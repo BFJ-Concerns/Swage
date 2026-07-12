@@ -1,6 +1,6 @@
 //! Workspace path resolution and scoping for file and shell tools.
 //!
-//! All file operations and shell commands are scoped to the bench's configured
+//! All file operations and shell commands are scoped to the space's configured
 //! workspace directory. This module provides the shared logic for resolving the
 //! workspace root and validating that paths don't escape it.
 

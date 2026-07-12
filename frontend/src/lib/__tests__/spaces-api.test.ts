@@ -1,5 +1,5 @@
 /**
- * Tests for the HTTP API client for bench CRUD and bench-scoped sessions.
+ * Tests for the HTTP API client for space CRUD and space-scoped sessions.
  *
  * All network calls are intercepted via a global fetch mock so these tests
  * run in isolation without a live gateway. Each test verifies the correct
@@ -9,19 +9,19 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 import {
-  listBenches,
-  createBench,
-  getBench,
-  updateBench,
-  deleteBench,
-  listBenchWorkspaces,
-  attachBenchWorkspace,
-  updateBenchWorkspaceTrust,
-  detachBenchWorkspace,
-  listBenchSessions,
-  createBenchSession,
-  setBenchesBaseUrl,
-} from "../api/benches";
+  listSpaces,
+  createSpace,
+  getSpace,
+  updateSpace,
+  deleteSpace,
+  listSpaceWorkspaces,
+  attachSpaceWorkspace,
+  updateSpaceWorkspaceTrust,
+  detachSpaceWorkspace,
+  listSpaceSessions,
+  createSpaceSession,
+  setSpacesBaseUrl,
+} from "../api/spaces";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -45,7 +45,7 @@ beforeEach(() => {
   // Replace the global fetch with a vitest spy so tests control responses.
   vi.stubGlobal("fetch", vi.fn());
   // Ensure base URL is reset to same-origin default between tests.
-  setBenchesBaseUrl("");
+  setSpacesBaseUrl("");
 });
 
 afterEach(() => {
@@ -56,20 +56,20 @@ afterEach(() => {
 // Sample fixtures
 // ---------------------------------------------------------------------------
 
-const sampleBench = {
+const sampleSpace = {
   id: "proj-1",
-  name: "My Bench",
+  name: "My Space",
   description: "",
   is_default: false,
-  slug: "my-bench",
+  slug: "my-space",
   created_at: "2026-01-01T00:00:00Z",
 };
 
 const sampleWorkspace = {
   id: "workspace-1",
-  bench_id: "proj-1",
+  space_id: "proj-1",
   label: "Codebase",
-  path: "/home/user/my-bench",
+  path: "/home/user/my-space",
   permissions: ["read", "write"],
   is_trusted: false,
   created_at: "2026-01-01T00:00:00Z",
@@ -84,152 +84,152 @@ const sampleSession = {
 };
 
 // ---------------------------------------------------------------------------
-// listBenches
+// listSpaces
 // ---------------------------------------------------------------------------
 
-describe("listBenches", () => {
-  it("sends GET /api/benches and unwraps the benches array", async () => {
+describe("listSpaces", () => {
+  it("sends GET /api/spaces and unwraps the spaces array", async () => {
     const fetchMock = vi.mocked(fetch);
     fetchMock.mockResolvedValueOnce(
-      mockResponse({ benches: [sampleBench] }),
+      mockResponse({ spaces: [sampleSpace] }),
     );
 
-    const result = await listBenches();
+    const result = await listSpaces();
 
-    expect(fetchMock).toHaveBeenCalledWith("/api/benches", { method: "GET" });
+    expect(fetchMock).toHaveBeenCalledWith("/api/spaces", { method: "GET" });
     expect(result).toHaveLength(1);
     expect(result[0].id).toBe("proj-1");
-    expect(result[0].slug).toBe("my-bench");
+    expect(result[0].slug).toBe("my-space");
   });
 
-  it("returns an empty array when there are no benches", async () => {
-    vi.mocked(fetch).mockResolvedValueOnce(mockResponse({ benches: [] }));
+  it("returns an empty array when there are no spaces", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(mockResponse({ spaces: [] }));
 
-    const result = await listBenches();
+    const result = await listSpaces();
     expect(result).toEqual([]);
   });
 
   it("throws on non-2xx response", async () => {
     vi.mocked(fetch).mockResolvedValueOnce(mockResponse({}, 500));
-    await expect(listBenches()).rejects.toThrow("500");
+    await expect(listSpaces()).rejects.toThrow("500");
   });
 });
 
 // ---------------------------------------------------------------------------
-// createBench
+// createSpace
 // ---------------------------------------------------------------------------
 
-describe("createBench", () => {
-  it("sends POST /api/benches with JSON body and returns the new bench", async () => {
+describe("createSpace", () => {
+  it("sends POST /api/spaces with JSON body and returns the new space", async () => {
     const fetchMock = vi.mocked(fetch);
-    fetchMock.mockResolvedValueOnce(mockResponse(sampleBench, 201));
+    fetchMock.mockResolvedValueOnce(mockResponse(sampleSpace, 201));
 
-    const result = await createBench({ name: "My Bench" });
+    const result = await createSpace({ name: "My Space" });
 
     expect(fetchMock).toHaveBeenCalledWith(
-      "/api/benches",
+      "/api/spaces",
       expect.objectContaining({
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: "My Bench" }),
+        body: JSON.stringify({ name: "My Space" }),
       }),
     );
     expect(result.id).toBe("proj-1");
-    expect(result.slug).toBe("my-bench");
+    expect(result.slug).toBe("my-space");
   });
 
   it("throws on non-2xx response", async () => {
     vi.mocked(fetch).mockResolvedValueOnce(mockResponse({}, 422));
-    await expect(createBench({ name: "Bad" })).rejects.toThrow("422");
+    await expect(createSpace({ name: "Bad" })).rejects.toThrow("422");
   });
 });
 
 // ---------------------------------------------------------------------------
-// getBench
+// getSpace
 // ---------------------------------------------------------------------------
 
-describe("getBench", () => {
-  it("sends GET /api/benches/:id and returns a Bench", async () => {
+describe("getSpace", () => {
+  it("sends GET /api/spaces/:id and returns a Space", async () => {
     const fetchMock = vi.mocked(fetch);
-    fetchMock.mockResolvedValueOnce(mockResponse(sampleBench));
+    fetchMock.mockResolvedValueOnce(mockResponse(sampleSpace));
 
-    const result = await getBench("proj-1");
+    const result = await getSpace("proj-1");
 
-    expect(fetchMock).toHaveBeenCalledWith("/api/benches/proj-1", {
+    expect(fetchMock).toHaveBeenCalledWith("/api/spaces/proj-1", {
       method: "GET",
     });
     expect(result.id).toBe("proj-1");
-    expect(result.slug).toBe("my-bench");
+    expect(result.slug).toBe("my-space");
   });
 
   it("throws on 404", async () => {
     vi.mocked(fetch).mockResolvedValueOnce(mockResponse({}, 404));
-    await expect(getBench("missing")).rejects.toThrow("404");
+    await expect(getSpace("missing")).rejects.toThrow("404");
   });
 });
 
 // ---------------------------------------------------------------------------
-// updateBench
+// updateSpace
 // ---------------------------------------------------------------------------
 
-describe("updateBench", () => {
-  it("sends PUT /api/benches/:id with JSON body and returns the updated bench", async () => {
+describe("updateSpace", () => {
+  it("sends PUT /api/spaces/:id with JSON body and returns the updated space", async () => {
     const fetchMock = vi.mocked(fetch);
-    const updated = { ...sampleBench, name: "Renamed", description: "Ops bench" };
+    const updated = { ...sampleSpace, name: "Renamed", description: "Ops space" };
     fetchMock.mockResolvedValueOnce(mockResponse(updated));
 
-    const result = await updateBench("proj-1", {
+    const result = await updateSpace("proj-1", {
       name: "Renamed",
-      description: "Ops bench",
+      description: "Ops space",
     });
 
     expect(fetchMock).toHaveBeenCalledWith(
-      "/api/benches/proj-1",
+      "/api/spaces/proj-1",
       expect.objectContaining({
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: "Renamed", description: "Ops bench" }),
+        body: JSON.stringify({ name: "Renamed", description: "Ops space" }),
       }),
     );
     expect(result.name).toBe("Renamed");
-    expect(result.description).toBe("Ops bench");
+    expect(result.description).toBe("Ops space");
   });
 
   it("throws on non-2xx response", async () => {
     vi.mocked(fetch).mockResolvedValueOnce(mockResponse({}, 400));
-    await expect(updateBench("proj-1", {})).rejects.toThrow("400");
+    await expect(updateSpace("proj-1", {})).rejects.toThrow("400");
   });
 });
 
-describe("bench workspaces", () => {
-  it("lists workspace attachments for a bench", async () => {
+describe("space workspaces", () => {
+  it("lists workspace attachments for a space", async () => {
     const fetchMock = vi.mocked(fetch);
     fetchMock.mockResolvedValueOnce(mockResponse({ workspaces: [sampleWorkspace] }));
 
-    const result = await listBenchWorkspaces("proj-1");
+    const result = await listSpaceWorkspaces("proj-1");
 
-    expect(fetchMock).toHaveBeenCalledWith("/api/benches/proj-1/workspaces", {
+    expect(fetchMock).toHaveBeenCalledWith("/api/spaces/proj-1/workspaces", {
       method: "GET",
     });
-    expect(result[0].path).toBe("/home/user/my-bench");
+    expect(result[0].path).toBe("/home/user/my-space");
   });
 
-  it("attaches a workspace to a bench", async () => {
+  it("attaches a workspace to a space", async () => {
     const fetchMock = vi.mocked(fetch);
     fetchMock.mockResolvedValueOnce(mockResponse(sampleWorkspace, 201));
 
-    await attachBenchWorkspace("proj-1", {
-      path: "/home/user/my-bench",
+    await attachSpaceWorkspace("proj-1", {
+      path: "/home/user/my-space",
       label: "Codebase",
       permissions: ["read", "write"],
     });
 
     expect(fetchMock).toHaveBeenCalledWith(
-      "/api/benches/proj-1/workspaces",
+      "/api/spaces/proj-1/workspaces",
       expect.objectContaining({
         method: "POST",
         body: JSON.stringify({
-          path: "/home/user/my-bench",
+          path: "/home/user/my-space",
           label: "Codebase",
           permissions: ["read", "write"],
         }),
@@ -243,10 +243,10 @@ describe("bench workspaces", () => {
       mockResponse({ ...sampleWorkspace, is_trusted: true }),
     );
 
-    await updateBenchWorkspaceTrust("proj-1", "workspace-1", { is_trusted: true });
+    await updateSpaceWorkspaceTrust("proj-1", "workspace-1", { is_trusted: true });
 
     expect(fetchMock).toHaveBeenCalledWith(
-      "/api/benches/proj-1/workspaces/workspace-1/trust",
+      "/api/spaces/proj-1/workspaces/workspace-1/trust",
       expect.objectContaining({
         method: "PUT",
         body: JSON.stringify({ is_trusted: true }),
@@ -258,28 +258,28 @@ describe("bench workspaces", () => {
     const fetchMock = vi.mocked(fetch);
     fetchMock.mockResolvedValueOnce(mockResponse(null, 204));
 
-    await detachBenchWorkspace("proj-1", "workspace-1");
+    await detachSpaceWorkspace("proj-1", "workspace-1");
 
     expect(fetchMock).toHaveBeenCalledWith(
-      "/api/benches/proj-1/workspaces/workspace-1",
+      "/api/spaces/proj-1/workspaces/workspace-1",
       { method: "DELETE" },
     );
   });
 });
 
 // ---------------------------------------------------------------------------
-// deleteBench
+// deleteSpace
 // ---------------------------------------------------------------------------
 
-describe("deleteBench", () => {
-  it("sends DELETE /api/benches/:id and returns undefined", async () => {
+describe("deleteSpace", () => {
+  it("sends DELETE /api/spaces/:id and returns undefined", async () => {
     const fetchMock = vi.mocked(fetch);
     // Gateway returns 204 No Content on successful delete.
     fetchMock.mockResolvedValueOnce(mockResponse(null, 204));
 
-    const result = await deleteBench("proj-1");
+    const result = await deleteSpace("proj-1");
 
-    expect(fetchMock).toHaveBeenCalledWith("/api/benches/proj-1", {
+    expect(fetchMock).toHaveBeenCalledWith("/api/spaces/proj-1", {
       method: "DELETE",
     });
     expect(result).toBeUndefined();
@@ -287,24 +287,24 @@ describe("deleteBench", () => {
 
   it("throws on non-2xx response", async () => {
     vi.mocked(fetch).mockResolvedValueOnce(mockResponse({}, 403));
-    await expect(deleteBench("proj-1")).rejects.toThrow("403");
+    await expect(deleteSpace("proj-1")).rejects.toThrow("403");
   });
 });
 
 // ---------------------------------------------------------------------------
-// listBenchSessions
+// listSpaceSessions
 // ---------------------------------------------------------------------------
 
-describe("listBenchSessions", () => {
-  it("sends GET /api/benches/:id/sessions and unwraps the conversations array", async () => {
+describe("listSpaceSessions", () => {
+  it("sends GET /api/spaces/:id/sessions and unwraps the conversations array", async () => {
     const fetchMock = vi.mocked(fetch);
     fetchMock.mockResolvedValueOnce(
       mockResponse({ conversations: [sampleSession] }),
     );
 
-    const result = await listBenchSessions("proj-1");
+    const result = await listSpaceSessions("proj-1");
 
-    expect(fetchMock).toHaveBeenCalledWith("/api/benches/proj-1/sessions", {
+    expect(fetchMock).toHaveBeenCalledWith("/api/spaces/proj-1/sessions", {
       method: "GET",
     });
     expect(result).toHaveLength(1);
@@ -313,38 +313,38 @@ describe("listBenchSessions", () => {
 
   it("throws on non-2xx response", async () => {
     vi.mocked(fetch).mockResolvedValueOnce(mockResponse({}, 404));
-    await expect(listBenchSessions("missing")).rejects.toThrow("404");
+    await expect(listSpaceSessions("missing")).rejects.toThrow("404");
   });
 });
 
 // ---------------------------------------------------------------------------
-// createBenchSession
+// createSpaceSession
 // ---------------------------------------------------------------------------
 
-describe("createBenchSession", () => {
-  it("sends POST /api/benches/:id/sessions and returns the new session", async () => {
+describe("createSpaceSession", () => {
+  it("sends POST /api/spaces/:id/sessions and returns the new session", async () => {
     const fetchMock = vi.mocked(fetch);
     const created = {
       id: "sess-new",
-      bench_id: "proj-1",
+      space_id: "proj-1",
       created_at: "2026-01-01T00:00:00Z",
       last_activity: "2026-01-01T00:00:00Z",
     };
     fetchMock.mockResolvedValueOnce(mockResponse(created, 201));
 
-    const result = await createBenchSession("proj-1");
+    const result = await createSpaceSession("proj-1");
 
     expect(fetchMock).toHaveBeenCalledWith(
-      "/api/benches/proj-1/sessions",
+      "/api/spaces/proj-1/sessions",
       expect.objectContaining({ method: "POST" }),
     );
     expect(result.id).toBe("sess-new");
-    expect(result.bench_id).toBe("proj-1");
+    expect(result.space_id).toBe("proj-1");
   });
 
   it("throws on non-2xx response", async () => {
     vi.mocked(fetch).mockResolvedValueOnce(mockResponse({}, 500));
-    await expect(createBenchSession("proj-1")).rejects.toThrow("500");
+    await expect(createSpaceSession("proj-1")).rejects.toThrow("500");
   });
 });
 
@@ -352,15 +352,15 @@ describe("createBenchSession", () => {
 // Configurable base URL
 // ---------------------------------------------------------------------------
 
-describe("setBenchesBaseUrl", () => {
+describe("setSpacesBaseUrl", () => {
   it("prepends the base URL to all requests", async () => {
-    setBenchesBaseUrl("http://localhost:3000");
-    vi.mocked(fetch).mockResolvedValueOnce(mockResponse({ benches: [] }));
+    setSpacesBaseUrl("http://localhost:3000");
+    vi.mocked(fetch).mockResolvedValueOnce(mockResponse({ spaces: [] }));
 
-    await listBenches();
+    await listSpaces();
 
     expect(vi.mocked(fetch)).toHaveBeenCalledWith(
-      "http://localhost:3000/api/benches",
+      "http://localhost:3000/api/spaces",
       expect.objectContaining({ method: "GET" }),
     );
   });

@@ -80,7 +80,7 @@ impl Tool for AgentMemoryTool {
         })
     }
 
-    fn requires_host_execution(&self) -> bool {
+    fn requires_device_execution(&self) -> bool {
         true
     }
 
@@ -171,7 +171,7 @@ impl AgentMemoryTool {
             .storage()
             .create_agent_memory(NewAgentMemoryRecord {
                 id: Uuid::new_v4(),
-                bench_id: session.bench_id,
+                space_id: session.space_id,
                 session_id: session.id,
                 turn_id,
                 topology_run_id,
@@ -229,7 +229,7 @@ impl AgentMemoryTool {
         let records = gateway_ctx
             .storage()
             .list_agent_memories(
-                session.bench_id,
+                session.space_id,
                 agent_id,
                 session_scope,
                 query.as_deref(),
@@ -262,7 +262,7 @@ impl AgentMemoryTool {
             })?;
         let memories = gateway_ctx
             .storage()
-            .list_agent_memories(session.bench_id, Some(ctx.agent_id()), None, None, limit)
+            .list_agent_memories(session.space_id, Some(ctx.agent_id()), None, None, limit)
             .await
             .map_err(storage_error(self.name()))?;
         let audit_events = gateway_ctx
@@ -462,7 +462,7 @@ fn storage_error(name: &str) -> impl FnOnce(swage_core::StorageError) -> ToolErr
 fn memory_to_json(record: &AgentMemoryRecord) -> Value {
     json!({
         "id": record.id,
-        "bench_id": record.bench_id,
+        "space_id": record.space_id,
         "session_id": record.session_id,
         "turn_id": record.turn_id,
         "topology_run_id": record.topology_run_id,
@@ -493,7 +493,7 @@ mod tests {
         NewTopologyRun, NewTurn, NodeExecutionState, SqliteStorage, TopologyRunState, TurnState,
         model::{TeamAgentDefinition, TopologyNodeRecordKind},
         store::{
-            AgentMemoryStore, AuditStore, BenchStore, SessionStore, TeamStore, ThreadStore,
+            AgentMemoryStore, AuditStore, SessionStore, SpaceStore, TeamStore, ThreadStore,
             TopologyTraceStore, TurnStore,
         },
     };
@@ -522,10 +522,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn remember_and_recall_persist_memory_with_run_provenance() {
         let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-        let bench = storage.get_or_create_default().await.unwrap();
+        let space = storage.get_or_create_default().await.unwrap();
         let session = storage
             .create_session(NewSession {
-                bench_id: bench.id,
+                space_id: space.id,
                 agent_id: "agent-a".into(),
                 metadata: None,
                 active_workspace_attachment_id: None,
@@ -553,7 +553,7 @@ mod tests {
             .unwrap();
         let team = storage
             .create_team(NewTeam {
-                bench_id: bench.id,
+                space_id: space.id,
                 name: "team".into(),
                 description: "desc".into(),
                 entry_agent_id: "agent-a".into(),
@@ -636,7 +636,7 @@ mod tests {
         );
 
         let persisted = storage
-            .list_agent_memories(bench.id, Some("agent-a"), None, None, 10)
+            .list_agent_memories(space.id, Some("agent-a"), None, None, 10)
             .await
             .unwrap();
         assert_eq!(persisted.len(), 1);
@@ -646,10 +646,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn history_filters_secret_events_and_recall_respects_scope_boundaries() {
         let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-        let bench = storage.get_or_create_default().await.unwrap();
+        let space = storage.get_or_create_default().await.unwrap();
         let session = storage
             .create_session(NewSession {
-                bench_id: bench.id,
+                space_id: space.id,
                 agent_id: "agent-a".into(),
                 metadata: None,
                 active_workspace_attachment_id: None,
@@ -678,7 +678,7 @@ mod tests {
         storage
             .create_agent_memory(NewAgentMemoryRecord {
                 id: Uuid::new_v4(),
-                bench_id: bench.id,
+                space_id: space.id,
                 session_id: session.id,
                 turn_id: turn.id,
                 topology_run_id: None,
@@ -697,7 +697,7 @@ mod tests {
         storage
             .create_agent_memory(NewAgentMemoryRecord {
                 id: Uuid::new_v4(),
-                bench_id: bench.id,
+                space_id: space.id,
                 session_id: session.id,
                 turn_id: turn.id,
                 topology_run_id: None,

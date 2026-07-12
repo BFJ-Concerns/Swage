@@ -1,11 +1,11 @@
 <!--
   Riso/cyanotype shell.
 
-  When no bench is selected the top bar collapses and the body becomes a
-  full-width bench picker. Switching benches goes through BenchSelector,
-  which resets the layout via onBenchChange.
+  When no space is selected the top bar collapses and the body becomes a
+  full-width space picker. Switching spaces goes through SpaceSelector,
+  which resets the layout via onSpaceChange.
 
-  WorkbenchRail (the right rail) was dropped per Surfaces.md — shared
+  SpaceRail (the right rail) was dropped per Surfaces.md — shared
   reference objects now sit on the module stage like any other module.
 
   Surface switching: the lens descriptor still exposes ui_modules, but the
@@ -17,9 +17,9 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import ConversationList from "./ConversationList.svelte";
-  import BenchSelector from "./BenchSelector.svelte";
-  import BenchPicker from "./BenchPicker.svelte";
-  import BenchSettingsPage from "./BenchSettingsPage.svelte";
+  import SpaceSelector from "./SpaceSelector.svelte";
+  import SpacePicker from "./SpacePicker.svelte";
+  import SpaceSettingsPage from "./SpaceSettingsPage.svelte";
   import MessageDisplay from "./MessageDisplay.svelte";
   import MessageInput from "./MessageInput.svelte";
   import ApprovalCard from "./ApprovalCard.svelte";
@@ -27,10 +27,10 @@
   import SharedReferenceStudio from "./SharedReferenceStudio.svelte";
   import SettingsPage from "./SettingsPage.svelte";
   import ThemeToggle from "./ThemeToggle.svelte";
-  import WorkbenchOperations from "./WorkbenchOperations.svelte";
+  import SpaceOperations from "./SpaceOperations.svelte";
   import { listTeams } from "../api/builder";
   import type { DisplayPreferences } from "../display-preferences";
-  import type { BenchSettingsTab, Route } from "../router";
+  import type { SpaceSettingsTab, Route } from "../router";
   import type { ThemeMode } from "../theme";
   import type { DesktopRuntimeInfo } from "../runtime";
   import type {
@@ -44,7 +44,7 @@
   import type { ConversationStore } from "../stores/conversations";
   import type { ConnectionStore } from "../stores/connection";
   import type { StreamingStore } from "../stores/streaming";
-  import type { BenchStore } from "../stores/benches";
+  import type { SpaceStore } from "../stores/spaces";
 
   type BuilderDeckModule = typeof import("./BuilderDeck.svelte");
   type OperatorDashboardModule = typeof import("./OperatorDashboard.svelte");
@@ -53,8 +53,8 @@
     conversationStore: ConversationStore;
     connectionStore: ConnectionStore;
     streamingStore: StreamingStore;
-    benchStore?: BenchStore;
-    onBenchChange?: () => void;
+    spaceStore?: SpaceStore;
+    onSpaceChange?: () => void;
     onRetry: () => void;
     activeLens: AppLens;
     availableLenses: LensDescriptor[];
@@ -81,8 +81,8 @@
     conversationStore,
     connectionStore,
     streamingStore,
-    benchStore,
-    onBenchChange,
+    spaceStore,
+    onSpaceChange,
     onRetry,
     activeLens,
     availableLenses,
@@ -106,24 +106,24 @@
   let operatorDashboardModule = $state<Promise<OperatorDashboardModule> | null>(null);
   let stageTeams = $state<TeamSummary[]>([]);
   let stageTeamError = $state<string | null>(null);
-  let lastStageTeamBenchId = "";
+  let lastStageTeamSpaceId = "";
 
   const activeLensDescriptor = $derived(
     availableLenses.find((lens) => lens.id === activeLens) ?? null,
   );
-  const benches = $derived(benchStore?.benches ?? []);
-  const currentBench = $derived(benchStore?.currentBench ?? null);
-  const recentBenches = $derived(benchStore?.recentBenches ?? []);
+  const spaces = $derived(spaceStore?.spaces ?? []);
+  const currentSpace = $derived(spaceStore?.currentSpace ?? null);
+  const recentSpaces = $derived(spaceStore?.recentSpaces ?? []);
   const conversationCount = $derived(conversationStore.conversations.length);
   const activeConversation = $derived(conversationStore.activeConversation);
   const settingsTab = $derived(route?.settingsTab ?? null);
-  const settingsBenchSlug = $derived(route?.settingsBenchSlug ?? null);
-  const settingsBenchTab = $derived(route?.settingsBenchTab ?? null);
-  const settingsMode = $derived(settingsTab !== null || settingsBenchSlug !== null);
+  const settingsSpaceSlug = $derived(route?.settingsSpaceSlug ?? null);
+  const settingsSpaceTab = $derived(route?.settingsSpaceTab ?? null);
+  const settingsMode = $derived(settingsTab !== null || settingsSpaceSlug !== null);
   const hasPlacedStageModules = $derived(stageModules.length > 0);
-  const settingsBench = $derived(
-    settingsBenchSlug
-      ? benches.find((bench) => bench.slug === settingsBenchSlug) ?? null
+  const settingsSpace = $derived(
+    settingsSpaceSlug
+      ? spaces.find((space) => space.slug === settingsSpaceSlug) ?? null
       : null,
   );
   let now = $state(Date.now());
@@ -143,14 +143,14 @@
     { id: "automation", label: "Automation", ix: "—", functional: true },
     { id: "plugins", label: "Plugins", ix: "—", functional: false },
     { id: "channels", label: "Channels", ix: "—", functional: false },
-    { id: "nodes", label: "Nodes", ix: "—", functional: false },
+    { id: "devices", label: "Devices", ix: "—", functional: false },
     { id: "voice", label: "Voice", ix: "—", functional: false },
     { id: "recovery", label: "Recovery", ix: "—", functional: true },
     { id: "display", label: "Display", ix: "—", functional: true },
     { id: "account", label: "Account", ix: "—", functional: false },
   ];
-  const BENCH_SETTINGS_PAGES: ReadonlyArray<{
-    id: BenchSettingsTab;
+  const SPACE_SETTINGS_PAGES: ReadonlyArray<{
+    id: SpaceSettingsTab;
     label: string;
     ix: string;
   }> = [
@@ -175,7 +175,7 @@
   ];
 
   // × CLOSE returns to the active conversation if one was open before the
-  // user entered settings; otherwise drops back to the bench picker (root).
+  // user entered settings; otherwise drops back to the space picker (root).
   function closeSettings(): void {
     const id = activeConversation?.id;
     onNavigate?.(id ? `/conversations/${id}` : "/");
@@ -201,7 +201,7 @@
   const isStageDominant = $derived(stageSurface !== null);
   const isConversationDominant = $derived(hasStage && !isStageDominant);
 
-  // Stamp shown on the right of the topbar. The bench portion is real; the
+  // Stamp shown on the right of the topbar. The space portion is real; the
   // state cycles through the streaming store. Team-live and approval states
   // are real too, but timed state durations need a separate aggregator.
   const stampState = $derived<{ label: string; tone: "idle" | "busy" | "alert" }>(
@@ -250,10 +250,10 @@
     return `${minutes}:${remainingSeconds.toString().padStart(2, "0")}`;
   }
 
-  async function openRecentBench(id: string): Promise<void> {
-    if (!benchStore) return;
-    await benchStore.selectBench(id);
-    onBenchChange?.();
+  async function openRecentSpace(id: string): Promise<void> {
+    if (!spaceStore) return;
+    await spaceStore.selectSpace(id);
+    onSpaceChange?.();
   }
 
   // The Builder lens carries a caret. Clicking the lens body activates it;
@@ -301,16 +301,16 @@
   });
 
   $effect(() => {
-    const benchId = currentBench?.id ?? "";
+    const spaceId = currentSpace?.id ?? "";
     const needsTeams = stageModules.some((module) => module.kind === "active_team_topology");
-    if (!benchId || !needsTeams || lastStageTeamBenchId === benchId) return;
-    lastStageTeamBenchId = benchId;
-    void loadStageTeams(benchId);
+    if (!spaceId || !needsTeams || lastStageTeamSpaceId === spaceId) return;
+    lastStageTeamSpaceId = spaceId;
+    void loadStageTeams(spaceId);
   });
 
-  async function loadStageTeams(benchId: string): Promise<void> {
+  async function loadStageTeams(spaceId: string): Promise<void> {
     try {
-      stageTeams = await listTeams(benchId);
+      stageTeams = await listTeams(spaceId);
       stageTeamError = null;
     } catch (error) {
       stageTeamError =
@@ -321,19 +321,19 @@
 
 <div
   class="window"
-  class:no-topbar={!currentBench && !settingsMode}
+  class:no-topbar={!currentSpace && !settingsMode}
   class:settings-mode={settingsMode}
 >
   {#if settingsMode}
     <!--
       Settings shell takes the window over completely: topbar collapses to a
-      single label and a × CLOSE affordance, nav becomes a parked bench-head
+      single label and a × CLOSE affordance, nav becomes a parked space-head
       plus a vertical page list, body is single-column.
     -->
     <header class="topbar settings-topbar">
       <span class="settings-label">
-        {#if settingsBenchSlug}
-          Bench settings · {settingsBench?.name ?? settingsBenchSlug}
+        {#if settingsSpaceSlug}
+          Space settings · {settingsSpace?.name ?? settingsSpaceSlug}
         {:else}
           Settings · {settingsTab}
         {/if}
@@ -347,10 +347,10 @@
         × Close
       </button>
     </header>
-  {:else if currentBench}
+  {:else if currentSpace}
     <!--
       Top bar: lens tabs. Each tab is a live lens with a close affordance and
-      a `+` to add another. When no bench is selected the bar drops out.
+      a `+` to add another. When no space is selected the bar drops out.
     -->
     <header class="topbar" role="tablist" aria-label="Lenses">
       {#each availableLenses as lens (lens.id)}
@@ -408,12 +408,12 @@
         </div>
       {/if}
 
-      <!-- Stamp area: bench + runtime state. The bench/state portion is real;
+      <!-- Stamp area: space + runtime state. The space/state portion is real;
            the runtime label (MANAGED/REMOTE) and timer are partial — see the
            mote on `.stamp-state-timer`. -->
       <div class="stamp">
-        {#if currentBench}
-          <span class="stamp-segment stamp-bench">Bench · {currentBench.name}</span>
+        {#if currentSpace}
+          <span class="stamp-segment stamp-space">Space · {currentSpace.name}</span>
           <span class="stamp-divider" aria-hidden="true">·</span>
           <span class="stamp-segment stamp-state" data-tone={stampState.tone}>
             {stampStateLabel}
@@ -435,7 +435,7 @@
   <aside class="nav" class:settings={settingsMode} aria-label="Navigation">
     {#if settingsMode}
       <!--
-        Settings nav: the parked bench-head is the wayfinding target × CLOSE
+        Settings nav: the parked space-head is the wayfinding target × CLOSE
         returns to. It's a real link back to the active conversation (or the
         picker if none was open), so the block reads as navigation rather than
         a label that looks like a breadcrumb. UI audit f-16: the old "Return
@@ -443,22 +443,22 @@
       -->
       <button
         type="button"
-        class="bench-head settings-head return-link"
+        class="space-head settings-head return-link"
         onclick={closeSettings}
-        aria-label={`Close settings and return to ${activeConversation?.id ? "conversation" : "bench picker"}`}
+        aria-label={`Close settings and return to ${activeConversation?.id ? "conversation" : "space picker"}`}
         title="Close settings"
       >
         <span class="return-mark">← Close</span>
-        <h2 class="name">{settingsBench?.name ?? currentBench?.name ?? "Swage"}</h2>
+        <h2 class="name">{settingsSpace?.name ?? currentSpace?.name ?? "Swage"}</h2>
       </button>
       <div class="settings-pages">
-        {#if settingsBenchSlug}
-          {#each BENCH_SETTINGS_PAGES as page (page.id)}
+        {#if settingsSpaceSlug}
+          {#each SPACE_SETTINGS_PAGES as page (page.id)}
             <button
               type="button"
               class="settings-page"
-              class:active={(settingsBenchTab ?? "overview") === page.id}
-              onclick={() => onNavigate?.(`/settings/bench/${settingsBenchSlug}/${page.id}`)}
+              class:active={(settingsSpaceTab ?? "overview") === page.id}
+              onclick={() => onNavigate?.(`/settings/space/${settingsSpaceSlug}/${page.id}`)}
             >
               <span>{page.label}</span>
               <span class="ix">{page.ix}</span>
@@ -502,32 +502,32 @@
           </div>
         {/if}
       </div>
-    {:else if currentBench}
+    {:else if currentSpace}
       <!--
-        Bench header. The back-arrow returns to the bench picker — a clear
+        Space header. The back-arrow returns to the space picker — a clear
         wayfinding target that the dropdown-only model lacked. The Switch
-        dropdown stays for fast switching without leaving the current bench
+        dropdown stays for fast switching without leaving the current space
         (UI audit f-7).
       -->
-      <div class="bench-head">
+      <div class="space-head">
         <button
           type="button"
           class="back-to-picker"
-          aria-label="Back to bench picker"
-          title="Back to bench picker"
+          aria-label="Back to space picker"
+          title="Back to space picker"
           onclick={() => {
-            benchStore?.closeBench();
+            spaceStore?.closeSpace();
             onNavigate?.("/");
           }}
         >
           <span aria-hidden="true">←</span>
         </button>
         <div class="crumb">
-          <span class="bench-label">Bench</span>
-          <span class="bench-count">{conversationCount} convos</span>
+          <span class="space-label">Space</span>
+          <span class="space-count">{conversationCount} convos</span>
         </div>
-        <h2 class="name">{currentBench.name}</h2>
-        <BenchSelector {benchStore} {onBenchChange} />
+        <h2 class="name">{currentSpace.name}</h2>
+        <SpaceSelector {spaceStore} {onSpaceChange} />
       </div>
 
       <!-- Conversation list section. -->
@@ -551,12 +551,12 @@
         <button class="footer-item" disabled title="Account (not yet wired)">Account</button>
       </div>
     {:else}
-      <!-- No bench selected: nav shows a "Recent" list plus a quick legend.
-           Selection still happens in the body via BenchPicker; the nav's
+      <!-- No space selected: nav shows a "Recent" list plus a quick legend.
+           Selection still happens in the body via SpacePicker; the nav's
            recent list is a fast lane for re-opening recent work. -->
-      <div class="bench-head picker-mode">
+      <div class="space-head picker-mode">
         <div class="crumb">
-          <span class="bench-label">Choose a bench</span>
+          <span class="space-label">Choose a space</span>
         </div>
         <h2 class="name">Swage</h2>
       </div>
@@ -564,27 +564,27 @@
         <div class="key">
           <span>Recent</span>
         </div>
-        {#if recentBenches.length > 0}
+        {#if recentSpaces.length > 0}
           <div class="recent-list">
-            {#each recentBenches as bench (bench.id)}
+            {#each recentSpaces as space (space.id)}
               <button
                 type="button"
-                class="recent-bench"
-                onclick={() => openRecentBench(bench.id)}
+                class="recent-space"
+                onclick={() => openRecentSpace(space.id)}
               >
-                <span>{bench.name}</span>
-                <span class="recent-meta">{bench.slug}</span>
+                <span>{space.name}</span>
+                <span class="recent-meta">{space.slug}</span>
               </button>
             {/each}
           </div>
         {:else}
-          <p class="recent-shell-body">Open a bench once and it will stay here.</p>
+          <p class="recent-shell-body">Open a space once and it will stay here.</p>
         {/if}
       </div>
       <div class="section picker-legend">
         <p class="eyebrow">Two-stage select</p>
         <p class="legend-body">
-          Click a bench card to preview, then open it. Or double-click to skip
+          Click a space card to preview, then open it. Or double-click to skip
           the preview.
         </p>
       </div>
@@ -603,24 +603,24 @@
 
   <main
     class="body"
-    class:full={!currentBench || settingsMode}
+    class:full={!currentSpace || settingsMode}
     class:conversation-dominant={isConversationDominant && !settingsMode}
     class:stage-dominant={isStageDominant && !settingsMode}
   >
-    {#if settingsBenchSlug}
-      <BenchSettingsPage bench={settingsBench} tab={settingsBenchTab ?? "overview"} />
+    {#if settingsSpaceSlug}
+      <SpaceSettingsPage space={settingsSpace} tab={settingsSpaceTab ?? "overview"} />
     {:else if settingsTab}
       <SettingsPage
         tab={settingsTab}
-        benchId={currentBench?.id ?? null}
+        spaceId={currentSpace?.id ?? null}
         sessionId={activeConversation?.id ?? null}
       />
-    {:else if !currentBench}
-      <!-- Bench picker view: full card grid with two-stage selection. -->
-      <BenchPicker
-        {benchStore}
-        {onBenchChange}
-        onOpenBenchSettings={(bench) => onNavigate?.(`/settings/bench/${bench.slug}`)}
+    {:else if !currentSpace}
+      <!-- Space picker view: full card grid with two-stage selection. -->
+      <SpacePicker
+        {spaceStore}
+        {onSpaceChange}
+        onOpenSpaceSettings={(space) => onNavigate?.(`/settings/space/${space.slug}`)}
       />
     {:else}
       <!-- Conversation pane: always present per Surfaces.md.
@@ -665,10 +665,10 @@
               {#await builderDeckModule then module}
                 {@const BuilderDeck = module.default}
                 <!-- The operator deck and the operations panel lost their
-                     home when the WorkbenchRail was dropped; the builder
+                     home when the SpaceRail was dropped; the builder
                      stage is where operators land, so they live here. -->
                 <BuilderDeck
-                  {benchStore}
+                  {spaceStore}
                   {desktopRuntime}
                   {activeLens}
                   {activeBuilderMode}
@@ -678,8 +678,8 @@
                   showSharedReferences={false}
                   showOperatorDeck={true}
                 />
-                <WorkbenchOperations
-                  benchId={currentBench?.id ?? null}
+                <SpaceOperations
+                  spaceId={currentSpace?.id ?? null}
                   sessionId={activeConversation?.id ?? null}
                 />
               {:catch error}
@@ -700,8 +700,8 @@
               {#await operatorDashboardModule then module}
                 {@const OperatorDashboard = module.default}
                 <OperatorDashboard />
-                <WorkbenchOperations
-                  benchId={currentBench?.id ?? null}
+                <SpaceOperations
+                  spaceId={currentSpace?.id ?? null}
                   sessionId={activeConversation?.id ?? null}
                 />
               {:catch error}
@@ -726,13 +726,13 @@
           </header>
           <div class="stage-modules">
             {#each stageModules as module (module.id)}
-              {#if module.kind === "shared_reference" && currentBench}
+              {#if module.kind === "shared_reference" && currentSpace}
                 <article class="stage-module" data-tone="auto">
                   <header class="stage-module-head">
                     <h3>{module.title}</h3>
                     <span class="stage-module-tag">Live</span>
                   </header>
-                  <SharedReferenceStudio benchId={currentBench.id} />
+                  <SharedReferenceStudio spaceId={currentSpace.id} />
                 </article>
               {:else if module.kind === "active_team_topology"}
                 <article class="stage-module" data-tone="streaming">
@@ -851,12 +851,12 @@
     background: var(--accent);
   }
 
-  /* Parked bench-head in settings nav: now a real link back to the
+  /* Parked space-head in settings nav: now a real link back to the
      conversation/picker rather than a label that looks like a breadcrumb.
      Same ink block as the regular nav, but the orange registration band
-     underneath is suppressed (the bench isn't currently active, just the
+     underneath is suppressed (the space isn't currently active, just the
      destination of × CLOSE). UI audit f-16. */
-  .nav.settings .bench-head {
+  .nav.settings .space-head {
     padding: 12px 16px;
     width: 100%;
     text-align: left;
@@ -867,16 +867,16 @@
     font: inherit;
   }
 
-  .nav.settings .bench-head:hover {
+  .nav.settings .space-head:hover {
     background: var(--ink-soft);
   }
 
-  .nav.settings .bench-head:focus-visible {
+  .nav.settings .space-head:focus-visible {
     outline: 2px solid var(--accent);
     outline-offset: -2px;
   }
 
-  .nav.settings .bench-head::after {
+  .nav.settings .space-head::after {
     display: none;
   }
 
@@ -893,12 +893,12 @@
     margin-bottom: 6px;
   }
 
-  .nav.settings .bench-head .name {
+  .nav.settings .space-head .name {
     font-size: var(--font-display-2);
     letter-spacing: 0.03em;
   }
 
-  /* Back-to-picker affordance in the active bench header — a clear wayfinding
+  /* Back-to-picker affordance in the active space header — a clear wayfinding
      target that the dropdown-only model lacked. UI audit f-7. */
   .back-to-picker {
     flex-shrink: 0;
@@ -1126,7 +1126,7 @@
     letter-spacing: 0.16em;
   }
 
-  .stamp-bench {
+  .stamp-space {
     color: var(--ink);
   }
 
@@ -1277,7 +1277,7 @@
   }
 
   /* ---------------------------------------------------------------------------
-     Nav — bench head, conversation list, footer.
+     Nav — space head, conversation list, footer.
      --------------------------------------------------------------------------- */
 
   .nav {
@@ -1290,7 +1290,7 @@
     min-height: 0;
   }
 
-  .bench-head {
+  .space-head {
     background: var(--ink);
     color: var(--paper);
     /* Density hierarchy: chrome padding tightens to 12–16px; generous air is
@@ -1300,7 +1300,7 @@
   }
 
   /* Orange band along the bottom edge — the "ink registration" stripe. */
-  .bench-head:not(.picker-mode)::after {
+  .space-head:not(.picker-mode)::after {
     content: "";
     position: absolute;
     bottom: -2px;
@@ -1310,14 +1310,14 @@
     background: var(--accent);
   }
 
-  .bench-head.picker-mode {
+  .space-head.picker-mode {
     background: var(--paper);
     color: var(--ink);
     text-align: center;
     border-bottom: var(--border-strong);
   }
 
-  .bench-head .crumb {
+  .space-head .crumb {
     font-family: var(--font-mono);
     font-weight: 500;
     font-size: var(--font-meta);
@@ -1329,15 +1329,15 @@
     margin-bottom: 8px;
   }
 
-  .bench-head.picker-mode .crumb {
+  .space-head.picker-mode .crumb {
     color: var(--ink-soft);
     justify-content: center;
   }
 
-  .bench-head .name {
+  .space-head .name {
     font-family: var(--font-display);
     font-weight: 400;
-    /* Right-size display type to content: a single bench name doesn't need
+    /* Right-size display type to content: a single space name doesn't need
        36px. 24–28px is still emphatically Bebas. UI audit f-21. */
     font-size: var(--font-display-2);
     line-height: 1;
@@ -1424,7 +1424,7 @@
     gap: 8px;
   }
 
-  .recent-bench {
+  .recent-space {
     display: flex;
     flex-direction: column;
     align-items: flex-start;
@@ -1438,7 +1438,7 @@
     cursor: pointer;
   }
 
-  .recent-bench:hover {
+  .recent-space:hover {
     background: var(--ink);
     color: var(--paper);
   }
@@ -1452,12 +1452,12 @@
     color: var(--ink-soft);
   }
 
-  .recent-bench:hover .recent-meta {
+  .recent-space:hover .recent-meta {
     color: var(--paper);
     opacity: 0.72;
   }
 
-  /* Legend block shown in the nav when no bench is selected. */
+  /* Legend block shown in the nav when no space is selected. */
   .picker-legend {
     gap: 8px;
   }
@@ -1524,9 +1524,9 @@
   }
 
   :global(body.print-marks-minimal) .topbar::before,
-  :global(body.print-marks-minimal) .bench-head::after,
+  :global(body.print-marks-minimal) .space-head::after,
   :global(body.print-marks-off) .topbar::before,
-  :global(body.print-marks-off) .bench-head::after,
+  :global(body.print-marks-off) .space-head::after,
   :global(body.print-marks-off) .lens.active::before,
   :global(body.print-marks-off) .settings-page.active::before {
     display: none;

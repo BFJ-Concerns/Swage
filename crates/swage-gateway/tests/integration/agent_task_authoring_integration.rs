@@ -20,7 +20,7 @@ use swage_gateway::{server::build_router, state::AppState};
 use swage_provider::LlmProvider;
 use swage_storage::{
     SqliteStorage,
-    store::{BenchStore, Storage},
+    store::{SpaceStore, Storage},
 };
 
 use crate::support::ProcessEnvGuard;
@@ -75,7 +75,7 @@ fn test_state(db_path: &Path, provider: Arc<dyn LlmProvider>) -> AppState {
     let storage = Arc::new(SqliteStorage::open(db_path).unwrap());
     AppState::new(
         Arc::clone(&storage) as Arc<dyn Storage>,
-        Arc::clone(&storage) as Arc<dyn BenchStore>,
+        Arc::clone(&storage) as Arc<dyn SpaceStore>,
         provider,
         swage_config::ResolvedConfig::default(),
         swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
@@ -142,22 +142,22 @@ async fn team_authoring_persists_agents_and_tasks_and_drives_topology_runs() {
     ]]));
     let router = build_router(test_state(&db_path, provider));
 
-    let (bench_status, bench_body) = request_json(
+    let (space_status, space_body) = request_json(
         &router,
         "POST",
-        "/api/benches",
+        "/api/spaces",
         Some(json!({
-            "name": "Authoring Bench"
+            "name": "Authoring Space"
         })),
     )
     .await;
-    assert_eq!(bench_status, StatusCode::CREATED);
-    let bench_id = bench_body["id"].as_str().unwrap();
+    assert_eq!(space_status, StatusCode::CREATED);
+    let space_id = space_body["id"].as_str().unwrap();
 
     let (team_status, team_body) = request_json(
         &router,
         "POST",
-        &format!("/api/benches/{bench_id}/teams"),
+        &format!("/api/spaces/{space_id}/teams"),
         Some(json!({
             "name": "delivery-core",
             "description": "Owns delivery work.",

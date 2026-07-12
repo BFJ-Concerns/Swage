@@ -590,11 +590,11 @@ fn make_empty_state() -> AppState {
     let storage = Arc::new(MockStorage::new());
     let storage_arc: Arc<dyn swage_storage::store::Storage> =
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>;
-    let bench_store: Arc<dyn swage_storage::store::BenchStore> =
-        storage as Arc<dyn swage_storage::store::BenchStore>;
+    let space_store: Arc<dyn swage_storage::store::SpaceStore> =
+        storage as Arc<dyn swage_storage::store::SpaceStore>;
     AppState::new(
         storage_arc,
-        bench_store,
+        space_store,
         Arc::new(MockProvider::new(vec![])) as Arc<dyn LlmProvider>,
         swage_config::ResolvedConfig::default(),
         crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -604,21 +604,21 @@ fn make_empty_state() -> AppState {
 
 /// Build an AppState with a pre-inserted session.
 async fn make_state_with_session() -> (AppState, Uuid) {
-    use swage_storage::store::BenchStore;
+    use swage_storage::store::SpaceStore;
 
     let storage = Arc::new(MockStorage::new());
     let session_id = Uuid::new_v4();
 
-    let bench = storage
+    let space = storage
         .get_or_create_default()
         .await
-        .expect("create default bench");
+        .expect("create default space");
 
     storage.db.lock().await.sessions.insert(
         session_id,
         Session {
             id: session_id,
-            bench_id: bench.id,
+            space_id: space.id,
             agent_id: "gateway".to_string(),
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
@@ -630,11 +630,11 @@ async fn make_state_with_session() -> (AppState, Uuid) {
 
     let storage_arc: Arc<dyn swage_storage::store::Storage> =
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>;
-    let bench_store: Arc<dyn swage_storage::store::BenchStore> =
-        storage as Arc<dyn swage_storage::store::BenchStore>;
+    let space_store: Arc<dyn swage_storage::store::SpaceStore> =
+        storage as Arc<dyn swage_storage::store::SpaceStore>;
     let state = AppState::new(
         storage_arc,
-        bench_store,
+        space_store,
         Arc::new(MockProvider::new(vec![])) as Arc<dyn LlmProvider>,
         swage_config::ResolvedConfig::default(),
         crate::tool::ToolDispatcher::allow_all(vec![]),

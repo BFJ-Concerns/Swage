@@ -14,11 +14,11 @@
 import type { Schedule } from "./protocol/Schedule";
 
 // -------------------------------------------------------------------------
-// Bench types
+// Space types
 // -------------------------------------------------------------------------
 
-/** A bench is the durable container users create and return to. */
-export interface Bench {
+/** A space is the durable container users create and return to. */
+export interface Space {
   id: string;
   name: string;
   description: string;
@@ -29,21 +29,21 @@ export interface Bench {
   last_opened_at?: string | null;
 }
 
-/** Request body for creating a new bench. */
-export interface CreateBenchRequest {
+/** Request body for creating a new space. */
+export interface CreateSpaceRequest {
   name: string;
   description?: string;
 }
 
-/** Request body for updating an existing bench. All fields are optional. */
-export interface UpdateBenchRequest {
+/** Request body for updating an existing space. All fields are optional. */
+export interface UpdateSpaceRequest {
   name?: string;
   description?: string;
 }
 
 export interface WorkspaceAttachment {
   id: string;
-  bench_id: string;
+  space_id: string;
   label: string;
   path: string;
   canonical_path: string;
@@ -253,7 +253,7 @@ export interface ConversationSummary {
 /** Full conversation with message history. */
 export interface ConversationDetail {
   id: string;
-  bench_id: string;
+  space_id: string;
   selected_model_id?: string | null;
   created_at: string;
   last_activity: string;
@@ -315,7 +315,7 @@ export interface MessageView {
 /** Response from creating a conversation. */
 export interface ConversationResponse {
   id: string;
-  bench_id: string;
+  space_id: string;
   selected_model_id?: string | null;
   created_at: string;
   last_activity: string;
@@ -341,7 +341,7 @@ export interface LensDescriptor {
 }
 
 export interface LensRuntimeResponse {
-  bench_id: string;
+  space_id: string;
   active_lens: AppLens;
   updated_at: string;
   available_lenses: LensDescriptor[];
@@ -380,7 +380,7 @@ export interface UpdateLensRequest {
 
 export interface TeamSummary {
   id: string;
-  bench_id: string;
+  space_id: string;
   name: string;
   description: string;
   entry_agent_id: string;
@@ -426,20 +426,20 @@ export interface UpdateTeamRequest {
   tasks?: TeamTaskDefinition[];
 }
 
-export type BenchExtensionStatus = "active" | "approval_required";
-export type BenchExtensionSourceKind = "managed" | "workspace_candidate";
+export type SpaceExtensionStatus = "active" | "approval_required";
+export type SpaceExtensionSourceKind = "managed" | "workspace_candidate";
 
-export interface BenchExtensionSummary {
+export interface SpaceExtensionSummary {
   name: string;
   display_name: string | null;
   description: string;
   requested_tools: string[];
   instructions: string;
-  status: BenchExtensionStatus;
-  source_kind: BenchExtensionSourceKind;
+  status: SpaceExtensionStatus;
+  source_kind: SpaceExtensionSourceKind;
 }
 
-export interface CreateBenchExtensionRequest {
+export interface CreateSpaceExtensionRequest {
   name: string;
   display_name?: string | null;
   description: string;
@@ -447,7 +447,7 @@ export interface CreateBenchExtensionRequest {
   instructions: string;
 }
 
-export interface UpdateBenchExtensionRequest {
+export interface UpdateSpaceExtensionRequest {
   display_name?: string | null;
   description: string;
   requested_tools: string[];
@@ -458,13 +458,13 @@ export interface UpdateBenchExtensionRequest {
 // Materials and attachments
 // -------------------------------------------------------------------------
 
-export type MaterialScopeKind = "session" | "bench";
+export type MaterialScopeKind = "session" | "space";
 
 export interface MaterialRecord {
   id: string;
   scope_kind: MaterialScopeKind;
   session_id: string | null;
-  bench_id: string | null;
+  space_id: string | null;
   source_kind: string;
   source_attachment_id: string | null;
   status: string;
@@ -482,7 +482,7 @@ export interface AttachmentRecord {
   id: string;
   scope_kind: MaterialScopeKind;
   session_id: string | null;
-  bench_id: string | null;
+  space_id: string | null;
   kind: string;
   status: string;
   filename: string;
@@ -510,7 +510,7 @@ export interface BackgroundJobRecord {
 export interface CreateAttachmentRequest {
   scope_kind: MaterialScopeKind;
   session_id?: string;
-  bench_id?: string;
+  space_id?: string;
   filename: string;
   mime_type: string;
   content_base64: string;
@@ -524,7 +524,7 @@ export interface AttachmentQueuedResponse {
 export interface CreateMaterialRequest {
   scope_kind: MaterialScopeKind;
   session_id?: string;
-  bench_id?: string;
+  space_id?: string;
   title: string;
   relative_path: string;
   mime_type?: string;
@@ -571,7 +571,7 @@ export type BuilderConfigOperation =
       members?: string[];
     }
   | {
-      kind: "create_bench_extension";
+      kind: "create_space_extension";
       name: string;
       display_name?: string | null;
       description: string;
@@ -579,7 +579,7 @@ export type BuilderConfigOperation =
       instructions: string;
     }
   | {
-      kind: "update_bench_extension";
+      kind: "update_space_extension";
       extension_name: string;
       display_name?: string | null;
       description: string;
@@ -676,7 +676,7 @@ export interface SharedReferenceEdge {
 
 export interface TeamTopologySharedReferencePayload {
   team_id: string;
-  bench_id: string;
+  space_id: string;
   entry_agent_id: string;
   members: string[];
   nodes: SharedReferenceNode[];
@@ -736,8 +736,8 @@ export interface OperatorGatewaySummary {
 
 export interface OperatorSessionSummary {
   id: string;
-  bench_id: string;
-  bench_name: string;
+  space_id: string;
+  space_name: string;
   created_at: string;
   last_activity: string;
   message_preview: string | null;
@@ -767,12 +767,12 @@ export interface RecoveryExportSummary {
   id: string;
   created_at: string;
   size_bytes: number;
-  benches: number;
+  spaces: number;
   workspaces: number;
   sessions: number;
   secrets: number;
   channel_links: number;
-  execution_hosts: number;
+  devices: number;
   schedules: number;
 }
 
@@ -788,8 +788,8 @@ export interface ChannelStatusSummary {
   last_delivery_at: string | null;
 }
 
-export interface OperatorNodeSummary {
-  host_id: string;
+export interface OperatorDeviceSummary {
+  device_id: string;
   label: string | null;
   kind: string;
   base_url: string | null;
@@ -811,7 +811,7 @@ export interface OperatorOverview {
   channels: {
     channels: ChannelStatusSummary[];
   };
-  nodes: OperatorNodeSummary[];
+  devices: OperatorDeviceSummary[];
 }
 
 // -------------------------------------------------------------------------
@@ -958,14 +958,14 @@ export type KnownServerEvent =
       session_id: string;
       topology_run_id: string;
       node_execution_id: string;
-      node_id: string;
+      device_id: string;
     }
   | {
       type: "topology_node_completed";
       session_id: string;
       topology_run_id: string;
       node_execution_id: string;
-      node_id: string;
+      device_id: string;
       success: boolean;
     }
   | {

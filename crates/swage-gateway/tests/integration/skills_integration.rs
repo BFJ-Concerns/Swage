@@ -155,7 +155,7 @@ async fn start_test_server_with_config(
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
         Arc::new(provider),
         config,
         swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
@@ -269,7 +269,7 @@ async fn ws_recv_lenient(stream: &mut WsStream) -> Option<Value> {
 
 /// Proof scenario 1: Slash command → assembly report.
 ///
-/// Creates a bench-level skill with distinctive instructions, invokes it
+/// Creates a space-level skill with distinctive instructions, invokes it
 /// via `/skill-name` in a conversation, and verifies the assembly report
 /// includes the skill's content as a skills element with a token count
 /// and the skill's name in provenance.
@@ -279,18 +279,18 @@ async fn ws_recv_lenient(stream: &mut WsStream) -> Option<Value> {
 /// assembly wiring (gateway) + assembly report delivery (gateway).
 #[tokio::test(flavor = "multi_thread")]
 async fn slash_command_activates_skill_and_appears_in_assembly_report() {
-    // Set up a temp directory with a bench-level skill.
+    // Set up a temp directory with a space-level skill.
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path();
 
     // Create the Swage config hierarchy.
-    std::fs::create_dir_all(root.join("benches/default/agents/gateway")).unwrap();
+    std::fs::create_dir_all(root.join("spaces/default/agents/gateway")).unwrap();
     std::fs::write(root.join("config.toml"), "").unwrap();
 
-    // Create a distinctive bench-level skill.
-    let bench_dir = root.join("benches/default");
+    // Create a distinctive space-level skill.
+    let space_dir = root.join("spaces/default");
     create_skill(
-        &bench_dir,
+        &space_dir,
         "code-review",
         "Structured code review with checklist",
         "Review the code change systematically:\n\n1. Correctness\n2. Edge cases\n3. Clarity",
@@ -384,7 +384,7 @@ async fn agent_level_skill_appears_in_assembly_without_invocation() {
     let root = tmp.path();
 
     // Create the config hierarchy with an agent-level skill.
-    let agent_dir = root.join("benches/default/agents/gateway");
+    let agent_dir = root.join("spaces/default/agents/gateway");
     std::fs::create_dir_all(&agent_dir).unwrap();
     std::fs::write(root.join("config.toml"), "").unwrap();
 
@@ -463,12 +463,12 @@ async fn activated_skill_persists_across_multiple_turns() {
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path();
 
-    std::fs::create_dir_all(root.join("benches/default/agents/gateway")).unwrap();
+    std::fs::create_dir_all(root.join("spaces/default/agents/gateway")).unwrap();
     std::fs::write(root.join("config.toml"), "").unwrap();
 
-    let bench_dir = root.join("benches/default");
+    let space_dir = root.join("spaces/default");
     create_skill(
-        &bench_dir,
+        &space_dir,
         "debug-helper",
         "Debugging assistance",
         "Help the user debug issues step by step.",
@@ -572,7 +572,7 @@ async fn deactivating_agent_level_skill_returns_error() {
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path();
 
-    let agent_dir = root.join("benches/default/agents/gateway");
+    let agent_dir = root.join("spaces/default/agents/gateway");
     std::fs::create_dir_all(&agent_dir).unwrap();
     std::fs::write(root.join("config.toml"), "").unwrap();
 
@@ -622,8 +622,8 @@ async fn skills_listing_shows_resolved_skills_with_override() {
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path();
 
-    let bench_dir = root.join("benches/default/agents/gateway");
-    std::fs::create_dir_all(&bench_dir).unwrap();
+    let space_dir = root.join("spaces/default/agents/gateway");
+    std::fs::create_dir_all(&space_dir).unwrap();
     std::fs::write(root.join("config.toml"), "").unwrap();
 
     // Global skill.
@@ -636,15 +636,15 @@ async fn skills_listing_shows_resolved_skills_with_override() {
         "Review code globally.",
     );
 
-    // Bench skill with the same name — should shadow the global one.
-    let bench_base = root.join("benches/default");
+    // Space skill with the same name — should shadow the global one.
+    let space_base = root.join("spaces/default");
     create_skill_with_tools(
-        &bench_base,
+        &space_base,
         "code-review",
-        "Bench Code Review",
-        "Bench-specific code review",
+        "Space Code Review",
+        "Space-specific code review",
         &["read_file", "search_files"],
-        "Review code for this bench.",
+        "Review code for this space.",
     );
 
     // A second global skill that should not be shadowed.
@@ -652,7 +652,7 @@ async fn skills_listing_shows_resolved_skills_with_override() {
         root,
         "formatting",
         "Code formatting assistance",
-        "Format code according to bench standards.",
+        "Format code according to space standards.",
     );
 
     let _env_guard = SwageHomeGuard::set(root);
@@ -660,14 +660,14 @@ async fn skills_listing_shows_resolved_skills_with_override() {
     let (router, _addr, storage) =
         start_test_server_with_config(FixedResponseProvider::new("ok"), config).await;
 
-    // Get the default bench ID for the query parameter.
-    use swage_storage::store::BenchStore;
-    let bench = storage.get_or_create_default().await.unwrap();
+    // Get the default space ID for the query parameter.
+    use swage_storage::store::SpaceStore;
+    let space = storage.get_or_create_default().await.unwrap();
 
     let (status, body) = http(
         &router,
         "GET",
-        &format!("/api/skills?bench_id={}", bench.id),
+        &format!("/api/skills?space_id={}", space.id),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -676,7 +676,7 @@ async fn skills_listing_shows_resolved_skills_with_override() {
         .as_array()
         .expect("response should have skills array");
 
-    // code-review should appear once (bench shadows global).
+    // code-review should appear once (space shadows global).
     let code_reviews: Vec<&Value> = skills
         .iter()
         .filter(|s| s["name"] == "code-review")
@@ -687,10 +687,10 @@ async fn skills_listing_shows_resolved_skills_with_override() {
         "same-name skill should appear once after override resolution"
     );
     assert_eq!(
-        code_reviews[0]["level"], "bench",
-        "bench-level skill should shadow global"
+        code_reviews[0]["level"], "space",
+        "space-level skill should shadow global"
     );
-    assert_eq!(code_reviews[0]["description"], "Bench-specific code review",);
+    assert_eq!(code_reviews[0]["description"], "Space-specific code review",);
 
     // Tool requirements should be present.
     let tools = code_reviews[0]["tools"]

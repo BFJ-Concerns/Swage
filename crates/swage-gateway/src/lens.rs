@@ -19,7 +19,7 @@ pub struct LensDescriptor {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LensRuntimeResponse {
-    pub bench_id: Uuid,
+    pub space_id: Uuid,
     pub active_lens: AppLens,
     pub updated_at: String,
     pub available_lenses: Vec<LensDescriptor>,
@@ -142,7 +142,7 @@ fn to_response(preference: LensPreference, lenses: Vec<LensRecord>) -> LensRunti
     let active_lens = preference.active_lens.clone();
     let active_record = lenses.iter().find(|lens| lens.id == active_lens);
     LensRuntimeResponse {
-        bench_id: preference.bench_id,
+        space_id: preference.space_id,
         active_lens: preference.active_lens,
         updated_at: preference.updated_at.to_rfc3339(),
         stage_modules: active_record
@@ -273,16 +273,16 @@ pub async fn install_lens(
 
 pub async fn get_lens_runtime(
     state: &AppState,
-    bench_id: Uuid,
+    space_id: Uuid,
 ) -> Result<LensRuntimeResponse, GatewayError> {
     state
-        .bench_store
-        .get(bench_id)
+        .space_store
+        .get(space_id)
         .await?
-        .ok_or(GatewayError::BenchNotFound { id: bench_id })?;
+        .ok_or(GatewayError::SpaceNotFound { id: space_id })?;
     let preference = state
         .storage
-        .get_active_lens(bench_id)
+        .get_active_lens(space_id)
         .await
         .map_err(GatewayError::Storage)?;
     let lenses = state
@@ -295,17 +295,17 @@ pub async fn get_lens_runtime(
 
 pub async fn update_lens_runtime(
     state: &AppState,
-    bench_id: Uuid,
+    space_id: Uuid,
     request: UpdateLensRuntimeRequest,
 ) -> Result<LensRuntimeResponse, GatewayError> {
     state
-        .bench_store
-        .get(bench_id)
+        .space_store
+        .get(space_id)
         .await?
-        .ok_or(GatewayError::BenchNotFound { id: bench_id })?;
+        .ok_or(GatewayError::SpaceNotFound { id: space_id })?;
     let preference = state
         .storage
-        .set_active_lens(bench_id, request.lens)
+        .set_active_lens(space_id, request.lens)
         .await
         .map_err(GatewayError::Storage)?;
     let lenses = state

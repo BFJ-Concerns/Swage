@@ -7,9 +7,9 @@
 use uuid::Uuid;
 
 use swage_core::{Role, compact_tool_arguments_for_model, compact_tool_result_for_model};
-use swage_storage::model::NewBench;
+use swage_storage::model::NewSpace;
 use swage_storage::store::{
-    BenchStore, MessageStore, SessionStore, ThreadStore, ToolCallStore, TurnStore,
+    MessageStore, SessionStore, SpaceStore, ThreadStore, ToolCallStore, TurnStore,
 };
 use swage_storage::{
     NewMessage, NewSession, NewThread, NewToolCall, NewTurn, SqliteStorage, ThreadState, TurnState,
@@ -22,31 +22,31 @@ use swage_storage::{
 const AGENT_A: &str = "agent_alpha";
 const AGENT_B: &str = "agent_beta";
 
-/// Create an in-memory SqliteStorage with a bench and return (storage, bench_id).
+/// Create an in-memory SqliteStorage with a space and return (storage, space_id).
 async fn setup() -> (SqliteStorage, Uuid) {
     let storage = SqliteStorage::in_memory().expect("in-memory should succeed");
-    let bench = BenchStore::create(
+    let space = SpaceStore::create(
         &storage,
-        NewBench {
+        NewSpace {
             name: "integration-test".into(),
             slug: "integration-test".into(),
         },
     )
     .await
-    .expect("create bench");
-    (storage, bench.id)
+    .expect("create space");
+    (storage, space.id)
 }
 
-/// Build a full entity hierarchy: bench → session → thread → turn → message + tool call.
+/// Build a full entity hierarchy: space → session → thread → turn → message + tool call.
 /// Returns all IDs for verification.
 async fn create_full_hierarchy(
     storage: &SqliteStorage,
-    bench_id: Uuid,
+    space_id: Uuid,
     agent_id: &str,
 ) -> (Uuid, Uuid, Uuid, Uuid, Uuid) {
     let session = storage
         .create_session(NewSession {
-            bench_id,
+            space_id,
             agent_id: agent_id.to_string(),
             metadata: None,
             active_workspace_attachment_id: None,
@@ -137,18 +137,18 @@ async fn full_hierarchy_survives_reconnection() {
     // Step 1: create all entities and drop the connection.
     let (session_id, thread_id, turn_id, message_id, tool_call_id) = {
         let storage = SqliteStorage::open(&db_path).expect("open");
-        let bench = BenchStore::create(
+        let space = SpaceStore::create(
             &storage,
-            NewBench {
+            NewSpace {
                 name: "roundtrip".into(),
                 slug: "roundtrip".into(),
             },
         )
         .await
-        .expect("create bench");
+        .expect("create space");
 
         // Storage dropped here — connection closed.
-        create_full_hierarchy(&storage, bench.id, AGENT_A).await
+        create_full_hierarchy(&storage, space.id, AGENT_A).await
     };
 
     // Step 2: reconnect and verify everything is readable.
@@ -195,11 +195,11 @@ async fn full_hierarchy_survives_reconnection() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn agent_id_isolation_across_entity_types() {
-    let (storage, bench_id) = setup().await;
+    let (storage, space_id) = setup().await;
 
     // Create hierarchies for two different agents.
-    create_full_hierarchy(&storage, bench_id, AGENT_A).await;
-    create_full_hierarchy(&storage, bench_id, AGENT_B).await;
+    create_full_hierarchy(&storage, space_id, AGENT_A).await;
+    create_full_hierarchy(&storage, space_id, AGENT_B).await;
 
     // Sessions: each agent should see only their own.
     let sessions_a = storage
@@ -241,25 +241,25 @@ async fn agent_id_isolation_across_entity_types() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 3: Cascade deletion from bench level
+// Test 3: Cascade deletion from space level
 //
 // Spans: ikjg (migrations with FK cascades), all store impls
 //
-// Proves: "Data model" — deleting a bench cascades through
+// Proves: "Data model" — deleting a space cascades through
 //         sessions → threads → turns → messages and tool calls.
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread")]
-async fn cascade_deletion_from_bench() {
-    let (storage, bench_id) = setup().await;
+async fn cascade_deletion_from_space() {
+    let (storage, space_id) = setup().await;
     let (session_id, thread_id, turn_id, message_id, tool_call_id) =
-        create_full_hierarchy(&storage, bench_id, AGENT_A).await;
+        create_full_hierarchy(&storage, space_id, AGENT_A).await;
 
-    // Delete the bench — everything underneath should cascade.
-    let deleted = BenchStore::delete(&storage, bench_id)
+    // Delete the space — everything underneath should cascade.
+    let deleted = SpaceStore::delete(&storage, space_id)
         .await
-        .expect("delete bench");
-    assert!(deleted, "bench should exist and be deleted");
+        .expect("delete space");
+    assert!(deleted, "space should exist and be deleted");
 
     // Verify all children are gone.
     assert!(
@@ -311,10 +311,10 @@ async fn cascade_deletion_from_bench() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn thread_state_machine_enforced() {
-    let (storage, bench_id) = setup().await;
+    let (storage, space_id) = setup().await;
     let session = storage
         .create_session(NewSession {
-            bench_id,
+            space_id,
             agent_id: AGENT_A.to_string(),
             metadata: None,
             active_workspace_attachment_id: None,
@@ -406,10 +406,10 @@ async fn thread_state_machine_enforced() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn turn_recovery_finds_pending_and_processing() {
-    let (storage, bench_id) = setup().await;
+    let (storage, space_id) = setup().await;
     let session = storage
         .create_session(NewSession {
-            bench_id,
+            space_id,
             agent_id: AGENT_A.to_string(),
             metadata: None,
             active_workspace_attachment_id: None,
@@ -500,22 +500,22 @@ async fn turn_recovery_finds_pending_and_processing() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 6: Default bench cannot be deleted
+// Test 6: Default space cannot be deleted
 //
-// Spans: ikjg (migrations/seeding), bench SQL impl
+// Spans: ikjg (migrations/seeding), space SQL impl
 //
-// Proves: "Data model" — deleting the default bench is rejected.
+// Proves: "Data model" — deleting the default space is rejected.
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread")]
-async fn default_bench_cannot_be_deleted() {
+async fn default_space_cannot_be_deleted() {
     let storage = SqliteStorage::in_memory().expect("in-memory");
     let default = storage.get_or_create_default().await.expect("get default");
 
-    let err = BenchStore::delete(&storage, default.id).await.unwrap_err();
+    let err = SpaceStore::delete(&storage, default.id).await.unwrap_err();
     assert!(
         matches!(err, swage_core::StorageError::ConstraintViolation(_)),
-        "deleting default bench should return ConstraintViolation, got: {err:?}"
+        "deleting default space should return ConstraintViolation, got: {err:?}"
     );
 }
 
@@ -530,10 +530,10 @@ async fn default_bench_cannot_be_deleted() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn messages_ordered_within_thread() {
-    let (storage, bench_id) = setup().await;
+    let (storage, space_id) = setup().await;
     let session = storage
         .create_session(NewSession {
-            bench_id,
+            space_id,
             agent_id: AGENT_A.to_string(),
             metadata: None,
             active_workspace_attachment_id: None,

@@ -33,7 +33,7 @@ pub use error::{ConfigError, ConfigProblem, ConfigProblemKind};
 
 // Discovery
 pub use discovery::{
-    AssemblyFile, DiscoveredBench, ResolvedAssembly, discover, discover_assemblies, discover_teams,
+    AssemblyFile, DiscoveredSpace, ResolvedAssembly, discover, discover_assemblies, discover_teams,
     effective_root_path, has_default_lens, resolve_assembly, resolve_root,
 };
 

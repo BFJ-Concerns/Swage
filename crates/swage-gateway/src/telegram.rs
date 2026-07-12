@@ -486,7 +486,7 @@ async fn redeem_link_control(
             integration: "telegram".into(),
             account: bot_id.to_string(),
             conversation: control.chat_id.clone(),
-            bench_id: record.bench_id,
+            space_id: record.space_id,
             agent_id: record.agent_id,
             home_target: record.home_target.or(Some(DeliveryTarget::Channel {
                 integration: ExternalChannelIntegration::Telegram,
@@ -967,7 +967,7 @@ mod tests {
     ) -> AppState {
         let mut state = AppState::new(
             Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-            Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
+            Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
             Arc::new(provider),
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -992,7 +992,7 @@ mod tests {
             state,
             CreateChannelLinkCodeRequest {
                 integration: ExternalChannelIntegration::Telegram,
-                bench_id: None,
+                space_id: None,
                 agent_id: None,
                 home_target: None,
             },
@@ -1031,7 +1031,7 @@ mod tests {
             .requeue_presented_for_inflight_turns()
             .await
             .unwrap();
-        crate::shutdown::recover_orphaned_turns(state.storage.as_ref(), state.bench_store.as_ref())
+        crate::shutdown::recover_orphaned_turns(state.storage.as_ref(), state.space_store.as_ref())
             .await
             .unwrap();
     }

@@ -1,33 +1,33 @@
-//! Bench context for per-turn tool access.
+//! Space context for per-turn tool access.
 //!
-//! `BenchContext` is set as a tokio task-local before each tool execution
+//! `SpaceContext` is set as a tokio task-local before each tool execution
 //! during a turn, giving tools (e.g., MemoryTool) access to the current
-//! bench without requiring it to be threaded through every function call.
+//! space without requiring it to be threaded through every function call.
 
 use std::path::PathBuf;
 
 use uuid::Uuid;
 
-/// Per-turn bench context, available to all tools during execution.
+/// Per-turn space context, available to all tools during execution.
 #[derive(Debug, Clone)]
-pub struct BenchContext {
-    /// The bench this turn belongs to.
-    pub bench_id: Uuid,
-    /// Slug of the bench (used for config resolution and filesystem paths).
-    pub bench_slug: String,
-    /// Absolute path to the bench's memory directory.
+pub struct SpaceContext {
+    /// The space this turn belongs to.
+    pub space_id: Uuid,
+    /// Slug of the space (used for config resolution and filesystem paths).
+    pub space_slug: String,
+    /// Absolute path to the space's memory directory.
     ///
-    /// Typically: `{swage_root}/benches/{slug}/memory/`
+    /// Typically: `{swage_root}/spaces/{slug}/memory/`
     pub memory_path: PathBuf,
 }
 
 tokio::task_local! {
-    /// Per-turn bench context, accessible to all tool executions.
+    /// Per-turn space context, accessible to all tool executions.
     ///
     /// Set by `process_turn` in `turn.rs` before each tool call. Tools like
-    /// MemoryTool read this to determine which bench's memory directory to use.
+    /// MemoryTool read this to determine which space's memory directory to use.
     ///
     /// Uses `try_with` rather than `with` to avoid panicking if called outside
     /// a turn (e.g., in unit tests that don't run through `process_turn`).
-    pub static BENCH_CONTEXT: BenchContext;
+    pub static SPACE_CONTEXT: SpaceContext;
 }

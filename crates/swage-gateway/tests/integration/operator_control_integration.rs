@@ -19,7 +19,7 @@ use swage_core::{
 };
 use swage_gateway::{
     channel_gateway::{ChannelOrigin, DeliveryTarget},
-    execution_host::{RegisterExecutionHostRequest, register_remote_execution_host},
+    device::{RegisterDeviceRequest, register_remote_device},
     schedule::create_schedule,
     secret::CreateSecretRequest,
     server::build_router,
@@ -29,7 +29,7 @@ use swage_protocol::client::schedule::{CreateScheduleRequest, ScheduleSpec, Sess
 use swage_provider::LlmProvider;
 use swage_storage::{
     ApprovalKind, NewApprovalRequest, NewDeliveryRecord, NewTurn, SqliteStorage, TurnState,
-    store::{BenchStore, Storage},
+    store::{SpaceStore, Storage},
 };
 
 use crate::support::ProcessEnvGuard;
@@ -76,7 +76,7 @@ fn test_state() -> AppState {
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
     AppState::new(
         Arc::clone(&storage) as Arc<dyn Storage>,
-        Arc::clone(&storage) as Arc<dyn BenchStore>,
+        Arc::clone(&storage) as Arc<dyn SpaceStore>,
         Arc::new(MockProvider),
         swage_config::ResolvedConfig::default(),
         swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
@@ -131,7 +131,7 @@ async fn create_conversation(router: &Router) -> Uuid {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn operator_overview_lists_sessions_jobs_approvals_channels_and_nodes() {
+async fn operator_overview_lists_sessions_jobs_approvals_channels_and_devices() {
     let _guard = with_secret_env();
     let state = test_state();
     let router = build_router(state.clone());
@@ -188,18 +188,18 @@ async fn operator_overview_lists_sessions_jobs_approvals_channels_and_nodes() {
         .await
         .unwrap();
 
-    register_remote_execution_host(
+    register_remote_device(
         &state,
-        RegisterExecutionHostRequest {
-            host_id: "docker-a".into(),
+        RegisterDeviceRequest {
+            device_id: "docker-a".into(),
             label: Some("Docker A".into()),
             kind: "docker".into(),
             base_url: "http://127.0.0.1:4100".into(),
             shared_token_secret_ref: state
                 .secret_manager
                 .create_secret(CreateSecretRequest {
-                    name: "Operator node token".into(),
-                    material_kind: "node_credential".into(),
+                    name: "Operator device token".into(),
+                    material_kind: "device_credential".into(),
                     owner_kind: "service".into(),
                     backend_kind: "managed".into(),
                     scope_kind: "gateway".into(),
@@ -258,15 +258,15 @@ async fn operator_overview_lists_sessions_jobs_approvals_channels_and_nodes() {
     );
     assert_eq!(body["channels"]["channels"][0]["integration"], "dev_dm");
     assert_eq!(body["channels"]["channels"][0]["status"], "active");
-    let docker_node = body["nodes"]
+    let docker_device = body["devices"]
         .as_array()
-        .and_then(|nodes| {
-            nodes
+        .and_then(|devices| {
+            devices
                 .iter()
-                .find(|node| node["host_id"] == json!("docker-a"))
+                .find(|device| device["device_id"] == json!("docker-a"))
         })
-        .expect("expected docker-a node in operator overview");
-    assert_eq!(docker_node["state"], "disconnected");
+        .expect("expected docker-a device in operator overview");
+    assert_eq!(docker_device["state"], "disconnected");
 
     let (channel_status, channel_body) = get_json(&router, "/api/channels").await;
     assert_eq!(channel_status, StatusCode::OK);

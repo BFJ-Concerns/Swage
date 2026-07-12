@@ -1,5 +1,5 @@
 <script lang="ts">
-  type InformationalTab = "plugins" | "channels" | "nodes" | "voice" | "account";
+  type InformationalTab = "plugins" | "channels" | "devices" | "voice" | "account";
 
   interface Props {
     tab: InformationalTab;
@@ -10,15 +10,15 @@
   const CONTENT: Record<InformationalTab, { title: string; body: string }> = {
     plugins: {
       title: "Installed plugins",
-      body: "No platform plugin registry yet. Bench-level extensions live in the Builder lens.",
+      body: "No platform plugin registry yet. Space-level extensions live in the Builder lens.",
     },
     channels: {
       title: "Delivery channels",
       body: "Channel management is read-only via the operator API; this page will configure them once a CRUD endpoint exists.",
     },
-    nodes: {
-      title: "Attached nodes",
-      body: "Node listing will mirror /api/operator/overview.nodes once this page is wired.",
+    devices: {
+      title: "Attached devices",
+      body: "Device listing will mirror /api/operator/overview.devices once this page is wired.",
     },
     voice: {
       title: "Voice capabilities",

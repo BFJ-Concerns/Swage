@@ -1,6 +1,6 @@
 ---
 name: skill-creator
-description: Use this skill to author, update, and audit Swage runtime skills — the SKILL.md prompt fragments discovered from the Swage config hierarchy (global, bench, agent) and parsed by `crates/swage-config/src/skill.rs`, which a user activates by slash command and which the context engine folds into the agent's system context. Use when the user wants to add a new Swage skill, rework an existing one, fix discovery or activation problems, write a triggering description, or decide which hierarchy level a skill belongs at. Not for Claude Code skills under `.claude/skills/` (those use a different frontmatter schema), and not for Swage runtime *tools* (use the tool-creator skill).
+description: Use this skill to author, update, and audit Swage runtime skills — the SKILL.md prompt fragments discovered from the Swage config hierarchy (global, space, agent) and parsed by `crates/swage-config/src/skill.rs`, which a user activates by slash command and which the context engine folds into the agent's system context. Use when the user wants to add a new Swage skill, rework an existing one, fix discovery or activation problems, write a triggering description, or decide which hierarchy level a skill belongs at. Not for Claude Code skills under `.claude/skills/` (those use a different frontmatter schema), and not for Swage runtime *tools* (use the tool-creator skill).
 metadata:
   audience: maintainers
   workflow: skill-authoring
@@ -18,8 +18,8 @@ Runtime skills are discovered from a `skills/` directory at three hierarchy leve
 
 ```
 $SWAGE_HOME/skills/<name>/SKILL.md                               # Global
-$SWAGE_HOME/benches/<bench>/skills/<name>/SKILL.md               # Bench
-$SWAGE_HOME/benches/<bench>/agents/<agent>/skills/<name>/SKILL.md # Agent
+$SWAGE_HOME/spaces/<space>/skills/<name>/SKILL.md               # Space
+$SWAGE_HOME/spaces/<space>/agents/<agent>/skills/<name>/SKILL.md # Agent
 ```
 
 (The wider Swage config cascade has a Team level too, but skill discovery — `discover_available` in `crates/swage-gateway/src/skill.rs` and the `GET /api/skills` handler — scans only these three. A `skills/` directory under a team is not loaded.)
@@ -28,7 +28,7 @@ Required rules:
 
 - The directory name is the canonical identifier and must match `[a-z0-9-]+` (lowercase ASCII letters, digits, hyphens). A name with uppercase, spaces, or other characters is skipped with a warning. The frontmatter `name` field is a display name only, never the identifier.
 - `SKILL.md` lives at the directory root, with a YAML frontmatter block followed by the body. A directory with no `SKILL.md` is silently skipped.
-- **Override resolution:** when the same name appears at more than one level, the most specific level wins — Agent > Bench > Global. Place a skill at the narrowest level that needs it; a global skill is shadowed by any same-named skill closer to the agent.
+- **Override resolution:** when the same name appears at more than one level, the most specific level wins — Agent > Space > Global. Place a skill at the narrowest level that needs it; a global skill is shadowed by any same-named skill closer to the agent.
 
 There are no built-in example skills shipped in the repo. The integration tests under `crates/swage-gateway/tests/integration/skills_endpoint_integration.rs` and the unit tests in `crates/swage-config/src/skill.rs` are the closest thing to worked examples of the file shape.
 
@@ -36,7 +36,7 @@ There are no built-in example skills shipped in the repo. The integration tests 
 
 1. Identify whether this is a new skill, an update, or a discovery/activation fix.
 2. Run the intake interview (below). Do this even for updates — at minimum confirm the problem, the behaviour to preserve, and which hierarchy level the skill belongs at.
-3. For an update, read the whole existing skill directory before editing, plus any agent or bench config that activates it.
+3. For an update, read the whole existing skill directory before editing, plus any agent or space config that activates it.
 4. Confirm the hierarchy level. A skill that should apply to one agent does not belong at the global level where every agent inherits it; a skill every agent needs does not belong buried under one agent.
 5. If the skill lists `tools:`, confirm those tools are actually permitted to the agents that will run it — see *Tools Are Informational* below. The `tools:` list does not grant anything.
 6. Draft the skill. Keep the body lean (see *Body Authoring*).
@@ -49,7 +49,7 @@ Jump in at the user's actual stage, but never skip confirming the hierarchy leve
 Establish before drafting:
 
 1. What should activating this skill make the agent better at?
-2. Which agents should have it — one agent, a whole bench, or every agent globally? This sets the hierarchy level (skills are discovered at the agent, bench, and global levels only).
+2. Which agents should have it — one agent, a whole space, or every agent globally? This sets the hierarchy level (skills are discovered at the agent, space, and global levels only).
 3. When should the user activate it? Phrase the trigger in terms of the situation or request the skill addresses, since that is what the description has to match.
 4. Is this a skill that should always be on for its agents (an agent-level skill, auto-activated) or one the user reaches for situationally (activated by slash command)?
 5. Does the skill rely on any tools? If so, are those tools in the relevant agents' permission config?
@@ -125,7 +125,7 @@ If a skill is not appearing or not activating as expected, check in this order:
 1. Directory name matches `[a-z0-9-]+`. Uppercase or spaces skip the skill with a warning.
 2. `SKILL.md` is present at the directory root and starts with a `---` frontmatter block closed by a standalone `---`.
 3. `description:` is present and non-empty — without it the skill is rejected.
-4. The skill is at the level you expect, and is not shadowed by a same-named skill at a more specific level (Agent > Bench > Global).
+4. The skill is at the level you expect, and is not shadowed by a same-named skill at a more specific level (Agent > Space > Global).
 5. For slash activation, the name the user types is lowercase and matches the directory name exactly.
 
 For trigger and instruction-following problems after discovery is confirmed, see `references/troubleshooting.md`.
@@ -139,7 +139,7 @@ Skills are folded into context alongside the agent's base instructions, the proj
 ### Core Skill Checklist
 
 - [ ] directory name matches `[a-z0-9-]+` and matches how the skill is activated
-- [ ] the skill is placed at the right hierarchy level (global / bench / agent) for who should have it
+- [ ] the skill is placed at the right hierarchy level (global / space / agent) for who should have it
 - [ ] `description` is present, non-empty, and specific enough to distinguish the skill from its neighbours and trigger when it should
 - [ ] the body opens with the function the skill performs, in plain instructional vocabulary, and avoids persona framing for system-level skills
 - [ ] the body avoids concrete illustrative examples that would anchor future outputs

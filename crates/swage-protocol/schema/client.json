@@ -62,7 +62,7 @@
       ]
     },
     "CreateChannelLinkCodeRequest": {
-      "description": "Request a short-lived code that links a channel conversation to a bench.",
+      "description": "Request a short-lived code that links a channel conversation to a space.",
       "type": "object",
       "properties": {
         "agent_id": {
@@ -70,14 +70,6 @@
             "string",
             "null"
           ],
-          "default": null
-        },
-        "bench_id": {
-          "type": [
-            "string",
-            "null"
-          ],
-          "format": "uuid",
           "default": null
         },
         "home_target": {
@@ -93,6 +85,14 @@
         },
         "integration": {
           "$ref": "#/$defs/ExternalChannelIntegration"
+        },
+        "space_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid",
+          "default": null
         }
       },
       "required": [
@@ -625,7 +625,7 @@
       ]
     },
     "SessionPolicy": {
-      "description": "Which session each run executes in.\n\n- `fresh` — every run creates a new session in `bench_id` for\n  `agent_id`, with a deliberately assembled opening context (the\n  schedule's message plus the previous run's outcome).\n- `continuation` — every run continues the named session, executing as\n  whatever agent that session has at run time.",
+      "description": "Which session each run executes in.\n\n- `fresh` — every run creates a new session in `space_id` for\n  `agent_id`, with a deliberately assembled opening context (the\n  schedule's message plus the previous run's outcome).\n- `continuation` — every run continues the named session, executing as\n  whatever agent that session has at run time.",
       "oneOf": [
         {
           "type": "object",
@@ -633,18 +633,18 @@
             "agent_id": {
               "type": "string"
             },
-            "bench_id": {
-              "type": "string",
-              "format": "uuid"
-            },
             "policy": {
               "type": "string",
               "const": "fresh"
+            },
+            "space_id": {
+              "type": "string",
+              "format": "uuid"
             }
           },
           "required": [
             "policy",
-            "bench_id",
+            "space_id",
             "agent_id"
           ]
         },

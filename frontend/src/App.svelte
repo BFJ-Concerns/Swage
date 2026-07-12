@@ -4,8 +4,8 @@
   Startup sequence:
     1. Create stores (synchronous, no IO).
     2. Wire cross-store events: connection → streaming, reconnect → refresh.
-    3. onMount: load benches (auto-selects default), load conversations for
-       the selected bench, then initialise router (reads URL, selects any
+    3. onMount: load spaces (auto-selects default), load conversations for
+       the selected space, then initialise router (reads URL, selects any
        conversation referenced by the path).
     4. Render: loading splash → layout, or error screen if the gateway is unreachable.
 -->
@@ -18,7 +18,7 @@
   import { createConversationStore } from "./lib/stores/conversations";
   import { createConnectionStore } from "./lib/stores/connection";
   import { createStreamingStore } from "./lib/stores/streaming";
-  import { createBenchStore } from "./lib/stores/benches";
+  import { createSpaceStore } from "./lib/stores/spaces";
   import { createRouter } from "./lib/router";
   import type { Route } from "./lib/router";
   import { getDesktopRuntime } from "./lib/runtime";
@@ -39,7 +39,7 @@
   // Store creation
   // ---------------------------------------------------------------------------
 
-  const benchStore = createBenchStore();
+  const spaceStore = createSpaceStore();
   const conversationStore = createConversationStore();
 
   // onReconnect re-fetches the active conversation over HTTP after a dropped
@@ -73,13 +73,13 @@
       activeSurface = "conversation";
       await conversationStore.selectConversation(id);
 
-      // A deep-linked conversation may belong to a bench other than the one
-      // currently in scope (or none, on first load). Bring the bench into
+      // A deep-linked conversation may belong to a space other than the one
+      // currently in scope (or none, on first load). Bring the space into
       // scope so the nav, conversation list, and lens runtime reflect it.
       const conv = conversationStore.activeConversation;
-      if (conv && benchStore.currentBench?.id !== conv.bench_id) {
-        await benchStore.selectBench(conv.bench_id);
-        await conversationStore.loadConversations(conv.bench_id);
+      if (conv && spaceStore.currentSpace?.id !== conv.space_id) {
+        await spaceStore.selectSpace(conv.space_id);
+        await conversationStore.loadConversations(conv.space_id);
         await refreshLensRuntime("conversation");
       }
 
@@ -94,9 +94,9 @@
   async function createAndNavigate(): Promise<void> {
     try {
       activeSurface = "conversation";
-      // Use the currently selected bench — should always be set after startup.
-      const benchId = benchStore.currentBench?.id ?? "";
-      await conversationStore.createConversation(benchId);
+      // Use the currently selected space — should always be set after startup.
+      const spaceId = spaceStore.currentSpace?.id ?? "";
+      await conversationStore.createConversation(spaceId);
       const id = conversationStore.activeConversation?.id;
       if (id) {
         connectionStore.connectTo(id);
@@ -119,11 +119,11 @@
     get isLoading() {
       return conversationStore.isLoading;
     },
-    loadConversations: (benchId) =>
-      conversationStore.loadConversations(benchId),
+    loadConversations: (spaceId) =>
+      conversationStore.loadConversations(spaceId),
     selectConversation: selectAndNavigate,
-    // No-arg wrapper: the proxy captures benchId from benchStore at
-    // call time so ConversationList doesn't need to know about benches.
+    // No-arg wrapper: the proxy captures spaceId from spaceStore at
+    // call time so ConversationList doesn't need to know about spaces.
     createConversation: createAndNavigate,
     deleteConversation: (id) => conversationStore.deleteConversation(id),
     appendOptimisticUserMessage: (msg) =>
@@ -287,9 +287,9 @@
   }
 
   async function refreshLensRuntime(preferredSurface?: LensSurface): Promise<void> {
-    const benchId = benchStore.currentBench?.id;
-    if (!benchId) return;
-    const runtime = await fetchLensRuntime(benchId);
+    const spaceId = spaceStore.currentSpace?.id;
+    if (!spaceId) return;
+    const runtime = await fetchLensRuntime(spaceId);
     availableLenses = runtime.available_lenses;
     stageModules = runtime.stage_modules;
     activeLens = runtime.active_lens;
@@ -303,9 +303,9 @@
   }
 
   async function handleSelectLens(next: AppLens): Promise<void> {
-    const benchId = benchStore.currentBench?.id;
-    if (!benchId) return;
-    const runtime = await updateLensRuntime(benchId, next);
+    const spaceId = spaceStore.currentSpace?.id;
+    if (!spaceId) return;
+    const runtime = await updateLensRuntime(spaceId, next);
     availableLenses = runtime.available_lenses;
     stageModules = runtime.stage_modules;
     activeLens = runtime.active_lens;
@@ -316,36 +316,36 @@
   // Startup
   // ---------------------------------------------------------------------------
 
-  // Called by BenchSelector when the user switches benches.
-  // Reloads the conversation list for the newly active bench and clears
-  // any cross-bench UI state (active conversation, WebSocket connection).
-  async function handleBenchChange(): Promise<void> {
+  // Called by SpaceSelector when the user switches spaces.
+  // Reloads the conversation list for the newly active space and clears
+  // any cross-space UI state (active conversation, WebSocket connection).
+  async function handleSpaceChange(): Promise<void> {
     try {
-      const benchId = benchStore.currentBench?.id;
-      if (!benchId) return;
+      const spaceId = spaceStore.currentSpace?.id;
+      if (!spaceId) return;
 
-      // Drop the WebSocket — it was bound to the previous bench's session.
+      // Drop the WebSocket — it was bound to the previous space's session.
       connectionStore.disconnect();
       // Reset the URL so the router doesn't try to restore a stale conversation.
       router.navigate("/");
       currentRoute = router.currentRoute;
-      // Load the new bench's conversations.
-      await conversationStore.loadConversations(benchId);
+      // Load the new space's conversations.
+      await conversationStore.loadConversations(spaceId);
       await refreshLensRuntime("conversation");
     } catch (err) {
-      console.error("Failed to switch bench:", err);
+      console.error("Failed to switch space:", err);
     }
   }
 
   onMount(async () => {
     try {
-      // 1. Load the bench list. We deliberately do not auto-select — the user
-      //    lands on the bench picker and chooses where to work.
-      await benchStore.loadBenches();
+      // 1. Load the space list. We deliberately do not auto-select — the user
+      //    lands on the space picker and chooses where to work.
+      await spaceStore.loadSpaces();
 
-      // 2. Fetch global model settings. Bench-scoped data (conversations,
-      //    lens runtime) loads when a bench is opened — either via the
-      //    picker or by a deep-linked conversation that selects its bench.
+      // 2. Fetch global model settings. Space-scoped data (conversations,
+      //    lens runtime) loads when a space is opened — either via the
+      //    picker or by a deep-linked conversation that selects its space.
       const settings = await fetchSettings().catch((error) => {
         console.error("Failed to load model settings:", error);
         return null;
@@ -355,7 +355,7 @@
       defaultModelId = settings?.default_model ?? null;
 
       // 3. Apply the URL. If it points at a conversation, selectAndNavigate
-      //    will bring its bench into scope along the way.
+      //    will bring its space into scope along the way.
       await router.init();
       currentRoute = router.currentRoute;
 
@@ -408,8 +408,8 @@
     conversationStore={routerAwareStore}
     {connectionStore}
     {streamingStore}
-    {benchStore}
-    onBenchChange={handleBenchChange}
+    {spaceStore}
+    onSpaceChange={handleSpaceChange}
     onRetry={handleRetry}
     {activeLens}
     {availableLenses}

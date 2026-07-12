@@ -71,7 +71,7 @@ async fn activity_recording_middleware(
 /// # Routes
 ///
 /// The router handles the following endpoints (in priority order):
-/// - `POST /api/benches` / `GET /api/benches` - bench management
+/// - `POST /api/spaces` / `GET /api/spaces` - space management
 /// - `POST /api/teams` / topology-run routes - team and topology execution
 /// - conversation, thread, turn, approval, and agent-message APIs
 /// - `GET /api/conversations/{id}/ws` - WebSocket upgrade for live turn events
@@ -79,75 +79,75 @@ async fn activity_recording_middleware(
 /// - `*` - embedded frontend SPA (with fallback)
 pub fn build_router(state: AppState) -> Router {
     Router::new()
-        // Bench CRUD
+        // Space CRUD
         .route(
-            "/api/benches",
-            post(handlers::create_bench).get(handlers::list_benches),
+            "/api/spaces",
+            post(handlers::create_space).get(handlers::list_spaces),
         )
         .route(
-            "/api/benches/{id}",
-            get(handlers::get_bench)
-                .put(handlers::update_bench)
-                .delete(handlers::delete_bench),
+            "/api/spaces/{id}",
+            get(handlers::get_space)
+                .put(handlers::update_space)
+                .delete(handlers::delete_space),
         )
         .route(
-            "/api/benches/{id}/workspaces",
-            get(handlers::list_bench_workspaces).post(handlers::attach_bench_workspace),
+            "/api/spaces/{id}/workspaces",
+            get(handlers::list_space_workspaces).post(handlers::attach_space_workspace),
         )
         .route(
-            "/api/benches/{bench_id}/workspaces/{workspace_id}",
-            axum::routing::delete(handlers::detach_bench_workspace),
+            "/api/spaces/{space_id}/workspaces/{workspace_id}",
+            axum::routing::delete(handlers::detach_space_workspace),
         )
         .route(
-            "/api/benches/{bench_id}/workspaces/{workspace_id}/trust",
-            put(handlers::update_bench_workspace_trust),
+            "/api/spaces/{space_id}/workspaces/{workspace_id}/trust",
+            put(handlers::update_space_workspace_trust),
         )
         .route(
-            "/api/benches/{bench_id}/teams",
+            "/api/spaces/{space_id}/teams",
             get(handlers::list_teams).post(handlers::create_team),
         )
         .route(
-            "/api/benches/{id}/extensions",
-            get(handlers::list_bench_extensions).post(handlers::create_bench_extension),
+            "/api/spaces/{id}/extensions",
+            get(handlers::list_space_extensions).post(handlers::create_space_extension),
         )
         .route(
-            "/api/benches/{id}/extensions/{name}",
-            put(handlers::update_bench_extension),
+            "/api/spaces/{id}/extensions/{name}",
+            put(handlers::update_space_extension),
         )
         .route(
-            "/api/benches/{id}/extensions/{name}/approve-workspace",
+            "/api/spaces/{id}/extensions/{name}/approve-workspace",
             post(handlers::approve_workspace_extension),
         )
         .route(
-            "/api/benches/{id}/topology-flows",
+            "/api/spaces/{id}/topology-flows",
             get(handlers::list_topology_flows).post(handlers::create_topology_flow),
         )
         .route(
-            "/api/benches/{id}/topology-flows/{name}",
+            "/api/spaces/{id}/topology-flows/{name}",
             get(handlers::get_topology_flow).put(handlers::update_topology_flow),
         )
         .route(
-            "/api/benches/{id}/context-definitions",
+            "/api/spaces/{id}/context-definitions",
             get(handlers::list_context_definitions).post(handlers::create_context_definition),
         )
         .route(
-            "/api/benches/{id}/context-definitions/{name}",
+            "/api/spaces/{id}/context-definitions/{name}",
             get(handlers::get_context_definition).put(handlers::update_context_definition),
         )
         .route(
-            "/api/benches/{id}/context-definitions/{name}/preview",
+            "/api/spaces/{id}/context-definitions/{name}/preview",
             post(handlers::preview_context_definition),
         )
         .route(
-            "/api/benches/{id}/builder/proposals",
+            "/api/spaces/{id}/builder/proposals",
             post(handlers::create_builder_proposal),
         )
         .route(
-            "/api/benches/{id}/builder/apply",
+            "/api/spaces/{id}/builder/apply",
             post(handlers::apply_builder_proposal),
         )
         .route(
-            "/api/benches/{id}/config-versions",
+            "/api/spaces/{id}/config-versions",
             get(handlers::list_configuration_versions),
         )
         .route(
@@ -186,21 +186,21 @@ pub fn build_router(state: AppState) -> Router {
             "/api/sessions/{id}/materials",
             get(handlers::list_session_materials),
         )
-        // Bench-scoped session routes. These supplement /api/conversations
-        // and allow the frontend to fetch/create sessions per bench.
+        // Space-scoped session routes. These supplement /api/conversations
+        // and allow the frontend to fetch/create sessions per space.
         .route(
-            "/api/benches/{bench_id}/sessions",
-            get(handlers::list_bench_sessions).post(handlers::create_bench_session),
+            "/api/spaces/{space_id}/sessions",
+            get(handlers::list_space_sessions).post(handlers::create_space_session),
         )
         .route(
-            "/api/benches/{id}/attachments",
-            get(handlers::list_bench_attachments),
+            "/api/spaces/{id}/attachments",
+            get(handlers::list_space_attachments),
         )
         .route(
-            "/api/benches/{id}/materials",
-            get(handlers::list_bench_materials),
+            "/api/spaces/{id}/materials",
+            get(handlers::list_space_materials),
         )
-        // Skills listing — resolved hierarchy for a bench/agent combination.
+        // Skills listing — resolved hierarchy for a space/agent combination.
         .route("/api/skills", get(handlers::list_skills))
         .route("/api/capabilities", get(handlers::workflow_capabilities))
         // External communication channel gateway.
@@ -222,12 +222,12 @@ pub fn build_router(state: AppState) -> Router {
             post(handlers::create_channel_link_code),
         )
         .route(
-            "/api/onboarding/nodes/pairing-codes",
-            post(handlers::create_node_pairing_code),
+            "/api/onboarding/devices/pairing-codes",
+            post(handlers::create_device_pairing_code),
         )
         .route(
-            "/api/onboarding/nodes/redeem",
-            post(handlers::redeem_node_pairing_code),
+            "/api/onboarding/devices/redeem",
+            post(handlers::redeem_device_pairing_code),
         )
         .route(
             "/api/recovery/export",
@@ -256,7 +256,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/lenses/install", post(handlers::install_lens))
         .route("/api/lenses/{id}", put(handlers::update_lens))
         .route(
-            "/api/benches/{id}/lens-runtime",
+            "/api/spaces/{id}/lens-runtime",
             get(handlers::get_lens_runtime).put(handlers::update_lens_runtime),
         )
         .route("/api/shared-objects", get(handlers::list_shared_objects))
@@ -374,12 +374,9 @@ pub fn build_router(state: AppState) -> Router {
             "/api/presence/machines/{id}",
             axum::routing::delete(handlers::disconnect_machine),
         )
-        // Execution hosts and attached nodes.
-        .route("/api/execution-hosts", get(handlers::list_execution_hosts))
-        .route(
-            "/api/execution-hosts/register",
-            post(handlers::register_execution_host),
-        )
+        // Devices and attached devices.
+        .route("/api/devices", get(handlers::list_devices))
+        .route("/api/devices/register", post(handlers::register_device))
         .route("/api/voice/capabilities", get(handlers::voice_capabilities))
         .route("/api/settings", get(handlers::get_settings))
         .route("/api/settings", put(handlers::save_settings))

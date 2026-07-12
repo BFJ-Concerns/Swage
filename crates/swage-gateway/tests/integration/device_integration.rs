@@ -19,9 +19,9 @@ use swage_core::{
     ToolCompletionRequest, ToolCompletionResponse, ToolError,
 };
 use swage_gateway::{
-    execution_host::{
-        ExecutionHostKind, RegisterExecutionHostRequest, register_attached_node_with_gateway,
-        register_local_execution_host, spawn_attached_node, spawn_transport_backed_host,
+    device::{
+        DeviceKind, RegisterDeviceRequest, register_attached_device_with_gateway,
+        register_local_device, spawn_attached_device, spawn_transport_backed_device,
     },
     secret::CreateSecretRequest,
     server::build_router,
@@ -50,7 +50,7 @@ impl ChannelProvider {
 #[async_trait]
 impl LlmProvider for ChannelProvider {
     fn model_id(&self) -> &str {
-        "execution-host-test"
+        "device-test"
     }
 
     async fn complete(
@@ -83,18 +83,18 @@ impl LlmProvider for ChannelProvider {
     }
 }
 
-struct HostIdentityTool {
+struct DeviceIdentityTool {
     marker: &'static str,
 }
 
 #[async_trait]
-impl Tool for HostIdentityTool {
+impl Tool for DeviceIdentityTool {
     fn name(&self) -> &str {
-        "host_identity"
+        "device_identity"
     }
 
     fn description(&self) -> &str {
-        "Returns the execution-host marker."
+        "Returns the device marker."
     }
 
     fn parameters(&self) -> Value {
@@ -102,7 +102,7 @@ impl Tool for HostIdentityTool {
     }
 
     async fn execute(&self, _params: Value, _ctx: &dyn ToolContext) -> Result<Value, ToolError> {
-        Ok(json!({ "host": self.marker }))
+        Ok(json!({ "device": self.marker }))
     }
 }
 
@@ -116,21 +116,21 @@ async fn start_test_server(
     provider: impl LlmProvider + 'static,
     dispatcher: swage_gateway::tool::ToolDispatcher,
     workspace_root: PathBuf,
-    register_local_host: bool,
+    include_local_device: bool,
 ) -> (SocketAddr, AppState) {
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
     let mut config = swage_config::ResolvedConfig::default();
     config.workspace.path = workspace_root.to_string_lossy().into_owned();
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
         Arc::new(provider),
         config,
         dispatcher,
         None,
     );
-    if register_local_host {
-        register_local_execution_host(&state).await;
+    if include_local_device {
+        register_local_device(&state).await;
     }
     let router: Router = build_router(state.clone());
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -146,22 +146,22 @@ async fn start_file_backed_test_server(
     provider: impl LlmProvider + 'static,
     dispatcher: swage_gateway::tool::ToolDispatcher,
     workspace_root: PathBuf,
-    restore_hosts: bool,
+    restore_devices: bool,
 ) -> (SocketAddr, AppState) {
     let storage = Arc::new(SqliteStorage::open(db_path).unwrap());
     let mut config = swage_config::ResolvedConfig::default();
     config.workspace.path = workspace_root.to_string_lossy().into_owned();
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::BenchStore>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
         Arc::new(provider),
         config,
         dispatcher,
         None,
     );
-    register_local_execution_host(&state).await;
-    if restore_hosts {
-        swage_gateway::execution_host::restore_registered_execution_hosts(&state)
+    register_local_device(&state).await;
+    if restore_devices {
+        swage_gateway::device::restore_registered_devices(&state)
             .await
             .unwrap();
     }
@@ -179,7 +179,7 @@ async fn create_secret_ref(state: &AppState, name: &str, value: &str) -> String 
         .secret_manager
         .create_secret(CreateSecretRequest {
             name: name.to_string(),
-            material_kind: "node_credential".into(),
+            material_kind: "device_credential".into(),
             owner_kind: "service".into(),
             backend_kind: "managed".into(),
             scope_kind: "gateway".into(),
@@ -240,12 +240,12 @@ async fn run_turn_and_collect_tool_result(
     if let Some(workspace_root) = workspace_root {
         let response = reqwest::Client::new()
             .post(format!(
-                "http://{addr}/api/benches/{}/workspaces",
-                conversation.bench_id
+                "http://{addr}/api/spaces/{}/workspaces",
+                conversation.space_id
             ))
             .json(&json!({
                 "path": workspace_root,
-                "label": "execution host test workspace",
+                "label": "device test workspace",
                 "active_session_id": conversation.id,
                 "permissions": ["read", "write"],
                 "is_trusted": true
@@ -269,7 +269,7 @@ async fn run_turn_and_collect_tool_result(
     .await;
     ws_send(
         &mut ws_write,
-        json!({"type": "send_message", "content": "Identify your execution host"}),
+        json!({"type": "send_message", "content": "Identify your device"}),
     )
     .await;
 
@@ -288,8 +288,8 @@ async fn run_turn_and_collect_tool_result(
 
     provider_tx1
         .send(StreamChunk::ToolUse {
-            call_id: "call_host".into(),
-            name: "host_identity".into(),
+            call_id: "call_device".into(),
+            name: "device_identity".into(),
             arguments: json!({}),
         })
         .await
@@ -319,94 +319,94 @@ async fn run_turn_and_collect_tool_result(
     let tool_call = assistant
         .tool_calls
         .iter()
-        .find(|tool_call| tool_call.call_id == "call_host")
-        .expect("host_identity tool call should persist");
+        .find(|tool_call| tool_call.call_id == "call_device")
+        .expect("device_identity tool call should persist");
     tool_call.result.clone().expect("tool result should exist")
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn same_machine_gateway_executes_turns_through_local_execution_host() {
+async fn same_machine_gateway_executes_turns_through_local_device() {
     let _guard = with_secret_env();
     let workspace = tempfile::TempDir::new().unwrap();
     let (tx1, rx1) = tokio::sync::mpsc::channel(10);
     let (tx2, rx2) = tokio::sync::mpsc::channel(10);
     let provider = ChannelProvider::new(vec![rx1, rx2]);
     let dispatcher =
-        swage_gateway::tool::ToolDispatcher::allow_all(vec![Arc::new(HostIdentityTool {
-            marker: "local-host",
+        swage_gateway::tool::ToolDispatcher::allow_all(vec![Arc::new(DeviceIdentityTool {
+            marker: "local-device",
         }) as Arc<dyn Tool>]);
     let (addr, _state) =
         start_test_server(provider, dispatcher, workspace.path().to_path_buf(), true).await;
 
-    let hosts: serde_json::Value = reqwest::get(format!("http://{addr}/api/execution-hosts"))
+    let devices: serde_json::Value = reqwest::get(format!("http://{addr}/api/devices"))
         .await
         .unwrap()
         .json()
         .await
         .unwrap();
-    assert_eq!(hosts["hosts"][0]["host_id"], "local");
+    assert_eq!(devices["devices"][0]["device_id"], "local");
 
     let result = run_turn_and_collect_tool_result(addr, tx1, tx2, Some(workspace.path())).await;
-    assert_eq!(result["host"], "local-host");
+    assert_eq!(result["device"], "local-device");
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn node_only_execution_host_registers_with_remote_gateway_and_executes_work() {
+async fn attached_device_registers_with_remote_gateway_and_executes_work() {
     let _guard = with_secret_env();
-    let node_workspace = tempfile::TempDir::new().unwrap();
+    let device_workspace = tempfile::TempDir::new().unwrap();
     let (tx1, rx1) = tokio::sync::mpsc::channel(10);
     let (tx2, rx2) = tokio::sync::mpsc::channel(10);
     let provider = ChannelProvider::new(vec![rx1, rx2]);
     let gateway_dispatcher =
-        swage_gateway::tool::ToolDispatcher::allow_all(vec![Arc::new(HostIdentityTool {
+        swage_gateway::tool::ToolDispatcher::allow_all(vec![Arc::new(DeviceIdentityTool {
             marker: "gateway-unused",
         }) as Arc<dyn Tool>]);
     let (addr, state) = start_test_server(
         provider,
         gateway_dispatcher,
-        node_workspace.path().to_path_buf(),
+        device_workspace.path().to_path_buf(),
         false,
     )
     .await;
     let shared_token_secret_ref =
-        create_secret_ref(&state, "Remote node token", "node-secret").await;
+        create_secret_ref(&state, "Remote device token", "device-secret").await;
 
-    let node_dispatcher =
-        swage_gateway::tool::ToolDispatcher::allow_all(vec![Arc::new(HostIdentityTool {
-            marker: "remote-node",
+    let device_dispatcher =
+        swage_gateway::tool::ToolDispatcher::allow_all(vec![Arc::new(DeviceIdentityTool {
+            marker: "remote-device",
         }) as Arc<dyn Tool>]);
-    let node = spawn_attached_node(
-        node_dispatcher,
-        node_workspace.path().to_path_buf(),
-        "node-secret".to_string(),
+    let device = spawn_attached_device(
+        device_dispatcher,
+        device_workspace.path().to_path_buf(),
+        "device-secret".to_string(),
     )
     .await;
-    let registration = RegisterExecutionHostRequest {
-        host_id: "remote-node-a".to_string(),
-        label: Some("Remote Node A".to_string()),
-        kind: "attached_node".to_string(),
-        base_url: node.base_url.clone(),
+    let registration = RegisterDeviceRequest {
+        device_id: "remote-device-a".to_string(),
+        label: Some("Remote Device A".to_string()),
+        kind: "attached_device".to_string(),
+        base_url: device.base_url.clone(),
         shared_token_secret_ref,
-        workspace_root: node_workspace.path().to_string_lossy().into_owned(),
+        workspace_root: device_workspace.path().to_string_lossy().into_owned(),
         workspace_roots: vec![],
-        capabilities: vec!["host_identity".to_string()],
+        capabilities: vec!["device_identity".to_string()],
     };
-    register_attached_node_with_gateway(&format!("http://{addr}"), &registration)
+    register_attached_device_with_gateway(&format!("http://{addr}"), &registration)
         .await
         .unwrap();
 
     let result =
-        run_turn_and_collect_tool_result(addr, tx1, tx2, Some(node_workspace.path())).await;
+        run_turn_and_collect_tool_result(addr, tx1, tx2, Some(device_workspace.path())).await;
     assert_eq!(
-        result["host"], "remote-node",
+        result["device"], "remote-device",
         "remote tool result: {result:?}"
     );
 
-    node.join_handle.abort();
+    device.join_handle.abort();
 }
 
 async fn run_transport_backend_round_trip(
-    backend_kind: ExecutionHostKind,
+    backend_kind: DeviceKind,
     backend_label: &str,
     marker: &'static str,
 ) {
@@ -416,7 +416,7 @@ async fn run_transport_backend_round_trip(
     let (tx2, rx2) = tokio::sync::mpsc::channel(10);
     let provider = ChannelProvider::new(vec![rx1, rx2]);
     let gateway_dispatcher =
-        swage_gateway::tool::ToolDispatcher::allow_all(vec![Arc::new(HostIdentityTool {
+        swage_gateway::tool::ToolDispatcher::allow_all(vec![Arc::new(DeviceIdentityTool {
             marker: "gateway-unused",
         }) as Arc<dyn Tool>]);
     let (addr, state) = start_test_server(
@@ -431,57 +431,60 @@ async fn run_transport_backend_round_trip(
 
     let backend_dispatcher =
         swage_gateway::tool::ToolDispatcher::allow_all(vec![
-            Arc::new(HostIdentityTool { marker }) as Arc<dyn Tool>
+            Arc::new(DeviceIdentityTool { marker }) as Arc<dyn Tool>,
         ]);
-    let backend = spawn_transport_backed_host(
+    let backend = spawn_transport_backed_device(
         backend_kind.clone(),
         backend_dispatcher,
         workspace.path().to_path_buf(),
         "backend-secret".to_string(),
     )
     .await;
-    let registration = RegisterExecutionHostRequest {
-        host_id: format!("{backend_label}-host"),
-        label: Some(format!("{backend_label} Host")),
+    let registration = RegisterDeviceRequest {
+        device_id: format!("{backend_label}-device"),
+        label: Some(format!("{backend_label} Device")),
         kind: backend_kind.to_string(),
         base_url: backend.base_url.clone(),
         shared_token_secret_ref,
         workspace_root: workspace.path().to_string_lossy().into_owned(),
         workspace_roots: vec![],
-        capabilities: vec!["host_identity".to_string()],
+        capabilities: vec!["device_identity".to_string()],
     };
-    register_attached_node_with_gateway(&format!("http://{addr}"), &registration)
+    register_attached_device_with_gateway(&format!("http://{addr}"), &registration)
         .await
         .unwrap();
 
     let result = run_turn_and_collect_tool_result(addr, tx1, tx2, Some(workspace.path())).await;
-    assert_eq!(result["host"], marker, "{backend_label} result: {result:?}");
+    assert_eq!(
+        result["device"], marker,
+        "{backend_label} result: {result:?}"
+    );
 
     backend.join_handle.abort();
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn docker_execution_backend_runs_through_shared_execution_interface() {
-    run_transport_backend_round_trip(ExecutionHostKind::Docker, "docker", "docker-host").await;
+    run_transport_backend_round_trip(DeviceKind::Docker, "docker", "docker-device").await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn ssh_execution_backend_runs_through_shared_execution_interface() {
-    run_transport_backend_round_trip(ExecutionHostKind::Ssh, "ssh", "ssh-host").await;
+    run_transport_backend_round_trip(DeviceKind::Ssh, "ssh", "ssh-device").await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn registered_remote_execution_host_survives_restart() {
+async fn registered_remote_device_survives_restart() {
     let _guard = with_secret_env();
     let dir = tempfile::tempdir().unwrap();
-    let db_path = dir.path().join("execution-hosts.db");
+    let db_path = dir.path().join("devices.db");
     let workspace = tempfile::TempDir::new().unwrap();
 
     let (_tx1, rx1) = tokio::sync::mpsc::channel(10);
     let (_tx2, rx2) = tokio::sync::mpsc::channel(10);
     let provider = ChannelProvider::new(vec![rx1, rx2]);
     let gateway_dispatcher =
-        swage_gateway::tool::ToolDispatcher::allow_all(vec![Arc::new(HostIdentityTool {
+        swage_gateway::tool::ToolDispatcher::allow_all(vec![Arc::new(DeviceIdentityTool {
             marker: "gateway-unused",
         }) as Arc<dyn Tool>]);
     let (addr, state) = start_file_backed_test_server(
@@ -496,27 +499,27 @@ async fn registered_remote_execution_host_survives_restart() {
         create_secret_ref(&state, "Persisted backend token", "backend-secret").await;
 
     let backend_dispatcher =
-        swage_gateway::tool::ToolDispatcher::allow_all(vec![Arc::new(HostIdentityTool {
-            marker: "persisted-host",
+        swage_gateway::tool::ToolDispatcher::allow_all(vec![Arc::new(DeviceIdentityTool {
+            marker: "persisted-device",
         }) as Arc<dyn Tool>]);
-    let backend = spawn_transport_backed_host(
-        ExecutionHostKind::Docker,
+    let backend = spawn_transport_backed_device(
+        DeviceKind::Docker,
         backend_dispatcher,
         workspace.path().to_path_buf(),
         "backend-secret".to_string(),
     )
     .await;
-    register_attached_node_with_gateway(
+    register_attached_device_with_gateway(
         &format!("http://{addr}"),
-        &RegisterExecutionHostRequest {
-            host_id: "docker-persisted".to_string(),
+        &RegisterDeviceRequest {
+            device_id: "docker-persisted".to_string(),
             label: Some("Docker Persisted".to_string()),
             kind: "docker".to_string(),
             base_url: backend.base_url.clone(),
             shared_token_secret_ref,
             workspace_root: workspace.path().to_string_lossy().into_owned(),
             workspace_roots: vec![],
-            capabilities: vec!["host_identity".to_string()],
+            capabilities: vec!["device_identity".to_string()],
         },
     )
     .await
@@ -524,7 +527,7 @@ async fn registered_remote_execution_host_survives_restart() {
 
     let restarted_provider = ChannelProvider::new(vec![]);
     let restarted_dispatcher =
-        swage_gateway::tool::ToolDispatcher::allow_all(vec![Arc::new(HostIdentityTool {
+        swage_gateway::tool::ToolDispatcher::allow_all(vec![Arc::new(DeviceIdentityTool {
             marker: "gateway-unused",
         }) as Arc<dyn Tool>]);
     let (_restarted_addr, restarted_state) = start_file_backed_test_server(
@@ -536,34 +539,34 @@ async fn registered_remote_execution_host_survives_restart() {
     )
     .await;
 
-    let hosts = swage_gateway::execution_host::list_execution_hosts(&restarted_state).await;
+    let devices = swage_gateway::device::list_devices(&restarted_state).await;
     assert!(
-        hosts
-            .hosts
+        devices
+            .devices
             .iter()
-            .any(|host| host.host_id == "docker-persisted"),
-        "persisted remote host should be restored: {:?}",
-        hosts.hosts
+            .any(|device| device.device_id == "docker-persisted"),
+        "persisted remote device should be restored: {:?}",
+        devices.devices
     );
 
-    let host = swage_gateway::execution_host::resolve_execution_host(
+    let device = swage_gateway::device::resolve_device(
         &restarted_state,
         Some(&json!({"execution_backend": "docker"})),
     )
     .await
-    .expect("persisted host should resolve after restart");
+    .expect("persisted device should resolve after restart");
     let mut ctx = MockToolContext::new("agent-test", "sess-test");
     ctx.working_directory = workspace.path().to_path_buf();
-    let result = swage_gateway::execution_host::execute_on_remote_host(
+    let result = swage_gateway::device::execute_on_remote_device(
         &restarted_state.secret_manager,
-        &host,
-        "host_identity",
+        &device,
+        "device_identity",
         &json!({}),
         &ctx,
     )
     .await
     .unwrap();
-    assert_eq!(result["host"], "persisted-host");
+    assert_eq!(result["device"], "persisted-device");
 
     backend.join_handle.abort();
 }

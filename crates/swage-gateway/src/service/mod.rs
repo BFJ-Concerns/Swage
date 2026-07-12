@@ -1,11 +1,11 @@
-mod bench;
 mod conversation;
+mod space;
 mod team;
 mod topology_run;
 mod workspace_attachment;
 
-pub use bench::*;
 pub use conversation::*;
+pub use space::*;
 pub use team::*;
 pub use topology_run::*;
 pub use workspace_attachment::*;
@@ -17,7 +17,7 @@ use swage_core::{GatewayError, Role, StorageError};
 #[cfg(test)]
 use swage_storage::model::NewSession;
 #[cfg(test)]
-use swage_storage::store::{BenchStore, Storage};
+use swage_storage::store::{SpaceStore, Storage};
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -35,7 +35,7 @@ mod tests {
         let storage = Arc::new(MockStorage::new());
         ConversationService::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            storage as Arc<dyn BenchStore>,
+            storage as Arc<dyn SpaceStore>,
         )
     }
 
@@ -50,20 +50,20 @@ mod tests {
 
     async fn make_workspace_service() -> (WorkspaceAttachmentService, Uuid) {
         let storage = Arc::new(SqliteStorage::in_memory().expect("sqlite should initialise"));
-        let bench = storage
+        let space = storage
             .get_or_create_default()
             .await
-            .expect("default bench should exist");
+            .expect("default space should exist");
         let service = WorkspaceAttachmentService::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            storage as Arc<dyn BenchStore>,
+            storage as Arc<dyn SpaceStore>,
         );
-        (service, bench.id)
+        (service, space.id)
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn attach_workspace_persists_canonical_path() {
-        let (service, bench_id) = make_workspace_service().await;
+        let (service, space_id) = make_workspace_service().await;
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace = temp.path().join("actual");
         std::fs::create_dir(&workspace).expect("workspace dir");
@@ -71,7 +71,7 @@ mod tests {
 
         let response = service
             .attach_workspace(
-                bench_id,
+                space_id,
                 CreateWorkspaceAttachmentRequest {
                     path: non_canonical.to_string_lossy().into_owned(),
                     label: None,
@@ -95,14 +95,14 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn list_workspaces_persists_missing_folder_state() {
-        let (service, bench_id) = make_workspace_service().await;
+        let (service, space_id) = make_workspace_service().await;
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace = temp.path().join("actual");
         std::fs::create_dir(&workspace).expect("workspace dir");
 
         let attached = service
             .attach_workspace(
-                bench_id,
+                space_id,
                 CreateWorkspaceAttachmentRequest {
                     path: workspace.to_string_lossy().into_owned(),
                     label: None,
@@ -119,7 +119,7 @@ mod tests {
         std::fs::remove_dir(&workspace).expect("workspace dir should be removable");
 
         let list = service
-            .list_workspaces(bench_id)
+            .list_workspaces(space_id)
             .await
             .expect("workspaces should list");
         assert_eq!(list.workspaces.len(), 1);
@@ -135,15 +135,15 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn attach_workspace_can_become_bench_default() {
-        let (service, bench_id) = make_workspace_service().await;
+    async fn attach_workspace_can_become_space_default() {
+        let (service, space_id) = make_workspace_service().await;
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace = temp.path().join("default");
         std::fs::create_dir(&workspace).expect("workspace dir");
 
         let response = service
             .attach_workspace(
-                bench_id,
+                space_id,
                 CreateWorkspaceAttachmentRequest {
                     path: workspace.to_string_lossy().into_owned(),
                     label: None,
@@ -168,11 +168,11 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn attach_workspace_can_become_session_active_workspace() {
-        let (service, bench_id) = make_workspace_service().await;
+        let (service, space_id) = make_workspace_service().await;
         let session = service
             .storage
             .create_session(NewSession {
-                bench_id,
+                space_id,
                 agent_id: "gateway".to_string(),
                 metadata: None,
                 active_workspace_attachment_id: None,
@@ -185,7 +185,7 @@ mod tests {
 
         let response = service
             .attach_workspace(
-                bench_id,
+                space_id,
                 CreateWorkspaceAttachmentRequest {
                     path: workspace.to_string_lossy().into_owned(),
                     label: None,
@@ -210,7 +210,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn attach_workspace_rejects_duplicate_canonical_path() {
-        let (service, bench_id) = make_workspace_service().await;
+        let (service, space_id) = make_workspace_service().await;
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace = temp.path().join("actual");
         let symlink = temp.path().join("alias");
@@ -219,7 +219,7 @@ mod tests {
 
         service
             .attach_workspace(
-                bench_id,
+                space_id,
                 CreateWorkspaceAttachmentRequest {
                     path: workspace.to_string_lossy().into_owned(),
                     label: None,
@@ -234,7 +234,7 @@ mod tests {
 
         let error = service
             .attach_workspace(
-                bench_id,
+                space_id,
                 CreateWorkspaceAttachmentRequest {
                     path: symlink.to_string_lossy().into_owned(),
                     label: None,
@@ -268,7 +268,7 @@ mod tests {
 
         // Non-nil UUID expected.
         assert_ne!(resp.id, Uuid::nil());
-        assert_ne!(resp.bench_id, Uuid::nil());
+        assert_ne!(resp.space_id, Uuid::nil());
     }
 
     #[tokio::test]
@@ -278,8 +278,8 @@ mod tests {
         let a = svc.create_conversation().await.unwrap();
         let b = svc.create_conversation().await.unwrap();
 
-        // Both conversations should belong to the same default bench.
-        assert_eq!(a.bench_id, b.bench_id);
+        // Both conversations should belong to the same default space.
+        assert_eq!(a.space_id, b.space_id);
         // But have distinct session IDs.
         assert_ne!(a.id, b.id);
     }

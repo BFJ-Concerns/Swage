@@ -72,7 +72,7 @@
     The smallest label is floored at 11px and metadata chips at 10px — the
     practical minimum for comfortable reading (UI audit f-15).
   */
-  --font-display-1: 32px;  /* hero bench name, splash mark */
+  --font-display-1: 32px;  /* hero space name, splash mark */
   --font-display-2: 24px;  /* pane/page titles */
   --font-display-3: 19px;  /* card titles, section heads */
   --font-body-lg: 16px;    /* prominent body */

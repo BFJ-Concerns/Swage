@@ -23,7 +23,7 @@ use swage_gateway::{server::build_router, state::AppState};
 use swage_provider::LlmProvider;
 use swage_storage::{
     NewTurn, SqliteStorage, TurnState,
-    store::{BenchStore, ContextSnapshotStore, SessionStore, Storage, ThreadStore, TurnStore},
+    store::{ContextSnapshotStore, SessionStore, SpaceStore, Storage, ThreadStore, TurnStore},
 };
 
 struct MockProvider;
@@ -62,7 +62,7 @@ fn test_state(db_path: &Path) -> (AppState, Arc<SqliteStorage>) {
     let storage = Arc::new(SqliteStorage::open(db_path).unwrap());
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn Storage>,
-        Arc::clone(&storage) as Arc<dyn BenchStore>,
+        Arc::clone(&storage) as Arc<dyn SpaceStore>,
         Arc::new(MockProvider),
         swage_config::ResolvedConfig::default(),
         swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
@@ -142,7 +142,7 @@ async fn shared_reference_objects_round_trip_visual_selection_and_team_updates()
 
     let session_id = create_conversation(&router).await;
     let session = storage.get_session(session_id).await.unwrap().unwrap();
-    let bench_id = session.bench_id;
+    let space_id = session.space_id;
     let thread_id = storage.list_by_session(session_id).await.unwrap()[0].id;
 
     let turn = storage
@@ -181,7 +181,7 @@ async fn shared_reference_objects_round_trip_visual_selection_and_team_updates()
 
     let (team_status, team_body) = post_json(
         &router,
-        &format!("/api/benches/{bench_id}/teams"),
+        &format!("/api/spaces/{space_id}/teams"),
         json!({
             "name": "builders",
             "description": "Shapes the builder graph.",
@@ -215,12 +215,12 @@ async fn shared_reference_objects_round_trip_visual_selection_and_team_updates()
     .await;
     assert_eq!(team_status, StatusCode::CREATED);
     let team_id = team_body["id"].as_str().unwrap();
-    let flow_shared_id = format!("{bench_id}:triage-flow");
-    let context_shared_id = format!("{bench_id}:triage-context");
+    let flow_shared_id = format!("{space_id}:triage-flow");
+    let context_shared_id = format!("{space_id}:triage-context");
 
     let (flow_status, flow_body) = post_json(
         &router,
-        &format!("/api/benches/{bench_id}/topology-flows"),
+        &format!("/api/spaces/{space_id}/topology-flows"),
         json!({
             "name": "triage-flow",
             "description": "Triage incoming work.",
@@ -243,7 +243,7 @@ async fn shared_reference_objects_round_trip_visual_selection_and_team_updates()
 
     let (context_definition_status, context_definition_body) = post_json(
         &router,
-        &format!("/api/benches/{bench_id}/context-definitions"),
+        &format!("/api/spaces/{space_id}/context-definitions"),
         json!({
             "name": "triage-context",
             "description": "Context profile for triage work.",
@@ -262,7 +262,7 @@ async fn shared_reference_objects_round_trip_visual_selection_and_team_updates()
     );
 
     let (list_status, list_body) =
-        get_json(&router, &format!("/api/shared-objects?bench_id={bench_id}")).await;
+        get_json(&router, &format!("/api/shared-objects?space_id={space_id}")).await;
     assert_eq!(list_status, StatusCode::OK, "body: {list_body:?}");
     let objects = list_body["objects"].as_array().unwrap();
     assert!(

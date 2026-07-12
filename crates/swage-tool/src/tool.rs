@@ -58,7 +58,7 @@ pub trait Tool: Send + Sync {
     /// The gateway resolves these references at the host boundary before
     /// execution. Tools that opt in here can receive injected raw secrets
     /// without exposing them to the model or sandbox IPC by default.
-    fn host_secret_keys(&self) -> &[&str] {
+    fn device_secret_keys(&self) -> &[&str] {
         &[]
     }
 
@@ -67,7 +67,7 @@ pub trait Tool: Send + Sync {
     ///
     /// Tools should opt in when they need gateway-only state, host networking,
     /// or typed errors that the sandbox IPC layer cannot preserve.
-    fn requires_host_execution(&self) -> bool {
+    fn requires_device_execution(&self) -> bool {
         false
     }
 

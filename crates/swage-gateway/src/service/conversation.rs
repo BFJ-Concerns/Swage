@@ -8,7 +8,7 @@ use serde_json::Value as JsonValue;
 use swage_core::{GatewayError, Role, StorageError};
 use swage_storage::{
     model::{NewSession, NewThread, ThreadBranch, TurnState},
-    store::{BenchStore, Storage},
+    store::{SpaceStore, Storage},
 };
 
 // ---------------------------------------------------------------------------
@@ -19,7 +19,7 @@ use swage_storage::{
 #[derive(Debug, Serialize)]
 pub struct ConversationResponse {
     pub id: Uuid,
-    pub bench_id: Uuid,
+    pub space_id: Uuid,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub selected_model_id: Option<String>,
     pub created_at: DateTime<Utc>,
@@ -44,7 +44,7 @@ pub struct ConversationSummary {
 #[derive(Debug, Serialize)]
 pub struct ConversationDetail {
     pub id: Uuid,
-    pub bench_id: Uuid,
+    pub space_id: Uuid,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub selected_model_id: Option<String>,
     pub created_at: DateTime<Utc>,
@@ -82,7 +82,7 @@ pub struct ConversationThreadDetail {
 
 // TODO Move API view/DTO types into the swage-protocol crate
 // The view types in this file (ToolCallView, MessageView, the conversation/
-// bench/workspace responses) are the HTTP wire contract, mirrored by hand in
+// space/workspace responses) are the HTTP wire contract, mirrored by hand in
 // frontend/src/lib/types.ts with no enforcement. Move them to swage-protocol
 // so the frontend types are generated rather than maintained in parallel. See
 // the wire-contract section in CLAUDE.md and the swage-protocol mote in
@@ -137,18 +137,18 @@ pub struct MessageView {
 #[derive(Clone)]
 pub struct ConversationService {
     pub(crate) storage: Arc<dyn Storage>,
-    pub(crate) bench_store: Arc<dyn BenchStore>,
+    pub(crate) space_store: Arc<dyn SpaceStore>,
 }
 
 impl ConversationService {
-    pub fn new(storage: Arc<dyn Storage>, bench_store: Arc<dyn BenchStore>) -> Self {
+    pub fn new(storage: Arc<dyn Storage>, space_store: Arc<dyn SpaceStore>) -> Self {
         Self {
             storage,
-            bench_store,
+            space_store,
         }
     }
 
-    /// Create a new conversation in the default bench.
+    /// Create a new conversation in the default space.
     ///
     /// Also creates a default thread for the session so that process_turn has
     /// a thread_id to attach turns and messages to.
@@ -160,12 +160,12 @@ impl ConversationService {
         &self,
         selected_model_id: Option<String>,
     ) -> Result<ConversationResponse, GatewayError> {
-        let bench = self.bench_store.get_or_create_default().await?;
-        let active_workspace_attachment_id = self.default_workspace_for_bench(bench.id).await?;
+        let space = self.space_store.get_or_create_default().await?;
+        let active_workspace_attachment_id = self.default_workspace_for_space(space.id).await?;
         let mut session = self
             .storage
             .create_session(NewSession {
-                bench_id: bench.id,
+                space_id: space.id,
                 agent_id: "gateway".to_string(),
                 metadata: None,
                 active_workspace_attachment_id,
@@ -189,17 +189,17 @@ impl ConversationService {
 
         Ok(ConversationResponse {
             id: session.id,
-            bench_id: session.bench_id,
+            space_id: session.space_id,
             selected_model_id: session.selected_model_id,
             created_at: session.created_at,
             last_activity: session.updated_at,
         })
     }
 
-    /// List all conversations in the default bench, ordered by most-recent activity.
+    /// List all conversations in the default space, ordered by most-recent activity.
     pub async fn list_conversations(&self) -> Result<Vec<ConversationSummary>, GatewayError> {
-        let bench = self.bench_store.get_or_create_default().await?;
-        let sessions = self.storage.list_by_bench(bench.id).await?;
+        let space = self.space_store.get_or_create_default().await?;
+        let sessions = self.storage.list_by_space(space.id).await?;
 
         let mut summaries = Vec::with_capacity(sessions.len());
 
@@ -294,7 +294,7 @@ impl ConversationService {
 
         Ok(ConversationDetail {
             id: session.id,
-            bench_id: session.bench_id,
+            space_id: session.space_id,
             selected_model_id: session.selected_model_id,
             created_at: session.created_at,
             last_activity: session.updated_at,
@@ -302,21 +302,21 @@ impl ConversationService {
         })
     }
 
-    /// List sessions belonging to a specific bench.
+    /// List sessions belonging to a specific space.
     ///
-    /// Returns `BenchNotFound` if no bench with the given ID exists.
-    pub async fn list_sessions_by_bench(
+    /// Returns `SpaceNotFound` if no space with the given ID exists.
+    pub async fn list_sessions_by_space(
         &self,
-        bench_id: Uuid,
+        space_id: Uuid,
     ) -> Result<Vec<ConversationSummary>, GatewayError> {
-        // Verify the bench exists before listing — gives a clean 404 rather
-        // than silently returning an empty list for a non-existent bench.
-        self.bench_store
-            .get(bench_id)
+        // Verify the space exists before listing — gives a clean 404 rather
+        // than silently returning an empty list for a non-existent space.
+        self.space_store
+            .get(space_id)
             .await?
-            .ok_or(GatewayError::BenchNotFound { id: bench_id })?;
+            .ok_or(GatewayError::SpaceNotFound { id: space_id })?;
 
-        let sessions = self.storage.list_by_bench(bench_id).await?;
+        let sessions = self.storage.list_by_space(space_id).await?;
 
         let mut summaries = Vec::with_capacity(sessions.len());
         for session in sessions {
@@ -341,48 +341,48 @@ impl ConversationService {
         Ok(summaries)
     }
 
-    /// Create a new session in the specified bench.
+    /// Create a new session in the specified space.
     ///
-    /// Returns `BenchNotFound` if no bench with the given ID exists.
-    pub async fn create_session_in_bench(
+    /// Returns `SpaceNotFound` if no space with the given ID exists.
+    pub async fn create_session_in_space(
         &self,
-        bench_id: Uuid,
+        space_id: Uuid,
     ) -> Result<ConversationResponse, GatewayError> {
-        self.create_session_in_bench_with_model(bench_id, None)
+        self.create_session_in_space_with_model(space_id, None)
             .await
     }
 
-    pub async fn create_session_in_bench_with_model(
+    pub async fn create_session_in_space_with_model(
         &self,
-        bench_id: Uuid,
+        space_id: Uuid,
         selected_model_id: Option<String>,
     ) -> Result<ConversationResponse, GatewayError> {
-        self.create_session_in_bench_for_agent(bench_id, "gateway", selected_model_id)
+        self.create_session_in_space_for_agent(space_id, "gateway", selected_model_id)
             .await
     }
 
-    /// Create a new session in the specified bench, owned by a specific agent.
+    /// Create a new session in the specified space, owned by a specific agent.
     ///
     /// The general session-creation path: interactive conversations use the
     /// default `"gateway"` agent via the wrappers above, while fresh-policy
     /// schedule runs create sessions for their schedule's target agent.
-    pub async fn create_session_in_bench_for_agent(
+    pub async fn create_session_in_space_for_agent(
         &self,
-        bench_id: Uuid,
+        space_id: Uuid,
         agent_id: &str,
         selected_model_id: Option<String>,
     ) -> Result<ConversationResponse, GatewayError> {
-        // Verify the bench exists — return 404 rather than a FK constraint error.
-        self.bench_store
-            .get(bench_id)
+        // Verify the space exists — return 404 rather than a FK constraint error.
+        self.space_store
+            .get(space_id)
             .await?
-            .ok_or(GatewayError::BenchNotFound { id: bench_id })?;
-        let active_workspace_attachment_id = self.default_workspace_for_bench(bench_id).await?;
+            .ok_or(GatewayError::SpaceNotFound { id: space_id })?;
+        let active_workspace_attachment_id = self.default_workspace_for_space(space_id).await?;
 
         let mut session = self
             .storage
             .create_session(NewSession {
-                bench_id,
+                space_id,
                 agent_id: agent_id.to_string(),
                 metadata: None,
                 active_workspace_attachment_id,
@@ -405,7 +405,7 @@ impl ConversationService {
 
         Ok(ConversationResponse {
             id: session.id,
-            bench_id: session.bench_id,
+            space_id: session.space_id,
             selected_model_id: session.selected_model_id,
             created_at: session.created_at,
             last_activity: session.updated_at,
@@ -556,13 +556,13 @@ impl ConversationService {
         Ok(false)
     }
 
-    async fn default_workspace_for_bench(
+    async fn default_workspace_for_space(
         &self,
-        bench_id: Uuid,
+        space_id: Uuid,
     ) -> Result<Option<Uuid>, GatewayError> {
         Ok(self
             .storage
-            .list_workspace_attachments_by_bench(bench_id)
+            .list_workspace_attachments_by_space(space_id)
             .await?
             .into_iter()
             .find(|workspace| workspace.is_default && !workspace.is_missing)

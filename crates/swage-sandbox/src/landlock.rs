@@ -395,7 +395,7 @@ mod tests {
     fn new_collects_read_paths_from_config() {
         let config = SandboxConfig::builder()
             .working_directory("/tmp/agent")
-            .landlock_read_path("/home/user/bench")
+            .landlock_read_path("/home/user/space")
             .landlock_read_path("/usr/lib")
             .build()
             .unwrap();
@@ -405,7 +405,7 @@ mod tests {
         assert!(
             ruleset
                 .read_paths
-                .contains(&PathBuf::from("/home/user/bench"))
+                .contains(&PathBuf::from("/home/user/space"))
         );
         assert!(ruleset.read_paths.contains(&PathBuf::from("/usr/lib")));
     }

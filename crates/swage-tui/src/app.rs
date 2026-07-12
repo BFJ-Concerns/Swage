@@ -7,9 +7,9 @@
 use crate::event::{AppEvent, EventHandler};
 use crate::gateway::{ConnectionManager, ConnectionState};
 use crate::keybindings::{AppAction, map_key_event};
-use crate::state::{BenchInfo, ContextReport, ContextSection, ConversationState};
-use crate::ui::bench_selector::BenchSelectorState;
+use crate::state::{ContextReport, ContextSection, ConversationState, SpaceInfo};
 use crate::ui::input::InputState;
+use crate::ui::space_selector::SpaceSelectorState;
 use crate::ui::{RenderParams, calculate_layout, compute_input_height, render};
 use swage_client::error::ClientError;
 use swage_client::websocket::ServerEvent;
@@ -52,26 +52,26 @@ pub struct App {
     pub input: InputState,
     /// Whether the context inspector panel is shown on the right.
     pub show_inspector: bool,
-    /// Bench selector modal overlay.
-    pub bench_selector: BenchSelectorState,
+    /// Space selector modal overlay.
+    pub space_selector: SpaceSelectorState,
     /// True while the application event loop should keep running.
     pub is_running: bool,
     pending_reconnect: Option<PendingReconnect>,
 }
 
 impl App {
-    /// Create an `App` targeting `gateway_url` with `bench` as the initial
-    /// active bench.
+    /// Create an `App` targeting `gateway_url` with `space` as the initial
+    /// active space.
     ///
     /// Does not connect to the gateway — connection is established inside
     /// [`run`][App::run] once the terminal is set up.
-    pub fn new(gateway_url: &str, bench: BenchInfo) -> Self {
+    pub fn new(gateway_url: &str, space: SpaceInfo) -> Self {
         Self {
-            state: ConversationState::new(bench),
+            state: ConversationState::new(space),
             connection: ConnectionManager::new(gateway_url.to_string()),
             input: InputState::new(),
             show_inspector: false,
-            bench_selector: BenchSelectorState::new(),
+            space_selector: SpaceSelectorState::new(),
             is_running: true,
             pending_reconnect: None,
         }
@@ -127,7 +127,7 @@ impl App {
     /// Apply a synchronous action to the application state.
     ///
     /// Actions that require async I/O (`SendMessage`, `NewConversation`,
-    /// bench confirmation) or live viewport dimensions (scroll-down actions)
+    /// space confirmation) or live viewport dimensions (scroll-down actions)
     /// are handled directly in the event loop and do not come through here.
     pub fn dispatch_action(&mut self, action: AppAction) {
         match action {
@@ -145,7 +145,7 @@ impl App {
             AppAction::ScrollPageUp => self.state.scroll_up(10),
             AppAction::ScrollPageDown => {}
             AppAction::NewConversation => {}
-            AppAction::OpenBenchSelector => self.bench_selector.show(),
+            AppAction::OpenSpaceSelector => self.space_selector.show(),
             // SendMessage requires async I/O — handled in event_loop.
             AppAction::SendMessage => {}
         }
@@ -255,7 +255,7 @@ impl App {
                 let params = RenderParams {
                     state: &self.state,
                     input_state: &self.input,
-                    selector_state: &self.bench_selector,
+                    selector_state: &self.space_selector,
                     connection_state: conn_state,
                     is_inspector_open: self.show_inspector,
                 };
@@ -274,25 +274,25 @@ impl App {
                 app_event = event_handler.next(&mut dormant_sink) => {
                     match app_event {
                         AppEvent::Terminal(TermEvent::Key(key)) => {
-                            if self.bench_selector.is_visible() {
-                                // Route keys to the bench selector overlay.
+                            if self.space_selector.is_visible() {
+                                // Route keys to the space selector overlay.
                                 match key.code {
-                                    KeyCode::Up => self.bench_selector.select_previous(),
-                                    KeyCode::Down => self.bench_selector.select_next(),
+                                    KeyCode::Up => self.space_selector.select_previous(),
+                                    KeyCode::Down => self.space_selector.select_next(),
                                     KeyCode::Enter => {
-                                        if let Some(bench) = self.bench_selector.confirm() {
-                                            self.bench_selector.hide();
+                                        if let Some(space) = self.space_selector.confirm() {
+                                            self.space_selector.hide();
                                             self.connection.disconnect().await;
                                             match self.connection
-                                                .connect_for_bench(bench.id)
+                                                .connect_for_space(space.id)
                                                 .await
                                             {
                                                 Ok(()) => {
                                                     // Clear stale messages, tokens, and streaming state
-                                                    // before switching benches so the display reflects the
+                                                    // before switching spaces so the display reflects the
                                                     // fresh session rather than the previous one.
                                                     self.state.clear();
-                                                    self.state.set_bench(bench);
+                                                    self.state.set_space(space);
                                                     self.state.set_conversation_id(
                                                         self.connection.conversation_id(),
                                                     );
@@ -301,13 +301,13 @@ impl App {
                                                 Err(e) => {
                                                     self.state.push_local_message(
                                                         "error",
-                                                        format!("Bench switch failed: {e}"),
+                                                        format!("Space switch failed: {e}"),
                                                     );
                                                 }
                                             }
                                         }
                                     }
-                                    KeyCode::Esc => self.bench_selector.hide(),
+                                    KeyCode::Esc => self.space_selector.hide(),
                                     _ => {}
                                 }
                             } else if let Some(action) =
@@ -660,7 +660,7 @@ mod tests {
     use uuid::Uuid;
 
     fn make_state() -> ConversationState {
-        ConversationState::new(BenchInfo {
+        ConversationState::new(SpaceInfo {
             id: Uuid::new_v4(),
             name: "Test".to_string(),
         })
@@ -1042,11 +1042,11 @@ mod tests {
     #[test]
     fn app_new_constructs_with_disconnected_state() {
         use crate::gateway::ConnectionState;
-        let bench = BenchInfo {
+        let space = SpaceInfo {
             id: Uuid::new_v4(),
             name: "Test".to_string(),
         };
-        let app = App::new("http://127.0.0.1:3000", bench);
+        let app = App::new("http://127.0.0.1:3000", space);
         assert_eq!(
             app.connection.connection_state(),
             ConnectionState::Disconnected
@@ -1060,11 +1060,11 @@ mod tests {
     #[test]
     fn dispatch_quit_sets_is_running_false() {
         use crate::keybindings::AppAction;
-        let bench = BenchInfo {
+        let space = SpaceInfo {
             id: Uuid::new_v4(),
             name: "Test".to_string(),
         };
-        let mut app = App::new("http://127.0.0.1:3000", bench);
+        let mut app = App::new("http://127.0.0.1:3000", space);
         app.dispatch_action(AppAction::Quit);
         assert!(!app.is_running);
     }
@@ -1072,11 +1072,11 @@ mod tests {
     #[test]
     fn dispatch_toggle_inspector_toggles_flag() {
         use crate::keybindings::AppAction;
-        let bench = BenchInfo {
+        let space = SpaceInfo {
             id: Uuid::new_v4(),
             name: "Test".to_string(),
         };
-        let mut app = App::new("http://127.0.0.1:3000", bench);
+        let mut app = App::new("http://127.0.0.1:3000", space);
         assert!(!app.show_inspector);
         app.dispatch_action(AppAction::ToggleInspector);
         assert!(app.show_inspector);
@@ -1087,11 +1087,11 @@ mod tests {
     #[test]
     fn dispatch_insert_char_updates_input() {
         use crate::keybindings::AppAction;
-        let bench = BenchInfo {
+        let space = SpaceInfo {
             id: Uuid::new_v4(),
             name: "Test".to_string(),
         };
-        let mut app = App::new("http://127.0.0.1:3000", bench);
+        let mut app = App::new("http://127.0.0.1:3000", space);
         app.dispatch_action(AppAction::InsertChar('h'));
         app.dispatch_action(AppAction::InsertChar('i'));
         assert_eq!(app.input.text, "hi");
@@ -1100,11 +1100,11 @@ mod tests {
     #[test]
     fn dispatch_delete_char_removes_from_input() {
         use crate::keybindings::AppAction;
-        let bench = BenchInfo {
+        let space = SpaceInfo {
             id: Uuid::new_v4(),
             name: "Test".to_string(),
         };
-        let mut app = App::new("http://127.0.0.1:3000", bench);
+        let mut app = App::new("http://127.0.0.1:3000", space);
         app.dispatch_action(AppAction::InsertChar('x'));
         assert_eq!(app.input.text, "x");
         app.dispatch_action(AppAction::DeleteChar);
@@ -1114,37 +1114,37 @@ mod tests {
     #[test]
     fn dispatch_toggle_multi_line_toggles_mode() {
         use crate::keybindings::AppAction;
-        let bench = BenchInfo {
+        let space = SpaceInfo {
             id: Uuid::new_v4(),
             name: "Test".to_string(),
         };
-        let mut app = App::new("http://127.0.0.1:3000", bench);
+        let mut app = App::new("http://127.0.0.1:3000", space);
         assert!(!app.input.is_multi_line);
         app.dispatch_action(AppAction::ToggleMultiLine);
         assert!(app.input.is_multi_line);
     }
 
     #[test]
-    fn dispatch_open_bench_selector_shows_overlay() {
+    fn dispatch_open_space_selector_shows_overlay() {
         use crate::keybindings::AppAction;
-        let bench = BenchInfo {
+        let space = SpaceInfo {
             id: Uuid::new_v4(),
             name: "Test".to_string(),
         };
-        let mut app = App::new("http://127.0.0.1:3000", bench);
-        assert!(!app.bench_selector.is_visible());
-        app.dispatch_action(AppAction::OpenBenchSelector);
-        assert!(app.bench_selector.is_visible());
+        let mut app = App::new("http://127.0.0.1:3000", space);
+        assert!(!app.space_selector.is_visible());
+        app.dispatch_action(AppAction::OpenSpaceSelector);
+        assert!(app.space_selector.is_visible());
     }
 
     #[test]
     fn dispatch_new_conversation_is_handled_in_event_loop() {
         use crate::keybindings::AppAction;
-        let bench = BenchInfo {
+        let space = SpaceInfo {
             id: Uuid::new_v4(),
             name: "Test".to_string(),
         };
-        let mut app = App::new("http://127.0.0.1:3000", bench);
+        let mut app = App::new("http://127.0.0.1:3000", space);
         // Push a message via server event so there is something to clear.
         handle_server_event(
             &mut app.state,
@@ -1159,11 +1159,11 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_event_disconnects_and_queues_reconnect() {
-        let bench = BenchInfo {
+        let space = SpaceInfo {
             id: Uuid::new_v4(),
             name: "Test".to_string(),
         };
-        let mut app = App::new("http://127.0.0.1:3000", bench);
+        let mut app = App::new("http://127.0.0.1:3000", space);
 
         app.handle_gateway_result(Ok(Some(ServerEvent::Shutdown {
             reason: "restart".to_string(),
@@ -1181,11 +1181,11 @@ mod tests {
 
     #[tokio::test]
     async fn clean_close_disconnects_and_queues_reconnect() {
-        let bench = BenchInfo {
+        let space = SpaceInfo {
             id: Uuid::new_v4(),
             name: "Test".to_string(),
         };
-        let mut app = App::new("http://127.0.0.1:3000", bench);
+        let mut app = App::new("http://127.0.0.1:3000", space);
 
         app.handle_gateway_result(Ok(None)).await;
 

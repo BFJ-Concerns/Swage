@@ -27,16 +27,16 @@ async function request(path: string, method: string, body?: unknown): Promise<Re
   return response;
 }
 
-export async function fetchLensRuntime(benchId: string): Promise<LensRuntimeResponse> {
-  const response = await request(`/api/benches/${benchId}/lens-runtime`, "GET");
+export async function fetchLensRuntime(spaceId: string): Promise<LensRuntimeResponse> {
+  const response = await request(`/api/spaces/${spaceId}/lens-runtime`, "GET");
   return response.json() as Promise<LensRuntimeResponse>;
 }
 
 export async function updateLensRuntime(
-  benchId: string,
+  spaceId: string,
   lens: AppLens,
 ): Promise<LensRuntimeResponse> {
-  const response = await request(`/api/benches/${benchId}/lens-runtime`, "PUT", { lens });
+  const response = await request(`/api/spaces/${spaceId}/lens-runtime`, "PUT", { lens });
   return response.json() as Promise<LensRuntimeResponse>;
 }
 

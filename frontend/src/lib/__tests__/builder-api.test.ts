@@ -5,11 +5,11 @@ import {
   applyBuilderProposal,
   createBuilderProposal,
   approveWorkspaceExtension,
-  createBenchExtension,
+  createSpaceExtension,
   createTeam,
-  listBenchExtensions,
+  listSpaceExtensions,
   listTeams,
-  updateBenchExtension,
+  updateSpaceExtension,
   updateTeam,
 } from "../api/builder";
 
@@ -25,15 +25,15 @@ describe("builder api", () => {
     vi.stubGlobal("fetch", vi.fn());
   });
 
-  it("lists teams for a bench", async () => {
+  it("lists teams for a space", async () => {
     vi.mocked(fetch).mockResolvedValueOnce(
       mockResponse({ teams: [{ id: "team-1", name: "core" }] }),
     );
 
-    const teams = await listTeams("bench-1");
+    const teams = await listTeams("space-1");
 
     expect(teams).toEqual([{ id: "team-1", name: "core" }]);
-    expect(fetch).toHaveBeenCalledWith("/api/benches/bench-1/teams", {
+    expect(fetch).toHaveBeenCalledWith("/api/spaces/space-1/teams", {
       method: "GET",
     });
   });
@@ -43,7 +43,7 @@ describe("builder api", () => {
       .mockResolvedValueOnce(mockResponse({ id: "team-1", name: "core" }, 201))
       .mockResolvedValueOnce(mockResponse({ id: "team-1", name: "core-updated" }));
 
-    const created = await createTeam("bench-1", {
+    const created = await createTeam("space-1", {
       name: "core",
       description: "",
       entry_agent_id: "default",
@@ -64,7 +64,7 @@ describe("builder api", () => {
     expect(updated.name).toBe("core-updated");
   });
 
-  it("lists, creates, updates, and approves bench extensions", async () => {
+  it("lists, creates, updates, and approves space extensions", async () => {
     vi.mocked(fetch)
       .mockResolvedValueOnce(
         mockResponse({
@@ -81,21 +81,21 @@ describe("builder api", () => {
         mockResponse({ name: "workspace-skill", status: "active" }),
       );
 
-    const listed = await listBenchExtensions("bench-1");
-    const created = await createBenchExtension("bench-1", {
+    const listed = await listSpaceExtensions("space-1");
+    const created = await createSpaceExtension("space-1", {
       name: "builder-guardrails",
       display_name: "Builder Guardrails",
       description: "desc",
       requested_tools: ["shell"],
       instructions: "Do the careful thing.",
     });
-    const updated = await updateBenchExtension("bench-1", "builder-guardrails", {
+    const updated = await updateSpaceExtension("space-1", "builder-guardrails", {
       display_name: "Builder Guardrails",
       description: "updated",
       requested_tools: ["shell", "file_read"],
       instructions: "Do the careful thing with logs.",
     });
-    const approved = await approveWorkspaceExtension("bench-1", "workspace-skill");
+    const approved = await approveWorkspaceExtension("space-1", "workspace-skill");
 
     expect(listed[0].name).toBe("builder-guardrails");
     expect(created.status).toBe("active");
@@ -147,10 +147,10 @@ describe("builder api", () => {
       );
 
     const proposal = await createBuilderProposal(
-      "bench-1",
+      "space-1",
       "Create a delivery workspace.",
     );
-    const applied = await applyBuilderProposal("bench-1", [
+    const applied = await applyBuilderProposal("space-1", [
       {
         kind: "create_team",
         name: "delivery-core",

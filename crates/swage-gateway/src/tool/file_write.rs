@@ -44,7 +44,7 @@ impl Tool for FileWriteTool {
         })
     }
 
-    fn requires_host_execution(&self) -> bool {
+    fn requires_device_execution(&self) -> bool {
         true
     }
 

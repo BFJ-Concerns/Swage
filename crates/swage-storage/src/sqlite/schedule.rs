@@ -48,7 +48,7 @@ fn parse_enum<T: std::str::FromStr<Err = String>>(
 /// Reassemble the session policy from its flattened columns.
 fn parse_session_policy(
     policy: &str,
-    bench_id: Option<String>,
+    space_id: Option<String>,
     agent_id: Option<String>,
     session_id: Option<String>,
 ) -> rusqlite::Result<SessionPolicy> {
@@ -64,8 +64,8 @@ fn parse_session_policy(
     };
     match policy {
         "fresh" => Ok(SessionPolicy::Fresh {
-            bench_id: parse_uuid(
-                &bench_id.ok_or_else(|| invalid("fresh policy row is missing bench_id"))?,
+            space_id: parse_uuid(
+                &space_id.ok_or_else(|| invalid("fresh policy row is missing space_id"))?,
             )?,
             agent_id: agent_id.ok_or_else(|| invalid("fresh policy row is missing agent_id"))?,
         }),
@@ -84,9 +84,9 @@ fn session_policy_columns(
     policy: &SessionPolicy,
 ) -> (&'static str, Option<String>, Option<String>, Option<String>) {
     match policy {
-        SessionPolicy::Fresh { bench_id, agent_id } => (
+        SessionPolicy::Fresh { space_id, agent_id } => (
             "fresh",
-            Some(bench_id.to_string()),
+            Some(space_id.to_string()),
             Some(agent_id.clone()),
             None,
         ),
@@ -119,7 +119,7 @@ fn gate_decision_from_columns(
     }
 }
 
-const SCHEDULE_COLUMNS: &str = "id, message, status, kind, expression, session_policy, bench_id, \
+const SCHEDULE_COLUMNS: &str = "id, message, status, kind, expression, session_policy, space_id, \
      agent_id, session_id, delivery_json, gate_model, gate_criteria, next_run_at, last_run_at, \
      created_at, updated_at";
 
@@ -130,7 +130,7 @@ fn row_to_schedule(row: &rusqlite::Row<'_>) -> rusqlite::Result<Schedule> {
     let kind: String = row.get(3)?;
     let expression: String = row.get(4)?;
     let session_policy: String = row.get(5)?;
-    let bench_id: Option<String> = row.get(6)?;
+    let space_id: Option<String> = row.get(6)?;
     let agent_id: Option<String> = row.get(7)?;
     let session_id: Option<String> = row.get(8)?;
     let delivery_json: String = row.get(9)?;
@@ -147,7 +147,7 @@ fn row_to_schedule(row: &rusqlite::Row<'_>) -> rusqlite::Result<Schedule> {
         status: parse_enum(2, &status)?,
         kind: parse_enum(3, &kind)?,
         expression,
-        session_policy: parse_session_policy(&session_policy, bench_id, agent_id, session_id)?,
+        session_policy: parse_session_policy(&session_policy, space_id, agent_id, session_id)?,
         delivery_routing: serde_json::from_str(&delivery_json).map_err(|error| {
             rusqlite::Error::FromSqlConversionFailure(
                 9,
@@ -222,7 +222,7 @@ impl ScheduleStore for SqliteStorage {
             let id = Uuid::new_v4();
             let now = Utc::now();
             let now_str = now.to_rfc3339();
-            let (policy, bench_id, agent_id, session_id) =
+            let (policy, space_id, agent_id, session_id) =
                 session_policy_columns(&schedule.session_policy);
             let next_run_at = serialise_optional_dt(schedule.next_run_at);
             let last_run_at = serialise_optional_dt(schedule.last_run_at);
@@ -233,7 +233,7 @@ impl ScheduleStore for SqliteStorage {
 
             conn.execute(
                 "INSERT INTO schedules
-                 (id, message, status, kind, expression, session_policy, bench_id, agent_id,
+                 (id, message, status, kind, expression, session_policy, space_id, agent_id,
                   session_id, delivery_json, gate_model, gate_criteria, next_run_at, last_run_at,
                   created_at, updated_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?15)",
@@ -244,7 +244,7 @@ impl ScheduleStore for SqliteStorage {
                     schedule.kind.to_string(),
                     &schedule.expression,
                     policy,
-                    &bench_id,
+                    &space_id,
                     &agent_id,
                     &session_id,
                     &delivery_json,
@@ -608,16 +608,16 @@ impl ScheduleStore for SqliteStorage {
 #[cfg(test)]
 mod tests {
     use crate::model::{
-        GateVerdict, NewBench, ScheduleKind, ScheduleRunTrigger, ScheduleStatus, SkipReason,
+        GateVerdict, NewSpace, ScheduleKind, ScheduleRunTrigger, ScheduleStatus, SkipReason,
     };
-    use crate::store::{BenchStore, SessionStore};
+    use crate::store::{SessionStore, SpaceStore};
 
     use super::*;
 
     async fn make_storage_with_session() -> (SqliteStorage, Uuid, Uuid) {
         let storage = SqliteStorage::in_memory().unwrap();
-        let bench = storage
-            .create(NewBench {
+        let space = storage
+            .create(NewSpace {
                 name: "sched".into(),
                 slug: "sched".into(),
             })
@@ -625,24 +625,24 @@ mod tests {
             .unwrap();
         let session = storage
             .create_session(crate::model::NewSession {
-                bench_id: bench.id,
+                space_id: space.id,
                 agent_id: "gateway".into(),
                 metadata: None,
                 active_workspace_attachment_id: None,
             })
             .await
             .unwrap();
-        (storage, bench.id, session.id)
+        (storage, space.id, session.id)
     }
 
-    fn fresh_schedule(bench_id: Uuid) -> NewSchedule {
+    fn fresh_schedule(space_id: Uuid) -> NewSchedule {
         NewSchedule {
             message: "run now".into(),
             status: ScheduleStatus::Active,
             kind: ScheduleKind::Interval,
             expression: "every 5 seconds".into(),
             session_policy: SessionPolicy::Fresh {
-                bench_id,
+                space_id,
                 agent_id: "gateway".into(),
             },
             delivery_routing: serde_json::json!({"store_local_output": true}),
@@ -670,7 +670,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn schedule_round_trips_both_session_policies_and_gate() {
-        let (storage, bench_id, session_id) = make_storage_with_session().await;
+        let (storage, space_id, session_id) = make_storage_with_session().await;
 
         let fresh = storage
             .create_schedule(NewSchedule {
@@ -678,7 +678,7 @@ mod tests {
                     model: "small".into(),
                     criteria: Some("only when the queue is non-empty".into()),
                 }),
-                ..fresh_schedule(bench_id)
+                ..fresh_schedule(space_id)
             })
             .await
             .unwrap();
@@ -686,7 +686,7 @@ mod tests {
             .create_schedule(NewSchedule {
                 message: "check in".into(),
                 session_policy: SessionPolicy::Continuation { session_id },
-                ..fresh_schedule(bench_id)
+                ..fresh_schedule(space_id)
             })
             .await
             .unwrap();
@@ -695,7 +695,7 @@ mod tests {
         assert_eq!(
             fetched.session_policy,
             SessionPolicy::Fresh {
-                bench_id,
+                space_id,
                 agent_id: "gateway".into()
             }
         );
@@ -720,15 +720,15 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn due_query_only_returns_active_rows() {
-        let (storage, bench_id, _) = make_storage_with_session().await;
+        let (storage, space_id, _) = make_storage_with_session().await;
         let due = storage
-            .create_schedule(fresh_schedule(bench_id))
+            .create_schedule(fresh_schedule(space_id))
             .await
             .unwrap();
         storage
             .create_schedule(NewSchedule {
                 status: ScheduleStatus::Paused,
-                ..fresh_schedule(bench_id)
+                ..fresh_schedule(space_id)
             })
             .await
             .unwrap();
@@ -740,14 +740,14 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn update_can_remove_the_gate() {
-        let (storage, bench_id, _) = make_storage_with_session().await;
+        let (storage, space_id, _) = make_storage_with_session().await;
         let schedule = storage
             .create_schedule(NewSchedule {
                 gate: Some(GateConfig {
                     model: "small".into(),
                     criteria: None,
                 }),
-                ..fresh_schedule(bench_id)
+                ..fresh_schedule(space_id)
             })
             .await
             .unwrap();
@@ -769,9 +769,9 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn run_accumulates_gate_decision_skip_reason_and_state() {
-        let (storage, bench_id, session_id) = make_storage_with_session().await;
+        let (storage, space_id, session_id) = make_storage_with_session().await;
         let schedule = storage
-            .create_schedule(fresh_schedule(bench_id))
+            .create_schedule(fresh_schedule(space_id))
             .await
             .unwrap();
         let run = storage
@@ -817,9 +817,9 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn one_in_flight_run_per_schedule_is_enforced_by_the_index() {
-        let (storage, bench_id, _) = make_storage_with_session().await;
+        let (storage, space_id, _) = make_storage_with_session().await;
         let schedule = storage
-            .create_schedule(fresh_schedule(bench_id))
+            .create_schedule(fresh_schedule(space_id))
             .await
             .unwrap();
 
@@ -883,16 +883,16 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn recovery_fails_incomplete_runs_and_leaves_finished_ones() {
-        let (storage, bench_id, _) = make_storage_with_session().await;
+        let (storage, space_id, _) = make_storage_with_session().await;
         // Incomplete runs land on separate schedules: the one-in-flight
         // guard forbids two non-terminal runs on a single schedule, and
         // recovery sweeps them across the whole table regardless.
         let schedule_a = storage
-            .create_schedule(fresh_schedule(bench_id))
+            .create_schedule(fresh_schedule(space_id))
             .await
             .unwrap();
         let schedule_b = storage
-            .create_schedule(fresh_schedule(bench_id))
+            .create_schedule(fresh_schedule(space_id))
             .await
             .unwrap();
 
@@ -969,9 +969,9 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn retention_reaps_terminal_runs_older_than_the_age_cap() {
-        let (storage, bench_id, _) = make_storage_with_session().await;
+        let (storage, space_id, _) = make_storage_with_session().await;
         let schedule = storage
-            .create_schedule(fresh_schedule(bench_id))
+            .create_schedule(fresh_schedule(space_id))
             .await
             .unwrap();
         let now = DateTime::parse_from_rfc3339("2026-07-06T12:00:00Z")
@@ -1034,9 +1034,9 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn retention_reaps_beyond_count_cap_but_spares_active_runs() {
-        let (storage, bench_id, _) = make_storage_with_session().await;
+        let (storage, space_id, _) = make_storage_with_session().await;
         let schedule = storage
-            .create_schedule(fresh_schedule(bench_id))
+            .create_schedule(fresh_schedule(space_id))
             .await
             .unwrap();
         let now = DateTime::parse_from_rfc3339("2026-07-06T12:00:00Z")

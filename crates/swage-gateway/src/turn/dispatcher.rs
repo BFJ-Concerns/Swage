@@ -73,7 +73,7 @@ pub(crate) struct GatewayDispatcherRequest<'a> {
     pub(crate) config: &'a swage_config::ResolvedConfig,
     pub(crate) agent_config: &'a AgentConfig,
     pub(crate) session_metadata: Option<&'a serde_json::Value>,
-    pub(crate) bench_id: Option<Uuid>,
+    pub(crate) space_id: Option<Uuid>,
     pub(crate) active_workspace_attachment_id: Option<Uuid>,
     pub(crate) ws_tx: mpsc::UnboundedSender<ServerEvent>,
 }
@@ -186,11 +186,11 @@ pub(crate) async fn build_gateway_dispatcher(
     config: &swage_config::ResolvedConfig,
     agent_config: &AgentConfig,
     session_metadata: Option<&serde_json::Value>,
-    bench_id: Option<Uuid>,
+    space_id: Option<Uuid>,
     active_workspace_attachment_id: Option<Uuid>,
     ws_tx: mpsc::UnboundedSender<ServerEvent>,
 ) -> Result<GatewayDispatcherBuild, swage_core::SandboxError> {
-    let workspace_policy = match bench_id {
+    let workspace_policy = match space_id {
         Some(id) => Some(
             load_trusted_workspace_policy(&state.storage, id, active_workspace_attachment_id).await,
         ),
@@ -203,7 +203,7 @@ pub(crate) async fn build_gateway_dispatcher(
         .clone();
     let startup_config = &state.config;
     let permissions =
-        build_permission_config(config, startup_config, bench_id, &session_approval_grants);
+        build_permission_config(config, startup_config, space_id, &session_approval_grants);
 
     let base_dispatcher = state.active_tool_dispatcher();
     let dispatcher = ToolDispatcher::new(
@@ -226,10 +226,8 @@ pub(crate) async fn build_gateway_dispatcher(
                 as Arc<dyn swage_tool::dispatch::ToolExecutionStrategy>
         });
 
-    let execution_host =
-        crate::execution_host::resolve_execution_host(state, session_metadata).await;
-    let advertisement_filter =
-        build_gateway_advertisement_filter(execution_host.as_ref(), agent_config);
+    let device = crate::device::resolve_device(state, session_metadata).await;
+    let advertisement_filter = build_gateway_advertisement_filter(device.as_ref(), agent_config);
     let dispatcher = match advertisement_filter {
         Some(filter) => dispatcher.with_advertisement_filter(filter),
         None => dispatcher,
@@ -239,7 +237,7 @@ pub(crate) async fn build_gateway_dispatcher(
         dispatcher: dispatcher.with_execution_strategy(Arc::new(GatewayExecutionStrategy::new(
             inner_strategy,
             ws_tx,
-            execution_host,
+            device,
             state.secret_manager.clone(),
             state.storage.clone(),
         ))),
@@ -256,7 +254,7 @@ pub(crate) async fn build_gateway_dispatcher_with_unsandboxed_degradation(
         config,
         agent_config,
         session_metadata,
-        bench_id,
+        space_id,
         active_workspace_attachment_id,
         ws_tx,
     } = request;
@@ -266,7 +264,7 @@ pub(crate) async fn build_gateway_dispatcher_with_unsandboxed_degradation(
         config,
         agent_config,
         session_metadata,
-        bench_id,
+        space_id,
         active_workspace_attachment_id,
         ws_tx.clone(),
     )
@@ -287,7 +285,7 @@ pub(crate) async fn build_gateway_dispatcher_with_unsandboxed_degradation(
                 &unsandboxed_config,
                 agent_config,
                 session_metadata,
-                bench_id,
+                space_id,
                 active_workspace_attachment_id,
                 ws_tx,
             )

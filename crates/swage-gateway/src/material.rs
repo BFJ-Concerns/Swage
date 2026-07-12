@@ -14,7 +14,7 @@ use crate::{state::AppState, tool::workspace::validate_path};
 pub struct CreateMaterialRequest {
     pub scope_kind: String,
     pub session_id: Option<Uuid>,
-    pub bench_id: Option<Uuid>,
+    pub space_id: Option<Uuid>,
     pub title: String,
     pub relative_path: String,
     pub mime_type: Option<String>,
@@ -25,7 +25,7 @@ pub struct CreateMaterialRequest {
 pub struct PromoteMaterialRequest {
     pub scope_kind: String,
     pub session_id: Option<Uuid>,
-    pub bench_id: Option<Uuid>,
+    pub space_id: Option<Uuid>,
     pub relative_path: String,
 }
 
@@ -34,7 +34,7 @@ pub struct MaterialResponse {
     pub id: Uuid,
     pub scope_kind: String,
     pub session_id: Option<Uuid>,
-    pub bench_id: Option<Uuid>,
+    pub space_id: Option<Uuid>,
     pub source_kind: String,
     pub source_attachment_id: Option<Uuid>,
     pub status: String,
@@ -71,7 +71,7 @@ pub async fn create_material(
         state,
         &request.scope_kind,
         request.session_id,
-        request.bench_id,
+        request.space_id,
     )
     .await?;
     let resolved_path = validate_material_relative_path(&scope.root, &request.relative_path)?;
@@ -85,7 +85,7 @@ pub async fn create_material(
             id: Uuid::new_v4(),
             scope_kind: scope.scope_kind.clone(),
             session_id: scope.session_id,
-            bench_id: scope.bench_id,
+            space_id: scope.space_id,
             source_kind: MaterialSourceKind::Manual,
             source_attachment_id: None,
             title: request.title,
@@ -128,16 +128,16 @@ pub async fn list_session_materials(
     Ok(MaterialListResponse { materials: items })
 }
 
-pub async fn list_bench_materials(
+pub async fn list_space_materials(
     state: &AppState,
-    bench_id: Uuid,
+    space_id: Uuid,
 ) -> Result<MaterialListResponse, GatewayError> {
     state
-        .bench_store
-        .get(bench_id)
+        .space_store
+        .get(space_id)
         .await?
-        .ok_or_else(|| GatewayError::ValidationError(format!("bench {bench_id} not found")))?;
-    let materials = state.storage.list_materials_by_bench(bench_id).await?;
+        .ok_or_else(|| GatewayError::ValidationError(format!("space {space_id} not found")))?;
+    let materials = state.storage.list_materials_by_space(space_id).await?;
     let mut items = Vec::with_capacity(materials.len());
     for material in materials {
         items.push(map_material_response(state, material).await?);
@@ -197,7 +197,7 @@ pub async fn promote_material(
         state,
         &request.scope_kind,
         request.session_id,
-        request.bench_id,
+        request.space_id,
     )
     .await?;
     let current_path = material_absolute_path(state, &material).await?;
@@ -209,7 +209,7 @@ pub async fn promote_material(
             material_id,
             target_scope.scope_kind,
             target_scope.session_id,
-            target_scope.bench_id,
+            target_scope.space_id,
             &request.relative_path,
         )
         .await?;
@@ -226,7 +226,7 @@ pub async fn ensure_attachment_material(
         state,
         &attachment.scope_kind.to_string(),
         attachment.session_id,
-        attachment.bench_id,
+        attachment.space_id,
     )
     .await?;
     let absolute_path = validate_material_relative_path(&scope.root, &relative_path)?;
@@ -242,7 +242,7 @@ pub async fn ensure_attachment_material(
                 existing.id,
                 attachment.scope_kind.clone(),
                 attachment.session_id,
-                attachment.bench_id,
+                attachment.space_id,
                 &relative_path,
             )
             .await?;
@@ -258,7 +258,7 @@ pub async fn ensure_attachment_material(
             id: Uuid::new_v4(),
             scope_kind: attachment.scope_kind.clone(),
             session_id: attachment.session_id,
-            bench_id: attachment.bench_id,
+            space_id: attachment.space_id,
             source_kind: MaterialSourceKind::AttachmentIngestion,
             source_attachment_id: Some(attachment.id),
             title: attachment.filename.clone(),
@@ -274,7 +274,7 @@ pub async fn ensure_attachment_material(
 struct MaterialScope {
     scope_kind: AttachmentScopeKind,
     session_id: Option<Uuid>,
-    bench_id: Option<Uuid>,
+    space_id: Option<Uuid>,
     root: PathBuf,
 }
 
@@ -282,7 +282,7 @@ async fn resolve_scope(
     state: &AppState,
     scope_kind: &str,
     session_id: Option<Uuid>,
-    bench_id: Option<Uuid>,
+    space_id: Option<Uuid>,
 ) -> Result<MaterialScope, GatewayError> {
     let scope_kind = scope_kind
         .parse::<AttachmentScopeKind>()
@@ -292,9 +292,9 @@ async fn resolve_scope(
             let session_id = session_id.ok_or_else(|| {
                 GatewayError::ValidationError("session materials require session_id".into())
             })?;
-            if bench_id.is_some() {
+            if space_id.is_some() {
                 return Err(GatewayError::ValidationError(
-                    "session materials must not set bench_id".into(),
+                    "session materials must not set space_id".into(),
                 ));
             }
             let session = state
@@ -302,57 +302,57 @@ async fn resolve_scope(
                 .get_session(session_id)
                 .await?
                 .ok_or(GatewayError::ConversationNotFound { id: session_id })?;
-            let bench = state
-                .bench_store
-                .get(session.bench_id)
+            let space = state
+                .space_store
+                .get(session.space_id)
                 .await?
                 .ok_or_else(|| {
-                    GatewayError::ValidationError(format!("bench {} not found", session.bench_id))
+                    GatewayError::ValidationError(format!("space {} not found", session.space_id))
                 })?;
-            let bench_root = bench_data_root(&bench.slug)?;
+            let space_root = space_data_root(&space.slug)?;
             Ok(MaterialScope {
                 scope_kind,
                 session_id: Some(session_id),
-                bench_id: Some(session.bench_id),
-                root: bench_root
+                space_id: Some(session.space_id),
+                root: space_root
                     .join(".swage")
                     .join("materials")
                     .join("sessions")
                     .join(session_id.to_string()),
             })
         }
-        AttachmentScopeKind::Bench => {
-            let bench_id = bench_id.ok_or_else(|| {
-                GatewayError::ValidationError("bench materials require bench_id".into())
+        AttachmentScopeKind::Space => {
+            let space_id = space_id.ok_or_else(|| {
+                GatewayError::ValidationError("space materials require space_id".into())
             })?;
             if session_id.is_some() {
                 return Err(GatewayError::ValidationError(
-                    "bench materials must not set session_id".into(),
+                    "space materials must not set session_id".into(),
                 ));
             }
-            let bench = state.bench_store.get(bench_id).await?.ok_or_else(|| {
-                GatewayError::ValidationError(format!("bench {bench_id} not found"))
+            let space = state.space_store.get(space_id).await?.ok_or_else(|| {
+                GatewayError::ValidationError(format!("space {space_id} not found"))
             })?;
-            let bench_root = bench_data_root(&bench.slug)?;
+            let space_root = space_data_root(&space.slug)?;
             Ok(MaterialScope {
                 scope_kind,
                 session_id: None,
-                bench_id: Some(bench_id),
-                root: bench_root
+                space_id: Some(space_id),
+                root: space_root
                     .join(".swage")
                     .join("materials")
-                    .join("benches")
-                    .join(bench_id.to_string()),
+                    .join("spaces")
+                    .join(space_id.to_string()),
             })
         }
     }
 }
 
-fn bench_data_root(bench_slug: &str) -> Result<PathBuf, GatewayError> {
+fn space_data_root(space_slug: &str) -> Result<PathBuf, GatewayError> {
     Ok(resolve_root()
         .map_err(|problem| GatewayError::ValidationError(problem.to_string()))?
-        .join("benches")
-        .join(bench_slug))
+        .join("spaces")
+        .join(space_slug))
 }
 
 fn validate_material_relative_path(
@@ -424,41 +424,41 @@ async fn scope_root_for_material(
                     material.id
                 ))
             })?;
-            let bench_id = match material.bench_id {
-                Some(bench_id) => bench_id,
+            let space_id = match material.space_id {
+                Some(space_id) => space_id,
                 None => {
                     state
                         .storage
                         .get_session(session_id)
                         .await?
                         .ok_or(GatewayError::ConversationNotFound { id: session_id })?
-                        .bench_id
+                        .space_id
                 }
             };
-            let bench = state.bench_store.get(bench_id).await?.ok_or_else(|| {
-                GatewayError::ValidationError(format!("bench {bench_id} not found"))
+            let space = state.space_store.get(space_id).await?.ok_or_else(|| {
+                GatewayError::ValidationError(format!("space {space_id} not found"))
             })?;
-            Ok(bench_data_root(&bench.slug)?
+            Ok(space_data_root(&space.slug)?
                 .join(".swage")
                 .join("materials")
                 .join("sessions")
                 .join(session_id.to_string()))
         }
-        AttachmentScopeKind::Bench => {
-            let bench_id = material.bench_id.ok_or_else(|| {
+        AttachmentScopeKind::Space => {
+            let space_id = material.space_id.ok_or_else(|| {
                 GatewayError::ValidationError(format!(
-                    "material {} is missing bench scope",
+                    "material {} is missing space scope",
                     material.id
                 ))
             })?;
-            let bench = state.bench_store.get(bench_id).await?.ok_or_else(|| {
-                GatewayError::ValidationError(format!("bench {bench_id} not found"))
+            let space = state.space_store.get(space_id).await?.ok_or_else(|| {
+                GatewayError::ValidationError(format!("space {space_id} not found"))
             })?;
-            Ok(bench_data_root(&bench.slug)?
+            Ok(space_data_root(&space.slug)?
                 .join(".swage")
                 .join("materials")
-                .join("benches")
-                .join(bench_id.to_string()))
+                .join("spaces")
+                .join(space_id.to_string()))
         }
     }
 }
@@ -483,7 +483,7 @@ async fn map_material_response(
         id: material.id,
         scope_kind: material.scope_kind.to_string(),
         session_id: material.session_id,
-        bench_id: material.bench_id,
+        space_id: material.space_id,
         source_kind: material.source_kind.to_string(),
         source_attachment_id: material.source_attachment_id,
         status: material.status.to_string(),

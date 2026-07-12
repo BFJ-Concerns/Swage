@@ -125,7 +125,7 @@ impl DelegationExecutor {
     /// Execute a delegation: instantiate the target agent, run it, and deliver
     /// the result back to the sender.
     ///
-    /// `bench_id` is the bench the child session should belong to (inherited
+    /// `space_id` is the space the child session should belong to (inherited
     /// from the parent session). `target_config` and `target_tool_dispatcher`
     /// are resolved by the caller (gateway) from the config cascade.
     /// `cancel_token` is a child token for this delegation: cancelling the
@@ -136,7 +136,7 @@ impl DelegationExecutor {
         &self,
         delegate_msg: &AgentMessage,
         sender_turn_id: Option<Uuid>,
-        bench_id: Uuid,
+        space_id: Uuid,
         target_config: AgentConfig,
         target_instructions: String,
         target_context_transfer_config: swage_config::ContextTransferConfig,
@@ -157,7 +157,7 @@ impl DelegationExecutor {
         let session = self
             .storage
             .create_session(NewSession {
-                bench_id,
+                space_id,
                 agent_id: target_agent_id.clone(),
                 metadata: None,
                 active_workspace_attachment_id: None,
@@ -289,7 +289,7 @@ impl DelegationExecutor {
                 session_id: session.id,
                 thread_id: thread.id,
                 turn_id: Uuid::new_v4(),
-                bench_id: Some(bench_id),
+                space_id: Some(space_id),
             },
             user_message: task_description.to_string(),
             assembled_context,
@@ -468,7 +468,7 @@ pub trait DelegationHandler: Send + Sync {
         context: Option<serde_json::Value>,
         sender_agent_id: &str,
         sender_turn_id: Uuid,
-        bench_id: Uuid,
+        space_id: Uuid,
         cancel_token: tokio_util::sync::CancellationToken,
         completion_mode: DelegateCompletionMode,
     ) -> Result<DelegationOutcome, AgentError>;

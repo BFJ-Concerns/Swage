@@ -30,7 +30,7 @@ use tracing::{info, warn};
 
 use swage_core::{ApprovalTimeoutPolicy, StorageError};
 use swage_storage::model::{ApprovalState, TurnState};
-use swage_storage::store::{BenchStore, Storage};
+use swage_storage::store::{SpaceStore, Storage};
 
 use crate::state::AppState;
 
@@ -92,12 +92,12 @@ pub async fn shutdown_active_turns(state: &AppState) {
 /// Returns the number of turns recovered.
 pub async fn recover_orphaned_turns(
     storage: &dyn Storage,
-    bench_store: &dyn BenchStore,
+    space_store: &dyn SpaceStore,
 ) -> Result<usize, StorageError> {
     let mut recovered_turn_ids = HashSet::new();
 
-    for bench in bench_store.list_all().await? {
-        for session in storage.list_by_bench(bench.id).await? {
+    for space in space_store.list_all().await? {
+        for session in storage.list_by_space(space.id).await? {
             for thread in storage.list_by_session(session.id).await? {
                 for turn in storage.list_turns_by_thread(thread.id).await? {
                     // TODO Preserve delegated parent turns across restart
@@ -291,7 +291,7 @@ mod tests {
     use std::sync::Arc;
 
     use swage_storage::model::{NewSession, NewThread, NewTurn, TurnState};
-    use swage_storage::store::{BenchStore, SessionStore, ThreadStore, TurnStore};
+    use swage_storage::store::{SessionStore, SpaceStore, ThreadStore, TurnStore};
 
     use super::*;
     use crate::turn::tests::MockStorage;
@@ -309,11 +309,11 @@ mod tests {
     ) -> Arc<MockStorage> {
         let storage = Arc::new(MockStorage::new());
 
-        // Create the bench → session → thread hierarchy required for FK integrity.
-        let bench = storage.get_or_create_default().await.unwrap();
+        // Create the space → session → thread hierarchy required for FK integrity.
+        let space = storage.get_or_create_default().await.unwrap();
         let session = storage
             .create_session(NewSession {
-                bench_id: bench.id,
+                space_id: space.id,
                 agent_id: "gateway".to_string(),
                 metadata: None,
                 active_workspace_attachment_id: None,
@@ -458,10 +458,10 @@ mod tests {
     #[tokio::test]
     async fn recovery_marks_pending_turns_interrupted() {
         let storage = Arc::new(MockStorage::new());
-        let bench = storage.get_or_create_default().await.unwrap();
+        let space = storage.get_or_create_default().await.unwrap();
         let session = storage
             .create_session(NewSession {
-                bench_id: bench.id,
+                space_id: space.id,
                 agent_id: "gateway".to_string(),
                 metadata: None,
                 active_workspace_attachment_id: None,
@@ -500,10 +500,10 @@ mod tests {
     #[tokio::test]
     async fn recovery_interrupts_orphaned_turns_for_non_gateway_agents() {
         let storage = Arc::new(MockStorage::new());
-        let bench = storage.get_or_create_default().await.unwrap();
+        let space = storage.get_or_create_default().await.unwrap();
         let session = storage
             .create_session(NewSession {
-                bench_id: bench.id,
+                space_id: space.id,
                 agent_id: "reviewer".to_string(),
                 metadata: None,
                 active_workspace_attachment_id: None,
@@ -542,10 +542,10 @@ mod tests {
     #[tokio::test]
     async fn recovery_interrupts_detached_child_turn_left_in_flight() {
         let storage = Arc::new(MockStorage::new());
-        let bench = storage.get_or_create_default().await.unwrap();
+        let space = storage.get_or_create_default().await.unwrap();
         let session = storage
             .create_session(NewSession {
-                bench_id: bench.id,
+                space_id: space.id,
                 agent_id: "agent-b".to_string(),
                 metadata: None,
                 active_workspace_attachment_id: None,
@@ -598,13 +598,13 @@ mod tests {
     /// thread, returning `(storage, thread_id)`.
     async fn make_sqlite_with_thread() -> (Arc<swage_storage::SqliteStorage>, uuid::Uuid) {
         use swage_storage::model::{NewSession, NewThread};
-        use swage_storage::store::{BenchStore, SessionStore};
+        use swage_storage::store::{SessionStore, SpaceStore};
 
         let storage = Arc::new(swage_storage::SqliteStorage::in_memory().unwrap());
-        let bench = storage.get_or_create_default().await.unwrap();
+        let space = storage.get_or_create_default().await.unwrap();
         let session = storage
             .create_session(NewSession {
-                bench_id: bench.id,
+                space_id: space.id,
                 agent_id: "gateway".to_string(),
                 metadata: None,
                 active_workspace_attachment_id: None,

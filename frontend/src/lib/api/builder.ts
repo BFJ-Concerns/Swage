@@ -3,15 +3,15 @@ import type {
   BuilderConfigOperation,
   BuilderProposalResponse,
   ContextSnapshotSharedReferencePayload,
-  CreateBenchExtensionRequest,
+  CreateSpaceExtensionRequest,
   SharedReferenceDetailResponse,
   SharedReferenceKind,
   SharedReferenceSummary,
   TeamTopologySharedReferencePayload,
   CreateTeamRequest,
-  BenchExtensionSummary,
+  SpaceExtensionSummary,
   TeamSummary,
-  UpdateBenchExtensionRequest,
+  UpdateSpaceExtensionRequest,
   UpdateTeamRequest,
 } from "../types";
 
@@ -40,17 +40,17 @@ async function request(
   return response;
 }
 
-export async function listTeams(benchId: string): Promise<TeamSummary[]> {
-  const response = await request(`/api/benches/${benchId}/teams`, "GET");
+export async function listTeams(spaceId: string): Promise<TeamSummary[]> {
+  const response = await request(`/api/spaces/${spaceId}/teams`, "GET");
   const body = (await response.json()) as { teams: TeamSummary[] };
   return body.teams;
 }
 
 export async function createTeam(
-  benchId: string,
+  spaceId: string,
   req: CreateTeamRequest,
 ): Promise<TeamSummary> {
-  const response = await request(`/api/benches/${benchId}/teams`, "POST", req);
+  const response = await request(`/api/spaces/${spaceId}/teams`, "POST", req);
   return response.json() as Promise<TeamSummary>;
 }
 
@@ -62,68 +62,68 @@ export async function updateTeam(
   return response.json() as Promise<TeamSummary>;
 }
 
-export async function listBenchExtensions(
-  benchId: string,
-): Promise<BenchExtensionSummary[]> {
-  const response = await request(`/api/benches/${benchId}/extensions`, "GET");
+export async function listSpaceExtensions(
+  spaceId: string,
+): Promise<SpaceExtensionSummary[]> {
+  const response = await request(`/api/spaces/${spaceId}/extensions`, "GET");
   const body = (await response.json()) as {
-    extensions: BenchExtensionSummary[];
+    extensions: SpaceExtensionSummary[];
   };
   return body.extensions;
 }
 
-export async function createBenchExtension(
-  benchId: string,
-  req: CreateBenchExtensionRequest,
-): Promise<BenchExtensionSummary> {
+export async function createSpaceExtension(
+  spaceId: string,
+  req: CreateSpaceExtensionRequest,
+): Promise<SpaceExtensionSummary> {
   const response = await request(
-    `/api/benches/${benchId}/extensions`,
+    `/api/spaces/${spaceId}/extensions`,
     "POST",
     req,
   );
-  return response.json() as Promise<BenchExtensionSummary>;
+  return response.json() as Promise<SpaceExtensionSummary>;
 }
 
-export async function updateBenchExtension(
-  benchId: string,
+export async function updateSpaceExtension(
+  spaceId: string,
   extensionName: string,
-  req: UpdateBenchExtensionRequest,
-): Promise<BenchExtensionSummary> {
+  req: UpdateSpaceExtensionRequest,
+): Promise<SpaceExtensionSummary> {
   const response = await request(
-    `/api/benches/${benchId}/extensions/${extensionName}`,
+    `/api/spaces/${spaceId}/extensions/${extensionName}`,
     "PUT",
     req,
   );
-  return response.json() as Promise<BenchExtensionSummary>;
+  return response.json() as Promise<SpaceExtensionSummary>;
 }
 
 export async function approveWorkspaceExtension(
-  benchId: string,
+  spaceId: string,
   extensionName: string,
-): Promise<BenchExtensionSummary> {
+): Promise<SpaceExtensionSummary> {
   const response = await request(
-    `/api/benches/${benchId}/extensions/${extensionName}/approve-workspace`,
+    `/api/spaces/${spaceId}/extensions/${extensionName}/approve-workspace`,
     "POST",
   );
-  return response.json() as Promise<BenchExtensionSummary>;
+  return response.json() as Promise<SpaceExtensionSummary>;
 }
 
 export async function createBuilderProposal(
-  benchId: string,
+  spaceId: string,
   prompt: string,
 ): Promise<BuilderProposalResponse> {
-  const response = await request(`/api/benches/${benchId}/builder/proposals`, "POST", {
+  const response = await request(`/api/spaces/${spaceId}/builder/proposals`, "POST", {
     prompt,
   });
   return response.json() as Promise<BuilderProposalResponse>;
 }
 
 export async function applyBuilderProposal(
-  benchId: string,
+  spaceId: string,
   operations: BuilderConfigOperation[],
   requestText?: string,
 ): Promise<{ status: number; body: BuilderApplyResponse }> {
-  const response = await fetch(`${baseUrl}/api/benches/${benchId}/builder/apply`, {
+  const response = await fetch(`${baseUrl}/api/spaces/${spaceId}/builder/apply`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -137,9 +137,9 @@ export async function applyBuilderProposal(
 }
 
 export async function listSharedReferences(
-  benchId: string,
+  spaceId: string,
 ): Promise<SharedReferenceSummary[]> {
-  const response = await request(`/api/shared-objects?bench_id=${benchId}`, "GET");
+  const response = await request(`/api/shared-objects?space_id=${spaceId}`, "GET");
   const body = (await response.json()) as { objects: SharedReferenceSummary[] };
   return body.objects;
 }

@@ -9,14 +9,12 @@ use swage_protocol::client::channel::{ChannelLinkCodeResponse, CreateChannelLink
 use swage_storage::{
     ChannelLink, GateConfig, NewChannelLink, NewSchedule, NewSession, NewThread,
     NewWorkspaceAttachment, ScheduleKind, ScheduleStatus, SessionPolicy,
-    model::{Bench, BenchSlug},
+    model::{Space, SpaceSlug},
 };
 
 use crate::{
     channel_gateway::{DeliveryTarget, ExternalChannelIntegration},
-    execution_host::{
-        ExecutionHostResponse, RegisterExecutionHostRequest, register_remote_execution_host,
-    },
+    device::{DeviceResponse, RegisterDeviceRequest, register_remote_device},
     state::{AppState, ChannelLinkCodeRecord, PairingCodeRecord},
 };
 
@@ -25,7 +23,7 @@ pub struct CreateChannelLinkRequest {
     pub integration: String,
     pub account: String,
     pub conversation: String,
-    pub bench_id: Option<Uuid>,
+    pub space_id: Option<Uuid>,
     pub agent_id: Option<String>,
     pub home_target: Option<DeliveryTarget>,
 }
@@ -35,7 +33,7 @@ pub struct ChannelLinkResponse {
     pub integration: String,
     pub account: String,
     pub conversation: String,
-    pub bench_id: Uuid,
+    pub space_id: Uuid,
     pub agent_id: String,
     pub session_id: Option<Uuid>,
     pub home_target: Option<serde_json::Value>,
@@ -49,22 +47,22 @@ pub struct ChannelLinkListResponse {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct CreateNodePairingCodeRequest {
+pub struct CreateDevicePairingCodeRequest {
     pub expires_in_seconds: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct NodePairingCodeResponse {
+pub struct DevicePairingCodeResponse {
     pub pairing_code: String,
     pub expires_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct RedeemNodePairingRequest {
+pub struct RedeemDevicePairingRequest {
     pub pairing_code: String,
-    pub host_id: String,
+    pub device_id: String,
     pub label: Option<String>,
-    #[serde(default = "default_attached_node_kind")]
+    #[serde(default = "default_attached_device_kind")]
     pub kind: String,
     pub base_url: String,
     pub shared_token_secret_ref: String,
@@ -76,13 +74,13 @@ pub struct RedeemNodePairingRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GatewayRecoveryBundle {
     pub version: u32,
-    pub benches: Vec<RecoveryBenchRecord>,
+    pub spaces: Vec<RecoverySpaceRecord>,
     #[serde(default)]
     pub workspaces: Vec<RecoveryWorkspaceRecord>,
     pub sessions: Vec<RecoverySessionRecord>,
     pub secrets: Vec<RecoverySecretRecord>,
     pub channel_links: Vec<RecoveryChannelLinkRecord>,
-    pub execution_hosts: Vec<RecoveryExecutionHostRecord>,
+    pub devices: Vec<RecoveryDeviceRecord>,
     pub schedules: Vec<RecoveryScheduleRecord>,
 }
 
@@ -97,12 +95,12 @@ pub struct RecoveryExportSummary {
     pub id: Uuid,
     pub created_at: DateTime<Utc>,
     pub size_bytes: usize,
-    pub benches: usize,
+    pub spaces: usize,
     pub workspaces: usize,
     pub sessions: usize,
     pub secrets: usize,
     pub channel_links: usize,
-    pub execution_hosts: usize,
+    pub devices: usize,
     pub schedules: usize,
 }
 
@@ -117,7 +115,7 @@ pub struct ImportGatewayRecoveryRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RecoveryBenchRecord {
+pub struct RecoverySpaceRecord {
     pub id: Uuid,
     pub name: String,
     pub slug: String,
@@ -127,7 +125,7 @@ pub struct RecoveryBenchRecord {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecoveryWorkspaceRecord {
     pub id: Uuid,
-    pub bench_id: Uuid,
+    pub space_id: Uuid,
     pub label: String,
     pub path: String,
     pub permissions: Vec<String>,
@@ -137,7 +135,7 @@ pub struct RecoveryWorkspaceRecord {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecoverySessionRecord {
     pub id: Uuid,
-    pub bench_id: Uuid,
+    pub space_id: Uuid,
     pub agent_id: String,
     pub metadata: Option<serde_json::Value>,
     pub active_workspace_attachment_id: Option<Uuid>,
@@ -163,15 +161,15 @@ pub struct RecoveryChannelLinkRecord {
     pub integration: String,
     pub account: String,
     pub conversation: String,
-    pub bench_id: Uuid,
+    pub space_id: Uuid,
     pub agent_id: String,
     pub session_id: Option<Uuid>,
     pub home_target: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RecoveryExecutionHostRecord {
-    pub host_id: String,
+pub struct RecoveryDeviceRecord {
+    pub device_id: String,
     pub label: Option<String>,
     pub kind: String,
     pub base_url: String,
@@ -188,7 +186,7 @@ pub struct RecoveryScheduleRecord {
     pub status: String,
     pub kind: String,
     pub expression: String,
-    /// Bench/session ids inside the policy refer to the exporting gateway;
+    /// Space/session ids inside the policy refer to the exporting gateway;
     /// import remaps them onto the freshly created rows.
     pub session_policy: SessionPolicy,
     pub delivery_routing: serde_json::Value,
@@ -197,8 +195,8 @@ pub struct RecoveryScheduleRecord {
     pub last_run_at: Option<DateTime<Utc>>,
 }
 
-fn default_attached_node_kind() -> String {
-    "attached_node".to_string()
+fn default_attached_device_kind() -> String {
+    "attached_device".to_string()
 }
 
 fn map_channel_link_response(link: ChannelLink) -> ChannelLinkResponse {
@@ -206,7 +204,7 @@ fn map_channel_link_response(link: ChannelLink) -> ChannelLinkResponse {
         integration: link.integration,
         account: link.account,
         conversation: link.conversation,
-        bench_id: link.bench_id,
+        space_id: link.space_id,
         agent_id: link.agent_id,
         session_id: link.session_id,
         home_target: link.home_target,
@@ -215,22 +213,20 @@ fn map_channel_link_response(link: ChannelLink) -> ChannelLinkResponse {
     }
 }
 
-fn map_execution_host_response(
-    host: crate::execution_host::RegisteredExecutionHost,
-) -> ExecutionHostResponse {
-    ExecutionHostResponse {
-        host_id: host.host_id,
-        label: host.label,
-        kind: host.kind.to_string(),
-        base_url: host.base_url,
-        workspace_root: host.workspace_root.to_string_lossy().into_owned(),
-        workspace_roots: host
+fn map_device_response(device: crate::device::RegisteredDevice) -> DeviceResponse {
+    DeviceResponse {
+        device_id: device.device_id,
+        label: device.label,
+        kind: device.kind.to_string(),
+        base_url: device.base_url,
+        workspace_root: device.workspace_root.to_string_lossy().into_owned(),
+        workspace_roots: device
             .workspace_roots
             .iter()
             .map(|path| path.to_string_lossy().into_owned())
             .collect(),
-        capabilities: host.capabilities,
-        registered_at: host.registered_at,
+        capabilities: device.capabilities,
+        registered_at: device.registered_at,
     }
 }
 
@@ -249,12 +245,12 @@ pub async fn create_channel_link(
         ));
     }
 
-    let bench =
-        match request.bench_id {
-            Some(bench_id) => state.bench_store.get(bench_id).await?.ok_or_else(|| {
-                GatewayError::ValidationError(format!("bench {bench_id} not found"))
+    let space =
+        match request.space_id {
+            Some(space_id) => state.space_store.get(space_id).await?.ok_or_else(|| {
+                GatewayError::ValidationError(format!("space {space_id} not found"))
             })?,
-            None => state.bench_store.get_or_create_default().await?,
+            None => state.space_store.get_or_create_default().await?,
         };
     let agent_id = request.agent_id.unwrap_or_else(|| "gateway".to_string());
     let metadata = serde_json::json!({
@@ -267,7 +263,7 @@ pub async fn create_channel_link(
     let session = state
         .storage
         .create_session(NewSession {
-            bench_id: bench.id,
+            space_id: space.id,
             agent_id: agent_id.clone(),
             metadata: Some(metadata),
             active_workspace_attachment_id: None,
@@ -287,7 +283,7 @@ pub async fn create_channel_link(
             integration: integration.as_metadata_value().to_string(),
             account: request.account,
             conversation: request.conversation,
-            bench_id: bench.id,
+            space_id: space.id,
             agent_id,
             session_id: Some(session.id),
             home_target: request
@@ -328,7 +324,7 @@ pub async fn create_channel_link_code(
         link_code.clone(),
         ChannelLinkCodeRecord {
             integration: request.integration,
-            bench_id: request.bench_id,
+            space_id: request.space_id,
             agent_id: request.agent_id,
             home_target: request.home_target,
             expires_at,
@@ -340,10 +336,10 @@ pub async fn create_channel_link_code(
     })
 }
 
-pub async fn create_node_pairing_code(
+pub async fn create_device_pairing_code(
     state: &AppState,
-    request: CreateNodePairingCodeRequest,
-) -> Result<NodePairingCodeResponse, GatewayError> {
+    request: CreateDevicePairingCodeRequest,
+) -> Result<DevicePairingCodeResponse, GatewayError> {
     let expires_in_seconds = request.expires_in_seconds.unwrap_or(600);
     if expires_in_seconds <= 0 {
         return Err(GatewayError::ValidationError(
@@ -357,16 +353,16 @@ pub async fn create_node_pairing_code(
         .lock()
         .await
         .insert(pairing_code.clone(), PairingCodeRecord { expires_at });
-    Ok(NodePairingCodeResponse {
+    Ok(DevicePairingCodeResponse {
         pairing_code,
         expires_at,
     })
 }
 
-pub async fn redeem_node_pairing_code(
+pub async fn redeem_device_pairing_code(
     state: &AppState,
-    request: RedeemNodePairingRequest,
-) -> Result<ExecutionHostResponse, GatewayError> {
+    request: RedeemDevicePairingRequest,
+) -> Result<DeviceResponse, GatewayError> {
     let mut pairing_codes = state.pairing_codes.lock().await;
     let record = pairing_codes.remove(&request.pairing_code).ok_or_else(|| {
         GatewayError::ValidationError("pairing code was not found or has already been used".into())
@@ -378,10 +374,10 @@ pub async fn redeem_node_pairing_code(
     }
     drop(pairing_codes);
 
-    let host = register_remote_execution_host(
+    let device = register_remote_device(
         state,
-        RegisterExecutionHostRequest {
-            host_id: request.host_id,
+        RegisterDeviceRequest {
+            device_id: request.device_id,
             label: request.label,
             kind: request.kind,
             base_url: request.base_url,
@@ -392,46 +388,46 @@ pub async fn redeem_node_pairing_code(
         },
     )
     .await?;
-    Ok(map_execution_host_response(host))
+    Ok(map_device_response(device))
 }
 
 pub async fn export_gateway_recovery_bundle(
     state: &AppState,
 ) -> Result<GatewayRecoveryBundle, GatewayError> {
-    let benches = state.bench_store.list_all().await?;
+    let spaces = state.space_store.list_all().await?;
     let mut workspaces = Vec::new();
     let mut sessions = Vec::new();
-    for bench in &benches {
+    for space in &spaces {
         workspaces.extend(
             state
                 .storage
-                .list_workspace_attachments_by_bench(bench.id)
+                .list_workspace_attachments_by_space(space.id)
                 .await?,
         );
-        sessions.extend(state.storage.list_by_bench(bench.id).await?);
+        sessions.extend(state.storage.list_by_space(space.id).await?);
     }
 
     let channel_links = state.storage.list_channel_links().await?;
     let secrets = state.storage.list_secrets().await?;
-    let execution_hosts = state.storage.list_execution_hosts().await?;
+    let devices = state.storage.list_devices().await?;
     let schedules = state.storage.list_schedules().await?;
 
     let bundle = GatewayRecoveryBundle {
         version: 1,
-        benches: benches
+        spaces: spaces
             .into_iter()
-            .map(|bench| RecoveryBenchRecord {
-                id: bench.id,
-                name: bench.name,
-                slug: bench.slug.to_string(),
-                is_default: bench.is_default,
+            .map(|space| RecoverySpaceRecord {
+                id: space.id,
+                name: space.name,
+                slug: space.slug.to_string(),
+                is_default: space.is_default,
             })
             .collect(),
         workspaces: workspaces
             .into_iter()
             .map(|workspace| RecoveryWorkspaceRecord {
                 id: workspace.id,
-                bench_id: workspace.bench_id,
+                space_id: workspace.space_id,
                 label: workspace.label,
                 path: workspace.path,
                 permissions: workspace.permissions,
@@ -442,7 +438,7 @@ pub async fn export_gateway_recovery_bundle(
             .into_iter()
             .map(|session| RecoverySessionRecord {
                 id: session.id,
-                bench_id: session.bench_id,
+                space_id: session.space_id,
                 agent_id: session.agent_id,
                 metadata: session.metadata,
                 active_workspace_attachment_id: session.active_workspace_attachment_id,
@@ -478,23 +474,23 @@ pub async fn export_gateway_recovery_bundle(
                 integration: link.integration,
                 account: link.account,
                 conversation: link.conversation,
-                bench_id: link.bench_id,
+                space_id: link.space_id,
                 agent_id: link.agent_id,
                 session_id: link.session_id,
                 home_target: link.home_target,
             })
             .collect(),
-        execution_hosts: execution_hosts
+        devices: devices
             .into_iter()
-            .map(|host| RecoveryExecutionHostRecord {
-                host_id: host.host_id,
-                label: host.label,
-                kind: host.kind,
-                base_url: host.base_url,
-                shared_token_secret_ref: host.shared_token,
-                workspace_root: host.workspace_root,
-                workspace_roots: host.workspace_roots,
-                capabilities: host.capabilities,
+            .map(|device| RecoveryDeviceRecord {
+                device_id: device.device_id,
+                label: device.label,
+                kind: device.kind,
+                base_url: device.base_url,
+                shared_token_secret_ref: device.shared_token,
+                workspace_root: device.workspace_root,
+                workspace_roots: device.workspace_roots,
+                capabilities: device.capabilities,
             })
             .collect(),
         schedules: schedules
@@ -557,12 +553,12 @@ async fn record_recovery_export(
         id: Uuid::new_v4(),
         created_at: Utc::now(),
         size_bytes,
-        benches: bundle.benches.len(),
+        spaces: bundle.spaces.len(),
         workspaces: bundle.workspaces.len(),
         sessions: bundle.sessions.len(),
         secrets: bundle.secrets.len(),
         channel_links: bundle.channel_links.len(),
-        execution_hosts: bundle.execution_hosts.len(),
+        devices: bundle.devices.len(),
         schedules: bundle.schedules.len(),
     };
 
@@ -581,21 +577,21 @@ pub async fn import_gateway_recovery_bundle(
 ) -> Result<(), GatewayError> {
     ensure_fresh_import_target(state).await?;
 
-    let mut bench_map = HashMap::new();
-    for bench in bundle.benches {
-        let bench_id = bench.id;
-        let imported = import_bench(state, bench).await?;
-        bench_map.insert(bench_id, imported.id);
+    let mut space_map = HashMap::new();
+    for space in bundle.spaces {
+        let space_id = space.id;
+        let imported = import_space(state, space).await?;
+        space_map.insert(space_id, imported.id);
     }
 
     for workspace in bundle.workspaces {
         state
             .storage
             .create_workspace_attachment(NewWorkspaceAttachment {
-                bench_id: *bench_map.get(&workspace.bench_id).ok_or_else(|| {
+                space_id: *space_map.get(&workspace.space_id).ok_or_else(|| {
                     GatewayError::ValidationError(format!(
-                        "workspace referenced unknown bench {}",
-                        workspace.bench_id
+                        "workspace referenced unknown space {}",
+                        workspace.space_id
                     ))
                 })?,
                 label: workspace.label,
@@ -611,10 +607,10 @@ pub async fn import_gateway_recovery_bundle(
         let imported = state
             .storage
             .create_session(NewSession {
-                bench_id: *bench_map.get(&session.bench_id).ok_or_else(|| {
+                space_id: *space_map.get(&session.space_id).ok_or_else(|| {
                     GatewayError::ValidationError(format!(
-                        "session referenced unknown bench {}",
-                        session.bench_id
+                        "session referenced unknown space {}",
+                        session.space_id
                     ))
                 })?,
                 agent_id: session.agent_id.clone(),
@@ -660,10 +656,10 @@ pub async fn import_gateway_recovery_bundle(
                 integration: link.integration,
                 account: link.account,
                 conversation: link.conversation,
-                bench_id: *bench_map.get(&link.bench_id).ok_or_else(|| {
+                space_id: *space_map.get(&link.space_id).ok_or_else(|| {
                     GatewayError::ValidationError(format!(
-                        "channel link referenced unknown bench {}",
-                        link.bench_id
+                        "channel link referenced unknown space {}",
+                        link.space_id
                     ))
                 })?,
                 agent_id: link.agent_id,
@@ -675,31 +671,31 @@ pub async fn import_gateway_recovery_bundle(
             .await?;
     }
 
-    for host in bundle.execution_hosts {
-        register_remote_execution_host(
+    for device in bundle.devices {
+        register_remote_device(
             state,
-            RegisterExecutionHostRequest {
-                host_id: host.host_id,
-                label: host.label,
-                kind: host.kind,
-                base_url: host.base_url,
-                shared_token_secret_ref: host.shared_token_secret_ref,
-                workspace_root: host.workspace_root,
-                workspace_roots: host.workspace_roots,
-                capabilities: host.capabilities,
+            RegisterDeviceRequest {
+                device_id: device.device_id,
+                label: device.label,
+                kind: device.kind,
+                base_url: device.base_url,
+                shared_token_secret_ref: device.shared_token_secret_ref,
+                workspace_root: device.workspace_root,
+                workspace_roots: device.workspace_roots,
+                capabilities: device.capabilities,
             },
         )
         .await?;
     }
 
     for schedule in bundle.schedules {
-        // The policy's bench/session ids belong to the exporting gateway;
+        // The policy's space/session ids belong to the exporting gateway;
         // remap them onto the rows this import just created.
         let session_policy = match schedule.session_policy {
-            SessionPolicy::Fresh { bench_id, agent_id } => SessionPolicy::Fresh {
-                bench_id: *bench_map.get(&bench_id).ok_or_else(|| {
+            SessionPolicy::Fresh { space_id, agent_id } => SessionPolicy::Fresh {
+                space_id: *space_map.get(&space_id).ok_or_else(|| {
                     GatewayError::ValidationError(format!(
-                        "schedule referenced unknown bench {bench_id}"
+                        "schedule referenced unknown space {space_id}"
                     ))
                 })?,
                 agent_id,
@@ -732,22 +728,22 @@ pub async fn import_gateway_recovery_bundle(
 }
 
 async fn ensure_fresh_import_target(state: &AppState) -> Result<(), GatewayError> {
-    let benches = state.bench_store.list_all().await?;
-    let has_non_default_benches = benches.iter().any(|bench| !bench.is_default);
-    let default_bench = benches
+    let spaces = state.space_store.list_all().await?;
+    let has_non_default_spaces = spaces.iter().any(|space| !space.is_default);
+    let default_space = spaces
         .iter()
-        .find(|bench| bench.is_default)
+        .find(|space| space.is_default)
         .cloned()
-        .or_else(|| benches.first().cloned());
-    let has_sessions = if let Some(bench) = default_bench {
-        !state.storage.list_by_bench(bench.id).await?.is_empty()
+        .or_else(|| spaces.first().cloned());
+    let has_sessions = if let Some(space) = default_space {
+        !state.storage.list_by_space(space.id).await?.is_empty()
     } else {
         false
     };
-    if has_non_default_benches
+    if has_non_default_spaces
         || has_sessions
         || !state.storage.list_channel_links().await?.is_empty()
-        || !state.storage.list_execution_hosts().await?.is_empty()
+        || !state.storage.list_devices().await?.is_empty()
         || !state.storage.list_schedules().await?.is_empty()
     {
         return Err(GatewayError::ValidationError(
@@ -757,20 +753,20 @@ async fn ensure_fresh_import_target(state: &AppState) -> Result<(), GatewayError
     Ok(())
 }
 
-async fn import_bench(state: &AppState, bench: RecoveryBenchRecord) -> Result<Bench, GatewayError> {
-    let slug = BenchSlug::new(bench.slug).map_err(GatewayError::ValidationError)?;
-    if bench.is_default {
-        let default_bench = state.bench_store.get_or_create_default().await?;
+async fn import_space(state: &AppState, space: RecoverySpaceRecord) -> Result<Space, GatewayError> {
+    let slug = SpaceSlug::new(space.slug).map_err(GatewayError::ValidationError)?;
+    if space.is_default {
+        let default_space = state.space_store.get_or_create_default().await?;
         state
-            .bench_store
-            .update(default_bench.id, Some(bench.name), None, Some(slug))
+            .space_store
+            .update(default_space.id, Some(space.name), None, Some(slug))
             .await
             .map_err(Into::into)
     } else {
         state
-            .bench_store
-            .create(swage_storage::NewBench {
-                name: bench.name,
+            .space_store
+            .create(swage_storage::NewSpace {
+                name: space.name,
                 slug,
             })
             .await

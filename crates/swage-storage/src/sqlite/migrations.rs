@@ -35,11 +35,9 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
         ("012_thread_branches", CREATE_THREAD_BRANCHES),
         ("013_message_turn_id", ADD_MESSAGE_TURN_ID),
         ("014_turn_inbound_audit", ADD_TURN_INBOUND_AUDIT),
-        ("015_bench_default_flag", ADD_BENCH_DEFAULT_FLAG),
         ("016_session_metadata", ADD_SESSION_METADATA_COLUMN),
         // 017/018 were the scheduled-job and heartbeat tables, absorbed into
         // the unified schedules schema in 001 during the private alpha.
-        ("019_execution_hosts", CREATE_EXECUTION_HOST_TABLE),
         ("021_delivery_and_audit", CREATE_DELIVERY_AND_AUDIT_TABLES),
         ("022_secrets", CREATE_SECRET_TABLES),
         ("023_encrypt_managed_secrets_at_rest", ""),
@@ -78,14 +76,9 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
             ADD_WORKSPACE_ATTACHMENT_ACTIVATION,
         ),
         (
-            "037_execution_host_workspace_roots",
-            ADD_EXECUTION_HOST_WORKSPACE_ROOTS,
-        ),
-        (
             "038_constrain_message_and_topology_enums",
             CONSTRAIN_MESSAGE_AND_TOPOLOGY_ENUMS,
         ),
-        ("039_bench_description", ADD_BENCH_DESCRIPTION),
         ("040_session_selected_model", ADD_SESSION_SELECTED_MODEL),
         ("041_tool_call_model_replay", ADD_TOOL_CALL_MODEL_REPLAY),
         ("042_tool_call_provider_round", ADD_TOOL_CALL_PROVIDER_ROUND),
@@ -102,26 +95,9 @@ const CREATE_CONTEXT_SNAPSHOTS: &str = "
     );
 ";
 
-const CREATE_EXECUTION_HOST_TABLE: &str = "
-    CREATE TABLE IF NOT EXISTS execution_hosts (
-        host_id           TEXT NOT NULL PRIMARY KEY,
-        label             TEXT,
-        kind              TEXT NOT NULL,
-        base_url          TEXT NOT NULL,
-        shared_token      TEXT NOT NULL,
-        workspace_root    TEXT NOT NULL,
-        capabilities_json TEXT NOT NULL,
-        registered_at     TEXT NOT NULL
-    );
-";
-
-const ADD_EXECUTION_HOST_WORKSPACE_ROOTS: &str = "
-    ALTER TABLE execution_hosts ADD COLUMN workspace_roots_json TEXT NOT NULL DEFAULT '[]';
-";
-
 const CREATE_LENS_PREFERENCES_TABLE: &str = "
     CREATE TABLE IF NOT EXISTS lens_preferences (
-        bench_id    TEXT NOT NULL PRIMARY KEY REFERENCES benches(id) ON DELETE CASCADE,
+        space_id    TEXT NOT NULL PRIMARY KEY REFERENCES spaces(id) ON DELETE CASCADE,
         active_lens TEXT NOT NULL,
         updated_at  TEXT NOT NULL
     );
@@ -130,7 +106,7 @@ const CREATE_LENS_PREFERENCES_TABLE: &str = "
 const CREATE_WORKSPACE_ATTACHMENT_TABLE: &str = "
     CREATE TABLE IF NOT EXISTS workspace_attachments (
         id               TEXT NOT NULL PRIMARY KEY,
-        bench_id         TEXT NOT NULL REFERENCES benches(id) ON DELETE CASCADE,
+        space_id         TEXT NOT NULL REFERENCES spaces(id) ON DELETE CASCADE,
         label            TEXT NOT NULL,
         path             TEXT NOT NULL,
         permissions_json TEXT NOT NULL,
@@ -139,10 +115,10 @@ const CREATE_WORKSPACE_ATTACHMENT_TABLE: &str = "
         updated_at       TEXT NOT NULL
     );
 
-    CREATE INDEX IF NOT EXISTS idx_workspace_attachments_bench_id
-        ON workspace_attachments(bench_id);
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_workspace_attachments_bench_path
-        ON workspace_attachments(bench_id, path);
+    CREATE INDEX IF NOT EXISTS idx_workspace_attachments_space_id
+        ON workspace_attachments(space_id);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_workspace_attachments_space_path
+        ON workspace_attachments(space_id, path);
 ";
 
 const CREATE_SHARED_REFERENCE_EVENT_TABLE: &str = "
@@ -448,7 +424,7 @@ const CREATE_DELIVERY_AND_AUDIT_TABLES: &str = "
 const CREATE_CONFIGURATION_VERSION_TABLE: &str = "
     CREATE TABLE IF NOT EXISTS configuration_versions (
         id                     TEXT NOT NULL PRIMARY KEY,
-        bench_id             TEXT REFERENCES benches(id) ON DELETE CASCADE,
+        space_id             TEXT REFERENCES spaces(id) ON DELETE CASCADE,
         session_id             TEXT REFERENCES sessions(id) ON DELETE SET NULL,
         entity_kind            TEXT NOT NULL,
         entity_id              TEXT NOT NULL,
@@ -463,8 +439,8 @@ const CREATE_CONFIGURATION_VERSION_TABLE: &str = "
         created_at             TEXT NOT NULL
     );
 
-    CREATE INDEX IF NOT EXISTS idx_configuration_versions_bench
-        ON configuration_versions(bench_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_configuration_versions_space
+        ON configuration_versions(space_id, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_configuration_versions_entity
         ON configuration_versions(entity_kind, entity_id, version_number DESC);
     CREATE INDEX IF NOT EXISTS idx_configuration_versions_session
@@ -474,7 +450,7 @@ const CREATE_CONFIGURATION_VERSION_TABLE: &str = "
 const CREATE_AGENT_MEMORY_TABLE: &str = "
     CREATE TABLE IF NOT EXISTS agent_memories (
         id                TEXT NOT NULL PRIMARY KEY,
-        bench_id        TEXT NOT NULL REFERENCES benches(id) ON DELETE CASCADE,
+        space_id        TEXT NOT NULL REFERENCES spaces(id) ON DELETE CASCADE,
         session_id        TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
         turn_id           TEXT NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
         topology_run_id   TEXT REFERENCES topology_runs(id) ON DELETE SET NULL,
@@ -491,8 +467,8 @@ const CREATE_AGENT_MEMORY_TABLE: &str = "
         updated_at        TEXT NOT NULL
     );
 
-    CREATE INDEX IF NOT EXISTS idx_agent_memories_bench_agent
-        ON agent_memories(bench_id, agent_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_agent_memories_space_agent
+        ON agent_memories(space_id, agent_id, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_agent_memories_session
         ON agent_memories(session_id, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_agent_memories_turn
@@ -515,7 +491,7 @@ const CREATE_AGENT_MEMORY_TABLE: &str = "
             'memory_recorded',
             'agent memory recorded',
             json_object(
-                'bench_id', NEW.bench_id,
+                'space_id', NEW.space_id,
                 'turn_id', NEW.turn_id,
                 'topology_run_id', COALESCE(NEW.topology_run_id, ''),
                 'node_execution_id', COALESCE(NEW.node_execution_id, ''),
@@ -571,7 +547,7 @@ const CREATE_ATTACHMENT_AND_BACKGROUND_JOB_TABLES: &str = "
         id                TEXT NOT NULL PRIMARY KEY,
         scope_kind        TEXT NOT NULL,
         session_id        TEXT REFERENCES sessions(id) ON DELETE CASCADE,
-        bench_id        TEXT REFERENCES benches(id) ON DELETE CASCADE,
+        space_id        TEXT REFERENCES spaces(id) ON DELETE CASCADE,
         kind              TEXT NOT NULL,
         status            TEXT NOT NULL,
         filename          TEXT NOT NULL,
@@ -585,8 +561,8 @@ const CREATE_ATTACHMENT_AND_BACKGROUND_JOB_TABLES: &str = "
 
     CREATE INDEX IF NOT EXISTS idx_attachments_session_id
         ON attachments(session_id, created_at);
-    CREATE INDEX IF NOT EXISTS idx_attachments_bench_id
-        ON attachments(bench_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_attachments_space_id
+        ON attachments(space_id, created_at);
 
     CREATE TABLE IF NOT EXISTS background_jobs (
         id             TEXT NOT NULL PRIMARY KEY,
@@ -614,7 +590,7 @@ const CREATE_MATERIAL_TABLES: &str = "
         id                   TEXT NOT NULL PRIMARY KEY,
         scope_kind           TEXT NOT NULL,
         session_id           TEXT REFERENCES sessions(id) ON DELETE CASCADE,
-        bench_id           TEXT REFERENCES benches(id) ON DELETE CASCADE,
+        space_id           TEXT REFERENCES spaces(id) ON DELETE CASCADE,
         source_kind          TEXT NOT NULL,
         source_attachment_id TEXT REFERENCES attachments(id) ON DELETE SET NULL,
         status               TEXT NOT NULL,
@@ -629,8 +605,8 @@ const CREATE_MATERIAL_TABLES: &str = "
 
     CREATE INDEX IF NOT EXISTS idx_materials_session_id
         ON materials(session_id, created_at);
-    CREATE INDEX IF NOT EXISTS idx_materials_bench_id
-        ON materials(bench_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_materials_space_id
+        ON materials(space_id, created_at);
     CREATE UNIQUE INDEX IF NOT EXISTS idx_materials_source_attachment_id
         ON materials(source_attachment_id)
         WHERE source_attachment_id IS NOT NULL;
@@ -662,21 +638,38 @@ const CREATE_ACTIVE_SKILLS: &str = "
 /// created with their final columns and constraints; there is no incremental
 /// ALTER TABLE patching required on a fresh database.
 const COMPLETE_SCHEMA: &str = "
-    -- Benches: name + slug uniqueness. External resources attach through
-    -- workspace_attachments so benches can exist without any workspace.
-    CREATE TABLE IF NOT EXISTS benches (
+    -- Spaces: name + slug uniqueness. External resources attach through
+    -- workspace_attachments so spaces can exist without any workspace.
+    CREATE TABLE IF NOT EXISTS spaces (
         id             TEXT NOT NULL PRIMARY KEY,
         name           TEXT NOT NULL UNIQUE,
+        description    TEXT NOT NULL DEFAULT '',
         slug           TEXT NOT NULL DEFAULT '',
+        is_default     INTEGER NOT NULL DEFAULT 0,
         created_at     TEXT NOT NULL,
         updated_at     TEXT NOT NULL
     );
 
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_benches_slug ON benches(slug);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_spaces_slug ON spaces(slug);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_spaces_single_default
+        ON spaces(is_default) WHERE is_default = 1;
+
+    -- Devices: local or paired machines available for tool execution.
+    CREATE TABLE IF NOT EXISTS devices (
+        device_id              TEXT NOT NULL PRIMARY KEY,
+        label                TEXT,
+        kind                 TEXT NOT NULL,
+        base_url             TEXT NOT NULL,
+        shared_token         TEXT NOT NULL,
+        workspace_root       TEXT NOT NULL,
+        workspace_roots_json TEXT NOT NULL DEFAULT '[]',
+        capabilities_json    TEXT NOT NULL,
+        registered_at        TEXT NOT NULL
+    );
 
     CREATE TABLE IF NOT EXISTS workspace_attachments (
         id               TEXT NOT NULL PRIMARY KEY,
-        bench_id         TEXT NOT NULL REFERENCES benches(id) ON DELETE CASCADE,
+        space_id         TEXT NOT NULL REFERENCES spaces(id) ON DELETE CASCADE,
         label            TEXT NOT NULL,
         path             TEXT NOT NULL,
         permissions_json TEXT NOT NULL,
@@ -685,30 +678,30 @@ const COMPLETE_SCHEMA: &str = "
         updated_at       TEXT NOT NULL
     );
 
-    CREATE INDEX IF NOT EXISTS idx_workspace_attachments_bench_id
-        ON workspace_attachments(bench_id);
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_workspace_attachments_bench_path
-        ON workspace_attachments(bench_id, path);
+    CREATE INDEX IF NOT EXISTS idx_workspace_attachments_space_id
+        ON workspace_attachments(space_id);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_workspace_attachments_space_path
+        ON workspace_attachments(space_id, path);
 
-    -- Sessions: belong to a bench, track which agent owns the session.
+    -- Sessions: belong to a space, track which agent owns the session.
     CREATE TABLE IF NOT EXISTS sessions (
         id         TEXT NOT NULL PRIMARY KEY,
-        bench_id TEXT NOT NULL REFERENCES benches(id) ON DELETE CASCADE,
+        space_id TEXT NOT NULL REFERENCES spaces(id) ON DELETE CASCADE,
         agent_id   TEXT NOT NULL,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
     );
 
-    CREATE INDEX IF NOT EXISTS idx_sessions_bench_id ON sessions(bench_id);
+    CREATE INDEX IF NOT EXISTS idx_sessions_space_id ON sessions(space_id);
     CREATE INDEX IF NOT EXISTS idx_sessions_agent_id   ON sessions(agent_id);
 
     -- Channel links: durable one-time binding from an external conversation
-    -- origin to the bench/agent/session it should resume.
+    -- origin to the space/agent/session it should resume.
     CREATE TABLE IF NOT EXISTS channel_links (
         integration      TEXT NOT NULL,
         account          TEXT NOT NULL,
         conversation     TEXT NOT NULL,
-        bench_id         TEXT NOT NULL REFERENCES benches(id) ON DELETE CASCADE,
+        space_id         TEXT NOT NULL REFERENCES spaces(id) ON DELETE CASCADE,
         agent_id         TEXT NOT NULL,
         session_id       TEXT REFERENCES sessions(id) ON DELETE SET NULL,
         home_target_json TEXT,
@@ -717,14 +710,14 @@ const COMPLETE_SCHEMA: &str = "
         PRIMARY KEY (integration, account, conversation)
     );
 
-    CREATE INDEX IF NOT EXISTS idx_channel_links_bench_id
-        ON channel_links(bench_id);
+    CREATE INDEX IF NOT EXISTS idx_channel_links_space_id
+        ON channel_links(space_id);
     CREATE INDEX IF NOT EXISTS idx_channel_links_session_id
         ON channel_links(session_id);
 
     -- Schedules: one durable definition per recurring or one-off piece of
     -- agent work. The session policy is flattened into columns: fresh rows
-    -- carry the target bench/agent, continuation rows the session each run
+    -- carry the target space/agent, continuation rows the session each run
     -- returns to.
     CREATE TABLE IF NOT EXISTS schedules (
         id             TEXT NOT NULL PRIMARY KEY,
@@ -733,7 +726,7 @@ const COMPLETE_SCHEMA: &str = "
         kind           TEXT NOT NULL,
         expression     TEXT NOT NULL,
         session_policy TEXT NOT NULL,
-        bench_id       TEXT REFERENCES benches(id) ON DELETE CASCADE,
+        space_id       TEXT REFERENCES spaces(id) ON DELETE CASCADE,
         agent_id       TEXT,
         session_id     TEXT REFERENCES sessions(id) ON DELETE CASCADE,
         delivery_json  TEXT NOT NULL,
@@ -931,11 +924,6 @@ const COMPLETE_SCHEMA: &str = "
     CREATE INDEX IF NOT EXISTS idx_tool_calls_agent_id ON tool_calls(agent_id);
 ";
 
-const ADD_BENCH_DESCRIPTION: &str = "
-    ALTER TABLE benches
-        ADD COLUMN description TEXT NOT NULL DEFAULT '';
-";
-
 const ADD_WORKSPACE_ATTACHMENT_CANONICAL_STATE: &str = "
     ALTER TABLE workspace_attachments
         ADD COLUMN canonical_path TEXT NOT NULL DEFAULT '';
@@ -944,15 +932,15 @@ const ADD_WORKSPACE_ATTACHMENT_CANONICAL_STATE: &str = "
         WHERE canonical_path = '';
     ALTER TABLE workspace_attachments
         ADD COLUMN is_missing INTEGER NOT NULL DEFAULT 0;
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_workspace_attachments_bench_canonical_path
-        ON workspace_attachments(bench_id, canonical_path);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_workspace_attachments_space_canonical_path
+        ON workspace_attachments(space_id, canonical_path);
 ";
 
 const ADD_WORKSPACE_ATTACHMENT_ACTIVATION: &str = "
     ALTER TABLE workspace_attachments
         ADD COLUMN is_default INTEGER NOT NULL DEFAULT 0;
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_workspace_attachments_one_default_per_bench
-        ON workspace_attachments(bench_id)
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_workspace_attachments_one_default_per_space
+        ON workspace_attachments(space_id)
         WHERE is_default = 1;
     ALTER TABLE sessions
         ADD COLUMN active_workspace_attachment_id TEXT REFERENCES workspace_attachments(id) ON DELETE SET NULL;
@@ -1052,24 +1040,9 @@ const ADD_TURN_INBOUND_AUDIT: &str = "
     ALTER TABLE turns ADD COLUMN inbound_audit TEXT;
 ";
 
-/// Structural default-bench identity.
+/// Structural default-space identity.
 ///
-/// The default bench is no longer identified by the mutable display name.
-const ADD_BENCH_DEFAULT_FLAG: &str = "
-    ALTER TABLE benches ADD COLUMN is_default INTEGER NOT NULL DEFAULT 0;
-    UPDATE benches
-    SET is_default = 1
-    WHERE id = (
-        SELECT id
-        FROM benches
-        WHERE name = 'default'
-        ORDER BY created_at ASC
-        LIMIT 1
-    );
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_benches_single_default
-        ON benches(is_default) WHERE is_default = 1;
-";
-
+/// The default space is no longer identified by the mutable display name.
 /// Delegation chain tracking — nullable parent reference on turns.
 const ADD_TURN_PARENT_TURN_ID: &str = "
     ALTER TABLE turns ADD COLUMN parent_turn_id TEXT;
@@ -1101,23 +1074,23 @@ const CREATE_ONE_IN_FLIGHT_TURN_INDEX: &str = "
 
 /// Teams: the organisational unit for multi-agent orchestration.
 ///
-/// A team belongs to a bench and defines an entry agent (receives user
+/// A team belongs to a space and defines an entry agent (receives user
 /// messages) plus a member list. Teams link to topology definitions and
 /// are the scope boundary for budget controls.
 const CREATE_TEAMS: &str = "
     CREATE TABLE IF NOT EXISTS teams (
         id             TEXT NOT NULL PRIMARY KEY,
-        bench_id     TEXT NOT NULL REFERENCES benches(id) ON DELETE CASCADE,
+        space_id     TEXT NOT NULL REFERENCES spaces(id) ON DELETE CASCADE,
         name           TEXT NOT NULL,
         description    TEXT NOT NULL DEFAULT '',
         entry_agent_id TEXT NOT NULL,
         members        TEXT NOT NULL DEFAULT '[]',
         created_at     TEXT NOT NULL,
         updated_at     TEXT NOT NULL,
-        UNIQUE(bench_id, name)
+        UNIQUE(space_id, name)
     );
 
-    CREATE INDEX IF NOT EXISTS idx_teams_bench_id ON teams(bench_id);
+    CREATE INDEX IF NOT EXISTS idx_teams_space_id ON teams(space_id);
 ";
 
 /// Topology runs and execution traces for multi-agent team orchestration.
@@ -1290,8 +1263,8 @@ pub fn run_migrations(conn: &Connection) -> Result<(), StorageError> {
         .map_err(|e| StorageError::MigrationFailed(e.to_string()))?;
     }
 
-    // Seed the default bench if it does not already exist.
-    seed_default_bench(conn)
+    // Seed the default space if it does not already exist.
+    seed_default_space(conn)
 }
 
 fn migrate_tool_call_model_replay(conn: &Connection) -> Result<(), StorageError> {
@@ -1351,13 +1324,13 @@ fn migrate_tool_call_model_replay(conn: &Connection) -> Result<(), StorageError>
     Ok(())
 }
 
-/// Insert the default bench on first run. Idempotent via INSERT OR IGNORE.
-fn seed_default_bench(conn: &Connection) -> Result<(), StorageError> {
+/// Insert the default space on first run. Idempotent via INSERT OR IGNORE.
+fn seed_default_space(conn: &Connection) -> Result<(), StorageError> {
     let id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
 
     conn.execute(
-        "INSERT OR IGNORE INTO benches (id, name, is_default, slug, created_at, updated_at)
+        "INSERT OR IGNORE INTO spaces (id, name, is_default, slug, created_at, updated_at)
          VALUES (?1, 'default', 1, 'default', ?2, ?2)",
         params![id, now],
     )
@@ -1413,17 +1386,17 @@ mod tests {
             .expect("record applied migration");
         }
 
-        super::seed_default_bench(&conn).expect("seed default bench");
+        super::seed_default_space(&conn).expect("seed default space");
         conn
     }
 
     // Convenience: insert a session using the new schema (requires agent_id).
-    fn insert_session(conn: &Connection, bench_id: &str, now: &str) -> String {
+    fn insert_session(conn: &Connection, space_id: &str, now: &str) -> String {
         let session_id = uuid::Uuid::new_v4().to_string();
         conn.execute(
-            "INSERT INTO sessions (id, bench_id, agent_id, created_at, updated_at)
+            "INSERT INTO sessions (id, space_id, agent_id, created_at, updated_at)
              VALUES (?1,?2,'agent-test',?3,?3)",
-            rusqlite::params![session_id, bench_id, now],
+            rusqlite::params![session_id, space_id, now],
         )
         .expect("insert session");
         session_id
@@ -1453,11 +1426,11 @@ mod tests {
         turn_id
     }
 
-    fn default_bench_id(conn: &Connection) -> String {
-        conn.query_row("SELECT id FROM benches WHERE name='default'", [], |r| {
+    fn default_space_id(conn: &Connection) -> String {
+        conn.query_row("SELECT id FROM spaces WHERE name='default'", [], |r| {
             r.get(0)
         })
-        .expect("default bench")
+        .expect("default space")
     }
 
     // ---------------------------------------------------------------------------
@@ -1489,10 +1462,10 @@ mod tests {
     fn existing_data_unaffected_after_migration() {
         // Insert data into the tables, then re-run migrations; data must survive.
         let conn = open_migrated();
-        let bench_id = default_bench_id(&conn);
+        let space_id = default_space_id(&conn);
         let now = chrono::Utc::now().to_rfc3339();
 
-        let session_id = insert_session(&conn, &bench_id, &now);
+        let session_id = insert_session(&conn, &space_id, &now);
         let thread_id = insert_thread(&conn, &session_id, &now);
         let _turn_id = insert_turn(&conn, &thread_id, &now);
 
@@ -1561,10 +1534,10 @@ mod tests {
     fn tool_calls_parent_call_id_nullable() {
         // Existing rows should have NULL parent_call_id when not set.
         let conn = open_migrated();
-        let bench_id = default_bench_id(&conn);
+        let space_id = default_space_id(&conn);
         let now = chrono::Utc::now().to_rfc3339();
 
-        let session_id = insert_session(&conn, &bench_id, &now);
+        let session_id = insert_session(&conn, &space_id, &now);
         let thread_id = insert_thread(&conn, &session_id, &now);
         let turn_id = insert_turn(&conn, &thread_id, &now);
 
@@ -1592,7 +1565,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------------
-    // Benches: slug column
+    // Spaces: slug column
     // ---------------------------------------------------------------------------
 
     #[test]
@@ -1600,7 +1573,7 @@ mod tests {
         let conn = open_migrated();
         let col_count: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('benches') WHERE name='slug'",
+                "SELECT COUNT(*) FROM pragma_table_info('spaces') WHERE name='slug'",
                 [],
                 |r| r.get(0),
             )
@@ -1609,14 +1582,14 @@ mod tests {
     }
 
     #[test]
-    fn default_bench_has_slug_default() {
+    fn default_space_has_slug_default() {
         let conn = open_migrated();
         let slug: String = conn
-            .query_row("SELECT slug FROM benches WHERE name = 'default'", [], |r| {
+            .query_row("SELECT slug FROM spaces WHERE name = 'default'", [], |r| {
                 r.get(0)
             })
-            .expect("default bench should exist with slug");
-        assert_eq!(slug, "default", "default bench slug should be 'default'");
+            .expect("default space should exist with slug");
+        assert_eq!(slug, "default", "default space slug should be 'default'");
     }
 
     #[test]
@@ -1625,14 +1598,14 @@ mod tests {
         let now = chrono::Utc::now().to_rfc3339();
 
         conn.execute(
-            "INSERT INTO benches (id, name, slug, created_at, updated_at)
+            "INSERT INTO spaces (id, name, slug, created_at, updated_at)
              VALUES (?1, 'alpha', 'alpha', ?2, ?2)",
             rusqlite::params![uuid::Uuid::new_v4().to_string(), now],
         )
         .expect("first insert should succeed");
 
         let result = conn.execute(
-            "INSERT INTO benches (id, name, slug, created_at, updated_at)
+            "INSERT INTO spaces (id, name, slug, created_at, updated_at)
              VALUES (?1, 'beta', 'alpha', ?2, ?2)",
             rusqlite::params![uuid::Uuid::new_v4().to_string(), now],
         );
@@ -1648,7 +1621,7 @@ mod tests {
         super::run_migrations(&conn).expect("second migration run should be idempotent");
         let count: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('benches') WHERE name='slug'",
+                "SELECT COUNT(*) FROM pragma_table_info('spaces') WHERE name='slug'",
                 [],
                 |r| r.get(0),
             )
@@ -1724,9 +1697,9 @@ mod tests {
             .expect("pragma_table_info query");
         assert_eq!(col_count, 1, "threads.state column should exist");
 
-        let bench_id = default_bench_id(&conn);
+        let space_id = default_space_id(&conn);
         let now = chrono::Utc::now().to_rfc3339();
-        let session_id = insert_session(&conn, &bench_id, &now);
+        let session_id = insert_session(&conn, &space_id, &now);
 
         // Insert a thread without specifying state — should default to 'idle'.
         let thread_id = uuid::Uuid::new_v4().to_string();
@@ -1776,9 +1749,9 @@ mod tests {
     #[test]
     fn turns_state_defaults_to_pending() {
         let conn = open_migrated();
-        let bench_id = default_bench_id(&conn);
+        let space_id = default_space_id(&conn);
         let now = chrono::Utc::now().to_rfc3339();
-        let session_id = insert_session(&conn, &bench_id, &now);
+        let session_id = insert_session(&conn, &space_id, &now);
         let thread_id = insert_thread(&conn, &session_id, &now);
 
         // Insert a turn without specifying state — should default to 'pending'.
@@ -1855,9 +1828,9 @@ mod tests {
     #[test]
     fn messages_role_rejects_unknown_values() {
         let conn = open_migrated();
-        let bench_id = default_bench_id(&conn);
+        let space_id = default_space_id(&conn);
         let now = chrono::Utc::now().to_rfc3339();
-        let session_id = insert_session(&conn, &bench_id, &now);
+        let session_id = insert_session(&conn, &space_id, &now);
         let thread_id = insert_thread(&conn, &session_id, &now);
 
         conn.execute(
@@ -1908,9 +1881,9 @@ mod tests {
     #[test]
     fn tool_call_model_replay_migration_backfills_legacy_rows() {
         let conn = open_migrated_until_exclusive("041_tool_call_model_replay");
-        let bench_id = default_bench_id(&conn);
+        let space_id = default_space_id(&conn);
         let now = chrono::Utc::now().to_rfc3339();
-        let session_id = insert_session(&conn, &bench_id, &now);
+        let session_id = insert_session(&conn, &space_id, &now);
         let thread_id = insert_thread(&conn, &session_id, &now);
         let turn_id = insert_turn(&conn, &thread_id, &now);
         let call_id = "legacy_call";
@@ -1983,9 +1956,9 @@ mod tests {
     #[test]
     fn cascade_session_delete_removes_threads() {
         let conn = open_migrated();
-        let bench_id = default_bench_id(&conn);
+        let space_id = default_space_id(&conn);
         let now = chrono::Utc::now().to_rfc3339();
-        let session_id = insert_session(&conn, &bench_id, &now);
+        let session_id = insert_session(&conn, &space_id, &now);
         let _thread_id = insert_thread(&conn, &session_id, &now);
 
         conn.execute(
@@ -2006,9 +1979,9 @@ mod tests {
     #[test]
     fn cascade_thread_delete_removes_turns() {
         let conn = open_migrated();
-        let bench_id = default_bench_id(&conn);
+        let space_id = default_space_id(&conn);
         let now = chrono::Utc::now().to_rfc3339();
-        let session_id = insert_session(&conn, &bench_id, &now);
+        let session_id = insert_session(&conn, &space_id, &now);
         let thread_id = insert_thread(&conn, &session_id, &now);
         let _turn_id = insert_turn(&conn, &thread_id, &now);
 
@@ -2030,9 +2003,9 @@ mod tests {
     #[test]
     fn cascade_thread_delete_removes_messages() {
         let conn = open_migrated();
-        let bench_id = default_bench_id(&conn);
+        let space_id = default_space_id(&conn);
         let now = chrono::Utc::now().to_rfc3339();
-        let session_id = insert_session(&conn, &bench_id, &now);
+        let session_id = insert_session(&conn, &space_id, &now);
         let thread_id = insert_thread(&conn, &session_id, &now);
 
         conn.execute(
@@ -2060,9 +2033,9 @@ mod tests {
     #[test]
     fn deleting_turn_orphans_but_keeps_messages() {
         let conn = open_migrated();
-        let bench_id = default_bench_id(&conn);
+        let space_id = default_space_id(&conn);
         let now = chrono::Utc::now().to_rfc3339();
-        let session_id = insert_session(&conn, &bench_id, &now);
+        let session_id = insert_session(&conn, &space_id, &now);
         let thread_id = insert_thread(&conn, &session_id, &now);
         let turn_id = insert_turn(&conn, &thread_id, &now);
         let message_id = uuid::Uuid::new_v4().to_string();
@@ -2106,9 +2079,9 @@ mod tests {
     #[test]
     fn context_snapshots_cascade_delete_with_turn() {
         let conn = open_migrated();
-        let bench_id = default_bench_id(&conn);
+        let space_id = default_space_id(&conn);
         let now = chrono::Utc::now().to_rfc3339();
-        let session_id = insert_session(&conn, &bench_id, &now);
+        let session_id = insert_session(&conn, &space_id, &now);
         let thread_id = insert_thread(&conn, &session_id, &now);
         let turn_id = insert_turn(&conn, &thread_id, &now);
 
@@ -2156,9 +2129,9 @@ mod tests {
     #[test]
     fn turns_cost_microcents_is_nullable() {
         let conn = open_migrated();
-        let bench_id = default_bench_id(&conn);
+        let space_id = default_space_id(&conn);
         let now = chrono::Utc::now().to_rfc3339();
-        let session_id = insert_session(&conn, &bench_id, &now);
+        let session_id = insert_session(&conn, &space_id, &now);
         let thread_id = insert_thread(&conn, &session_id, &now);
 
         // Insert a turn without cost — should default to NULL.
@@ -2197,9 +2170,9 @@ mod tests {
     #[test]
     fn approval_requests_cascade_delete_on_turn_delete() {
         let conn = open_migrated();
-        let bench_id = default_bench_id(&conn);
+        let space_id = default_space_id(&conn);
         let now = chrono::Utc::now().to_rfc3339();
-        let session_id = insert_session(&conn, &bench_id, &now);
+        let session_id = insert_session(&conn, &space_id, &now);
         let thread_id = insert_thread(&conn, &session_id, &now);
         let turn_id = insert_turn(&conn, &thread_id, &now);
 
@@ -2247,10 +2220,10 @@ mod tests {
     #[test]
     fn tool_calls_foreign_key_cascade_on_turn_delete() {
         let conn = open_migrated();
-        let bench_id = default_bench_id(&conn);
+        let space_id = default_space_id(&conn);
         let now = chrono::Utc::now().to_rfc3339();
 
-        let session_id = insert_session(&conn, &bench_id, &now);
+        let session_id = insert_session(&conn, &space_id, &now);
         let thread_id = insert_thread(&conn, &session_id, &now);
         let turn_id = insert_turn(&conn, &thread_id, &now);
 
@@ -2313,15 +2286,15 @@ mod tests {
     #[test]
     fn node_executions_node_kind_rejects_unknown_values() {
         let conn = open_migrated();
-        let bench_id = default_bench_id(&conn);
+        let space_id = default_space_id(&conn);
         let now = chrono::Utc::now().to_rfc3339();
-        let session_id = insert_session(&conn, &bench_id, &now);
+        let session_id = insert_session(&conn, &space_id, &now);
         let team_id = uuid::Uuid::new_v4().to_string();
 
         conn.execute(
-            "INSERT INTO teams (id, bench_id, name, description, entry_agent_id, members, created_at, updated_at)
+            "INSERT INTO teams (id, space_id, name, description, entry_agent_id, members, created_at, updated_at)
              VALUES (?1, ?2, 'trace-team', '', 'planner', '[\"planner\"]', ?3, ?3)",
-            rusqlite::params![team_id, bench_id, now],
+            rusqlite::params![team_id, space_id, now],
         )
         .expect("insert team");
 
@@ -2363,15 +2336,15 @@ mod tests {
     #[test]
     fn topology_run_cascade_delete_removes_trace_rows() {
         let conn = open_migrated();
-        let bench_id = default_bench_id(&conn);
+        let space_id = default_space_id(&conn);
         let now = chrono::Utc::now().to_rfc3339();
-        let session_id = insert_session(&conn, &bench_id, &now);
+        let session_id = insert_session(&conn, &space_id, &now);
         let team_id = uuid::Uuid::new_v4().to_string();
 
         conn.execute(
-            "INSERT INTO teams (id, bench_id, name, description, entry_agent_id, members, created_at, updated_at)
+            "INSERT INTO teams (id, space_id, name, description, entry_agent_id, members, created_at, updated_at)
              VALUES (?1, ?2, 'trace-team', '', 'planner', '[\"planner\"]', ?3, ?3)",
-            rusqlite::params![team_id, bench_id, now],
+            rusqlite::params![team_id, space_id, now],
         )
         .expect("insert team");
 

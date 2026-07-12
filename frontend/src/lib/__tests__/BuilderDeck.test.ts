@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mount, unmount } from "svelte";
 
 import BuilderDeck from "../components/BuilderDeck.svelte";
-import type { BenchStore } from "../stores/benches";
+import type { SpaceStore } from "../stores/spaces";
 
 import * as builderApi from "../api/builder";
 import * as operatorApi from "../api/operator";
@@ -14,9 +14,9 @@ vi.mock("../api/builder", () => ({
   listTeams: vi.fn(),
   createTeam: vi.fn(),
   updateTeam: vi.fn(),
-  listBenchExtensions: vi.fn(),
-  createBenchExtension: vi.fn(),
-  updateBenchExtension: vi.fn(),
+  listSpaceExtensions: vi.fn(),
+  createSpaceExtension: vi.fn(),
+  updateSpaceExtension: vi.fn(),
   approveWorkspaceExtension: vi.fn(),
   listSharedReferences: vi.fn(),
   getSharedReference: vi.fn(),
@@ -48,41 +48,41 @@ async function flushUi(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 0));
 }
 
-function mockBenchStore(): BenchStore {
+function mockSpaceStore(): SpaceStore {
   return {
-    get benches() {
+    get spaces() {
       return [
         {
-          id: "bench-1",
-          name: "Builder Bench",
+          id: "space-1",
+          name: "Builder Space",
           description: "",
           is_default: false,
-          slug: "builder-bench",
+          slug: "builder-space",
           created_at: "2026-01-01T00:00:00Z",
         },
       ];
     },
-    get currentBench() {
-      return this.benches[0];
+    get currentSpace() {
+      return this.spaces[0];
     },
-    get recentBenches() {
+    get recentSpaces() {
       return [];
     },
     get isLoading() {
       return false;
     },
-    loadBenches: async () => {},
-    selectBench: async () => {},
-    closeBench: () => {},
-    createBench: async () => {},
-    deleteBench: async () => {},
+    loadSpaces: async () => {},
+    selectSpace: async () => {},
+    closeSpace: () => {},
+    createSpace: async () => {},
+    deleteSpace: async () => {},
   };
 }
 
 function buildTeam(id: string, name: string) {
   return {
     id,
-    bench_id: "bench-1",
+    space_id: "space-1",
     name,
     description: `${name} team`,
     entry_agent_id: "default",
@@ -127,7 +127,7 @@ describe("BuilderDeck", () => {
     vi.mocked(builderApi.listTeams).mockResolvedValue([
       buildTeam("team-1", "core"),
     ]);
-    vi.mocked(builderApi.listBenchExtensions).mockResolvedValue([
+    vi.mocked(builderApi.listSpaceExtensions).mockResolvedValue([
       {
         name: "builder-guardrails",
         display_name: "Builder Guardrails",
@@ -162,7 +162,7 @@ describe("BuilderDeck", () => {
       tasks: [],
       members: ["default", "reviewer"],
     });
-    vi.mocked(builderApi.createBenchExtension).mockResolvedValue({
+    vi.mocked(builderApi.createSpaceExtension).mockResolvedValue({
       name: "delivery-brief",
       display_name: "Delivery Brief",
       description: "Managed extension",
@@ -230,7 +230,7 @@ describe("BuilderDeck", () => {
       approvals: [],
       schedules: { schedules: [] },
       channels: { channels: [] },
-      nodes: [],
+      devices: [],
     });
   });
 
@@ -242,11 +242,11 @@ describe("BuilderDeck", () => {
     document.body.innerHTML = "";
   });
 
-  it("loads existing teams and extensions for the current bench", async () => {
+  it("loads existing teams and extensions for the current space", async () => {
     component = mount(BuilderDeck, {
       target: document.body,
       props: {
-        benchStore: mockBenchStore(),
+        spaceStore: mockSpaceStore(),
         activeLens: "builder",
         availableLenses: [
           {
@@ -283,7 +283,7 @@ describe("BuilderDeck", () => {
     component = mount(BuilderDeck, {
       target: document.body,
       props: {
-        benchStore: mockBenchStore(),
+        spaceStore: mockSpaceStore(),
         activeLens: "builder",
         availableLenses: [
           {
@@ -335,7 +335,7 @@ describe("BuilderDeck", () => {
     component = mount(BuilderDeck, {
       target: document.body,
       props: {
-        benchStore: mockBenchStore(),
+        spaceStore: mockSpaceStore(),
         activeLens: "builder",
         availableLenses: [
           {
@@ -382,7 +382,7 @@ describe("BuilderDeck", () => {
     ).click();
     await flushUi();
 
-    expect(builderApi.createTeam).toHaveBeenCalledWith("bench-1", {
+    expect(builderApi.createTeam).toHaveBeenCalledWith("space-1", {
       name: "delivery",
       description: "Delivery team",
       entry_agent_id: "default",
@@ -418,7 +418,7 @@ describe("BuilderDeck", () => {
     ).click();
     await flushUi();
 
-    expect(builderApi.createBenchExtension).toHaveBeenCalledWith("bench-1", {
+    expect(builderApi.createSpaceExtension).toHaveBeenCalledWith("space-1", {
       name: "delivery-brief",
       display_name: null,
       description: "Managed extension",
@@ -432,7 +432,7 @@ describe("BuilderDeck", () => {
     component = mount(BuilderDeck, {
       target: document.body,
       props: {
-        benchStore: mockBenchStore(),
+        spaceStore: mockSpaceStore(),
         activeLens: "builder",
         availableLenses: [
           {
@@ -468,7 +468,7 @@ describe("BuilderDeck", () => {
     await flushUi();
 
     expect(builderApi.approveWorkspaceExtension).toHaveBeenCalledWith(
-      "bench-1",
+      "space-1",
       "workspace-skill",
     );
   });
@@ -478,7 +478,7 @@ describe("BuilderDeck", () => {
     component = mount(BuilderDeck, {
       target: document.body,
       props: {
-        benchStore: mockBenchStore(),
+        spaceStore: mockSpaceStore(),
         activeLens: "builder",
         availableLenses: [
           {
@@ -522,7 +522,7 @@ describe("BuilderDeck", () => {
     await flushUi();
 
     expect(builderApi.createBuilderProposal).toHaveBeenCalledWith(
-      "bench-1",
+      "space-1",
       "Create a delivery workspace.",
     );
     expect(document.body.textContent).toContain("Create team delivery-core.");
