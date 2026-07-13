@@ -231,6 +231,21 @@ pub enum ServerEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         final_output: Option<serde_json::Value>,
     },
+    /// A detached workflow run has started.
+    WorkflowRunStarted {
+        event: swage_protocol::client::workflow::WorkflowRunStartedEvent,
+    },
+    /// A workflow journal entry changed state.
+    WorkflowEntryStarted {
+        event: swage_protocol::client::workflow::WorkflowEntryEvent,
+    },
+    WorkflowEntryCompleted {
+        event: swage_protocol::client::workflow::WorkflowEntryEvent,
+    },
+    /// A detached workflow run reached a terminal state.
+    WorkflowRunCompleted {
+        event: swage_protocol::client::workflow::WorkflowRunCompletedEvent,
+    },
     /// An error occurred during or before turn processing.
     Error { code: String, message: String },
     /// A pending turn was successfully cancelled.

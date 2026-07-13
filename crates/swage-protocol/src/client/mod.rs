@@ -5,6 +5,7 @@ pub mod channel;
 pub mod delivery;
 pub mod provider_signin;
 pub mod schedule;
+pub mod workflow;
 
 use schemars::JsonSchema;
 
@@ -29,4 +30,14 @@ pub struct ClientSurface {
     start_provider_sign_in_request: provider_signin::StartProviderSignInRequest,
     start_provider_sign_in_response: provider_signin::StartProviderSignInResponse,
     provider_sign_in_state: provider_signin::ProviderSignInState,
+    create_workflow_script_request: workflow::CreateWorkflowScriptRequest,
+    update_workflow_script_request: workflow::UpdateWorkflowScriptRequest,
+    workflow_script_list: workflow::WorkflowScriptListResponse,
+    start_workflow_run_request: workflow::StartWorkflowRunRequest,
+    start_inline_workflow_run_request: workflow::StartInlineWorkflowRunRequest,
+    workflow_run_detail: workflow::WorkflowRunDetailResponse,
+    workflow_run_list: workflow::WorkflowRunListResponse,
+    workflow_run_started_event: workflow::WorkflowRunStartedEvent,
+    workflow_entry_event: workflow::WorkflowEntryEvent,
+    workflow_run_completed_event: workflow::WorkflowRunCompletedEvent,
 }

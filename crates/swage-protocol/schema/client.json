@@ -13,6 +13,9 @@
     "create_schedule_request": {
       "$ref": "#/$defs/CreateScheduleRequest"
     },
+    "create_workflow_script_request": {
+      "$ref": "#/$defs/CreateWorkflowScriptRequest"
+    },
     "provider_sign_in_state": {
       "$ref": "#/$defs/ProviderSignInState"
     },
@@ -28,17 +31,44 @@
     "schedule_run_list": {
       "$ref": "#/$defs/ScheduleRunListResponse"
     },
+    "start_inline_workflow_run_request": {
+      "$ref": "#/$defs/StartInlineWorkflowRunRequest"
+    },
     "start_provider_sign_in_request": {
       "$ref": "#/$defs/StartProviderSignInRequest"
     },
     "start_provider_sign_in_response": {
       "$ref": "#/$defs/StartProviderSignInResponse"
     },
+    "start_workflow_run_request": {
+      "$ref": "#/$defs/StartWorkflowRunRequest"
+    },
     "trigger_schedule_response": {
       "$ref": "#/$defs/TriggerScheduleResponse"
     },
     "update_schedule_request": {
       "$ref": "#/$defs/UpdateScheduleRequest"
+    },
+    "update_workflow_script_request": {
+      "$ref": "#/$defs/UpdateWorkflowScriptRequest"
+    },
+    "workflow_entry_event": {
+      "$ref": "#/$defs/WorkflowEntryEvent"
+    },
+    "workflow_run_completed_event": {
+      "$ref": "#/$defs/WorkflowRunCompletedEvent"
+    },
+    "workflow_run_detail": {
+      "$ref": "#/$defs/WorkflowRunDetailResponse"
+    },
+    "workflow_run_list": {
+      "$ref": "#/$defs/WorkflowRunListResponse"
+    },
+    "workflow_run_started_event": {
+      "$ref": "#/$defs/WorkflowRunStartedEvent"
+    },
+    "workflow_script_list": {
+      "$ref": "#/$defs/WorkflowScriptListResponse"
     }
   },
   "required": [
@@ -53,7 +83,17 @@
     "trigger_schedule_response",
     "start_provider_sign_in_request",
     "start_provider_sign_in_response",
-    "provider_sign_in_state"
+    "provider_sign_in_state",
+    "create_workflow_script_request",
+    "update_workflow_script_request",
+    "workflow_script_list",
+    "start_workflow_run_request",
+    "start_inline_workflow_run_request",
+    "workflow_run_detail",
+    "workflow_run_list",
+    "workflow_run_started_event",
+    "workflow_entry_event",
+    "workflow_run_completed_event"
   ],
   "$defs": {
     "ChannelLinkCodeResponse": {
@@ -153,6 +193,29 @@
         "message",
         "spec",
         "session"
+      ]
+    },
+    "CreateWorkflowScriptRequest": {
+      "type": "object",
+      "properties": {
+        "delivery_grant": {
+          "description": "Server-side delivery targets granted to this script. Responses expose\nonly whether a grant exists, never its URLs or secret references.",
+          "default": null
+        },
+        "description": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "description",
+        "source"
       ]
     },
     "DeliveryRoutingRequest": {
@@ -788,6 +851,29 @@
         }
       ]
     },
+    "StartInlineWorkflowRunRequest": {
+      "type": "object",
+      "properties": {
+        "args": true,
+        "budget": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkflowBudget"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "source": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "source",
+        "args"
+      ]
+    },
     "StartProviderSignInRequest": {
       "type": "object",
       "properties": {
@@ -843,6 +929,25 @@
             "login_id"
           ]
         }
+      ]
+    },
+    "StartWorkflowRunRequest": {
+      "type": "object",
+      "properties": {
+        "args": true,
+        "budget": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkflowBudget"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "args"
       ]
     },
     "TriggerScheduleResponse": {
@@ -902,6 +1007,427 @@
           "default": null
         }
       }
+    },
+    "UpdateWorkflowScriptRequest": {
+      "type": "object",
+      "properties": {
+        "delivery_grant": {
+          "default": null
+        },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "WorkflowAgentCallDetail": {
+      "type": "object",
+      "properties": {
+        "agent_id": {
+          "type": "string"
+        },
+        "input_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "output_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "session_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "thread_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "turn_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        }
+      },
+      "required": [
+        "agent_id"
+      ]
+    },
+    "WorkflowBudget": {
+      "type": "object",
+      "properties": {
+        "max_agent_calls": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "max_concurrent_agent_calls": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "max_total_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        }
+      }
+    },
+    "WorkflowEffectDetail": {
+      "type": "object",
+      "properties": {
+        "effect_kind": {
+          "type": "string"
+        },
+        "idempotency_key": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "target_kind": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "effect_kind",
+        "target_kind",
+        "idempotency_key"
+      ]
+    },
+    "WorkflowEntryEvent": {
+      "type": "object",
+      "properties": {
+        "entry": {
+          "$ref": "#/$defs/WorkflowJournalEntry"
+        },
+        "run_id": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "required": [
+        "run_id",
+        "entry"
+      ]
+    },
+    "WorkflowJournalEntry": {
+      "type": "object",
+      "properties": {
+        "agent_call": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkflowAgentCallDetail"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "completed_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "completed_order": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "effect": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkflowEffectDetail"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "error_message": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "kind": {
+          "$ref": "#/$defs/WorkflowJournalEntryKind"
+        },
+        "label": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "request": true,
+        "result": true,
+        "seq": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "started_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "status": {
+          "$ref": "#/$defs/WorkflowJournalEntryStatus"
+        }
+      },
+      "required": [
+        "id",
+        "seq",
+        "kind",
+        "status",
+        "request",
+        "started_at"
+      ]
+    },
+    "WorkflowJournalEntryKind": {
+      "type": "string",
+      "enum": [
+        "agent_call",
+        "effect",
+        "log",
+        "phase"
+      ]
+    },
+    "WorkflowJournalEntryStatus": {
+      "type": "string",
+      "enum": [
+        "started",
+        "completed",
+        "failed"
+      ]
+    },
+    "WorkflowRun": {
+      "type": "object",
+      "properties": {
+        "args": true,
+        "budget": {
+          "$ref": "#/$defs/WorkflowBudget"
+        },
+        "completed_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "error_message": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "final_output": true,
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "script_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "script_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "script_version": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "space_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "state": {
+          "$ref": "#/$defs/WorkflowRunState"
+        }
+      },
+      "required": [
+        "id",
+        "space_id",
+        "state",
+        "args",
+        "budget",
+        "created_at"
+      ]
+    },
+    "WorkflowRunCompletedEvent": {
+      "type": "object",
+      "properties": {
+        "run": {
+          "$ref": "#/$defs/WorkflowRun"
+        }
+      },
+      "required": [
+        "run"
+      ]
+    },
+    "WorkflowRunDetailResponse": {
+      "type": "object",
+      "properties": {
+        "journal": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/WorkflowJournalEntry"
+          }
+        },
+        "run": {
+          "$ref": "#/$defs/WorkflowRun"
+        }
+      },
+      "required": [
+        "run",
+        "journal"
+      ]
+    },
+    "WorkflowRunListResponse": {
+      "type": "object",
+      "properties": {
+        "runs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/WorkflowRun"
+          }
+        }
+      },
+      "required": [
+        "runs"
+      ]
+    },
+    "WorkflowRunStartedEvent": {
+      "type": "object",
+      "properties": {
+        "run": {
+          "$ref": "#/$defs/WorkflowRun"
+        }
+      },
+      "required": [
+        "run"
+      ]
+    },
+    "WorkflowRunState": {
+      "type": "string",
+      "enum": [
+        "running",
+        "completed",
+        "failed",
+        "cancelled",
+        "interrupted"
+      ]
+    },
+    "WorkflowScript": {
+      "type": "object",
+      "properties": {
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "description": {
+          "type": "string"
+        },
+        "has_delivery_grant": {
+          "type": "boolean"
+        },
+        "head_version": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "name": {
+          "type": "string"
+        },
+        "space_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "space_id",
+        "name",
+        "description",
+        "head_version",
+        "has_delivery_grant",
+        "created_at",
+        "updated_at"
+      ]
+    },
+    "WorkflowScriptListResponse": {
+      "type": "object",
+      "properties": {
+        "scripts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/WorkflowScript"
+          }
+        }
+      },
+      "required": [
+        "scripts"
+      ]
     }
   }
 }

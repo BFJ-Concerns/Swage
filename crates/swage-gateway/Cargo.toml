@@ -26,6 +26,7 @@ swage-context = { path = "../swage-context" }
 swage-client = { path = "../swage-client" }
 swage-tui = { path = "../swage-tui" }
 swage-topology = { path = "../swage-topology" }
+swage-workflow = { path = "../swage-workflow" }
 swage-hook = { path = "../swage-hook" }
 swage-codex = { path = "../swage-codex" }
 axum = { workspace = true }
@@ -33,6 +34,7 @@ tokio = { workspace = true }
 tower-http = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
 toml = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }

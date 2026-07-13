@@ -42,6 +42,23 @@ fn typescript_bindings_are_regenerated() {
     client::schedule::ScheduleListResponse::export_all(&cfg).expect("export list");
     client::schedule::ScheduleRunListResponse::export_all(&cfg).expect("export runs");
     client::schedule::TriggerScheduleResponse::export_all(&cfg).expect("export trigger");
+    client::workflow::CreateWorkflowScriptRequest::export_all(&cfg)
+        .expect("export workflow create");
+    client::workflow::UpdateWorkflowScriptRequest::export_all(&cfg)
+        .expect("export workflow update");
+    client::workflow::WorkflowScriptListResponse::export_all(&cfg)
+        .expect("export workflow scripts");
+    client::workflow::StartWorkflowRunRequest::export_all(&cfg)
+        .expect("export workflow run request");
+    client::workflow::StartInlineWorkflowRunRequest::export_all(&cfg)
+        .expect("export inline workflow run request");
+    client::workflow::WorkflowRunDetailResponse::export_all(&cfg).expect("export workflow detail");
+    client::workflow::WorkflowRunListResponse::export_all(&cfg).expect("export workflow runs");
+    client::workflow::WorkflowRunStartedEvent::export_all(&cfg)
+        .expect("export workflow started event");
+    client::workflow::WorkflowEntryEvent::export_all(&cfg).expect("export workflow entry event");
+    client::workflow::WorkflowRunCompletedEvent::export_all(&cfg)
+        .expect("export workflow completed event");
 }
 
 #[test]

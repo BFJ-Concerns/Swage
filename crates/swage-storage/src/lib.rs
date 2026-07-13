@@ -20,12 +20,14 @@ pub use model::{
     NewConfigurationVersion, NewDeliveryRecord, NewEdgeEvaluation, NewLensRecord, NewMaterial,
     NewMessage, NewNodeExecution, NewNodeRetry, NewSchedule, NewScheduleRun, NewSecretRecord,
     NewSession, NewSharedReferenceEvent, NewSpace, NewTeam, NewThread, NewToolCall, NewTopologyRun,
-    NewTurn, NewWorkspaceAttachment, NodeExecution, NodeExecutionState, NodeRetry,
-    PendingChannelOrigin, Schedule, ScheduleCreator, ScheduleKind, ScheduleRun, ScheduleRunState,
-    ScheduleRunTrigger, ScheduleRunUpdate, ScheduleStatus, SecretRecord, Session, SessionPolicy,
-    SharedReferenceEvent, SharedReferenceKind, SkipReason, Space, SpaceSlug, Team, Thread,
-    ThreadBranch, ThreadState, ToolCallRecord, TopologyRun, TopologyRunState, Turn, TurnState,
-    UpdateSchedule, WorkspaceAttachment,
+    NewTurn, NewWorkflowJournalIntent, NewWorkflowRun, NewWorkflowScript, NewWorkspaceAttachment,
+    NodeExecution, NodeExecutionState, NodeRetry, PendingChannelOrigin, Schedule, ScheduleCreator,
+    ScheduleKind, ScheduleRun, ScheduleRunState, ScheduleRunTrigger, ScheduleRunUpdate,
+    ScheduleStatus, SecretRecord, Session, SessionPolicy, SharedReferenceEvent,
+    SharedReferenceKind, SkipReason, Space, SpaceSlug, Team, Thread, ThreadBranch, ThreadState,
+    ToolCallRecord, TopologyRun, TopologyRunState, Turn, TurnState, UpdateSchedule,
+    WorkflowJournalRecord, WorkflowRunRecord, WorkflowScriptRecord, WorkflowScriptVersion,
+    WorkspaceAttachment,
 };
 pub use sqlite::SqliteStorage;
 pub use store::{
@@ -33,5 +35,6 @@ pub use store::{
     BackgroundJobStore, ChannelLinkStore, ChannelQueueStore, ConfigurationVersionStore,
     ContextSnapshotStore, DeliveryStore, LensStore, MaterialStore, MessageStore, ScheduleStore,
     SecretStore, SessionStore, SharedReferenceStore, SkillActivationStore, SpaceStore, Storage,
-    TeamStore, ThreadStore, ToolCallStore, TopologyTraceStore, TurnStore, WorkspaceAttachmentStore,
+    TeamStore, ThreadStore, ToolCallStore, TopologyTraceStore, TurnStore, WorkflowStore,
+    WorkspaceAttachmentStore,
 };
