@@ -500,6 +500,16 @@ pub fn handle_server_event(state: &mut ConversationState, event: ServerEvent) ->
             EventOutcome::Continue
         }
 
+        // Retry and workflow events are observational; the TUI has no
+        // dedicated panels for them yet, so the shared contract can carry
+        // them without inventing partial presentation state here.
+        ServerEvent::ProviderRetryStarted { .. }
+        | ServerEvent::ProviderRetrySettled { .. }
+        | ServerEvent::WorkflowRunStarted { .. }
+        | ServerEvent::WorkflowEntryStarted { .. }
+        | ServerEvent::WorkflowEntryCompleted { .. }
+        | ServerEvent::WorkflowRunCompleted { .. } => EventOutcome::Continue,
+
         ServerEvent::Shutdown { reason } => {
             state.push_local_message("system", format!("Gateway shutting down — {reason}"));
             EventOutcome::Shutdown
@@ -1025,7 +1035,7 @@ mod tests {
         let outcome = handle_server_event(
             &mut state,
             ServerEvent::ApprovalDecisionError {
-                approval_id: "bad-id".to_string(),
+                approval_id: uuid::Uuid::new_v4(),
                 error: "already_decided".to_string(),
                 message: "Approval was already resolved.".to_string(),
                 current_state: Some("approved".to_string()),

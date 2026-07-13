@@ -380,24 +380,14 @@ pub(super) async fn dispatch_client_message(
             scope,
             reason,
         } => {
-            // Step 1: Parse the approval_id as a UUID.
-            let approval_uuid = match approval_id.parse::<Uuid>() {
-                Ok(id) => id,
-                Err(_) => {
-                    let _ = tx.send(ServerEvent::ApprovalDecisionError {
-                        approval_id,
-                        error: "invalid_decision".to_string(),
-                        message: "approval_id is not a valid UUID.".to_string(),
-                        current_state: None,
-                    });
-                    return;
-                }
-            };
+            // The shared wire contract deserialises the identifier as a UUID,
+            // so malformed values are rejected before dispatch.
+            let approval_uuid = approval_id;
 
             // Step 2: Validate that the decision string is one of the two legal values.
             if decision != "approved" && decision != "rejected" {
                 let _ = tx.send(ServerEvent::ApprovalDecisionError {
-                    approval_id: approval_uuid.to_string(),
+                    approval_id: approval_uuid,
                     error: "invalid_decision".to_string(),
                     message: format!(
                         "decision must be \"approved\" or \"rejected\", got \"{decision}\"."
@@ -412,7 +402,7 @@ pub(super) async fn dispatch_client_message(
                 Ok(Some(a)) => a,
                 Ok(None) => {
                     let _ = tx.send(ServerEvent::ApprovalDecisionError {
-                        approval_id: approval_uuid.to_string(),
+                        approval_id: approval_uuid,
                         error: "not_found".to_string(),
                         message: "No approval request found with that ID.".to_string(),
                         current_state: None,
@@ -456,7 +446,7 @@ pub(super) async fn dispatch_client_message(
                 Ok(false) => {
                     // Concurrent decision or expiry beat us to it.
                     let _ = tx.send(ServerEvent::ApprovalDecisionError {
-                        approval_id: approval_uuid.to_string(),
+                        approval_id: approval_uuid,
                         error: "already_decided".to_string(),
                         message: "This approval request has already been resolved.".to_string(),
                         current_state: Some(approval.state.to_string()),
@@ -506,7 +496,7 @@ pub(super) async fn dispatch_client_message(
 
             // Step 6: Broadcast confirmation to the client.
             let _ = tx.send(ServerEvent::ApprovalConfirmed {
-                approval_id: approval_uuid.to_string(),
+                approval_id: approval_uuid,
                 decision,
                 reason,
             });

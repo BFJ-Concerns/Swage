@@ -9,7 +9,7 @@ import type { SessionPolicy } from "./SessionPolicy";
 /**
  * A schedule as returned by the API.
  */
-export type Schedule = { id: string, message: string, status: ScheduleStatus, spec: ScheduleSpec, session: SessionPolicy, 
+export type Schedule = { id: string, message: string, status: ScheduleStatus, spec: ScheduleSpec, session: SessionPolicy,
 /**
  * Where this schedule came from — a person or an agent.
  */

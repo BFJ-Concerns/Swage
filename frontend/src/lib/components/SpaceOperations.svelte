@@ -6,10 +6,8 @@
     exportRecoveryBundle,
     fetchVoiceCapabilities,
   } from "../api/workflows";
-  import type {
-    MaterialScopeKind,
-    VoiceCapabilitiesResponse,
-  } from "../types";
+  import type { MaterialScopeKind } from "../types";
+  import type { VoiceCapabilitiesResponse } from "../protocol/VoiceCapabilitiesResponse";
 
   interface Props {
     spaceId: string | null;

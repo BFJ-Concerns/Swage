@@ -7,11 +7,11 @@ import type { SessionPolicy } from "./SessionPolicy";
 /**
  * Create a schedule.
  */
-export type CreateScheduleRequest = { 
+export type CreateScheduleRequest = {
 /**
  * What each run asks the agent to do.
  */
-message: string, spec: ScheduleSpec, session: SessionPolicy, 
+message: string, spec: ScheduleSpec, session: SessionPolicy,
 /**
  * Defaults to local-record-only routing when omitted.
  */

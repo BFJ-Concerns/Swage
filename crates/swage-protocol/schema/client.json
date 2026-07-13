@@ -7,14 +7,35 @@
     "channel_link_code_response": {
       "$ref": "#/$defs/ChannelLinkCodeResponse"
     },
+    "client_event": {
+      "$ref": "#/$defs/ClientEvent"
+    },
+    "conversation": {
+      "$ref": "#/$defs/ConversationResponse"
+    },
+    "conversation_detail": {
+      "$ref": "#/$defs/ConversationDetail"
+    },
+    "conversation_list": {
+      "$ref": "#/$defs/ConversationListResponse"
+    },
+    "conversation_thread": {
+      "$ref": "#/$defs/ConversationThreadDetail"
+    },
     "create_channel_link_code_request": {
       "$ref": "#/$defs/CreateChannelLinkCodeRequest"
     },
     "create_schedule_request": {
       "$ref": "#/$defs/CreateScheduleRequest"
     },
+    "create_space_request": {
+      "$ref": "#/$defs/CreateSpaceRequest"
+    },
     "create_workflow_script_request": {
       "$ref": "#/$defs/CreateWorkflowScriptRequest"
+    },
+    "create_workspace_attachment_request": {
+      "$ref": "#/$defs/CreateWorkspaceAttachmentRequest"
     },
     "provider_sign_in_state": {
       "$ref": "#/$defs/ProviderSignInState"
@@ -31,6 +52,12 @@
     "schedule_run_list": {
       "$ref": "#/$defs/ScheduleRunListResponse"
     },
+    "server_event": {
+      "$ref": "#/$defs/ServerEvent"
+    },
+    "space_list": {
+      "$ref": "#/$defs/SpaceListResponse"
+    },
     "start_inline_workflow_run_request": {
       "$ref": "#/$defs/StartInlineWorkflowRunRequest"
     },
@@ -43,14 +70,26 @@
     "start_workflow_run_request": {
       "$ref": "#/$defs/StartWorkflowRunRequest"
     },
+    "synthesise_speech": {
+      "$ref": "#/$defs/SynthesiseSpeechRequest"
+    },
+    "transcribe_audio": {
+      "$ref": "#/$defs/TranscribeAudioRequest"
+    },
     "trigger_schedule_response": {
       "$ref": "#/$defs/TriggerScheduleResponse"
     },
     "update_schedule_request": {
       "$ref": "#/$defs/UpdateScheduleRequest"
     },
+    "update_space_request": {
+      "$ref": "#/$defs/UpdateSpaceRequest"
+    },
     "update_workflow_script_request": {
       "$ref": "#/$defs/UpdateWorkflowScriptRequest"
+    },
+    "voice_capabilities": {
+      "$ref": "#/$defs/VoiceCapabilitiesResponse"
     },
     "workflow_entry_event": {
       "$ref": "#/$defs/WorkflowEntryEvent"
@@ -69,11 +108,28 @@
     },
     "workflow_script_list": {
       "$ref": "#/$defs/WorkflowScriptListResponse"
+    },
+    "workspace_attachment_list": {
+      "$ref": "#/$defs/WorkspaceAttachmentListResponse"
     }
   },
   "required": [
+    "client_event",
+    "server_event",
+    "voice_capabilities",
+    "transcribe_audio",
+    "synthesise_speech",
     "create_channel_link_code_request",
+    "create_space_request",
+    "update_space_request",
+    "space_list",
+    "create_workspace_attachment_request",
+    "workspace_attachment_list",
     "channel_link_code_response",
+    "conversation",
+    "conversation_list",
+    "conversation_detail",
+    "conversation_thread",
     "create_schedule_request",
     "update_schedule_request",
     "schedule",
@@ -96,6 +152,16 @@
     "workflow_run_completed_event"
   ],
   "$defs": {
+    "ApprovalDecisionScope": {
+      "description": "How widely an approved decision should apply.",
+      "type": "string",
+      "enum": [
+        "once",
+        "session",
+        "permanent",
+        "permanent_global"
+      ]
+    },
     "ChannelLinkCodeResponse": {
       "description": "A short-lived, single-use channel link code.",
       "type": "object",
@@ -111,6 +177,357 @@
       "required": [
         "link_code",
         "expires_at"
+      ]
+    },
+    "ClientEvent": {
+      "description": "Events sent by the client over the WebSocket connection.",
+      "oneOf": [
+        {
+          "description": "Send a message to the conversation, triggering a provider turn.",
+          "type": "object",
+          "properties": {
+            "content": {
+              "type": "string"
+            },
+            "selected_model_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "thread_id": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "uuid"
+            },
+            "type": {
+              "type": "string",
+              "const": "send_message"
+            }
+          },
+          "required": [
+            "type",
+            "content"
+          ]
+        },
+        {
+          "description": "Human responds to a pending approval request.\n\nThe client sends this event when the user approves or rejects an action\nthat was held for review by the agent's approval gate. The server\nresolves the pending `ApprovalRequired` event and unblocks (or cancels)\nthe agent turn accordingly.",
+          "type": "object",
+          "properties": {
+            "approval_id": {
+              "description": "Identifies the approval request being resolved.",
+              "type": "string",
+              "format": "uuid"
+            },
+            "decision": {
+              "description": "The human's verdict: `\"approved\"` or `\"rejected\"`.",
+              "type": "string"
+            },
+            "reason": {
+              "description": "Optional explanation from the human reviewer.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "scope": {
+              "description": "How widely an approved decision should apply.",
+              "$ref": "#/$defs/ApprovalDecisionScope"
+            },
+            "type": {
+              "type": "string",
+              "const": "approval_decision"
+            }
+          },
+          "required": [
+            "type",
+            "approval_id",
+            "decision"
+          ]
+        },
+        {
+          "description": "Cancel the currently active turn.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "cancel"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "description": "Subscribe to one or more observability channels by name.\n\nValid channel names: `\"context\"`, `\"tools\"`. Unknown names are silently\nignored so forward-compatible clients do not break on older servers.",
+          "type": "object",
+          "properties": {
+            "channels": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "type": {
+              "type": "string",
+              "const": "subscribe"
+            }
+          },
+          "required": [
+            "type",
+            "channels"
+          ]
+        },
+        {
+          "description": "Unsubscribe from one or more observability channels by name.",
+          "type": "object",
+          "properties": {
+            "channels": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "type": {
+              "type": "string",
+              "const": "unsubscribe"
+            }
+          },
+          "required": [
+            "type",
+            "channels"
+          ]
+        },
+        {
+          "description": "Client requests activating a named skill for the current session.",
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "activate_skill"
+            }
+          },
+          "required": [
+            "type",
+            "name"
+          ]
+        },
+        {
+          "description": "Client requests deactivating a named skill for the current session.",
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "deactivate_skill"
+            }
+          },
+          "required": [
+            "type",
+            "name"
+          ]
+        }
+      ]
+    },
+    "ConversationBranchResponse": {
+      "type": "object",
+      "properties": {
+        "branched_from_message_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "child_thread_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "parent_thread_id": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "required": [
+        "child_thread_id",
+        "parent_thread_id",
+        "branched_from_message_id",
+        "created_at"
+      ]
+    },
+    "ConversationDetail": {
+      "type": "object",
+      "properties": {
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "last_activity": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "messages": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MessageView"
+          }
+        },
+        "selected_model_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "space_id": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "required": [
+        "id",
+        "space_id",
+        "created_at",
+        "last_activity",
+        "messages"
+      ]
+    },
+    "ConversationListResponse": {
+      "type": "object",
+      "properties": {
+        "conversations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ConversationSummary"
+          }
+        }
+      },
+      "required": [
+        "conversations"
+      ]
+    },
+    "ConversationResponse": {
+      "type": "object",
+      "properties": {
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "last_activity": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "selected_model_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "space_id": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "required": [
+        "id",
+        "space_id",
+        "created_at",
+        "last_activity"
+      ]
+    },
+    "ConversationSummary": {
+      "type": "object",
+      "properties": {
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "has_interrupted_turn": {
+          "type": "boolean"
+        },
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "last_activity": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "message_preview": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "selected_model_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "created_at",
+        "last_activity",
+        "has_interrupted_turn"
+      ]
+    },
+    "ConversationThreadDetail": {
+      "type": "object",
+      "properties": {
+        "agent_id": {
+          "type": "string"
+        },
+        "branch": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ConversationBranchResponse"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "messages": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MessageView"
+          }
+        },
+        "session_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "state": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "session_id",
+        "agent_id",
+        "state",
+        "messages"
       ]
     },
     "CreateChannelLinkCodeRequest": {
@@ -195,6 +612,21 @@
         "session"
       ]
     },
+    "CreateSpaceRequest": {
+      "type": "object",
+      "properties": {
+        "description": {
+          "type": "string",
+          "default": ""
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ]
+    },
     "CreateWorkflowScriptRequest": {
       "type": "object",
       "properties": {
@@ -216,6 +648,48 @@
         "name",
         "description",
         "source"
+      ]
+    },
+    "CreateWorkspaceAttachmentRequest": {
+      "type": "object",
+      "properties": {
+        "active_session_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid",
+          "default": null
+        },
+        "is_trusted": {
+          "type": "boolean",
+          "default": false
+        },
+        "label": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path": {
+          "type": "string"
+        },
+        "permissions": {
+          "type": "array",
+          "default": [
+            "read"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "set_as_default": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "required": [
+        "path"
       ]
     },
     "DeliveryRoutingRequest": {
@@ -362,6 +836,55 @@
       "enum": [
         "run",
         "skip"
+      ]
+    },
+    "MessageView": {
+      "type": "object",
+      "properties": {
+        "content": {
+          "type": "string"
+        },
+        "role": {
+          "type": "string"
+        },
+        "thread_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "tool_calls": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ToolCallView"
+          }
+        },
+        "turn_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "turn_state": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TurnState"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "thread_id",
+        "role",
+        "content",
+        "timestamp",
+        "tool_calls"
       ]
     },
     "ProviderAccount": {
@@ -786,6 +1309,887 @@
         }
       ]
     },
+    "SchemaValidationError": {
+      "description": "A single JSON Schema validation error from output schema checking.",
+      "type": "object",
+      "properties": {
+        "message": {
+          "description": "Human-readable description of the constraint that was violated.",
+          "type": "string"
+        },
+        "path": {
+          "description": "JSON pointer to the failing location (e.g. `\"/properties/name\"`).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "message"
+      ]
+    },
+    "ServerEvent": {
+      "description": "Events sent by the server to the client over the WebSocket connection.",
+      "oneOf": [
+        {
+          "description": "A token streamed from the provider.",
+          "type": "object",
+          "properties": {
+            "content": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "token"
+            }
+          },
+          "required": [
+            "type",
+            "content"
+          ]
+        },
+        {
+          "description": "A tool call has begun execution. Correlates with a later ToolEnd via call_id.",
+          "type": "object",
+          "properties": {
+            "arguments": true,
+            "call_id": {
+              "type": "string"
+            },
+            "parent_call_id": {
+              "description": "call_id of the enclosing tool if this is a sub-tool invocation.\n\nOmitted from the serialised JSON when None so existing clients that\ndo not handle sub-tools remain unaffected.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "tool": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "tool_start"
+            }
+          },
+          "required": [
+            "type",
+            "call_id",
+            "tool",
+            "arguments"
+          ]
+        },
+        {
+          "description": "A tool call has finished. Contains the result and execution metadata.",
+          "type": "object",
+          "properties": {
+            "call_id": {
+              "type": "string"
+            },
+            "duration_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "parent_call_id": {
+              "description": "call_id of the enclosing tool if this is a sub-tool invocation.\n\nOmitted from the serialised JSON when None.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "result": true,
+            "status": {
+              "description": "\"success\" or \"error\".",
+              "type": "string"
+            },
+            "tool": {
+              "type": "string"
+            },
+            "total_bytes": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0
+            },
+            "truncated": {
+              "type": "boolean"
+            },
+            "type": {
+              "type": "string",
+              "const": "tool_end"
+            }
+          },
+          "required": [
+            "type",
+            "call_id",
+            "tool",
+            "result",
+            "status",
+            "duration_ms",
+            "truncated"
+          ]
+        },
+        {
+          "description": "Context assembly completed for a turn.\n\nContains the full assembly report for diagnostics and token budget\ninspection. Only delivered to connections subscribed to the `\"context\"`\nchannel unless the report contains errors, in which case it is always\nsent so the client can surface assembly failures to the user.\n\nThe report is carried as `serde_json::Value` to decouple the wire\nformat from swage-context's internal types — the shape matches\n`swage_context::report::AssemblyReport` when serialised.",
+          "type": "object",
+          "properties": {
+            "report": true,
+            "turn_id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "type": {
+              "type": "string",
+              "const": "context_assembled"
+            }
+          },
+          "required": [
+            "type",
+            "turn_id",
+            "report"
+          ]
+        },
+        {
+          "description": "The provider has finished and the turn has been committed.\n\nThe base event always includes `turn_id`. Usage fields are populated\nonly for connections subscribed to the `\"context\"` channel — unsubscribed\nclients receive `turn_id` alone (the `skip_serializing_if` annotation\nkeeps the JSON shape backward-compatible).",
+          "type": "object",
+          "properties": {
+            "cost_microcents": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            },
+            "input_tokens": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0
+            },
+            "output_tokens": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0
+            },
+            "structured_output": {
+              "description": "Validated, parsed JSON output when an output schema was configured and\nvalidation passed. Absent (serialised as omitted) when no schema is\nconfigured or when validation failed after retry exhaustion."
+            },
+            "turn_id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "type": {
+              "type": "string",
+              "const": "turn_complete"
+            }
+          },
+          "required": [
+            "type",
+            "turn_id"
+          ]
+        },
+        {
+          "description": "A schema validation attempt failed and the agent will retry.\n\nOnly delivered to connections subscribed to the `\"context\"` channel —\nthese are observability events that provide retry progress to developers\nand diagnostic tooling. Normal clients that have not subscribed do not\nreceive intermediate retry noise.",
+          "type": "object",
+          "properties": {
+            "attempt": {
+              "description": "1-indexed attempt number (first retry = 1).",
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "errors": {
+              "description": "Validation errors from this attempt.",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/SchemaValidationError"
+              }
+            },
+            "max_retries": {
+              "description": "Maximum configured retries for this turn.",
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "turn_id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "type": {
+              "type": "string",
+              "const": "output_schema_retry"
+            }
+          },
+          "required": [
+            "type",
+            "turn_id",
+            "attempt",
+            "max_retries",
+            "errors"
+          ]
+        },
+        {
+          "description": "Provider retry progress for the active turn.",
+          "type": "object",
+          "properties": {
+            "attempt": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "max_retries": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "provider": {
+              "type": "string"
+            },
+            "turn_id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "type": {
+              "type": "string",
+              "const": "provider_retry_started"
+            },
+            "wait_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "type",
+            "turn_id",
+            "attempt",
+            "max_retries",
+            "provider",
+            "wait_ms"
+          ]
+        },
+        {
+          "description": "Provider retry wait has settled.",
+          "type": "object",
+          "properties": {
+            "attempt": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "max_retries": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "provider": {
+              "type": "string"
+            },
+            "success": {
+              "type": "boolean"
+            },
+            "turn_id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "type": {
+              "type": "string",
+              "const": "provider_retry_settled"
+            }
+          },
+          "required": [
+            "type",
+            "turn_id",
+            "attempt",
+            "max_retries",
+            "provider",
+            "success"
+          ]
+        },
+        {
+          "description": "All schema validation retries were exhausted without a valid response.\n\nAlways delivered regardless of subscription state — this is an error\ncondition that the client must surface to the user.",
+          "type": "object",
+          "properties": {
+            "attempts": {
+              "description": "Total number of attempts made (including the initial attempt).",
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "errors": {
+              "description": "Validation errors from the final attempt.",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/SchemaValidationError"
+              }
+            },
+            "turn_id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "type": {
+              "type": "string",
+              "const": "output_schema_failed"
+            }
+          },
+          "required": [
+            "type",
+            "turn_id",
+            "attempts",
+            "errors"
+          ]
+        },
+        {
+          "description": "A delegation from one agent to another has started.\nAlways delivered — clients need delegation lifecycle events to track\nsub-agent progress regardless of subscription state.",
+          "type": "object",
+          "properties": {
+            "child_turn_id": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "uuid"
+            },
+            "parent_turn_id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "target_agent_id": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "delegation_started"
+            }
+          },
+          "required": [
+            "type",
+            "parent_turn_id",
+            "target_agent_id"
+          ]
+        },
+        {
+          "description": "A delegation has completed (successfully or with failure).\nAlways delivered — matches DelegationStarted semantics.",
+          "type": "object",
+          "properties": {
+            "child_turn_id": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "uuid"
+            },
+            "parent_turn_id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "success": {
+              "type": "boolean"
+            },
+            "target_agent_id": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "delegation_completed"
+            }
+          },
+          "required": [
+            "type",
+            "parent_turn_id",
+            "target_agent_id",
+            "success"
+          ]
+        },
+        {
+          "description": "A topology run has started for a session.",
+          "type": "object",
+          "properties": {
+            "session_id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "team_id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "topology_run_id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "type": {
+              "type": "string",
+              "const": "topology_run_started"
+            }
+          },
+          "required": [
+            "type",
+            "session_id",
+            "topology_run_id",
+            "team_id"
+          ]
+        },
+        {
+          "description": "A topology node has started for a session.",
+          "type": "object",
+          "properties": {
+            "node_execution_id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "node_id": {
+              "type": "string"
+            },
+            "session_id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "topology_run_id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "type": {
+              "type": "string",
+              "const": "topology_node_started"
+            }
+          },
+          "required": [
+            "type",
+            "session_id",
+            "topology_run_id",
+            "node_execution_id",
+            "node_id"
+          ]
+        },
+        {
+          "description": "A topology node has finished for a session.",
+          "type": "object",
+          "properties": {
+            "node_execution_id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "node_id": {
+              "type": "string"
+            },
+            "session_id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "success": {
+              "type": "boolean"
+            },
+            "topology_run_id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "type": {
+              "type": "string",
+              "const": "topology_node_completed"
+            }
+          },
+          "required": [
+            "type",
+            "session_id",
+            "topology_run_id",
+            "node_execution_id",
+            "node_id",
+            "success"
+          ]
+        },
+        {
+          "description": "A topology run has finished for a session.",
+          "type": "object",
+          "properties": {
+            "final_output": true,
+            "session_id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "success": {
+              "type": "boolean"
+            },
+            "topology_run_id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "type": {
+              "type": "string",
+              "const": "topology_run_completed"
+            }
+          },
+          "required": [
+            "type",
+            "session_id",
+            "topology_run_id",
+            "success"
+          ]
+        },
+        {
+          "description": "A detached workflow run has started.",
+          "type": "object",
+          "properties": {
+            "event": {
+              "$ref": "#/$defs/WorkflowRunStartedEvent"
+            },
+            "type": {
+              "type": "string",
+              "const": "workflow_run_started"
+            }
+          },
+          "required": [
+            "type",
+            "event"
+          ]
+        },
+        {
+          "description": "A workflow journal entry changed state.",
+          "type": "object",
+          "properties": {
+            "event": {
+              "$ref": "#/$defs/WorkflowEntryEvent"
+            },
+            "type": {
+              "type": "string",
+              "const": "workflow_entry_started"
+            }
+          },
+          "required": [
+            "type",
+            "event"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "event": {
+              "$ref": "#/$defs/WorkflowEntryEvent"
+            },
+            "type": {
+              "type": "string",
+              "const": "workflow_entry_completed"
+            }
+          },
+          "required": [
+            "type",
+            "event"
+          ]
+        },
+        {
+          "description": "A detached workflow run reached a terminal state.",
+          "type": "object",
+          "properties": {
+            "event": {
+              "$ref": "#/$defs/WorkflowRunCompletedEvent"
+            },
+            "type": {
+              "type": "string",
+              "const": "workflow_run_completed"
+            }
+          },
+          "required": [
+            "type",
+            "event"
+          ]
+        },
+        {
+          "description": "An error occurred during or before turn processing.",
+          "type": "object",
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "error"
+            }
+          },
+          "required": [
+            "type",
+            "code",
+            "message"
+          ]
+        },
+        {
+          "description": "A pending turn was successfully cancelled.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "cancelled"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "description": "The server is shutting down. Clients should clean up and disconnect.\n\nAlways delivered regardless of subscription state — a client that\nmisses this event will simply see the connection close without a\ngraceful handshake.",
+          "type": "object",
+          "properties": {
+            "reason": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "shutdown"
+            }
+          },
+          "required": [
+            "type",
+            "reason"
+          ]
+        },
+        {
+          "description": "A skill was successfully activated for the current session.\n\nIncludes metadata so the client can display the skill without a\nseparate lookup.",
+          "type": "object",
+          "properties": {
+            "description": {
+              "type": "string"
+            },
+            "display_name": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "token_count": {
+              "description": "Token budget consumed by this skill's instructions in the context window.",
+              "type": "integer",
+              "format": "uint",
+              "minimum": 0
+            },
+            "type": {
+              "type": "string",
+              "const": "skill_activated"
+            }
+          },
+          "required": [
+            "type",
+            "name",
+            "display_name",
+            "description",
+            "token_count"
+          ]
+        },
+        {
+          "description": "A skill was already active — no state change occurred.",
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "skill_already_active"
+            }
+          },
+          "required": [
+            "type",
+            "name"
+          ]
+        },
+        {
+          "description": "A skill was successfully deactivated for the current session.",
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "skill_deactivated"
+            }
+          },
+          "required": [
+            "type",
+            "name"
+          ]
+        },
+        {
+          "description": "A tool call (or other action) requires human approval before proceeding.\n\nDelivered when the agent's dispatch pipeline raises an approval gate.\nThe client should present the approval UI and respond with a\n`ClientEvent::ApprovalDecision` before `timeout_at` elapses.",
+          "type": "object",
+          "properties": {
+            "agent_id": {
+              "description": "Agent that raised the gate.",
+              "type": "string"
+            },
+            "approval_id": {
+              "description": "Unique identifier for this approval request.",
+              "type": "string",
+              "format": "uuid"
+            },
+            "context": {
+              "description": "Additional context the client may render to assist the decision."
+            },
+            "kind": {
+              "description": "Category of the action requiring approval (e.g. `\"tool_call\"`).",
+              "type": "string"
+            },
+            "prompt": {
+              "description": "Human-readable description of the action to be approved.",
+              "type": "string"
+            },
+            "timeout_at": {
+              "description": "ISO 8601 timestamp after which the approval is considered expired.",
+              "type": "string"
+            },
+            "timeout_policy": {
+              "description": "Policy applied on expiry: `\"reject\"` or `\"interrupt\"`.",
+              "type": "string"
+            },
+            "tool_arguments": {
+              "description": "Parsed arguments of the tool call, for display in the approval UI."
+            },
+            "tool_name": {
+              "description": "Name of the tool involved, if the approval is for a tool call.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "turn_id": {
+              "description": "Turn that triggered the approval gate.",
+              "type": "string",
+              "format": "uuid"
+            },
+            "type": {
+              "type": "string",
+              "const": "approval_required"
+            }
+          },
+          "required": [
+            "type",
+            "approval_id",
+            "turn_id",
+            "agent_id",
+            "kind",
+            "prompt",
+            "timeout_at",
+            "timeout_policy"
+          ]
+        },
+        {
+          "description": "The approval decision has been recorded and forwarded to the agent.\n\nSent to the client that submitted the decision as an acknowledgement,\nand broadcast to other clients on the same session for consistency.",
+          "type": "object",
+          "properties": {
+            "approval_id": {
+              "description": "Identifier of the resolved approval request.",
+              "type": "string",
+              "format": "uuid"
+            },
+            "decision": {
+              "description": "The recorded decision: `\"approved\"` or `\"rejected\"`.",
+              "type": "string"
+            },
+            "reason": {
+              "description": "Optional explanation provided by the human reviewer.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "type": "string",
+              "const": "approval_confirmed"
+            }
+          },
+          "required": [
+            "type",
+            "approval_id",
+            "decision"
+          ]
+        },
+        {
+          "description": "An approval request timed out before a decision was submitted.\n\nThe `timeout_policy` field indicates the action that was taken\nautomatically as a result of the expiry.",
+          "type": "object",
+          "properties": {
+            "approval_id": {
+              "description": "Identifier of the expired approval request.",
+              "type": "string",
+              "format": "uuid"
+            },
+            "timeout_policy": {
+              "description": "Policy that was applied: `\"reject\"` or `\"interrupt\"`.",
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "approval_expired"
+            }
+          },
+          "required": [
+            "type",
+            "approval_id",
+            "timeout_policy"
+          ]
+        },
+        {
+          "description": "A submitted approval decision was rejected by the server.\n\nPossible causes include attempting to decide an already-resolved request\nor submitting an unknown `approval_id`. The `error` field carries a\nmachine-readable code; `message` gives a human-readable explanation.",
+          "type": "object",
+          "properties": {
+            "approval_id": {
+              "description": "Identifier of the approval request that could not be decided.",
+              "type": "string",
+              "format": "uuid"
+            },
+            "current_state": {
+              "description": "Current state of the request, if known (e.g. `\"approved\"`, `\"expired\"`).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "error": {
+              "description": "Machine-readable error code (e.g. `\"already_decided\"`, `\"not_found\"`).",
+              "type": "string"
+            },
+            "message": {
+              "description": "Human-readable description of the error.",
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "approval_decision_error"
+            }
+          },
+          "required": [
+            "type",
+            "approval_id",
+            "error",
+            "message"
+          ]
+        },
+        {
+          "description": "A gateway event this client version does not understand.\n\nThis is constructed by the Rust client after a tagged event fails to\ndeserialise; the gateway never emits it directly.",
+          "type": "object",
+          "properties": {
+            "event_type": {
+              "type": "string"
+            },
+            "payload": true,
+            "type": {
+              "type": "string",
+              "const": "unknown"
+            }
+          },
+          "required": [
+            "type",
+            "event_type",
+            "payload"
+          ]
+        }
+      ]
+    },
     "SessionPolicy": {
       "description": "Which session each run executes in.\n\n- `fresh` — every run creates a new session in `space_id` for\n  `agent_id`, with a deliberately assembled opening context (the\n  schedule's message plus the previous run's outcome).\n- `continuation` — every run continues the named session, executing as\n  whatever agent that session has at run time.",
       "oneOf": [
@@ -849,6 +2253,53 @@
           "type": "string",
           "const": "overlap"
         }
+      ]
+    },
+    "SpaceListResponse": {
+      "type": "object",
+      "properties": {
+        "spaces": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SpaceResponse"
+          }
+        }
+      },
+      "required": [
+        "spaces"
+      ]
+    },
+    "SpaceResponse": {
+      "type": "object",
+      "properties": {
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "description": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "is_default": {
+          "type": "boolean"
+        },
+        "name": {
+          "type": "string"
+        },
+        "slug": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "description",
+        "is_default",
+        "slug",
+        "created_at"
       ]
     },
     "StartInlineWorkflowRunRequest": {
@@ -950,6 +2401,102 @@
         "args"
       ]
     },
+    "SynthesiseSpeechRequest": {
+      "type": "object",
+      "properties": {
+        "format": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "text": {
+          "type": "string"
+        },
+        "voice": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "text"
+      ]
+    },
+    "ToolCallView": {
+      "type": "object",
+      "properties": {
+        "arguments": true,
+        "call_id": {
+          "type": "string"
+        },
+        "duration_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "parent_call_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "result": true,
+        "status": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tool": {
+          "type": "string"
+        },
+        "total_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "call_id",
+        "tool",
+        "arguments",
+        "truncated"
+      ]
+    },
+    "TranscribeAudioRequest": {
+      "type": "object",
+      "properties": {
+        "audio_bytes": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint8",
+            "maximum": 255,
+            "minimum": 0
+          }
+        },
+        "mime_type": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "audio_bytes",
+        "mime_type"
+      ]
+    },
     "TriggerScheduleResponse": {
       "type": "object",
       "properties": {
@@ -959,6 +2506,18 @@
       },
       "required": [
         "run"
+      ]
+    },
+    "TurnState": {
+      "type": "string",
+      "enum": [
+        "pending",
+        "processing",
+        "completed",
+        "failed",
+        "interrupted",
+        "awaiting_approval",
+        "delegating"
       ]
     },
     "UpdateScheduleRequest": {
@@ -1008,6 +2567,23 @@
         }
       }
     },
+    "UpdateSpaceRequest": {
+      "type": "object",
+      "properties": {
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
     "UpdateWorkflowScriptRequest": {
       "type": "object",
       "properties": {
@@ -1027,6 +2603,34 @@
           ]
         }
       }
+    },
+    "VoiceCapabilitiesResponse": {
+      "type": "object",
+      "properties": {
+        "default_voice": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "supported_voices": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "synthesis": {
+          "type": "boolean"
+        },
+        "transcription": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "transcription",
+        "synthesis"
+      ]
     },
     "WorkflowAgentCallDetail": {
       "type": "object",
@@ -1427,6 +3031,73 @@
       },
       "required": [
         "scripts"
+      ]
+    },
+    "WorkspaceAttachmentListResponse": {
+      "type": "object",
+      "properties": {
+        "workspaces": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/WorkspaceAttachmentResponse"
+          }
+        }
+      },
+      "required": [
+        "workspaces"
+      ]
+    },
+    "WorkspaceAttachmentResponse": {
+      "type": "object",
+      "properties": {
+        "canonical_path": {
+          "type": "string"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "is_default": {
+          "type": "boolean"
+        },
+        "is_missing": {
+          "type": "boolean"
+        },
+        "is_trusted": {
+          "type": "boolean"
+        },
+        "label": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "permissions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "space_id": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "required": [
+        "id",
+        "space_id",
+        "label",
+        "path",
+        "canonical_path",
+        "is_missing",
+        "is_default",
+        "permissions",
+        "is_trusted",
+        "created_at"
       ]
     }
   }

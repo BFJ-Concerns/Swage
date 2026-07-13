@@ -8,6 +8,7 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+swage-protocol = { path = "../swage-protocol" }
 swage-core = { path = "../swage-core" }
 swage-safety = { path = "../swage-safety" }
 uuid.workspace = true

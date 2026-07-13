@@ -1,10 +1,15 @@
 //! Client surface: types spoken between the gateway and its own clients
 //! (web frontend, TUI, desktop shell) over HTTP and WebSocket.
 
+pub mod approval;
 pub mod channel;
+pub mod conversation;
 pub mod delivery;
 pub mod provider_signin;
 pub mod schedule;
+pub mod space;
+pub mod voice;
+pub mod websocket;
 pub mod workflow;
 
 use schemars::JsonSchema;
@@ -18,8 +23,22 @@ use schemars::JsonSchema;
 #[derive(JsonSchema)]
 #[allow(dead_code)]
 pub struct ClientSurface {
+    client_event: websocket::ClientEvent,
+    server_event: websocket::ServerEvent,
+    voice_capabilities: voice::VoiceCapabilitiesResponse,
+    transcribe_audio: voice::TranscribeAudioRequest,
+    synthesise_speech: voice::SynthesiseSpeechRequest,
     create_channel_link_code_request: channel::CreateChannelLinkCodeRequest,
+    create_space_request: space::CreateSpaceRequest,
+    update_space_request: space::UpdateSpaceRequest,
+    space_list: space::SpaceListResponse,
+    create_workspace_attachment_request: space::CreateWorkspaceAttachmentRequest,
+    workspace_attachment_list: space::WorkspaceAttachmentListResponse,
     channel_link_code_response: channel::ChannelLinkCodeResponse,
+    conversation: conversation::ConversationResponse,
+    conversation_list: conversation::ConversationListResponse,
+    conversation_detail: conversation::ConversationDetail,
+    conversation_thread: conversation::ConversationThreadDetail,
     create_schedule_request: schedule::CreateScheduleRequest,
     update_schedule_request: schedule::UpdateScheduleRequest,
     schedule: schedule::Schedule,

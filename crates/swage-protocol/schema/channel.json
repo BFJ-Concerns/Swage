@@ -1,0 +1,315 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ChannelSurface",
+  "type": "object",
+  "properties": {
+    "delivery_log": {
+      "$ref": "#/$defs/DeliveryLogResponse"
+    },
+    "delivery_log_query": {
+      "$ref": "#/$defs/DeliveryLogQuery"
+    },
+    "dm_inbound": {
+      "$ref": "#/$defs/DevDmInboundRequest"
+    },
+    "inbound_response": {
+      "$ref": "#/$defs/ChannelInboundResponse"
+    },
+    "status": {
+      "$ref": "#/$defs/ChannelStatusListResponse"
+    },
+    "thread_inbound": {
+      "$ref": "#/$defs/DevThreadInboundRequest"
+    }
+  },
+  "required": [
+    "dm_inbound",
+    "thread_inbound",
+    "inbound_response",
+    "delivery_log_query",
+    "delivery_log",
+    "status"
+  ],
+  "$defs": {
+    "ChannelInboundResponse": {
+      "type": "object",
+      "properties": {
+        "delivered_to": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DeliveryTarget"
+          }
+        },
+        "response": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "required": [
+        "session_id",
+        "delivered_to",
+        "response"
+      ]
+    },
+    "ChannelStatusListResponse": {
+      "type": "object",
+      "properties": {
+        "channels": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ChannelStatusResponse"
+          }
+        }
+      },
+      "required": [
+        "channels"
+      ]
+    },
+    "ChannelStatusResponse": {
+      "type": "object",
+      "properties": {
+        "delivery_count": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "integration": {
+          "type": "string"
+        },
+        "last_delivery_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "route_count": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "status": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "integration",
+        "status",
+        "route_count",
+        "delivery_count"
+      ]
+    },
+    "DeliveryLogQuery": {
+      "type": "object",
+      "properties": {
+        "session_id": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "required": [
+        "session_id"
+      ]
+    },
+    "DeliveryLogResponse": {
+      "type": "object",
+      "properties": {
+        "deliveries": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RecordedDelivery"
+          }
+        }
+      },
+      "required": [
+        "deliveries"
+      ]
+    },
+    "DeliveryRoutingRequest": {
+      "description": "Where output should be routed once a run completes.\n\n`deliver_to_origin` defaults to true for channel-initiated turns, where\nan origin always exists. Callers without an origin (schedules, manual\nAPI calls) must set it false or target resolution errors.",
+      "type": "object",
+      "properties": {
+        "deliver_to_origin": {
+          "type": "boolean",
+          "default": true
+        },
+        "explicit_targets": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/DeliveryTarget"
+          }
+        },
+        "home_target": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DeliveryTarget"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "store_local_output": {
+          "type": "boolean",
+          "default": false
+        }
+      }
+    },
+    "DeliveryTarget": {
+      "description": "A destination for a run's output.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "account": {
+              "type": "string"
+            },
+            "conversation": {
+              "type": "string"
+            },
+            "integration": {
+              "$ref": "#/$defs/ExternalChannelIntegration"
+            },
+            "kind": {
+              "type": "string",
+              "const": "channel"
+            }
+          },
+          "required": [
+            "kind",
+            "integration",
+            "account",
+            "conversation"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "local_storage"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "webhook"
+            },
+            "url": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "url"
+          ]
+        }
+      ]
+    },
+    "DevDmInboundRequest": {
+      "type": "object",
+      "properties": {
+        "account": {
+          "type": "string"
+        },
+        "routing": {
+          "$ref": "#/$defs/DeliveryRoutingRequest",
+          "default": {
+            "deliver_to_origin": true,
+            "explicit_targets": [],
+            "home_target": null,
+            "store_local_output": false
+          }
+        },
+        "text": {
+          "type": "string"
+        },
+        "user_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "account",
+        "user_id",
+        "text"
+      ]
+    },
+    "DevThreadInboundRequest": {
+      "type": "object",
+      "properties": {
+        "account": {
+          "type": "string"
+        },
+        "channel_id": {
+          "type": "string"
+        },
+        "routing": {
+          "$ref": "#/$defs/DeliveryRoutingRequest",
+          "default": {
+            "deliver_to_origin": true,
+            "explicit_targets": [],
+            "home_target": null,
+            "store_local_output": false
+          }
+        },
+        "text": {
+          "type": "string"
+        },
+        "thread_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "account",
+        "channel_id",
+        "thread_id",
+        "text"
+      ]
+    },
+    "ExternalChannelIntegration": {
+      "description": "An external channel integration that can receive delivered output.",
+      "type": "string",
+      "enum": [
+        "dev_dm",
+        "dev_thread",
+        "telegram"
+      ]
+    },
+    "RecordedDelivery": {
+      "type": "object",
+      "properties": {
+        "content": {
+          "type": "string"
+        },
+        "delivered_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "session_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "target": {
+          "$ref": "#/$defs/DeliveryTarget"
+        }
+      },
+      "required": [
+        "session_id",
+        "target",
+        "content",
+        "delivered_at"
+      ]
+    }
+  }
+}
