@@ -27,6 +27,7 @@ swage-client = { path = "../swage-client" }
 swage-tui = { path = "../swage-tui" }
 swage-topology = { path = "../swage-topology" }
 swage-hook = { path = "../swage-hook" }
+swage-codex = { path = "../swage-codex" }
 axum = { workspace = true }
 tokio = { workspace = true }
 tower-http = { workspace = true }
@@ -52,6 +53,7 @@ clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
 cron = "0.16"
 chromiumoxide = "0.9.1"
+jsonschema = { workspace = true }
 
 [dev-dependencies]
 swage-safety = { path = "../swage-safety" }

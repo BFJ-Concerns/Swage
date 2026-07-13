@@ -788,6 +788,8 @@ const COMPLETE_SCHEMA: &str = "
         session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
         agent_id   TEXT NOT NULL,
         state      TEXT NOT NULL DEFAULT 'idle',
+        codex_thread_id TEXT,
+        codex_tools_json TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
     );

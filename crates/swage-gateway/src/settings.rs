@@ -34,6 +34,8 @@ pub struct ProviderSettings {
     pub api_key_secret_ref: Option<String>,
     pub api_key_env: Option<String>,
     pub has_credential: bool,
+    pub command: Option<String>,
+    pub state_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -102,6 +104,10 @@ pub struct SaveProviderSettings {
     pub api_key_env: Option<String>,
     #[serde(default)]
     pub api_key: Option<String>,
+    #[serde(default)]
+    pub command: Option<String>,
+    #[serde(default)]
+    pub state_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -140,6 +146,8 @@ pub async fn load_settings(state: &AppState) -> SettingsResponse {
                     api_key_env: provider.api_key_env.clone(),
                     has_credential: provider.api_key_secret_ref.is_some()
                         || provider.api_key_env.is_some(),
+                    command: provider.command.clone(),
+                    state_dir: provider.state_dir.clone(),
                 },
             )
         })
@@ -214,6 +222,8 @@ pub async fn save_settings(
                 api_key_secret_ref: secret_ref.or(provider.api_key_secret_ref),
                 api_key_env: provider.api_key_env,
                 base_url: provider.base_url,
+                command: provider.command,
+                state_dir: provider.state_dir,
             },
         );
     }
@@ -471,6 +481,40 @@ pub async fn discover_models(
             "claude-3-5-haiku-20241022",
         ]),
         swage_config::Protocol::Google => known_models(&["gemini-2.5-pro", "gemini-2.5-flash"]),
+        swage_config::Protocol::Codex => {
+            let response = state
+                .codex_supervisor
+                .client()
+                .await
+                .map_err(|error| ApiError::internal(error.to_string()))?
+                .request("model/list", json!({}))
+                .await
+                .map_err(|error| ApiError::internal(error.to_string()))?;
+            response
+                .get("data")
+                .or_else(|| response.get("models"))
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|model| {
+                    let id = model.get("id")?.as_str()?.to_string();
+                    let name = model
+                        .get("displayName")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or(&id)
+                        .to_string();
+                    let context_window = model
+                        .get("contextWindow")
+                        .and_then(serde_json::Value::as_u64)
+                        .and_then(|value| u32::try_from(value).ok());
+                    Some(DiscoveredModel {
+                        id,
+                        name,
+                        context_window,
+                    })
+                })
+                .collect()
+        }
     };
 
     if let Some(query) = query.filter(|q| !q.trim().is_empty()) {
@@ -493,6 +537,8 @@ impl SaveProviderSettings {
             base_url: self.base_url,
             api_key_secret_ref: self.api_key_secret_ref,
             api_key_env: self.api_key_env,
+            command: self.command,
+            state_dir: self.state_dir,
         }
     }
 }
@@ -523,6 +569,8 @@ fn settings_response_from_saved_config(
                     api_key_env: provider.api_key_env.clone(),
                     has_credential: provider.api_key_secret_ref.is_some()
                         || provider.api_key_env.is_some(),
+                    command: provider.command.clone(),
+                    state_dir: provider.state_dir.clone(),
                 },
             )
         })
@@ -1111,6 +1159,8 @@ mod tests {
                 base_url: Some("http://127.0.0.1:8080/v1".to_string()),
                 api_key_secret_ref: Some("secret:abc".to_string()),
                 api_key_env: None,
+                command: None,
+                state_dir: None,
             },
         );
 
@@ -1163,6 +1213,8 @@ mod tests {
                     api_key_secret_ref: None,
                     api_key_env: None,
                     api_key: None,
+                    command: None,
+                    state_dir: None,
                 },
             )]
             .into_iter()
@@ -1302,6 +1354,8 @@ mod tests {
                     api_key_secret_ref: None,
                     api_key_env: None,
                     api_key: None,
+                    command: None,
+                    state_dir: None,
                 },
             )]
             .into_iter()
@@ -1413,6 +1467,8 @@ mod tests {
                     api_key_secret_ref: None,
                     api_key_env: None,
                     api_key: None,
+                    command: None,
+                    state_dir: None,
                 },
             )]
             .into_iter()

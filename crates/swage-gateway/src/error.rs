@@ -74,6 +74,14 @@ fn classify(err: &GatewayError) -> (StatusCode, &'static str) {
         GatewayError::SpaceConflict(_) => (StatusCode::CONFLICT, "conflict"),
         GatewayError::ValidationError(_) => (StatusCode::UNPROCESSABLE_ENTITY, "validation_error"),
         GatewayError::Provider(_) => (StatusCode::BAD_GATEWAY, "provider_error"),
+        GatewayError::SignInUnsupported(_) => {
+            (StatusCode::UNPROCESSABLE_ENTITY, "sign_in_unsupported")
+        }
+        GatewayError::SignInFailed(_) => (StatusCode::BAD_GATEWAY, "sign_in_failed"),
+        GatewayError::ProviderRuntimeUnavailable(_) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "provider_runtime_unavailable",
+        ),
         GatewayError::Storage(swage_core::StorageError::NotFound { .. }) => {
             (StatusCode::NOT_FOUND, "not_found")
         }
@@ -140,5 +148,32 @@ mod tests {
             status_and_code(GatewayError::ConfigError("bad config".to_string())).await;
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(code, "internal_error");
+    }
+
+    #[tokio::test]
+    async fn provider_sign_in_errors_have_stable_codes() {
+        let cases = [
+            (
+                GatewayError::SignInUnsupported("native provider".to_string()),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "sign_in_unsupported",
+            ),
+            (
+                GatewayError::SignInFailed("login rejected".to_string()),
+                StatusCode::BAD_GATEWAY,
+                "sign_in_failed",
+            ),
+            (
+                GatewayError::ProviderRuntimeUnavailable("spawn failed".to_string()),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "provider_runtime_unavailable",
+            ),
+        ];
+
+        for (error, expected_status, expected_code) in cases {
+            let (status, code) = status_and_code(error).await;
+            assert_eq!(status, expected_status);
+            assert_eq!(code, expected_code);
+        }
     }
 }

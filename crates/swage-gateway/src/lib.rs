@@ -53,6 +53,7 @@ pub mod capabilities;
 pub mod capability_bundle;
 pub mod channel_gateway;
 pub mod cli;
+pub mod codex;
 pub mod context;
 pub mod device;
 pub mod error;
