@@ -64,44 +64,46 @@ fn version_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkflowScriptVersio
 
 fn run_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkflowRunRecord> {
     let script_version_id: Option<String> = row.get(2)?;
-    let session_id: Option<String> = row.get(5)?;
-    let final_output: Option<String> = row.get(9)?;
-    let completed_at: Option<String> = row.get(13)?;
+    let script_id: Option<String> = row.get(3)?;
+    let final_output: Option<String> = row.get(11)?;
+    let completed_at: Option<String> = row.get(15)?;
     Ok(WorkflowRunRecord {
         id: uuid(row.get(0)?)?,
         space_id: uuid(row.get(1)?)?,
         script_version_id: script_version_id.map(uuid).transpose()?,
-        source: row.get(3)?,
-        source_hash: row.get(4)?,
-        session_id: session_id.map(uuid).transpose()?,
-        args: serde_json::from_str(&row.get::<_, String>(6)?).map_err(|error| {
+        script_id: script_id.map(uuid).transpose()?,
+        script_name: row.get(4)?,
+        script_version: row.get::<_, Option<i64>>(5)?.map(|value| value as u32),
+        source: row.get(6)?,
+        source_hash: row.get(7)?,
+        args: serde_json::from_str(&row.get::<_, String>(8)?).map_err(|error| {
             rusqlite::Error::FromSqlConversionFailure(
-                6,
+                8,
                 rusqlite::types::Type::Text,
                 Box::new(error),
             )
         })?,
-        budget: serde_json::from_str(&row.get::<_, String>(7)?).map_err(|error| {
+        budget: serde_json::from_str(&row.get::<_, String>(9)?).map_err(|error| {
             rusqlite::Error::FromSqlConversionFailure(
-                7,
+                9,
                 rusqlite::types::Type::Text,
                 Box::new(error),
             )
         })?,
-        state: row.get(8)?,
+        state: row.get(10)?,
         final_output: final_output
             .map(|value| serde_json::from_str(&value))
             .transpose()
             .map_err(|error| {
                 rusqlite::Error::FromSqlConversionFailure(
-                    9,
+                    11,
                     rusqlite::types::Type::Text,
                     Box::new(error),
                 )
             })?,
-        error_message: row.get(10)?,
-        engine_version: row.get(11)?,
-        created_at: time(row.get(12)?)?,
+        error_message: row.get(12)?,
+        engine_version: row.get(13)?,
+        created_at: time(row.get(14)?)?,
         completed_at: completed_at.map(time).transpose()?,
     })
 }
@@ -109,7 +111,11 @@ fn run_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkflowRunRecord> {
 const SCRIPT_COLUMNS: &str =
     "id, space_id, name, description, delivery_grant_json, created_at, updated_at";
 const VERSION_COLUMNS: &str = "id, script_id, version, source, created_at";
-const RUN_COLUMNS: &str = "id, space_id, script_version_id, source, source_hash, session_id, args_json, budget_json, state, final_output_json, error_message, engine_version, created_at, completed_at";
+const RUN_COLUMNS: &str = "id, space_id, script_version_id, \
+    (SELECT script_id FROM workflow_script_versions WHERE id = workflow_runs.script_version_id), \
+    (SELECT name FROM workflow_scripts WHERE id = (SELECT script_id FROM workflow_script_versions WHERE id = workflow_runs.script_version_id)), \
+    (SELECT version FROM workflow_script_versions WHERE id = workflow_runs.script_version_id), \
+    source, source_hash, args_json, budget_json, state, final_output_json, error_message, engine_version, created_at, completed_at";
 const JOURNAL_COLUMNS: &str = "id, run_id, seq, completed_order, kind, status, args_hash, request_json, result_json, error_message, effect_kind, idempotency_key, target_kind, started_at, completed_at";
 
 fn journal_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkflowJournalRecord> {
@@ -392,6 +398,9 @@ mod tests {
             })
             .await
             .expect("run");
+        assert_eq!(run.script_id, Some(script.id));
+        assert_eq!(run.script_name.as_deref(), Some("publish"));
+        assert_eq!(run.script_version, Some(2));
         storage
             .interrupt_running_workflow_runs()
             .await

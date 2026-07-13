@@ -16,20 +16,25 @@ use swage_protocol::client::workflow::{
     UpdateWorkflowScriptRequest, WorkflowBudget, WorkflowRun, WorkflowRunDetailResponse,
     WorkflowRunListResponse, WorkflowRunState, WorkflowScript, WorkflowScriptListResponse,
 };
+use swage_storage::WorkflowJournalRecord;
 use swage_storage::{
     NewAuditEvent, NewSession, NewThread, NewWorkflowJournalIntent, NewWorkflowRun,
     NewWorkflowScript, ThreadStore, WorkflowRunRecord, WorkflowScriptRecord,
 };
 use swage_workflow::{
-    AgentCallRequest, AgentCallResult, EffectPayload, EffectReceipt, EngineLimits, JournalReplay,
-    WorkflowEngine, WorkflowHost,
+    AgentCallRequest, AgentCallResult, EffectPayload, EffectReceipt, EngineLimits, WorkflowEngine,
+    WorkflowHost, journal_args_hash,
 };
 use tokio::sync::{Mutex, Notify, Semaphore, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::{
-    error::ApiError, state::AppState, subscription::SubscriptionState, websocket::ServerEvent,
+    error::ApiError,
+    state::AppState,
+    subscription::SubscriptionState,
+    websocket::ServerEvent,
+    workflow_delivery::{DeliveryCapability, capability_from_grant},
 };
 
 #[async_trait::async_trait]
@@ -142,6 +147,8 @@ enum HostCommand {
 
 struct ChannelWorkflowHost {
     tx: mpsc::UnboundedSender<HostCommand>,
+    spent_tokens: Arc<AtomicU64>,
+    max_total_tokens: Option<u64>,
 }
 
 #[async_trait::async_trait]
@@ -151,6 +158,15 @@ impl WorkflowHost for ChannelWorkflowHost {
             kind: kind.into(),
             message,
         });
+    }
+
+    fn budget_spent(&self) -> u64 {
+        self.spent_tokens.load(Ordering::SeqCst)
+    }
+
+    fn budget_remaining(&self) -> Option<u64> {
+        self.max_total_tokens
+            .map(|limit| limit.saturating_sub(self.budget_spent()))
     }
 
     async fn run_agent_call(
@@ -264,68 +280,28 @@ async fn run_ephemeral_agent_call(
     })
 }
 
-async fn deliver_webhook(
-    grant: Option<&Value>,
-    payload: EffectPayload,
-    cancellation: CancellationToken,
-    effect_seq: u64,
-    key: Uuid,
-) -> Result<EffectReceipt, String> {
-    let targets = grant
-        .and_then(Value::as_array)
-        .ok_or_else(|| "DeliveryNotGrantedError".to_string())?;
-    let target = targets
-        .iter()
-        .find(|target| {
-            target.get("kind").and_then(Value::as_str) == Some("webhook")
-                && payload
-                    .target
-                    .as_deref()
-                    .is_none_or(|name| target.get("name").and_then(Value::as_str) == Some(name))
-        })
-        .ok_or_else(|| "DeliveryNotGrantedError".to_string())?;
-    let url = target
-        .get("url")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "webhook grant is missing url".to_string())?;
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .build()
-        .map_err(|error| error.to_string())?;
-    let request = client.post(url).header("Idempotency-Key", key.to_string()).json(&serde_json::json!({ "effect_id": key, "content": payload.content, "metadata": payload.metadata }));
-    let response = tokio::select! { response = request.send() => response.map_err(|error| error.to_string())?, () = cancellation.cancelled() => return Err("WorkflowCancelledError".into()) };
-    if !response.status().is_success() {
-        return Err(format!("webhook returned {}", response.status()));
-    }
-    Ok(EffectReceipt {
-        delivered: true,
-        target: "webhook".into(),
-        effect_seq,
-    })
-}
-
 async fn run_host_commands(
     state: AppState,
     run_id: Uuid,
     space_id: Uuid,
     delivery_grant: Option<Value>,
     budget: WorkflowBudget,
+    replay: Vec<WorkflowJournalRecord>,
+    agent_calls: Arc<AtomicU32>,
+    spent_tokens: Arc<AtomicU64>,
     mut commands: mpsc::UnboundedReceiver<HostCommand>,
 ) {
-    let effect_seq = Arc::new(AtomicU64::new(0));
+    let effect_seq = Arc::new(AtomicU64::new(
+        replay
+            .iter()
+            .filter(|entry| entry.kind == "effect" && entry.status == "completed")
+            .count() as u64,
+    ));
     let seq = Arc::new(AtomicU64::new(0));
-    let agent_calls = Arc::new(AtomicU32::new(0));
-    let spent_tokens = Arc::new(AtomicU64::new(0));
     let semaphore = Arc::new(Semaphore::new(
         budget.max_concurrent_agent_calls.unwrap_or(4).max(1) as usize,
     ));
-    let replay = Arc::new(
-        state
-            .storage
-            .list_workflow_journal(run_id)
-            .await
-            .unwrap_or_default(),
-    );
+    let replay = Arc::new(replay);
     // Only agent calls can be outstanding together. Map their persisted completion
     // order to a dense rank so replay releases parallel promises in exactly the
     // interleaving observed by the original run, irrespective of unrelated log rows.
@@ -355,7 +331,7 @@ async fn run_host_commands(
                         run_id,
                         seq: current_seq,
                         kind,
-                        args_hash: JournalReplay::args_hash(&request),
+                        args_hash: journal_args_hash(&request),
                         request,
                         effect_kind: None,
                         idempotency_key: None,
@@ -374,20 +350,29 @@ async fn run_host_commands(
                 cancellation,
                 reply,
             } => {
-                if budget
-                    .max_agent_calls
-                    .is_some_and(|limit| agent_calls.fetch_add(1, Ordering::SeqCst) >= limit)
-                {
-                    let _ = reply.send(Err("BudgetExceededError: agent call limit reached".into()));
-                    continue;
+                let current_seq = seq.load(Ordering::SeqCst);
+                let existing_call = replay.get(current_seq as usize);
+                if existing_call.is_none() {
+                    if budget
+                        .max_agent_calls
+                        .is_some_and(|limit| agent_calls.load(Ordering::SeqCst) >= limit)
+                    {
+                        let _ =
+                            reply.send(Err("BudgetExceededError: agent call limit reached".into()));
+                        continue;
+                    }
+                    if budget
+                        .max_total_tokens
+                        .is_some_and(|limit| spent_tokens.load(Ordering::SeqCst) >= limit)
+                    {
+                        let _ = reply.send(Err("BudgetExceededError: token limit reached".into()));
+                        continue;
+                    }
+                    agent_calls.fetch_add(1, Ordering::SeqCst);
                 }
-                if budget
-                    .max_total_tokens
-                    .is_some_and(|limit| spent_tokens.load(Ordering::SeqCst) >= limit)
-                {
-                    let _ = reply.send(Err("BudgetExceededError: token limit reached".into()));
-                    continue;
-                }
+                seq.fetch_add(1, Ordering::SeqCst);
+                let completed_replay =
+                    existing_call.is_some_and(|entry| entry.status == "completed");
                 let state = state.clone();
                 let replay = Arc::clone(&replay);
                 let spent = Arc::clone(&spent_tokens);
@@ -398,7 +383,6 @@ async fn run_host_commands(
                 // The channel is the deterministic boundary. Assigning sequence
                 // numbers inside spawned tasks would make scheduler timing part of
                 // the journal, which is an especially unhelpful kind of experiment.
-                let current_seq = seq.fetch_add(1, Ordering::SeqCst);
                 tokio::spawn(async move {
                     let _permit = match semaphore.acquire().await {
                         Ok(permit) => permit,
@@ -409,7 +393,7 @@ async fn run_host_commands(
                     };
                     let request_json =
                         serde_json::to_value(&request).expect("agent request serialises");
-                    let hash = JournalReplay::args_hash(&request_json);
+                    let hash = journal_args_hash(&request_json);
                     let existing = replay.get(current_seq as usize);
                     let result = if let Some(entry) = existing {
                         if entry.args_hash != hash {
@@ -463,7 +447,7 @@ async fn run_host_commands(
                             Err(error) => Err(error.to_string()),
                         }
                     };
-                    if let Ok(result) = &result {
+                    if !completed_replay && let Ok(result) = &result {
                         spent.fetch_add(
                             result.input_tokens + result.output_tokens,
                             Ordering::SeqCst,
@@ -479,7 +463,7 @@ async fn run_host_commands(
             } => {
                 let request_json =
                     serde_json::to_value(&payload).expect("effect payload serialises");
-                let hash = JournalReplay::args_hash(&request_json);
+                let hash = journal_args_hash(&request_json);
                 let current_seq = seq.fetch_add(1, Ordering::SeqCst);
                 let current_effect = effect_seq.load(Ordering::SeqCst);
                 let existing = replay.get(current_seq as usize);
@@ -495,9 +479,22 @@ async fn run_host_commands(
                                 serde_json::from_value(value).map_err(|error| error.to_string())
                             })
                     } else if let Some(key) = entry.idempotency_key {
+                        let capability = match capability_from_grant(
+                            Arc::clone(&state.storage),
+                            delivery_grant.as_ref(),
+                            payload.target.as_deref(),
+                        )
+                        .await
+                        {
+                            Ok(capability) => capability,
+                            Err(error) => {
+                                let _ = reply.send(Err(error));
+                                continue;
+                            }
+                        };
                         complete_effect_entry(
                             &state,
-                            delivery_grant.as_ref(),
+                            capability,
                             entry.id,
                             payload,
                             cancellation,
@@ -510,6 +507,23 @@ async fn run_host_commands(
                     }
                 } else {
                     let key = Uuid::new_v4();
+                    let capability = match capability_from_grant(
+                        Arc::clone(&state.storage),
+                        delivery_grant.as_ref(),
+                        payload.target.as_deref(),
+                    )
+                    .await
+                    {
+                        Ok(capability) => capability,
+                        Err(error) => {
+                            let _ = reply.send(Err(error));
+                            continue;
+                        }
+                    };
+                    let effect_kind = match capability.effect_kind() {
+                        swage_workflow::EffectKind::IdempotencyKey => "idempotency_key",
+                        swage_workflow::EffectKind::CheckBeforeRedo => "check_before_redo",
+                    };
                     match state
                         .storage
                         .create_workflow_journal_intent(NewWorkflowJournalIntent {
@@ -518,16 +532,16 @@ async fn run_host_commands(
                             kind: "effect".into(),
                             args_hash: hash,
                             request: request_json,
-                            effect_kind: Some("idempotency_key".into()),
+                            effect_kind: Some(effect_kind.into()),
                             idempotency_key: Some(key),
-                            target_kind: Some("webhook".into()),
+                            target_kind: Some(capability.kind().into()),
                         })
                         .await
                     {
                         Ok(intent) => {
                             complete_effect_entry(
                                 &state,
-                                delivery_grant.as_ref(),
+                                capability,
                                 intent.id,
                                 payload,
                                 cancellation,
@@ -582,14 +596,29 @@ async fn complete_agent_entry(
 
 async fn complete_effect_entry(
     state: &AppState,
-    grant: Option<&Value>,
+    capability: Arc<dyn DeliveryCapability>,
     entry_id: Uuid,
     payload: EffectPayload,
     cancellation: CancellationToken,
     effect_seq: u64,
     key: Uuid,
 ) -> Result<EffectReceipt, String> {
-    let receipt = deliver_webhook(grant, payload, cancellation, effect_seq, key).await?;
+    let receipt = match capability.effect_kind() {
+        swage_workflow::EffectKind::IdempotencyKey => {
+            capability
+                .deliver(key, payload, effect_seq, cancellation)
+                .await?
+        }
+        swage_workflow::EffectKind::CheckBeforeRedo => {
+            if let Some(receipt) = capability.probe(key, &payload).await? {
+                receipt
+            } else {
+                capability
+                    .deliver(key, payload, effect_seq, cancellation)
+                    .await?
+            }
+        }
+    };
     state
         .storage
         .complete_workflow_journal_entry(
@@ -637,10 +666,9 @@ fn run_wire(record: WorkflowRunRecord) -> Result<WorkflowRun, ApiError> {
     Ok(WorkflowRun {
         id: record.id,
         space_id: record.space_id,
-        script_id: None,
-        script_name: None,
-        script_version: None,
-        session_id: record.session_id,
+        script_id: record.script_id,
+        script_name: record.script_name,
+        script_version: record.script_version,
         state: run_state(&record.state)?,
         args: record.args,
         budget: budget_wire(&record.budget),
@@ -801,7 +829,7 @@ async fn launch_existing_run(
         .storage
         .create_audit_event(NewAuditEvent {
             id: Uuid::new_v4().to_string(),
-            session_id: record.session_id,
+            session_id: None,
             entity_kind: "workflow_run".into(),
             entity_id: record.id.to_string(),
             event_kind: "started".into(),
@@ -819,15 +847,48 @@ async fn launch_existing_run(
     let (result_tx, result_rx) = tokio::sync::oneshot::channel();
     let (host_tx, host_rx) = mpsc::unbounded_channel();
     let run_budget = budget_wire(&record.budget);
-    tokio::spawn(run_host_commands(
+    let replay = state
+        .storage
+        .list_workflow_journal(record.id)
+        .await
+        .map_err(internal)?;
+    let initial_agent_calls = replay
+        .iter()
+        .filter(|entry| entry.kind == "agent_call")
+        .count() as u32;
+    let initial_spent_tokens = replay
+        .iter()
+        .filter(|entry| entry.kind == "agent_call" && entry.status == "completed")
+        .filter_map(|entry| entry.result.as_ref())
+        .map(|result| {
+            result
+                .get("input_tokens")
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+                + result
+                    .get("output_tokens")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0)
+        })
+        .sum();
+    let agent_calls = Arc::new(AtomicU32::new(initial_agent_calls));
+    let spent_tokens = Arc::new(AtomicU64::new(initial_spent_tokens));
+    let host_task = tokio::spawn(run_host_commands(
         state.clone(),
         record.id,
         space_id,
         delivery_grant.clone(),
-        run_budget,
+        run_budget.clone(),
+        replay,
+        Arc::clone(&agent_calls),
+        Arc::clone(&spent_tokens),
         host_rx,
     ));
-    let host: Arc<dyn WorkflowHost> = Arc::new(ChannelWorkflowHost { tx: host_tx });
+    let host: Arc<dyn WorkflowHost> = Arc::new(ChannelWorkflowHost {
+        tx: host_tx,
+        spent_tokens,
+        max_total_tokens: run_budget.max_total_tokens,
+    });
     let args_json = serde_json::to_string(&record.args).map_err(internal)?;
     let delivery_granted = delivery_grant.is_some();
     std::thread::Builder::new()
@@ -862,6 +923,10 @@ async fn launch_existing_run(
             Ok(Err(problem)) => ("failed", None, Some(problem.to_string())),
             Err(problem) => ("failed", None, Some(problem.to_string())),
         };
+        // The engine drops its host sender before producing the result. Drain the
+        // command loop so fire-and-forget log/phase records are durable before the
+        // run becomes terminal and visible to trace readers.
+        let _ = host_task.await;
         let _ = storage
             .update_workflow_run_state(run_id, run_state, output, error.as_deref())
             .await;
@@ -1255,6 +1320,64 @@ mod tests {
             .expect("resume");
         wait_for_terminal(&state, started.id).await;
         assert_eq!(deliveries.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn saved_run_projects_script_version_and_parallel_failure_log() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let (script, version) = storage
+            .create_workflow_script(NewWorkflowScript {
+                space_id: space.id,
+                name: "trace-contract".into(),
+                description: String::new(),
+                source: "await parallel([()=>{throw new Error('branch failed')}]); return {spent:budget.spent(),remaining:budget.remaining()};".into(),
+                delivery_grant: None,
+            })
+            .await
+            .expect("script");
+        let Json(started) = start_saved_run(
+            State(state.clone()),
+            Path(script.id),
+            Json(StartWorkflowRunRequest {
+                args: Value::Null,
+                budget: Some(WorkflowBudget {
+                    max_agent_calls: None,
+                    max_total_tokens: Some(10),
+                    max_concurrent_agent_calls: None,
+                }),
+            }),
+        )
+        .await
+        .expect("start");
+        wait_for_terminal(&state, started.id).await;
+
+        let Json(detail) = get_run(State(state), Path(started.id))
+            .await
+            .expect("detail");
+        assert_eq!(detail.run.script_id, Some(script.id));
+        assert_eq!(detail.run.script_name.as_deref(), Some("trace-contract"));
+        assert_eq!(detail.run.script_version, Some(version.version));
+        assert_eq!(
+            detail.run.final_output,
+            Some(serde_json::json!({"spent":0,"remaining":10}))
+        );
+        assert!(detail.journal.iter().any(|entry| {
+            entry.kind == swage_protocol::client::workflow::WorkflowJournalEntryKind::Log
+                && entry
+                    .request
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .is_some_and(|message| message.contains("parallel thunk 0 failed"))
+        }));
     }
 
     async fn wait_for_terminal(state: &AppState, id: Uuid) {
