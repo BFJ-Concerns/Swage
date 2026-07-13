@@ -941,9 +941,36 @@ pub(crate) async fn process_turn_with_existing_turn(
         if let Some(hook_registry) = state.hook_registry.clone() {
             agent_builder = agent_builder.hook_registry(hook_registry);
         }
-        let agent = agent_builder.build().map_err(|error| {
-            GatewayError::WebSocketError(format!("agent construction failed: {error}"))
-        })?;
+        let agent = match agent_builder.build() {
+            Ok(agent) => agent,
+            Err(error) => {
+                tracing::error!(%error, "failed to build agent for turn");
+                let _ = ws_tx.send(ServerEvent::Error {
+                    code: "agent_construction_error".to_string(),
+                    message: error.to_string(),
+                });
+                if let Err(update_error) = state
+                    .storage
+                    .update_turn_state(prepared_turn_id, TurnState::Failed)
+                    .await
+                {
+                    tracing::warn!(
+                        turn_id = %prepared_turn_id,
+                        error = %update_error,
+                        "failed to mark turn failed after agent construction error"
+                    );
+                }
+                shutdown_sandbox_guard(
+                    &sandbox_guard,
+                    "failed to shut down turn sandbox after agent construction error",
+                )
+                .await;
+                state.active_turns.lock().await.remove(&session_id);
+                return Err(GatewayError::WebSocketError(format!(
+                    "agent construction failed: {error}"
+                )));
+            }
+        };
         let turn_request = TurnRequest {
             execution: swage_agent::context::TurnExecutionContext {
                 session_id,

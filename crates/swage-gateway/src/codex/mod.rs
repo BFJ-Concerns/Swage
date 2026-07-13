@@ -196,15 +196,6 @@ async fn run_turn_inner(
                 "Codex App Server unavailable: {error}"
             )))
         })?;
-    record_audit(
-        &state.storage,
-        request.session_id,
-        request.turn_id,
-        "codex_runtime",
-        "Codex App Server ready",
-        json!({"user_agent":handle.user_agent,"cli_version":handle.cli_version}),
-    )
-    .await;
     let client = handle.client;
     let mut notifications = client.subscribe();
     let mut server_requests = client.subscribe_requests();
@@ -320,6 +311,11 @@ async fn run_turn_inner(
     let mut tool_tasks = JoinSet::new();
     loop {
         tokio::select! {
+            () = client.closed() => {
+                return Err(AgentError::ProviderFailed(swage_core::ProviderError::InvalidResponse(
+                    "Codex App Server transport closed mid-turn".to_string(),
+                )));
+            }
             () = request.cancellation.cancelled() => {
                 if let Some(turn_id) = codex_turn_id.as_deref() {
                     let _ = client.request("turn/interrupt", json!({"threadId":codex_thread_id,"turnId":turn_id})).await;
@@ -798,6 +794,7 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use swage_core::ToolError;
+    use swage_storage::NewTurn;
     use swage_tool::permission::RequireApprovalEntry;
     use swage_tool::{context::ToolContext, tool::Tool};
 
@@ -833,6 +830,233 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    async fn run_scripted_turn(
+        scenario: Value,
+        dispatcher: ToolDispatcher,
+        permissions: PermissionConfig,
+    ) -> (Result<OutboundMessage, AgentError>, Vec<Value>) {
+        let (mut state, session_id) = crate::turn::tests::make_state_with_session(Vec::new()).await;
+        let thread = state
+            .storage
+            .list_by_session(session_id)
+            .await
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        let turn = state
+            .storage
+            .create_turn(NewTurn {
+                thread_id: thread.id,
+                agent_id: "gateway".to_string(),
+                state: TurnState::Pending,
+                user_input: Some("scripted turn".to_string()),
+                parent_turn_id: None,
+            })
+            .await
+            .unwrap();
+        let (client_side, server_side) = tokio::io::duplex(64 * 1024);
+        let (client_read, client_write) = tokio::io::split(client_side);
+        let (server_read, server_write) = tokio::io::split(server_side);
+        let client =
+            AppServerClient::new(client_write, client_read, std::time::Duration::from_secs(2));
+        state.codex_supervisor = swage_codex::AppServerSupervisor::with_client(
+            swage_codex::AppServerConfig::codex("/tmp/swage-codex-scenario".into()),
+            client,
+        );
+        let mut server = tokio::spawn(async move {
+            swage_codex::fake::run_scenario(
+                &scenario,
+                tokio::io::BufReader::new(server_read),
+                server_write,
+            )
+            .await
+        });
+        let (event_tx, _events) = mpsc::unbounded_channel();
+        let request = CodexTurnRequest {
+            session_id,
+            thread_id: thread.id,
+            turn_id: turn.id,
+            agent_id: "gateway".to_string(),
+            model: "fake-codex".to_string(),
+            user_message: "scripted turn".to_string(),
+            assembled_context: Vec::new(),
+            agent_config: AgentConfig::new("gateway").with_workspace("/work", vec!["/work".into()]),
+            permissions,
+            dispatcher: Arc::new(dispatcher),
+            event_tx,
+            cancellation: CancellationToken::new(),
+        };
+        let result =
+            tokio::time::timeout(std::time::Duration::from_secs(3), run_turn(state, request))
+                .await
+                .expect("scripted turn timed out");
+        let frames =
+            match tokio::time::timeout(std::time::Duration::from_millis(100), &mut server).await {
+                Ok(server) => server
+                    .expect("scenario task panicked")
+                    .expect("scenario mismatch"),
+                Err(_elapsed) if result.is_ok() => {
+                    server.abort();
+                    Vec::new()
+                }
+                Err(elapsed) => {
+                    panic!("scenario server did not finish ({elapsed}); turn result: {result:?}")
+                }
+            };
+        (result, frames)
+    }
+
+    fn successful_turn_notifications() -> Vec<Value> {
+        vec![
+            json!({"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"delta":"done"}}),
+            json!({"jsonrpc":"2.0","method":"turn/completed","params":{"turn":{"id":"fake-turn","status":"completed","error":null}}}),
+        ]
+    }
+
+    #[tokio::test]
+    async fn scripted_malformed_frame_does_not_corrupt_the_turn_stream() {
+        let notifications = successful_turn_notifications();
+        let scenario = json!({"keepOpen":true,"steps":[
+            {
+                "receive":{"method":"thread/start"},
+                "send":[{"jsonrpc":"2.0","id":"$request_id","result":{"thread":{"id":"fake-thread"}}}]
+            },
+            {
+                "receive":{"method":"turn/start"},
+                "send":[
+                    {"jsonrpc":"2.0","id":"$request_id","result":{"turn":{"id":"fake-turn"}}},
+                    {"raw":"malformed frame"},
+                    notifications[0].clone(),
+                    notifications[1].clone()
+                ]
+            }
+        ]});
+        let dispatcher = ToolDispatcher::allow_all(Vec::<Arc<dyn Tool>>::new());
+
+        let (result, _) = run_scripted_turn(scenario, dispatcher, permissions(&[], &[])).await;
+        assert_eq!(
+            result
+                .expect("valid frames after malformed input win")
+                .response,
+            "done"
+        );
+    }
+
+    #[tokio::test]
+    async fn scripted_mid_turn_server_death_fails_the_turn() {
+        let scenario = json!({"steps":[
+            {
+                "receive":{"method":"thread/start"},
+                "send":[{"jsonrpc":"2.0","id":"$request_id","result":{"thread":{"id":"fake-thread"}}}]
+            },
+            {
+                "receive":{"method":"turn/start"},
+                "send":[
+                    {"jsonrpc":"2.0","id":"$request_id","result":{"turn":{"id":"fake-turn"}}},
+                    {"jsonrpc":"2.0","method":"turn/started","params":{"turn":{"id":"fake-turn","status":"inProgress"}}}
+                ],
+                "close":true
+            }
+        ]});
+        let dispatcher = ToolDispatcher::allow_all(Vec::<Arc<dyn Tool>>::new());
+
+        let (result, _) = run_scripted_turn(scenario, dispatcher, permissions(&[], &[])).await;
+        assert!(
+            result
+                .expect_err("child death must fail the turn")
+                .to_string()
+                .contains("transport closed")
+        );
+    }
+
+    #[tokio::test]
+    async fn scripted_tool_call_offers_dispatcher_definitions_and_returns_result() {
+        let dispatcher =
+            ToolDispatcher::allow_all([Arc::new(NamedTool("file_read")) as Arc<dyn Tool>]);
+        let expected_tools = json!([{
+            "type":"function",
+            "name":"file_read",
+            "description":"test tool",
+            "inputSchema":{"type":"object"}
+        }]);
+        let success_notifications = successful_turn_notifications();
+        let scenario = json!({"keepOpen":true,"steps":[
+            {
+                "receive":{"method":"thread/start","params":{"dynamicTools":expected_tools}},
+                "send":[{"jsonrpc":"2.0","id":"$request_id","result":{"thread":{"id":"fake-thread"}}}]
+            },
+            {
+                "receive":{"method":"turn/start"},
+                "send":[
+                    {"jsonrpc":"2.0","id":"$request_id","result":{"turn":{"id":"fake-turn"}}},
+                    {"jsonrpc":"2.0","id":"tool-request","method":"item/tool/call","params":{"tool":"file_read","callId":"call-1","arguments":{"path":"probe.txt"}}}
+                ]
+            },
+            {
+                "receiveExact":true,
+                "receive":{"jsonrpc":"2.0","id":"tool-request","result":{"success":true,"contentItems":[{"type":"inputText","text":"{\"path\":\"probe.txt\"}"}]}},
+                "send":success_notifications
+            }
+        ]});
+
+        let (result, _) =
+            run_scripted_turn(scenario, dispatcher, permissions(&["file_read"], &[])).await;
+        let output = result.expect("scripted tool turn succeeds");
+        assert_eq!(output.response, "done");
+        assert_eq!(output.tool_calls_count, 1);
+    }
+
+    #[tokio::test]
+    async fn scripted_approvals_enforce_grants_network_and_unknown_deny() {
+        let final_notifications = successful_turn_notifications();
+        let scenario = json!({"keepOpen":true,"steps":[
+            {
+                "receive":{"method":"thread/start"},
+                "send":[{"jsonrpc":"2.0","id":"$request_id","result":{"thread":{"id":"fake-thread"}}}]
+            },
+            {
+                "receive":{"method":"turn/start"},
+                "send":[
+                    {"jsonrpc":"2.0","id":"$request_id","result":{"turn":{"id":"fake-turn"}}},
+                    {"jsonrpc":"2.0","id":"in-grant","method":"item/commandExecution/requestApproval","params":{"cwd":"/work"}}
+                ]
+            },
+            {
+                "receiveExact":true,
+                "receive":{"jsonrpc":"2.0","id":"in-grant","result":{"decision":"accept"}},
+                "send":[
+                    {"jsonrpc":"2.0","method":"item/started","params":{"item":{"id":"outside-edit","type":"fileChange","changes":[{"path":"/outside/file"}]}}},
+                    {"jsonrpc":"2.0","id":"out-of-grant","method":"item/fileChange/requestApproval","params":{"itemId":"outside-edit"}}
+                ]
+            },
+            {
+                "receiveExact":true,
+                "receive":{"jsonrpc":"2.0","id":"out-of-grant","result":{"decision":"decline"}},
+                "send":[{"jsonrpc":"2.0","id":"network","method":"item/commandExecution/requestApproval","params":{"cwd":"/work","networkApprovalContext":{"host":"example.test"}}}]
+            },
+            {
+                "receiveExact":true,
+                "receive":{"jsonrpc":"2.0","id":"network","result":{"decision":"decline"}},
+                "send":[{"jsonrpc":"2.0","id":"unknown","method":"item/unknown/requestApproval","params":{}}]
+            },
+            {
+                "receiveExact":true,
+                "receive":{"jsonrpc":"2.0","id":"unknown","error":{"code":-32601,"message":"request kind is outside the granted envelope"}},
+                "send":final_notifications
+            }
+        ]});
+        let dispatcher = ToolDispatcher::allow_all(Vec::<Arc<dyn Tool>>::new());
+
+        let (result, _) = run_scripted_turn(
+            scenario,
+            dispatcher,
+            permissions(&["shell", "file_edit"], &[]),
+        )
+        .await;
+        assert_eq!(result.expect("approval scenario succeeds").response, "done");
     }
 
     #[test]

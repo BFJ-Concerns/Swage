@@ -14,12 +14,12 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use swage_agent::ApprovalDecision;
-use swage_codex::{AppServerConfig, AppServerSupervisor};
+use swage_codex::{AppServerConfig, AppServerSupervisor, RuntimeEvent};
 use swage_config::{CommunicationConfig, ResolvedConfig};
 use swage_hook::HookRegistry;
 use swage_provider::{LlmProvider, UnsupportedVoiceProvider, VoiceProvider};
 use swage_storage::{
-    model::{ApprovalKind, ApprovalRequest},
+    model::{ApprovalKind, ApprovalRequest, NewAuditEvent},
     store::{SpaceStore, Storage},
 };
 
@@ -183,6 +183,18 @@ impl AppState {
         if let Some(command) = codex_endpoint.and_then(|provider| provider.command.clone()) {
             codex_config.command = command;
         }
+        let codex_supervisor = AppServerSupervisor::new(codex_config);
+        let mut codex_runtime_events = codex_supervisor.subscribe_runtime();
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            let audit_storage = storage.clone();
+            runtime.spawn(async move {
+                while let Ok(event) = codex_runtime_events.recv().await {
+                    if let Err(error) = record_codex_runtime_event(&audit_storage, event).await {
+                        tracing::warn!(%error, "failed to record Codex runtime lifecycle");
+                    }
+                }
+            });
+        }
         Self {
             storage: storage.clone(),
             space_store,
@@ -216,7 +228,7 @@ impl AppState {
             runtime_config: Arc::new(RwLock::new(config)),
             runtime_provider: Arc::new(RwLock::new(provider)),
             runtime_tool_dispatcher: Arc::new(RwLock::new(tool_dispatcher)),
-            codex_supervisor: AppServerSupervisor::new(codex_config),
+            codex_supervisor,
             agent_message_expiry: Arc::new(Mutex::new(None)),
         }
     }
@@ -339,6 +351,94 @@ impl AppState {
             .unwrap_or_else(|error| error.into_inner())
             .as_ref()
             .map(|runtime| runtime.communication.clone())
+    }
+}
+
+async fn record_codex_runtime_event(
+    storage: &Arc<dyn Storage>,
+    event: RuntimeEvent,
+) -> Result<(), swage_core::StorageError> {
+    let (summary, metadata) = match event {
+        RuntimeEvent::Spawned {
+            command,
+            pid,
+            cli_version,
+        } => (
+            "Codex App Server spawned",
+            serde_json::json!({
+                "lifecycle":"spawned",
+                "command":command,
+                "pid":pid,
+                "cli_version":cli_version,
+            }),
+        ),
+        RuntimeEvent::Initialised { user_agent } => (
+            "Codex App Server initialised",
+            serde_json::json!({
+                "lifecycle":"initialised",
+                "user_agent":user_agent,
+            }),
+        ),
+        RuntimeEvent::Stopped { reason } => (
+            "Codex App Server stopped",
+            serde_json::json!({
+                "lifecycle":"stopped",
+                "reason":reason,
+            }),
+        ),
+    };
+    storage
+        .create_audit_event(NewAuditEvent {
+            id: Uuid::new_v4().to_string(),
+            session_id: None,
+            entity_kind: "gateway".to_string(),
+            entity_id: "codex-app-server".to_string(),
+            event_kind: "codex_runtime".to_string(),
+            summary: summary.to_string(),
+            metadata,
+        })
+        .await?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod codex_runtime_audit_tests {
+    use super::*;
+    use swage_storage::SqliteStorage;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn lifecycle_events_are_recorded_at_gateway_grain() {
+        let storage: Arc<dyn Storage> = Arc::new(SqliteStorage::in_memory().unwrap());
+        for event in [
+            RuntimeEvent::Spawned {
+                command: "codex".to_string(),
+                pid: 42,
+                cli_version: Some("codex 1".to_string()),
+            },
+            RuntimeEvent::Initialised {
+                user_agent: Some("swage-test".to_string()),
+            },
+            RuntimeEvent::Stopped {
+                reason: "process exited unexpectedly".to_string(),
+            },
+        ] {
+            record_codex_runtime_event(&storage, event).await.unwrap();
+        }
+
+        let events = storage.list_audit_events().await.unwrap();
+        assert_eq!(events.len(), 3);
+        assert!(events.iter().all(|event| {
+            event.event_kind == "codex_runtime"
+                && event.entity_kind == "gateway"
+                && event.entity_id == "codex-app-server"
+                && event.session_id.is_none()
+        }));
+        let mut lifecycles = events
+            .iter()
+            .filter_map(|event| event.metadata["lifecycle"].as_str())
+            .collect::<Vec<_>>();
+        lifecycles.sort_unstable();
+        assert_eq!(lifecycles, ["initialised", "spawned", "stopped"]);
     }
 }
 
