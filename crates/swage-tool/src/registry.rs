@@ -105,16 +105,17 @@ impl ToolRegistry {
 
     /// Look up a registered tool by exact name.
     ///
-    /// Returns `None` for unknown names and protected built-in names (the
-    /// built-ins are dispatched separately, not stored in this registry).
+    /// Returns `None` for unknown names. Built-ins registered through
+    /// [`register_builtin`](Self::register_builtin) live in the same map and
+    /// are returned here like any other tool.
     pub fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
         self.tools.get(name).cloned()
     }
 
     /// Return all registered tool names in sorted order.
     ///
-    /// Does not include protected built-in names — those are dispatched
-    /// through the built-in handler, not this registry.
+    /// Includes built-ins registered through
+    /// [`register_builtin`](Self::register_builtin).
     pub fn list(&self) -> Vec<&str> {
         let mut names: Vec<&str> = self.tools.keys().map(String::as_str).collect();
         // Sorted for deterministic output, which helps tests and schema diffing.
