@@ -51,6 +51,9 @@ mod sandbox_entrypoint_integration;
 mod sandbox_observability_integration;
 #[path = "integration/schedule_integration.rs"]
 mod schedule_integration;
+
+#[path = "integration/schedule_tools_integration.rs"]
+mod schedule_tools_integration;
 #[path = "integration/shared_reference_integration.rs"]
 mod shared_reference_integration;
 #[path = "integration/skills_endpoint_integration.rs"]

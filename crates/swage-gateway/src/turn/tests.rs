@@ -1486,6 +1486,7 @@ impl ScheduleStore for MockStorage {
             kind: schedule.kind,
             expression: schedule.expression,
             session_policy: schedule.session_policy,
+            creator: schedule.creator,
             delivery_routing: schedule.delivery_routing,
             gate: schedule.gate,
             next_run_at: schedule.next_run_at,

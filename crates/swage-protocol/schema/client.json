@@ -356,6 +356,10 @@
           "type": "string",
           "format": "date-time"
         },
+        "creator": {
+          "description": "Where this schedule came from — a person or an agent.",
+          "$ref": "#/$defs/ScheduleCreator"
+        },
         "gate": {
           "anyOf": [
             {
@@ -410,9 +414,45 @@
         "status",
         "spec",
         "session",
+        "creator",
         "routing",
         "created_at",
         "updated_at"
+      ]
+    },
+    "ScheduleCreator": {
+      "description": "Who created a schedule.\n\nThis is provenance, not a request field: the surface that creates the\nschedule stamps it (the settings UI and HTTP surface stamp `user`; the\nscheduling tools stamp `agent`), so an agent cannot claim a schedule was\na person's. It answers the audit question \"where did this schedule come\nfrom\" wherever schedules are listed.",
+      "oneOf": [
+        {
+          "description": "A person, through the settings automation panel or the HTTP surface.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "user"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "description": "An agent, through the scheduling tools. Carries the id of the agent\nthat made it.",
+          "type": "object",
+          "properties": {
+            "agent_id": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "agent"
+            }
+          },
+          "required": [
+            "kind",
+            "agent_id"
+          ]
+        }
       ]
     },
     "ScheduleGateUpdate": {

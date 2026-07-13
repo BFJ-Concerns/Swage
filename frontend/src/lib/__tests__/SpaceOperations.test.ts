@@ -13,7 +13,6 @@ vi.mock("../api/materials", () => ({
 vi.mock("../api/workflows", () => ({
   bytesToBase64: vi.fn(() => "encoded"),
   createAttachment: vi.fn(),
-  createSchedule: vi.fn(),
   exportRecoveryBundle: vi.fn(),
   fetchVoiceCapabilities: vi.fn(),
 }));
@@ -80,24 +79,6 @@ describe("SpaceOperations", () => {
       created_at: "2026-01-01T00:00:00Z",
       updated_at: "2026-01-01T00:00:00Z",
       archived_at: null,
-    });
-    vi.mocked(workflowApi.createSchedule).mockResolvedValue({
-      id: "schedule-1",
-      message: "Review the queue.",
-      status: "active",
-      spec: { kind: "interval", every: "every 1 hours" },
-      session: { policy: "fresh", space_id: "space-1", agent_id: "gateway" },
-      routing: {
-        deliver_to_origin: false,
-        home_target: null,
-        explicit_targets: [],
-        store_local_output: true,
-      },
-      gate: null,
-      next_run_at: null,
-      last_run_at: null,
-      created_at: "2026-01-01T00:00:00Z",
-      updated_at: "2026-01-01T00:00:00Z",
     });
     vi.mocked(workflowApi.exportRecoveryBundle).mockResolvedValue({
       version: 1,
@@ -206,7 +187,7 @@ describe("SpaceOperations", () => {
     });
   });
 
-  it("creates a fresh-session schedule with a gate", async () => {
+  it("no longer offers schedule creation — the automation panel owns it", async () => {
     component = mount(SpaceOperations, {
       target: document.body,
       props: {
@@ -216,74 +197,11 @@ describe("SpaceOperations", () => {
     });
     await flushUi();
 
-    setFieldValue(textareaByPlaceholder("Run the review checklist."), "Review the queue.");
-    const gateToggle = document.querySelector<HTMLInputElement>('input[type="checkbox"]');
-    if (!gateToggle) throw new Error("missing gate toggle");
-    gateToggle.click();
-    await flushUi();
-    setFieldValue(inputByPlaceholder("model id or alias"), "cheap");
-    setFieldValue(
-      textareaByPlaceholder("Only when there is something new to act on."),
-      "Only when the queue is non-empty.",
+    expect(document.body.textContent).not.toContain("Schedule work");
+    const scheduleButton = [...document.querySelectorAll("button")].find(
+      (button) => button.textContent?.trim() === "Schedule",
     );
-    clickButton("Schedule");
-    await flushUi();
-
-    expect(workflowApi.createSchedule).toHaveBeenCalledWith({
-      message: "Review the queue.",
-      spec: { kind: "interval", every: "every 1 hours" },
-      session: { policy: "fresh", space_id: "space-1", agent_id: "gateway" },
-      routing: null,
-      gate: { model: "cheap", criteria: "Only when the queue is non-empty." },
-    });
-  });
-
-  it("blocks a ticked gate with a blank model before submitting", async () => {
-    component = mount(SpaceOperations, {
-      target: document.body,
-      props: {
-        spaceId: "space-1",
-        sessionId: "session-1",
-      },
-    });
-    await flushUi();
-
-    setFieldValue(textareaByPlaceholder("Run the review checklist."), "Review the queue.");
-    const gateToggle = document.querySelector<HTMLInputElement>('input[type="checkbox"]');
-    if (!gateToggle) throw new Error("missing gate toggle");
-    gateToggle.click();
-    await flushUi();
-    // Gate ticked, model left blank.
-    clickButton("Schedule");
-    await flushUi();
-
-    expect(workflowApi.createSchedule).not.toHaveBeenCalled();
-    expect(document.body.textContent).toContain("Enter a gate model");
-  });
-
-  it("creates a continuation schedule against the active conversation", async () => {
-    component = mount(SpaceOperations, {
-      target: document.body,
-      props: {
-        spaceId: "space-1",
-        sessionId: "session-1",
-      },
-    });
-    await flushUi();
-
-    setFieldValue(textareaByPlaceholder("Run the review checklist."), "Check status.");
-    clickButton("This conversation");
-    await flushUi();
-    clickButton("Schedule");
-    await flushUi();
-
-    expect(workflowApi.createSchedule).toHaveBeenCalledWith({
-      message: "Check status.",
-      spec: { kind: "interval", every: "every 1 hours" },
-      session: { policy: "continuation", session_id: "session-1" },
-      routing: null,
-      gate: null,
-    });
+    expect(scheduleButton).toBeUndefined();
   });
 
   it("surfaces recovery export counts", async () => {

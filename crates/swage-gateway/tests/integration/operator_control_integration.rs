@@ -25,7 +25,9 @@ use swage_gateway::{
     server::build_router,
     state::AppState,
 };
-use swage_protocol::client::schedule::{CreateScheduleRequest, ScheduleSpec, SessionPolicy};
+use swage_protocol::client::schedule::{
+    CreateScheduleRequest, ScheduleCreator, ScheduleSpec, SessionPolicy,
+};
 use swage_provider::LlmProvider;
 use swage_storage::{
     ApprovalKind, NewApprovalRequest, NewDeliveryRecord, NewTurn, SqliteStorage, TurnState,
@@ -155,6 +157,7 @@ async fn operator_overview_lists_sessions_jobs_approvals_channels_and_devices() 
             routing: None,
             gate: None,
         },
+        ScheduleCreator::User,
     )
     .await
     .unwrap();
@@ -290,6 +293,7 @@ async fn operator_controls_manage_approvals_and_schedules_without_full_restart()
             routing: None,
             gate: None,
         },
+        ScheduleCreator::User,
     )
     .await
     .unwrap();

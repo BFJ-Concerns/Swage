@@ -232,6 +232,13 @@ impl Default for ToolPermissionConfig {
                 "browser_scroll".to_string(),
             ],
         );
+        // The schedule tools as one grantable unit: a user can allow (or deny)
+        // an agent's standing-schedule powers without touching the rest of its
+        // permissions.
+        bundles.insert(
+            "scheduling".to_string(),
+            vec!["schedule".to_string(), "wake_me_later".to_string()],
+        );
         Self {
             allow: vec!["*".into()],
             deny: vec![],
@@ -1276,6 +1283,11 @@ timeout_policy = "reject"
                 "browser_select".to_string(),
                 "browser_scroll".to_string()
             ]
+        );
+        // The schedule tools are grantable as one unit.
+        assert_eq!(
+            cfg.bundles.get("scheduling").expect("scheduling bundle"),
+            &vec!["schedule".to_string(), "wake_me_later".to_string()]
         );
         assert_eq!(
             cfg.require_approval

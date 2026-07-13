@@ -24,8 +24,8 @@ use swage_core::{ChatMessage, CompletionRequest, GatewayError, Role};
 use swage_protocol::client::schedule as wire;
 use swage_storage::{
     GateConfig, GateDecision, GateVerdict, NewAuditEvent, NewSchedule, NewScheduleRun, Schedule,
-    ScheduleKind, ScheduleRun, ScheduleRunState, ScheduleRunTrigger, ScheduleRunUpdate,
-    ScheduleStatus, SessionPolicy, SkipReason, UpdateSchedule,
+    ScheduleCreator, ScheduleKind, ScheduleRun, ScheduleRunState, ScheduleRunTrigger,
+    ScheduleRunUpdate, ScheduleStatus, SessionPolicy, SkipReason, UpdateSchedule,
 };
 
 use crate::channel_gateway::{
@@ -209,6 +209,7 @@ fn parse_interval(text: &str) -> Result<Duration, GatewayError> {
 pub async fn create_schedule(
     state: &AppState,
     request: wire::CreateScheduleRequest,
+    creator: ScheduleCreator,
 ) -> Result<wire::Schedule, GatewayError> {
     if request.message.trim().is_empty() {
         return Err(GatewayError::ValidationError(
@@ -236,6 +237,7 @@ pub async fn create_schedule(
             kind: parsed.kind(),
             expression: parsed.expression(),
             session_policy: request.session,
+            creator,
             delivery_routing: routing_to_value(&routing)?,
             gate: request.gate,
             next_run_at: parsed.initial_next_run_at(now),
@@ -455,9 +457,27 @@ fn routing_to_value(routing: &DeliveryRoutingRequest) -> Result<serde_json::Valu
 // Ticking
 // ---------------------------------------------------------------------------
 
-pub async fn tick_once(state: &AppState, now: DateTime<Utc>) -> Result<usize, GatewayError> {
+/// Run one scheduler tick: advance every due schedule's lifecycle and spawn
+/// its run.
+///
+/// Each due run is spawned rather than awaited in turn, so a slow run — a
+/// fresh-session schedule waking a frontier model may take minutes — cannot
+/// head-of-line block the other schedules due this instant. The schedule's
+/// status and next fire are still advanced *synchronously, before* the spawn:
+/// a crash mid-run must not re-fire the same due instant, and with the run now
+/// detached the advance can no longer ride inside it.
+///
+/// The returned handles are the spawned runs. Each run records its own
+/// outcome on its run row and logs an execution error itself, so the handles
+/// are not needed to see failures — the scheduler loop keeps them only to
+/// observe a *panic* (which no run row would capture), and tests await them to
+/// make spawned execution deterministic.
+pub async fn tick_once(
+    state: &AppState,
+    now: DateTime<Utc>,
+) -> Result<Vec<JoinHandle<()>>, GatewayError> {
     let schedules = state.storage.list_due_schedules(now).await?;
-    let mut executed = 0;
+    let mut handles = Vec::with_capacity(schedules.len());
     for schedule in schedules {
         let parsed = ParsedSpec::parse_stored(schedule.kind, &schedule.expression)?;
         let next_status = match schedule.kind {
@@ -476,16 +496,21 @@ pub async fn tick_once(state: &AppState, now: DateTime<Utc>) -> Result<usize, Ga
                 },
             )
             .await?;
+
         // One schedule's bad day must not stall the rest of the tick: the
-        // failure is already on the run record, so log and move on.
-        if let Err(error) =
-            execute_schedule(state, &schedule, ScheduleRunTrigger::Tick, Some(now)).await
-        {
-            tracing::warn!(schedule_id = %schedule.id, %error, "schedule run failed");
-        }
-        executed += 1;
+        // failure lands on the run record, so the detached task logs it and
+        // the tick moves on. Overlap between a slow run and its own next
+        // occurrence is caught by the pending-run insert's atomic guard.
+        let task_state = state.clone();
+        handles.push(tokio::spawn(async move {
+            if let Err(error) =
+                execute_schedule(&task_state, &schedule, ScheduleRunTrigger::Tick, Some(now)).await
+            {
+                tracing::warn!(schedule_id = %schedule.id, %error, "schedule run failed");
+            }
+        }));
     }
-    Ok(executed)
+    Ok(handles)
 }
 
 async fn prune_schedule_run_history(
@@ -514,6 +539,12 @@ pub fn spawn_schedule_loop_until_cancelled(
     shutdown: CancellationToken,
 ) -> JoinHandle<()> {
     let last_retention_sweep = std::sync::Arc::new(std::sync::Mutex::new(None::<DateTime<Utc>>));
+    // Spawned runs still in flight, carried across ticks so a panic in one is
+    // observed rather than silently dropped (a returned error already reaches
+    // the run row and the task's own log). We deliberately do not await these
+    // on shutdown: an interrupted run's turn is cancelled and its row
+    // recovered as failed at next startup, matching crash semantics.
+    let in_flight = std::sync::Arc::new(std::sync::Mutex::new(Vec::<JoinHandle<()>>::new()));
     crate::background_loop::spawn_periodic_loop(
         SCHEDULE_POLL_INTERVAL,
         shutdown,
@@ -521,9 +552,28 @@ pub fn spawn_schedule_loop_until_cancelled(
         move || {
             let state = state.clone();
             let last_retention_sweep = last_retention_sweep.clone();
+            let in_flight = in_flight.clone();
             async move {
                 let now = Utc::now();
-                tick_once(&state, now).await?;
+                let spawned = tick_once(&state, now).await?;
+
+                // Reap finished runs to surface any panic; runs still going
+                // carry over to the next tick. Awaiting happens outside the
+                // lock, and a finished handle resolves immediately.
+                let finished = {
+                    let mut tracked = in_flight.lock().unwrap_or_else(|error| error.into_inner());
+                    tracked.extend(spawned);
+                    let (done, pending): (Vec<_>, Vec<_>) = std::mem::take(&mut *tracked)
+                        .into_iter()
+                        .partition(|handle| handle.is_finished());
+                    *tracked = pending;
+                    done
+                };
+                for handle in finished {
+                    if let Err(join_error) = handle.await {
+                        tracing::error!(%join_error, "spawned schedule run panicked");
+                    }
+                }
 
                 // The scheduler tick is deliberately frequent; retention is
                 // not. Reuse the existing loop without turning every clock
@@ -1093,6 +1143,7 @@ fn map_schedule(schedule: Schedule) -> Result<wire::Schedule, GatewayError> {
         status: schedule.status,
         spec: ParsedSpec::parse_stored(schedule.kind, &schedule.expression)?.into_spec(),
         session: schedule.session_policy,
+        creator: schedule.creator,
         routing: serde_json::from_value(schedule.delivery_routing).map_err(|error| {
             GatewayError::ValidationError(format!("invalid stored delivery routing: {error}"))
         })?,
