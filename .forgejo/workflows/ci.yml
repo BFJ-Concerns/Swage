@@ -70,6 +70,12 @@ jobs:
       - name: Rust tests (nextest, ci profile)
         run: cargo nextest run --workspace --profile ci
 
+      # swage-protocol's projection test regenerates the committed JSON Schema
+      # and TypeScript contract. A dirty tree here means the projection in the
+      # commit was stale, even though the regenerated contract itself tested.
+      - name: Protocol projections are current
+        run: git diff --exit-code
+
       # A flaky test is one nextest saw fail and then pass on retry: the run
       # is green, but the junit report carries <flakyFailure> elements and the
       # log above marks the tests FLAKY. Label the PR so label-driven
