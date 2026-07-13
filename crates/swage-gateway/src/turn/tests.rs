@@ -452,6 +452,8 @@ pub(crate) struct InMemoryDb {
     pub(crate) devices: HashMap<String, DeviceRegistration>,
     pub(crate) channel_links: HashMap<(String, String, String), ChannelLink>,
     pub(crate) threads: HashMap<Uuid, Thread>,
+    pub(crate) codex_thread_ids: HashMap<Uuid, String>,
+    pub(crate) codex_tools_json: HashMap<Uuid, String>,
     pub(crate) turns: HashMap<Uuid, Turn>,
     pub(crate) messages: Vec<Message>,
     pub(crate) tool_calls: Vec<ToolCallRecord>,
@@ -2221,6 +2223,48 @@ impl ThreadStore for MockStorage {
                 Ok(())
             }
         }
+    }
+
+    async fn get_codex_thread_id(&self, id: Uuid) -> Result<Option<String>, StorageError> {
+        Ok(self.db.lock().await.codex_thread_ids.get(&id).cloned())
+    }
+
+    async fn set_codex_thread_id(
+        &self,
+        id: Uuid,
+        codex_thread_id: Option<&str>,
+    ) -> Result<(), StorageError> {
+        let mut db = self.db.lock().await;
+        match codex_thread_id {
+            Some(value) => {
+                db.codex_thread_ids.insert(id, value.to_string());
+            }
+            None => {
+                db.codex_thread_ids.remove(&id);
+            }
+        }
+        Ok(())
+    }
+
+    async fn get_codex_tools_json(&self, id: Uuid) -> Result<Option<String>, StorageError> {
+        Ok(self.db.lock().await.codex_tools_json.get(&id).cloned())
+    }
+
+    async fn set_codex_tools_json(
+        &self,
+        id: Uuid,
+        tools_json: Option<&str>,
+    ) -> Result<(), StorageError> {
+        let mut db = self.db.lock().await;
+        match tools_json {
+            Some(value) => {
+                db.codex_tools_json.insert(id, value.to_string());
+            }
+            None => {
+                db.codex_tools_json.remove(&id);
+            }
+        }
+        Ok(())
     }
 
     async fn delete(&self, id: Uuid) -> Result<bool, StorageError> {
@@ -7960,6 +8004,72 @@ async fn existing_placeholder_turn_receives_provider_visible_snapshot() {
         provider_request["request"]["body"]["messages"].is_array(),
         "provider-visible request should be attached to the reused turn"
     );
+}
+
+#[tokio::test]
+async fn failed_agent_build_marks_turn_failed_and_leaves_thread_usable() {
+    let chunks = vec![
+        StreamChunk::Delta {
+            content: "Recovered".to_string(),
+        },
+        StreamChunk::Done {
+            finish_reason: None,
+        },
+    ];
+    let (state, session_id) = make_state_with_session(chunks).await;
+    let (tx, mut rx) = mpsc::unbounded_channel();
+
+    let malformed_schema = serde_json::json!({"type": 17});
+    let error = process_turn(
+        &state,
+        session_id,
+        None,
+        "First attempt".to_string(),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        Some(malformed_schema),
+    )
+    .await
+    .expect_err("malformed output schema must fail agent construction");
+    assert!(error.to_string().contains("agent construction failed"));
+    assert!(matches!(
+        rx.recv().await,
+        Some(ServerEvent::Error { code, .. }) if code == "agent_construction_error"
+    ));
+    assert!(
+        !state.active_turns.lock().await.contains_key(&session_id),
+        "failed construction must release the in-memory turn guard"
+    );
+
+    let thread = state
+        .storage
+        .list_by_session(session_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    let turns = state.storage.list_turns_by_thread(thread.id).await.unwrap();
+    assert_eq!(turns.len(), 1);
+    assert_eq!(turns[0].state, TurnState::Failed);
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    process_turn(
+        &state,
+        session_id,
+        Some(thread.id),
+        "Second attempt".to_string(),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .expect("the same thread must accept a later valid turn");
+
+    let turns = state.storage.list_turns_by_thread(thread.id).await.unwrap();
+    assert_eq!(turns.len(), 2);
+    assert_eq!(turns[0].state, TurnState::Failed);
+    assert_eq!(turns[1].state, TurnState::Completed);
 }
 
 #[tokio::test]

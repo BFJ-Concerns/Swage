@@ -2,10 +2,10 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use serde_json::{Value, json};
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    process::{ChildStdin, ChildStdout},
+    io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader},
     sync::{Mutex, broadcast, oneshot},
 };
+use tokio_util::sync::CancellationToken;
 
 use crate::{JsonRpcError, RequestId};
 
@@ -41,24 +41,31 @@ type Pending = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, ClientError>
 /// Multiplexed line-delimited JSON-RPC client.
 #[derive(Clone)]
 pub struct AppServerClient {
-    writer: Arc<Mutex<ChildStdin>>,
+    writer: Arc<Mutex<Box<dyn AsyncWrite + Send + Unpin>>>,
     pending: Pending,
     next_id: Arc<std::sync::atomic::AtomicU64>,
     notifications: broadcast::Sender<ServerEvent>,
     server_requests: broadcast::Sender<ServerRequest>,
+    closed: CancellationToken,
     timeout: Duration,
 }
 
 impl AppServerClient {
-    pub fn new(stdin: ChildStdin, stdout: ChildStdout, timeout: Duration) -> Self {
+    pub fn new<W, R>(stdin: W, stdout: R, timeout: Duration) -> Self
+    where
+        W: AsyncWrite + Send + Unpin + 'static,
+        R: AsyncRead + Send + Unpin + 'static,
+    {
         let (notifications, _) = broadcast::channel(512);
         let (server_requests, _) = broadcast::channel(128);
+        let closed = CancellationToken::new();
         let client = Self {
-            writer: Arc::new(Mutex::new(stdin)),
+            writer: Arc::new(Mutex::new(Box::new(stdin))),
             pending: Arc::new(Mutex::new(HashMap::new())),
             next_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
             notifications,
             server_requests,
+            closed,
             timeout,
         };
         client.spawn_reader(stdout);
@@ -71,6 +78,10 @@ impl AppServerClient {
 
     pub fn subscribe_requests(&self) -> broadcast::Receiver<ServerRequest> {
         self.server_requests.subscribe()
+    }
+
+    pub async fn closed(&self) {
+        self.closed.cancelled().await;
     }
 
     pub async fn request(&self, method: &str, params: Value) -> Result<Value, ClientError> {
@@ -123,10 +134,14 @@ impl AppServerClient {
         Ok(())
     }
 
-    fn spawn_reader(&self, stdout: ChildStdout) {
+    fn spawn_reader<R>(&self, stdout: R)
+    where
+        R: AsyncRead + Send + Unpin + 'static,
+    {
         let pending = self.pending.clone();
         let notifications = self.notifications.clone();
         let server_requests = self.server_requests.clone();
+        let closed = self.closed.clone();
         tokio::spawn(async move {
             let mut lines = BufReader::new(stdout).lines();
             while let Ok(Some(line)) = lines.next_line().await {
@@ -178,6 +193,7 @@ impl AppServerClient {
             for (_, tx) in pending.drain() {
                 let _ = tx.send(Err(ClientError::Closed));
             }
+            closed.cancel();
         });
     }
 }

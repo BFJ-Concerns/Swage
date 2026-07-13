@@ -4,9 +4,12 @@
 //! speaks the app-server protocol; the gateway decides what requests mean.
 
 mod client;
+pub mod fake;
 mod protocol;
 mod supervisor;
 
 pub use client::{AppServerClient, ClientError, ServerEvent, ServerRequest};
 pub use protocol::*;
-pub use supervisor::{AppServerConfig, AppServerHandle, AppServerSupervisor, RuntimeEvent};
+pub use supervisor::{
+    AppServerConfig, AppServerHandle, AppServerSupervisor, RuntimeEvent, SupervisorError,
+};
