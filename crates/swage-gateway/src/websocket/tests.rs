@@ -820,8 +820,11 @@ fn output_schema_retry_empty_errors_serialises() {
 
 #[test]
 fn client_event_approval_decision_approved_deserialises() {
-    let json = r#"{"type": "approval_decision", "approval_id": "apr_01", "decision": "approved"}"#;
-    let event: ClientEvent = serde_json::from_str(json).unwrap();
+    let expected_id = Uuid::new_v4();
+    let json = format!(
+        r#"{{"type": "approval_decision", "approval_id": "{expected_id}", "decision": "approved"}}"#
+    );
+    let event: ClientEvent = serde_json::from_str(&json).unwrap();
     match event {
         ClientEvent::ApprovalDecision {
             approval_id,
@@ -829,7 +832,7 @@ fn client_event_approval_decision_approved_deserialises() {
             scope,
             reason,
         } => {
-            assert_eq!(approval_id, "apr_01");
+            assert_eq!(approval_id, expected_id);
             assert_eq!(decision, "approved");
             assert_eq!(scope, swage_agent::approval::ApprovalDecisionScope::Once);
             assert!(reason.is_none(), "reason should be None when absent");
@@ -840,8 +843,11 @@ fn client_event_approval_decision_approved_deserialises() {
 
 #[test]
 fn client_event_approval_decision_rejected_with_reason_deserialises() {
-    let json = r#"{"type": "approval_decision", "approval_id": "apr_02", "decision": "rejected", "reason": "too risky"}"#;
-    let event: ClientEvent = serde_json::from_str(json).unwrap();
+    let expected_id = Uuid::new_v4();
+    let json = format!(
+        r#"{{"type": "approval_decision", "approval_id": "{expected_id}", "decision": "rejected", "reason": "too risky"}}"#
+    );
+    let event: ClientEvent = serde_json::from_str(&json).unwrap();
     match event {
         ClientEvent::ApprovalDecision {
             approval_id,
@@ -849,7 +855,7 @@ fn client_event_approval_decision_rejected_with_reason_deserialises() {
             scope,
             reason,
         } => {
-            assert_eq!(approval_id, "apr_02");
+            assert_eq!(approval_id, expected_id);
             assert_eq!(decision, "rejected");
             assert_eq!(scope, swage_agent::approval::ApprovalDecisionScope::Once);
             assert_eq!(reason.as_deref(), Some("too risky"));
@@ -864,9 +870,11 @@ fn client_event_approval_decision_rejected_with_reason_deserialises() {
 
 #[test]
 fn server_event_approval_required_serialises() {
+    let approval_id = Uuid::new_v4();
+    let turn_id = Uuid::new_v4();
     let event = ServerEvent::ApprovalRequired {
-        approval_id: "apr_01".to_string(),
-        turn_id: "tur_01".to_string(),
+        approval_id,
+        turn_id,
         agent_id: "gateway".to_string(),
         kind: "tool_call".to_string(),
         tool_name: Some("shell".to_string()),
@@ -878,8 +886,8 @@ fn server_event_approval_required_serialises() {
     };
     let json = serde_json::to_value(&event).unwrap();
     assert_eq!(json["type"], "approval_required");
-    assert_eq!(json["approval_id"], "apr_01");
-    assert_eq!(json["turn_id"], "tur_01");
+    assert_eq!(json["approval_id"], approval_id.to_string());
+    assert_eq!(json["turn_id"], turn_id.to_string());
     assert_eq!(json["agent_id"], "gateway");
     assert_eq!(json["kind"], "tool_call");
     assert_eq!(json["tool_name"], "shell");
@@ -893,8 +901,8 @@ fn server_event_approval_required_serialises() {
 #[test]
 fn server_event_approval_required_omits_optional_fields_when_none() {
     let event = ServerEvent::ApprovalRequired {
-        approval_id: "apr_02".to_string(),
-        turn_id: "tur_02".to_string(),
+        approval_id: Uuid::new_v4(),
+        turn_id: Uuid::new_v4(),
         agent_id: "gateway".to_string(),
         kind: "generic".to_string(),
         tool_name: None,
@@ -924,13 +932,12 @@ fn server_event_approval_required_omits_optional_fields_when_none() {
 #[test]
 fn server_event_approval_confirmed_serialises() {
     let event = ServerEvent::ApprovalConfirmed {
-        approval_id: "apr_03".to_string(),
+        approval_id: Uuid::new_v4(),
         decision: "approved".to_string(),
         reason: Some("looks safe".to_string()),
     };
     let json = serde_json::to_value(&event).unwrap();
     assert_eq!(json["type"], "approval_confirmed");
-    assert_eq!(json["approval_id"], "apr_03");
     assert_eq!(json["decision"], "approved");
     assert_eq!(json["reason"], "looks safe");
 }
@@ -938,7 +945,7 @@ fn server_event_approval_confirmed_serialises() {
 #[test]
 fn server_event_approval_confirmed_omits_reason_when_none() {
     let event = ServerEvent::ApprovalConfirmed {
-        approval_id: "apr_04".to_string(),
+        approval_id: Uuid::new_v4(),
         decision: "rejected".to_string(),
         reason: None,
     };
@@ -953,26 +960,24 @@ fn server_event_approval_confirmed_omits_reason_when_none() {
 #[test]
 fn server_event_approval_expired_serialises() {
     let event = ServerEvent::ApprovalExpired {
-        approval_id: "apr_05".to_string(),
+        approval_id: Uuid::new_v4(),
         timeout_policy: "reject".to_string(),
     };
     let json = serde_json::to_value(&event).unwrap();
     assert_eq!(json["type"], "approval_expired");
-    assert_eq!(json["approval_id"], "apr_05");
     assert_eq!(json["timeout_policy"], "reject");
 }
 
 #[test]
 fn server_event_approval_decision_error_serialises() {
     let event = ServerEvent::ApprovalDecisionError {
-        approval_id: "apr_06".to_string(),
+        approval_id: Uuid::new_v4(),
         error: "already_decided".to_string(),
         message: "Approval was already resolved.".to_string(),
         current_state: Some("approved".to_string()),
     };
     let json = serde_json::to_value(&event).unwrap();
     assert_eq!(json["type"], "approval_decision_error");
-    assert_eq!(json["approval_id"], "apr_06");
     assert_eq!(json["error"], "already_decided");
     assert_eq!(json["message"], "Approval was already resolved.");
     assert_eq!(json["current_state"], "approved");
@@ -981,7 +986,7 @@ fn server_event_approval_decision_error_serialises() {
 #[test]
 fn server_event_approval_decision_error_omits_current_state_when_none() {
     let event = ServerEvent::ApprovalDecisionError {
-        approval_id: "apr_07".to_string(),
+        approval_id: Uuid::new_v4(),
         error: "not_found".to_string(),
         message: "Approval request not found.".to_string(),
         current_state: None,
@@ -1012,13 +1017,11 @@ async fn approval_decision_invalid_uuid_sends_error() {
 
     let event = rx.recv().await.expect("should receive an error event");
     match event {
-        ServerEvent::ApprovalDecisionError {
-            error, approval_id, ..
-        } => {
-            assert_eq!(error, "invalid_decision");
-            assert_eq!(approval_id, "not-a-uuid");
+        ServerEvent::Error { code, message } => {
+            assert_eq!(code, "internal_error");
+            assert!(message.contains("invalid event"));
         }
-        other => panic!("expected ApprovalDecisionError, got {other:?}"),
+        other => panic!("expected Error, got {other:?}"),
     }
 }
 
@@ -1064,7 +1067,7 @@ async fn approval_decision_not_found_sends_error() {
             error, approval_id, ..
         } => {
             assert_eq!(error, "not_found");
-            assert_eq!(approval_id, id.to_string());
+            assert_eq!(approval_id, id);
         }
         other => panic!("expected ApprovalDecisionError, got {other:?}"),
     }
@@ -1171,7 +1174,7 @@ async fn approval_decision_success_sends_confirmed() {
             decision,
             reason,
         } => {
-            assert_eq!(approval_id, approval.id.to_string());
+            assert_eq!(approval_id, approval.id);
             assert_eq!(decision, "approved");
             assert_eq!(reason, Some("Looks safe".to_string()));
         }

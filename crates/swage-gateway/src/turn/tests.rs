@@ -8825,7 +8825,7 @@ async fn sandbox_degradation_approval_uses_resolved_hitl_settings() {
             ..
         } => {
             assert_eq!(timeout_policy, "interrupt");
-            Uuid::parse_str(&approval_id).unwrap()
+            approval_id
         }
         other => panic!("expected ApprovalRequired, got: {other:?}"),
     };
@@ -8898,7 +8898,7 @@ async fn sandbox_degradation_rejection_refuses_the_attended_fallback() {
     });
 
     let approval_id = match rx.recv().await.expect("approval event should be sent") {
-        ServerEvent::ApprovalRequired { approval_id, .. } => Uuid::parse_str(&approval_id).unwrap(),
+        ServerEvent::ApprovalRequired { approval_id, .. } => approval_id,
         other => panic!("expected ApprovalRequired, got: {other:?}"),
     };
     approval_channels
@@ -9019,7 +9019,7 @@ async fn sandbox_degradation_timeout_interrupts_and_cleans_channel() {
     });
 
     let approval_id = match rx.recv().await.expect("approval event should be sent") {
-        ServerEvent::ApprovalRequired { approval_id, .. } => Uuid::parse_str(&approval_id).unwrap(),
+        ServerEvent::ApprovalRequired { approval_id, .. } => approval_id,
         other => panic!("expected ApprovalRequired, got: {other:?}"),
     };
 
@@ -9081,8 +9081,8 @@ fn approval_required_routes_to_ws_tx() {
             tool_name,
             ..
         } => {
-            assert_eq!(aid, approval_id.to_string());
-            assert_eq!(tid, turn_id.to_string());
+            assert_eq!(aid, approval_id);
+            assert_eq!(tid, turn_id);
             assert_eq!(agent_id, "agent-1");
             assert_eq!(kind, "tool");
             assert_eq!(tool_name, Some("shell".to_string()));
@@ -9111,7 +9111,7 @@ fn approval_confirmed_routes_to_ws_tx() {
             decision,
             reason,
         } => {
-            assert_eq!(aid, approval_id.to_string());
+            assert_eq!(aid, approval_id);
             assert_eq!(decision, "approved");
             assert_eq!(reason, Some("looks safe".to_string()));
         }
@@ -9137,7 +9137,7 @@ fn approval_expired_routes_to_ws_tx() {
             approval_id: aid,
             timeout_policy,
         } => {
-            assert_eq!(aid, approval_id.to_string());
+            assert_eq!(aid, approval_id);
             assert_eq!(timeout_policy, "reject");
         }
         other => panic!("expected ApprovalExpired, got: {other:?}"),

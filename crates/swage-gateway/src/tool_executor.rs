@@ -16,7 +16,7 @@ use tokio::sync::mpsc;
 use swage_core::{SandboxError, ToolError};
 use swage_sandbox::Sandbox;
 use swage_storage::store::Storage;
-use swage_tool::context::{SerializableToolContext, ToolContext};
+use swage_tool::context::{SerializableToolContext, ToolContext, serialise_tool_context};
 use swage_tool::dispatch::ToolExecutionStrategy;
 use swage_tool::tool::Tool;
 
@@ -44,7 +44,7 @@ impl GatewayToolContext {
         storage: Arc<dyn Storage>,
     ) -> Self {
         Self {
-            base: SerializableToolContext::from_context(ctx),
+            base: serialise_tool_context(ctx),
             ws_tx,
             storage,
             app_state: None,

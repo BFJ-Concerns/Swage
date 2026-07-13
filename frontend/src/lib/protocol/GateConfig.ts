@@ -7,11 +7,11 @@
  * and the previous run's outcome, then verdicts `run` or `skip`. Its
  * decision and reasoning are recorded on the run.
  */
-export type GateConfig = { 
+export type GateConfig = {
 /**
  * Model id or alias from the configured model catalogue.
  */
-model: string, 
+model: string,
 /**
  * What "work needed" means for this schedule. When absent the gate
  * judges from the schedule message and previous outcome alone.

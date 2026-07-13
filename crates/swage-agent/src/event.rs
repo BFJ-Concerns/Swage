@@ -4,32 +4,12 @@
 //! and forwards them to connected clients. This decouples the agent's
 //! execution loop from transport concerns.
 
-use serde::{Deserialize, Serialize};
 use swage_core::ApprovalTimeoutPolicy;
 use uuid::Uuid;
 
 use crate::approval::ApprovalDecisionValue;
 
-// TODO Define SchemaValidationError once in the swage-protocol crate
-// Three structurally-identical copies of this struct exist (here, the gateway's
-// websocket.rs, swage-client's websocket.rs), kept in sync only by the review
-// discipline described below. One shared definition in swage-protocol removes
-// the discipline requirement. See the wire-contract section in CLAUDE.md and
-// the swage-protocol mote in .motes/TODO.md.
-// ---
-
-/// A single JSON Schema validation error reported during output schema checking.
-///
-/// Wire-compatible with `swage_gateway::websocket::SchemaValidationError` — the
-/// two structs must be kept structurally identical. Any deviation is a protocol
-/// mismatch and should be surfaced in review.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SchemaValidationError {
-    /// JSON pointer to the failing location (e.g. `"/properties/name"`).
-    pub path: String,
-    /// Human-readable description of the constraint that was violated.
-    pub message: String,
-}
+pub use swage_protocol::client::websocket::SchemaValidationError;
 
 /// Events emitted by the agent over a channel during streaming turn execution.
 ///

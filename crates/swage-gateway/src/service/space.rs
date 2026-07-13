@@ -1,7 +1,5 @@
 use std::{path::PathBuf, sync::Arc};
 
-use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use swage_core::GatewayError;
@@ -10,38 +8,9 @@ use swage_storage::{
     store::SpaceStore,
 };
 
-// ---------------------------------------------------------------------------
-/// Request body for creating a space.
-#[derive(Debug, Deserialize)]
-pub struct CreateSpaceRequest {
-    pub name: String,
-    #[serde(default)]
-    pub description: String,
-}
-
-/// Request body for partially updating a space.
-#[derive(Debug, Deserialize)]
-pub struct UpdateSpaceRequest {
-    pub name: Option<String>,
-    pub description: Option<String>,
-}
-
-/// API response for a single space.
-#[derive(Debug, Serialize)]
-pub struct SpaceResponse {
-    pub id: Uuid,
-    pub name: String,
-    pub description: String,
-    pub is_default: bool,
-    pub slug: String,
-    pub created_at: DateTime<Utc>,
-}
-
-/// API response for the list-spaces endpoint.
-#[derive(Debug, Serialize)]
-pub struct SpaceListResponse {
-    pub spaces: Vec<SpaceResponse>,
-}
+pub use swage_protocol::client::space::{
+    CreateSpaceRequest, SpaceListResponse, SpaceResponse, UpdateSpaceRequest,
+};
 
 /// Derives a URL-safe slug from a space name.
 ///

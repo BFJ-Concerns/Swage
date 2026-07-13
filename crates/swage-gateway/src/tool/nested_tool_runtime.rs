@@ -185,7 +185,7 @@ mod tests {
     use swage_storage::store::{
         SessionStore, SpaceStore, Storage, ThreadStore, ToolCallStore, TurnStore,
     };
-    use swage_tool::context::{MockToolContext, SerializableToolContext, ToolContext, UserInfo};
+    use swage_tool::context::{MockToolContext, ToolContext, UserInfo, serialise_tool_context};
     use swage_tool::tool::Tool;
 
     use super::NestedToolRuntime;
@@ -301,7 +301,7 @@ mod tests {
             storage_dyn,
             turn_id,
             "python_parent".into(),
-            SerializableToolContext::from_context(&parent_context),
+            serialise_tool_context(&parent_context),
         );
 
         let output = runtime

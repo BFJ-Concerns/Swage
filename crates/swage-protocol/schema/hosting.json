@@ -1,0 +1,942 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "HostingSurface",
+  "type": "object",
+  "properties": {
+    "approval_decision": {
+      "$ref": "#/$defs/ApprovalDecisionRequest"
+    },
+    "approvals": {
+      "$ref": "#/$defs/ApprovalListResponse"
+    },
+    "devices": {
+      "$ref": "#/$defs/DeviceListResponse"
+    },
+    "heartbeat": {
+      "$ref": "#/$defs/MachineHeartbeatRequest"
+    },
+    "operator_overview": {
+      "$ref": "#/$defs/OperatorOverviewResponse"
+    },
+    "presence": {
+      "$ref": "#/$defs/PresenceSnapshotResponse"
+    }
+  },
+  "required": [
+    "presence",
+    "heartbeat",
+    "approvals",
+    "approval_decision",
+    "operator_overview",
+    "devices"
+  ],
+  "$defs": {
+    "ApprovalDecisionRequest": {
+      "type": "object",
+      "properties": {
+        "decision": {
+          "$ref": "#/$defs/ApprovalDecisionValue"
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "scope": {
+          "$ref": "#/$defs/ApprovalDecisionScope",
+          "default": "once"
+        }
+      },
+      "required": [
+        "decision"
+      ]
+    },
+    "ApprovalDecisionScope": {
+      "description": "How widely an approved decision should apply.",
+      "type": "string",
+      "enum": [
+        "once",
+        "session",
+        "permanent",
+        "permanent_global"
+      ]
+    },
+    "ApprovalDecisionValue": {
+      "description": "The human verdict on a pending approval.",
+      "type": "string",
+      "enum": [
+        "approved",
+        "rejected"
+      ]
+    },
+    "ApprovalListResponse": {
+      "type": "object",
+      "properties": {
+        "approvals": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ApprovalSummary"
+          }
+        }
+      },
+      "required": [
+        "approvals"
+      ]
+    },
+    "ApprovalSummary": {
+      "type": "object",
+      "properties": {
+        "agent_id": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "prompt": {
+          "type": "string"
+        },
+        "timeout_at": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tool_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "turn_id": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "required": [
+        "id",
+        "turn_id",
+        "agent_id",
+        "kind",
+        "prompt"
+      ]
+    },
+    "ChannelStatusListResponse": {
+      "type": "object",
+      "properties": {
+        "channels": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ChannelStatusResponse"
+          }
+        }
+      },
+      "required": [
+        "channels"
+      ]
+    },
+    "ChannelStatusResponse": {
+      "type": "object",
+      "properties": {
+        "delivery_count": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "integration": {
+          "type": "string"
+        },
+        "last_delivery_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "route_count": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "status": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "integration",
+        "status",
+        "route_count",
+        "delivery_count"
+      ]
+    },
+    "ClientPresenceResponse": {
+      "type": "object",
+      "properties": {
+        "connected_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "disconnected_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "last_seen_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "session_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "state": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "session_id",
+        "state"
+      ]
+    },
+    "DeliveryRoutingRequest": {
+      "description": "Where output should be routed once a run completes.\n\n`deliver_to_origin` defaults to true for channel-initiated turns, where\nan origin always exists. Callers without an origin (schedules, manual\nAPI calls) must set it false or target resolution errors.",
+      "type": "object",
+      "properties": {
+        "deliver_to_origin": {
+          "type": "boolean",
+          "default": true
+        },
+        "explicit_targets": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/DeliveryTarget"
+          }
+        },
+        "home_target": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DeliveryTarget"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "store_local_output": {
+          "type": "boolean",
+          "default": false
+        }
+      }
+    },
+    "DeliveryTarget": {
+      "description": "A destination for a run's output.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "account": {
+              "type": "string"
+            },
+            "conversation": {
+              "type": "string"
+            },
+            "integration": {
+              "$ref": "#/$defs/ExternalChannelIntegration"
+            },
+            "kind": {
+              "type": "string",
+              "const": "channel"
+            }
+          },
+          "required": [
+            "kind",
+            "integration",
+            "account",
+            "conversation"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "local_storage"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "webhook"
+            },
+            "url": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "url"
+          ]
+        }
+      ]
+    },
+    "DeviceListResponse": {
+      "type": "object",
+      "properties": {
+        "devices": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DeviceResponse"
+          }
+        }
+      },
+      "required": [
+        "devices"
+      ]
+    },
+    "DeviceResponse": {
+      "type": "object",
+      "properties": {
+        "base_url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "device_id": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "label": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "registered_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "workspace_root": {
+          "type": "string"
+        },
+        "workspace_roots": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "device_id",
+        "kind",
+        "workspace_root",
+        "workspace_roots",
+        "capabilities",
+        "registered_at"
+      ]
+    },
+    "ExternalChannelIntegration": {
+      "description": "An external channel integration that can receive delivered output.",
+      "type": "string",
+      "enum": [
+        "dev_dm",
+        "dev_thread",
+        "telegram"
+      ]
+    },
+    "GateConfig": {
+      "description": "A cheap-model check that runs before the main model wakes.\n\nThe gate model inspects the schedule's message, the optional criteria,\nand the previous run's outcome, then verdicts `run` or `skip`. Its\ndecision and reasoning are recorded on the run.",
+      "type": "object",
+      "properties": {
+        "criteria": {
+          "description": "What \"work needed\" means for this schedule. When absent the gate\njudges from the schedule message and previous outcome alone.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "model": {
+          "description": "Model id or alias from the configured model catalogue.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "model"
+      ]
+    },
+    "MachineHeartbeatRequest": {
+      "type": "object",
+      "properties": {
+        "label": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "machine_id": {
+          "type": "string"
+        },
+        "stale_after_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 30,
+          "minimum": 0
+        }
+      },
+      "required": [
+        "machine_id"
+      ]
+    },
+    "MachinePresenceResponse": {
+      "type": "object",
+      "properties": {
+        "disconnected_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "label": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "last_seen_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "machine_id": {
+          "type": "string"
+        },
+        "registered_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "stale_after_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "state": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "machine_id",
+        "state",
+        "registered_at",
+        "last_seen_at",
+        "stale_after_secs"
+      ]
+    },
+    "OperatorDeviceSummary": {
+      "type": "object",
+      "properties": {
+        "base_url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "device_id": {
+          "type": "string"
+        },
+        "disconnected_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "label": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "last_seen_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "registered_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "state": {
+          "type": "string"
+        },
+        "workspace_root": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "device_id",
+        "kind",
+        "workspace_root",
+        "capabilities",
+        "registered_at",
+        "state"
+      ]
+    },
+    "OperatorGatewaySummary": {
+      "type": "object",
+      "properties": {
+        "active_connection_count": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "active_turn_count": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "health": {
+          "type": "string"
+        },
+        "seconds_since_activity": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "shutdown_requested": {
+          "type": "boolean"
+        },
+        "status": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "status",
+        "health",
+        "shutdown_requested",
+        "seconds_since_activity",
+        "active_turn_count",
+        "active_connection_count"
+      ]
+    },
+    "OperatorOverviewResponse": {
+      "type": "object",
+      "properties": {
+        "approvals": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ApprovalSummary"
+          }
+        },
+        "channels": {
+          "$ref": "#/$defs/ChannelStatusListResponse"
+        },
+        "devices": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/OperatorDeviceSummary"
+          }
+        },
+        "gateway": {
+          "$ref": "#/$defs/OperatorGatewaySummary"
+        },
+        "schedules": {
+          "$ref": "#/$defs/ScheduleListResponse"
+        },
+        "sessions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/OperatorSessionSummary"
+          }
+        }
+      },
+      "required": [
+        "gateway",
+        "sessions",
+        "approvals",
+        "schedules",
+        "channels",
+        "devices"
+      ]
+    },
+    "OperatorSessionSummary": {
+      "type": "object",
+      "properties": {
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "has_active_connection": {
+          "type": "boolean"
+        },
+        "has_interrupted_turn": {
+          "type": "boolean"
+        },
+        "has_running_turn": {
+          "type": "boolean"
+        },
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "last_activity": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "message_preview": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "space_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "space_name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "space_id",
+        "space_name",
+        "created_at",
+        "last_activity",
+        "has_interrupted_turn",
+        "has_active_connection",
+        "has_running_turn"
+      ]
+    },
+    "PresenceGatewayResponse": {
+      "type": "object",
+      "properties": {
+        "active_connection_count": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "active_turn_count": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "seconds_since_activity": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "shutdown_requested": {
+          "type": "boolean"
+        },
+        "status": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "status",
+        "shutdown_requested",
+        "seconds_since_activity",
+        "active_turn_count",
+        "active_connection_count"
+      ]
+    },
+    "PresenceSnapshotResponse": {
+      "type": "object",
+      "properties": {
+        "clients": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ClientPresenceResponse"
+          }
+        },
+        "gateway": {
+          "$ref": "#/$defs/PresenceGatewayResponse"
+        },
+        "machines": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MachinePresenceResponse"
+          }
+        }
+      },
+      "required": [
+        "gateway",
+        "clients",
+        "machines"
+      ]
+    },
+    "Schedule": {
+      "description": "A schedule as returned by the API.",
+      "type": "object",
+      "properties": {
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "creator": {
+          "description": "Where this schedule came from — a person or an agent.",
+          "$ref": "#/$defs/ScheduleCreator"
+        },
+        "gate": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GateConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "last_run_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "message": {
+          "type": "string"
+        },
+        "next_run_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "routing": {
+          "$ref": "#/$defs/DeliveryRoutingRequest"
+        },
+        "session": {
+          "$ref": "#/$defs/SessionPolicy"
+        },
+        "spec": {
+          "$ref": "#/$defs/ScheduleSpec"
+        },
+        "status": {
+          "$ref": "#/$defs/ScheduleStatus"
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "message",
+        "status",
+        "spec",
+        "session",
+        "creator",
+        "routing",
+        "created_at",
+        "updated_at"
+      ]
+    },
+    "ScheduleCreator": {
+      "description": "Who created a schedule.\n\nThis is provenance, not a request field: the surface that creates the\nschedule stamps it (the settings UI and HTTP surface stamp `user`; the\nscheduling tools stamp `agent`), so an agent cannot claim a schedule was\na person's. It answers the audit question \"where did this schedule come\nfrom\" wherever schedules are listed.",
+      "oneOf": [
+        {
+          "description": "A person, through the settings automation panel or the HTTP surface.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "user"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "description": "An agent, through the scheduling tools. Carries the id of the agent\nthat made it.",
+          "type": "object",
+          "properties": {
+            "agent_id": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "agent"
+            }
+          },
+          "required": [
+            "kind",
+            "agent_id"
+          ]
+        }
+      ]
+    },
+    "ScheduleListResponse": {
+      "type": "object",
+      "properties": {
+        "schedules": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Schedule"
+          }
+        }
+      },
+      "required": [
+        "schedules"
+      ]
+    },
+    "ScheduleSpec": {
+      "description": "When a schedule fires.\n\n- `one_shot` — a single RFC 3339 instant.\n- `interval` — natural-language `\"every N seconds|minutes|hours|days\"`.\n- `cron` — a cron expression (seconds-resolution, as parsed by the\n  `cron` crate).",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "at": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "one_shot"
+            }
+          },
+          "required": [
+            "kind",
+            "at"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "every": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "interval"
+            }
+          },
+          "required": [
+            "kind",
+            "every"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "cron": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "cron"
+            }
+          },
+          "required": [
+            "kind",
+            "cron"
+          ]
+        }
+      ]
+    },
+    "ScheduleStatus": {
+      "description": "Lifecycle status of a schedule definition.",
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "active",
+            "paused"
+          ]
+        },
+        {
+          "description": "A one-shot that has fired, or an interval/cron with no next\noccurrence.",
+          "type": "string",
+          "const": "completed"
+        }
+      ]
+    },
+    "SessionPolicy": {
+      "description": "Which session each run executes in.\n\n- `fresh` — every run creates a new session in `space_id` for\n  `agent_id`, with a deliberately assembled opening context (the\n  schedule's message plus the previous run's outcome).\n- `continuation` — every run continues the named session, executing as\n  whatever agent that session has at run time.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "agent_id": {
+              "type": "string"
+            },
+            "policy": {
+              "type": "string",
+              "const": "fresh"
+            },
+            "space_id": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "required": [
+            "policy",
+            "space_id",
+            "agent_id"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "policy": {
+              "type": "string",
+              "const": "continuation"
+            },
+            "session_id": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "required": [
+            "policy",
+            "session_id"
+          ]
+        }
+      ]
+    }
+  }
+}
