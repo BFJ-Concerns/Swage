@@ -45,6 +45,14 @@ pub struct EffectReceipt {
 pub trait WorkflowHost: Send + Sync {
     fn record(&self, _kind: &str, _message: String) {}
 
+    fn budget_spent(&self) -> u64 {
+        0
+    }
+
+    fn budget_remaining(&self) -> Option<u64> {
+        None
+    }
+
     async fn run_agent_call(
         &self,
         request: AgentCallRequest,

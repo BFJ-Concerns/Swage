@@ -10,6 +10,27 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{AgentCallRequest, EffectPayload, WorkflowHost};
 
+fn named_host_error(error: &str, fallback: &str) -> (String, String) {
+    const NAMES: [(&str, &str); 5] = [
+        ("BudgetExceededError", "BudgetExceededError"),
+        ("DeliveryNotGrantedError", "DeliveryNotGrantedError"),
+        ("WorkflowCancelledError", "WorkflowCancelledError"),
+        ("NondeterministicReplayError", "NondeterministicCallError"),
+        ("EmptyAgentOutputError", "EmptyAgentOutputError"),
+    ];
+    NAMES
+        .iter()
+        .find_map(|(prefix, public_name)| {
+            error.strip_prefix(prefix).map(|message| {
+                (
+                    (*public_name).to_string(),
+                    message.trim_start_matches([':', ' ']).to_string(),
+                )
+            })
+        })
+        .unwrap_or_else(|| (fallback.to_string(), error.to_string()))
+}
+
 /// Hard limits applied by the host to each fresh JavaScript runtime.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct EngineLimits {
@@ -123,14 +144,35 @@ impl WorkflowEngine {
                             let host = Arc::clone(&agent_host);
                             let cancellation = agent_cancellation.clone();
                             async move {
-                                let request: AgentCallRequest = serde_json::from_str(&options_json)
-                                    .map_err(|error| rquickjs::Error::new_from_js_message("options", "AgentCallRequest", error.to_string()))?;
+                                let request: AgentCallRequest = match serde_json::from_str(&options_json) {
+                                    Ok(request) => request,
+                                    Err(error) => return serde_json::json!({
+                                        "ok": false,
+                                        "error": {"name": "AgentCallError", "message": error.to_string()}
+                                    }).to_string(),
+                                };
                                 let mut request = request;
                                 request.prompt = prompt;
-                                let result = host.run_agent_call(request, cancellation).await
-                                    .map_err(|error| rquickjs::Error::new_from_js_message("host", "agent result", error))?;
-                                serde_json::to_string(&result.output)
-                                    .map_err(|error| rquickjs::Error::new_from_js_message("agent result", "JSON", error.to_string()))
+                                match host.run_agent_call(request.clone(), cancellation).await {
+                                    Ok(result) => {
+                                        if request.schema.is_none()
+                                            && result.output.as_str().is_some_and(|value| value.trim().is_empty())
+                                        {
+                                            return serde_json::json!({
+                                                "ok": false,
+                                                "error": {"name": "EmptyAgentOutputError", "message": "agent returned empty output"}
+                                            }).to_string();
+                                        }
+                                        serde_json::json!({"ok": true, "value": result.output}).to_string()
+                                    }
+                                    Err(error) => {
+                                        let (name, message) = named_host_error(&error, "AgentCallError");
+                                        serde_json::json!({
+                                            "ok": false,
+                                            "error": {"name": name, "message": message}
+                                        }).to_string()
+                                    }
+                                }
                             }
                         }),
                     ).map_err(|error| error.to_string())?;
@@ -152,19 +194,48 @@ impl WorkflowEngine {
                                 let host = Arc::clone(&delivery_host);
                                 let cancellation = delivery_cancellation.clone();
                                 async move {
-                                    let payload: EffectPayload = serde_json::from_str(&payload_json)
-                                        .map_err(|error| rquickjs::Error::new_from_js_message("payload", "EffectPayload", error.to_string()))?;
-                                    let receipt = host.deliver(payload, cancellation).await
-                                        .map_err(|error| rquickjs::Error::new_from_js_message("host", "delivery receipt", error))?;
-                                    serde_json::to_string(&receipt)
-                                        .map_err(|error| rquickjs::Error::new_from_js_message("delivery receipt", "JSON", error.to_string()))
+                                    let payload: EffectPayload = match serde_json::from_str(&payload_json) {
+                                        Ok(payload) => payload,
+                                        Err(error) => return serde_json::json!({
+                                            "ok": false,
+                                            "error": {"name": "DeliveryError", "message": error.to_string()}
+                                        }).to_string(),
+                                    };
+                                    match host.deliver(payload, cancellation).await {
+                                        Ok(receipt) => serde_json::json!({"ok": true, "value": receipt}).to_string(),
+                                        Err(error) => {
+                                            let (name, message) = named_host_error(&error, "DeliveryError");
+                                            serde_json::json!({
+                                                "ok": false,
+                                                "error": {"name": name, "message": message}
+                                            }).to_string()
+                                        }
+                                    }
                                 }
                             }),
                         ).map_err(|error| error.to_string())?;
                         ctx.globals().set("__deliver", deliver).map_err(|error| error.to_string())?;
                     }
 
+                    let spent_host = Arc::clone(&host);
+                    let spent = Function::new(ctx.clone(), move || spent_host.budget_spent())
+                        .map_err(|error| error.to_string())?;
+                    ctx.globals().set("__budgetSpent", spent).map_err(|error| error.to_string())?;
+                    let remaining_host = Arc::clone(&host);
+                    let remaining = Function::new(ctx.clone(), move || remaining_host.budget_remaining())
+                        .map_err(|error| error.to_string())?;
+                    ctx.globals().set("__budgetRemaining", remaining).map_err(|error| error.to_string())?;
+
                     ctx.eval::<(), _>(r#"
+                        const unwrapHostResponse = (json) => {
+                            const response = JSON.parse(json);
+                            if (!response.ok) {
+                                const error = new Error(response.error.message);
+                                error.name = response.error.name;
+                                throw error;
+                            }
+                            return response.value;
+                        };
                         globalThis.agent = async (prompt, options = {}) => {
                             if (!options.agent) {
                                 const error = new Error("opts.agent is required");
@@ -179,10 +250,10 @@ impl WorkflowEngine {
                                 max_attempts: options.maxAttempts ?? 3,
                                 label: options.label ?? null,
                             };
-                            return JSON.parse(await __agent(String(prompt), JSON.stringify(request)));
+                            return unwrapHostResponse(await __agent(String(prompt), JSON.stringify(request)));
                         };
                         if (typeof __deliver !== "undefined") {
-                            globalThis.deliver = async (payload, options = {}) => JSON.parse(
+                            globalThis.deliver = async (payload, options = {}) => unwrapHostResponse(
                                 await __deliver(JSON.stringify({
                                     content: payload.content,
                                     metadata: payload.metadata ?? null,
@@ -191,8 +262,18 @@ impl WorkflowEngine {
                             );
                         }
                         globalThis.parallel = async (thunks) => Promise.all(
-                            thunks.map(async (thunk) => { try { return await thunk(); } catch (_) { return null; } })
+                            thunks.map(async (thunk, index) => {
+                                try { return await thunk(); }
+                                catch (error) {
+                                    __log(`parallel thunk ${index} failed: ${error.name}: ${error.message}`);
+                                    return null;
+                                }
+                            })
                         );
+                        globalThis.budget = Object.freeze({
+                            spent: () => __budgetSpent(),
+                            remaining: () => __budgetRemaining(),
+                        });
                         globalThis.log = (message) => __log(String(message));
                         globalThis.phase = (title) => __phase(String(title));
                         globalThis.console = { log, warn: log, error: log };
@@ -237,6 +318,9 @@ mod tests {
     struct FakeHost {
         outputs: Mutex<VecDeque<Value>>,
         deliveries: Mutex<Vec<EffectPayload>>,
+        records: Mutex<Vec<(String, String)>>,
+        spent: u64,
+        remaining: Option<u64>,
     }
 
     struct ConcurrentHost {
@@ -274,6 +358,21 @@ mod tests {
 
     #[async_trait]
     impl WorkflowHost for FakeHost {
+        fn record(&self, kind: &str, message: String) {
+            self.records
+                .lock()
+                .expect("records")
+                .push((kind.to_string(), message));
+        }
+
+        fn budget_spent(&self) -> u64 {
+            self.spent
+        }
+
+        fn budget_remaining(&self) -> Option<u64> {
+            self.remaining
+        }
+
         async fn run_agent_call(
             &self,
             _: AgentCallRequest,
@@ -384,6 +483,9 @@ mod tests {
                 json!({"approved": true, "reasons": "corrected", "approved_content": "reviewed copy"}),
             ])),
             deliveries: Mutex::new(Vec::new()),
+            records: Mutex::new(Vec::new()),
+            spent: 0,
+            remaining: None,
         });
         let engine = WorkflowEngine::new(EngineLimits::default());
         let output = engine.execute_hosted(
@@ -419,6 +521,9 @@ mod tests {
                 json!({"approved": false, "reasons": "mistake"}),
             ])),
             deliveries: Mutex::new(Vec::new()),
+            records: Mutex::new(Vec::new()),
+            spent: 0,
+            remaining: None,
         });
         let engine = WorkflowEngine::new(EngineLimits::default());
         let output = engine
@@ -448,5 +553,180 @@ mod tests {
         });
         WorkflowEngine::new(EngineLimits::default()).execute_hosted("return await parallel([() => agent('a',{agent:'one'}), () => agent('b',{agent:'two'})]);","null",CancellationToken::new(),Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),false).await.expect("parallel run");
         assert_eq!(host.peak.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn committed_write_review_deliver_example_posts_reviewed_content() {
+        let host = Arc::new(FakeHost {
+            outputs: Mutex::new(VecDeque::from([
+                json!("unchecked draft"),
+                json!({"accepted": true, "content": "reviewed copy"}),
+            ])),
+            deliveries: Mutex::new(Vec::new()),
+            records: Mutex::new(Vec::new()),
+            spent: 2,
+            remaining: Some(8),
+        });
+        let source = include_str!("../../../examples/workflows/write-review-deliver.js");
+        let output = WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                source,
+                r#"{"writerPrompt":"draft","writerAgent":"writer","reviewerAgent":"reviewer","deliveryTarget":"public"}"#,
+                CancellationToken::new(),
+                Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                true,
+            )
+            .await
+            .expect("committed example runs");
+
+        assert_eq!(
+            serde_json::from_str::<Value>(&output).unwrap(),
+            "reviewed copy"
+        );
+        let deliveries = host.deliveries.lock().expect("deliveries");
+        assert_eq!(deliveries.len(), 1);
+        assert_eq!(deliveries[0].content, "reviewed copy");
+        assert_eq!(deliveries[0].target.as_deref(), Some("public"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn committed_write_review_deliver_example_does_not_post_rejection() {
+        let host = Arc::new(FakeHost {
+            outputs: Mutex::new(VecDeque::from([
+                json!("unchecked draft"),
+                json!({"accepted": false, "content": "must not leave"}),
+            ])),
+            deliveries: Mutex::new(Vec::new()),
+            records: Mutex::new(Vec::new()),
+            spent: 2,
+            remaining: None,
+        });
+        let source = include_str!("../../../examples/workflows/write-review-deliver.js");
+        let result = WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                source,
+                r#"{"writerPrompt":"draft","writerAgent":"writer","reviewerAgent":"reviewer","deliveryTarget":"public"}"#,
+                CancellationToken::new(),
+                Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                true,
+            )
+            .await;
+
+        assert!(matches!(result, Err(WorkflowEngineError::Script(_))));
+        assert!(host.deliveries.lock().expect("deliveries").is_empty());
+    }
+
+    struct ErrorHost(&'static str);
+
+    #[async_trait]
+    impl WorkflowHost for ErrorHost {
+        async fn run_agent_call(
+            &self,
+            _: AgentCallRequest,
+            _: CancellationToken,
+        ) -> Result<AgentCallResult, String> {
+            Err(self.0.to_string())
+        }
+
+        async fn deliver(
+            &self,
+            _: EffectPayload,
+            _: CancellationToken,
+        ) -> Result<EffectReceipt, String> {
+            Err(self.0.to_string())
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn scripts_can_discriminate_named_host_errors() {
+        let host: Arc<dyn WorkflowHost> =
+            Arc::new(ErrorHost("BudgetExceededError: agent call limit reached"));
+        let output = WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                "try { await agent('x',{agent:'writer'}); } catch (error) { return {name:error.name,message:error.message}; }",
+                "null",
+                CancellationToken::new(),
+                Some(host),
+                false,
+            )
+            .await
+            .expect("error is catchable");
+        assert_eq!(
+            serde_json::from_str::<Value>(&output).unwrap(),
+            json!({"name":"BudgetExceededError","message":"agent call limit reached"})
+        );
+    }
+
+    #[test]
+    fn host_error_contract_names_known_and_generic_agent_failures() {
+        assert_eq!(
+            named_host_error("DeliveryNotGrantedError: no target", "DeliveryError"),
+            ("DeliveryNotGrantedError".into(), "no target".into())
+        );
+        assert_eq!(
+            named_host_error("WorkflowCancelledError: stopped", "AgentCallError"),
+            ("WorkflowCancelledError".into(), "stopped".into())
+        );
+        assert_eq!(
+            named_host_error("NondeterministicReplayError", "AgentCallError"),
+            ("NondeterministicCallError".into(), String::new())
+        );
+        assert_eq!(
+            named_host_error("provider unavailable", "AgentCallError"),
+            ("AgentCallError".into(), "provider unavailable".into())
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn empty_schemaless_agent_output_is_a_named_error() {
+        let host = Arc::new(FakeHost {
+            outputs: Mutex::new(VecDeque::from([json!("  ")])),
+            deliveries: Mutex::new(Vec::new()),
+            records: Mutex::new(Vec::new()),
+            spent: 0,
+            remaining: Some(10),
+        });
+        let output = WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                "try { await agent('x',{agent:'writer'}); } catch (error) { return error.name; }",
+                "null",
+                CancellationToken::new(),
+                Some(host as Arc<dyn WorkflowHost>),
+                false,
+            )
+            .await
+            .expect("empty output is catchable");
+        assert_eq!(
+            serde_json::from_str::<Value>(&output).unwrap(),
+            "EmptyAgentOutputError"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn budget_reads_and_parallel_failures_use_host_state_and_journal_log() {
+        let host = Arc::new(FakeHost {
+            outputs: Mutex::new(VecDeque::new()),
+            deliveries: Mutex::new(Vec::new()),
+            records: Mutex::new(Vec::new()),
+            spent: 7,
+            remaining: Some(13),
+        });
+        let output = WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                "const values=await parallel([()=>{throw new Error('nope')}]); return {values,spent:budget.spent(),remaining:budget.remaining()};",
+                "null",
+                CancellationToken::new(),
+                Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                false,
+            )
+            .await
+            .expect("budget surface");
+        assert_eq!(
+            serde_json::from_str::<Value>(&output).unwrap(),
+            json!({"values":[null],"spent":7,"remaining":13})
+        );
+        assert!(host.records.lock().unwrap().iter().any(|(kind, message)| {
+            kind == "log" && message.contains("parallel thunk 0 failed: Error: nope")
+        }));
     }
 }

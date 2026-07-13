@@ -27,5 +27,5 @@ if (!review.accepted) {
   throw new Error("Reviewer rejected the draft");
 }
 
-await deliver(review.content, { target: args.deliveryTarget });
+await deliver({ content: review.content }, { target: args.deliveryTarget });
 return review.content;
