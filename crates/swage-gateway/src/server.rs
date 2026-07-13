@@ -11,7 +11,7 @@ use tower_http::trace::TraceLayer;
 use tracing::Instrument;
 use uuid::Uuid;
 
-use crate::{assets, handlers, state::AppState, websocket};
+use crate::{assets, handlers, state::AppState, websocket, workflow};
 
 // ---------------------------------------------------------------------------
 // Request ID correlation middleware
@@ -150,6 +150,25 @@ pub fn build_router(state: AppState) -> Router {
             "/api/spaces/{id}/config-versions",
             get(handlers::list_configuration_versions),
         )
+        .route(
+            "/api/spaces/{id}/workflow-scripts",
+            get(workflow::list_scripts).post(workflow::create_script),
+        )
+        .route(
+            "/api/workflow-scripts/{id}",
+            get(workflow::get_script).put(workflow::update_script),
+        )
+        .route(
+            "/api/workflow-scripts/{id}/runs",
+            post(workflow::start_saved_run),
+        )
+        .route(
+            "/api/spaces/{id}/workflow-runs",
+            get(workflow::list_runs).post(workflow::start_inline_run),
+        )
+        .route("/api/workflow-runs/{id}", get(workflow::get_run))
+        .route("/api/workflow-runs/{id}/cancel", post(workflow::cancel_run))
+        .route("/api/workflow-runs/{id}/resume", post(workflow::resume_run))
         .route(
             "/api/config-versions/{id}/rollback",
             post(handlers::rollback_configuration_version),

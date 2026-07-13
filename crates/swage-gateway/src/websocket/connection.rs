@@ -290,6 +290,10 @@ pub(super) fn broadcast_event_matches_session(session_id: Uuid, event: &ServerEv
         | ServerEvent::TopologyRunCompleted {
             session_id: target, ..
         } => *target == session_id,
+        ServerEvent::WorkflowRunStarted { .. }
+        | ServerEvent::WorkflowEntryStarted { .. }
+        | ServerEvent::WorkflowEntryCompleted { .. }
+        | ServerEvent::WorkflowRunCompleted { .. } => true,
         _ => false,
     }
 }

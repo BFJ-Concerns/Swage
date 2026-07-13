@@ -81,6 +81,7 @@ pub async fn run_placeholder_turn(
         ws_tx,
         subscription,
         None,
+        None,
         Some(turn_id),
         crate::turn::TurnAttendance::Unattended,
     )
