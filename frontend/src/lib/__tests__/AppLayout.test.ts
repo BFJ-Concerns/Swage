@@ -83,6 +83,7 @@ function mockConversationStore(): ConversationStore {
     deleteConversation: async () => {},
     appendOptimisticUserMessage: () => {},
     appendAssistantMessage: () => {},
+    clearActiveConversation: () => {},
     refreshActiveConversation: async () => {},
   };
 }

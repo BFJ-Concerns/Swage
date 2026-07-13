@@ -42,6 +42,7 @@ function makeStore(
     deleteConversation: vi.fn().mockResolvedValue(undefined),
     appendOptimisticUserMessage: vi.fn(),
     appendAssistantMessage: vi.fn(),
+    clearActiveConversation: vi.fn(),
     refreshActiveConversation: vi.fn().mockResolvedValue(undefined),
   };
 }

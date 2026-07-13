@@ -19,6 +19,10 @@ export interface ConversationStore {
   // threading spaceId through every intermediate component.
   createConversation(spaceId?: string, selectedModelId?: string | null): Promise<void>;
   deleteConversation(id: string): Promise<void>;
+  // Drops the active conversation without touching the server — used when the
+  // selected space changes so a conversation from the old space can't linger
+  // as the target of the composer.
+  clearActiveConversation(): void;
   appendOptimisticUserMessage(message: {
     content: string;
     timestamp: string;
@@ -196,6 +200,10 @@ export function createConversationStore(): ConversationStore {
           activeConversationStore.set(null);
         }
       }
+    },
+
+    clearActiveConversation() {
+      activeConversationStore.set(null);
     },
 
     appendOptimisticUserMessage(message) {
