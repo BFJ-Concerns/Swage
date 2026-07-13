@@ -14,7 +14,8 @@
 //! - `dev_thread` models thread-or-topic routing keyed by
 //!   `(account, channel_id/thread_id)`.
 
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
+use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -30,6 +31,18 @@ use swage_storage::{
 use crate::state::AppState;
 use crate::subscription::SubscriptionState;
 use crate::thread_selection::resolve_thread_for_session;
+
+const WEBHOOK_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Webhook delivery is a frequent path, so retain its connection pool instead
+/// of constructing a fresh client for every POST.
+static WEBHOOK_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
+    webhook_client(WEBHOOK_REQUEST_TIMEOUT).expect("webhook HTTP client should build")
+});
+
+fn webhook_client(timeout: Duration) -> Result<reqwest::Client, reqwest::Error> {
+    reqwest::Client::builder().timeout(timeout).build()
+}
 
 // The delivery wire types live in the protocol crate (the schedule contract
 // embeds them); re-exported here so gateway call sites keep their paths.
@@ -687,7 +700,7 @@ async fn deliver_to_target(
             let parsed = reqwest::Url::parse(url).map_err(|error| {
                 GatewayError::ValidationError(format!("invalid webhook target URL: {error}"))
             })?;
-            let response = reqwest::Client::new()
+            let response = WEBHOOK_CLIENT
                 .post(parsed)
                 .json(&serde_json::json!({
                     "session_id": session_id,
@@ -743,6 +756,7 @@ mod tests {
     use super::*;
     use crate::turn::tests::make_state_with_session;
     use swage_core::{FinishReason, StreamChunk};
+    use tokio::net::TcpListener;
 
     #[test]
     fn home_target_defaults_to_origin() {
@@ -861,6 +875,29 @@ mod tests {
 
         assert_eq!(compose_channel_messages(&rows[..1]), "first");
         assert_eq!(compose_channel_messages(&rows), "first\n\nsecond");
+    }
+
+    #[tokio::test]
+    async fn webhook_client_enforces_its_request_timeout() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            // Accept the request but never produce an HTTP response. This
+            // isolates the client's request deadline from connection errors.
+            let (_connection, _) = listener.accept().await.unwrap();
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        });
+        let client = webhook_client(Duration::from_millis(25)).unwrap();
+
+        let error = client
+            .post(format!("http://{address}"))
+            .body("payload")
+            .send()
+            .await
+            .expect_err("a stalled webhook must time out");
+
+        assert!(error.is_timeout(), "unexpected request error: {error}");
+        server.abort();
     }
 
     #[tokio::test]
