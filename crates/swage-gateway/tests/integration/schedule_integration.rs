@@ -29,8 +29,8 @@ use tokio::sync::oneshot;
 use swage_gateway::{schedule, server::build_router, state::AppState};
 use swage_protocol::client::delivery::{DeliveryRoutingRequest, DeliveryTarget};
 use swage_protocol::client::schedule::{
-    CreateScheduleRequest, GateConfig, GateVerdict, ScheduleSpec, ScheduleStatus, SessionPolicy,
-    SkipReason, UpdateScheduleRequest,
+    CreateScheduleRequest, GateConfig, GateVerdict, ScheduleCreator, ScheduleSpec, ScheduleStatus,
+    SessionPolicy, SkipReason, UpdateScheduleRequest,
 };
 use swage_provider::LlmProvider;
 use swage_storage::{
@@ -207,6 +207,18 @@ async fn create_conversation(router: &Router) -> Uuid {
 
 fn continuation(session_id: Uuid) -> SessionPolicy {
     SessionPolicy::Continuation { session_id }
+}
+
+/// Drive one tick to quiescence: `tick_once` now spawns each due run rather
+/// than awaiting it, so a test that reads run rows must first await the
+/// spawned handles. Returns how many runs the tick spawned.
+async fn tick_to_completion(state: &AppState, now: chrono::DateTime<Utc>) -> usize {
+    let handles = schedule::tick_once(state, now).await.unwrap();
+    let spawned = handles.len();
+    for handle in handles {
+        handle.await.unwrap();
+    }
+    spawned
 }
 
 fn create_request(
@@ -392,6 +404,7 @@ async fn each_schedule_kind_fires_on_tick_and_advances() {
                 spec,
                 continuation(create_conversation(&router).await),
             ),
+            ScheduleCreator::User,
         )
         .await
         .unwrap();
@@ -399,7 +412,7 @@ async fn each_schedule_kind_fires_on_tick_and_advances() {
         let due_at = created
             .next_run_at
             .expect("every kind computes a first occurrence");
-        let executed = schedule::tick_once(&state, due_at).await.unwrap();
+        let executed = tick_to_completion(&state, due_at).await;
         assert_eq!(executed, 1, "{kind} should fire when its occurrence is due");
 
         let runs = state.storage.list_schedule_runs(created.id).await.unwrap();
@@ -425,6 +438,299 @@ async fn each_schedule_kind_fires_on_tick_and_advances() {
             assert!(next > due_at, "{kind} next occurrence should move forward");
         }
     }
+}
+
+/// Provider that stalls any turn whose input contains a marker until the
+/// test releases a gate, and streams a fixed reply for every other turn. It
+/// proves the tick executes runs concurrently: a stalled run cannot hold up
+/// a sibling due at the same instant.
+struct HeadOfLineProvider {
+    gate: Arc<tokio::sync::Semaphore>,
+    stall_marker: &'static str,
+}
+
+#[async_trait]
+impl LlmProvider for HeadOfLineProvider {
+    fn model_id(&self) -> &str {
+        "head-of-line-mock"
+    }
+
+    async fn complete(
+        &self,
+        _request: CompletionRequest,
+    ) -> Result<CompletionResponse, ProviderError> {
+        unreachable!("head-of-line test declares no gate")
+    }
+
+    async fn complete_with_tools(
+        &self,
+        _request: ToolCompletionRequest,
+    ) -> Result<ToolCompletionResponse, ProviderError> {
+        unreachable!("head-of-line test does not use tool completion")
+    }
+
+    fn stream(
+        &self,
+        request: CompletionRequest,
+    ) -> Pin<Box<dyn futures::Stream<Item = StreamChunk> + Send>> {
+        let stalls = request
+            .messages
+            .iter()
+            .any(|message| message.text_content().contains(self.stall_marker));
+        if !stalls {
+            return Box::pin(futures::stream::iter(MockProvider::text_round("fast done")));
+        }
+        // Wait on the gate before producing any output, so this run stays
+        // in flight until the test releases a permit.
+        let gate = Arc::clone(&self.gate);
+        Box::pin(
+            futures::stream::once(async move {
+                let _permit = gate.acquire().await.expect("gate open");
+                futures::stream::iter(MockProvider::text_round("slow done"))
+            })
+            .flatten(),
+        )
+    }
+}
+
+/// Poll a schedule's newest run until it reaches a terminal state, or panic
+/// on timeout. Used to observe one run finishing while another is stalled.
+async fn await_terminal_run(state: &AppState, schedule_id: Uuid) -> swage_storage::ScheduleRun {
+    let deadline = std::time::Duration::from_secs(5);
+    let started = std::time::Instant::now();
+    loop {
+        if let Some(run) = state
+            .storage
+            .list_schedule_runs(schedule_id)
+            .await
+            .unwrap()
+            .into_iter()
+            .next_back()
+        {
+            let terminal = matches!(
+                run.state,
+                ScheduleRunState::Completed
+                    | ScheduleRunState::CompletedEmpty
+                    | ScheduleRunState::Failed
+                    | ScheduleRunState::Skipped
+            );
+            if terminal {
+                return run;
+            }
+        }
+        assert!(
+            started.elapsed() < deadline,
+            "run for schedule {schedule_id} never reached a terminal state"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn two_due_schedules_do_not_head_of_line_block() {
+    let dir = tempfile::tempdir().unwrap();
+    let due_at = Utc::now() - Duration::seconds(5);
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    let state = test_state(
+        &dir.path().join("head-of-line.db"),
+        HeadOfLineProvider {
+            gate: Arc::clone(&gate),
+            stall_marker: "STALL",
+        },
+    );
+    let router = build_router(state.clone());
+    let slow_session = create_conversation(&router).await;
+    let fast_session = create_conversation(&router).await;
+
+    // Two one-shot schedules due at the same instant: the slow one's turn
+    // blocks on the gate, the fast one streams straight through.
+    let slow = schedule::create_schedule(
+        &state,
+        create_request(
+            "STALL until released",
+            ScheduleSpec::OneShot {
+                at: due_at.to_rfc3339(),
+            },
+            continuation(slow_session),
+        ),
+        ScheduleCreator::User,
+    )
+    .await
+    .unwrap();
+    let fast = schedule::create_schedule(
+        &state,
+        create_request(
+            "run promptly",
+            ScheduleSpec::OneShot {
+                at: due_at.to_rfc3339(),
+            },
+            continuation(fast_session),
+        ),
+        ScheduleCreator::User,
+    )
+    .await
+    .unwrap();
+
+    // tick_once returns as soon as both runs are spawned; it does not wait
+    // for them. A serial tick would block here inside the slow run.
+    let handles = schedule::tick_once(&state, Utc::now()).await.unwrap();
+    assert_eq!(handles.len(), 2);
+
+    // The fast schedule completes while the slow one is still gated — the
+    // proof that the slow run did not hold up the tick.
+    let fast_run = await_terminal_run(&state, fast.id).await;
+    assert_eq!(fast_run.state, ScheduleRunState::Completed);
+    assert_eq!(fast_run.output_text.as_deref(), Some("fast done"));
+
+    let slow_run = state
+        .storage
+        .list_schedule_runs(slow.id)
+        .await
+        .unwrap()
+        .pop()
+        .expect("slow run row exists");
+    assert!(
+        matches!(
+            slow_run.state,
+            ScheduleRunState::Pending | ScheduleRunState::Running
+        ),
+        "slow run should still be in flight while the fast run has finished, was {:?}",
+        slow_run.state
+    );
+
+    // Release the slow run and let both spawned tasks finish cleanly.
+    gate.add_permits(1);
+    for handle in handles {
+        handle.await.unwrap();
+    }
+    let slow_run = await_terminal_run(&state, slow.id).await;
+    assert_eq!(slow_run.state, ScheduleRunState::Completed);
+    assert_eq!(slow_run.output_text.as_deref(), Some("slow done"));
+}
+
+/// Panics inside `complete` — the gate call, which the run awaits directly in
+/// its own spawned task (unlike `stream`, which the turn engine drives on a
+/// nested task). Proves a *panicking* run, not merely a failing one, is caught
+/// on the schedule's join handle without taking the tick down. `stream` serves
+/// a clean reply for the ungated sibling.
+struct PanicProvider;
+
+#[async_trait]
+impl LlmProvider for PanicProvider {
+    fn model_id(&self) -> &str {
+        "panic-mock"
+    }
+
+    async fn complete(
+        &self,
+        _request: CompletionRequest,
+    ) -> Result<CompletionResponse, ProviderError> {
+        panic!("injected panic inside a scheduled run's gate check");
+    }
+
+    async fn complete_with_tools(
+        &self,
+        _request: ToolCompletionRequest,
+    ) -> Result<ToolCompletionResponse, ProviderError> {
+        unreachable!("panic test does not use tool completion")
+    }
+
+    fn stream(
+        &self,
+        _request: CompletionRequest,
+    ) -> Pin<Box<dyn futures::Stream<Item = StreamChunk> + Send>> {
+        Box::pin(futures::stream::iter(MockProvider::text_round(
+            "survivor done",
+        )))
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_panicking_spawned_run_is_caught_and_the_tick_survives() {
+    let dir = tempfile::tempdir().unwrap();
+    let due_at = Utc::now() - Duration::seconds(5);
+    let state = test_state_with_config(
+        &dir.path().join("panic.db"),
+        PanicProvider,
+        config_with_gate_model(),
+    );
+    let router = build_router(state.clone());
+    let panic_session = create_conversation(&router).await;
+    let survivor_session = create_conversation(&router).await;
+
+    // The panicking schedule declares a gate, so its run calls the (panicking)
+    // gate model inline before any turn machinery.
+    let panicking = schedule::create_schedule(
+        &state,
+        CreateScheduleRequest {
+            gate: Some(GateConfig {
+                model: GATE_MODEL.into(),
+                criteria: None,
+            }),
+            ..create_request(
+                "this run panics in the gate",
+                ScheduleSpec::OneShot {
+                    at: due_at.to_rfc3339(),
+                },
+                continuation(panic_session),
+            )
+        },
+        ScheduleCreator::User,
+    )
+    .await
+    .unwrap();
+    let survivor = schedule::create_schedule(
+        &state,
+        create_request(
+            "this run just works",
+            ScheduleSpec::OneShot {
+                at: due_at.to_rfc3339(),
+            },
+            continuation(survivor_session),
+        ),
+        ScheduleCreator::User,
+    )
+    .await
+    .unwrap();
+
+    // tick_once returns without panicking, even though one of the runs it
+    // spawned will panic — a panic in a run does not take the tick down.
+    let handles = schedule::tick_once(&state, Utc::now()).await.unwrap();
+    assert_eq!(handles.len(), 2);
+
+    // Exactly one join handle carries a panic (the mechanism the loop reaps to
+    // surface it); the other completes cleanly.
+    let mut panicked = 0;
+    let mut completed = 0;
+    for handle in handles {
+        match handle.await {
+            Err(join_error) if join_error.is_panic() => panicked += 1,
+            Ok(()) => completed += 1,
+            Err(other) => panic!("unexpected join error: {other}"),
+        }
+    }
+    assert_eq!(
+        panicked, 1,
+        "the panicking run's handle must report a panic"
+    );
+    assert_eq!(completed, 1, "the sibling run must finish cleanly");
+
+    // The surviving schedule ran to completion; the panicking one's run row
+    // was left non-terminal (the task died mid-run) — recovered at next
+    // startup, exactly like a crash.
+    let survivor_run = await_terminal_run(&state, survivor.id).await;
+    assert_eq!(survivor_run.state, ScheduleRunState::Completed);
+    assert_eq!(survivor_run.output_text.as_deref(), Some("survivor done"));
+    let panic_runs = state
+        .storage
+        .list_schedule_runs(panicking.id)
+        .await
+        .unwrap();
+    assert_eq!(panic_runs.len(), 1);
+    assert!(matches!(
+        panic_runs[0].state,
+        ScheduleRunState::Pending | ScheduleRunState::Running
+    ));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -453,6 +759,7 @@ async fn tick_continues_after_a_due_schedule_run_fails() {
             },
             continuation(first_session),
         ),
+        ScheduleCreator::User,
     )
     .await
     .unwrap();
@@ -465,29 +772,37 @@ async fn tick_continues_after_a_due_schedule_run_fails() {
             },
             continuation(second_session),
         ),
+        ScheduleCreator::User,
     )
     .await
     .unwrap();
 
-    let executed = schedule::tick_once(&state, Utc::now()).await.unwrap();
+    let executed = tick_to_completion(&state, Utc::now()).await;
     assert_eq!(
         executed, 2,
         "one failing due schedule must not abort the rest of the tick"
     );
 
+    // Runs are spawned concurrently, so which of the two schedules pops the
+    // failing provider round is a race — the guarantee under test is
+    // isolation, not order: exactly one run fails and the other completes,
+    // each with a single Tick-triggered run.
     let first_runs = state.storage.list_schedule_runs(first.id).await.unwrap();
-    assert_eq!(first_runs.len(), 1);
-    assert_eq!(first_runs[0].trigger, ScheduleRunTrigger::Tick);
-    assert_eq!(first_runs[0].state, ScheduleRunState::Failed);
-    assert!(first_runs[0].error_message.is_some());
-    assert!(first_runs[0].completed_at.is_some());
-
     let second_runs = state.storage.list_schedule_runs(second.id).await.unwrap();
+    assert_eq!(first_runs.len(), 1);
     assert_eq!(second_runs.len(), 1);
-    assert_eq!(second_runs[0].trigger, ScheduleRunTrigger::Tick);
-    assert_eq!(second_runs[0].state, ScheduleRunState::Completed);
+    let (failed, completed) = match first_runs[0].state {
+        ScheduleRunState::Failed => (&first_runs[0], &second_runs[0]),
+        _ => (&second_runs[0], &first_runs[0]),
+    };
+    assert_eq!(failed.trigger, ScheduleRunTrigger::Tick);
+    assert_eq!(failed.state, ScheduleRunState::Failed);
+    assert!(failed.error_message.is_some());
+    assert!(failed.completed_at.is_some());
+    assert_eq!(completed.trigger, ScheduleRunTrigger::Tick);
+    assert_eq!(completed.state, ScheduleRunState::Completed);
     assert_eq!(
-        second_runs[0].output_text.as_deref(),
+        completed.output_text.as_deref(),
         Some("later schedule still ran")
     );
 
@@ -531,6 +846,7 @@ async fn fresh_policy_creates_a_session_per_run_and_seeds_previous_outcome() {
                 agent_id: "gateway".into(),
             },
         ),
+        ScheduleCreator::User,
     )
     .await
     .unwrap();
@@ -607,6 +923,7 @@ async fn continuation_policy_reuses_the_named_session() {
             },
             continuation(session_id),
         ),
+        ScheduleCreator::User,
     )
     .await
     .unwrap();
@@ -676,6 +993,7 @@ async fn gate_skip_verdict_records_the_run_without_waking_the_main_model() {
                 criteria: Some("Run only when there are unreviewed alerts.".into()),
             }),
         },
+        ScheduleCreator::User,
     )
     .await
     .unwrap();
@@ -759,6 +1077,7 @@ async fn gate_run_verdict_proceeds_to_execution() {
                 criteria: None,
             }),
         },
+        ScheduleCreator::User,
     )
     .await
     .unwrap();
@@ -805,6 +1124,7 @@ async fn gate_failure_fails_the_run_instead_of_waking_the_main_model() {
                 criteria: None,
             }),
         },
+        ScheduleCreator::User,
     )
     .await
     .unwrap();
@@ -856,6 +1176,7 @@ async fn gate_model_must_exist_in_the_catalogue() {
                 criteria: None,
             }),
         },
+        ScheduleCreator::User,
     )
     .await;
     assert!(
@@ -884,6 +1205,7 @@ async fn due_run_meeting_an_executing_predecessor_is_skipped_and_recorded() {
             },
             continuation(session_id),
         ),
+        ScheduleCreator::User,
     )
     .await
     .unwrap();
@@ -954,6 +1276,7 @@ async fn busy_continuation_session_skips_the_run_deliberately() {
             },
             continuation(session_id),
         ),
+        ScheduleCreator::User,
     )
     .await
     .unwrap();
@@ -1001,13 +1324,12 @@ async fn completed_runs_deliver_to_local_and_channel_targets() {
             }),
             gate: None,
         },
+        ScheduleCreator::User,
     )
     .await
     .unwrap();
 
-    schedule::tick_once(&state, created.next_run_at.unwrap())
-        .await
-        .unwrap();
+    tick_to_completion(&state, created.next_run_at.unwrap()).await;
 
     let runs = state.storage.list_schedule_runs(created.id).await.unwrap();
     assert_eq!(runs.len(), 1);
@@ -1050,13 +1372,12 @@ async fn empty_successful_run_records_a_distinct_state() {
             },
             continuation(session_id),
         ),
+        ScheduleCreator::User,
     )
     .await
     .unwrap();
 
-    schedule::tick_once(&state, created.next_run_at.unwrap())
-        .await
-        .unwrap();
+    tick_to_completion(&state, created.next_run_at.unwrap()).await;
 
     let runs = state.storage.list_schedule_runs(created.id).await.unwrap();
     assert_eq!(runs.len(), 1);
@@ -1095,6 +1416,7 @@ async fn restart_recovery_fails_runs_orphaned_by_a_previous_process() {
                 },
                 continuation(session_id),
             ),
+            ScheduleCreator::User,
         )
     };
     let schedule_a = make_schedule().await.unwrap();
@@ -1182,9 +1504,13 @@ async fn paused_future_one_shot_resumes_and_still_fires() {
     let session_id = create_conversation(&router).await;
 
     let moment = Utc::now() + Duration::hours(1);
-    let created = schedule::create_schedule(&state, one_shot_request(session_id, moment))
-        .await
-        .unwrap();
+    let created = schedule::create_schedule(
+        &state,
+        one_shot_request(session_id, moment),
+        ScheduleCreator::User,
+    )
+    .await
+    .unwrap();
 
     schedule::pause_schedule(&state, created.id).await.unwrap();
     let resumed = schedule::resume_schedule(&state, created.id).await.unwrap();
@@ -1210,9 +1536,13 @@ async fn paused_lapsed_one_shot_resumes_completed_without_firing() {
     let session_id = create_conversation(&router).await;
 
     let lapsed = Utc::now() - Duration::hours(1);
-    let created = schedule::create_schedule(&state, one_shot_request(session_id, lapsed))
-        .await
-        .unwrap();
+    let created = schedule::create_schedule(
+        &state,
+        one_shot_request(session_id, lapsed),
+        ScheduleCreator::User,
+    )
+    .await
+    .unwrap();
     schedule::pause_schedule(&state, created.id).await.unwrap();
 
     let resumed = schedule::resume_schedule(&state, created.id).await.unwrap();
@@ -1237,12 +1567,16 @@ async fn fired_one_shot_never_refires_via_pause_resume_or_unchanged_update() {
     let session_id = create_conversation(&router).await;
 
     let moment = Utc::now() - Duration::seconds(1);
-    let created = schedule::create_schedule(&state, one_shot_request(session_id, moment))
-        .await
-        .unwrap();
+    let created = schedule::create_schedule(
+        &state,
+        one_shot_request(session_id, moment),
+        ScheduleCreator::User,
+    )
+    .await
+    .unwrap();
 
     // Fire it.
-    schedule::tick_once(&state, Utc::now()).await.unwrap();
+    tick_to_completion(&state, Utc::now()).await;
     let after_fire = state
         .storage
         .get_schedule(created.id)
@@ -1277,7 +1611,7 @@ async fn fired_one_shot_never_refires_via_pause_resume_or_unchanged_update() {
     .await
     .unwrap();
 
-    schedule::tick_once(&state, Utc::now()).await.unwrap();
+    tick_to_completion(&state, Utc::now()).await;
     assert_eq!(
         state
             .storage
@@ -1308,11 +1642,12 @@ async fn updating_one_shot_moment_to_future_rearms_and_fires_once_more() {
     let created = schedule::create_schedule(
         &state,
         one_shot_request(session_id, Utc::now() - Duration::seconds(1)),
+        ScheduleCreator::User,
     )
     .await
     .unwrap();
 
-    schedule::tick_once(&state, Utc::now()).await.unwrap();
+    tick_to_completion(&state, Utc::now()).await;
     assert_eq!(
         state
             .storage
@@ -1345,7 +1680,7 @@ async fn updating_one_shot_moment_to_future_rearms_and_fires_once_more() {
     );
 
     // The re-armed moment fires once more, then the schedule is spent again.
-    schedule::tick_once(&state, rearm_at).await.unwrap();
+    tick_to_completion(&state, rearm_at).await;
     let runs = state.storage.list_schedule_runs(created.id).await.unwrap();
     assert_eq!(runs.len(), 2, "re-armed one-shot fires exactly once more");
     assert!(
@@ -1450,6 +1785,7 @@ async fn delivery_failure_preserves_output_on_the_failed_run() {
                 continuation(session_id),
             )
         },
+        ScheduleCreator::User,
     )
     .await
     .unwrap();
@@ -1578,6 +1914,7 @@ async fn concurrent_manual_triggers_run_one_and_skip_the_overlap_cleanly() {
             },
             continuation(session_id),
         ),
+        ScheduleCreator::User,
     )
     .await
     .unwrap();
@@ -1639,6 +1976,7 @@ async fn tick_racing_an_in_flight_manual_run_records_a_clean_overlap_skip() {
             },
             continuation(session_id),
         ),
+        ScheduleCreator::User,
     )
     .await
     .unwrap();
@@ -1656,7 +1994,7 @@ async fn tick_racing_an_in_flight_manual_run_records_a_clean_overlap_skip() {
         .expect("the manual turn should start before the tick fires");
 
     // The tick finds the schedule due, tries to run it, and trips the guard.
-    let executed = schedule::tick_once(&state, due_at).await.unwrap();
+    let executed = tick_to_completion(&state, due_at).await;
     assert_eq!(executed, 1);
 
     let runs = state.storage.list_schedule_runs(created.id).await.unwrap();

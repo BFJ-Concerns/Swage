@@ -345,6 +345,7 @@ pub(crate) async fn build_gateway_dispatcher(
             device,
             state.secret_manager.clone(),
             state.storage.clone(),
+            Some(state.clone()),
         ))),
         sandbox_guard,
         isolation: sandbox_build.isolation,

@@ -729,6 +729,10 @@ const COMPLETE_SCHEMA: &str = "
         space_id       TEXT REFERENCES spaces(id) ON DELETE CASCADE,
         agent_id       TEXT,
         session_id     TEXT REFERENCES sessions(id) ON DELETE CASCADE,
+        -- Provenance: 'user' or 'agent'. creator_agent_id names the agent
+        -- for agent-created schedules, and is NULL for user-created ones.
+        creator_kind     TEXT NOT NULL,
+        creator_agent_id TEXT,
         delivery_json  TEXT NOT NULL,
         gate_model     TEXT,
         gate_criteria  TEXT,

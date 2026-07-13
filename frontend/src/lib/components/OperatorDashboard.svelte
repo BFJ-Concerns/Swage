@@ -28,9 +28,13 @@
 
   function describeSession(schedule: Schedule): string {
     if (schedule.session.policy === "fresh") {
-      return `fresh session · ${schedule.session.agent_id}`;
+      return `fresh session · runs as ${schedule.session.agent_id}`;
     }
     return `continues session ${schedule.session.session_id.slice(0, 8)}`;
+  }
+
+  function describeCreator(creator: Schedule["creator"]): string {
+    return creator.kind === "agent" ? `agent ${creator.agent_id}` : "you";
   }
 
   function describeRunOutcome(run: ScheduleRun): string {
@@ -272,6 +276,7 @@
                   {#if schedule.gate}
                     · gated by {schedule.gate.model}
                   {/if}
+                  · created by {describeCreator(schedule.creator)}
                 </p>
                 {#if schedule.next_run_at}
                   <p class="detail-copy">

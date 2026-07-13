@@ -41,6 +41,23 @@ pub enum SessionPolicy {
     Continuation { session_id: Uuid },
 }
 
+/// Who created a schedule.
+///
+/// This is provenance, not a request field: the surface that creates the
+/// schedule stamps it (the settings UI and HTTP surface stamp `user`; the
+/// scheduling tools stamp `agent`), so an agent cannot claim a schedule was
+/// a person's. It answers the audit question "where did this schedule come
+/// from" wherever schedules are listed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ScheduleCreator {
+    /// A person, through the settings automation panel or the HTTP surface.
+    User,
+    /// An agent, through the scheduling tools. Carries the id of the agent
+    /// that made it.
+    Agent { agent_id: String },
+}
+
 /// A cheap-model check that runs before the main model wakes.
 ///
 /// The gate model inspects the schedule's message, the optional criteria,
@@ -232,6 +249,8 @@ pub struct Schedule {
     pub status: ScheduleStatus,
     pub spec: ScheduleSpec,
     pub session: SessionPolicy,
+    /// Where this schedule came from — a person or an agent.
+    pub creator: ScheduleCreator,
     pub routing: DeliveryRoutingRequest,
     pub gate: Option<GateConfig>,
     pub next_run_at: Option<DateTime<Utc>>,
