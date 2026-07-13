@@ -1,4 +1,6 @@
 use serde::{Deserialize, Serialize};
+
+use crate::MaskedString;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use swage_core::ApprovalTimeoutPolicy;
@@ -191,7 +193,7 @@ pub struct SearchProviderConfig {
     /// The search provider's API endpoint (e.g. "http://localhost:8080").
     pub base_url: String,
     /// Optional API key — required by some hosted providers, unused for self-hosted.
-    pub api_key: Option<String>,
+    pub api_key: Option<MaskedString>,
 }
 
 /// Tool permission configuration — controls which tools an agent may invoke.
@@ -1000,11 +1002,14 @@ mod tests {
         let cfg = SearchProviderConfig {
             provider_type: "searxng".to_string(),
             base_url: "http://localhost:8080".to_string(),
-            api_key: None,
+            api_key: Some("search-credential".into()),
         };
         assert_eq!(cfg.provider_type, "searxng");
         assert_eq!(cfg.base_url, "http://localhost:8080");
-        assert_eq!(cfg.api_key, None);
+        assert_eq!(cfg.api_key.as_deref(), Some("search-credential"));
+        let debug = format!("{cfg:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("search-credential"));
     }
 
     #[test]
