@@ -955,7 +955,6 @@ const COMPLETE_SCHEMA: &str = "
         script_version_id   TEXT REFERENCES workflow_script_versions(id),
         source              TEXT,
         source_hash         TEXT NOT NULL,
-        session_id          TEXT REFERENCES sessions(id) ON DELETE SET NULL,
         args_json           TEXT NOT NULL,
         budget_json         TEXT NOT NULL,
         state               TEXT NOT NULL CHECK (state IN ('running', 'completed', 'failed', 'cancelled', 'interrupted')),

@@ -2,4 +2,4 @@
 import type { WorkflowBudget } from "./WorkflowBudget";
 import type { WorkflowRunState } from "./WorkflowRunState";
 
-export type WorkflowRun = { id: string, space_id: string, script_id: string | null, script_name: string | null, script_version: number | null, session_id: string | null, state: WorkflowRunState, args: unknown, budget: WorkflowBudget, final_output: unknown, error_message: string | null, created_at: string, completed_at: string | null, };
+export type WorkflowRun = { id: string, space_id: string, script_id: string | null, script_name: string | null, script_version: number | null, state: WorkflowRunState, args: unknown, budget: WorkflowBudget, final_output: unknown, error_message: string | null, created_at: string, completed_at: string | null, };
