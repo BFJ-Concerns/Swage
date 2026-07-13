@@ -5,84 +5,12 @@
 //! human decision. These types bridge the agent runtime with the gateway's
 //! WebSocket-based approval UI.
 
-use serde::{Deserialize, Serialize};
-use std::str::FromStr;
 use std::sync::Arc;
-use thiserror::Error;
 use uuid::Uuid;
 
-/// The outcome of a human approval decision, sent back to the agent through
-/// a oneshot channel.
-#[derive(Debug, Clone)]
-pub struct ApprovalDecision {
-    pub decision: ApprovalDecisionValue,
-    pub scope: ApprovalDecisionScope,
-    /// Optional human-readable rationale from the reviewer.
-    pub reason: Option<String>,
-}
-
-impl ApprovalDecision {
-    pub fn is_approved(&self) -> bool {
-        self.decision == ApprovalDecisionValue::Approved
-    }
-}
-
-/// How widely an approval decision should apply.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ApprovalDecisionScope {
-    /// Approve only the pending request.
-    #[default]
-    Once,
-    /// Approve this request and later matching gates until the gateway exits.
-    Session,
-    /// Approve this request and persist the matching tool as ungated.
-    Permanent,
-    /// Approve this request and persist the matching tool as globally ungated.
-    PermanentGlobal,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ApprovalDecisionValue {
-    Approved,
-    Rejected,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Error)]
-#[error("unknown approval decision: {value}")]
-pub struct ApprovalDecisionParseError {
-    value: String,
-}
-
-impl ApprovalDecisionValue {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Approved => "approved",
-            Self::Rejected => "rejected",
-        }
-    }
-}
-
-impl std::fmt::Display for ApprovalDecisionValue {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-impl FromStr for ApprovalDecisionValue {
-    type Err = ApprovalDecisionParseError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "approved" => Ok(Self::Approved),
-            "rejected" => Ok(Self::Rejected),
-            other => Err(ApprovalDecisionParseError {
-                value: other.to_string(),
-            }),
-        }
-    }
-}
+pub use swage_protocol::client::approval::{
+    ApprovalDecision, ApprovalDecisionParseError, ApprovalDecisionScope, ApprovalDecisionValue,
+};
 
 /// Callback type for registering a oneshot channel with the gateway.
 ///

@@ -8,7 +8,7 @@ use serde_json::Value;
 use swage_core::ToolError;
 use swage_python::{PythonWorkerRuntime, WorkerPool};
 use swage_storage::store::Storage;
-use swage_tool::context::{SerializableToolContext, ToolContext};
+use swage_tool::context::{ToolContext, serialise_tool_context};
 
 use super::{Tool, ToolDispatcher};
 use crate::tool::nested_tool_runtime::NestedToolRuntime;
@@ -96,7 +96,7 @@ impl Tool for PythonExecuteTool {
             Arc::clone(&self.storage),
             turn_id,
             parent_call_id.to_string(),
-            SerializableToolContext::from_context(ctx),
+            serialise_tool_context(ctx),
         );
 
         let mut lease = self

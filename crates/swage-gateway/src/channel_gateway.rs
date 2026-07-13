@@ -17,8 +17,6 @@
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, mpsc};
 use uuid::Uuid;
 
@@ -67,63 +65,10 @@ impl ChannelOrigin {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RecordedDelivery {
-    pub session_id: Uuid,
-    pub target: DeliveryTarget,
-    pub content: String,
-    pub delivered_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct ChannelInboundResponse {
-    pub session_id: Uuid,
-    pub delivered_to: Vec<DeliveryTarget>,
-    pub response: String,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct DevDmInboundRequest {
-    pub account: String,
-    pub user_id: String,
-    pub text: String,
-    #[serde(default)]
-    pub routing: DeliveryRoutingRequest,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct DevThreadInboundRequest {
-    pub account: String,
-    pub channel_id: String,
-    pub thread_id: String,
-    pub text: String,
-    #[serde(default)]
-    pub routing: DeliveryRoutingRequest,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct DeliveryLogQuery {
-    pub session_id: Uuid,
-}
-
-#[derive(Debug, Serialize)]
-pub struct DeliveryLogResponse {
-    pub deliveries: Vec<RecordedDelivery>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct ChannelStatusResponse {
-    pub integration: String,
-    pub status: String,
-    pub route_count: usize,
-    pub delivery_count: usize,
-    pub last_delivery_at: Option<DateTime<Utc>>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct ChannelStatusListResponse {
-    pub channels: Vec<ChannelStatusResponse>,
-}
+pub use swage_protocol::channel::{
+    ChannelInboundResponse, ChannelStatusListResponse, ChannelStatusResponse, DeliveryLogQuery,
+    DeliveryLogResponse, DevDmInboundRequest, DevThreadInboundRequest, RecordedDelivery,
+};
 
 pub async fn handle_dev_dm_inbound(
     state: &AppState,
@@ -841,7 +786,7 @@ mod tests {
 
     #[test]
     fn compose_channel_messages_separates_queued_updates() {
-        let received_at = Utc::now();
+        let received_at = chrono::Utc::now();
         let rows = vec![
             ChannelInboundMessage {
                 id: Uuid::new_v4(),

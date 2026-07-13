@@ -18,7 +18,7 @@ use tokio::task::JoinHandle;
 
 use swage_core::ToolError;
 use swage_storage::model::NewDeviceRegistration;
-use swage_tool::context::{SerializableToolContext, ToolContext};
+use swage_tool::context::{ToolContext, serialise_tool_context};
 use swage_tool::dispatch::ToolDispatcher;
 
 use crate::secret::SecretManager;
@@ -80,54 +80,10 @@ pub struct DeviceRuntime {
     pub devices: HashMap<String, RegisteredDevice>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DeviceResponse {
-    pub device_id: String,
-    pub label: Option<String>,
-    pub kind: String,
-    pub base_url: Option<String>,
-    pub workspace_root: String,
-    pub workspace_roots: Vec<String>,
-    pub capabilities: Vec<String>,
-    pub registered_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DeviceListResponse {
-    pub devices: Vec<DeviceResponse>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RegisterDeviceRequest {
-    pub device_id: String,
-    pub label: Option<String>,
-    #[serde(default = "default_remote_device_kind")]
-    pub kind: String,
-    pub base_url: String,
-    pub shared_token_secret_ref: String,
-    pub workspace_root: String,
-    #[serde(default)]
-    pub workspace_roots: Vec<String>,
-    #[serde(default)]
-    pub capabilities: Vec<String>,
-}
-
-fn default_remote_device_kind() -> String {
-    DeviceKind::AttachedDevice.to_string()
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RemoteToolExecutionRequest {
-    pub shared_token: String,
-    pub tool_name: String,
-    pub params: Value,
-    pub context: SerializableToolContext,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RemoteToolExecutionResponse {
-    pub output: Value,
-}
+pub use swage_protocol::device::{
+    DeviceListResponse, DeviceResponse, RegisterDeviceRequest, RemoteToolExecutionRequest,
+    RemoteToolExecutionResponse,
+};
 
 #[derive(Clone)]
 struct TransportBackedDeviceState {
@@ -401,7 +357,7 @@ pub async fn execute_on_remote_device(
         shared_token,
         tool_name: tool_name.to_string(),
         params: params.clone(),
-        context: SerializableToolContext::from_context(ctx),
+        context: serialise_tool_context(ctx),
     };
 
     let response = Client::new()

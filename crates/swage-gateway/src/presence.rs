@@ -50,53 +50,10 @@ pub struct PresenceRuntime {
     pub machines: HashMap<String, MachinePresenceRecord>,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct PresenceGatewayResponse {
-    pub status: String,
-    pub shutdown_requested: bool,
-    pub seconds_since_activity: u64,
-    pub active_turn_count: usize,
-    pub active_connection_count: usize,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct ClientPresenceResponse {
-    pub session_id: Uuid,
-    pub state: String,
-    pub connected_at: Option<DateTime<Utc>>,
-    pub last_seen_at: Option<DateTime<Utc>>,
-    pub disconnected_at: Option<DateTime<Utc>>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct MachinePresenceResponse {
-    pub machine_id: String,
-    pub label: Option<String>,
-    pub state: String,
-    pub registered_at: DateTime<Utc>,
-    pub last_seen_at: DateTime<Utc>,
-    pub disconnected_at: Option<DateTime<Utc>>,
-    pub stale_after_secs: u64,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct PresenceSnapshotResponse {
-    pub gateway: PresenceGatewayResponse,
-    pub clients: Vec<ClientPresenceResponse>,
-    pub machines: Vec<MachinePresenceResponse>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct MachineHeartbeatRequest {
-    pub machine_id: String,
-    pub label: Option<String>,
-    #[serde(default = "default_machine_stale_after_secs")]
-    pub stale_after_secs: u64,
-}
-
-fn default_machine_stale_after_secs() -> u64 {
-    30
-}
+pub use swage_protocol::hosting::{
+    ClientPresenceResponse, MachineHeartbeatRequest, MachinePresenceResponse,
+    PresenceGatewayResponse, PresenceSnapshotResponse,
+};
 
 pub async fn snapshot_presence(state: &AppState) -> PresenceSnapshotResponse {
     let now = Utc::now();

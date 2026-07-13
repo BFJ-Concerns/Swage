@@ -436,7 +436,10 @@ mod tests {
         assert_eq!(detail.messages.len(), 2);
         assert_eq!(detail.messages[0].role, "user");
         assert_eq!(detail.messages[0].content, "Hi");
-        assert_eq!(detail.messages[0].turn_state, Some(TurnState::Completed));
+        assert_eq!(
+            detail.messages[0].turn_state,
+            Some(swage_protocol::client::conversation::TurnState::Completed)
+        );
         assert_eq!(detail.messages[1].role, "assistant");
         assert_eq!(detail.messages[1].content, "Hello!");
     }

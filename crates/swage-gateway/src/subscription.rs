@@ -185,6 +185,9 @@ impl SubscriptionState {
             | ServerEvent::SkillAlreadyActive { .. }
             | ServerEvent::SkillDeactivated { .. }
             | ServerEvent::Shutdown { .. } => true,
+
+            // Client-side fallback; the gateway does not construct this.
+            ServerEvent::Unknown { .. } => false,
         }
     }
 }

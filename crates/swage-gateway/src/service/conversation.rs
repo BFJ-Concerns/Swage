@@ -1,7 +1,5 @@
 use std::{collections::HashMap, sync::Arc};
 
-use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use serde_json::Value as JsonValue;
@@ -11,125 +9,23 @@ use swage_storage::{
     store::{SpaceStore, Storage},
 };
 
-// ---------------------------------------------------------------------------
-// Response types — serialised to JSON for API consumers
-// ---------------------------------------------------------------------------
+use swage_protocol::client::conversation::TurnState as WireTurnState;
+pub use swage_protocol::client::conversation::{
+    ConversationBranchResponse, ConversationDetail, ConversationResponse, ConversationSummary,
+    ConversationThreadDetail, CreateConversationBranchRequest, MessageView, ToolCallView,
+};
 
-/// Response body for a newly created (or fetched) conversation.
-#[derive(Debug, Serialize)]
-pub struct ConversationResponse {
-    pub id: Uuid,
-    pub space_id: Uuid,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub selected_model_id: Option<String>,
-    pub created_at: DateTime<Utc>,
-    pub last_activity: DateTime<Utc>,
+fn turn_state_to_wire(state: &TurnState) -> WireTurnState {
+    match state {
+        TurnState::Pending => WireTurnState::Pending,
+        TurnState::Processing => WireTurnState::Processing,
+        TurnState::Completed => WireTurnState::Completed,
+        TurnState::Failed => WireTurnState::Failed,
+        TurnState::Interrupted => WireTurnState::Interrupted,
+        TurnState::AwaitingApproval => WireTurnState::AwaitingApproval,
+        TurnState::Delegating => WireTurnState::Delegating,
+    }
 }
-
-/// Compact representation of a conversation, used in list responses.
-#[derive(Debug, Serialize)]
-pub struct ConversationSummary {
-    pub id: Uuid,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub selected_model_id: Option<String>,
-    pub created_at: DateTime<Utc>,
-    pub last_activity: DateTime<Utc>,
-    /// Content of the most recent message in the conversation, if any.
-    pub message_preview: Option<String>,
-    /// True if any turn in the conversation was interrupted (e.g. by a crash).
-    pub has_interrupted_turn: bool,
-}
-
-/// Full conversation including all messages with turn-level state information.
-#[derive(Debug, Serialize)]
-pub struct ConversationDetail {
-    pub id: Uuid,
-    pub space_id: Uuid,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub selected_model_id: Option<String>,
-    pub created_at: DateTime<Utc>,
-    pub last_activity: DateTime<Utc>,
-    pub messages: Vec<MessageView>,
-}
-
-/// Branch metadata for a child thread within a conversation.
-#[derive(Debug, Serialize)]
-pub struct ConversationBranchResponse {
-    pub child_thread_id: Uuid,
-    pub parent_thread_id: Uuid,
-    pub branched_from_message_id: Uuid,
-    pub created_at: DateTime<Utc>,
-}
-
-/// Request body for creating a branch from a thread/message pair.
-#[derive(Debug, Deserialize)]
-pub struct CreateConversationBranchRequest {
-    pub thread_id: Uuid,
-    pub from_message_id: Uuid,
-}
-
-/// Detailed view of a single thread within a conversation.
-#[derive(Debug, Serialize)]
-pub struct ConversationThreadDetail {
-    pub id: Uuid,
-    pub session_id: Uuid,
-    pub agent_id: String,
-    pub state: String,
-    pub messages: Vec<MessageView>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub branch: Option<ConversationBranchResponse>,
-}
-
-// TODO Move API view/DTO types into the swage-protocol crate
-// The view types in this file (ToolCallView, MessageView, the conversation/
-// space/workspace responses) are the HTTP wire contract, mirrored by hand in
-// frontend/src/lib/types.ts with no enforcement. Move them to swage-protocol
-// so the frontend types are generated rather than maintained in parallel. See
-// the wire-contract section in CLAUDE.md and the swage-protocol mote in
-// .motes/TODO.md.
-// ---
-
-/// A tool call that occurred within a turn, as surfaced by the conversation API.
-#[derive(Debug, Clone, Serialize)]
-pub struct ToolCallView {
-    pub call_id: String,
-    pub tool: String,
-    /// Tool arguments, parsed from the stored JSON string.
-    pub arguments: JsonValue,
-    /// Tool result, if available. Parsed from the stored string when valid JSON;
-    /// otherwise wrapped as a plain string value.
-    pub result: Option<JsonValue>,
-    pub status: Option<String>,
-    pub duration_ms: Option<u64>,
-    pub truncated: bool,
-    pub total_bytes: Option<u64>,
-    /// call_id of the enclosing python_execute (or similar) call, if this is a
-    /// sub-tool invocation. None for top-level native calls.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub parent_call_id: Option<String>,
-}
-
-/// A single message in a conversation, annotated with its turn's lifecycle state.
-#[derive(Debug, Serialize)]
-pub struct MessageView {
-    pub thread_id: Uuid,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub turn_id: Option<Uuid>,
-    pub role: String,
-    pub content: String,
-    pub timestamp: DateTime<Utc>,
-    /// Lifecycle state of the turn that produced this message, when known.
-    pub turn_state: Option<TurnState>,
-    /// Tool calls that occurred in this message's turn.
-    ///
-    /// Populated for assistant messages when the originating turn is known.
-    pub tool_calls: Vec<ToolCallView>,
-}
-
-// ---------------------------------------------------------------------------
-// Service
-// ---------------------------------------------------------------------------
-
 /// Mediates between HTTP handlers and storage.
 ///
 /// Translates domain errors into `GatewayError` variants and maps storage
@@ -269,7 +165,8 @@ impl ConversationService {
             .map(|message| {
                 let turn_id = message.turn_id;
                 let turn_state = turn_id
-                    .and_then(|message_turn_id| turn_state_by_turn.get(&message_turn_id).cloned());
+                    .and_then(|message_turn_id| turn_state_by_turn.get(&message_turn_id))
+                    .map(turn_state_to_wire);
                 let tool_calls = if message.role == Role::Assistant {
                     turn_id
                         .and_then(|message_turn_id| {
@@ -521,7 +418,8 @@ impl ConversationService {
                         timestamp: message.created_at,
                         turn_state: message
                             .turn_id
-                            .and_then(|turn_id| turn_state_by_turn.get(&turn_id).cloned()),
+                            .and_then(|turn_id| turn_state_by_turn.get(&turn_id))
+                            .map(turn_state_to_wire),
                         tool_calls: if is_assistant {
                             message
                                 .turn_id

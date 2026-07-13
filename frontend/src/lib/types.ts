@@ -1,72 +1,31 @@
-// Shared TypeScript types for the Swage web interface.
-// These mirror the gateway's API response shapes.
+// Shared frontend types. Wire-contract types are generated from swage-protocol;
+// this module remains a compatibility barrel while the non-wire UI state below
+// stays authored locally.
 
-// TODO Replace hand-written API types with generated swage-protocol output
-// Every interface in this file mirrors a gateway serde type by hand, with no
-// enforcement — drift surfaces only at runtime. Once wire types live in the
-// swage-protocol crate, this file should be generated (ts-rs), with the
-// committed JSON Schema as the canonical contract. The schedule types have
-// already made the move — they live under src/lib/protocol/, generated from
-// the swage-protocol crate. See the wire-contract section in CLAUDE.md and
-// the swage-protocol mote in .motes/TODO.md.
-// ---
+import type { SpaceResponse } from "./protocol/SpaceResponse";
+import type { WorkspaceAttachmentResponse } from "./protocol/WorkspaceAttachmentResponse";
 
-import type { Schedule } from "./protocol/Schedule";
+import type { CreateSpaceRequest as WireCreateSpaceRequest } from "./protocol/CreateSpaceRequest";
+import type { UpdateSpaceRequest as WireUpdateSpaceRequest } from "./protocol/UpdateSpaceRequest";
+import type { CreateWorkspaceAttachmentRequest as WireCreateWorkspaceAttachmentRequest } from "./protocol/CreateWorkspaceAttachmentRequest";
 
-// -------------------------------------------------------------------------
-// Space types
-// -------------------------------------------------------------------------
-
-/** A space is the durable container users create and return to. */
-export interface Space {
-  id: string;
-  name: string;
-  description: string;
-  is_default: boolean;
-  slug: string;
-  created_at: string;
-  /** Client-side recency marker until the gateway persists last_opened_at. */
-  last_opened_at?: string | null;
-}
-
-/** Request body for creating a new space. */
-export interface CreateSpaceRequest {
-  name: string;
-  description?: string;
-}
-
-/** Request body for updating an existing space. All fields are optional. */
-export interface UpdateSpaceRequest {
-  name?: string;
-  description?: string;
-}
-
-export interface WorkspaceAttachment {
-  id: string;
-  space_id: string;
-  label: string;
-  path: string;
-  canonical_path: string;
-  is_missing: boolean;
-  is_default: boolean;
-  permissions: string[];
-  is_trusted: boolean;
-  created_at: string;
-}
-
-export interface CreateWorkspaceAttachmentRequest {
-  path: string;
-  label?: string;
+export type CreateSpaceRequest = Omit<WireCreateSpaceRequest, "description"> & { description?: string };
+export type UpdateSpaceRequest = WireUpdateSpaceRequest;
+export type CreateWorkspaceAttachmentRequest = Omit<
+  WireCreateWorkspaceAttachmentRequest,
+  "set_as_default" | "permissions" | "is_trusted"
+> & {
   set_as_default?: boolean;
-  active_session_id?: string;
   permissions?: string[];
   is_trusted?: boolean;
-}
+};
+export interface UpdateWorkspaceTrustRequest { is_trusted: boolean }
 
-export interface UpdateWorkspaceTrustRequest {
-  is_trusted: boolean;
-}
-
+export type Space = SpaceResponse & {
+  /** Client-side recency marker until the gateway persists last_opened_at. */
+  last_opened_at?: string | null;
+};
+export type WorkspaceAttachment = WorkspaceAttachmentResponse;
 export type ProviderProtocol = "openai" | "anthropic" | "google" | "openrouter" | "codex";
 
 export interface ProviderSettings {
@@ -242,87 +201,45 @@ export interface RestartStatusResponse {
   guidance: string;
 }
 
-/** Compact conversation entry for the list view. */
-export interface ConversationSummary {
-  id: string;
-  selected_model_id?: string | null;
-  created_at: string;
-  last_activity: string;
-  message_preview: string | null;
-  has_interrupted_turn: boolean;
-}
+import type { ConversationSummary as WireConversationSummary } from "./protocol/ConversationSummary";
+import type { ConversationDetail as WireConversationDetail } from "./protocol/ConversationDetail";
+import type { ConversationResponse as WireConversationResponse } from "./protocol/ConversationResponse";
+import type { MessageView as WireMessageView } from "./protocol/MessageView";
+import type { ToolCallView as WireToolCallView } from "./protocol/ToolCallView";
 
-/** Full conversation with message history. */
-export interface ConversationDetail {
-  id: string;
-  space_id: string;
+export type ConversationSummary = Omit<WireConversationSummary, "selected_model_id"> & {
   selected_model_id?: string | null;
-  created_at: string;
-  last_activity: string;
+};
+export type ConversationResponse = Omit<WireConversationResponse, "selected_model_id"> & {
+  selected_model_id?: string | null;
+};
+export type ConversationDetail = Omit<WireConversationDetail, "messages" | "selected_model_id"> & {
+  selected_model_id?: string | null;
   messages: MessageView[];
   input_tokens?: number | null;
   output_tokens?: number | null;
-}
+};
 
-/** A single tool call recorded against a message. */
-export interface ToolCallView {
-  call_id: string;
-  tool: string;
-  // The arguments passed to the tool, as a free-form key-value map.
+export type ToolCallView = Omit<
+  WireToolCallView,
+  "arguments" | "result" | "status" | "duration_ms" | "total_bytes" | "parent_call_id"
+> & {
   arguments: Record<string, unknown>;
-  // Null while the tool is still running; populated once it completes.
   result: string | Record<string, unknown> | null;
-  // Null while in progress; "success" or "error" once resolved.
-  status: "success" | "error" | null;
-  // Wall time for the call in milliseconds; null while in progress.
+  status: string | null;
   duration_ms: number | null;
-  // True when the result was cut off to fit the wire size limit.
-  truncated: boolean;
-  // Untruncated size of the result in bytes; null when not available.
   total_bytes: number | null;
-  // Set on sub-tool calls (tools invoked within python_execute); absent/null on top-level calls.
   parent_call_id?: string | null;
-  // Sub-tool calls nested under this invocation (populated client-side by the streaming store
-  // and the historical tree builder; not present in the raw API response).
   sub_calls?: ToolCallView[];
-}
+};
 
-/** A single message in a conversation. */
-export interface MessageView {
+export type MessageView = Omit<WireMessageView, "role" | "tool_calls" | "thread_id" | "turn_id"> & {
   thread_id?: string;
   turn_id?: string | null;
   role: "user" | "assistant";
-  content: string;
-  timestamp: string;
-  turn_state:
-    | "pending"
-    | "processing"
-    | "completed"
-    | "failed"
-    | "interrupted"
-    | "awaiting_approval"
-    | "delegating"
-    | null;
-  // Model id that produced an assistant message, when the API carries it.
-  // Absent on user messages and on assistant messages whose model wasn't
-  // reported — the message surface renders no model chip in that case rather
-  // than a permanent "Model not reported" label (UI audit f-9).
   model?: string | null;
-  // Present on every message in the conversation API; empty when no tool calls
-  // were recorded for that message. Kept optional here so local client-created
-  // message objects do not need to synthesise it eagerly.
   tool_calls?: ToolCallView[];
-}
-
-/** Response from creating a conversation. */
-export interface ConversationResponse {
-  id: string;
-  space_id: string;
-  selected_model_id?: string | null;
-  created_at: string;
-  last_activity: string;
-}
-
+};
 // -------------------------------------------------------------------------
 // Lens runtime types
 // -------------------------------------------------------------------------
@@ -727,43 +644,12 @@ export interface SharedReferenceDetailResponse {
 // Operator surface types
 // -------------------------------------------------------------------------
 
-export interface OperatorGatewaySummary {
-  status: string;
-  health: string;
-  shutdown_requested: boolean;
-  seconds_since_activity: number;
-  active_turn_count: number;
-  active_connection_count: number;
-}
-
-export interface OperatorSessionSummary {
-  id: string;
-  space_id: string;
-  space_name: string;
-  created_at: string;
-  last_activity: string;
-  message_preview: string | null;
-  has_interrupted_turn: boolean;
-  has_active_connection: boolean;
-  has_running_turn: boolean;
-}
-
-export interface OperatorApprovalSummary {
-  id: string;
-  turn_id: string;
-  agent_id: string;
-  kind: string;
-  tool_name: string | null;
-  prompt: string;
-  timeout_at: string | null;
-}
-
-export interface VoiceCapabilitiesResponse {
-  transcription: boolean;
-  synthesis: boolean;
-  default_voice: string | null;
-  supported_voices: string[];
-}
+export type { OperatorGatewaySummary } from "./protocol/OperatorGatewaySummary";
+export type { OperatorSessionSummary } from "./protocol/OperatorSessionSummary";
+export type { OperatorDeviceSummary } from "./protocol/OperatorDeviceSummary";
+export type { ChannelStatusResponse as ChannelStatusSummary } from "./protocol/ChannelStatusResponse";
+export type { ApprovalSummary as OperatorApprovalSummary } from "./protocol/ApprovalSummary";
+export type { OperatorOverviewResponse as OperatorOverview } from "./protocol/OperatorOverviewResponse";
 
 export interface RecoveryExportSummary {
   id: string;
@@ -782,266 +668,34 @@ export interface RecoveryExportListResponse {
   exports: RecoveryExportSummary[];
 }
 
-export interface ChannelStatusSummary {
-  integration: string;
-  status: string;
-  route_count: number;
-  delivery_count: number;
-  last_delivery_at: string | null;
-}
-
-export interface OperatorDeviceSummary {
-  device_id: string;
-  label: string | null;
-  kind: string;
-  base_url: string | null;
-  workspace_root: string;
-  capabilities: string[];
-  registered_at: string;
-  state: string;
-  last_seen_at: string | null;
-  disconnected_at: string | null;
-}
-
-export interface OperatorOverview {
-  gateway: OperatorGatewaySummary;
-  sessions: OperatorSessionSummary[];
-  approvals: OperatorApprovalSummary[];
-  schedules: {
-    schedules: Schedule[];
-  };
-  channels: {
-    channels: ChannelStatusSummary[];
-  };
-  devices: OperatorDeviceSummary[];
-}
-
 // -------------------------------------------------------------------------
 // WebSocket event types
 // -------------------------------------------------------------------------
 
-/** Client → Server events. */
-export type ClientEvent =
-  | { type: "send_message"; content: string; thread_id?: string; selected_model_id?: string }
-  | { type: "cancel" }
-  // Subscribe to one or more observability channels (e.g. "tools", "context").
-  | { type: "subscribe"; channels: string[] }
-  // Unsubscribe from previously subscribed channels.
-  | { type: "unsubscribe"; channels: string[] };
+import type { ClientEvent as WireClientEvent } from "./protocol/ClientEvent";
+import type { ServerEvent as WireServerEvent } from "./protocol/ServerEvent";
+export type { SchemaValidationError } from "./protocol/SchemaValidationError";
 
-/** Server → Client events. */
-export interface SchemaValidationError {
-  path: string;
-  message: string;
-}
+export type ClientEvent = WireClientEvent;
+export type KnownServerEvent = Exclude<WireServerEvent, { type: "unknown" }>;
+export type KnownServerEventType = KnownServerEvent["type"];
 
+// Runtime validation still needs values. The type assertion makes additions to
+// the generated union fail the frontend check until this parser list follows.
 export const KNOWN_SERVER_EVENT_TYPES = [
-  "token",
-  "turn_complete",
-  "error",
-  "cancelled",
-  "tool_start",
-  "tool_end",
-  "context_assembled",
-  "output_schema_retry",
-  "provider_retry_started",
-  "provider_retry_settled",
-  "output_schema_failed",
-  "delegation_started",
-  "delegation_completed",
-  "topology_run_started",
-  "topology_node_started",
-  "topology_node_completed",
-  "topology_run_completed",
-  "shutdown",
-  "skill_activated",
-  "skill_already_active",
-  "skill_deactivated",
-  "approval_required",
-  "approval_confirmed",
-  "approval_expired",
+  "token", "tool_start", "tool_end", "context_assembled", "turn_complete",
+  "output_schema_retry", "provider_retry_started", "provider_retry_settled",
+  "output_schema_failed", "delegation_started", "delegation_completed",
+  "topology_run_started", "topology_node_started", "topology_node_completed",
+  "topology_run_completed", "workflow_run_started", "workflow_entry_started",
+  "workflow_entry_completed", "workflow_run_completed", "error", "cancelled",
+  "shutdown", "skill_activated", "skill_already_active", "skill_deactivated",
+  "approval_required", "approval_confirmed", "approval_expired",
   "approval_decision_error",
-] as const;
+] as const satisfies readonly KnownServerEventType[];
 
-export type KnownServerEventType = (typeof KNOWN_SERVER_EVENT_TYPES)[number];
-
-export type KnownServerEvent =
-  | { type: "token"; content: string }
-  | {
-      type: "turn_complete";
-      turn_id: string;
-      input_tokens?: number;
-      output_tokens?: number;
-      cost_microcents?: number;
-      structured_output?: Record<string, unknown>;
-    }
-  | { type: "error"; code: string; message: string }
-  | { type: "cancelled" }
-  // Fires when the gateway begins executing a tool call.
-  | {
-      type: "tool_start";
-      call_id: string;
-      tool: string;
-      arguments: Record<string, unknown>;
-      // Present when this call was invoked within a parent call (e.g. python_execute).
-      parent_call_id?: string;
-    }
-  // Fires when a tool call finishes (success or error).
-  | {
-      type: "tool_end";
-      call_id: string;
-      tool: string;
-      result: string | Record<string, unknown>;
-      status: "success" | "error";
-      duration_ms: number;
-      truncated: boolean;
-      total_bytes: number | null;
-      // Mirrors parent_call_id from the corresponding tool_start.
-      parent_call_id?: string;
-    }
-  // Fires once per turn after context assembly completes, before streaming begins.
-  // Contains a diagnostic report that includes token budgets and any assembly errors.
-  // Always delivered when the report has errors; otherwise requires a "context" subscription.
-  | {
-      type: "context_assembled";
-      turn_id: string;
-      report: Record<string, unknown>;
-    }
-  | {
-      type: "output_schema_retry";
-      turn_id: string;
-      attempt: number;
-      max_retries: number;
-      errors: SchemaValidationError[];
-    }
-  | {
-      type: "provider_retry_started";
-      turn_id: string;
-      attempt: number;
-      max_retries: number;
-      provider: string;
-      wait_ms: number;
-    }
-  | {
-      type: "provider_retry_settled";
-      turn_id: string;
-      attempt: number;
-      max_retries: number;
-      provider: string;
-      success: boolean;
-    }
-  | {
-      type: "output_schema_failed";
-      turn_id: string;
-      attempts: number;
-      errors: SchemaValidationError[];
-    }
-  | {
-    type: "delegation_started";
-    parent_turn_id: string;
-    child_turn_id: string | null;
-    target_agent_id: string;
-  }
-  | {
-    type: "delegation_completed";
-    parent_turn_id: string;
-    child_turn_id: string | null;
-    target_agent_id: string;
-    success: boolean;
-  }
-  | {
-      type: "topology_run_started";
-      session_id: string;
-      topology_run_id: string;
-      team_id: string;
-    }
-  | {
-      type: "topology_node_started";
-      session_id: string;
-      topology_run_id: string;
-      node_execution_id: string;
-      device_id: string;
-    }
-  | {
-      type: "topology_node_completed";
-      session_id: string;
-      topology_run_id: string;
-      node_execution_id: string;
-      device_id: string;
-      success: boolean;
-    }
-  | {
-      type: "topology_run_completed";
-      session_id: string;
-      topology_run_id: string;
-      success: boolean;
-      final_output?: Record<string, unknown>;
-    }
-  // Fired by the gateway before it shuts down. Clients should surface this as
-  // a disconnection notice; the WebSocket will close shortly after.
-  | {
-      type: "shutdown";
-      reason: string;
-    }
-  // A skill was successfully activated for the current session. Includes metadata
-  // so the client can display the skill without a separate lookup.
-  | {
-      type: "skill_activated";
-      name: string;
-      display_name: string;
-      description: string;
-      token_count: number;
-    }
-  // A skill was already active — no state change occurred.
-  | {
-      type: "skill_already_active";
-      name: string;
-    }
-  // A skill was successfully deactivated for the current session.
-  | {
-      type: "skill_deactivated";
-      name: string;
-    }
-  | {
-      type: "approval_required";
-      approval_id: string;
-      turn_id: string;
-      agent_id: string;
-      kind: string;
-      tool_name?: string;
-      tool_arguments?: Record<string, unknown>;
-      prompt: string;
-      context?: Record<string, unknown>;
-      timeout_at: string;
-      timeout_policy: string;
-    }
-  | {
-      type: "approval_confirmed";
-      approval_id: string;
-      decision: string;
-      reason?: string;
-    }
-  | {
-      type: "approval_expired";
-      approval_id: string;
-      timeout_policy: string;
-    }
-  | {
-      type: "approval_decision_error";
-      approval_id: string;
-      error: string;
-      message: string;
-      current_state?: string;
-    };
-
-export interface UnknownServerEvent {
-  type: "unknown_event";
-  original_type: string;
-  raw: Record<string, unknown>;
-}
-
-export type ServerEvent = KnownServerEvent | UnknownServerEvent;
-
+export type UnknownServerEvent = Extract<WireServerEvent, { type: "unknown" }>;
+export type ServerEvent = WireServerEvent;
 // -------------------------------------------------------------------------
 // Connection state
 // -------------------------------------------------------------------------

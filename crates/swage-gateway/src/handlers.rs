@@ -2219,29 +2219,7 @@ pub async fn get_message_status(
     }))
 }
 
-/// Approval listing response.
-#[derive(Debug, Clone, Serialize)]
-pub struct ApprovalListResponse {
-    pub approvals: Vec<ApprovalSummary>,
-}
-
-/// Summary of a pending approval request.
-#[derive(Debug, Clone, Serialize)]
-pub struct ApprovalSummary {
-    pub id: Uuid,
-    pub turn_id: Uuid,
-    pub agent_id: String,
-    pub kind: String,
-    pub tool_name: Option<String>,
-    pub prompt: String,
-    pub timeout_at: Option<String>,
-}
-
-/// Query parameters for approval listing.
-#[derive(Debug, Deserialize)]
-pub struct ApprovalListQuery {
-    pub agent_id: Option<String>,
-}
+pub use swage_protocol::hosting::{ApprovalListQuery, ApprovalListResponse, ApprovalSummary};
 
 /// `GET /api/approvals` — list pending approval requests.
 ///
@@ -2304,14 +2282,7 @@ impl ApprovalOutcome {
     }
 }
 
-/// Request body for an approval decision.
-#[derive(Debug, Deserialize)]
-pub struct ApprovalDecisionRequest {
-    pub decision: ApprovalDecisionValue,
-    #[serde(default)]
-    pub scope: swage_agent::approval::ApprovalDecisionScope,
-    pub reason: Option<String>,
-}
+pub use swage_protocol::hosting::ApprovalDecisionRequest;
 
 /// `POST /api/approvals/:id` — decide on a pending approval.
 ///
@@ -2832,7 +2803,11 @@ mod tests {
         );
 
         let decision = client
-            .decide_approval(approval.id, "approved", Some("looks safe"))
+            .decide_approval(
+                approval.id,
+                swage_protocol::client::approval::ApprovalDecisionValue::Approved,
+                Some("looks safe"),
+            )
             .await
             .expect("decide approval through live gateway");
         assert_eq!(decision["approval_id"], approval.id.to_string());

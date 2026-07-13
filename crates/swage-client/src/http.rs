@@ -9,147 +9,25 @@ use std::fmt::Write as _;
 
 use crate::error::ClientError;
 use crate::runtime::RuntimeMetadata;
-use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use uuid::Uuid;
 
-// ---------------------------------------------------------------------------
-// Space request / response types
-// ---------------------------------------------------------------------------
+pub use swage_protocol::client::space::{
+    CreateSpaceRequest, CreateWorkspaceAttachmentRequest, SpaceListResponse, SpaceResponse,
+    UpdateSpaceRequest, UpdateWorkspaceTrustRequest, WorkspaceAttachmentListResponse,
+    WorkspaceAttachmentResponse,
+};
 
-/// Client-side view of a space returned by the gateway.
-#[derive(Debug, Clone, Deserialize)]
-pub struct SpaceResponse {
-    pub id: Uuid,
-    pub name: String,
-    pub slug: String,
-    pub created_at: DateTime<Utc>,
-}
+pub use swage_protocol::client::approval::{ApprovalDecisionScope, ApprovalDecisionValue};
+pub use swage_protocol::hosting::{
+    ApprovalDecisionRequest, ClientPresenceResponse, MachinePresenceResponse,
+    PresenceGatewayResponse, PresenceSnapshotResponse,
+};
 
-/// Response from the list-spaces endpoint.
-#[derive(Debug, Clone, Deserialize)]
-pub struct SpaceListResponse {
-    pub spaces: Vec<SpaceResponse>,
-}
-
-/// Request body for creating a new space.
-#[derive(Debug, Serialize)]
-pub struct CreateSpaceRequest {
-    pub name: String,
-}
-
-/// Request body for partially updating a space.
-///
-/// `None` fields are omitted from the JSON body — the gateway interprets an
-/// absent field as "no change" rather than "clear this field".
-#[derive(Debug, Serialize)]
-pub struct UpdateSpaceRequest {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct WorkspaceAttachmentResponse {
-    pub id: Uuid,
-    pub space_id: Uuid,
-    pub label: String,
-    pub path: String,
-    pub permissions: Vec<String>,
-    pub is_trusted: bool,
-    pub created_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct WorkspaceAttachmentListResponse {
-    pub workspaces: Vec<WorkspaceAttachmentResponse>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct CreateWorkspaceAttachmentRequest {
-    pub path: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub label: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub permissions: Option<Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub is_trusted: Option<bool>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct UpdateWorkspaceTrustRequest {
-    pub is_trusted: bool,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct PresenceGatewayResponse {
-    pub status: String,
-    pub shutdown_requested: bool,
-    pub seconds_since_activity: u64,
-    pub active_turn_count: usize,
-    pub active_connection_count: usize,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct ClientPresenceResponse {
-    pub session_id: Uuid,
-    pub state: String,
-    pub connected_at: Option<DateTime<Utc>>,
-    pub last_seen_at: Option<DateTime<Utc>>,
-    pub disconnected_at: Option<DateTime<Utc>>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct MachinePresenceResponse {
-    pub machine_id: String,
-    pub label: Option<String>,
-    pub state: String,
-    pub registered_at: DateTime<Utc>,
-    pub last_seen_at: DateTime<Utc>,
-    pub disconnected_at: Option<DateTime<Utc>>,
-    pub stale_after_secs: u64,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct PresenceSnapshotResponse {
-    pub gateway: PresenceGatewayResponse,
-    pub clients: Vec<ClientPresenceResponse>,
-    pub machines: Vec<MachinePresenceResponse>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct VoiceCapabilitiesResponse {
-    pub transcription: bool,
-    pub synthesis: bool,
-    pub default_voice: Option<String>,
-    pub supported_voices: Vec<String>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct TranscribeAudioRequest {
-    pub audio_bytes: Vec<u8>,
-    pub mime_type: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct TranscribeAudioResponse {
-    pub text: String,
-}
-
-#[derive(Debug, Serialize)]
-pub struct SynthesiseSpeechRequest {
-    pub text: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub voice: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub format: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct SynthesiseSpeechResponse {
-    pub audio_bytes: Vec<u8>,
-    pub mime_type: String,
-    pub voice: String,
-}
+pub use swage_protocol::client::voice::{
+    SynthesiseSpeechRequest, SynthesiseSpeechResponse, TranscribeAudioRequest,
+    TranscribeAudioResponse, VoiceCapabilitiesResponse,
+};
 
 // ---------------------------------------------------------------------------
 // GatewayClient
@@ -346,6 +224,7 @@ impl GatewayClient {
         let url = format!("{}/api/spaces", self.base_url);
         let body = CreateSpaceRequest {
             name: name.to_string(),
+            description: String::new(),
         };
         let response = self
             .client
@@ -399,6 +278,7 @@ impl GatewayClient {
         let url = format!("{}/api/spaces/{}", self.base_url, id);
         let body = UpdateSpaceRequest {
             name: name.map(str::to_string),
+            description: None,
         };
         let response = self
             .client
@@ -567,76 +447,10 @@ impl GatewayClient {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Conversation response types
-// ---------------------------------------------------------------------------
-
-/// Response returned when creating a conversation or querying its metadata.
-#[derive(Debug, Clone, Deserialize)]
-pub struct ConversationResponse {
-    pub id: Uuid,
-    pub space_id: Uuid,
-    pub selected_model_id: Option<String>,
-    pub created_at: DateTime<Utc>,
-    pub last_activity: DateTime<Utc>,
-}
-
-/// Compact summary of a conversation, used in list responses.
-#[derive(Debug, Clone, Deserialize)]
-pub struct ConversationSummary {
-    pub id: Uuid,
-    pub selected_model_id: Option<String>,
-    pub created_at: DateTime<Utc>,
-    pub last_activity: DateTime<Utc>,
-    /// First few words of the most recent message, if any.
-    pub message_preview: Option<String>,
-    /// Whether the most recent turn was interrupted before completing.
-    pub has_interrupted_turn: bool,
-}
-
-/// Full conversation detail including message history.
-#[derive(Debug, Clone, Deserialize)]
-pub struct ConversationDetail {
-    pub id: Uuid,
-    pub space_id: Uuid,
-    pub selected_model_id: Option<String>,
-    pub created_at: DateTime<Utc>,
-    pub last_activity: DateTime<Utc>,
-    pub messages: Vec<MessageView>,
-}
-
-/// A single message in a conversation, with its associated tool calls.
-#[derive(Debug, Clone, Deserialize)]
-pub struct MessageView {
-    /// `"user"` or `"assistant"`.
-    pub role: String,
-    pub content: String,
-    pub timestamp: DateTime<Utc>,
-    /// Lifecycle state of the turn this message belongs to.
-    pub turn_state: String,
-    pub tool_calls: Vec<ToolCallView>,
-}
-
-/// A tool call made during a turn, with its result and execution metadata.
-#[derive(Debug, Clone, Deserialize)]
-pub struct ToolCallView {
-    pub call_id: String,
-    pub tool: String,
-    pub arguments: serde_json::Value,
-    pub result: Option<serde_json::Value>,
-    pub status: Option<String>,
-    pub duration_ms: Option<u64>,
-    pub truncated: bool,
-    pub total_bytes: Option<u64>,
-    /// Set when this tool call was spawned by another tool call.
-    pub parent_call_id: Option<String>,
-}
-
-/// Private wrapper for deserialising the `{"conversations": [...]}` list envelope.
-#[derive(Deserialize)]
-struct ConversationListEnvelope {
-    conversations: Vec<ConversationSummary>,
-}
+use swage_protocol::client::conversation::ConversationListResponse as ConversationListEnvelope;
+pub use swage_protocol::client::conversation::{
+    ConversationDetail, ConversationResponse, ConversationSummary, MessageView, ToolCallView,
+};
 
 #[derive(Debug, Serialize)]
 struct CreateConversationRequest<'a> {
@@ -964,10 +778,10 @@ impl GatewayClient {
     pub async fn decide_approval(
         &self,
         approval_id: Uuid,
-        decision: &str,
+        decision: ApprovalDecisionValue,
         reason: Option<&str>,
     ) -> Result<serde_json::Value, ClientError> {
-        self.decide_approval_with_scope(approval_id, decision, None, reason)
+        self.decide_approval_with_scope(approval_id, decision, ApprovalDecisionScope::Once, reason)
             .await
     }
 
@@ -976,23 +790,16 @@ impl GatewayClient {
     pub async fn decide_approval_with_scope(
         &self,
         approval_id: Uuid,
-        decision: &str,
-        scope: Option<&str>,
+        decision: ApprovalDecisionValue,
+        scope: ApprovalDecisionScope,
         reason: Option<&str>,
     ) -> Result<serde_json::Value, ClientError> {
         let url = format!("{}/api/approvals/{approval_id}", self.base_url);
-        let mut body = serde_json::json!({
-            "decision": decision,
-            "reason": reason,
-        });
-        if let Some(scope) = scope
-            && let Some(object) = body.as_object_mut()
-        {
-            object.insert(
-                "scope".to_string(),
-                serde_json::Value::String(scope.to_string()),
-            );
-        }
+        let body = ApprovalDecisionRequest {
+            decision,
+            scope,
+            reason: reason.map(str::to_owned),
+        };
 
         let response = self
             .client
@@ -1065,6 +872,8 @@ mod space_type_tests {
     const SAMPLE_SPACE_JSON: &str = r#"{
         "id": "550e8400-e29b-41d4-a716-446655440000",
         "name": "My Space",
+        "description": "A workspace",
+        "is_default": false,
         "slug": "my-space",
         "created_at": "2024-01-01T00:00:00Z"
     }"#;
@@ -1095,6 +904,7 @@ mod space_type_tests {
     fn create_space_request_serialises_name_only() {
         let req = CreateSpaceRequest {
             name: "My Space".to_string(),
+            description: String::new(),
         };
         let json: serde_json::Value = serde_json::to_value(&req).unwrap();
         assert_eq!(json["name"], "My Space");
@@ -1104,6 +914,7 @@ mod space_type_tests {
     fn update_space_request_serialises_partial() {
         let req = UpdateSpaceRequest {
             name: Some("New Name".to_string()),
+            description: None,
         };
         let json: serde_json::Value = serde_json::to_value(&req).unwrap();
         assert_eq!(json["name"], "New Name");
@@ -1113,6 +924,7 @@ mod space_type_tests {
     fn workspace_attachment_request_serialises_scope() {
         let req = UpdateSpaceRequest {
             name: Some("Renamed".to_string()),
+            description: None,
         };
         let json: serde_json::Value = serde_json::to_value(&req).unwrap();
         assert_eq!(json["name"], "Renamed");
@@ -1120,8 +932,10 @@ mod space_type_tests {
         let workspace = CreateWorkspaceAttachmentRequest {
             path: "/new/path".to_string(),
             label: Some("Notes".to_string()),
-            permissions: Some(vec!["read".to_string()]),
-            is_trusted: Some(false),
+            set_as_default: false,
+            active_session_id: None,
+            permissions: vec!["read".to_string()],
+            is_trusted: false,
         };
         let json: serde_json::Value = serde_json::to_value(&workspace).unwrap();
         assert_eq!(json["path"], "/new/path");
@@ -1286,6 +1100,8 @@ mod tests {
             "last_activity": "2025-01-01T01:00:00Z",
             "messages": [
                 {
+                    "thread_id": Uuid::new_v4(),
+                    "turn_id": Uuid::new_v4(),
                     "role": "user",
                     "content": "Hello",
                     "timestamp": "2025-01-01T00:01:00Z",

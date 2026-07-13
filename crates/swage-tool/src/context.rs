@@ -1,20 +1,9 @@
 //! Tool execution context — the opaque boundary between tools and agent internals.
 
 use std::any::Any;
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
-
-/// Information about the user who initiated the current session.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct UserInfo {
-    pub id: String,
-    pub name: String,
-    /// Arbitrary metadata from the agent's auth layer.
-    pub metadata: HashMap<String, Value>,
-}
+pub use swage_protocol::device::{SerializableToolContext, UserInfo};
 
 /// Context passed to every tool execution.
 ///
@@ -50,33 +39,16 @@ pub trait ToolContext: Send + Sync {
     }
 }
 
-/// A serialisable snapshot of a ToolContext.
-///
-/// Built from `&dyn ToolContext` and round-trips through serde so it can be
-/// sent across process boundaries (e.g. into a sandboxed subprocess).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct SerializableToolContext {
-    pub agent_id: String,
-    pub session_id: String,
-    pub working_directory: PathBuf,
-    pub allowed_paths: Vec<PathBuf>,
-    pub user_info: Option<UserInfo>,
-    pub call_id: Option<String>,
-    pub turn_id: Option<uuid::Uuid>,
-}
-
-impl SerializableToolContext {
-    /// Snapshot an opaque context into a serialisable form.
-    pub fn from_context(ctx: &dyn ToolContext) -> Self {
-        Self {
-            agent_id: ctx.agent_id().to_owned(),
-            session_id: ctx.session_id().to_owned(),
-            working_directory: ctx.working_directory().to_owned(),
-            allowed_paths: ctx.allowed_paths().to_owned(),
-            user_info: ctx.user_info().cloned(),
-            call_id: ctx.call_id().map(ToOwned::to_owned),
-            turn_id: ctx.turn_id(),
-        }
+/// Snapshot an opaque context into the serialisable wire representation.
+pub fn serialise_tool_context(ctx: &dyn ToolContext) -> SerializableToolContext {
+    SerializableToolContext {
+        agent_id: ctx.agent_id().to_owned(),
+        session_id: ctx.session_id().to_owned(),
+        working_directory: ctx.working_directory().to_owned(),
+        allowed_paths: ctx.allowed_paths().to_owned(),
+        user_info: ctx.user_info().cloned(),
+        call_id: ctx.call_id().map(ToOwned::to_owned),
+        turn_id: ctx.turn_id(),
     }
 }
 
@@ -180,6 +152,10 @@ impl ToolContext for MockToolContext {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
+    use serde_json::Value;
+
     use super::*;
 
     fn make_mock() -> MockToolContext {
@@ -228,7 +204,7 @@ mod tests {
     #[test]
     fn serializable_context_round_trips() {
         let mock = make_mock();
-        let snap = SerializableToolContext::from_context(&mock);
+        let snap = serialise_tool_context(&mock);
 
         let json = serde_json::to_string(&snap).expect("serialise");
         let restored: SerializableToolContext = serde_json::from_str(&json).expect("deserialise");
@@ -254,7 +230,7 @@ mod tests {
     #[test]
     fn serializable_context_is_also_a_tool_context() {
         let mock = make_mock();
-        let snap = SerializableToolContext::from_context(&mock);
+        let snap = serialise_tool_context(&mock);
         let dyn_ctx: &dyn ToolContext = &snap;
 
         assert_eq!(dyn_ctx.agent_id(), "agent-1");

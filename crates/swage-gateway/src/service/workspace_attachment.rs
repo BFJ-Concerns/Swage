@@ -1,7 +1,5 @@
 use std::{path::Path, sync::Arc};
 
-use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use swage_core::GatewayError;
@@ -10,44 +8,10 @@ use swage_storage::{
     store::{SpaceStore, Storage},
 };
 
-// ---------------------------------------------------------------------------
-#[derive(Debug, Deserialize)]
-pub struct CreateWorkspaceAttachmentRequest {
-    pub path: String,
-    pub label: Option<String>,
-    #[serde(default)]
-    pub set_as_default: bool,
-    #[serde(default)]
-    pub active_session_id: Option<Uuid>,
-    #[serde(default = "default_workspace_permissions")]
-    pub permissions: Vec<String>,
-    #[serde(default)]
-    pub is_trusted: bool,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct UpdateWorkspaceTrustRequest {
-    pub is_trusted: bool,
-}
-
-#[derive(Debug, Serialize)]
-pub struct WorkspaceAttachmentResponse {
-    pub id: Uuid,
-    pub space_id: Uuid,
-    pub label: String,
-    pub path: String,
-    pub canonical_path: String,
-    pub is_missing: bool,
-    pub is_default: bool,
-    pub permissions: Vec<String>,
-    pub is_trusted: bool,
-    pub created_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct WorkspaceAttachmentListResponse {
-    pub workspaces: Vec<WorkspaceAttachmentResponse>,
-}
+pub use swage_protocol::client::space::{
+    CreateWorkspaceAttachmentRequest, UpdateWorkspaceTrustRequest, WorkspaceAttachmentListResponse,
+    WorkspaceAttachmentResponse,
+};
 
 fn default_workspace_permissions() -> Vec<String> {
     vec!["read".to_string()]
