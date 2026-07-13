@@ -117,6 +117,12 @@ impl ParsedSpec {
 
     fn initial_next_run_at(&self, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
         match self {
+            // Creation stores a lapsed one-shot as immediately due, so the
+            // scheduler runs it on its next tick. Resume and update instead
+            // use `arm`, where a lapsed one-shot is already complete. The
+            // asymmetry is deliberate: an explicit create in the past means
+            // "run now", while a missed existing schedule must not surprise
+            // the user with a late run.
             ParsedSpec::OneShot { at } => Some(*at),
             ParsedSpec::Interval { every, .. } => Some(now + *every),
             ParsedSpec::Cron { schedule, .. } => schedule.after(&now).next(),
@@ -1214,6 +1220,18 @@ mod tests {
             .initial_next_run_at(reference)
             .expect("next occurrence");
         assert_eq!(next.to_rfc3339(), "2026-04-17T12:34:15+00:00");
+    }
+
+    #[test]
+    fn creating_a_lapsed_one_shot_arms_it_for_the_next_tick() {
+        let now = DateTime::parse_from_rfc3339("2026-07-13T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let lapsed = now - Duration::minutes(5);
+        let parsed = ParsedSpec::OneShot { at: lapsed };
+
+        assert_eq!(parsed.initial_next_run_at(now), Some(lapsed));
+        assert_eq!(parsed.arm(now), (ScheduleStatus::Completed, None));
     }
 
     #[test]
