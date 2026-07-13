@@ -346,7 +346,9 @@ async fn create_voice_provider(
         swage_config::Protocol::OpenAi | swage_config::Protocol::OpenRouter => Arc::new(
             swage_provider::OpenAiVoiceProvider::from_config(provider_config),
         ),
-        swage_config::Protocol::Anthropic | swage_config::Protocol::Google => {
+        swage_config::Protocol::Anthropic
+        | swage_config::Protocol::Google
+        | swage_config::Protocol::Codex => {
             Arc::new(swage_provider::UnsupportedVoiceProvider::new(format!(
                 "voice is unavailable for provider protocol {:?}",
                 provider_endpoint.protocol
@@ -361,6 +363,7 @@ fn provider_base_url(config: &swage_config::ProviderEndpointConfig) -> &str {
         swage_config::Protocol::Anthropic => "https://api.anthropic.com",
         swage_config::Protocol::Google => "https://generativelanguage.googleapis.com",
         swage_config::Protocol::OpenRouter => "https://openrouter.ai/api/v1",
+        swage_config::Protocol::Codex => "",
     })
 }
 
@@ -851,6 +854,12 @@ async fn create_provider_with_retry(
             continue;
         };
 
+        // Codex is thread/turn-shaped and runs below the provider-parity
+        // selection surface. It must never enter the completion failover chain.
+        if provider_endpoint.protocol == swage_config::Protocol::Codex {
+            continue;
+        }
+
         let provider_config = match resolve_provider_config(
             provider_endpoint,
             model_endpoint,
@@ -924,6 +933,9 @@ fn concrete_provider(
         swage_config::Protocol::Google => Box::new(
             swage_provider::google::GoogleProvider::from_config(provider_config),
         ),
+        swage_config::Protocol::Codex => Box::new(swage_provider::UnsupportedLlmProvider::new(
+            "Codex turns run through the App Server harness",
+        )),
     }
 }
 
@@ -1164,6 +1176,8 @@ mod tests {
                             api_key_secret_ref: None,
                             api_key_env: None,
                             base_url: Some(primary_base_url),
+                            command: None,
+                            state_dir: None,
                         },
                     ),
                     (
@@ -1173,6 +1187,8 @@ mod tests {
                             api_key_secret_ref: None,
                             api_key_env: None,
                             base_url: Some(secondary_base_url),
+                            command: None,
+                            state_dir: None,
                         },
                     ),
                 ]
@@ -1235,6 +1251,8 @@ mod tests {
                             api_key_secret_ref: None,
                             api_key_env: None,
                             base_url: Some("http://localhost/openai".to_string()),
+                            command: None,
+                            state_dir: None,
                         },
                     ),
                     (
@@ -1244,6 +1262,8 @@ mod tests {
                             api_key_secret_ref: None,
                             api_key_env: None,
                             base_url: Some("http://localhost/anthropic".to_string()),
+                            command: None,
+                            state_dir: None,
                         },
                     ),
                 ]
@@ -1468,6 +1488,8 @@ mod tests {
             api_key_secret_ref: Some(secret.reference),
             api_key_env: Some("SHOULD_NOT_BE_READ".into()),
             base_url: Some("https://provider.invalid".into()),
+            command: None,
+            state_dir: None,
         };
         let model = swage_config::ModelEndpointConfig {
             provider_id: "anthropic".into(),

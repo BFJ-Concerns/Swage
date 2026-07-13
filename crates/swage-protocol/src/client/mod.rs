@@ -3,6 +3,7 @@
 
 pub mod channel;
 pub mod delivery;
+pub mod provider_signin;
 pub mod schedule;
 
 use schemars::JsonSchema;
@@ -25,4 +26,7 @@ pub struct ClientSurface {
     schedule_run: schedule::ScheduleRun,
     schedule_run_list: schedule::ScheduleRunListResponse,
     trigger_schedule_response: schedule::TriggerScheduleResponse,
+    start_provider_sign_in_request: provider_signin::StartProviderSignInRequest,
+    start_provider_sign_in_response: provider_signin::StartProviderSignInResponse,
+    provider_sign_in_state: provider_signin::ProviderSignInState,
 }

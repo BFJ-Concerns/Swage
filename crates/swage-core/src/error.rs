@@ -551,6 +551,18 @@ pub enum GatewayError {
     /// Request body or parameters failed validation (permanent).
     #[error("validation error: {0}")]
     ValidationError(String),
+
+    /// The selected provider does not expose the requested sign-in flow.
+    #[error("provider sign-in is unsupported: {0}")]
+    SignInUnsupported(String),
+
+    /// The provider rejected or could not complete a sign-in operation.
+    #[error("provider sign-in failed: {0}")]
+    SignInFailed(String),
+
+    /// The provider runtime could not be started or reached.
+    #[error("provider runtime unavailable: {0}")]
+    ProviderRuntimeUnavailable(String),
 }
 
 impl GatewayError {
@@ -567,7 +579,10 @@ impl GatewayError {
             | GatewayError::ConversationNotFound { .. }
             | GatewayError::SpaceNotFound { .. }
             | GatewayError::SpaceConflict(_)
-            | GatewayError::ValidationError(_) => false,
+            | GatewayError::ValidationError(_)
+            | GatewayError::SignInUnsupported(_)
+            | GatewayError::SignInFailed(_)
+            | GatewayError::ProviderRuntimeUnavailable(_) => false,
         }
     }
 }

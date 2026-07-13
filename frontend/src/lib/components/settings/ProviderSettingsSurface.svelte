@@ -1,7 +1,8 @@
 <script lang="ts">
-  import { onMount } from "svelte";
-  import { discoverModels } from "../../api/settings";
+  import { onDestroy, onMount } from "svelte";
+  import { discoverModels, fetchProviderSignIn, signOutProvider, startProviderSignIn } from "../../api/settings";
   import type { DiscoveredModel, ModelSettings, ProviderProtocol, SettingsResponse } from "../../types";
+  import type { ProviderSignInState } from "../../protocol/ProviderSignInState";
 
   interface Props {
     settings: SettingsResponse;
@@ -30,6 +31,9 @@
   let newModelIdByProvider = $state<Record<string, string>>({});
   let discoveredModels = $state<DiscoveredModel[]>([]);
   let collapsedProviderIds = $state<Set<string>>(new Set());
+  let signInByProvider = $state<Record<string, ProviderSignInState>>({});
+  let deviceCode = $state<{ code: string; verificationUrl: string } | null>(null);
+  const signInPolls = new Map<string, ReturnType<typeof setTimeout>>();
 
   const PROVIDER_KINDS = [
     { id: "OpenAi", label: "OpenAI", protocol: "openai" },
@@ -37,6 +41,7 @@
     { id: "Google", label: "Google", protocol: "google" },
     { id: "OpenRouter", label: "OpenRouter", protocol: "openrouter" },
     { id: "OpenAiCompatible", label: "OpenAI compatible", protocol: "openai" },
+    { id: "Codex", label: "Codex", protocol: "codex" },
   ] as const satisfies readonly ProviderKindDefinition[];
   const providerIds = $derived(Object.keys(settings.providers));
   const modelIds = $derived(Object.keys(settings.models));
@@ -57,12 +62,21 @@
   onMount(() => {
     selectedProvider = settings.default_provider || providerIds[0] || "";
     if (selectedProvider) void loadModels();
+    if (selectedProvider) void loadSignInState(selectedProvider);
+  });
+
+  onDestroy(() => {
+    for (const poll of signInPolls.values()) clearTimeout(poll);
   });
 
   async function loadModels(): Promise<void> {
     if (!selectedProvider) return;
     const provider = settings.providers[selectedProvider];
     if (!provider) return;
+    if (provider.protocol === "codex" && savedProviderIds.has(selectedProvider) && !codexModelsUsable(selectedProvider)) {
+      discoveredModels = [];
+      return;
+    }
     const discoveryDraft = savedProviderIds.has(selectedProvider)
       ? undefined
       : {
@@ -70,6 +84,10 @@
           base_url: provider.base_url,
           api_key_secret_ref: provider.api_key_secret_ref,
           api_key_env: provider.api_key_env,
+          ...(provider.protocol === "codex" ? {
+            command: provider.command,
+            state_dir: provider.state_dir,
+          } : {}),
         };
     try {
       const response = await discoverModels(selectedProvider, modelQuery, discoveryDraft);
@@ -87,6 +105,73 @@
     selectedProvider = id;
     modelQuery = "";
     loadModels();
+    void loadSignInState(id);
+  }
+
+  async function loadSignInState(id: string): Promise<void> {
+    if (settings.providers[id]?.protocol !== "codex" || !savedProviderIds.has(id)) return;
+    try {
+      const state = await fetchProviderSignIn(id);
+      signInByProvider[id] = state;
+      if (state.status === "signed_in" && selectedProvider === id) void loadModels();
+    } catch (err) {
+      error = err instanceof Error ? err.message : "Failed to read provider sign-in state.";
+    }
+  }
+
+  function pollSignInState(id: string, remaining = 60): void {
+    const previous = signInPolls.get(id);
+    if (previous) clearTimeout(previous);
+    if (remaining <= 0 || signInByProvider[id]?.status !== "signing_in") {
+      signInPolls.delete(id);
+      return;
+    }
+    signInPolls.set(id, setTimeout(async () => {
+      await loadSignInState(id);
+      pollSignInState(id, remaining - 1);
+    }, 2_000));
+  }
+
+  function signInStatusLabel(state: ProviderSignInState | undefined): string {
+    switch (state?.status) {
+      case "signed_in": return "✓ Signed in";
+      case "signing_in": return "Sign-in pending";
+      case "expired": return "Sign-in expired";
+      default: return "Signed out";
+    }
+  }
+
+  function codexModelsUsable(id: string): boolean {
+    return signInByProvider[id]?.status === "signed_in";
+  }
+
+  async function beginSignIn(id: string, method: "browser" | "device_code"): Promise<void> {
+    try {
+      const response = await startProviderSignIn(id, method);
+      if (response.method === "browser") {
+        window.open(response.auth_url, "_blank", "noopener,noreferrer");
+      } else {
+        deviceCode = { code: response.user_code, verificationUrl: response.verification_url };
+        window.open(response.verification_url, "_blank", "noopener,noreferrer");
+      }
+      signInByProvider[id] = { status: "signing_in", account: null };
+      pollSignInState(id);
+    } catch (err) {
+      error = err instanceof Error ? err.message : "Failed to start provider sign-in.";
+    }
+  }
+
+  async function copyDeviceCode(): Promise<void> {
+    if (deviceCode) await navigator.clipboard.writeText(deviceCode.code);
+  }
+
+  async function endSignIn(id: string): Promise<void> {
+    try {
+      signInByProvider[id] = await signOutProvider(id);
+      deviceCode = null;
+    } catch (err) {
+      error = err instanceof Error ? err.message : "Failed to sign out provider.";
+    }
   }
 
   function addDiscoveredModel(model: DiscoveredModel): void {
@@ -129,7 +214,7 @@
     protocol: ProviderProtocol;
   };
 
-  type ProviderKind = "OpenAi" | "Anthropic" | "Google" | "OpenRouter" | "OpenAiCompatible";
+  type ProviderKind = "OpenAi" | "Anthropic" | "Google" | "OpenRouter" | "OpenAiCompatible" | "Codex";
 
   function slugifyProviderName(value: string): string {
     return value
@@ -185,6 +270,8 @@
       api_key_env: null,
       has_credential: false,
       api_key: "",
+      command: kind.id === "Codex" ? "codex" : null,
+      state_dir: null,
     };
     selectedProvider = id;
     discoveredModels = [];
@@ -416,8 +503,10 @@
                   <span class="meta-endpoint">{provider.base_url || "provider default endpoint"}</span>
                 </p>
               </span>
-              <span class="credential-status" class:set={provider.has_credential}>
-                {provider.has_credential ? "✓ Credential" : "No credential"}
+              <span class="credential-status" class:set={provider.has_credential || signInByProvider[id]?.status === "signed_in"}>
+                {provider.protocol === "codex"
+                  ? signInStatusLabel(signInByProvider[id])
+                  : provider.has_credential ? "✓ Credential" : "No credential"}
               </span>
             </button>
             <button
@@ -433,6 +522,7 @@
 
           {#if !isCollapsed}
             <div class="provider-body">
+              {#if provider.protocol !== "codex"}
               <div class="field">
                 <div class="key">
                   Base URL
@@ -448,7 +538,6 @@
                   />
                 </div>
               </div>
-
               <div class="field">
                 <div class="key">
                   API key
@@ -467,6 +556,47 @@
                   </span>
                 </div>
               </div>
+              {:else}
+                <div class="field">
+                  <div class="key">
+                    ChatGPT account
+                    <small>Codex manages the browser or device-code sign-in and refreshes it automatically.</small>
+                  </div>
+                  <div class="val val-stack">
+                    {#if signInByProvider[id]?.status === "signed_in"}
+                      <span class="credential-status set">
+                        Signed in{signInByProvider[id]?.account?.email ? ` as ${signInByProvider[id].account.email}` : ""}
+                      </span>
+                      <button type="button" class="secondary" onclick={() => endSignIn(id)}>Sign out</button>
+                    {:else}
+                      {#if signInByProvider[id]?.status === "signing_in"}
+                        <p class="sign-in-guidance">Complete sign-in in the opened tab. Swage checks automatically; use “Check now” to finish immediately.</p>
+                      {:else if signInByProvider[id]?.status === "expired"}
+                        <p class="sign-in-guidance warning">Your ChatGPT sign-in has expired. Sign in again to use Codex models.</p>
+                      {/if}
+                      <div class="opt-row">
+                        <button type="button" class="secondary" disabled={!savedProviderIds.has(id)} onclick={() => beginSignIn(id, "browser")}>Sign in with browser</button>
+                        <button type="button" class="secondary" disabled={!savedProviderIds.has(id)} onclick={() => beginSignIn(id, "device_code")}>Use device code</button>
+                        <button type="button" class="secondary" disabled={!savedProviderIds.has(id)} onclick={() => loadSignInState(id)}>Check now</button>
+                      </div>
+                      {#if !savedProviderIds.has(id)}<small>Save settings before signing in.</small>{/if}
+                      {#if deviceCode}
+                        <div class="device-code-instruction">
+                          <span>Enter this device code on the verification page opened in your browser:</span>
+                          <div class="opt-row">
+                            <label>
+                              <span class="sr-only">Device code</span>
+                              <input class="text device-code" readonly value={deviceCode.code} />
+                            </label>
+                            <button type="button" class="secondary" onclick={copyDeviceCode}>Copy code</button>
+                            <a href={deviceCode.verificationUrl} target="_blank" rel="noreferrer">Open verification page</a>
+                          </div>
+                        </div>
+                      {/if}
+                    {/if}
+                  </div>
+                </div>
+              {/if}
 
               <div class="field">
                 <div class="key">
@@ -474,6 +604,9 @@
                   <small>Configured model IDs for this provider. The active default is marked.</small>
                 </div>
                 <div class="val val-stack">
+                  {#if provider.protocol === "codex" && !codexModelsUsable(id)}
+                    <p class="sign-in-guidance warning">These models cannot be used until the ChatGPT account is signed in.</p>
+                  {/if}
                   {#each modelsForProvider as [modelKey, model] (modelKey)}
                     <div class="model-row provider-model-row">
                       <div class="model-main">
@@ -492,6 +625,7 @@
                           type="button"
                           class="opt"
                           class:active={settings.default_model === modelKey}
+                          disabled={provider.protocol === "codex" && !codexModelsUsable(id)}
                           onclick={() => {
                             if (!settings) return;
                             settings.default_model = modelKey;
@@ -516,8 +650,9 @@
                       placeholder="model-id"
                       aria-label={`Add model by id for ${providerDisplayName(id)}`}
                       autocomplete="off"
+                      disabled={provider.protocol === "codex" && !codexModelsUsable(id)}
                     />
-                    <button type="button" class="opt opt-pick" onclick={() => addManualModel(id)}>
+                    <button type="button" class="opt opt-pick" disabled={provider.protocol === "codex" && !codexModelsUsable(id)} onclick={() => addManualModel(id)}>
                       <span class="pick-mark" aria-hidden="true">+</span>
                       <span>Add model</span>
                     </button>
@@ -544,11 +679,12 @@
                       }}
                       placeholder="Search models"
                       autocomplete="off"
+                      disabled={provider.protocol === "codex" && !codexModelsUsable(id)}
                     />
                     <button
                       type="button"
                       class="opt"
-                      disabled={isPersisting}
+                      disabled={isPersisting || (provider.protocol === "codex" && !codexModelsUsable(id))}
                       onclick={() => {
                         selectedProvider = id;
                         loadModels();
@@ -565,7 +701,7 @@
                           type="button"
                           class="opt"
                           class:active={added}
-                          disabled={added}
+                          disabled={added || (provider.protocol === "codex" && !codexModelsUsable(id))}
                           onclick={() => addDiscoveredModel(model)}
                           title={added ? "Already added" : `Add ${model.name}`}
                         >
@@ -837,6 +973,38 @@
     font-family: var(--font-body);
     font-size: 13px;
     line-height: 1.4;
+  }
+
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+  }
+
+  .sign-in-guidance {
+    margin: 0;
+    color: var(--ink-soft);
+  }
+
+  .sign-in-guidance.warning {
+    color: var(--ink-orange);
+  }
+
+  .device-code-instruction {
+    display: grid;
+    gap: 8px;
+  }
+
+  .device-code {
+    width: 14ch;
+    font-family: var(--font-mono);
+    letter-spacing: 0.08em;
   }
 
   .text.search {

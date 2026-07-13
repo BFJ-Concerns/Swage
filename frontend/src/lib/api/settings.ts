@@ -6,6 +6,9 @@ import type {
   SettingsPayload,
   SettingsResponse,
 } from "../types";
+import type { ProviderSignInState } from "../protocol/ProviderSignInState";
+import type { SignInMethod } from "../protocol/SignInMethod";
+import type { StartProviderSignInResponse } from "../protocol/StartProviderSignInResponse";
 
 async function request(path: string, method = "GET", body?: unknown): Promise<Response> {
   const init: RequestInit = { method };
@@ -58,6 +61,24 @@ export async function fetchRestartStatus(): Promise<RestartStatusResponse> {
 
 export async function restartGateway(): Promise<RestartStatusResponse> {
   return (await request("/api/settings/restart", "POST")).json() as Promise<RestartStatusResponse>;
+}
+
+export async function fetchProviderSignIn(providerId: string): Promise<ProviderSignInState> {
+  return (await request(`/api/settings/providers/${encodeURIComponent(providerId)}/sign-in`))
+    .json() as Promise<ProviderSignInState>;
+}
+
+export async function startProviderSignIn(
+  providerId: string,
+  method: SignInMethod = "browser",
+): Promise<StartProviderSignInResponse> {
+  return (await request(`/api/settings/providers/${encodeURIComponent(providerId)}/sign-in`, "POST", { method }))
+    .json() as Promise<StartProviderSignInResponse>;
+}
+
+export async function signOutProvider(providerId: string): Promise<ProviderSignInState> {
+  return (await request(`/api/settings/providers/${encodeURIComponent(providerId)}/sign-in`, "DELETE"))
+    .json() as Promise<ProviderSignInState>;
 }
 
 export function emptyPreset(): GenerationPresetConfig {

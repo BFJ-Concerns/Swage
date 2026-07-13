@@ -1120,6 +1120,8 @@ mod tests {
                         api_key_secret_ref: None,
                         api_key_env: Some("OPENAI_API_KEY".to_string()),
                         base_url: None,
+                        command: None,
+                        state_dir: None,
                     },
                 )])),
             }),
