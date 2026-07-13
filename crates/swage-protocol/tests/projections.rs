@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 use ts_rs::TS;
 
-use swage_protocol::client;
+use swage_protocol::{channel, client, device, hosting};
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -31,6 +31,23 @@ fn typescript_bindings_are_regenerated() {
         .expect("export channel link code request");
     client::channel::ChannelLinkCodeResponse::export_all(&cfg)
         .expect("export channel link code response");
+    client::websocket::ClientEvent::export_all(&cfg).expect("export client events");
+    client::websocket::ServerEvent::export_all(&cfg).expect("export server events");
+    client::space::CreateSpaceRequest::export_all(&cfg).expect("export create space");
+    client::space::UpdateSpaceRequest::export_all(&cfg).expect("export update space");
+    client::space::SpaceListResponse::export_all(&cfg).expect("export spaces");
+    client::space::CreateWorkspaceAttachmentRequest::export_all(&cfg)
+        .expect("export attach workspace");
+    client::space::WorkspaceAttachmentListResponse::export_all(&cfg).expect("export workspaces");
+    client::conversation::ConversationListResponse::export_all(&cfg).expect("export conversations");
+    client::conversation::ConversationResponse::export_all(&cfg)
+        .expect("export conversation response");
+    client::conversation::ConversationDetail::export_all(&cfg).expect("export conversation detail");
+    client::conversation::ConversationThreadDetail::export_all(&cfg)
+        .expect("export conversation thread");
+    client::voice::VoiceCapabilitiesResponse::export_all(&cfg).expect("export voice capabilities");
+    client::voice::TranscribeAudioRequest::export_all(&cfg).expect("export transcription");
+    client::voice::SynthesiseSpeechRequest::export_all(&cfg).expect("export speech synthesis");
     client::provider_signin::StartProviderSignInRequest::export_all(&cfg)
         .expect("export sign-in request");
     client::provider_signin::StartProviderSignInResponse::export_all(&cfg)
@@ -59,6 +76,28 @@ fn typescript_bindings_are_regenerated() {
     client::workflow::WorkflowEntryEvent::export_all(&cfg).expect("export workflow entry event");
     client::workflow::WorkflowRunCompletedEvent::export_all(&cfg)
         .expect("export workflow completed event");
+
+    // ts-rs preserves line-breaking spaces around documented enum fields.
+    // Normalise generated files so the committed projection also satisfies
+    // the repository whitespace gate.
+    trim_generated_typescript(&repo_root().join("frontend/src/lib/protocol"));
+}
+
+fn trim_generated_typescript(directory: &Path) {
+    for entry in std::fs::read_dir(directory).expect("read generated TypeScript directory") {
+        let path = entry.expect("read generated TypeScript entry").path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("ts") {
+            continue;
+        }
+        let source = std::fs::read_to_string(&path).expect("read generated TypeScript file");
+        let normalised = source
+            .lines()
+            .map(str::trim_end)
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        std::fs::write(path, normalised).expect("normalise generated TypeScript file");
+    }
 }
 
 #[test]
@@ -69,4 +108,29 @@ fn client_schema_is_regenerated() {
     let schema_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("schema/client.json");
     std::fs::create_dir_all(schema_path.parent().expect("schema dir")).expect("create schema dir");
     std::fs::write(&schema_path, rendered).expect("write schema document");
+}
+
+#[test]
+fn device_schema_is_regenerated() {
+    write_schema::<device::DeviceSurface>("device.json");
+}
+
+#[test]
+fn channel_schema_is_regenerated() {
+    write_schema::<channel::ChannelSurface>("channel.json");
+}
+
+#[test]
+fn hosting_schema_is_regenerated() {
+    write_schema::<hosting::HostingSurface>("hosting.json");
+}
+
+fn write_schema<T: schemars::JsonSchema>(name: &str) {
+    let schema = schemars::schema_for!(T);
+    let rendered = serde_json::to_string_pretty(&schema).expect("schema serialises") + "\n";
+    let schema_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("schema")
+        .join(name);
+    std::fs::create_dir_all(schema_path.parent().expect("schema dir")).expect("create schema dir");
+    std::fs::write(schema_path, rendered).expect("write schema document");
 }

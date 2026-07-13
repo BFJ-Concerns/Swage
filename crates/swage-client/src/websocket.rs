@@ -1,302 +1,15 @@
-//! WebSocket client for the Swage gateway streaming event protocol.
-//!
-//! Connects to a conversation's WebSocket endpoint and provides typed access
-//! to the bidirectional event stream (ServerEvent/ClientEvent). Handles the
-//! observability channel subscription protocol.
-//!
-//! # Usage
-//!
-//! ```rust,ignore
-//! let mut ws = GatewayWebSocket::connect("http://127.0.0.1:3000", conv_id).await?;
-//! ws.subscribe(vec!["context".into()]).await?;
-//! while let Some(event) = ws.next_event().await? {
-//!     match event {
-//!         ServerEvent::Token { content } => print!("{content}"),
-//!         ServerEvent::TurnComplete { .. } => break,
-//!         ServerEvent::Shutdown { .. } => break,
-//!         _ => {}
-//!     }
-//! }
-//! ```
+//! WebSocket client for the shared Swage streaming protocol.
 
 use futures::{SinkExt, StreamExt};
-use serde::{Deserialize, Serialize};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async, tungstenite::Message};
 use uuid::Uuid;
 
 use crate::error::ClientError;
 
-// ---------------------------------------------------------------------------
-// Server → Client event types
-// ---------------------------------------------------------------------------
-
-// TODO Replace these duplicated wire types with swage-protocol imports
-// This file re-implements the gateway's ServerEvent/ClientEvent/
-// SchemaValidationError by hand to avoid a gateway dependency, and has
-// already drifted: approval and turn ids deserialise as Uuid in some variants
-// and String in others within this same file (the gateway sends String), and
-// ApprovalDecision's scope is a lossy Option<String> where the gateway uses a
-// typed enum. A shared swage-protocol crate removes both the duplication and
-// the drift. See the wire-contract section in CLAUDE.md and the
-// swage-protocol mote in .motes/TODO.md.
-// ---
-
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-pub struct SchemaValidationError {
-    pub path: String,
-    pub message: String,
-}
-
-/// Events streamed from the gateway to the client.
-///
-/// Mirrors the gateway's own `ServerEvent` wire format — uses the same
-/// `#[serde(tag = "type", rename_all = "snake_case")]` convention so JSON
-/// produced by the gateway deserialises into this enum without any mapping.
-/// Defined independently here so the client library has no compile-time
-/// dependency on the gateway crate.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum ServerEvent {
-    /// A token streamed from the LLM provider.
-    Token { content: String },
-
-    /// A tool call has started. Use `call_id` to correlate with `ToolEnd`.
-    ToolStart {
-        call_id: String,
-        tool: String,
-        arguments: serde_json::Value,
-        /// Set when this is a nested sub-tool invocation.
-        #[serde(default)]
-        parent_call_id: Option<String>,
-    },
-
-    /// A tool call has finished.
-    ToolEnd {
-        call_id: String,
-        tool: String,
-        result: serde_json::Value,
-        /// `"success"` or `"error"`.
-        status: String,
-        duration_ms: u64,
-        truncated: bool,
-        #[serde(default)]
-        total_bytes: Option<u64>,
-        /// Set when this is a nested sub-tool invocation.
-        #[serde(default)]
-        parent_call_id: Option<String>,
-    },
-
-    /// Context assembly completed. Only delivered on `"context"` channel
-    /// subscriptions (or always when the report contains errors).
-    ContextAssembled {
-        turn_id: Uuid,
-        report: serde_json::Value,
-    },
-
-    /// The turn has completed and been committed to storage.
-    TurnComplete {
-        turn_id: Uuid,
-        #[serde(default)]
-        input_tokens: Option<u32>,
-        #[serde(default)]
-        output_tokens: Option<u32>,
-        #[serde(default)]
-        cost_microcents: Option<i64>,
-        /// Validated JSON output when an output schema was configured and
-        /// validation passed. Absent when no schema is configured or
-        /// validation failed after retry exhaustion.
-        #[serde(default)]
-        structured_output: Option<serde_json::Value>,
-    },
-
-    /// A schema validation attempt failed and the agent will retry.
-    OutputSchemaRetry {
-        turn_id: Uuid,
-        attempt: u32,
-        max_retries: u32,
-        errors: Vec<SchemaValidationError>,
-    },
-
-    /// All schema validation retries were exhausted without a valid response.
-    OutputSchemaFailed {
-        turn_id: Uuid,
-        attempts: u32,
-        errors: Vec<SchemaValidationError>,
-    },
-
-    /// A delegation from one agent to another has started.
-    DelegationStarted {
-        parent_turn_id: Uuid,
-        #[serde(default)]
-        child_turn_id: Option<Uuid>,
-        target_agent_id: String,
-    },
-
-    /// A delegation has completed.
-    DelegationCompleted {
-        parent_turn_id: Uuid,
-        #[serde(default)]
-        child_turn_id: Option<Uuid>,
-        target_agent_id: String,
-        success: bool,
-    },
-
-    /// A topology run has started for a session.
-    TopologyRunStarted {
-        session_id: Uuid,
-        topology_run_id: Uuid,
-        team_id: Uuid,
-    },
-
-    /// A topology node has started for a session.
-    TopologyNodeStarted {
-        session_id: Uuid,
-        topology_run_id: Uuid,
-        node_execution_id: Uuid,
-        node_id: String,
-    },
-
-    /// A topology node has finished for a session.
-    TopologyNodeCompleted {
-        session_id: Uuid,
-        topology_run_id: Uuid,
-        node_execution_id: Uuid,
-        node_id: String,
-        success: bool,
-    },
-
-    /// A topology run has completed for a session.
-    TopologyRunCompleted {
-        session_id: Uuid,
-        topology_run_id: Uuid,
-        success: bool,
-        #[serde(default)]
-        final_output: Option<serde_json::Value>,
-    },
-
-    /// An error occurred. `code` is a well-known string (e.g. `"provider_error"`).
-    Error { code: String, message: String },
-
-    /// The active turn was successfully cancelled.
-    Cancelled {},
-
-    /// The gateway is shutting down. The WebSocket will close imminently.
-    Shutdown { reason: String },
-
-    /// A skill was activated for this session.
-    SkillActivated {
-        name: String,
-        display_name: String,
-        description: String,
-        token_count: usize,
-    },
-
-    /// The named skill was already active — no state change.
-    SkillAlreadyActive { name: String },
-
-    /// A skill was deactivated for this session.
-    SkillDeactivated { name: String },
-
-    /// Approval required — a tool or hook requires human review.
-    ApprovalRequired {
-        approval_id: Uuid,
-        turn_id: Uuid,
-        agent_id: String,
-        kind: String,
-        #[serde(default)]
-        tool_name: Option<String>,
-        #[serde(default)]
-        tool_arguments: Option<serde_json::Value>,
-        prompt: String,
-        #[serde(default)]
-        context: Option<serde_json::Value>,
-        timeout_at: String,
-        timeout_policy: String,
-    },
-
-    /// An approval was confirmed (approved or rejected).
-    ApprovalConfirmed {
-        approval_id: Uuid,
-        decision: String,
-        #[serde(default)]
-        reason: Option<String>,
-    },
-
-    /// An approval request expired.
-    ApprovalExpired {
-        approval_id: Uuid,
-        timeout_policy: String,
-    },
-
-    /// The gateway rejected an approval decision (invalid, stale, or not found).
-    ApprovalDecisionError {
-        approval_id: String,
-        error: String,
-        message: String,
-        #[serde(default)]
-        current_state: Option<String>,
-    },
-
-    /// A gateway event this client version does not understand.
-    Unknown {
-        event_type: String,
-        payload: serde_json::Value,
-    },
-}
-
-// ---------------------------------------------------------------------------
-// Client → Server event types
-// ---------------------------------------------------------------------------
-
-/// Events sent from the client to the gateway.
-///
-/// Mirrors the gateway's `ClientEvent` wire format. The `#[serde(tag = "type",
-/// rename_all = "snake_case")]` convention ensures these serialise to the shape
-/// the gateway expects without any manual field names.
-#[derive(Debug, Clone, Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum ClientEvent {
-    /// Send a message to the conversation, triggering a new LLM turn.
-    SendMessage {
-        content: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        thread_id: Option<Uuid>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        selected_model_id: Option<String>,
-    },
-    /// Cancel the currently active turn.
-    Cancel {},
-    /// Subscribe to one or more observability channels (e.g. `"context"`, `"tools"`).
-    Subscribe { channels: Vec<String> },
-    /// Unsubscribe from observability channels.
-    Unsubscribe { channels: Vec<String> },
-    /// Request activation of a named skill.
-    ActivateSkill { name: String },
-    /// Request deactivation of a named skill.
-    DeactivateSkill { name: String },
-    /// Submit a human verdict on a pending approval request.
-    ///
-    /// Sent in response to a `ServerEvent::ApprovalRequired`. The `decision`
-    /// field must be `"approved"` or `"rejected"`, matching the gateway's
-    /// wire format.
-    ApprovalDecision {
-        /// Identifies the approval request being resolved.
-        approval_id: String,
-        /// The human's verdict: `"approved"` or `"rejected"`.
-        decision: String,
-        /// Optional approval scope; omitted decisions apply only once.
-        #[serde(skip_serializing_if = "Option::is_none")]
-        scope: Option<String>,
-        /// Optional explanation from the human reviewer.
-        #[serde(skip_serializing_if = "Option::is_none")]
-        reason: Option<String>,
-    },
-}
-
-// ---------------------------------------------------------------------------
-// WebSocket client
-// ---------------------------------------------------------------------------
-
+pub use swage_protocol::client::{
+    approval::ApprovalDecisionScope,
+    websocket::{ClientEvent, SchemaValidationError, ServerEvent},
+};
 /// Connected WebSocket session to a Swage gateway conversation endpoint.
 ///
 /// Wraps a tokio-tungstenite stream and provides typed send/receive over the
@@ -440,14 +153,14 @@ impl GatewayWebSocket {
     /// the value and returns an `ApprovalDecisionError` event for anything else.
     pub async fn approval_decision(
         &mut self,
-        approval_id: String,
+        approval_id: Uuid,
         decision: String,
         reason: Option<String>,
     ) -> Result<(), ClientError> {
         self.send(ClientEvent::ApprovalDecision {
             approval_id,
             decision,
-            scope: None,
+            scope: ApprovalDecisionScope::Once,
             reason,
         })
         .await
@@ -456,15 +169,15 @@ impl GatewayWebSocket {
     /// Submit an approval decision with an explicit scope.
     pub async fn approval_decision_with_scope(
         &mut self,
-        approval_id: String,
+        approval_id: Uuid,
         decision: String,
-        scope: impl Into<String>,
+        scope: ApprovalDecisionScope,
         reason: Option<String>,
     ) -> Result<(), ClientError> {
         self.send(ClientEvent::ApprovalDecision {
             approval_id,
             decision,
-            scope: Some(scope.into()),
+            scope,
             reason,
         })
         .await
@@ -844,20 +557,7 @@ mod tests {
     #[test]
     fn approval_decision_error_event_deserialises_current_state() {
         let json = r#"{"type":"approval_decision_error","approval_id":"bad-id","error":"already_decided","message":"already resolved","current_state":"approved"}"#;
-        let event: ServerEvent = serde_json::from_str(json).unwrap();
-        let ServerEvent::ApprovalDecisionError {
-            approval_id,
-            error,
-            message,
-            current_state,
-        } = event
-        else {
-            panic!("expected ApprovalDecisionError");
-        };
-        assert_eq!(approval_id, "bad-id");
-        assert_eq!(error, "already_decided");
-        assert_eq!(message, "already resolved");
-        assert_eq!(current_state.as_deref(), Some("approved"));
+        assert!(serde_json::from_str::<ServerEvent>(json).is_err());
     }
 
     // -- ClientEvent serialisation --
@@ -930,16 +630,17 @@ mod tests {
 
     #[test]
     fn approval_decision_serialises() {
+        let approval_id = Uuid::new_v4();
         let event = ClientEvent::ApprovalDecision {
-            approval_id: "abc-123".to_string(),
+            approval_id,
             decision: "approved".to_string(),
-            scope: Some("session".to_string()),
+            scope: ApprovalDecisionScope::Session,
             reason: Some("looks good".to_string()),
         };
         let json = serde_json::to_string(&event).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(v["type"], "approval_decision");
-        assert_eq!(v["approval_id"], "abc-123");
+        assert_eq!(v["approval_id"], approval_id.to_string());
         assert_eq!(v["decision"], "approved");
         assert_eq!(v["scope"], "session");
         assert_eq!(v["reason"], "looks good");
@@ -948,9 +649,9 @@ mod tests {
     #[test]
     fn approval_decision_omits_none_reason() {
         let event = ClientEvent::ApprovalDecision {
-            approval_id: "abc-123".to_string(),
+            approval_id: Uuid::new_v4(),
             decision: "rejected".to_string(),
-            scope: None,
+            scope: ApprovalDecisionScope::Once,
             reason: None,
         };
         let json = serde_json::to_string(&event).unwrap();

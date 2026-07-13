@@ -7,7 +7,7 @@ import type { SkipReason } from "./SkipReason";
 /**
  * A recorded run: everything needed to reconstruct what happened.
  */
-export type ScheduleRun = { id: string, schedule_id: string, trigger: ScheduleRunTrigger, state: ScheduleRunState, skip_reason: SkipReason | null, scheduled_for: string | null, 
+export type ScheduleRun = { id: string, schedule_id: string, trigger: ScheduleRunTrigger, state: ScheduleRunState, skip_reason: SkipReason | null, scheduled_for: string | null,
 /**
  * The session the run executed in — created fresh or continued,
  * depending on the schedule's session policy. Absent when the run

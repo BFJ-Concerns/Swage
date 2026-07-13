@@ -10,4 +10,7 @@
 //! schema document. Only the client surface exists so far; hosting, device,
 //! and channel surfaces join as their types migrate in.
 
+pub mod channel;
 pub mod client;
+pub mod device;
+pub mod hosting;

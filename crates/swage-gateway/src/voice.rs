@@ -3,63 +3,24 @@
 //! Translates direct client audio requests into provider-backed transcription
 //! and synthesis calls without changing the canonical text turn pipeline.
 
-use serde::{Deserialize, Serialize};
-use swage_provider::{
-    SpeechRequest, SpeechResponse, TranscriptionRequest, TranscriptionResponse, VoiceCapabilities,
-};
+use swage_provider::{SpeechRequest, SpeechResponse, TranscriptionRequest, TranscriptionResponse};
 
 use crate::{error::ApiError, state::AppState};
 use swage_core::GatewayError;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VoiceCapabilitiesResponse {
-    pub transcription: bool,
-    pub synthesis: bool,
-    pub default_voice: Option<String>,
-    #[serde(default)]
-    pub supported_voices: Vec<String>,
-}
-
-impl From<VoiceCapabilities> for VoiceCapabilitiesResponse {
-    fn from(value: VoiceCapabilities) -> Self {
-        Self {
-            transcription: value.transcription,
-            synthesis: value.synthesis,
-            default_voice: value.default_voice,
-            supported_voices: value.supported_voices,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TranscribeAudioRequest {
-    pub audio_bytes: Vec<u8>,
-    pub mime_type: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TranscribeAudioResponse {
-    pub text: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SynthesiseSpeechRequest {
-    pub text: String,
-    #[serde(default)]
-    pub voice: Option<String>,
-    #[serde(default)]
-    pub format: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SynthesiseSpeechResponse {
-    pub audio_bytes: Vec<u8>,
-    pub mime_type: String,
-    pub voice: String,
-}
+pub use swage_protocol::client::voice::{
+    SynthesiseSpeechRequest, SynthesiseSpeechResponse, TranscribeAudioRequest,
+    TranscribeAudioResponse, VoiceCapabilitiesResponse,
+};
 
 pub async fn voice_capabilities(state: &AppState) -> VoiceCapabilitiesResponse {
-    state.voice_provider.capabilities().into()
+    let capabilities = state.voice_provider.capabilities();
+    VoiceCapabilitiesResponse {
+        transcription: capabilities.transcription,
+        synthesis: capabilities.synthesis,
+        default_voice: capabilities.default_voice,
+        supported_voices: capabilities.supported_voices,
+    }
 }
 
 pub async fn transcribe_audio(

@@ -1,0 +1,237 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "DeviceSurface",
+  "type": "object",
+  "properties": {
+    "execute": {
+      "$ref": "#/$defs/RemoteToolExecutionRequest"
+    },
+    "execute_response": {
+      "$ref": "#/$defs/RemoteToolExecutionResponse"
+    },
+    "list": {
+      "$ref": "#/$defs/DeviceListResponse"
+    },
+    "register": {
+      "$ref": "#/$defs/RegisterDeviceRequest"
+    }
+  },
+  "required": [
+    "register",
+    "list",
+    "execute",
+    "execute_response"
+  ],
+  "$defs": {
+    "DeviceListResponse": {
+      "type": "object",
+      "properties": {
+        "devices": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DeviceResponse"
+          }
+        }
+      },
+      "required": [
+        "devices"
+      ]
+    },
+    "DeviceResponse": {
+      "type": "object",
+      "properties": {
+        "base_url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "device_id": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "label": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "registered_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "workspace_root": {
+          "type": "string"
+        },
+        "workspace_roots": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "device_id",
+        "kind",
+        "workspace_root",
+        "workspace_roots",
+        "capabilities",
+        "registered_at"
+      ]
+    },
+    "RegisterDeviceRequest": {
+      "type": "object",
+      "properties": {
+        "base_url": {
+          "type": "string"
+        },
+        "capabilities": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "device_id": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string",
+          "default": "attached_device"
+        },
+        "label": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "shared_token_secret_ref": {
+          "type": "string"
+        },
+        "workspace_root": {
+          "type": "string"
+        },
+        "workspace_roots": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "device_id",
+        "base_url",
+        "shared_token_secret_ref",
+        "workspace_root"
+      ]
+    },
+    "RemoteToolExecutionRequest": {
+      "type": "object",
+      "properties": {
+        "context": {
+          "$ref": "#/$defs/SerializableToolContext"
+        },
+        "params": true,
+        "shared_token": {
+          "type": "string"
+        },
+        "tool_name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "shared_token",
+        "tool_name",
+        "params",
+        "context"
+      ]
+    },
+    "RemoteToolExecutionResponse": {
+      "type": "object",
+      "properties": {
+        "output": true
+      },
+      "required": [
+        "output"
+      ]
+    },
+    "SerializableToolContext": {
+      "type": "object",
+      "properties": {
+        "agent_id": {
+          "type": "string"
+        },
+        "allowed_paths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "call_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "turn_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "user_info": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UserInfo"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "working_directory": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "agent_id",
+        "session_id",
+        "working_directory",
+        "allowed_paths"
+      ]
+    },
+    "UserInfo": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "metadata": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "metadata"
+      ]
+    }
+  }
+}

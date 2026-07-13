@@ -282,8 +282,8 @@ async fn request_sandbox_degradation_approval(
         .insert(approval.id, decision_tx);
 
     let _ = ws_tx.send(ServerEvent::ApprovalRequired {
-        approval_id: approval.id.to_string(),
-        turn_id: turn_id.to_string(),
+        approval_id: approval.id,
+        turn_id,
         agent_id: agent_id.to_owned(),
         kind: "hook".to_string(),
         tool_name: None,
@@ -326,7 +326,7 @@ async fn request_sandbox_degradation_approval(
                 )
                 .await?;
             let _ = ws_tx.send(ServerEvent::ApprovalConfirmed {
-                approval_id: approval.id.to_string(),
+                approval_id: approval.id,
                 decision: "approved".to_string(),
                 reason: decision.reason,
             });
@@ -342,7 +342,7 @@ async fn request_sandbox_degradation_approval(
                 )
                 .await?;
             let _ = ws_tx.send(ServerEvent::ApprovalConfirmed {
-                approval_id: approval.id.to_string(),
+                approval_id: approval.id,
                 decision: "rejected".to_string(),
                 reason: decision.reason,
             });
@@ -358,7 +358,7 @@ async fn request_sandbox_degradation_approval(
                 )
                 .await?;
             let _ = ws_tx.send(ServerEvent::ApprovalExpired {
-                approval_id: approval.id.to_string(),
+                approval_id: approval.id,
                 timeout_policy: timeout_policy.to_string(),
             });
             match timeout_policy {
@@ -1130,13 +1130,7 @@ pub(crate) async fn process_turn_with_existing_turn(
                     turn_id,
                     attempt,
                     max_retries,
-                    errors: errors
-                        .into_iter()
-                        .map(|e| crate::websocket::SchemaValidationError {
-                            path: e.path,
-                            message: e.message,
-                        })
-                        .collect(),
+                    errors,
                 };
                 if subscription.lock().await.should_deliver(&retry_event) {
                     let _ = ws_tx.send(retry_event);
@@ -1188,13 +1182,7 @@ pub(crate) async fn process_turn_with_existing_turn(
                 let _ = ws_tx.send(ServerEvent::OutputSchemaFailed {
                     turn_id,
                     attempts,
-                    errors: errors
-                        .into_iter()
-                        .map(|e| crate::websocket::SchemaValidationError {
-                            path: e.path,
-                            message: e.message,
-                        })
-                        .collect(),
+                    errors,
                 });
             }
             AgentEvent::TurnCompleted {
@@ -1390,8 +1378,8 @@ pub(crate) fn route_approval_agent_event(
             timeout_policy,
         } => {
             let _ = ws_tx.send(ServerEvent::ApprovalRequired {
-                approval_id: approval_id.to_string(),
-                turn_id: turn_id.to_string(),
+                approval_id,
+                turn_id,
                 agent_id,
                 kind,
                 tool_name,
@@ -1409,7 +1397,7 @@ pub(crate) fn route_approval_agent_event(
             reason,
         } => {
             let _ = ws_tx.send(ServerEvent::ApprovalConfirmed {
-                approval_id: approval_id.to_string(),
+                approval_id,
                 decision: decision.to_string(),
                 reason,
             });
@@ -1420,7 +1408,7 @@ pub(crate) fn route_approval_agent_event(
             timeout_policy,
         } => {
             let _ = ws_tx.send(ServerEvent::ApprovalExpired {
-                approval_id: approval_id.to_string(),
+                approval_id,
                 timeout_policy: timeout_policy.to_string(),
             });
             true

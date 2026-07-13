@@ -206,8 +206,8 @@ async fn handle_connection(socket: WebSocket, state: AppState, session_id: Uuid)
         Ok(pending) => {
             for approval in pending {
                 let event = ServerEvent::ApprovalRequired {
-                    approval_id: approval.id.to_string(),
-                    turn_id: approval.turn_id.to_string(),
+                    approval_id: approval.id,
+                    turn_id: approval.turn_id,
                     agent_id: approval.agent_id.clone(),
                     kind: approval.kind.to_string(),
                     tool_name: approval.tool_name.clone(),
