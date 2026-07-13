@@ -264,9 +264,9 @@ describe("server event dispatch", () => {
     ).not.toThrow();
     expect(received).toEqual([
       {
-        type: "unknown_event",
-        original_type: "future_event",
-        raw: { type: "future_event", payload: "x" },
+        type: "unknown",
+        event_type: "future_event",
+        payload: { type: "future_event", payload: "x" },
       },
     ]);
   });

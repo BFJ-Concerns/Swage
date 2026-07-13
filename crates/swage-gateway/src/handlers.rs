@@ -2803,7 +2803,11 @@ mod tests {
         );
 
         let decision = client
-            .decide_approval(approval.id, "approved", Some("looks safe"))
+            .decide_approval(
+                approval.id,
+                swage_protocol::client::approval::ApprovalDecisionValue::Approved,
+                Some("looks safe"),
+            )
             .await
             .expect("decide approval through live gateway");
         assert_eq!(decision["approval_id"], approval.id.to_string());

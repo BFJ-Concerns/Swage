@@ -2,8 +2,8 @@ import type {
   AttachmentQueuedResponse,
   CreateAttachmentRequest,
   RecoveryExportListResponse,
-  VoiceCapabilitiesResponse,
 } from "../types";
+import type { VoiceCapabilitiesResponse } from "../protocol/VoiceCapabilitiesResponse";
 import type { CreateScheduleRequest } from "../protocol/CreateScheduleRequest";
 import type { Schedule } from "../protocol/Schedule";
 

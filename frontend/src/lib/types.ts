@@ -2,7 +2,6 @@
 // this module remains a compatibility barrel while the non-wire UI state below
 // stays authored locally.
 
-import type { Schedule } from "./protocol/Schedule";
 import type { SpaceResponse } from "./protocol/SpaceResponse";
 import type { WorkspaceAttachmentResponse } from "./protocol/WorkspaceAttachmentResponse";
 
@@ -645,43 +644,12 @@ export interface SharedReferenceDetailResponse {
 // Operator surface types
 // -------------------------------------------------------------------------
 
-export interface OperatorGatewaySummary {
-  status: string;
-  health: string;
-  shutdown_requested: boolean;
-  seconds_since_activity: number;
-  active_turn_count: number;
-  active_connection_count: number;
-}
-
-export interface OperatorSessionSummary {
-  id: string;
-  space_id: string;
-  space_name: string;
-  created_at: string;
-  last_activity: string;
-  message_preview: string | null;
-  has_interrupted_turn: boolean;
-  has_active_connection: boolean;
-  has_running_turn: boolean;
-}
-
-export interface OperatorApprovalSummary {
-  id: string;
-  turn_id: string;
-  agent_id: string;
-  kind: string;
-  tool_name: string | null;
-  prompt: string;
-  timeout_at: string | null;
-}
-
-export interface VoiceCapabilitiesResponse {
-  transcription: boolean;
-  synthesis: boolean;
-  default_voice: string | null;
-  supported_voices: string[];
-}
+export type { OperatorGatewaySummary } from "./protocol/OperatorGatewaySummary";
+export type { OperatorSessionSummary } from "./protocol/OperatorSessionSummary";
+export type { OperatorDeviceSummary } from "./protocol/OperatorDeviceSummary";
+export type { ChannelStatusResponse as ChannelStatusSummary } from "./protocol/ChannelStatusResponse";
+export type { ApprovalSummary as OperatorApprovalSummary } from "./protocol/ApprovalSummary";
+export type { OperatorOverviewResponse as OperatorOverview } from "./protocol/OperatorOverviewResponse";
 
 export interface RecoveryExportSummary {
   id: string;
@@ -698,40 +666,6 @@ export interface RecoveryExportSummary {
 
 export interface RecoveryExportListResponse {
   exports: RecoveryExportSummary[];
-}
-
-export interface ChannelStatusSummary {
-  integration: string;
-  status: string;
-  route_count: number;
-  delivery_count: number;
-  last_delivery_at: string | null;
-}
-
-export interface OperatorDeviceSummary {
-  device_id: string;
-  label: string | null;
-  kind: string;
-  base_url: string | null;
-  workspace_root: string;
-  capabilities: string[];
-  registered_at: string;
-  state: string;
-  last_seen_at: string | null;
-  disconnected_at: string | null;
-}
-
-export interface OperatorOverview {
-  gateway: OperatorGatewaySummary;
-  sessions: OperatorSessionSummary[];
-  approvals: OperatorApprovalSummary[];
-  schedules: {
-    schedules: Schedule[];
-  };
-  channels: {
-    channels: ChannelStatusSummary[];
-  };
-  devices: OperatorDeviceSummary[];
 }
 
 // -------------------------------------------------------------------------
@@ -760,13 +694,8 @@ export const KNOWN_SERVER_EVENT_TYPES = [
   "approval_decision_error",
 ] as const satisfies readonly KnownServerEventType[];
 
-export interface UnknownServerEvent {
-  type: "unknown_event";
-  original_type: string;
-  raw: Record<string, unknown>;
-}
-
-export type ServerEvent = KnownServerEvent | UnknownServerEvent;
+export type UnknownServerEvent = Extract<WireServerEvent, { type: "unknown" }>;
+export type ServerEvent = WireServerEvent;
 // -------------------------------------------------------------------------
 // Connection state
 // -------------------------------------------------------------------------

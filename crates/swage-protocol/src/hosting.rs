@@ -12,6 +12,7 @@ use crate::{channel::ChannelStatusListResponse, client::approval, client::schedu
 pub struct PresenceGatewayResponse {
     pub status: String,
     pub shutdown_requested: bool,
+    #[ts(type = "number")]
     pub seconds_since_activity: u64,
     pub active_turn_count: usize,
     pub active_connection_count: usize,
@@ -34,6 +35,7 @@ pub struct MachinePresenceResponse {
     pub registered_at: DateTime<Utc>,
     pub last_seen_at: DateTime<Utc>,
     pub disconnected_at: Option<DateTime<Utc>>,
+    #[ts(type = "number")]
     pub stale_after_secs: u64,
 }
 
@@ -49,6 +51,7 @@ pub struct MachineHeartbeatRequest {
     pub machine_id: String,
     pub label: Option<String>,
     #[serde(default = "default_machine_stale_after_secs")]
+    #[ts(type = "number")]
     pub stale_after_secs: u64,
 }
 
@@ -86,6 +89,7 @@ pub struct OperatorGatewaySummary {
     pub status: String,
     pub health: String,
     pub shutdown_requested: bool,
+    #[ts(type = "number")]
     pub seconds_since_activity: u64,
     pub active_turn_count: usize,
     pub active_connection_count: usize,
