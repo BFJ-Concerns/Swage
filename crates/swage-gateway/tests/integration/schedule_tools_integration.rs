@@ -183,6 +183,55 @@ async fn agent_created_schedule_is_attributed_and_fires() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn scheduling_bundle_can_pause_and_resume_a_schedule_through_the_tool() {
+    let state = test_state();
+    let space = state.space_store.get_or_create_default().await.unwrap();
+    let dispatcher = dispatcher(permissions(&["scheduling"], &[]));
+    let ctx = host_context(&state, "researcher", Uuid::new_v4());
+
+    let created = dispatcher
+        .dispatch(
+            "schedule",
+            json!({
+                "action": "create",
+                "message": "sweep the inbox",
+                "timing": "every",
+                "every": "every 1 hours",
+                "session": "fresh",
+                "space_id": space.id,
+                "agent_id": "gateway",
+            }),
+            &ctx,
+            "researcher",
+        )
+        .await
+        .unwrap();
+    let schedule_id = created.result["schedule"]["id"].as_str().unwrap();
+
+    let paused = dispatcher
+        .dispatch(
+            "schedule",
+            json!({"action": "pause", "schedule_id": schedule_id}),
+            &ctx,
+            "researcher",
+        )
+        .await
+        .unwrap();
+    assert_eq!(paused.result["schedule"]["status"], "paused");
+
+    let resumed = dispatcher
+        .dispatch(
+            "schedule",
+            json!({"action": "resume", "schedule_id": schedule_id}),
+            &ctx,
+            "researcher",
+        )
+        .await
+        .unwrap();
+    assert_eq!(resumed.result["schedule"]["status"], "active");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn wake_me_later_schedules_a_one_off_continuation_of_the_calling_session() {
     let state = test_state();
     let space = state.space_store.get_or_create_default().await.unwrap();

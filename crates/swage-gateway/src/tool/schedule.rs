@@ -4,7 +4,7 @@
 //! HTTP surface use (`crate::schedule`), so an agent's standing work is a
 //! first-class schedule, recorded and attributed like any other:
 //!
-//! - **`schedule`** — create, list, change, and remove standing schedules.
+//! - **`schedule`** — create, list, change, pause, resume, and remove standing schedules.
 //! - **`wake_me_later`** — resume the current session once after a delay.
 //!
 //! Both need the live gateway state, so both run on the host
@@ -128,7 +128,7 @@ impl Tool for ScheduleTool {
     fn description(&self) -> &str {
         "Create and manage standing schedules — recurring or one-off background work the \
          gateway runs on its own clock, whether or not this conversation is still open. Set \
-         `action` to create, list, update, or remove.\n\n\
+         `action` to create, list, update, pause, resume, or remove.\n\n\
          You choose where each run executes with `session` (required on create). Almost always \
          set it to `fresh`: every run gets its own new session, opened with just the task and the \
          previous run's outcome — a clean, minimal context each time, not the entire history of \
@@ -148,16 +148,19 @@ impl Tool for ScheduleTool {
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["create", "list", "update", "remove"],
+                    "enum": ["create", "list", "update", "pause", "resume", "remove"],
                     "description": "create: define a new schedule. list: return every schedule \
                                     with its status, next run time, and creator. update: change an \
-                                    existing schedule's task, timing, or gate. remove: delete a \
-                                    schedule permanently."
+                                    existing schedule's task, timing, or gate. pause: stop future \
+                                    runs without deleting the schedule. resume: re-arm a paused \
+                                    schedule from its stored timing. remove: delete a schedule \
+                                    permanently."
                 },
                 "schedule_id": {
                     "type": "string",
                     "description": "The schedule's UUID, from a create result or a list entry. \
-                                    Required for update and remove; ignored otherwise."
+                                    Required for update, pause, resume, and remove; ignored \
+                                    otherwise."
                 },
                 "message": {
                     "type": "string",
@@ -261,10 +264,14 @@ impl Tool for ScheduleTool {
             "create" => self.create(state, &params, ctx.agent_id()).await,
             "list" => self.list(state).await,
             "update" => self.update(state, &params).await,
+            "pause" => self.pause(state, &params).await,
+            "resume" => self.resume(state, &params).await,
             "remove" => self.remove(state, &params).await,
             other => Err(invalid(
                 SCHEDULE_TOOL,
-                format!("unknown action '{other}': use create, list, update, or remove"),
+                format!(
+                    "unknown action '{other}': use create, list, update, pause, resume, or remove"
+                ),
             )),
         }
     }
@@ -339,11 +346,7 @@ impl ScheduleTool {
     }
 
     async fn remove(&self, state: &AppState, params: &Value) -> Result<Value, ToolError> {
-        let schedule_id = parse_uuid(
-            SCHEDULE_TOOL,
-            "schedule_id",
-            required_str(SCHEDULE_TOOL, params, "schedule_id")?,
-        )?;
+        let schedule_id = schedule_id(params)?;
         let removed = crate::schedule::delete_schedule(state, schedule_id)
             .await
             .map_err(|error| map_service_error(SCHEDULE_TOOL, error))?;
@@ -355,6 +358,28 @@ impl ScheduleTool {
         }
         Ok(json!({ "removed": true, "schedule_id": schedule_id }))
     }
+
+    async fn pause(&self, state: &AppState, params: &Value) -> Result<Value, ToolError> {
+        let schedule = crate::schedule::pause_schedule(state, schedule_id(params)?)
+            .await
+            .map_err(|error| map_service_error(SCHEDULE_TOOL, error))?;
+        Ok(json!({ "schedule": schedule }))
+    }
+
+    async fn resume(&self, state: &AppState, params: &Value) -> Result<Value, ToolError> {
+        let schedule = crate::schedule::resume_schedule(state, schedule_id(params)?)
+            .await
+            .map_err(|error| map_service_error(SCHEDULE_TOOL, error))?;
+        Ok(json!({ "schedule": schedule }))
+    }
+}
+
+fn schedule_id(params: &Value) -> Result<Uuid, ToolError> {
+    parse_uuid(
+        SCHEDULE_TOOL,
+        "schedule_id",
+        required_str(SCHEDULE_TOOL, params, "schedule_id")?,
+    )
 }
 
 /// Assemble a schedule spec from the flat timing parameters, checking that the
