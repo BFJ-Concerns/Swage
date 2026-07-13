@@ -6,7 +6,7 @@ use std::{path::Path, sync::Arc, time::Instant};
 use serde_json::{Value, json};
 use swage_agent::{AgentConfig, AgentError, AgentEvent, OutboundMessage};
 use swage_codex::{AppServerClient, ClientError, ContentItem, DynamicToolSpec, ToolCallResponse};
-use swage_core::{ChatMessage, Role};
+use swage_core::{ChatMessage, Role, StorageError};
 use swage_storage::{
     model::{AppendMessage, NewAuditEvent, NewToolCall, ThreadState, TurnState},
     store::Storage,
@@ -377,7 +377,7 @@ async fn run_turn_inner(
                             response_text = text.to_string();
                             let _ = request.event_tx.send(AgentEvent::Token { content: text.to_string() });
                         }
-                        record_audit(&state.storage, request.session_id, request.turn_id, "codex_item", item.get("type").and_then(Value::as_str).unwrap_or("item"), json!({
+                        let _ = record_audit(&state.storage, request.session_id, request.turn_id, "codex_item", item.get("type").and_then(Value::as_str).unwrap_or("item"), json!({
                             "codex_thread_id":codex_thread_id,
                             "codex_turn_id":codex_turn_id,
                             "item":item,
@@ -717,7 +717,7 @@ async fn handle_approval(
             json!({"permissions":{"fileSystem":null,"network":null},"scope":"turn"}),
         ),
         _ => {
-            record_audit(
+            let _ = record_audit(
                 &state.storage,
                 request.session_id,
                 request.turn_id,
@@ -741,7 +741,7 @@ async fn handle_approval(
             return;
         }
     };
-    record_audit(
+    let audit_result = record_audit(
         &state.storage,
         request.session_id,
         request.turn_id,
@@ -755,11 +755,21 @@ async fn handle_approval(
         }),
     )
     .await;
+    // Approval without a durable audit record would make the harness path
+    // less strict than native dispatch. Storage failure therefore narrows any
+    // computed outcome to a denial; an already-denied request stays denied.
+    let response = if audit_result.is_ok() {
+        response
+    } else {
+        json!({"decision":"decline"})
+    };
     let _ = client.respond(incoming.id, response).await;
 }
 
 fn path_allowed(path: &Path, roots: &[std::path::PathBuf]) -> bool {
-    roots.iter().any(|root| path.starts_with(root))
+    roots
+        .iter()
+        .any(|root| crate::tool::workspace::validate_path(root, &path.to_string_lossy()).is_ok())
 }
 
 async fn record_audit(
@@ -769,8 +779,8 @@ async fn record_audit(
     event_kind: &str,
     summary: &str,
     metadata: Value,
-) {
-    let _ = storage
+) -> Result<(), StorageError> {
+    storage
         .create_audit_event(NewAuditEvent {
             id: Uuid::new_v4().to_string(),
             session_id: Some(session_id),
@@ -780,7 +790,8 @@ async fn record_audit(
             summary: summary.to_string(),
             metadata,
         })
-        .await;
+        .await
+        .map(|_| ())
 }
 
 fn provider_error(error: swage_codex::ClientError) -> AgentError {
@@ -837,7 +848,18 @@ mod tests {
         dispatcher: ToolDispatcher,
         permissions: PermissionConfig,
     ) -> (Result<OutboundMessage, AgentError>, Vec<Value>) {
-        let (mut state, session_id) = crate::turn::tests::make_state_with_session(Vec::new()).await;
+        run_scripted_turn_with_audit_failure(scenario, dispatcher, permissions, false).await
+    }
+
+    async fn run_scripted_turn_with_audit_failure(
+        scenario: Value,
+        dispatcher: ToolDispatcher,
+        permissions: PermissionConfig,
+        fail_audit_writes: bool,
+    ) -> (Result<OutboundMessage, AgentError>, Vec<Value>) {
+        let storage = Arc::new(crate::turn::tests::MockStorage::new());
+        let (mut state, session_id) =
+            crate::turn::tests::make_state_with_storage(Vec::new(), Arc::clone(&storage)).await;
         let thread = state
             .storage
             .list_by_session(session_id)
@@ -857,6 +879,9 @@ mod tests {
             })
             .await
             .unwrap();
+        if fail_audit_writes {
+            storage.fail_audit_writes();
+        }
         let (client_side, server_side) = tokio::io::duplex(64 * 1024);
         let (client_read, client_write) = tokio::io::split(client_side);
         let (server_read, server_write) = tokio::io::split(server_side);
@@ -1059,6 +1084,44 @@ mod tests {
         assert_eq!(result.expect("approval scenario succeeds").response, "done");
     }
 
+    #[tokio::test]
+    async fn scripted_approval_denies_when_the_audit_write_fails() {
+        let final_notifications = successful_turn_notifications();
+        let scenario = json!({"keepOpen":true,"steps":[
+            {
+                "receive":{"method":"thread/start"},
+                "send":[{"jsonrpc":"2.0","id":"$request_id","result":{"thread":{"id":"fake-thread"}}}]
+            },
+            {
+                "receive":{"method":"turn/start"},
+                "send":[
+                    {"jsonrpc":"2.0","id":"$request_id","result":{"turn":{"id":"fake-turn"}}},
+                    {"jsonrpc":"2.0","id":"approval","method":"item/commandExecution/requestApproval","params":{"cwd":"/work"}}
+                ]
+            },
+            {
+                "receiveExact":true,
+                "receive":{"jsonrpc":"2.0","id":"approval","result":{"decision":"decline"}},
+                "send":final_notifications
+            }
+        ]});
+        let dispatcher = ToolDispatcher::allow_all(Vec::<Arc<dyn Tool>>::new());
+
+        let (result, _) = run_scripted_turn_with_audit_failure(
+            scenario,
+            dispatcher,
+            permissions(&["shell"], &[]),
+            true,
+        )
+        .await;
+        assert_eq!(
+            result
+                .expect("audit failure must deny without breaking the turn")
+                .response,
+            "done"
+        );
+    }
+
     #[test]
     fn sandbox_defaults_to_read_only_without_mutation_grants() {
         let policy = sandbox_policy(&permissions(&["file_read"], &[]), &["/work".into()]);
@@ -1091,6 +1154,21 @@ mod tests {
         assert!(!path_allowed(
             Path::new("/elsewhere/file"),
             &["/work".into()]
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn paths_beneath_a_symlinked_parent_outside_the_workspace_are_rejected() {
+        use std::os::unix::fs::symlink;
+
+        let workspace = tempfile::tempdir().expect("create workspace");
+        let outside = tempfile::tempdir().expect("create outside directory");
+        symlink(outside.path(), workspace.path().join("escape")).expect("create escape symlink");
+
+        assert!(!path_allowed(
+            &workspace.path().join("escape/new-file.txt"),
+            &[workspace.path().to_path_buf()],
         ));
     }
 
