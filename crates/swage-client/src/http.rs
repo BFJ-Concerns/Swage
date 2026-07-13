@@ -18,9 +18,10 @@ pub use swage_protocol::client::space::{
     WorkspaceAttachmentResponse,
 };
 
+pub use swage_protocol::client::approval::{ApprovalDecisionScope, ApprovalDecisionValue};
 pub use swage_protocol::hosting::{
-    ClientPresenceResponse, MachinePresenceResponse, PresenceGatewayResponse,
-    PresenceSnapshotResponse,
+    ApprovalDecisionRequest, ClientPresenceResponse, MachinePresenceResponse,
+    PresenceGatewayResponse, PresenceSnapshotResponse,
 };
 
 pub use swage_protocol::client::voice::{
@@ -777,10 +778,10 @@ impl GatewayClient {
     pub async fn decide_approval(
         &self,
         approval_id: Uuid,
-        decision: &str,
+        decision: ApprovalDecisionValue,
         reason: Option<&str>,
     ) -> Result<serde_json::Value, ClientError> {
-        self.decide_approval_with_scope(approval_id, decision, None, reason)
+        self.decide_approval_with_scope(approval_id, decision, ApprovalDecisionScope::Once, reason)
             .await
     }
 
@@ -789,23 +790,16 @@ impl GatewayClient {
     pub async fn decide_approval_with_scope(
         &self,
         approval_id: Uuid,
-        decision: &str,
-        scope: Option<&str>,
+        decision: ApprovalDecisionValue,
+        scope: ApprovalDecisionScope,
         reason: Option<&str>,
     ) -> Result<serde_json::Value, ClientError> {
         let url = format!("{}/api/approvals/{approval_id}", self.base_url);
-        let mut body = serde_json::json!({
-            "decision": decision,
-            "reason": reason,
-        });
-        if let Some(scope) = scope
-            && let Some(object) = body.as_object_mut()
-        {
-            object.insert(
-                "scope".to_string(),
-                serde_json::Value::String(scope.to_string()),
-            );
-        }
+        let body = ApprovalDecisionRequest {
+            decision,
+            scope,
+            reason: reason.map(str::to_owned),
+        };
 
         let response = self
             .client

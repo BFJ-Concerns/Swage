@@ -76,6 +76,22 @@ fn typescript_bindings_are_regenerated() {
     client::workflow::WorkflowEntryEvent::export_all(&cfg).expect("export workflow entry event");
     client::workflow::WorkflowRunCompletedEvent::export_all(&cfg)
         .expect("export workflow completed event");
+    hosting::PresenceSnapshotResponse::export_all(&cfg).expect("export hosting presence");
+    hosting::MachineHeartbeatRequest::export_all(&cfg).expect("export hosting heartbeat");
+    hosting::ApprovalListResponse::export_all(&cfg).expect("export hosting approvals");
+    hosting::ApprovalDecisionRequest::export_all(&cfg).expect("export hosting approval decision");
+    hosting::OperatorOverviewResponse::export_all(&cfg).expect("export operator overview");
+    device::RegisterDeviceRequest::export_all(&cfg).expect("export device registration");
+    device::DeviceListResponse::export_all(&cfg).expect("export device list");
+    device::RemoteToolExecutionRequest::export_all(&cfg).expect("export device execution");
+    device::RemoteToolExecutionResponse::export_all(&cfg)
+        .expect("export device execution response");
+    channel::DevDmInboundRequest::export_all(&cfg).expect("export direct-message inbound");
+    channel::DevThreadInboundRequest::export_all(&cfg).expect("export thread inbound");
+    channel::ChannelInboundResponse::export_all(&cfg).expect("export channel response");
+    channel::DeliveryLogQuery::export_all(&cfg).expect("export delivery query");
+    channel::DeliveryLogResponse::export_all(&cfg).expect("export delivery log");
+    channel::ChannelStatusListResponse::export_all(&cfg).expect("export channel status");
 
     // ts-rs preserves line-breaking spaces around documented enum fields.
     // Normalise generated files so the committed projection also satisfies

@@ -9,14 +9,15 @@ use serde_json::Value;
 use ts_rs::TS;
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS, JsonSchema)]
 pub struct UserInfo {
     pub id: String,
     pub name: String,
+    #[ts(type = "Record<string, unknown>")]
     pub metadata: HashMap<String, Value>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS, JsonSchema)]
 pub struct SerializableToolContext {
     pub agent_id: String,
     pub session_id: String,
@@ -59,16 +60,18 @@ pub struct RegisterDeviceRequest {
     pub capabilities: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
 pub struct RemoteToolExecutionRequest {
     pub shared_token: String,
     pub tool_name: String,
+    #[ts(type = "unknown")]
     pub params: Value,
     pub context: SerializableToolContext,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
 pub struct RemoteToolExecutionResponse {
+    #[ts(type = "unknown")]
     pub output: Value,
 }
 

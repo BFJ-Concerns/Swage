@@ -49,9 +49,9 @@ function parseServerEventFrame(raw: unknown): ServerEvent {
   }
 
   return {
-    type: "unknown_event",
-    original_type: raw.type,
-    raw,
+    type: "unknown",
+    event_type: raw.type,
+    payload: raw,
   };
 }
 
