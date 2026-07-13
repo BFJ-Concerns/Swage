@@ -4,6 +4,7 @@
 pub mod discovery;
 pub mod error;
 pub mod instructions;
+mod masked_string;
 pub mod merge;
 pub mod model;
 pub mod prompt_rule;
@@ -17,6 +18,7 @@ pub mod validation;
 // ---------------------------------------------------------------------------
 
 // Resolved config types
+pub use masked_string::MaskedString;
 pub use model::{
     BrowserScreenshotPolicy, BrowserToolConfig, ChannelsConfig, CommunicationConfig, ContextConfig,
     ContextTransferConfig, ContextTransferField, ContextTransferMode, ContextTransferTargetConfig,
