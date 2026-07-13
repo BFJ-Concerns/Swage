@@ -212,7 +212,7 @@ impl OpenAiProvider {
             HeaderValue::from_static("application/json"),
         );
         if let Some(ref key) = self.config.api_key
-            && let Ok(val) = HeaderValue::from_str(&format!("Bearer {key}"))
+            && let Ok(val) = HeaderValue::from_str(&format!("Bearer {}", key.expose_secret()))
         {
             headers.insert(reqwest::header::AUTHORIZATION, val);
         }

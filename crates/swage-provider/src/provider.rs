@@ -2,6 +2,7 @@ use std::pin::Pin;
 
 use async_trait::async_trait;
 use futures::Stream;
+use swage_config::MaskedString;
 use swage_core::{
     CompletionRequest, CompletionResponse, ProviderError, StreamChunk, ToolCompletionRequest,
     ToolCompletionResponse,
@@ -13,14 +14,14 @@ use swage_core::{
 
 /// Resolved configuration for connecting to an LLM provider.
 ///
-/// The API key is `Option<String>` to support keyless local endpoints (e.g.
-/// Ollama running on localhost). Remote providers populate it from an
+/// The API key is optional to support keyless local endpoints (e.g. Ollama
+/// running on localhost). Remote providers populate it from a resolved
 /// configuration before provider construction. Providers should not know where
 /// a credential came from; that keeps secret access in the governed runtime
 /// surface that can validate and audit it.
 #[derive(Debug, Clone)]
 pub struct ProviderConfig {
-    pub api_key: Option<String>,
+    pub api_key: Option<MaskedString>,
     pub model: String,
     pub base_url: String,
 }
@@ -33,7 +34,7 @@ impl ProviderConfig {
         base_url: impl Into<String>,
     ) -> Self {
         Self {
-            api_key: Some(api_key.into()),
+            api_key: Some(MaskedString::from(api_key.into())),
             model: model.into(),
             base_url: base_url.into(),
         }
@@ -85,7 +86,7 @@ impl
             .unwrap_or_else(|| default_base_url(provider.protocol.clone()).to_owned());
 
         Ok(Self {
-            api_key: Some(api_key),
+            api_key: Some(api_key.into()),
             model: model.model_id.clone(),
             base_url,
         })
@@ -339,7 +340,10 @@ mod tests {
     #[test]
     fn provider_config_new() {
         let cfg = ProviderConfig::new("sk-test", "gpt-4o", "https://api.openai.com/v1");
-        assert_eq!(cfg.api_key, Some("sk-test".into()));
+        assert_eq!(cfg.api_key.as_deref(), Some("sk-test"));
+        let debug = format!("{cfg:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("sk-test"));
         assert_eq!(cfg.model, "gpt-4o");
         assert_eq!(cfg.base_url, "https://api.openai.com/v1");
     }
@@ -404,7 +408,7 @@ mod tests {
         unsafe { std::env::set_var("TEVIK_TEST_API_KEY_XYZ", "test-key-value") };
 
         let cfg = ProviderConfig::try_from((&provider, &model)).unwrap();
-        assert_eq!(cfg.api_key, Some("test-key-value".into()));
+        assert_eq!(cfg.api_key.as_deref(), Some("test-key-value"));
         assert_eq!(cfg.model, "claude-sonnet");
         assert_eq!(cfg.base_url, "http://127.0.0.1:11434/v1");
 
