@@ -25,7 +25,10 @@
  */
 import { describe, it, expect, vi } from "vitest";
 
-import { createStreamingStore } from "../stores/streaming";
+import {
+  createStreamingStore,
+  withConversationAutoCreate,
+} from "../stores/streaming";
 
 // ---------------------------------------------------------------------------
 // Mock dependency factories
@@ -819,5 +822,107 @@ describe("startTurn clears activeToolCalls", () => {
     // Second turn — should start with a clean slate.
     store.startTurn("second question");
     expect(store.activeToolCalls).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// withConversationAutoCreate
+// ---------------------------------------------------------------------------
+// The wrapper handed to the composer: startTurn with no conversation in scope
+// creates one first, then dispatches through the wrapped store.
+
+describe("withConversationAutoCreate", () => {
+  function createWrappedStore(hasActive: () => boolean) {
+    const conversation = createMockConversationStore();
+    const connection = createMockConnectionStore();
+    const base = createStreamingStore({
+      conversationStore: conversation,
+      connectionStore: connection,
+    });
+
+    // Deferred so tests control exactly when creation settles.
+    let settleCreate!: (id: string | null) => void;
+    const createConversation = vi.fn(
+      () =>
+        new Promise<string | null>((resolve) => {
+          settleCreate = resolve;
+        }),
+    );
+
+    const store = withConversationAutoCreate(base, {
+      hasActiveConversation: hasActive,
+      createConversation,
+    });
+
+    return {
+      store,
+      connection,
+      createConversation,
+      settleCreate: (id: string | null) => settleCreate(id),
+    };
+  }
+
+  it("delegates directly when a conversation is active", () => {
+    const { store, connection, createConversation } = createWrappedStore(
+      () => true,
+    );
+
+    store.startTurn("hello", "model-a");
+
+    expect(createConversation).not.toHaveBeenCalled();
+    expect(connection.sendMessage).toHaveBeenCalledWith("hello", "model-a");
+  });
+
+  it("creates a conversation first when none is active, then starts the turn", async () => {
+    const { store, connection, createConversation, settleCreate } =
+      createWrappedStore(() => false);
+
+    store.startTurn("first message", "model-a");
+
+    // Dispatch must wait for the conversation to exist.
+    expect(createConversation).toHaveBeenCalledWith("model-a");
+    expect(connection.sendMessage).not.toHaveBeenCalled();
+
+    settleCreate("conv-9");
+    await vi.waitFor(() =>
+      expect(connection.sendMessage).toHaveBeenCalledWith(
+        "first message",
+        "model-a",
+      ),
+    );
+  });
+
+  it("reports streaming during the creation window and ignores a second send", async () => {
+    const { store, createConversation, settleCreate } = createWrappedStore(
+      () => false,
+    );
+
+    store.startTurn("first");
+    expect(store.isStreaming).toBe(true);
+
+    // A second send while creation is in flight must not fork a second
+    // conversation.
+    store.startTurn("second");
+    expect(createConversation).toHaveBeenCalledTimes(1);
+
+    settleCreate("conv-9");
+    await vi.waitFor(() => expect(store.isStreaming).toBe(true));
+  });
+
+  it("surfaces a failed creation as a turn error carrying the content", async () => {
+    const { store, connection, settleCreate } = createWrappedStore(() => false);
+
+    store.startTurn("precious words");
+    settleCreate(null);
+
+    await vi.waitFor(() => {
+      expect(store.turnError).not.toBeNull();
+    });
+    expect(store.turnError?.code).toBe("conversation_create_failed");
+    // The composer cleared its draft on send — the error echoes the content
+    // back so it isn't lost.
+    expect(store.turnError?.message).toContain("precious words");
+    expect(store.isStreaming).toBe(false);
+    expect(connection.sendMessage).not.toHaveBeenCalled();
   });
 });

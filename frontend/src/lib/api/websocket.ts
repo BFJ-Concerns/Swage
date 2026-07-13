@@ -84,6 +84,13 @@ export function createWebSocketClient(
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   let reconnectDelay = BACKOFF_BASE_MS;
 
+  // Frames handed to send() while the socket is still connecting. Flushed in
+  // order once the handshake completes, so callers can dispatch immediately
+  // after connect() without racing the upgrade (the compose-then-create flow
+  // does exactly that). Cleared on connect()/disconnect() so frames never
+  // leak into a different conversation's socket.
+  let pendingFrames: ClientEvent[] = [];
+
   // True once the current socket instance reaches OPEN state. Reset each time
   // attemptConnect() creates a fresh socket. A close event that arrives before
   // wasConnected becomes true indicates a handshake rejection (e.g. HTTP 409
@@ -106,6 +113,19 @@ export function createWebSocketClient(
 
   function emitStatus(status: ConnectionStatus): void {
     for (const handler of statusHandlers) handler(status);
+  }
+
+  // A frame could not be delivered and will not be retried. Surfaced as a
+  // turn error rather than swallowed: the streaming store treats it like any
+  // other failed turn, so the UI never shows a working timer for a message
+  // that went nowhere.
+  function emitDeliveryFailure(): void {
+    const deliveryError: ServerEvent = {
+      type: "error",
+      code: "not_connected",
+      message: "Not connected to the conversation — the message was not sent.",
+    };
+    for (const handler of eventHandlers) handler(deliveryError);
   }
 
   function scheduleReconnect(): void {
@@ -139,6 +159,11 @@ export function createWebSocketClient(
       // Subscribe to the live observability channels the conversation surface
       // renders inline: tools for call cards, retry for provider retry chips.
       ws!.send(JSON.stringify({ type: "subscribe", channels: ["tools", "retry"] }));
+
+      // Deliver anything queued while the handshake was in flight.
+      const queued = pendingFrames;
+      pendingFrames = [];
+      for (const frame of queued) ws!.send(JSON.stringify(frame));
     };
 
     ws.onmessage = (event: MessageEvent) => {
@@ -171,7 +196,13 @@ export function createWebSocketClient(
       if (!wasConnected) {
         // The socket closed before it ever opened — this is a handshake
         // rejection (HTTP 409 Conflict, 404, etc.). Do not retry; surface as
-        // a permanent error so the UI can prompt the user.
+        // a permanent error so the UI can prompt the user. Frames queued
+        // during the handshake are lost — say so rather than dropping them
+        // silently.
+        if (pendingFrames.length > 0) {
+          pendingFrames = [];
+          emitDeliveryFailure();
+        }
         emitStatus("error");
         return;
       }
@@ -204,19 +235,28 @@ export function createWebSocketClient(
       conversationId = id;
       intentionalClose = false;
       reconnectDelay = BACKOFF_BASE_MS;
+      pendingFrames = [];
       attemptConnect();
     },
 
     send(event: ClientEvent): void {
-      // Guard against CONNECTING / CLOSING / CLOSED states — callers should
-      // not need to track readyState themselves.
+      // Callers should not need to track readyState themselves: an open
+      // socket sends now, a connecting one queues for the open flush, and
+      // anything else is a delivery failure surfaced as a turn error.
       if (ws !== null && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify(event));
+        return;
       }
+      if (ws !== null && ws.readyState === WebSocket.CONNECTING) {
+        pendingFrames.push(event);
+        return;
+      }
+      emitDeliveryFailure();
     },
 
     disconnect(): void {
       intentionalClose = true;
+      pendingFrames = [];
 
       if (reconnectTimer !== null) {
         clearTimeout(reconnectTimer);

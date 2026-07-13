@@ -196,6 +196,63 @@ describe("send", () => {
     expect(() => client.send({ type: "cancel" })).not.toThrow();
     expect(latestWs().sentMessages).toHaveLength(0);
   });
+
+  it("queues frames during the handshake and flushes them once open", () => {
+    const client = createWebSocketClient({ wsBaseUrl: "ws://localhost:3000" });
+    client.connect("conv-abc");
+    client.send({ type: "send_message", content: "queued during handshake" });
+    expect(latestWs().sentMessages).toHaveLength(0);
+
+    latestWs().simulateOpen();
+
+    // sentMessages[0] is the automatic subscribe; the queued frame follows.
+    const sent = latestWs().sentMessages;
+    expect(sent).toHaveLength(2);
+    expect(JSON.parse(sent[1])).toEqual({
+      type: "send_message",
+      content: "queued during handshake",
+    });
+  });
+
+  it("does not carry queued frames into a different conversation's socket", () => {
+    const client = createWebSocketClient({ wsBaseUrl: "ws://localhost:3000" });
+    client.connect("conv-1");
+    client.send({ type: "send_message", content: "meant for conv-1" });
+
+    client.connect("conv-2");
+    latestWs().simulateOpen();
+
+    // Only the automatic subscribe — the stale frame must not leak across.
+    expect(latestWs().sentMessages).toHaveLength(1);
+  });
+
+  it("surfaces frames lost to a handshake rejection as a delivery error", () => {
+    const client = createWebSocketClient({ wsBaseUrl: "ws://localhost:3000" });
+    const received: ServerEvent[] = [];
+    client.onEvent((e) => received.push(e));
+
+    client.connect("conv-abc");
+    client.send({ type: "send_message", content: "doomed" });
+    latestWs().simulateUnexpectedClose(1006);
+
+    expect(received).toContainEqual({
+      type: "error",
+      code: "not_connected",
+      message: "Not connected to the conversation — the message was not sent.",
+    });
+  });
+
+  it("emits a delivery error instead of silently dropping a frame sent with no socket", () => {
+    const client = createWebSocketClient({ wsBaseUrl: "ws://localhost:3000" });
+    const received: ServerEvent[] = [];
+    client.onEvent((e) => received.push(e));
+
+    client.send({ type: "send_message", content: "nowhere to go" });
+
+    expect(received).toContainEqual(
+      expect.objectContaining({ type: "error", code: "not_connected" }),
+    );
+  });
 });
 
 // ---------------------------------------------------------------------------

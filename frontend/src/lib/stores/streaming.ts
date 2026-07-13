@@ -434,3 +434,96 @@ export function createStreamingStore(
     },
   };
 }
+
+// ---------------------------------------------------------------------------
+// Conversation auto-create wrapper
+// ---------------------------------------------------------------------------
+
+export interface ConversationAutoCreateOptions {
+  /** Whether a conversation is currently in scope to receive the turn. */
+  hasActiveConversation(): boolean;
+  /**
+   * Create (and connect to) a conversation for the turn. Resolves to the new
+   * conversation's id, or null when creation failed. The WebSocket client
+   * queues frames during the handshake, so the turn can be dispatched as soon
+   * as this resolves without racing the connection.
+   */
+  createConversation(selectedModelId?: string | null): Promise<string | null>;
+}
+
+// Wraps a streaming store so the composer works in a space with no
+// conversation yet: startTurn transparently creates one, connects, then
+// dispatches. Every other member delegates to the wrapped store.
+export function withConversationAutoCreate(
+  base: StreamingStore,
+  options: ConversationAutoCreateOptions,
+): StreamingStore {
+  // True while a conversation is being created for a pending turn. Folded
+  // into isStreaming so the composer's in-flight guard also covers the
+  // creation window (no second send, draft preserved).
+  const isCreatingStore = writable(false);
+  const isCreatingState = fromStore(isCreatingStore);
+
+  return {
+    get isStreaming(): boolean {
+      return isCreatingState.current || base.isStreaming;
+    },
+    get streamedContent(): string {
+      return base.streamedContent;
+    },
+    get turnError(): { code: string; message: string } | null {
+      return base.turnError;
+    },
+    get turnStartedAt(): string | null {
+      return base.turnStartedAt;
+    },
+    get lastInputTokens(): number | null {
+      return base.lastInputTokens;
+    },
+    get lastOutputTokens(): number | null {
+      return base.lastOutputTokens;
+    },
+    get activeToolCalls(): ToolCallView[] {
+      return base.activeToolCalls;
+    },
+    get providerRetry(): ProviderRetryState | null {
+      return base.providerRetry;
+    },
+    get pendingApproval(): PendingApproval | null {
+      return base.pendingApproval;
+    },
+    handleServerEvent: (event) => base.handleServerEvent(event),
+    cancelTurn: () => base.cancelTurn(),
+
+    startTurn(content: string, selectedModelId?: string | null): void {
+      if (options.hasActiveConversation()) {
+        base.startTurn(content, selectedModelId);
+        return;
+      }
+      if (get(isCreatingStore)) return;
+      isCreatingStore.set(true);
+
+      void (async () => {
+        try {
+          // A rejection counts as a failed creation, same as a null id.
+          const id = await options
+            .createConversation(selectedModelId)
+            .catch(() => null);
+          if (id) {
+            base.startTurn(content, selectedModelId);
+            return;
+          }
+          // Creation failed and the composer has already cleared the draft —
+          // echo the content back so it isn't lost.
+          base.handleServerEvent({
+            type: "error",
+            code: "conversation_create_failed",
+            message: `Could not create a conversation, so this was not sent: ${content}`,
+          });
+        } finally {
+          isCreatingStore.set(false);
+        }
+      })();
+    },
+  };
+}

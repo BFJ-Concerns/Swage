@@ -17,7 +17,10 @@
   import type { ConversationStore } from "./lib/stores/conversations";
   import { createConversationStore } from "./lib/stores/conversations";
   import { createConnectionStore } from "./lib/stores/connection";
-  import { createStreamingStore } from "./lib/stores/streaming";
+  import {
+    createStreamingStore,
+    withConversationAutoCreate,
+  } from "./lib/stores/streaming";
   import { createSpaceStore } from "./lib/stores/spaces";
   import { createRouter } from "./lib/router";
   import type { Route } from "./lib/router";
@@ -91,19 +94,28 @@
     }
   }
 
-  async function createAndNavigate(): Promise<void> {
+  // Creates a conversation in the current space, connects, and navigates to
+  // it. Returns the new conversation's id, or null when creation failed —
+  // the auto-create composer path uses the id to decide whether its pending
+  // turn can be dispatched.
+  async function createAndNavigate(
+    selectedModelId?: string | null,
+  ): Promise<string | null> {
     try {
       activeSurface = "conversation";
       // Use the currently selected space — should always be set after startup.
       const spaceId = spaceStore.currentSpace?.id ?? "";
-      await conversationStore.createConversation(spaceId);
+      await conversationStore.createConversation(spaceId, selectedModelId);
       const id = conversationStore.activeConversation?.id;
       if (id) {
         connectionStore.connectTo(id);
         router.navigate(`/conversations/${id}`);
+        return id;
       }
+      return null;
     } catch (err) {
       console.error("Failed to create conversation:", err);
+      return null;
     }
   }
 
@@ -124,14 +136,27 @@
     selectConversation: selectAndNavigate,
     // No-arg wrapper: the proxy captures spaceId from spaceStore at
     // call time so ConversationList doesn't need to know about spaces.
-    createConversation: createAndNavigate,
+    createConversation: async () => {
+      await createAndNavigate();
+    },
     deleteConversation: (id) => conversationStore.deleteConversation(id),
+    clearActiveConversation: () => conversationStore.clearActiveConversation(),
     appendOptimisticUserMessage: (msg) =>
       conversationStore.appendOptimisticUserMessage(msg),
     appendAssistantMessage: (msg) => conversationStore.appendAssistantMessage(msg),
     refreshActiveConversation: () =>
       conversationStore.refreshActiveConversation(),
   };
+
+  // The streaming store handed to the layout: identical to the base store,
+  // except that sending with no conversation in scope creates one in the
+  // current space first (connect, then dispatch — the WebSocket client queues
+  // the frame during the handshake). The composer that renders in an empty
+  // space therefore just works instead of dropping the message.
+  const composerStreamingStore = withConversationAutoCreate(streamingStore, {
+    hasActiveConversation: () => conversationStore.activeConversation !== null,
+    createConversation: createAndNavigate,
+  });
 
   // ---------------------------------------------------------------------------
   // Router
@@ -326,6 +351,9 @@
 
       // Drop the WebSocket — it was bound to the previous space's session.
       connectionStore.disconnect();
+      // Drop the active conversation too: left in place, the old space's
+      // conversation would keep rendering and the composer would send into it.
+      conversationStore.clearActiveConversation();
       // Reset the URL so the router doesn't try to restore a stale conversation.
       router.navigate("/");
       currentRoute = router.currentRoute;
@@ -407,7 +435,7 @@
   <AppLayout
     conversationStore={routerAwareStore}
     {connectionStore}
-    {streamingStore}
+    streamingStore={composerStreamingStore}
     {spaceStore}
     onSpaceChange={handleSpaceChange}
     onRetry={handleRetry}

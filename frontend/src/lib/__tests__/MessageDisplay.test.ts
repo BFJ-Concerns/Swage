@@ -85,6 +85,7 @@ function makeConversationStore(messages: MessageView[]): ConversationStore {
     deleteConversation: async () => {},
     appendOptimisticUserMessage: () => {},
     appendAssistantMessage: () => {},
+    clearActiveConversation: () => {},
     refreshActiveConversation: async () => {},
   };
 }
