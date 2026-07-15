@@ -7,6 +7,20 @@ backward-compatibility or data-migration paths for schema and format
 changes; change them freely and let the fresh migration rebuild. Strip out any existing migrations when working in the area. This is a
 deliberate "for now": it lifts the day there are users with data to migrate.
 
+## Build and Verification
+
+Use the repository's `just` targets rather than assembling equivalent command
+sequences by hand:
+
+- `just check` for the fast workspace check.
+- `just build-dev-embedded` when the gateway needs the current frontend embedded.
+- `just test` for the full Rust, frontend, and desktop-smoke suite.
+- `just ci` before landing; it adds formatting and clippy checks to the test suite.
+
+For manual browser driving, run the work in Codex on `gpt-5.6-terra` with the
+global `$playwright` skill. Keep the browser workflow and its transient artefacts
+there rather than recreating a project-local driver.
+
 ## Working Principles
 
 ### Prefer the general path over the special case
@@ -83,8 +97,7 @@ and channel (the contract external integrators speak). Subset clients
 implement only their surfaces; external parties see only the surface
 published to them.
 
-Until the migration lands (motes track it), wire types are still
-hand-duplicated across the gateway, swage-client, and
-`frontend/src/lib/types.ts`. Don't add a fourth copy: new wire types should
-start in the shape above, and work touching the existing ones should move
-them toward it rather than extending the duplication.
+The migration is complete. Do not hand-author wire-contract copies in the
+gateway, clients, or frontend. Frontend view types may adapt imports from
+`frontend/src/lib/protocol/`, but the wire definition remains in
+`swage-protocol` and its generated projections.
