@@ -40,7 +40,7 @@ Most "the model isn't using my tool" problems are description-writing problems e
 5. Write the description and parameter descriptions (see `references/description-writing.md`). This is the highest-leverage part of the work — give it real attention, not a tail-end pass.
 6. Wire the tool: register it, add it to the protected namespace if it is a built-in, and confirm the permission model lets the intended agents reach it.
 7. Summarise what changed — the design choice, the description, and the wiring — before writing live files.
-8. After the edits land, verify them. A tool that compiles can still be unregistered, unadvertised, missing from the sandbox catalogue, or rejected at dispatch — none of which the compiler catches. Confirm the crate builds and the relevant tests pass, using the project's build/test workflow (the run-swage skill) rather than duplicating commands here; at minimum `cargo check` and the targeted tests for the touched crate, plus any test that enumerates the tool catalogue.
+8. After the edits land, verify them. A tool that compiles can still be unregistered, unadvertised, missing from the sandbox catalogue, or rejected at dispatch — none of which the compiler catches. Confirm the crate builds and the relevant tests pass through the project's `just` targets; at minimum run `just check` and the targeted tests for the touched crate, plus any test that enumerates the tool catalogue.
 
 ## Intake Interview
 
