@@ -17,9 +17,10 @@ sequences by hand:
 - `just test` for the full Rust, frontend, and desktop-smoke suite.
 - `just ci` before landing; it adds formatting and clippy checks to the test suite.
 
-For manual browser driving, run the work in Codex on `gpt-5.6-terra` with the
-global `$playwright` skill. Keep the browser workflow and its transient artefacts
-there rather than recreating a project-local driver.
+For manually driving the running app, dispatch a subagent on `gpt-5.6-terra`;
+it uses the global `playwright` skill for browser work or `waldo` for the live
+desktop, depending on need. Keep the driving workflow and its transient
+artefacts in that subagent rather than recreating a project-local driver.
 
 ## Working Principles
 
