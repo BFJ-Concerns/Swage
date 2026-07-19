@@ -2,7 +2,7 @@
 #
 # Mirrors `just ci` in substance — fmt, frontend typecheck/tests, clippy,
 # Rust tests — but runs the Rust suite through cargo-nextest so flaky tests
-# (fail, then pass on retry) are detected and surfaced as a "Flaky Tests"
+# (fail, then pass on retry) are detected and surfaced as a "Flaky Test"
 # label on the PR instead of hiding behind a lucky green.
 #
 # Deliberately not covered yet:
@@ -92,9 +92,9 @@ jobs:
           pr="${{ github.event.pull_request.number }}"
           label_id=$(curl -sf -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
             "$api/repos/$repo/labels?limit=100" \
-            | jq '[.[] | select(.name == "Flaky Tests")][0].id')
+            | jq '[.[] | select(.name == "Flaky Test")][0].id')
           if [ -z "$label_id" ] || [ "$label_id" = "null" ]; then
-            echo "::warning::'Flaky Tests' label not found on $repo — create it in repo settings"
+            echo "::warning::'Flaky Test' label not found on $repo — create it in repo settings"
             exit 0
           fi
           curl -sf -X POST \
@@ -102,4 +102,4 @@ jobs:
             -H "Content-Type: application/json" \
             -d "{\"labels\":[$label_id]}" \
             "$api/repos/$repo/issues/$pr/labels" >/dev/null
-          echo "Applied 'Flaky Tests' label to PR #$pr"
+          echo "Applied 'Flaky Test' label to PR #$pr"
