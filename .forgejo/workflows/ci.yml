@@ -69,6 +69,16 @@ jobs:
           curl -LsSf https://github.com/casey/just/releases/download/1.57.0/just-1.57.0-x86_64-unknown-linux-musl.tar.gz \
             | tar zxf - -C /usr/local/bin just
 
+      # The desktop smoke drives Chromium through Playwright, which ships no
+      # browser binary of its own. Installed from the desktop package so the
+      # download matches the Playwright version pinned there, and ahead of the
+      # gate because the gate's own `npm --prefix desktop ci` would otherwise
+      # be the first thing to want it.
+      - name: Install Playwright browsers
+        run: |
+          npm --prefix desktop ci
+          npm --prefix desktop exec -- playwright install chromium
+
       # The whole gate, in one command — the same one a dev box runs. Steps
       # live in xtask, not here, so CI and local cannot drift apart. Under
       # xvfb-run so the electron smoke test has a display; the frontend
