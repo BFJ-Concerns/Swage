@@ -51,7 +51,7 @@ fn run() -> Result<()> {
         Some("test") => test(),
         Some("test-lib") => test_lib(args),
         Some("test-integration") => test_integration(args),
-        Some("ci") => ci(),
+        Some("verify" | "ci") => verify(),
         Some("sweep") => run_sweep(),
         Some("release" | "build") => {
             let options = ReleaseOptions::parse(args)?;
@@ -321,11 +321,34 @@ fn run_test_suite() -> Result<()> {
     setup()?;
 
     let mut failures = Vec::new();
-    record_stage_result(
-        &mut failures,
-        "Running Rust tests",
-        command("cargo", ["test", "--workspace"]),
-    );
+    match env::var("SWAGE_TEST_RUNNER").as_deref() {
+        // Nextest's ci profile retries, so a flaky test is reported as a flake
+        // instead of failing the run. It cannot run doctests, though — see
+        // <https://nexte.st/docs/running/> — so those get their own stage
+        // below and are never silently dropped.
+        Ok("nextest") => {
+            record_stage_result(
+                &mut failures,
+                "Running Rust tests (nextest)",
+                command(
+                    "cargo",
+                    ["nextest", "run", "--workspace", "--profile", "ci"],
+                ),
+            );
+            record_stage_result(
+                &mut failures,
+                "Running Rust doctests",
+                command("cargo", ["test", "--workspace", "--doc"]),
+            );
+        }
+        // Plain `cargo test --workspace` already includes doctests.
+        Ok("cargo") | Err(_) => record_stage_result(
+            &mut failures,
+            "Running Rust tests",
+            command("cargo", ["test", "--workspace"]),
+        ),
+        Ok(other) => return Err(format!("unknown SWAGE_TEST_RUNNER '{other}'").into()),
+    }
     record_stage_result(
         &mut failures,
         "Running frontend tests",
@@ -421,13 +444,39 @@ fn filter_label(filters: &[String]) -> String {
     }
 }
 
-fn ci() -> Result<()> {
-    run_with_final_sweep("ci", || {
+/// The gate: everything that must pass before work lands, run identically here
+/// and in CI. `just verify` is the front door; CI runs the same recipe, so the
+/// two cannot drift apart.
+fn verify() -> Result<()> {
+    run_with_final_sweep("verify", || {
+        check_tracked_local_state()?;
         fmt_check()?;
         check()?;
         clippy()?;
-        run_test_suite()
+        run_test_suite()?;
+        check_projections_are_current()
     })
+}
+
+/// Local runtime state must not be tracked. Cheap, and it catches a class of
+/// accident that is tedious to unpick once it reaches history.
+fn check_tracked_local_state() -> Result<()> {
+    run_command(
+        "Checking for tracked local state",
+        command("scripts/check-tracked-local-state.sh", []),
+    )
+}
+
+/// swage-protocol's projection test *rewrites* the committed JSON Schema and
+/// TypeScript contract as it runs. Passing tests therefore prove the contract
+/// regenerates, not that what was committed matches — a dirty tree here means
+/// the projections in the commit were stale. Runs last, once the tests that
+/// regenerate them are done.
+fn check_projections_are_current() -> Result<()> {
+    run_command(
+        "Checking protocol projections are current",
+        command("git", ["diff", "--exit-code"]),
+    )
 }
 
 fn run_sweep() -> Result<()> {
@@ -1088,6 +1137,6 @@ fn option_value(arg: &str) -> &str {
 
 fn print_help() {
     println!(
-        "Usage: cargo run -p xtask -- <command>\n\nCommands:\n  setup\n  build-dev [--embed-frontend]\n  dev [--gateway-port PORT] [--vite-host HOST] [--vite-port PORT]\n  fmt\n  fmt-check\n  check\n  clippy\n  test\n  test-lib <package> [filter...]\n  test-integration <package> <test-target> [filter...]\n  ci\n  sweep\n  release [--force-frontend]\n  install [--prefix DIR] [--skip-frontend] [--lan]"
+        "Usage: cargo run -p xtask -- <command>\n\nCommands:\n  setup\n  build-dev [--embed-frontend]\n  dev [--gateway-port PORT] [--vite-host HOST] [--vite-port PORT]\n  fmt\n  fmt-check\n  check\n  clippy\n  test\n  test-lib <package> [filter...]\n  test-integration <package> <test-target> [filter...]\n  verify (alias: ci)\n  sweep\n  release [--force-frontend]\n  install [--prefix DIR] [--skip-frontend] [--lan]"
     );
 }
