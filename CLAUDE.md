@@ -15,7 +15,11 @@ sequences by hand:
 - `just check` for the fast workspace check.
 - `just build-dev-embedded` when the gateway needs the current frontend embedded.
 - `just test` for the full Rust, frontend, and desktop-smoke suite.
-- `just ci` before landing; it adds formatting and clippy checks to the test suite.
+- `just verify` before landing (`just ci` is an alias). It is the gate: the
+  tracked-local-state and formatting checks, clippy, the test suite, and a
+  final check that the committed protocol projections are not stale. CI runs
+  this same recipe, so a green run here means CI's checks passed — a new check
+  belongs in `xtask`, not in the workflow file.
 
 For manually driving the running app, dispatch a subagent on `gpt-5.6-terra`;
 it uses the global `playwright` skill for browser work or `waldo` for the live
