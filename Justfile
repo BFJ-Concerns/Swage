@@ -39,8 +39,11 @@ test-lib package *filter:
 test-integration package target *filter:
     cargo run -p xtask -- test-integration {{ package }} {{ target }} {{ filter }}
 
+verify:
+    cargo run -p xtask -- verify
+
 ci:
-    cargo run -p xtask -- ci
+    cargo run -p xtask -- verify
 
 sweep:
     cargo run -p xtask -- sweep
