@@ -39,9 +39,12 @@ test-lib package *filter:
 test-integration package target *filter:
     cargo run -p xtask -- test-integration {{ package }} {{ target }} {{ filter }}
 
+# CI runs this same recipe, so the local gate and CI cannot drift apart.
+# The gate: local-state and format checks, clippy, tests, desktop smoke.
 verify:
     cargo run -p xtask -- verify
 
+# Alias for `verify`, kept for muscle memory.
 ci:
     cargo run -p xtask -- verify
 
