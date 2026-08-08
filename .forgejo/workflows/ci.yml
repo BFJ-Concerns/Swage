@@ -18,14 +18,13 @@ name: CI
 on:
   pull_request:
     types: [opened, synchronize, reopened, edited]
-    branches-ignore: ['structural/**']
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
   test:
-    if: forgejo.event.pull_request.draft == false
+    if: forgejo.event.pull_request.draft == false && !startsWith(forgejo.event.pull_request.head.ref, 'structural/')
     runs-on: docker
     container:
       image: rust:1.95
