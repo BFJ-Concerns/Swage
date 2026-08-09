@@ -1,8 +1,6 @@
 #[path = "integration/support.rs"]
 mod support;
 
-#[path = "integration/agent_task_authoring_integration.rs"]
-mod agent_task_authoring_integration;
 #[path = "integration/attachment_ingestion_integration.rs"]
 mod attachment_ingestion_integration;
 #[path = "integration/browser_journey_integration.rs"]

@@ -275,12 +275,12 @@ async fn handle_connection(socket: WebSocket, state: AppState, session_id: Uuid)
 }
 
 pub(super) fn broadcast_event_matches_session(_session_id: Uuid, event: &ServerEvent) -> bool {
-    match event {
-        ServerEvent::Shutdown { .. } => true,
-        ServerEvent::WorkflowRunStarted { .. }
-        | ServerEvent::WorkflowEntryStarted { .. }
-        | ServerEvent::WorkflowEntryCompleted { .. }
-        | ServerEvent::WorkflowRunCompleted { .. } => true,
-        _ => false,
-    }
+    matches!(
+        event,
+        ServerEvent::Shutdown { .. }
+            | ServerEvent::WorkflowRunStarted { .. }
+            | ServerEvent::WorkflowEntryStarted { .. }
+            | ServerEvent::WorkflowEntryCompleted { .. }
+            | ServerEvent::WorkflowRunCompleted { .. }
+    )
 }
