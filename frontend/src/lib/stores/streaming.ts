@@ -390,10 +390,6 @@ export function createStreamingStore(
         case "output_schema_retry":
         case "delegation_started":
         case "delegation_completed":
-        case "topology_run_started":
-        case "topology_node_started":
-        case "topology_node_completed":
-        case "topology_run_completed":
           // Diagnostic event carrying the context assembly report for this turn.
           // No action required in the streaming store — display is handled
           // separately. The case is listed explicitly to avoid a fall-through

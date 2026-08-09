@@ -1,13 +1,9 @@
 mod conversation;
 mod space;
-mod team;
-mod topology_run;
 mod workspace_attachment;
 
 pub use conversation::*;
 pub use space::*;
-pub use team::*;
-pub use topology_run::*;
 pub use workspace_attachment::*;
 
 #[cfg(test)]

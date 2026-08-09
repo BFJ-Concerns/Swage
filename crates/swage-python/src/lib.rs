@@ -7,7 +7,6 @@ mod blocking;
 
 pub mod runner;
 pub mod runtime_resolver;
-pub mod topology;
 pub mod worker_host;
 pub mod worker_pool;
 pub mod worker_protocol;
