@@ -10,6 +10,7 @@ pub mod delta_summarisation;
 pub mod element;
 pub mod history;
 pub mod memory;
+pub mod orientation;
 pub mod prompts;
 pub mod report;
 pub mod selective_eviction;

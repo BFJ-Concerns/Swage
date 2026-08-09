@@ -652,12 +652,36 @@ pub(crate) async fn process_turn_with_existing_turn(
         None => String::new(),
     };
 
+    // The workspace root doubles as the session's working directory in the
+    // orientation baseline, so it is resolved before elements are built.
+    let workspace_policy = load_trusted_workspace_policy(
+        &state.storage,
+        space_id,
+        session.active_workspace_attachment_id,
+    )
+    .await;
+    let (workspace_root, mut allowed_paths) =
+        agent_workspace_from_policy(&workspace_policy, space_id, session.id);
+
+    let environment = build_session_environment(
+        &space,
+        Some(workspace_root.display().to_string()),
+        session.metadata.as_ref(),
+    );
+    let available_skills = available_skills_for_agent(
+        &space_slug,
+        &session.agent_id,
+        swage_root_opt.as_deref(),
+    );
+
     let elements = build_assembly_elements(
         &config.instructions,
         active_skills,
         history_messages,
         memory_content,
         space.name.clone(),
+        environment,
+        available_skills,
     );
     let tokeniser = TiktokenTokeniser::new(config.default_model_id());
 
@@ -680,14 +704,6 @@ pub(crate) async fn process_turn_with_existing_turn(
         serde_json::json!({ "error": "serialisation failed" })
     });
 
-    let workspace_policy = load_trusted_workspace_policy(
-        &state.storage,
-        space_id,
-        session.active_workspace_attachment_id,
-    )
-    .await;
-    let (workspace_root, mut allowed_paths) =
-        agent_workspace_from_policy(&workspace_policy, space_id, session.id);
     let session_approval_grants = state
         .session_approval_grants
         .lock()
