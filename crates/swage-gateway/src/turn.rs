@@ -712,7 +712,31 @@ pub(crate) async fn process_turn_with_existing_turn(
     // assembly from the config hierarchy; "default" (or empty) runs the
     // built-in implementation. JS assemblies fail open to the default with
     // the error recorded in the report.
-    let assembly_name = config.context.assembly.trim();
+    //
+    // The assembly name is an experiment location: when variants are
+    // registered for it, the selection loop chooses which serves this turn
+    // (honouring the kill switch and forced pins), and every decision —
+    // including "experimentation is off" — lands in the audit trail. The
+    // report and every model-facing surface stay function-named; the audit
+    // record is the only place the variant id appears.
+    let configured_assembly = config.context.assembly.trim().to_owned();
+    let assembly_variants: Vec<&str> = vec![]; // registered by config as they earn their place
+    let assembly_decision = crate::experimentation::select_variant(
+        &config.experimentation,
+        crate::experimentation::LOCATION_CONTEXT_ASSEMBLY,
+        &assembly_variants,
+        &configured_assembly,
+        prepared_turn_id,
+    );
+    crate::experimentation::record_selection(
+        state,
+        crate::experimentation::LOCATION_CONTEXT_ASSEMBLY,
+        &assembly_decision,
+        Some(session_id),
+        Some(prepared_turn_id),
+    )
+    .await;
+    let assembly_name = assembly_decision.variant.trim();
     let output = if assembly_name.is_empty() || assembly_name == "default" {
         swage_context::assembly::assemble(&elements, &config.context, &tokeniser)
     } else {
