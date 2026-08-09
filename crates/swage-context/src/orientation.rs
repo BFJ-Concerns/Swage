@@ -65,9 +65,11 @@ everything you do here is recorded locally on the operator's machine and is \
 reconstructable afterwards.
 
 You have tools; each description states what the tool is for. Some tool \
-calls pause for approval before running — a pause is the platform asking \
-your operator, not an error. File paths in tool calls are relative to your \
-working directory unless a tool says otherwise.";
+calls pause for approval before running — the platform is asking your \
+operator, not reporting an error: wait for the outcome rather than \
+retrying, and continue with the approved result or work around a \
+rejection. File paths in tool calls resolve against your working \
+directory unless a tool says otherwise.";
 
 /// The context element carrying baseline orientation.
 ///
@@ -118,9 +120,11 @@ impl OrientationElement {
 
         if !self.available_skills.is_empty() {
             let mut skills = String::from(
-                "## Skills you can activate\n\
-                 Each skill adds instructions for a kind of task. Activate one \
-                 when its trigger fits what you are doing:\n",
+                "## Skills available in this session\n\
+                 Each skill adds instructions for a kind of task. Your \
+                 operator activates one by typing /its-name; when a task fits \
+                 a skill's trigger and it is not active, say so and suggest \
+                 it:\n",
             );
             for skill in &self.available_skills {
                 skills.push_str(&format!("- {} — {}\n", skill.name, skill.trigger));
