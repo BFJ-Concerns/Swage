@@ -11,7 +11,11 @@ export function setBaseUrl(url: string): void {
   baseUrl = url;
 }
 
-// The report mirrors the gateway's AssemblyReport serialisation.
+// These types transcribe swage-context's AssemblyReport serialisation.
+// The report types are not yet part of swage-protocol's projected wire
+// contract (the one-definition rule says they should be — tracked in the
+// annexe); until they are projected, this file is the single frontend
+// transcription and nothing else may re-declare these shapes.
 export interface ElementReport {
   name: string;
   source: string;
@@ -21,10 +25,12 @@ export interface ElementReport {
 }
 
 export interface CompactionRecord {
-  strategy: string;
+  element: string;
+  requested_strategy: string;
+  actual_strategy: string;
+  messages_removed: number;
   tokens_before: number;
   tokens_after: number;
-  messages_removed: number;
 }
 
 export interface AssemblyErrorReport {

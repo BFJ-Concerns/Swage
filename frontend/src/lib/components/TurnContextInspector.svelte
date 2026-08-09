@@ -108,9 +108,11 @@
         <ul>
           {#each report.compaction_applied as record}
             <li>
-              {record.strategy}: {record.tokens_before} →
-              {record.tokens_after} tokens ({record.messages_removed} messages
-              removed)
+              {record.element} via {record.actual_strategy}{record.actual_strategy !==
+              record.requested_strategy
+                ? ` (requested ${record.requested_strategy})`
+                : ""}: {record.tokens_before} → {record.tokens_after} tokens
+              ({record.messages_removed} messages removed)
             </li>
           {/each}
         </ul>
