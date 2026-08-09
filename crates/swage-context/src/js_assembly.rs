@@ -113,7 +113,7 @@ pub fn assemble_named(
             // script's composition replaces its message list.
             output.report.assembly_name = name.to_owned();
             output.report.total_tokens = tokeniser.count_messages(&messages);
-            output.report.duration_ms += started.elapsed().as_millis() as u64;
+            output.report.duration += started.elapsed();
             AssemblyOutput::new_unchecked(messages, output.report)
         }
         Err(error) => fallback(

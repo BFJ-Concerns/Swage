@@ -41,7 +41,8 @@ export interface TurnContextReport {
   compaction_applied: CompactionRecord[];
   warnings: string[];
   errors: AssemblyErrorReport[];
-  duration_ms: number;
+  // serde's default Duration serialisation.
+  duration: { secs: number; nanos: number };
 }
 
 /**
