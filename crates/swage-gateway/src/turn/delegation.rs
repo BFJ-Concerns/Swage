@@ -1,12 +1,81 @@
 use super::{
     AgentError, AppState, Arc, CancellationToken, DelegationExecutor, DelegationHandler,
-    GatewayDispatcherRequest, MessageRouter, NewAgentMessage, Uuid,
-    build_agent_config_for_space_workspace, build_approval_registrar,
-    build_gateway_dispatcher_for_unattended_execution, delegated_target_instructions_for_space,
-    load_session_config, mpsc, shutdown_sandbox_guard,
+    GatewayDispatcherRequest, MessageRouter, NewAgentMessage, Uuid, available_skills_for_agent,
+    build_agent_config_for_space_workspace, build_approval_registrar, build_assembly_elements,
+    build_gateway_dispatcher_for_unattended_execution, build_session_environment,
+    delegated_target_instructions_for_space, load_active_skills_for_agent, load_session_config,
+    load_space_memory, mpsc, resolve_swage_root, shutdown_sandbox_guard,
 };
-use swage_agent::DelegationOutcome;
+use swage_agent::{DelegationContextAssembler, DelegationOutcome};
+use swage_context::tokeniser::TiktokenTokeniser;
 use swage_core::DelegateCompletionMode;
+
+struct GatewayDelegatedContextAssembler {
+    state: AppState,
+    space: swage_storage::Space,
+    config: swage_config::ResolvedConfig,
+    agent_id: String,
+    working_directory: String,
+    swage_root: Option<std::path::PathBuf>,
+}
+
+pub(crate) fn delegated_context_assembler(
+    state: AppState,
+    space: swage_storage::Space,
+    config: swage_config::ResolvedConfig,
+    agent_id: String,
+    working_directory: String,
+) -> Arc<dyn DelegationContextAssembler> {
+    Arc::new(GatewayDelegatedContextAssembler {
+        state,
+        space,
+        config,
+        agent_id,
+        working_directory,
+        swage_root: resolve_swage_root(),
+    })
+}
+
+#[async_trait::async_trait]
+impl DelegationContextAssembler for GatewayDelegatedContextAssembler {
+    async fn assemble(
+        &self,
+        session: &swage_storage::Session,
+        delegated_history: Vec<swage_core::ChatMessage>,
+    ) -> Result<Vec<swage_core::ChatMessage>, AgentError> {
+        let active_skills = load_active_skills_for_agent(
+            &self.state,
+            session.id,
+            &self.space.slug,
+            &self.agent_id,
+            self.swage_root.as_deref(),
+            false,
+        )
+        .await;
+        let memory_content = match self.swage_root.as_deref() {
+            Some(root) => load_space_memory(root, &self.space.slug).await,
+            None => String::new(),
+        };
+        let environment =
+            build_session_environment(&self.space, Some(self.working_directory.clone()), session);
+        let available_skills = available_skills_for_agent(
+            &self.space.slug,
+            &self.agent_id,
+            self.swage_root.as_deref(),
+        );
+        let elements = build_assembly_elements(
+            &self.config.instructions,
+            active_skills,
+            delegated_history,
+            memory_content,
+            self.space.name.clone(),
+            environment,
+            available_skills,
+        );
+        let tokeniser = TiktokenTokeniser::new(self.config.default_model_id());
+        Ok(swage_context::assembly::assemble(&elements, &self.config.context, &tokeniser).messages)
+    }
+}
 
 #[derive(Clone)]
 pub(crate) struct GatewayDelegationHandler {
@@ -105,6 +174,13 @@ impl DelegationHandler for GatewayDelegationHandler {
             delegation_handler: Some(Arc::new(self.clone())),
             router: router.clone(),
             active_delegations: self.active_delegations.clone(),
+            context_assembler: Some(delegated_context_assembler(
+                self.state.clone(),
+                space.clone(),
+                target_resolved.clone(),
+                target_agent_id.to_string(),
+                target_agent_config.working_directory.display().to_string(),
+            )),
         };
 
         let mut payload = serde_json::json!({

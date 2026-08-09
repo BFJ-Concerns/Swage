@@ -119,6 +119,19 @@ pub struct DelegationExecutor {
     /// Shared registry of in-flight delegations — lets `handle_cancel`
     /// find the cancellation token and child session for a specific delegation.
     pub active_delegations: ActiveDelegations,
+    /// Caller-owned assembly path for the child session. The gateway uses this
+    /// to apply the same context elements as every other session entry point.
+    pub context_assembler: Option<Arc<dyn DelegationContextAssembler>>,
+}
+
+/// Assembles model context after the delegated child session has been created.
+#[async_trait::async_trait]
+pub trait DelegationContextAssembler: Send + Sync {
+    async fn assemble(
+        &self,
+        session: &swage_storage::Session,
+        delegated_history: Vec<ChatMessage>,
+    ) -> Result<Vec<ChatMessage>, AgentError>;
 }
 
 impl DelegationExecutor {
@@ -220,8 +233,12 @@ impl DelegationExecutor {
             })
             .unwrap_or_default();
 
-        let assembled_context =
-            build_delegated_context(&target_instructions, &transferred_context, task_description);
+        let delegated_history = build_delegated_history(&transferred_context, task_description);
+        let assembled_context = if let Some(assembler) = &self.context_assembler {
+            assembler.assemble(&session, delegated_history).await?
+        } else {
+            build_delegated_context(&target_instructions, delegated_history)
+        };
 
         // 4. Build agent config with schema override.
         let mut agent_config = target_config;
@@ -355,22 +372,11 @@ impl DelegationExecutor {
     }
 }
 
-fn build_delegated_context(
-    target_instructions: &str,
+fn build_delegated_history(
     transferred_context: &[ChatMessage],
     task_description: &str,
 ) -> Vec<ChatMessage> {
     let mut context = Vec::new();
-
-    if !target_instructions.trim().is_empty() {
-        context.push(ChatMessage::new(
-            Role::System,
-            format!(
-                "Target Agent Instructions\n\n{}",
-                target_instructions.trim()
-            ),
-        ));
-    }
 
     if !transferred_context.is_empty() {
         let inherited = transferred_context
@@ -401,6 +407,25 @@ fn build_delegated_context(
     ));
 
     context
+}
+
+fn build_delegated_context(
+    target_instructions: &str,
+    mut delegated_history: Vec<ChatMessage>,
+) -> Vec<ChatMessage> {
+    if !target_instructions.trim().is_empty() {
+        delegated_history.insert(
+            0,
+            ChatMessage::new(
+                Role::System,
+                format!(
+                    "Target Agent Instructions\n\n{}",
+                    target_instructions.trim()
+                ),
+            ),
+        );
+    }
+    delegated_history
 }
 
 // ---------------------------------------------------------------------------
@@ -514,8 +539,8 @@ mod tests {
             ChatMessage::new(Role::Assistant, "Caller analysis"),
         ];
 
-        let context =
-            build_delegated_context("Act as the reviewer.", &transferred, "Review the patch.");
+        let history = build_delegated_history(&transferred, "Review the patch.");
+        let context = build_delegated_context("Act as the reviewer.", history);
 
         assert_eq!(context.len(), 3);
         assert_eq!(context[0].role(), Role::System);
@@ -542,7 +567,8 @@ mod tests {
 
     #[test]
     fn delegated_context_omits_empty_instruction_and_background_sections() {
-        let context = build_delegated_context("", &[], "Execute delegated work");
+        let history = build_delegated_history(&[], "Execute delegated work");
+        let context = build_delegated_context("", history);
 
         assert_eq!(context.len(), 1);
         assert_eq!(context[0].role(), Role::User);
