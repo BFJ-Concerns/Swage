@@ -166,7 +166,7 @@
   <text class="box-title" x="480" y="222">Browser web UI</text>
   <text class="box-subtitle" x="480" y="249">frontend/src/App.svelte</text>
   <text class="small" x="480" y="276">Svelte 5 app for spaces, conversations,</text>
-  <text class="small" x="480" y="294">builder, operator and reference studio views.</text>
+  <text class="small" x="480" y="294">conversation and operator views.</text>
 
   <rect class="section ui" x="840" y="185" width="330" height="122"/>
   <text class="box-title" x="865" y="222">CLI and TUI</text>
@@ -185,7 +185,7 @@
   <rect class="section front" x="70" y="384" width="420" height="150"/>
   <text class="box-title" x="95" y="421">Svelte app shell and router</text>
   <text class="box-subtitle" x="95" y="448">App.svelte + lib/router.ts</text>
-  <text class="small" x="95" y="475">Initialises spaces, conversations and lenses;</text>
+  <text class="small" x="95" y="475">Initialises spaces and conversations;</text>
   <text class="small" x="95" y="493">syncs /conversations/:id with active selection;</text>
   <text class="small" x="95" y="511">disconnects WS when leaving conversation surface.</text>
 
@@ -215,9 +215,9 @@
   <rect class="section gateway" x="445" y="613" width="330" height="180"/>
   <text class="box-title" x="470" y="650">REST handlers</text>
   <text class="box-subtitle" x="470" y="677">handlers.rs</text>
-  <text class="small" x="470" y="704">Space/session CRUD, lenses, shared objects,</text>
-  <text class="small" x="470" y="722">builder proposals, operator views, attachments,</text>
-  <text class="small" x="470" y="740">materials, approvals and topology endpoints.</text>
+  <text class="small" x="470" y="704">Space/session CRUD,</text>
+  <text class="small" x="470" y="722">operator views and attachments,</text>
+  <text class="small" x="470" y="740">materials and approval endpoints.</text>
 
   <rect class="section gateway" x="820" y="613" width="330" height="180"/>
   <text class="box-title" x="845" y="650">WebSocket session</text>

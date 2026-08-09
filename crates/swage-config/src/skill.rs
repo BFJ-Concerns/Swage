@@ -216,9 +216,8 @@ fn parse_skill_frontmatter(raw: &str) -> Result<SkillFrontmatterParts, String> {
 fn level_specificity(level: &HierarchyLevel) -> i32 {
     match level {
         HierarchyLevel::Agent => 0,
-        HierarchyLevel::Team => 1,
-        HierarchyLevel::Space => 2,
-        HierarchyLevel::Global => 3,
+        HierarchyLevel::Space => 1,
+        HierarchyLevel::Global => 2,
     }
 }
 
@@ -231,10 +230,9 @@ fn level_specificity(level: &HierarchyLevel) -> i32 {
 /// 4. Parses found `SKILL.md` files via [`parse_skill_file`]
 ///
 /// **Override resolution:** When the same skill name appears at more than one
-/// level, only the most specific version survives (Agent > Team > Space >
-/// Global).
+/// level, only the most specific version survives (Agent > Space > Global).
 ///
-/// **Sort order:** Agent → Team → Space → Global, then alphabetically
+/// **Sort order:** Agent → Space → Global, then alphabetically
 /// by name within each level.
 ///
 /// Invalid directory names and malformed `SKILL.md` files produce

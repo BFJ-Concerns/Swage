@@ -6,9 +6,7 @@ use serde_json::json;
 use uuid::Uuid;
 
 use swage_core::{GatewayError, StorageError};
-use swage_storage::{
-    NodeExecutionState, ScheduleRunState, SessionPolicy, TopologyRunState, TurnState,
-};
+use swage_storage::{ScheduleRunState, SessionPolicy, TurnState};
 
 use crate::state::AppState;
 
@@ -67,8 +65,6 @@ pub async fn get_run_detail(
     match kind {
         "user_turn" | "delegated_turn" => get_turn_detail(state, id).await,
         "schedule_run" => get_schedule_run_detail(state, id).await,
-        "topology_run" => get_topology_run_detail(state, id).await,
-        "node_execution" => get_node_execution_detail(state, id).await,
         other => Err(GatewayError::ValidationError(format!(
             "unknown run kind: {other}"
         ))),
@@ -142,50 +138,6 @@ async fn gather_runs(state: &AppState) -> Result<Vec<RunSummary>, GatewayError> 
                     .unwrap_or(run.created_at),
                 completed_at: run.completed_at,
             });
-        }
-    }
-
-    for session_id in session_spaces.keys().copied() {
-        for run in state
-            .storage
-            .list_topology_runs_by_session(session_id)
-            .await?
-        {
-            runs.push(RunSummary {
-                kind: "topology_run".to_string(),
-                id: run.id,
-                status: classify_topology_run_status(run.state.clone(), run.created_at, now),
-                title: space_names
-                    .get(&session_spaces[&session_id])
-                    .map(|name| format!("topology for {name}"))
-                    .unwrap_or_else(|| "topology run".to_string()),
-                session_id: Some(run.session_id),
-                space_id: session_spaces.get(&run.session_id).copied(),
-                started_at: run.created_at,
-                updated_at: run.completed_at.unwrap_or(run.created_at),
-                completed_at: run.completed_at,
-            });
-
-            for node in state.storage.list_node_executions_by_run(run.id).await? {
-                runs.push(RunSummary {
-                    kind: "node_execution".to_string(),
-                    id: node.id,
-                    status: classify_node_execution_status(
-                        node.state.clone(),
-                        node.created_at,
-                        now,
-                    ),
-                    title: node
-                        .task_name
-                        .clone()
-                        .unwrap_or_else(|| node.node_id.clone()),
-                    session_id: Some(run.session_id),
-                    space_id: session_spaces.get(&run.session_id).copied(),
-                    started_at: node.created_at,
-                    updated_at: node.completed_at.unwrap_or(node.created_at),
-                    completed_at: node.completed_at,
-                });
-            }
         }
     }
 
@@ -306,105 +258,6 @@ async fn get_schedule_run_detail(
     })
 }
 
-async fn get_topology_run_detail(
-    state: &AppState,
-    id: Uuid,
-) -> Result<RunDetailResponse, GatewayError> {
-    let run = state
-        .storage
-        .get_topology_run(id)
-        .await?
-        .ok_or_else(|| not_found("topology_run", id))?;
-    let node_count = state
-        .storage
-        .list_node_executions_by_run(run.id)
-        .await?
-        .len();
-    let summary = RunSummary {
-        kind: "topology_run".to_string(),
-        id: run.id,
-        status: classify_topology_run_status(run.state.clone(), run.created_at, Utc::now()),
-        title: "topology run".to_string(),
-        session_id: Some(run.session_id),
-        space_id: Some(
-            state
-                .storage
-                .get_session(run.session_id)
-                .await?
-                .ok_or_else(|| not_found("session", run.session_id))?
-                .space_id,
-        ),
-        started_at: run.created_at,
-        updated_at: run.completed_at.unwrap_or(run.created_at),
-        completed_at: run.completed_at,
-    };
-    let detail = json!({
-        "team_id": run.team_id,
-        "session_id": run.session_id,
-        "source_turn_id": run.source_turn_id,
-        "final_output": run.final_output,
-        "error_message": run.error_message,
-        "node_count": node_count,
-    });
-    Ok(RunDetailResponse {
-        run: summary,
-        detail,
-    })
-}
-
-async fn get_node_execution_detail(
-    state: &AppState,
-    id: Uuid,
-) -> Result<RunDetailResponse, GatewayError> {
-    let node = state
-        .storage
-        .get_node_execution(id)
-        .await?
-        .ok_or_else(|| not_found("node_execution", id))?;
-    let run = state
-        .storage
-        .get_topology_run(node.topology_run_id)
-        .await?
-        .ok_or_else(|| not_found("topology_run", node.topology_run_id))?;
-    let retries = state.storage.list_node_retries(node.id).await?;
-    let summary = RunSummary {
-        kind: "node_execution".to_string(),
-        id: node.id,
-        status: classify_node_execution_status(node.state.clone(), node.created_at, Utc::now()),
-        title: node
-            .task_name
-            .clone()
-            .unwrap_or_else(|| node.node_id.clone()),
-        session_id: Some(run.session_id),
-        space_id: Some(
-            state
-                .storage
-                .get_session(run.session_id)
-                .await?
-                .ok_or_else(|| not_found("session", run.session_id))?
-                .space_id,
-        ),
-        started_at: node.created_at,
-        updated_at: node.completed_at.unwrap_or(node.created_at),
-        completed_at: node.completed_at,
-    };
-    let detail = json!({
-        "topology_run_id": node.topology_run_id,
-        "node_id": node.node_id,
-        "node_kind": node.node_kind.to_string(),
-        "agent_id": node.agent_id,
-        "task_name": node.task_name,
-        "input_json": node.input_json,
-        "output_json": node.output_json,
-        "error_message": node.error_message,
-        "retry_count": retries.len(),
-    });
-    Ok(RunDetailResponse {
-        run: summary,
-        detail,
-    })
-}
-
 fn classify_turn_status(state: TurnState, created_at: DateTime<Utc>, now: DateTime<Utc>) -> String {
     match state {
         TurnState::Pending | TurnState::Processing => {
@@ -438,43 +291,6 @@ fn classify_schedule_run_status(
         ScheduleRunState::Completed | ScheduleRunState::CompletedEmpty => "completed".to_string(),
         ScheduleRunState::Failed => "failed".to_string(),
         ScheduleRunState::Skipped => "skipped".to_string(),
-    }
-}
-
-fn classify_topology_run_status(
-    state: TopologyRunState,
-    created_at: DateTime<Utc>,
-    now: DateTime<Utc>,
-) -> String {
-    match state {
-        TopologyRunState::Pending | TopologyRunState::Running => {
-            if now - created_at > STUCK_AFTER {
-                "stuck".to_string()
-            } else {
-                "running".to_string()
-            }
-        }
-        TopologyRunState::Completed => "completed".to_string(),
-        TopologyRunState::Failed => "failed".to_string(),
-        TopologyRunState::Interrupted => "interrupted".to_string(),
-    }
-}
-
-fn classify_node_execution_status(
-    state: NodeExecutionState,
-    created_at: DateTime<Utc>,
-    now: DateTime<Utc>,
-) -> String {
-    match state {
-        NodeExecutionState::Pending | NodeExecutionState::Running => {
-            if now - created_at > STUCK_AFTER {
-                "stuck".to_string()
-            } else {
-                "running".to_string()
-            }
-        }
-        NodeExecutionState::Completed | NodeExecutionState::Skipped => "completed".to_string(),
-        NodeExecutionState::Failed => "failed".to_string(),
     }
 }
 

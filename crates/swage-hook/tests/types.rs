@@ -139,72 +139,6 @@ fn hook_event_agent_stop() {
     assert_eq!(event.event_name(), "AgentStop");
 }
 
-#[test]
-fn hook_event_topology_start() {
-    let event = HookEvent::TopologyStart {
-        topology_run_id: "run-1".into(),
-        team_id: "team-1".into(),
-        session_id: "session-1".into(),
-    };
-    assert_eq!(event.event_name(), "TopologyStart");
-}
-
-#[test]
-fn hook_event_topology_end() {
-    let event = HookEvent::TopologyEnd {
-        topology_run_id: "run-1".into(),
-        team_id: "team-1".into(),
-        session_id: "session-1".into(),
-        success: true,
-    };
-    assert_eq!(event.event_name(), "TopologyEnd");
-}
-
-#[test]
-fn hook_event_node_start() {
-    let event = HookEvent::NodeStart {
-        topology_run_id: "run-1".into(),
-        node_execution_id: "exec-1".into(),
-        node_id: "plan".into(),
-        agent_id: Some("planner".into()),
-    };
-    assert_eq!(event.event_name(), "NodeStart");
-}
-
-#[test]
-fn hook_event_node_end() {
-    let event = HookEvent::NodeEnd {
-        topology_run_id: "run-1".into(),
-        node_execution_id: "exec-1".into(),
-        node_id: "plan".into(),
-        success: true,
-        output: Some(json!({"result": "ok"})),
-    };
-    assert_eq!(event.event_name(), "NodeEnd");
-}
-
-#[test]
-fn hook_event_fan_out_spawn() {
-    let event = HookEvent::FanOutSpawn {
-        topology_run_id: "run-1".into(),
-        source_node_execution_id: "exec-1".into(),
-        edge_id: "plan->review".into(),
-        branch_count: 3,
-    };
-    assert_eq!(event.event_name(), "FanOutSpawn");
-}
-
-#[test]
-fn hook_event_fan_out_collect() {
-    let event = HookEvent::FanOutCollect {
-        topology_run_id: "run-1".into(),
-        source_node_execution_id: "exec-1".into(),
-        edge_id: "plan->review".into(),
-        branch_count: 3,
-    };
-    assert_eq!(event.event_name(), "FanOutCollect");
-}
-
 // -- HookEvent derives Debug and Clone --------------------------------------
 
 #[test]
@@ -490,42 +424,6 @@ async fn mock_hook_handles_all_event_variants() {
         },
         HookEvent::AgentStop {
             agent_id: "a".into(),
-        },
-        HookEvent::TopologyStart {
-            topology_run_id: "run".into(),
-            team_id: "team".into(),
-            session_id: "session".into(),
-        },
-        HookEvent::TopologyEnd {
-            topology_run_id: "run".into(),
-            team_id: "team".into(),
-            session_id: "session".into(),
-            success: true,
-        },
-        HookEvent::NodeStart {
-            topology_run_id: "run".into(),
-            node_execution_id: "exec".into(),
-            node_id: "plan".into(),
-            agent_id: Some("planner".into()),
-        },
-        HookEvent::NodeEnd {
-            topology_run_id: "run".into(),
-            node_execution_id: "exec".into(),
-            node_id: "plan".into(),
-            success: true,
-            output: Some(json!({"result": "ok"})),
-        },
-        HookEvent::FanOutSpawn {
-            topology_run_id: "run".into(),
-            source_node_execution_id: "exec".into(),
-            edge_id: "edge".into(),
-            branch_count: 2,
-        },
-        HookEvent::FanOutCollect {
-            topology_run_id: "run".into(),
-            source_node_execution_id: "exec".into(),
-            edge_id: "edge".into(),
-            branch_count: 2,
         },
     ];
 

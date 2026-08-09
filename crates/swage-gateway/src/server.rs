@@ -72,7 +72,6 @@ async fn activity_recording_middleware(
 ///
 /// The router handles the following endpoints (in priority order):
 /// - `POST /api/spaces` / `GET /api/spaces` - space management
-/// - `POST /api/teams` / topology-run routes - team and topology execution
 /// - conversation, thread, turn, approval, and agent-message APIs
 /// - `GET /api/conversations/{id}/ws` - WebSocket upgrade for live turn events
 /// - `GET /api/skills`, `POST /api/shutdown`, `GET /api/health`
@@ -103,42 +102,6 @@ pub fn build_router(state: AppState) -> Router {
             put(handlers::update_space_workspace_trust),
         )
         .route(
-            "/api/spaces/{id}/extensions",
-            get(handlers::list_space_extensions).post(handlers::create_space_extension),
-        )
-        .route(
-            "/api/spaces/{id}/extensions/{name}",
-            put(handlers::update_space_extension),
-        )
-        .route(
-            "/api/spaces/{id}/extensions/{name}/approve-workspace",
-            post(handlers::approve_workspace_extension),
-        )
-        .route(
-            "/api/spaces/{id}/context-definitions",
-            get(handlers::list_context_definitions).post(handlers::create_context_definition),
-        )
-        .route(
-            "/api/spaces/{id}/context-definitions/{name}",
-            get(handlers::get_context_definition).put(handlers::update_context_definition),
-        )
-        .route(
-            "/api/spaces/{id}/context-definitions/{name}/preview",
-            post(handlers::preview_context_definition),
-        )
-        .route(
-            "/api/spaces/{id}/builder/proposals",
-            post(handlers::create_builder_proposal),
-        )
-        .route(
-            "/api/spaces/{id}/builder/apply",
-            post(handlers::apply_builder_proposal),
-        )
-        .route(
-            "/api/spaces/{id}/config-versions",
-            get(handlers::list_configuration_versions),
-        )
-        .route(
             "/api/spaces/{id}/workflow-scripts",
             get(workflow::list_scripts).post(workflow::create_script),
         )
@@ -157,10 +120,6 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/workflow-runs/{id}", get(workflow::get_run))
         .route("/api/workflow-runs/{id}/cancel", post(workflow::cancel_run))
         .route("/api/workflow-runs/{id}/resume", post(workflow::resume_run))
-        .route(
-            "/api/config-versions/{id}/rollback",
-            post(handlers::rollback_configuration_version),
-        )
         .route(
             "/api/conversations/{id}/branches",
             get(handlers::list_conversation_branches).post(handlers::create_conversation_branch),
@@ -245,30 +204,6 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/operator/overview", get(handlers::operator_overview))
         .route("/api/operator/search", get(handlers::operator_search))
         .route("/api/operator/usage", get(handlers::operator_usage))
-        .route("/api/shared-objects", get(handlers::list_shared_objects))
-        .route(
-            "/api/shared-objects/{kind}/{id}",
-            get(handlers::get_shared_object),
-        )
-        .route(
-            "/api/shared-objects/{kind}/{id}/events",
-            post(handlers::create_shared_object_event),
-        )
-        .route(
-            "/api/shared-objects/team_topology/{id}",
-            get(handlers::get_team_topology_reference)
-                .put(handlers::update_team_topology_reference),
-        )
-        .route(
-            "/api/shared-objects/orchestration_flow/{id}",
-            get(handlers::get_orchestration_flow_reference)
-                .put(handlers::update_orchestration_flow_reference),
-        )
-        .route(
-            "/api/shared-objects/context_definition/{id}",
-            get(handlers::get_context_definition_reference)
-                .put(handlers::update_context_definition_reference),
-        )
         .route(
             "/api/secrets",
             get(handlers::list_secrets).post(handlers::create_secret),

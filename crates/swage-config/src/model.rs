@@ -921,7 +921,6 @@ impl ResolvedConfig {
 pub enum HierarchyLevel {
     Global,
     Space,
-    Team,
     Agent,
 }
 
@@ -930,7 +929,6 @@ impl std::fmt::Display for HierarchyLevel {
         let name = match self {
             Self::Global => "Global",
             Self::Space => "Space",
-            Self::Team => "Team",
             Self::Agent => "Agent",
         };
         write!(f, "{name}")

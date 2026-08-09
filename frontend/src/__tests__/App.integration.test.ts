@@ -15,20 +15,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { flushSync, mount, unmount } from "svelte";
 
 import App from "../App.svelte";
-import * as builderApi from "../lib/api/builder";
 import * as conversationsApi from "../lib/api/conversations";
-import * as lensApi from "../lib/api/lens";
 import * as materialsApi from "../lib/api/materials";
 import * as operatorApi from "../lib/api/operator";
 import * as spacesApi from "../lib/api/spaces";
 import type {
-  AppLens,
   ClientEvent,
   ConnectionStatus,
   ConversationDetail,
   ConversationResponse,
   ConversationSummary,
-  LensRuntimeResponse,
   OperatorOverview,
   Space,
   ServerEvent,
@@ -91,22 +87,6 @@ vi.mock("../lib/api/conversations", () => ({
   createConversation: vi.fn(),
   getConversation: vi.fn(),
   deleteConversation: vi.fn(),
-}));
-
-vi.mock("../lib/api/lens", () => ({
-  fetchLensRuntime: vi.fn(),
-  updateLensRuntime: vi.fn(),
-}));
-
-vi.mock("../lib/api/builder", () => ({
-  listTeams: vi.fn(),
-  createTeam: vi.fn(),
-  updateTeam: vi.fn(),
-  listSpaceExtensions: vi.fn(),
-  createSpaceExtension: vi.fn(),
-  updateSpaceExtension: vi.fn(),
-  approveWorkspaceExtension: vi.fn(),
-  listSharedReferences: vi.fn(),
 }));
 
 vi.mock("../lib/api/materials", () => ({
@@ -240,49 +220,6 @@ function makeOperatorOverview(
   };
 }
 
-function makeLensRuntime(
-  activeLens: AppLens = "assistant",
-): LensRuntimeResponse {
-  return {
-    space_id: "proj-default",
-    active_lens: activeLens,
-    updated_at: "2026-04-07T12:00:00Z",
-    stage_modules: [],
-    available_lenses: [
-      {
-        id: "assistant",
-        title: "Assistant lens",
-        summary: "Conversation-first view",
-        default_surface: "conversation",
-        ui_modules: ["conversation", "operator"],
-        prominent_team_ids: ["default"],
-        source_kind: "built_in",
-      },
-      {
-        id: "builder",
-        title: "Builder lens",
-        summary: "Workspace-first view",
-        default_surface: "builder",
-        ui_modules: ["builder", "conversation"],
-        prominent_team_ids: ["workspace-core"],
-        source_kind: "built_in",
-      },
-      {
-        // Operator-led lens — the new shell reaches the operator surface by
-        // selecting a lens whose default_surface is "operator", rather than
-        // by switching surface tabs within a lens.
-        id: "operator",
-        title: "Operator lens",
-        summary: "Operator-first view",
-        default_surface: "operator",
-        ui_modules: ["operator", "conversation"],
-        prominent_team_ids: [],
-        source_kind: "built_in",
-      },
-    ],
-  };
-}
-
 async function settleUi(): Promise<void> {
   for (let attempt = 0; attempt < 12; attempt += 1) {
     await Promise.resolve();
@@ -337,11 +274,6 @@ describe("App", () => {
     vi.clearAllMocks();
     setPath("/");
     delete window.swageDesktop;
-    vi.mocked(lensApi.fetchLensRuntime).mockResolvedValue(makeLensRuntime());
-    vi.mocked(lensApi.updateLensRuntime).mockResolvedValue(makeLensRuntime("builder"));
-    vi.mocked(builderApi.listTeams).mockResolvedValue([]);
-    vi.mocked(builderApi.listSpaceExtensions).mockResolvedValue([]);
-    vi.mocked(builderApi.listSharedReferences).mockResolvedValue([]);
     vi.mocked(materialsApi.listSpaceMaterials).mockResolvedValue([]);
     vi.mocked(materialsApi.listSessionMaterials).mockResolvedValue([]);
     vi.mocked(operatorApi.fetchOperatorOverview).mockResolvedValue(makeOperatorOverview());
@@ -396,7 +328,6 @@ describe("App", () => {
     await settleUi();
 
     expect(spacesApi.listSpaces).toHaveBeenCalledTimes(1);
-    expect(lensApi.fetchLensRuntime).toHaveBeenCalledTimes(1);
     expect(conversationsApi.listConversations).toHaveBeenCalledWith(defaultSpace.id);
     expect(conversationsApi.getConversation).toHaveBeenCalledWith("conv-linked");
     expect(websocketHarness.client.connect).toHaveBeenCalledWith("conv-linked");
@@ -533,29 +464,19 @@ describe("App", () => {
     vi.mocked(operatorApi.fetchOperatorOverview).mockResolvedValue(
       makeOperatorOverview(),
     );
-    // Override the default beforeEach mock (which returns "builder") so
-    // selecting the Operator lens lands us in operator mode.
-    vi.mocked(lensApi.updateLensRuntime).mockResolvedValueOnce(
-      makeLensRuntime("operator"),
-    );
-
     component = mount(App, { target: document.body });
     await settleUi();
-    // Open the space so the lens tabs render in the top bar.
     await openSpaceFromPicker(defaultSpace.name);
 
-    // Lens tabs sit in the top bar with class .lens. We look for the lens
-    // whose title resolves to "Operator" (after stripping the trailing "lens"
-    // word in AppLayout).
-    const operatorLens = Array.from(
-      document.querySelectorAll(".topbar .lens"),
+    const operatorButton = Array.from(
+      document.querySelectorAll(".surface-switch button"),
     ).find((button) => button.textContent?.toLowerCase().includes("operator")) as
       | HTMLButtonElement
       | undefined;
 
-    expect(operatorLens).toBeDefined();
+    expect(operatorButton).toBeDefined();
 
-    flushSync(() => operatorLens!.click());
+    flushSync(() => operatorButton!.click());
     await waitForText("Live control surface for the running gateway");
 
     expect(operatorApi.fetchOperatorOverview).toHaveBeenCalled();
@@ -564,34 +485,6 @@ describe("App", () => {
     );
     expect(document.body.textContent).toContain("dev_dm");
     expect(document.body.textContent).toContain("Local machine");
-  });
-
-  it("loads the builder lens and renders the builder deck by default", async () => {
-    const defaultSpace = makeSpace({ name: "Space" });
-
-    vi.mocked(spacesApi.listSpaces).mockResolvedValueOnce([defaultSpace]);
-    vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([]);
-    vi.mocked(operatorApi.fetchOperatorOverview).mockResolvedValueOnce(
-      makeOperatorOverview(),
-    );
-    vi.mocked(lensApi.fetchLensRuntime).mockResolvedValueOnce(
-      makeLensRuntime("builder"),
-    );
-
-    component = mount(App, { target: document.body });
-    await settleUi();
-    // Open the space so the builder lens runtime is fetched and the deck
-    // gets placed on the stage.
-    await openSpaceFromPicker(defaultSpace.name);
-    await waitForText("Author the space, then let the agent live in it.");
-
-    expect(document.body.textContent).toContain(
-      "Author the space, then let the agent live in it.",
-    );
-    // Space name still surfaces in the space head.
-    expect(document.body.textContent).toContain("Space");
-    // Operator overview is no longer pre-fetched on mount — the rail that
-    // displayed it was dropped. The operator lens loads its own data.
   });
 
   it("shows missing space workspaces and relinks them before opening", async () => {
@@ -654,38 +547,4 @@ describe("App", () => {
     });
   });
 
-  // The right-hand SpaceRail (materials / shared references / operator
-  // pulse) was dropped per Surfaces.md ("Reference rail dropped; shared
-  // reference objects sit in the module stage"). The test that exercised the
-  // rail's contents is no longer applicable to the riso shell. When stage
-  // modules grow to expose those views, equivalent coverage should be added
-  // there.
-
-  it("persists a lens switch and changes the available primary surface", async () => {
-    const defaultSpace = makeSpace();
-
-    vi.mocked(spacesApi.listSpaces).mockResolvedValueOnce([defaultSpace]);
-    vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([]);
-
-    component = mount(App, { target: document.body });
-    await settleUi();
-    // Open the space so the lens tabs render in the top bar.
-    await openSpaceFromPicker(defaultSpace.name);
-
-    const builderLens = Array.from(
-      document.querySelectorAll(".topbar .lens"),
-    ).find((button) => button.textContent?.toLowerCase().includes("builder")) as
-      | HTMLButtonElement
-      | undefined;
-
-    expect(builderLens).toBeDefined();
-
-    flushSync(() => builderLens!.click());
-    await waitForText("Author the space, then let the agent live in it.");
-
-    expect(lensApi.updateLensRuntime).toHaveBeenCalledWith("proj-default", "builder");
-    expect(document.body.textContent).toContain(
-      "Author the space, then let the agent live in it.",
-    );
-  });
 });

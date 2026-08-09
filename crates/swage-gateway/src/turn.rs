@@ -652,31 +652,6 @@ pub(crate) async fn process_turn_with_existing_turn(
         None => String::new(),
     };
 
-    // Build the assembly search hierarchy for locating Python assembly files.
-    // Collected as owned PathBufs first so references can be formed safely
-    // after the Vec is complete.
-    let assembly_search_paths: Vec<(HierarchyLevel, PathBuf)> = swage_root_opt
-        .as_ref()
-        .map(|root| {
-            let space_dir = root.join("spaces").join(&space_slug);
-            let agent_dir = space_dir.join("agents").join(&session.agent_id);
-            let mut levels = vec![
-                (HierarchyLevel::Global, root.clone()),
-                (HierarchyLevel::Space, space_dir),
-            ];
-            // Only include the agent level when the directory exists;
-            // a missing agent dir means no agent-specific assemblies.
-            if agent_dir.is_dir() {
-                levels.push((HierarchyLevel::Agent, agent_dir));
-            }
-            levels
-        })
-        .unwrap_or_default();
-    let search_level_refs: Vec<(HierarchyLevel, &Path)> = assembly_search_paths
-        .iter()
-        .map(|(level, path)| (level.clone(), path.as_path()))
-        .collect();
-
     let elements = build_assembly_elements(
         &config.instructions,
         active_skills,
@@ -686,23 +661,8 @@ pub(crate) async fn process_turn_with_existing_turn(
     );
     let tokeniser = TiktokenTokeniser::new(config.default_model_id());
 
-    // Run the fail-open assembly orchestrator. For "default" (or empty)
-    // assembly names this delegates to default_assembly() synchronously.
-    // Named Python assemblies now execute in a child worker instead of an
-    // embedded interpreter.
-    let assembly_runner =
-        swage_python::ConfiguredAssemblyRunner::new(config.tools.python_execute.clone());
-    let provider = state.active_provider();
-    let output = swage_context::assembly::assemble_for_agent(
-        &session.agent_id,
-        &elements,
-        &config.context,
-        &tokeniser,
-        &search_level_refs,
-        provider.as_ref(),
-        Some(&assembly_runner),
-    )
-    .await;
+    // Assemble context with the built-in default implementation.
+    let output = swage_context::assembly::assemble(&elements, &config.context, &tokeniser);
     let (assembled_messages, assembly_report) = (output.messages, output.report);
 
     tracing::debug!(
