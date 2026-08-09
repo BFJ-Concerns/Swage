@@ -757,6 +757,83 @@ pub struct NewMaterial {
     pub content_text: String,
 }
 
+/// Where a source observation came from: a URL, a local file, or both
+/// (a local capture of remote content records both).
+///
+/// At least one of the two is always present — the schema enforces it, and
+/// `NewSourceObservation` construction should too.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ObservationOrigin {
+    pub url: Option<String>,
+    pub local_path: Option<String>,
+}
+
+/// One immutable capture of an external source in a space's knowledge base.
+///
+/// Observations are the knowledge base's unit of storage and are never
+/// mutated or deleted: a fresh capture of the same origin is a new row, and
+/// curation reorganises through separate append-only assertions. The raw
+/// body lives as a content-addressed file under the space data root
+/// (addressed by `body_sha256`); this row holds metadata only.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SourceObservation {
+    pub id: Uuid,
+    pub space_id: Uuid,
+    pub origin: ObservationOrigin,
+    pub retrieved_at: DateTime<Utc>,
+    /// Lowercase hex SHA-256 of the raw body — the body file's address.
+    pub body_sha256: String,
+    pub body_bytes: u64,
+    pub media_type: String,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Input for recording a new source observation.
+#[derive(Debug, Clone)]
+pub struct NewSourceObservation {
+    pub space_id: Uuid,
+    pub origin: ObservationOrigin,
+    pub retrieved_at: DateTime<Utc>,
+    pub body_sha256: String,
+    pub body_bytes: u64,
+    pub media_type: String,
+}
+
+/// One versioned text extraction of an observation's raw body.
+///
+/// Versions are assigned by the store (per observation, ascending) and an
+/// existing derivation is never mutated: re-extraction inserts the next
+/// version, so a citation pinned to (observation, version, offsets) stays
+/// valid across extractor upgrades.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExtractionDerivation {
+    pub id: Uuid,
+    pub observation_id: Uuid,
+    pub version: u32,
+    pub extracted_text: String,
+    /// What produced this text (e.g. "html-to-text v1") — provenance for
+    /// judging whether a better extraction is worth deriving.
+    pub extractor: String,
+    pub created_at: DateTime<Utc>,
+}
+
+/// One full-text search hit over a space's knowledge base.
+///
+/// Carries everything a citation needs: the observation, the derivation
+/// version the snippet was located in, and the snippet with its byte
+/// offsets in that derivation's text.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KnowledgeSearchHit {
+    pub observation_id: Uuid,
+    pub derivation_version: u32,
+    pub origin: ObservationOrigin,
+    pub retrieved_at: DateTime<Utc>,
+    /// The matching passage, exactly as it appears in the derivation text.
+    pub snippet: String,
+    /// Byte offset of `snippet` within the derivation's extracted text.
+    pub snippet_offset: usize,
+}
+
 /// A manually appended audit event.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NewAuditEvent {
