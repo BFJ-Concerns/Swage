@@ -76,49 +76,49 @@
   }
 </script>
 
-{#if !currentSpace}
-  <SpacePicker {spaceStore} {onSpaceChange} />
-{:else}
+{#if currentSpace}
   <header class="topbar">
     <SpaceSelector {spaceStore} {onSpaceChange} />
     <nav aria-label="Surface">
-      <button class:active={activeSurface === "conversation"} onclick={() => onSelectSurface("conversation")}>Conversation</button>
-      <button class:active={activeSurface === "operator"} onclick={() => onSelectSurface("operator")}>Operator</button>
+      <button aria-pressed={activeSurface === "conversation"} class:active={activeSurface === "conversation"} onclick={() => onSelectSurface("conversation")}>Conversation</button>
+      <button aria-pressed={activeSurface === "operator"} class:active={activeSurface === "operator"} onclick={() => onSelectSurface("operator")}>Operator</button>
       <button onclick={() => onNavigate?.("/settings/providers")}>Settings</button>
     </nav>
     {#if desktopRuntime}<span>{desktopRuntime.managedGateway ? "MANAGED" : "REMOTE"}</span>{/if}
     {#if onSelectTheme}<ThemeToggle mode={themeMode} onSelect={onSelectTheme} />{/if}
   </header>
+{/if}
 
-  {#if settingsMode}
-    <!-- The settings window chrome lives here; the pages own their content only. -->
-    <div class="settings-window">
-      <header class="settings-chrome">
-        <h2>Settings</h2>
-        <button class="close" onclick={closeSettings} aria-label="Close settings">×</button>
-      </header>
-      {#if settingsSpace}
-        <SpaceSettingsPage space={settingsSpace} tab={settingsSpaceTab ?? undefined} />
+{#if settingsMode}
+  <!-- The settings window chrome lives here; the pages own their content only. -->
+  <div class="settings-window">
+    <header class="settings-chrome">
+      <h2>Settings</h2>
+      <button class="close" onclick={closeSettings} aria-label="Close settings">×</button>
+    </header>
+    {#if settingsSpace}
+      <SpaceSettingsPage space={settingsSpace} tab={settingsSpaceTab ?? undefined} />
+    {:else}
+      <SettingsPage tab={settingsTab ?? undefined} />
+    {/if}
+  </div>
+{:else if !currentSpace}
+  <SpacePicker {spaceStore} {onSpaceChange} />
+{:else if activeSurface === "operator"}
+  <main class="operator"><OperatorDashboard /></main>
+{:else}
+  <main class="conversation">
+    <aside><ConversationList store={conversationStore} /></aside>
+    <section aria-label="Conversation">
+      {#if activeConversation}<ConnectionIndicator store={connectionStore} {onRetry} />{/if}
+      <MessageDisplay store={conversationStore} {streamingStore} {displayPreferences} />
+      {#if streamingStore.pendingApproval}
+        <ApprovalCard approval={streamingStore.pendingApproval} />
       {:else}
-        <SettingsPage tab={settingsTab ?? undefined} />
+        <MessageInput store={streamingStore} {modelOptions} selectedModelId={activeConversation?.selected_model_id ?? defaultModelId} />
       {/if}
-    </div>
-  {:else if activeSurface === "operator"}
-    <main class="operator"><OperatorDashboard /></main>
-  {:else}
-    <main class="conversation">
-      <aside><ConversationList store={conversationStore} /></aside>
-      <section aria-label="Conversation">
-        {#if activeConversation}<ConnectionIndicator store={connectionStore} {onRetry} />{/if}
-        <MessageDisplay store={conversationStore} {streamingStore} {displayPreferences} />
-        {#if streamingStore.pendingApproval}
-          <ApprovalCard approval={streamingStore.pendingApproval} />
-        {:else}
-          <MessageInput store={streamingStore} {modelOptions} selectedModelId={activeConversation?.selected_model_id ?? defaultModelId} />
-        {/if}
-      </section>
-    </main>
-  {/if}
+    </section>
+  </main>
 {/if}
 
 <style>
