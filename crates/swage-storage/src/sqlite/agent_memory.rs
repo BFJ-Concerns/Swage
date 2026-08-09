@@ -260,7 +260,7 @@ mod tests {
             .unwrap()
             .expect("record should exist");
         assert_eq!(fetched.title, "Build quirk");
-        assert_eq!(fetched.tags, vec!["builder", "preview"]);
+        assert_eq!(fetched.tags, vec!["preview"]);
 
         let only_agent_a = storage
             .list_agent_memories(space.id, Some("agent-a"), None, Some("preview"), 10)

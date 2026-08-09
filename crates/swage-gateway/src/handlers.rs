@@ -49,11 +49,9 @@ use crate::{
     service::{
         ConversationBranchResponse, ConversationDetail, ConversationResponse, ConversationService,
         ConversationSummary, ConversationThreadDetail, CreateConversationBranchRequest,
-        CreateSpaceRequest,
-        CreateWorkspaceAttachmentRequest, SpaceListResponse, SpaceResponse, SpaceService,
-        UpdateSpaceRequest,
-        UpdateWorkspaceTrustRequest, WorkspaceAttachmentListResponse, WorkspaceAttachmentResponse,
-        WorkspaceAttachmentService,
+        CreateSpaceRequest, CreateWorkspaceAttachmentRequest, SpaceListResponse, SpaceResponse,
+        SpaceService, UpdateSpaceRequest, UpdateWorkspaceTrustRequest,
+        WorkspaceAttachmentListResponse, WorkspaceAttachmentResponse, WorkspaceAttachmentService,
     },
     settings::{SaveProviderSettings, SaveSettingsRequest, SettingsResponse},
     state::AppState,
@@ -287,6 +285,76 @@ pub async fn operator_usage(
     Query(query): Query<OperatorUsageQuery>,
 ) -> Result<Json<OperatorUsageResponse>, ApiError> {
     Ok(Json(crate::audit::operator_usage(&state, query).await?))
+}
+
+/// `GET /api/secrets` — list governed secrets without revealing raw values.
+pub async fn list_secrets(
+    State(state): State<AppState>,
+) -> Result<Json<SecretListResponse>, ApiError> {
+    Ok(Json(state.secret_manager.list_secrets().await?))
+}
+
+/// `POST /api/secrets` — create a governed secret.
+pub async fn create_secret(
+    State(state): State<AppState>,
+    Json(req): Json<CreateSecretRequest>,
+) -> Result<(StatusCode, Json<SecretResponse>), ApiError> {
+    Ok((
+        StatusCode::CREATED,
+        Json(state.secret_manager.create_secret(req).await?),
+    ))
+}
+
+/// `POST /api/secrets/generate` — generate a managed secret material.
+pub async fn generate_secret(
+    State(state): State<AppState>,
+    Json(req): Json<GenerateSecretRequest>,
+) -> Result<(StatusCode, Json<SecretResponse>), ApiError> {
+    Ok((
+        StatusCode::CREATED,
+        Json(state.secret_manager.generate_secret(req).await?),
+    ))
+}
+
+/// `GET /api/secrets/:id` — inspect one governed secret without revealing its value.
+pub async fn get_secret(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<SecretResponse>, ApiError> {
+    Ok(Json(state.secret_manager.get_secret(id).await?))
+}
+
+/// `POST /api/secrets/:id/rotate` — rotate a governed secret.
+pub async fn rotate_secret(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<RotateSecretRequest>,
+) -> Result<Json<SecretResponse>, ApiError> {
+    Ok(Json(state.secret_manager.rotate_secret(id, req).await?))
+}
+
+/// `POST /api/secrets/:id/revoke` — revoke a governed secret.
+pub async fn revoke_secret(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<SecretResponse>, ApiError> {
+    Ok(Json(state.secret_manager.revoke_secret(id).await?))
+}
+
+/// `POST /api/secrets/:id/restore` — restore a previously revoked secret.
+pub async fn restore_secret(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<SecretResponse>, ApiError> {
+    Ok(Json(state.secret_manager.restore_secret(id).await?))
+}
+
+/// `POST /api/secrets/:id/validate` — resolve and validate a governed secret.
+pub async fn validate_secret(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<SecretValidationResponse>, ApiError> {
+    Ok(Json(state.secret_manager.validate_secret(id).await?))
 }
 
 /// `GET /api/operator/runs` — inspect live and historical run supervision.
@@ -1955,9 +2023,7 @@ mod tests {
     use crate::{
         server::build_router,
         state::AppState,
-        turn::tests::{
-            CapturingMultiRoundProvider, MockProvider, MockStorage, MultiRoundMockProvider,
-        },
+        turn::tests::{CapturingMultiRoundProvider, MockProvider, MockStorage},
         websocket::ServerEvent,
     };
 

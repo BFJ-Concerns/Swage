@@ -11,7 +11,7 @@
   import SpaceSettingsPage from "./SpaceSettingsPage.svelte";
   import ThemeToggle from "./ThemeToggle.svelte";
   import type { DisplayPreferences } from "../display-preferences";
-  import type { Route, SpaceSettingsTab } from "../router";
+  import type { Route } from "../router";
   import type { DesktopRuntimeInfo } from "../runtime";
   import type { ThemeMode } from "../theme";
   import type { ConnectionStore } from "../stores/connection";
@@ -34,7 +34,6 @@
     themeMode?: ThemeMode;
     displayPreferences?: DisplayPreferences;
     onSelectTheme?: (mode: ThemeMode) => void;
-    activeModelContextWindow?: number | null;
     modelOptions?: string[];
     defaultModelId?: string | null;
     route?: Route;
@@ -54,7 +53,6 @@
     themeMode = "system",
     displayPreferences,
     onSelectTheme,
-    activeModelContextWindow = null,
     modelOptions = [],
     defaultModelId = null,
     route,
@@ -65,6 +63,7 @@
   const activeConversation = $derived(conversationStore.activeConversation);
   const settingsTab = $derived(route?.settingsTab ?? null);
   const settingsSpaceSlug = $derived(route?.settingsSpaceSlug ?? null);
+  const settingsSpaceTab = $derived(route?.settingsSpaceTab ?? null);
   const settingsMode = $derived(settingsTab !== null || settingsSpaceSlug !== null);
   const settingsSpace = $derived(
     settingsSpaceSlug
@@ -78,10 +77,10 @@
 </script>
 
 {#if !currentSpace}
-  <SpacePicker store={spaceStore} onSelect={onSpaceChange} />
+  <SpacePicker {spaceStore} {onSpaceChange} />
 {:else}
   <header class="topbar">
-    <SpaceSelector store={spaceStore} onChange={onSpaceChange} />
+    <SpaceSelector {spaceStore} {onSpaceChange} />
     <nav aria-label="Surface">
       <button class:active={activeSurface === "conversation"} onclick={() => onSelectSurface("conversation")}>Conversation</button>
       <button class:active={activeSurface === "operator"} onclick={() => onSelectSurface("operator")}>Operator</button>
@@ -92,11 +91,18 @@
   </header>
 
   {#if settingsMode}
-    {#if settingsSpace}
-      <SpaceSettingsPage space={settingsSpace} onClose={closeSettings} />
-    {:else}
-      <SettingsPage tab={settingsTab} onClose={closeSettings} />
-    {/if}
+    <!-- The settings window chrome lives here; the pages own their content only. -->
+    <div class="settings-window">
+      <header class="settings-chrome">
+        <h2>Settings</h2>
+        <button class="close" onclick={closeSettings} aria-label="Close settings">×</button>
+      </header>
+      {#if settingsSpace}
+        <SpaceSettingsPage space={settingsSpace} tab={settingsSpaceTab ?? undefined} />
+      {:else}
+        <SettingsPage tab={settingsTab ?? undefined} />
+      {/if}
+    </div>
   {:else if activeSurface === "operator"}
     <main class="operator"><OperatorDashboard /></main>
   {:else}
@@ -116,8 +122,11 @@
 {/if}
 
 <style>
-  .topbar { display: flex; align-items: centre; gap: 1rem; padding: .75rem; border-bottom: 1px solid var(--ink, #222); }
+  .topbar { display: flex; align-items: center; gap: 1rem; padding: .75rem; border-bottom: 1px solid var(--ink, #222); }
   nav { display: flex; gap: .5rem; }
+  .settings-window { height: calc(100vh - 4rem); overflow: auto; }
+  .settings-chrome { display: flex; align-items: center; justify-content: space-between; padding: .75rem; border-bottom: 1px solid var(--ink, #222); }
+  .settings-chrome h2 { margin: 0; font-size: 1rem; }
   button.active { font-weight: bold; }
   .conversation { display: grid; grid-template-columns: minmax(16rem, 25%) 1fr; height: calc(100vh - 4rem); }
   .conversation aside { overflow: auto; border-right: 1px solid var(--ink, #222); }

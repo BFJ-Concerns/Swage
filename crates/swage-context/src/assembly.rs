@@ -14,7 +14,7 @@ use swage_core::ChatMessage;
 
 use crate::compaction::TruncationCompactor;
 use crate::element::ContextElement;
-use crate::report::{AssemblyOutput, AssemblyReport, ElementReport};
+use crate::report::{AssemblyOutput, AssemblyReport, CompactionRecord, ElementReport};
 use crate::tokeniser::Tokeniser;
 
 /// Produce an assembled context from the provided elements.

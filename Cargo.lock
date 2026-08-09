@@ -3527,6 +3527,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "futures",
+ "rquickjs",
  "serde",
  "serde_json",
  "swage-config",

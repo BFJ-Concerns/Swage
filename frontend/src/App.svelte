@@ -171,7 +171,6 @@
   let notFound = $state(false);
   let activeSurface = $state<Surface>("conversation");
   let currentRoute = $state<Route>(router.currentRoute);
-  let activeModelContextWindow = $state<number | null>(null);
   let modelOptions = $state<string[]>([]);
   let defaultModelId = $state<string | null>(null);
   const desktopRuntime = getDesktopRuntime();
@@ -316,7 +315,6 @@
         console.error("Failed to load model settings:", error);
         return null;
       });
-      activeModelContextWindow = settings?.models[settings.default_model]?.context_window ?? null;
       modelOptions = Object.keys(settings?.models ?? {});
       defaultModelId = settings?.default_model ?? null;
 
@@ -383,7 +381,6 @@
     {themeMode}
     {displayPreferences}
     onSelectTheme={setThemeMode}
-    {activeModelContextWindow}
     {modelOptions}
     {defaultModelId}
     route={currentRoute}

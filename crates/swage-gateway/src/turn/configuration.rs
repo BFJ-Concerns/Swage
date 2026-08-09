@@ -162,8 +162,7 @@ pub(crate) fn apply_agent_definition(
         if config.instructions.is_empty() {
             config.instructions = definition.instructions.clone();
         } else {
-            config.instructions =
-                format!("{}\n\n{}", config.instructions, definition.instructions);
+            config.instructions = format!("{}\n\n{}", config.instructions, definition.instructions);
         }
     }
 
@@ -298,16 +297,24 @@ mod tests {
 
     #[test]
     fn definition_instructions_append_after_operator_instructions() {
-        let mut config = swage_config::ResolvedConfig::default();
-        config.instructions = "Operator ambient rules.".into();
+        let config = swage_config::ResolvedConfig {
+            instructions: "Operator ambient rules.".into(),
+            ..Default::default()
+        };
 
         let applied = apply_agent_definition(
             config,
             &definition_with("Gather and cite evidence.", None, None),
         );
 
-        let operator = applied.instructions.find("Operator ambient rules.").unwrap();
-        let agent = applied.instructions.find("Gather and cite evidence.").unwrap();
+        let operator = applied
+            .instructions
+            .find("Operator ambient rules.")
+            .unwrap();
+        let agent = applied
+            .instructions
+            .find("Gather and cite evidence.")
+            .unwrap();
         assert!(
             operator < agent,
             "the definition extends the operator's instructions, never precedes them"

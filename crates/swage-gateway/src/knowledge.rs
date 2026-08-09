@@ -11,8 +11,8 @@
 use std::path::PathBuf;
 
 use sha2::{Digest, Sha256};
-use swage_core::GatewayError;
 use swage_config::discovery::resolve_root;
+use swage_core::GatewayError;
 
 /// A stored body's address and size, as the observation row records them.
 #[derive(Debug, Clone)]
@@ -47,7 +47,10 @@ fn body_path(space_slug: &str, sha256: &str) -> Result<PathBuf, GatewayError> {
 /// Store raw bytes, returning their address. Idempotent: identical bytes
 /// hash to the same path, and an existing file is left untouched.
 pub async fn write_body(space_slug: &str, bytes: &[u8]) -> Result<StoredBody, GatewayError> {
-    let sha256 = format!("{:x}", Sha256::digest(bytes));
+    let sha256: String = Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
     let path = body_path(space_slug, &sha256)?;
 
     if tokio::fs::try_exists(&path)

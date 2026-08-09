@@ -13,8 +13,6 @@ use crate::state::AppState;
 #[cfg(test)]
 use axum::http::StatusCode;
 #[cfg(test)]
-use connection::broadcast_event_matches_session;
-#[cfg(test)]
 use dispatch::TEST_SKILL_ROOTS;
 use dispatch::dispatch_client_message;
 #[cfg(test)]

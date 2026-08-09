@@ -148,7 +148,7 @@ impl ContextElement for OrientationElement {
     }
 
     fn content(&self) -> Vec<ChatMessage> {
-        vec![ChatMessage::new(Role::System, &self.render())]
+        vec![ChatMessage::new(Role::System, self.render())]
     }
 
     fn token_count(&self, tokeniser: &dyn Tokeniser) -> usize {
@@ -161,10 +161,7 @@ impl ContextElement for OrientationElement {
             parts.push("channel orientation".to_string());
         }
         if !self.available_skills.is_empty() {
-            parts.push(format!(
-                "{} available skills",
-                self.available_skills.len()
-            ));
+            parts.push(format!("{} available skills", self.available_skills.len()));
         }
         parts.join(", ")
     }
@@ -194,7 +191,7 @@ mod tests {
 
         let content = element.content();
         assert_eq!(content.len(), 1);
-        assert_eq!(content[0].role, Role::System);
+        assert_eq!(content[0].role(), Role::System);
 
         let text = content[0].text_content();
         assert!(text.contains("agent running on Swage"));
