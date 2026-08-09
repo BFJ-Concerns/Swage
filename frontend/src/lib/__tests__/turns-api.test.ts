@@ -36,7 +36,7 @@ describe("fetchTurnContext", () => {
       compaction_applied: [],
       warnings: [],
       errors: [],
-      duration_ms: 2,
+      duration: { secs: 0, nanos: 2_000_000 },
     };
     vi.mocked(fetch).mockResolvedValueOnce(
       mockResponse({ turn_id: "t-1", report }),

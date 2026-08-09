@@ -39,6 +39,13 @@
   });
 
   const totalTokens = $derived(report?.total_tokens ?? 0);
+  const durationMs = $derived(
+    report
+      ? Math.round(
+          report.duration.secs * 1000 + report.duration.nanos / 1_000_000,
+        )
+      : 0,
+  );
 </script>
 
 <aside class="context-inspector" aria-label="Turn context">
@@ -62,7 +69,7 @@
     <p class="summary">
       Assembled by <strong>{report.assembly_name}</strong> — {totalTokens}
       tokens across {report.elements.length} elements in
-      {report.duration_ms}&nbsp;ms.
+      {durationMs}&nbsp;ms.
     </p>
 
     <table class="elements">
