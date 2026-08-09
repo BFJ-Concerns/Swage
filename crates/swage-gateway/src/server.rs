@@ -103,10 +103,6 @@ pub fn build_router(state: AppState) -> Router {
             put(handlers::update_space_workspace_trust),
         )
         .route(
-            "/api/spaces/{space_id}/teams",
-            get(handlers::list_teams).post(handlers::create_team),
-        )
-        .route(
             "/api/spaces/{id}/extensions",
             get(handlers::list_space_extensions).post(handlers::create_space_extension),
         )
@@ -117,14 +113,6 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/api/spaces/{id}/extensions/{name}/approve-workspace",
             post(handlers::approve_workspace_extension),
-        )
-        .route(
-            "/api/spaces/{id}/topology-flows",
-            get(handlers::list_topology_flows).post(handlers::create_topology_flow),
-        )
-        .route(
-            "/api/spaces/{id}/topology-flows/{name}",
-            get(handlers::get_topology_flow).put(handlers::update_topology_flow),
         )
         .route(
             "/api/spaces/{id}/context-definitions",
@@ -173,17 +161,6 @@ pub fn build_router(state: AppState) -> Router {
             "/api/config-versions/{id}/rollback",
             post(handlers::rollback_configuration_version),
         )
-        .route(
-            "/api/teams/{id}",
-            get(handlers::get_team)
-                .put(handlers::update_team)
-                .delete(handlers::delete_team),
-        )
-        .route(
-            "/api/teams/{id}/runs",
-            get(handlers::list_topology_runs).post(handlers::create_topology_run),
-        )
-        .route("/api/topology-runs/{id}", get(handlers::get_topology_run))
         .route(
             "/api/conversations/{id}/branches",
             get(handlers::list_conversation_branches).post(handlers::create_conversation_branch),
