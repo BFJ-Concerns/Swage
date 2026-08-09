@@ -103,6 +103,7 @@
     {/if}
   </div>
 {:else if !currentSpace}
+  <button onclick={() => onNavigate?.("/settings/providers")}>Settings</button>
   <SpacePicker {spaceStore} {onSpaceChange} />
 {:else if activeSurface === "operator"}
   <main class="operator"><OperatorDashboard /></main>

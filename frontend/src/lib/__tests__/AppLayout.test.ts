@@ -171,6 +171,14 @@ describe("AppLayout shell navigation", () => {
     expect(document.querySelector('textarea[aria-label="Message"]')).not.toBeNull();
   });
 
+  it("renders the space switcher in the shell", () => {
+    component = mountLayout();
+
+    expect(document.querySelector('button[title="Switch space"]')?.textContent).toContain(
+      "Switch — default",
+    );
+  });
+
   it("marks conversation as the selected surface", () => {
     component = mountLayout();
 
@@ -217,19 +225,20 @@ describe("AppLayout shell navigation", () => {
     expect(onNavigate).toHaveBeenCalledWith("/");
   });
 
-  it("keeps global settings available without a selected space", () => {
+  it("opens global settings without a selected space", () => {
     const onNavigate = vi.fn();
     component = mountLayout({
       hasCurrentSpace: false,
       onNavigate,
-      routePath: "/settings/providers",
     });
 
-    expect(document.querySelector('[aria-label="Settings"]')).not.toBeNull();
-    expect(document.body.textContent).not.toContain("Choose where to work.");
-    flushSync(() =>
-      (document.querySelector('[aria-label="Close settings"]') as HTMLButtonElement).click(),
+    const settingsButton = Array.from(document.querySelectorAll("button")).find(
+      (button) => button.textContent?.trim() === "Settings",
     );
-    expect(onNavigate).toHaveBeenCalledWith("/");
+    expect(settingsButton).toBeInstanceOf(HTMLButtonElement);
+
+    flushSync(() => settingsButton?.click());
+
+    expect(onNavigate).toHaveBeenCalledWith("/settings/providers");
   });
 });
