@@ -9,6 +9,7 @@ pub mod compaction;
 pub mod delta_summarisation;
 pub mod element;
 pub mod history;
+pub mod js_assembly;
 pub mod memory;
 pub mod orientation;
 pub mod prompts;
