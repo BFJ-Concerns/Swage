@@ -35,7 +35,10 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use rquickjs::{Context, Runtime};
+use rquickjs::{
+    Context, Runtime,
+    context::intrinsic::{Eval, Json, MapSet, RegExp, RegExpCompiler},
+};
 use swage_config::HierarchyLevel;
 use swage_config::model::ContextConfig;
 use swage_core::{ChatMessage, Role};
@@ -108,14 +111,37 @@ pub fn assemble_named(
             tokeniser,
         ),
         Ok(messages) => {
+            // The report describes what actually ran: the script's own
+            // composition. Element rows describe the inputs the script was
+            // given (real either way); everything the default assembly would
+            // have done — compaction, budget enforcement — did not happen
+            // here and is reported as such rather than inherited.
             let started = Instant::now();
-            let mut output = default_assembly(elements, config, tokeniser);
-            // The default run above supplies the per-element accounting; the
-            // script's composition replaces its message list.
-            output.report.assembly_name = name.to_owned();
-            output.report.total_tokens = tokeniser.count_messages(&messages);
-            output.report.duration += started.elapsed();
-            AssemblyOutput::new_unchecked(messages, output.report)
+            let mut report = crate::report::AssemblyReport::new(name);
+            report.elements = elements
+                .iter()
+                .map(|element| crate::report::ElementReport {
+                    name: element.name().to_string(),
+                    source: element.source(),
+                    token_count: element.token_count(tokeniser),
+                    preview: None,
+                    priority: element.priority(),
+                    named_assembly: None,
+                })
+                .collect();
+            report.total_tokens = tokeniser.count_messages(&messages);
+            report.budget = config.budget;
+            if let Some(budget) = config.budget
+                && report.total_tokens > budget
+            {
+                report.warnings.push(format!(
+                    "assembly '{name}' composed {} tokens over the {budget}-token \
+                     budget; scripted compositions are not compacted",
+                    report.total_tokens
+                ));
+            }
+            report.duration = started.elapsed();
+            AssemblyOutput::new_unchecked(messages, report)
         }
         Err(error) => fallback(
             name,
@@ -161,7 +187,13 @@ fn run_script(
     // deadline the script is aborted so the default assembly can serve.
     let deadline = Instant::now() + timeout;
     runtime.set_interrupt_handler(Some(Box::new(move || Instant::now() >= deadline)));
-    let context = Context::full(&runtime).map_err(|error| error.to_string())?;
+    // Explicit intrinsics, the workflow engine's idiom: no Date, so
+    // wall-clock time is constructively absent rather than policed. Eval is
+    // required for host-side source evaluation; the JS-visible global is
+    // deleted in the cage below before script code runs.
+    type AssemblyIntrinsics = (Eval, Json, MapSet, RegExpCompiler, RegExp);
+    let context =
+        Context::custom::<AssemblyIntrinsics>(&runtime).map_err(|error| error.to_string())?;
 
     let elements_json = serde_json::to_string(
         &elements
@@ -381,6 +413,14 @@ mod tests {
         assert!(
             error.contains("deterministic"),
             "Math.random must fail loudly: {error}"
+        );
+
+        // Wall-clock time is constructively absent — the Date intrinsic is
+        // not installed, so scripts cannot depend on when they run.
+        let result = run("add([{ role: 'system', text: String(Date.now()) }]);");
+        assert!(
+            result.is_err(),
+            "Date must not exist in the assembly cage: {result:?}"
         );
     }
 
