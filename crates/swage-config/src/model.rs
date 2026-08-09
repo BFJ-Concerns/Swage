@@ -241,6 +241,17 @@ impl Default for ToolPermissionConfig {
             "scheduling".to_string(),
             vec!["schedule".to_string(), "wake_me_later".to_string()],
         );
+        // Knowledge-base access at registry grain: reading the space's
+        // gathered evidence and writing captures into it are separate powers,
+        // so gathering workers can hold write without every reader gaining it.
+        bundles.insert(
+            "knowledge-read".to_string(),
+            vec!["knowledge_search".to_string()],
+        );
+        bundles.insert(
+            "knowledge-write".to_string(),
+            vec!["knowledge_record".to_string()],
+        );
         Self {
             allow: vec!["*".into()],
             deny: vec![],
