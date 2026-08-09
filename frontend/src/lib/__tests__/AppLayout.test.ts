@@ -1,22 +1,13 @@
 // @vitest-environment jsdom
-/**
- * Tests for the AppLayout riso/cyanotype shell.
- *
- * Verifies the new shell structure:
- *   - top bar is present when a space is selected
- *   - left nav (.nav) holds space head + ConversationList
- *   - body holds a .conversation-pane (always) and an optional .stage-pane
- *
- * The right-hand SpaceRail was dropped per Surfaces.md — these tests no
- * longer assert on `.space-rail`.
- */
-import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
-import { mount, unmount } from "svelte";
+/** Behavioural coverage for the shell's conversation, operator, and settings surfaces. */
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { flushSync, mount, unmount } from "svelte";
 import AppLayout from "../components/AppLayout.svelte";
+import { parseRoute } from "../router";
 import type { ConversationStore } from "../stores/conversations";
 import type { ConnectionStore } from "../stores/connection";
-import type { StreamingStore } from "../stores/streaming";
 import type { SpaceStore } from "../stores/spaces";
+import type { StreamingStore } from "../stores/streaming";
 
 import * as operatorApi from "../api/operator";
 
@@ -29,12 +20,7 @@ vi.mock("../api/operator", () => ({
   fetchScheduleRuns: vi.fn(),
 }));
 
-
 type MountedComponent = ReturnType<typeof mount>;
-
-// ---------------------------------------------------------------------------
-// Minimal mock stores — satisfy the interface so AppLayout can thread them.
-// ---------------------------------------------------------------------------
 
 function mockConversationStore(): ConversationStore {
   return {
@@ -81,30 +67,19 @@ function mockStreamingStore(): StreamingStore {
   };
 }
 
-// AppLayout collapses the top bar and shows a "pick a space" placeholder when
-// no space is selected, so the shell tests need a space in scope.
-function mockSpaceStore(): SpaceStore {
+function mockSpaceStore(hasCurrentSpace = true): SpaceStore {
+  const space = {
+    id: "default",
+    name: "default",
+    description: "",
+    is_default: true,
+    slug: "default",
+    created_at: "",
+  };
+
   return {
-    get spaces() {
-      return [{
-        id: "default",
-        name: "default",
-        description: "",
-        is_default: true,
-        slug: "default",
-        created_at: "",
-      }];
-    },
-    get currentSpace() {
-      return {
-        id: "default",
-        name: "default",
-        description: "",
-        is_default: true,
-        slug: "default",
-        created_at: "",
-      };
-    },
+    get spaces() { return hasCurrentSpace ? [space] : []; },
+    get currentSpace() { return hasCurrentSpace ? space : null; },
     get recentSpaces() { return []; },
     get isLoading() { return false; },
     loadSpaces: async () => {},
@@ -115,26 +90,43 @@ function mockSpaceStore(): SpaceStore {
   };
 }
 
-function mountLayout(): MountedComponent {
+interface MountOptions {
+  activeSurface?: "conversation" | "operator";
+  hasCurrentSpace?: boolean;
+  onNavigate?: (path: string) => void;
+  onSelectSurface?: (surface: "conversation" | "operator") => void;
+  routePath?: string;
+}
+
+function mountLayout(options: MountOptions = {}): MountedComponent {
   return mount(AppLayout, {
     target: document.body,
     props: {
       conversationStore: mockConversationStore(),
       connectionStore: mockConnectionStore(),
       streamingStore: mockStreamingStore(),
-      spaceStore: mockSpaceStore(),
+      spaceStore: mockSpaceStore(options.hasCurrentSpace ?? true),
       onRetry: () => {},
-      activeSurface: "conversation",
-      onSelectSurface: () => {},
+      activeSurface: options.activeSurface ?? "conversation",
+      onSelectSurface: options.onSelectSurface ?? (() => {}),
+      onNavigate: options.onNavigate,
+      route: options.routePath ? parseRoute(options.routePath) : undefined,
     },
   });
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
+function surfaceButton(label: string): HTMLButtonElement {
+  const navigation = document.querySelector('nav[aria-label="Surface"]');
+  const button = Array.from(navigation?.querySelectorAll("button") ?? []).find(
+    (candidate) => candidate.textContent?.trim() === label,
+  );
+  if (!(button instanceof HTMLButtonElement)) {
+    throw new Error(`Surface control "${label}" was not rendered`);
+  }
+  return button;
+}
 
-describe("AppLayout: space shell", () => {
+describe("AppLayout shell navigation", () => {
   let component: MountedComponent | undefined;
 
   beforeEach(() => {
@@ -161,129 +153,83 @@ describe("AppLayout: space shell", () => {
       unmount(component);
       component = undefined;
     }
-    while (document.body.firstChild) {
-      document.body.removeChild(document.body.firstChild);
-    }
+    document.body.replaceChildren();
   });
 
-  it("renders the nav panel", () => {
+  it("shows the space picker before a space is selected", () => {
+    component = mountLayout({ hasCurrentSpace: false });
+
+    expect(document.querySelector("h1")?.textContent).toBe("Choose where to work.");
+    expect(document.querySelector('nav[aria-label="Surface"]')).toBeNull();
+  });
+
+  it("renders the conversation surface with its list, messages, and composer", () => {
     component = mountLayout();
 
-    expect(document.querySelector(".nav")).not.toBeNull();
+    expect(document.querySelector(".conversation-list")).not.toBeNull();
+    expect(document.querySelector('[aria-label="Conversation messages"]')).not.toBeNull();
+    expect(document.querySelector('textarea[aria-label="Message"]')).not.toBeNull();
   });
 
-  it("renders the conversation pane", () => {
+  it("marks conversation as the selected surface", () => {
     component = mountLayout();
 
-    expect(document.querySelector(".conversation-pane")).not.toBeNull();
+    expect(surfaceButton("Conversation").getAttribute("aria-pressed")).toBe("true");
+    expect(surfaceButton("Operator").getAttribute("aria-pressed")).toBe("false");
   });
 
-  it("renders SpaceSelector inside the nav", () => {
-    component = mountLayout();
+  it("requests the operator surface from its labelled control", () => {
+    const onSelectSurface = vi.fn();
+    component = mountLayout({ onSelectSurface });
 
-    const nav = document.querySelector(".nav");
-    expect(nav).not.toBeNull();
-    expect(nav!.querySelector(".space-selector")).not.toBeNull();
+    flushSync(() => surfaceButton("Operator").click());
+
+    expect(onSelectSurface).toHaveBeenCalledWith("operator");
   });
 
-  it("renders ConversationList inside the nav", () => {
-    component = mountLayout();
+  it("renders the operator dashboard when that surface is selected", () => {
+    component = mountLayout({ activeSurface: "operator" });
 
-    const nav = document.querySelector(".nav");
-    expect(nav).not.toBeNull();
-    expect(nav!.querySelector(".conversation-list")).not.toBeNull();
+    expect(document.querySelector("main.operator h1")?.textContent).toContain(
+      "Live control surface for the running gateway",
+    );
+    expect(surfaceButton("Operator").getAttribute("aria-pressed")).toBe("true");
   });
 
-  it("renders MessageDisplay inside the conversation pane", () => {
-    component = mountLayout();
-
-    const pane = document.querySelector(".conversation-pane");
-    expect(pane).not.toBeNull();
-    expect(pane!.querySelector(".message-display")).not.toBeNull();
-  });
-
-  it("renders MessageInput inside the conversation pane", () => {
-    component = mountLayout();
-
-    const pane = document.querySelector(".conversation-pane");
-    expect(pane).not.toBeNull();
-    expect(pane!.querySelector(".message-input")).not.toBeNull();
-  });
-
-  it("renders conversation pane with message display and input sections", () => {
-    component = mountLayout();
-
-    const pane = document.querySelector(".conversation-pane");
-    expect(pane).not.toBeNull();
-    // ConnectionIndicator is hidden when status is "disconnected" (no active
-    // connection attempt), so we verify the other children are present.
-    expect(pane!.children.length).toBeGreaterThan(0);
-  });
-
-  it("collapses the top bar when no space is selected", () => {
-    // Replace the space-store mock with one that has no current space.
-    const noSpaceStore: SpaceStore = {
-      get spaces() { return []; },
-      get currentSpace() { return null; },
-      get recentSpaces() { return []; },
-      get isLoading() { return false; },
-      loadSpaces: async () => {},
-      selectSpace: async () => {},
-      closeSpace: () => {},
-      createSpace: async () => {},
-      deleteSpace: async () => {},
-    };
-    component = mount(AppLayout, {
-      target: document.body,
-      props: {
-        conversationStore: mockConversationStore(),
-        connectionStore: mockConnectionStore(),
-        streamingStore: mockStreamingStore(),
-        spaceStore: noSpaceStore,
-        onRetry: () => {},
-        activeSurface: "conversation",
-        onSelectSurface: () => {},
-      },
-    });
-
-    // The window flips into no-topbar mode and the body shows the SpacePicker.
-    expect(document.querySelector(".window.no-topbar")).not.toBeNull();
-    expect(document.querySelector(".space-grid")).not.toBeNull();
-  });
-
-  it("keeps global settings reachable when no space is selected", () => {
-    const noSpaceStore: SpaceStore = {
-      get spaces() { return []; },
-      get currentSpace() { return null; },
-      get recentSpaces() { return []; },
-      get isLoading() { return false; },
-      loadSpaces: async () => {},
-      selectSpace: async () => {},
-      closeSpace: () => {},
-      createSpace: async () => {},
-      deleteSpace: async () => {},
-    };
+  it("navigates to global settings from the surface controls", () => {
     const onNavigate = vi.fn();
-    component = mount(AppLayout, {
-      target: document.body,
-      props: {
-        conversationStore: mockConversationStore(),
-        connectionStore: mockConnectionStore(),
-        streamingStore: mockStreamingStore(),
-        spaceStore: noSpaceStore,
-        onRetry: () => {},
-        activeSurface: "conversation",
-        onSelectSurface: () => {},
-        onNavigate,
-      },
-    });
+    component = mountLayout({ onNavigate });
 
-    (
-      Array.from(document.querySelectorAll(".footer-item")).find((button) =>
-        button.textContent?.includes("Settings"),
-      ) as HTMLButtonElement
-    ).click();
+    flushSync(() => surfaceButton("Settings").click());
 
     expect(onNavigate).toHaveBeenCalledWith("/settings/providers");
+  });
+
+  it("renders settings and returns to the shell", () => {
+    const onNavigate = vi.fn();
+    component = mountLayout({ onNavigate, routePath: "/settings/providers" });
+
+    expect(document.querySelector('[aria-label="Settings"]')).not.toBeNull();
+    flushSync(() =>
+      (document.querySelector('[aria-label="Close settings"]') as HTMLButtonElement).click(),
+    );
+
+    expect(onNavigate).toHaveBeenCalledWith("/");
+  });
+
+  it("keeps global settings available without a selected space", () => {
+    const onNavigate = vi.fn();
+    component = mountLayout({
+      hasCurrentSpace: false,
+      onNavigate,
+      routePath: "/settings/providers",
+    });
+
+    expect(document.querySelector('[aria-label="Settings"]')).not.toBeNull();
+    expect(document.body.textContent).not.toContain("Choose where to work.");
+    flushSync(() =>
+      (document.querySelector('[aria-label="Close settings"]') as HTMLButtonElement).click(),
+    );
+    expect(onNavigate).toHaveBeenCalledWith("/");
   });
 });
