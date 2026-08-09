@@ -317,7 +317,8 @@ mod tests {
         let mut new = definition("scoped", None, "");
         new.tool_permissions = Some(serde_json::json!({
             "allow": ["knowledge_search"],
-            "deny": ["shell"]
+            "deny": ["shell"],
+            "bundles": {}
         }));
 
         let stored = storage.upsert_agent_definition(new).await.unwrap();

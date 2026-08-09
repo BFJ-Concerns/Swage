@@ -12,6 +12,15 @@
 //! attaches to this same lifecycle when a posture wants it; it is not a
 //! separate flow.
 //!
+//! The apply and its record are separate storage writes, so a crash or
+//! storage failure between them can leave an applied change without its
+//! case. That window is not silently accepted: a recording failure turns
+//! the whole apply into an error naming the applied-but-unrecorded state,
+//! so no caller ever reports a recorded change that is not one. Closing
+//! the window fully means one transaction spanning the resource store and
+//! the version store — a storage-layer seam for when a resource kind
+//! needs it, not something to re-derive per kind.
+//!
 //! Agent definitions are the first registered resource kind. A new kind
 //! registers an operation variant set, validation, and apply/snapshot
 //! handling here — never a new flow, screen, or version store.
@@ -65,11 +74,19 @@ impl ChangeOperation {
         }
     }
 
+    /// The version-chain identity. Agent ids are unique only within a scope,
+    /// so the scope is part of the identity — a global `assistant` and a
+    /// space-scoped `assistant` must never share a version chain.
     fn entity_id(&self) -> String {
-        match self {
-            Self::UpsertAgentDefinition { definition } => definition.id.clone(),
-            Self::DeleteAgentDefinition { agent_id, .. } => agent_id.clone(),
-        }
+        let (id, space_id) = match self {
+            Self::UpsertAgentDefinition { definition } => {
+                (definition.id.as_str(), definition.space_id)
+            }
+            Self::DeleteAgentDefinition { agent_id, space_id } => {
+                (agent_id.as_str(), *space_id)
+            }
+        };
+        scoped_entity_id(id, space_id)
     }
 
     fn operation_kind(&self) -> &'static str {
@@ -147,6 +164,20 @@ impl ChangeOperation {
     }
 }
 
+/// One version-chain identity per (resource id, scope). The rendered form is
+/// readable in version listings; `agent_id_from_entity` inverts it for
+/// rollback.
+fn scoped_entity_id(id: &str, space_id: Option<Uuid>) -> String {
+    match space_id {
+        Some(space) => format!("{id}@{space}"),
+        None => format!("{id}@global"),
+    }
+}
+
+fn agent_id_from_entity(entity_id: &str) -> &str {
+    entity_id.rsplit_once('@').map_or(entity_id, |(id, _)| id)
+}
+
 // ---------------------------------------------------------------------------
 // The applied case
 // ---------------------------------------------------------------------------
@@ -180,8 +211,11 @@ pub async fn apply_change(
     let space_id = operation.space_id();
 
     // Snapshot before, apply through the resource's own store, snapshot
-    // after: the diff is derived, never supplied.
-    let before = snapshot_agent_definition(state, &entity_id, space_id).await?;
+    // after: the diff is derived, never supplied. Snapshots address the
+    // resource by its bare id; the scoped entity_id is version-chain
+    // identity only.
+    let agent_id = agent_id_from_entity(&entity_id).to_owned();
+    let before = snapshot_agent_definition(state, &agent_id, space_id).await?;
 
     let summary = match &operation {
         ChangeOperation::UpsertAgentDefinition { definition } => {
@@ -209,7 +243,7 @@ pub async fn apply_change(
         }
     };
 
-    let after = snapshot_agent_definition(state, &entity_id, space_id).await?;
+    let after = snapshot_agent_definition(state, &agent_id, space_id).await?;
     record_case(
         state,
         RecordCase {
@@ -227,6 +261,16 @@ pub async fn apply_change(
         },
     )
     .await
+    .map_err(|error| {
+        // The apply landed but its record did not: the change exists without
+        // the case the commission requires. Surface it as the error it is —
+        // callers must not report a recorded change — and name the applied
+        // state so the operator can reconcile.
+        GatewayError::ConfigError(format!(
+            "'{summary}' was applied but recording its change case failed ({error}); \
+             the configuration is changed without a record — reconcile before further changes"
+        ))
+    })
 }
 
 /// Roll a resource back to a recorded version's snapshot.
@@ -256,17 +300,20 @@ pub async fn rollback_to_version(
     }
 
     let space_id = version.space_id;
-    let before = snapshot_agent_definition(state, &version.entity_id, space_id).await?;
+    // The version chain's entity_id carries the scope; the store addresses
+    // the resource by its bare id.
+    let agent_id = agent_id_from_entity(&version.entity_id).to_owned();
+    let before = snapshot_agent_definition(state, &agent_id, space_id).await?;
 
     // A null snapshot records "did not exist": rolling back to it deletes.
     let summary = if version.snapshot.is_null() {
         state
             .storage
-            .delete_agent_definition(&version.entity_id, space_id)
+            .delete_agent_definition(&agent_id, space_id)
             .await?;
         format!(
-            "rolled agent definition '{}' back to absence (version {})",
-            version.entity_id, version.version_number
+            "rolled agent definition '{agent_id}' back to absence (version {})",
+            version.version_number
         )
     } else {
         let definition: AgentDefinition = serde_json::from_value(version.snapshot.clone())
@@ -288,12 +335,12 @@ pub async fn rollback_to_version(
             })
             .await?;
         format!(
-            "rolled agent definition '{}' back to version {}",
-            version.entity_id, version.version_number
+            "rolled agent definition '{agent_id}' back to version {}",
+            version.version_number
         )
     };
 
-    let after = snapshot_agent_definition(state, &version.entity_id, space_id).await?;
+    let after = snapshot_agent_definition(state, &agent_id, space_id).await?;
     record_case(
         state,
         RecordCase {

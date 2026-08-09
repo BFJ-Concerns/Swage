@@ -1011,7 +1011,9 @@ impl<T> Storage for T where
         + DeliveryStore
         + AuditStore
         + AgentMemoryStore
+        + AgentDefinitionStore
         + ConfigurationVersionStore
+        + ObservationStore
         + SecretStore
         + ThreadStore
         + TurnStore

@@ -103,14 +103,21 @@ pub fn select_variant(
 /// Record a selection to the audit trail. Every decision is recorded — the
 /// disabled and default-only cases included, because "experimentation did
 /// not run here" is itself something a later reader needs to know.
+///
+/// The record is a precondition of using the variant, not a courtesy after
+/// it: an unrecorded draw would shape behaviour invisibly, so on recording
+/// failure the caller must not use the drawn variant — fall back to the
+/// default (and if even that fallback cannot be recorded, proceed with the
+/// default: the default is what serves when experimentation cannot run, and
+/// its use is reconstructable from the absence of a record).
 pub async fn record_selection(
     state: &AppState,
     location_id: &str,
     decision: &VariantDecision,
     session_id: Option<Uuid>,
     turn_id: Option<Uuid>,
-) {
-    let result = state
+) -> Result<(), swage_core::StorageError> {
+    state
         .storage
         .create_audit_event(swage_storage::NewAuditEvent {
             id: Uuid::new_v4().to_string(),
@@ -128,17 +135,8 @@ pub async fn record_selection(
                 "turn_id": turn_id,
             }),
         })
-        .await;
-    if let Err(error) = result {
-        // Selection has already shaped behaviour; losing its record breaks
-        // the reconstructable-afterwards guarantee, so this is loud.
-        tracing::error!(
-            location_id,
-            variant = %decision.variant,
-            %error,
-            "failed to record variant selection to the audit trail"
-        );
-    }
+        .await
+        .map(|_| ())
 }
 
 #[cfg(test)]

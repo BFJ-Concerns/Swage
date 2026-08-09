@@ -183,13 +183,25 @@ pub(crate) fn apply_agent_definition(
         }
     }
 
-    if let Some(overlay) = definition
-        .tool_permissions
-        .as_ref()
-        .and_then(|value| {
-            serde_json::from_value::<swage_config::model::ToolPermissionConfig>(value.clone()).ok()
-        })
-    {
+    let overlay = definition.tool_permissions.as_ref().and_then(|value| {
+        match serde_json::from_value::<swage_config::model::ToolPermissionConfig>(value.clone()) {
+            Ok(overlay) => Some(overlay),
+            Err(error) => {
+                // A malformed overlay must not silently leave the agent's
+                // broader grants intact while looking applied. Change-case
+                // validation rejects these before storage; a row that fails
+                // here anyway is surfaced, and the session falls back to
+                // the resolved config's own grants.
+                tracing::warn!(
+                    agent_id = %definition.id,
+                    %error,
+                    "agent definition's permission overlay does not parse; ignoring it"
+                );
+                None
+            }
+        }
+    });
+    if let Some(overlay) = overlay {
         // Intersection, never expansion: the effective allow is what both the
         // resolved config and the overlay permit ("*" on either side defers
         // to the other), and every deny from either side stands.
@@ -335,9 +347,12 @@ mod tests {
                 None,
                 Some(serde_json::json!({
                     // The overlay asks for one held tool and one the config
-                    // never granted: only the held one survives.
+                    // never granted: only the held one survives. The shape is
+                    // a full ToolPermissionConfig — bundles included — as
+                    // change-case validation requires.
                     "allow": ["knowledge_search", "schedule"],
-                    "deny": ["browser_navigate"]
+                    "deny": ["browser_navigate"],
+                    "bundles": {}
                 })),
             ),
         );
@@ -367,7 +382,11 @@ mod tests {
             &definition_with(
                 "",
                 None,
-                Some(serde_json::json!({ "allow": ["knowledge_search"], "deny": [] })),
+                Some(serde_json::json!({
+                    "allow": ["knowledge_search"],
+                    "deny": [],
+                    "bundles": {}
+                })),
             ),
         );
 

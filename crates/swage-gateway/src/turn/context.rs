@@ -113,8 +113,9 @@ pub(crate) fn build_assembly_elements(
 pub(crate) fn build_session_environment(
     space: &swage_storage::Space,
     working_directory: Option<String>,
-    session_metadata: Option<&serde_json::Value>,
+    session: &swage_storage::Session,
 ) -> SessionEnvironment {
+    let session_metadata = session.metadata.as_ref();
     // A channel session's origin was stamped at session creation; surface the
     // integration by name so the model knows whose voice it uses. Constraints
     // are stated per integration — Telegram is the only channel today.
@@ -144,7 +145,10 @@ pub(crate) fn build_session_environment(
         },
         space_description: space.description.clone(),
         working_directory,
-        started_at: chrono::Utc::now(),
+        // The session row's creation time, not the turn's clock: the block
+        // renders identically on every turn of the session, keeping the
+        // assembled prefix stable.
+        started_at: session.created_at,
         channel,
     }
 }

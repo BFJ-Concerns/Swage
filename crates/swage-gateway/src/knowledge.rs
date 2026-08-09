@@ -66,9 +66,11 @@ pub async fn write_body(space_slug: &str, bytes: &[u8]) -> Result<StoredBody, Ga
             .map_err(|error| GatewayError::ValidationError(error.to_string()))?;
     }
 
-    // Write via a temp file and rename so a crash mid-write can never leave a
-    // half body at a valid address.
-    let tmp = path.with_extension("tmp");
+    // Write via a uniquely named temp file and rename: a crash mid-write can
+    // never leave a half body at a valid address, and concurrent writers of
+    // the same content (parallel gather workers are the normal case) each
+    // rename their own file — last rename wins with identical bytes.
+    let tmp = path.with_extension(format!("tmp-{}", uuid::Uuid::new_v4()));
     tokio::fs::write(&tmp, bytes)
         .await
         .map_err(|error| GatewayError::ValidationError(error.to_string()))?;
