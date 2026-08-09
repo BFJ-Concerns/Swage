@@ -30,6 +30,7 @@
   } from "../display-preferences";
   import type { ToolCallView } from "../types";
   import ToolCallDisplay from "./ToolCallDisplay.svelte";
+  import TurnContextInspector from "./TurnContextInspector.svelte";
 
   // ---- Markdown configuration -----------------------------------------------
   // Module-level setup: runs once when this module is first imported.
@@ -117,6 +118,9 @@
   // ---- Auto-scroll ----------------------------------------------------------
 
   let scrollEl: HTMLDivElement | undefined = $state();
+
+  // The turn whose context report the inspector shows; null when closed.
+  let inspectedTurnId = $state<string | null>(null);
 
   // Paused when the user has scrolled up to read earlier messages.
   // Resumes automatically when they scroll back within the 50 px threshold.
@@ -264,6 +268,18 @@
         {#if shouldShowModel(message.role) && message.model}
           <div class="message-model">{message.model}</div>
         {/if}
+        {#if message.role === "assistant" && message.turn_id}
+          <!-- Inspectability affordance: every agent turn's assembled
+               context is one click away, per the platform's
+               reconstructable-afterwards claim. -->
+          <button
+            type="button"
+            class="context-link"
+            onclick={() => (inspectedTurnId = message.turn_id ?? null)}
+          >
+            context
+          </button>
+        {/if}
       </div>
 
       <!-- ---- Persisted tool calls for this message (history) ---- -->
@@ -336,7 +352,28 @@
   {/if}
 </div>
 
+{#if inspectedTurnId}
+  <TurnContextInspector
+    turnId={inspectedTurnId}
+    onClose={() => (inspectedTurnId = null)}
+  />
+{/if}
+
 <style>
+  .context-link {
+    border: none;
+    background: none;
+    padding: 0;
+    font-size: 0.75rem;
+    color: var(--muted-color, #888);
+    cursor: pointer;
+    text-decoration: underline dotted;
+  }
+
+  .context-link:hover {
+    color: var(--ink, #333);
+  }
+
   /*
     Riso conversation surface. Messages are not bubbles in the design — they
     are short ink-coloured passages prefixed by an uppercased "WHO" label,
