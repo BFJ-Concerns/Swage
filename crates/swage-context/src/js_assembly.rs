@@ -1,0 +1,420 @@
+//! JavaScript context assemblies — operator-programmable composition behind
+//! the stable assembly-name surface.
+//!
+//! A named assembly is a `<name>.js` file in the config hierarchy
+//! (`assemblies/` under global, space, or agent — the most specific wins).
+//! The script runs in a caged QuickJS runtime — no IO, no network, no
+//! timers, no randomness — and composes the turn's context from the typed
+//! elements the gateway built. Assemblies compose context; they never call
+//! models.
+//!
+//! Failure is fail-open by contract: any script problem (missing file,
+//! syntax error, runtime error, empty output) falls back to the built-in
+//! default assembly with the error carried in the report.
+//!
+//! ## The script contract
+//!
+//! The script body runs with two globals and communicates by calling `add`:
+//!
+//! - `elements` — the turn's elements, read-only:
+//!   `[{ name, priority, source, tokenCount, messages }]` where `messages`
+//!   is `[{ role, text }]`.
+//! - `add(element_or_messages)` — appends an element's messages (pass an
+//!   entry from `elements`) or a raw `[{ role, text }]` array to the output,
+//!   in call order.
+//!
+//! A minimal reordering assembly:
+//!
+//! ```js
+//! const byName = Object.fromEntries(elements.map(e => [e.name, e]));
+//! add(byName.orientation);
+//! add(byName.prompts);
+//! add(byName.history);
+//! ```
+
+use std::path::{Path, PathBuf};
+use std::time::Instant;
+
+use rquickjs::{Context, Runtime};
+use swage_config::HierarchyLevel;
+use swage_config::model::ContextConfig;
+use swage_core::{ChatMessage, Role};
+
+use crate::assembly::default_assembly;
+use crate::element::ContextElement;
+use crate::report::{AssemblyError, AssemblyOutput};
+use crate::tokeniser::Tokeniser;
+
+/// Memory and stack caps for assembly scripts. Assemblies transform message
+/// lists; they get a fraction of the workflow engine's room.
+const MEMORY_LIMIT_BYTES: usize = 16 * 1024 * 1024;
+const STACK_LIMIT_BYTES: usize = 256 * 1024;
+
+/// Locate `<name>.js` in the hierarchy's `assemblies/` directories, most
+/// specific level first.
+pub fn resolve_js_assembly(
+    name: &str,
+    search_levels: &[(HierarchyLevel, &Path)],
+) -> Option<PathBuf> {
+    // Later entries are more specific (global → space → agent); search in
+    // reverse so the most specific hit wins.
+    search_levels.iter().rev().find_map(|(_, base)| {
+        let candidate = base.join("assemblies").join(format!("{name}.js"));
+        candidate.is_file().then_some(candidate)
+    })
+}
+
+/// Run the named assembly, falling back to the default on any failure.
+///
+/// The report always states what actually ran: a fallback carries the
+/// configured name, the error that forced it, and the default assembly's
+/// element accounting.
+pub fn assemble_named(
+    name: &str,
+    source_path: Option<&Path>,
+    elements: &[Box<dyn ContextElement>],
+    config: &ContextConfig,
+    tokeniser: &dyn Tokeniser,
+) -> AssemblyOutput {
+    let Some(path) = source_path else {
+        return fallback(
+            name,
+            format!("assembly '{name}' was not found in any assemblies/ directory"),
+            elements,
+            config,
+            tokeniser,
+        );
+    };
+    let source = match std::fs::read_to_string(path) {
+        Ok(source) => source,
+        Err(error) => {
+            return fallback(
+                name,
+                format!("assembly '{name}' is not readable: {error}"),
+                elements,
+                config,
+                tokeniser,
+            );
+        }
+    };
+
+    match run_script(&source, elements, tokeniser) {
+        Ok(messages) if messages.is_empty() => fallback(
+            name,
+            format!("assembly '{name}' produced no messages"),
+            elements,
+            config,
+            tokeniser,
+        ),
+        Ok(messages) => {
+            let started = Instant::now();
+            let mut output = default_assembly(elements, config, tokeniser);
+            // The default run above supplies the per-element accounting; the
+            // script's composition replaces its message list.
+            output.report.assembly_name = name.to_owned();
+            output.report.total_tokens = tokeniser.count_messages(&messages);
+            output.report.duration_ms += started.elapsed().as_millis() as u64;
+            AssemblyOutput::new_unchecked(messages, output.report)
+        }
+        Err(error) => fallback(
+            name,
+            format!("assembly '{name}' failed: {error}"),
+            elements,
+            config,
+            tokeniser,
+        ),
+    }
+}
+
+fn fallback(
+    name: &str,
+    message: String,
+    elements: &[Box<dyn ContextElement>],
+    config: &ContextConfig,
+    tokeniser: &dyn Tokeniser,
+) -> AssemblyOutput {
+    tracing::warn!(assembly = name, %message, "assembly fell back to default");
+    let mut output = default_assembly(elements, config, tokeniser);
+    output.report.errors.push(AssemblyError {
+        assembly_name: name.to_owned(),
+        error_kind: "script_failure".to_owned(),
+        message,
+        fallback_used: "default".to_owned(),
+    });
+    output
+}
+
+/// Execute the script against a read-only projection of the elements,
+/// returning the composed message list.
+fn run_script(
+    source: &str,
+    elements: &[Box<dyn ContextElement>],
+    tokeniser: &dyn Tokeniser,
+) -> Result<Vec<ChatMessage>, String> {
+    let runtime = Runtime::new().map_err(|error| error.to_string())?;
+    runtime.set_memory_limit(MEMORY_LIMIT_BYTES);
+    runtime.set_max_stack_size(STACK_LIMIT_BYTES);
+    let context = Context::full(&runtime).map_err(|error| error.to_string())?;
+
+    let elements_json = serde_json::to_string(
+        &elements
+            .iter()
+            .map(|element| {
+                serde_json::json!({
+                    "name": element.name(),
+                    "priority": element.priority(),
+                    "source": element.source(),
+                    "tokenCount": element.token_count(tokeniser),
+                    "messages": element
+                        .content()
+                        .iter()
+                        .map(|message| {
+                            serde_json::json!({
+                                "role": role_name(message.role()),
+                                "text": message.text_content(),
+                            })
+                        })
+                        .collect::<Vec<_>>(),
+                })
+            })
+            .collect::<Vec<_>>(),
+    )
+    .map_err(|error| error.to_string())?;
+
+    context.with(|ctx| -> Result<Vec<ChatMessage>, String> {
+        // The cage: no eval, no ambient nondeterminism. Assemblies must be
+        // pure functions of their elements.
+        ctx.eval::<(), _>(
+            r#"
+            delete globalThis.eval;
+            if (typeof Math !== "undefined") {
+                Math.random = () => {
+                    throw new Error("Math.random is not available in assemblies; composition must be deterministic");
+                };
+            }
+            globalThis.__output = [];
+            globalThis.add = (value) => {
+                const messages = Array.isArray(value) ? value : value && value.messages;
+                if (!Array.isArray(messages)) {
+                    throw new Error("add() takes an element from `elements` or an array of {role, text} messages");
+                }
+                for (const message of messages) {
+                    if (typeof message.role !== "string" || typeof message.text !== "string") {
+                        throw new Error("each message needs a string role and text");
+                    }
+                    globalThis.__output.push({ role: message.role, text: message.text });
+                }
+            };
+            "#,
+        )
+        .map_err(|error| format!("cage setup failed: {error}"))?;
+
+        let globals = ctx.globals();
+        globals
+            .set(
+                "elements",
+                ctx.json_parse(elements_json.as_bytes())
+                    .map_err(|error| error.to_string())?,
+            )
+            .map_err(|error| error.to_string())?;
+
+        ctx.eval::<(), _>(source.as_bytes())
+            .map_err(|error| script_error(&ctx, error))?;
+
+        let output_json: String = ctx
+            .eval("JSON.stringify(globalThis.__output)")
+            .map_err(|error| script_error(&ctx, error))?;
+        let raw: Vec<RawMessage> =
+            serde_json::from_str(&output_json).map_err(|error| error.to_string())?;
+        raw.into_iter()
+            .map(|message| {
+                Ok(ChatMessage::new(
+                    parse_role(&message.role)?,
+                    &message.text,
+                ))
+            })
+            .collect()
+    })
+}
+
+#[derive(serde::Deserialize)]
+struct RawMessage {
+    role: String,
+    text: String,
+}
+
+fn role_name(role: Role) -> &'static str {
+    match role {
+        Role::System => "system",
+        Role::User => "user",
+        Role::Assistant => "assistant",
+        Role::Tool => "tool",
+    }
+}
+
+fn parse_role(role: &str) -> Result<Role, String> {
+    match role {
+        "system" => Ok(Role::System),
+        "user" => Ok(Role::User),
+        "assistant" => Ok(Role::Assistant),
+        "tool" => Ok(Role::Tool),
+        other => Err(format!("unknown message role '{other}'")),
+    }
+}
+
+fn script_error(ctx: &rquickjs::Ctx<'_>, error: rquickjs::Error) -> String {
+    if let rquickjs::Error::Exception = error {
+        let exception = ctx.catch();
+        if let Some(exception) = exception.as_exception() {
+            return exception
+                .message()
+                .unwrap_or_else(|| "script exception".to_owned());
+        }
+    }
+    error.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::history::HistoryElement;
+    use crate::prompts::PromptsElement;
+    use swage_config::model::ContextConfig;
+    use swage_config::prompt_rule::PromptRule;
+
+    struct WordTokeniser;
+    impl Tokeniser for WordTokeniser {
+        fn count_text(&self, text: &str) -> usize {
+            text.split_whitespace().count()
+        }
+        fn count_messages(&self, messages: &[ChatMessage]) -> usize {
+            messages
+                .iter()
+                .map(|m| self.count_text(&m.text_content()))
+                .sum()
+        }
+    }
+
+    fn test_elements() -> Vec<Box<dyn ContextElement>> {
+        vec![
+            Box::new(PromptsElement::new(vec![PromptRule {
+                priority: 0,
+                content: "operator instructions".into(),
+                source_level: HierarchyLevel::Global,
+                file_path: PathBuf::from("test"),
+            }])),
+            Box::new(HistoryElement::new(vec![
+                ChatMessage::new(Role::User, "hello"),
+                ChatMessage::new(Role::Assistant, "hi"),
+            ])),
+        ]
+    }
+
+    fn run(source: &str) -> Result<Vec<ChatMessage>, String> {
+        run_script(source, &test_elements(), &WordTokeniser)
+    }
+
+    #[test]
+    fn script_composes_from_elements_in_call_order() {
+        let messages = run(
+            r#"
+            const byName = Object.fromEntries(elements.map(e => [e.name, e]));
+            add(byName.history);
+            add(byName.prompts);
+            "#,
+        )
+        .unwrap();
+
+        // History first, prompts last — exactly the call order, however
+        // unusual, because composition belongs to the script.
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0].text_content(), "hello");
+        assert_eq!(messages[2].text_content(), "operator instructions");
+    }
+
+    #[test]
+    fn script_can_add_raw_messages() {
+        let messages = run(
+            r#"
+            add([{ role: "system", text: "composed inline" }]);
+            "#,
+        )
+        .unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].role(), Role::System);
+    }
+
+    #[test]
+    fn nondeterminism_is_caged() {
+        let result = run("add([{ role: 'system', text: String(Math.random()) }]);");
+        let error = result.unwrap_err();
+        assert!(
+            error.contains("deterministic"),
+            "Math.random must fail loudly: {error}"
+        );
+    }
+
+    #[test]
+    fn script_errors_surface_with_their_message() {
+        let error = run("throw new Error('deliberate');").unwrap_err();
+        assert!(error.contains("deliberate"));
+    }
+
+    #[test]
+    fn missing_assembly_falls_back_to_default_with_error_report() {
+        let elements = test_elements();
+        let output = assemble_named(
+            "no-such-assembly",
+            None,
+            &elements,
+            &ContextConfig::default(),
+            &WordTokeniser,
+        );
+
+        assert!(!output.messages.is_empty(), "fallback still assembles");
+        assert_eq!(output.report.errors.len(), 1);
+        assert_eq!(output.report.errors[0].fallback_used, "default");
+    }
+
+    #[test]
+    fn empty_script_output_falls_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("assemblies").join("empty.js");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "// adds nothing").unwrap();
+
+        let elements = test_elements();
+        let output = assemble_named(
+            "empty",
+            Some(&path),
+            &elements,
+            &ContextConfig::default(),
+            &WordTokeniser,
+        );
+
+        assert!(!output.messages.is_empty());
+        assert!(output.report.errors[0].message.contains("no messages"));
+    }
+
+    #[test]
+    fn resolution_prefers_the_most_specific_level() {
+        let dir = tempfile::tempdir().unwrap();
+        let global = dir.path().join("global");
+        let space = dir.path().join("space");
+        for base in [&global, &space] {
+            let assemblies = base.join("assemblies");
+            std::fs::create_dir_all(&assemblies).unwrap();
+            std::fs::write(assemblies.join("focus.js"), "// present").unwrap();
+        }
+
+        let levels: Vec<(HierarchyLevel, &Path)> = vec![
+            (HierarchyLevel::Global, global.as_path()),
+            (HierarchyLevel::Space, space.as_path()),
+        ];
+        let resolved = resolve_js_assembly("focus", &levels).unwrap();
+        assert!(
+            resolved.starts_with(&space),
+            "the space-level assembly shadows the global one"
+        );
+    }
+}

@@ -708,8 +708,43 @@ pub(crate) async fn process_turn_with_existing_turn(
     );
     let tokeniser = TiktokenTokeniser::new(config.default_model_id());
 
-    // Assemble context with the built-in default implementation.
-    let output = swage_context::assembly::assemble(&elements, &config.context, &tokeniser);
+    // Assemble context: a configured assembly name selects an operator's JS
+    // assembly from the config hierarchy; "default" (or empty) runs the
+    // built-in implementation. JS assemblies fail open to the default with
+    // the error recorded in the report.
+    let assembly_name = config.context.assembly.trim();
+    let output = if assembly_name.is_empty() || assembly_name == "default" {
+        swage_context::assembly::assemble(&elements, &config.context, &tokeniser)
+    } else {
+        let search_levels: Vec<(swage_config::HierarchyLevel, PathBuf)> = swage_root_opt
+            .as_ref()
+            .map(|root| {
+                let space_dir = root.join("spaces").join(&space_slug);
+                let agent_dir = space_dir.join("agents").join(&session.agent_id);
+                let mut levels = vec![
+                    (swage_config::HierarchyLevel::Global, root.clone()),
+                    (swage_config::HierarchyLevel::Space, space_dir),
+                ];
+                if agent_dir.is_dir() {
+                    levels.push((swage_config::HierarchyLevel::Agent, agent_dir));
+                }
+                levels
+            })
+            .unwrap_or_default();
+        let level_refs: Vec<(swage_config::HierarchyLevel, &Path)> = search_levels
+            .iter()
+            .map(|(level, path)| (level.clone(), path.as_path()))
+            .collect();
+        let source_path =
+            swage_context::js_assembly::resolve_js_assembly(assembly_name, &level_refs);
+        swage_context::js_assembly::assemble_named(
+            assembly_name,
+            source_path.as_deref(),
+            &elements,
+            &config.context,
+            &tokeniser,
+        )
+    };
     let (assembled_messages, assembly_report) = (output.messages, output.report);
 
     tracing::debug!(
