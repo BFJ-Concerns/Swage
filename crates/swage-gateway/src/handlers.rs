@@ -1575,6 +1575,13 @@ async fn execute_external_delegate_message(
         ))),
         router: router.clone(),
         active_delegations: swage_agent::active_delegations(),
+        context_assembler: Some(crate::turn::delegated_context_assembler(
+            state.clone(),
+            space.clone(),
+            target_resolved.clone(),
+            delegate_msg.recipient_agent_id.clone(),
+            target_agent_config.working_directory.display().to_string(),
+        )),
     };
 
     let result = executor
