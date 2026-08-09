@@ -58,7 +58,6 @@ pub mod context;
 pub mod device;
 pub mod error;
 pub mod handlers;
-pub mod lens;
 pub mod lifecycle;
 pub mod material;
 pub mod onboarding;

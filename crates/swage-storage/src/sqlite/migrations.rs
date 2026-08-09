@@ -46,13 +46,11 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
             CREATE_ATTACHMENT_AND_BACKGROUND_JOB_TABLES,
         ),
         ("025_materials", CREATE_MATERIAL_TABLES),
-        ("026_lens_preferences", CREATE_LENS_PREFERENCES_TABLE),
         (
             "027_shared_reference_events",
             CREATE_SHARED_REFERENCE_EVENT_TABLE,
         ),
         ("028_deduplicate_attachment_ingestion_content", ""),
-        ("029_lens_catalog", CREATE_LENS_CATALOG_TABLES),
         ("030_team_agent_and_task_authoring", ""),
         (
             "031_configuration_versioning",
@@ -95,14 +93,6 @@ const CREATE_CONTEXT_SNAPSHOTS: &str = "
     );
 ";
 
-const CREATE_LENS_PREFERENCES_TABLE: &str = "
-    CREATE TABLE IF NOT EXISTS lens_preferences (
-        space_id    TEXT NOT NULL PRIMARY KEY REFERENCES spaces(id) ON DELETE CASCADE,
-        active_lens TEXT NOT NULL,
-        updated_at  TEXT NOT NULL
-    );
-";
-
 const CREATE_WORKSPACE_ATTACHMENT_TABLE: &str = "
     CREATE TABLE IF NOT EXISTS workspace_attachments (
         id               TEXT NOT NULL PRIMARY KEY,
@@ -133,55 +123,6 @@ const CREATE_SHARED_REFERENCE_EVENT_TABLE: &str = "
 
     CREATE INDEX IF NOT EXISTS idx_shared_reference_events_object
         ON shared_reference_events(object_kind, object_id, created_at);
-";
-
-const CREATE_LENS_CATALOG_TABLES: &str = "
-    CREATE TABLE IF NOT EXISTS lenses (
-        id                 TEXT NOT NULL PRIMARY KEY,
-        title              TEXT NOT NULL,
-        summary            TEXT NOT NULL,
-        default_surface    TEXT NOT NULL,
-        ui_modules_json    TEXT NOT NULL,
-        prominent_teams_json TEXT NOT NULL,
-        source_kind        TEXT NOT NULL,
-        created_at         TEXT NOT NULL,
-        updated_at         TEXT NOT NULL
-    );
-
-    INSERT OR IGNORE INTO lenses (
-        id,
-        title,
-        summary,
-        default_surface,
-        ui_modules_json,
-        prominent_teams_json,
-        source_kind,
-        created_at,
-        updated_at
-    )
-    VALUES
-        (
-            'assistant',
-            'Assistant lens',
-            'Conversation-first view for direct work with the active agent.',
-            'conversation',
-            '[\"conversation\",\"operator\"]',
-            '[\"default\"]',
-            'built_in',
-            strftime('%Y-%m-%dT%H:%M:%fZ','now'),
-            strftime('%Y-%m-%dT%H:%M:%fZ','now')
-        ),
-        (
-            'builder',
-            'Builder lens',
-            'Workspace-first view that foregrounds system shaping and operator state.',
-            'builder',
-            '[\"builder\",\"conversation\"]',
-            '[\"workspace-core\"]',
-            'built_in',
-            strftime('%Y-%m-%dT%H:%M:%fZ','now'),
-            strftime('%Y-%m-%dT%H:%M:%fZ','now')
-        );
 ";
 
 const CREATE_DELIVERY_AND_AUDIT_TABLES: &str = "

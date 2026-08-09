@@ -12,7 +12,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import AppLayout from "./lib/components/AppLayout.svelte";
-  import { fetchLensRuntime, updateLensRuntime } from "./lib/api/lens";
   import { fetchSettings } from "./lib/api/settings";
   import type { ConversationStore } from "./lib/stores/conversations";
   import { createConversationStore } from "./lib/stores/conversations";
@@ -31,12 +30,7 @@
     writeDisplayPreferences,
     type DisplayPreferences,
   } from "./lib/display-preferences";
-  import type {
-    AppLens,
-    LensDescriptor,
-    LensStageModulePlacement,
-    LensSurface,
-  } from "./lib/types";
+  type Surface = "conversation" | "operator";
 
   // ---------------------------------------------------------------------------
   // Store creation
@@ -83,7 +77,6 @@
       if (conv && spaceStore.currentSpace?.id !== conv.space_id) {
         await spaceStore.selectSpace(conv.space_id);
         await conversationStore.loadConversations(conv.space_id);
-        await refreshLensRuntime("conversation");
       }
 
       connectionStore.connectTo(id);
@@ -176,10 +169,7 @@
   let loadError = $state<string | null>(null);
   // Set to true when the router detects that the URL contained a stale ID.
   let notFound = $state(false);
-  let activeLens = $state<AppLens>("assistant");
-  let activeSurface = $state<LensSurface>("conversation");
-  let availableLenses = $state<LensDescriptor[]>([]);
-  let stageModules = $state<LensStageModulePlacement[]>([]);
+  let activeSurface = $state<Surface>("conversation");
   let currentRoute = $state<Route>(router.currentRoute);
   let activeModelContextWindow = $state<number | null>(null);
   let modelOptions = $state<string[]>([]);
@@ -263,38 +253,13 @@
     };
   });
 
-  function getLensDescriptor(lensId: AppLens): LensDescriptor | undefined {
-    return availableLenses.find((lens) => lens.id === lensId);
-  }
-
-  function fallbackSurfaceForModules(modules: LensSurface[]): LensSurface {
-    if (modules.includes("conversation")) {
-      return "conversation";
-    }
-    return modules[0] ?? "conversation";
-  }
-
-  function defaultSurfaceForLens(lensId: AppLens): LensSurface {
-    const descriptor = getLensDescriptor(lensId);
-    if (descriptor) {
-      return descriptor.default_surface;
-    }
-    return "conversation";
-  }
-
   // Passed to ConnectionIndicator so the user can trigger a manual reconnect.
   function handleRetry(): void {
     const id = conversationStore.activeConversation?.id;
     if (id) connectionStore.connectTo(id);
   }
 
-  function handleSelectSurface(next: LensSurface): void {
-    const descriptor = getLensDescriptor(activeLens);
-    if (descriptor && !descriptor.ui_modules.includes(next)) {
-      activeSurface = fallbackSurfaceForModules(descriptor.ui_modules);
-      return;
-    }
-
+  function handleSelectSurface(next: Surface): void {
     activeSurface = next;
 
     if (next !== "conversation") {
@@ -309,32 +274,6 @@
   function navigate(path: string): void {
     router.navigate(path);
     currentRoute = router.currentRoute;
-  }
-
-  async function refreshLensRuntime(preferredSurface?: LensSurface): Promise<void> {
-    const spaceId = spaceStore.currentSpace?.id;
-    if (!spaceId) return;
-    const runtime = await fetchLensRuntime(spaceId);
-    availableLenses = runtime.available_lenses;
-    stageModules = runtime.stage_modules;
-    activeLens = runtime.active_lens;
-
-    const descriptor = getLensDescriptor(runtime.active_lens);
-    const nextSurface =
-      preferredSurface && descriptor?.ui_modules.includes(preferredSurface)
-        ? preferredSurface
-        : defaultSurfaceForLens(runtime.active_lens);
-    handleSelectSurface(nextSurface);
-  }
-
-  async function handleSelectLens(next: AppLens): Promise<void> {
-    const spaceId = spaceStore.currentSpace?.id;
-    if (!spaceId) return;
-    const runtime = await updateLensRuntime(spaceId, next);
-    availableLenses = runtime.available_lenses;
-    stageModules = runtime.stage_modules;
-    activeLens = runtime.active_lens;
-    handleSelectSurface(defaultSurfaceForLens(runtime.active_lens));
   }
 
   // ---------------------------------------------------------------------------
@@ -359,7 +298,6 @@
       currentRoute = router.currentRoute;
       // Load the new space's conversations.
       await conversationStore.loadConversations(spaceId);
-      await refreshLensRuntime("conversation");
     } catch (err) {
       console.error("Failed to switch space:", err);
     }
@@ -439,12 +377,7 @@
     {spaceStore}
     onSpaceChange={handleSpaceChange}
     onRetry={handleRetry}
-    {activeLens}
-    {availableLenses}
-    {stageModules}
     {activeSurface}
-    onSelectLens={handleSelectLens}
-    onRefreshLenses={refreshLensRuntime}
     onSelectSurface={handleSelectSurface}
     {desktopRuntime}
     {themeMode}
