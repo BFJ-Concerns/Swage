@@ -4,11 +4,13 @@ use uuid::Uuid;
 use swage_core::StorageError;
 
 use crate::model::{
-    ActiveSkillRecord, AgentMemoryRecord, AgentMessage, AppendMessage, ApprovalRequest,
+    ActiveSkillRecord, AgentDefinition, AgentMemoryRecord, AgentMessage, AppendMessage,
+    ApprovalRequest,
     ApprovalState, Attachment, AttachmentStatus, AuditEvent, BackgroundJob, ChannelInboundMessage,
     ChannelLink, ConfigurationVersion, ContextSnapshotRecord, DeliveryRecord, DeviceRegistration,
     ExtractionDerivation, InboundAudit, KnowledgeSearchHit, Material, Message,
-    NewAgentMemoryRecord, NewAgentMessage, NewApprovalRequest, NewAttachment, NewAuditEvent,
+    NewAgentDefinition, NewAgentMemoryRecord, NewAgentMessage, NewApprovalRequest, NewAttachment,
+    NewAuditEvent,
     NewBackgroundJob, NewChannelInboundMessage, NewChannelLink, NewConfigurationVersion,
     NewDeliveryRecord, NewDeviceRegistration, NewMaterial,
     NewMessage, NewSchedule, NewScheduleRun, NewSecretRecord,
@@ -189,6 +191,39 @@ pub trait AgentMemoryStore: Send + Sync {
         query: Option<&str>,
         limit: usize,
     ) -> Result<Vec<AgentMemoryRecord>, StorageError>;
+}
+
+/// Store for durable agent definitions.
+///
+/// Writes are whole-definition upserts because mutations arrive through the
+/// recorded configuration-change path, which validates and diffs complete
+/// definitions rather than field patches.
+#[async_trait]
+pub trait AgentDefinitionStore: Send + Sync {
+    async fn upsert_agent_definition(
+        &self,
+        definition: NewAgentDefinition,
+    ) -> Result<AgentDefinition, StorageError>;
+
+    /// Resolve the definition a session starting as `agent_id` in `space_id`
+    /// should use: the space-scoped definition when one exists, else the
+    /// global one, else none (the agent runs on resolved config alone).
+    async fn resolve_agent_definition(
+        &self,
+        agent_id: &str,
+        space_id: Uuid,
+    ) -> Result<Option<AgentDefinition>, StorageError>;
+
+    async fn list_agent_definitions(
+        &self,
+        space_id: Option<Uuid>,
+    ) -> Result<Vec<AgentDefinition>, StorageError>;
+
+    async fn delete_agent_definition(
+        &self,
+        agent_id: &str,
+        space_id: Option<Uuid>,
+    ) -> Result<bool, StorageError>;
 }
 
 /// Store for a space's knowledge base: immutable source observations and
@@ -944,6 +979,7 @@ pub trait Storage:
     + DeliveryStore
     + AuditStore
     + AgentMemoryStore
+    + AgentDefinitionStore
     + ConfigurationVersionStore
     + ObservationStore
     + SecretStore
@@ -1287,6 +1323,39 @@ mod tests {
             _: &str,
             _: &str,
         ) -> Result<Option<ConfigurationVersion>, StorageError> {
+            unimplemented!()
+        }
+    }
+
+    #[async_trait]
+    impl AgentDefinitionStore for StubStorage {
+        async fn upsert_agent_definition(
+            &self,
+            _: NewAgentDefinition,
+        ) -> Result<AgentDefinition, StorageError> {
+            unimplemented!()
+        }
+
+        async fn resolve_agent_definition(
+            &self,
+            _: &str,
+            _: Uuid,
+        ) -> Result<Option<AgentDefinition>, StorageError> {
+            unimplemented!()
+        }
+
+        async fn list_agent_definitions(
+            &self,
+            _: Option<Uuid>,
+        ) -> Result<Vec<AgentDefinition>, StorageError> {
+            unimplemented!()
+        }
+
+        async fn delete_agent_definition(
+            &self,
+            _: &str,
+            _: Option<Uuid>,
+        ) -> Result<bool, StorageError> {
             unimplemented!()
         }
     }

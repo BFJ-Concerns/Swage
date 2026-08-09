@@ -834,6 +834,43 @@ pub struct KnowledgeSearchHit {
     pub snippet_offset: usize,
 }
 
+/// A durable agent definition — the bundle that gives a session its entire
+/// character, selected at session start by agent id.
+///
+/// `space_id` `None` is a global definition; a space-scoped definition with
+/// the same id shadows it within that space. The permission overlay
+/// intersects with the resolved config's grants and never expands them.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentDefinition {
+    /// The stable agent id sessions carry (`sessions.agent_id`).
+    pub id: String,
+    pub space_id: Option<Uuid>,
+    pub display_name: String,
+    pub description: String,
+    /// The agent's own instructions, appended after operator instructions.
+    pub instructions: String,
+    /// Model preference, used when the session has no explicit selection.
+    pub model_id: Option<String>,
+    /// Optional tool-permission overlay (serialised `PermissionConfig`).
+    pub tool_permissions: Option<serde_json::Value>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Input for creating or replacing an agent definition. Mutations travel as
+/// recorded configuration changes, so the caller supplies whole definitions
+/// rather than field patches.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NewAgentDefinition {
+    pub id: String,
+    pub space_id: Option<Uuid>,
+    pub display_name: String,
+    pub description: String,
+    pub instructions: String,
+    pub model_id: Option<String>,
+    pub tool_permissions: Option<serde_json::Value>,
+}
+
 /// A manually appended audit event.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NewAuditEvent {

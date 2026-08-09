@@ -147,6 +147,76 @@ pub(crate) fn load_session_config(
         .map_err(|error| GatewayError::ConfigError(error.to_string()))
 }
 
+/// Overlay a durable agent definition onto the session's resolved config.
+///
+/// The definition is the agent's character; the file hierarchy is ambient
+/// operator configuration. Its instructions append after the operator's, its
+/// model preference applies only where the session has no explicit
+/// selection, and its permission overlay intersects with the resolved
+/// grants — a definition can narrow what an agent may do, never widen it.
+pub(crate) fn apply_agent_definition(
+    mut config: swage_config::ResolvedConfig,
+    definition: &swage_storage::AgentDefinition,
+) -> swage_config::ResolvedConfig {
+    if !definition.instructions.trim().is_empty() {
+        if config.instructions.is_empty() {
+            config.instructions = definition.instructions.clone();
+        } else {
+            config.instructions =
+                format!("{}\n\n{}", config.instructions, definition.instructions);
+        }
+    }
+
+    if let Some(model_id) = definition
+        .model_id
+        .as_deref()
+        .filter(|id| !id.trim().is_empty())
+    {
+        if config.models.entries.contains_key(model_id) {
+            config.models.default = model_id.to_string();
+        } else {
+            tracing::warn!(
+                agent_id = %definition.id,
+                model_id,
+                "agent definition prefers an unconfigured model; keeping the resolved default"
+            );
+        }
+    }
+
+    if let Some(overlay) = definition
+        .tool_permissions
+        .as_ref()
+        .and_then(|value| {
+            serde_json::from_value::<swage_config::model::ToolPermissionConfig>(value.clone()).ok()
+        })
+    {
+        // Intersection, never expansion: the effective allow is what both the
+        // resolved config and the overlay permit ("*" on either side defers
+        // to the other), and every deny from either side stands.
+        let config_allows_all = config.tools.permissions.allow.iter().any(|t| t == "*");
+        let overlay_allows_all = overlay.allow.iter().any(|t| t == "*");
+        config.tools.permissions.allow = match (config_allows_all, overlay_allows_all) {
+            (_, true) => config.tools.permissions.allow.clone(),
+            (true, false) => overlay.allow.clone(),
+            (false, false) => config
+                .tools
+                .permissions
+                .allow
+                .iter()
+                .filter(|tool| overlay.allow.contains(tool))
+                .cloned()
+                .collect(),
+        };
+        for denied in overlay.deny {
+            if !config.tools.permissions.deny.contains(&denied) {
+                config.tools.permissions.deny.push(denied);
+            }
+        }
+    }
+
+    config
+}
+
 pub(super) fn effective_session_config(
     mut config: swage_config::ResolvedConfig,
     selected_model_id: Option<&str>,
@@ -190,4 +260,121 @@ pub(super) fn ensure_selected_model_available(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn definition_with(
+        instructions: &str,
+        model_id: Option<&str>,
+        tool_permissions: Option<serde_json::Value>,
+    ) -> swage_storage::AgentDefinition {
+        swage_storage::AgentDefinition {
+            id: "researcher".into(),
+            space_id: None,
+            display_name: "Researcher".into(),
+            description: String::new(),
+            instructions: instructions.into(),
+            model_id: model_id.map(str::to_owned),
+            tool_permissions,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        }
+    }
+
+    #[test]
+    fn definition_instructions_append_after_operator_instructions() {
+        let mut config = swage_config::ResolvedConfig::default();
+        config.instructions = "Operator ambient rules.".into();
+
+        let applied = apply_agent_definition(
+            config,
+            &definition_with("Gather and cite evidence.", None, None),
+        );
+
+        let operator = applied.instructions.find("Operator ambient rules.").unwrap();
+        let agent = applied.instructions.find("Gather and cite evidence.").unwrap();
+        assert!(
+            operator < agent,
+            "the definition extends the operator's instructions, never precedes them"
+        );
+    }
+
+    #[test]
+    fn definition_fills_empty_instructions() {
+        let config = swage_config::ResolvedConfig::default();
+        let applied =
+            apply_agent_definition(config, &definition_with("Agent character.", None, None));
+        assert_eq!(applied.instructions, "Agent character.");
+    }
+
+    #[test]
+    fn unconfigured_model_preference_is_ignored() {
+        let config = swage_config::ResolvedConfig::default();
+        let default_before = config.models.default.clone();
+
+        let applied =
+            apply_agent_definition(config, &definition_with("", Some("no-such-model"), None));
+        assert_eq!(
+            applied.models.default, default_before,
+            "a preference for an absent model must not break the session"
+        );
+    }
+
+    #[test]
+    fn permission_overlay_intersects_and_never_expands() {
+        let mut config = swage_config::ResolvedConfig::default();
+        config.tools.permissions.allow = vec!["shell".into(), "knowledge_search".into()];
+
+        let applied = apply_agent_definition(
+            config,
+            &definition_with(
+                "",
+                None,
+                Some(serde_json::json!({
+                    // The overlay asks for one held tool and one the config
+                    // never granted: only the held one survives.
+                    "allow": ["knowledge_search", "schedule"],
+                    "deny": ["browser_navigate"]
+                })),
+            ),
+        );
+
+        assert_eq!(
+            applied.tools.permissions.allow,
+            vec!["knowledge_search".to_string()],
+            "intersection keeps only what both sides grant"
+        );
+        assert!(
+            applied
+                .tools
+                .permissions
+                .deny
+                .contains(&"browser_navigate".to_string()),
+            "overlay denies are added"
+        );
+    }
+
+    #[test]
+    fn wildcard_config_narrows_to_the_overlay_allow() {
+        let config = swage_config::ResolvedConfig::default();
+        assert!(config.tools.permissions.allow.iter().any(|t| t == "*"));
+
+        let applied = apply_agent_definition(
+            config,
+            &definition_with(
+                "",
+                None,
+                Some(serde_json::json!({ "allow": ["knowledge_search"], "deny": [] })),
+            ),
+        );
+
+        assert_eq!(
+            applied.tools.permissions.allow,
+            vec!["knowledge_search".to_string()],
+            "an allow-all config defers to the definition's narrower grant"
+        );
+    }
 }

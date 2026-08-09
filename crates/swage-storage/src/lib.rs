@@ -9,13 +9,15 @@ pub use crate::sqlite::secret::{
     managed_secret_encryption_diagnostics,
 };
 pub use model::{
-    ActiveSkillRecord, AgentMemoryRecord, AgentMessage, ApprovalKind, ApprovalRequest,
+    ActiveSkillRecord, AgentDefinition, AgentMemoryRecord, AgentMessage, ApprovalKind,
+    ApprovalRequest,
     ApprovalState, Attachment, AttachmentKind, AttachmentScopeKind, AttachmentStatus, AuditEvent,
     BackgroundJob, BackgroundJobKind, BackgroundJobState, ChannelInboundMessage,
     ChannelInboundMessageState, ChannelLink, ConfigurationVersion, ContextSnapshotRecord,
     DeliveryRecord, ExtractionDerivation, GateConfig, GateDecision, GateVerdict, InboundAudit,
     KnowledgeSearchHit, Material, MaterialSourceKind, MaterialStatus,
-    Message, NewAgentMemoryRecord, NewAgentMessage, NewApprovalRequest, NewAttachment,
+    Message, NewAgentDefinition, NewAgentMemoryRecord, NewAgentMessage, NewApprovalRequest,
+    NewAttachment,
     NewAuditEvent, NewBackgroundJob, NewChannelInboundMessage, NewChannelLink,
     NewConfigurationVersion, NewDeliveryRecord, NewMaterial,
     NewMessage, NewSchedule, NewScheduleRun, NewSecretRecord,
@@ -31,7 +33,8 @@ pub use model::{
 };
 pub use sqlite::SqliteStorage;
 pub use store::{
-    AgentMemoryStore, AgentMessageStore, ApprovalStore, AttachmentStore, AuditStore,
+    AgentDefinitionStore, AgentMemoryStore, AgentMessageStore, ApprovalStore, AttachmentStore,
+    AuditStore,
     BackgroundJobStore, ChannelLinkStore, ChannelQueueStore, ConfigurationVersionStore,
     ContextSnapshotStore, DeliveryStore, MaterialStore, MessageStore, ObservationStore,
     ScheduleStore,
