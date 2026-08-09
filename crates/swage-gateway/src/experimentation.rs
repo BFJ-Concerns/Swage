@@ -34,6 +34,9 @@ pub enum SelectionReason {
     /// Experimentation is off (globally or for this location); the default
     /// serves.
     Disabled,
+    /// The draw could not be recorded, so the default serves — an
+    /// unrecorded variant never shapes behaviour.
+    RecordUnavailable,
     /// The operator pinned this variant for the location.
     Forced,
     /// Drawn from the registered variants.

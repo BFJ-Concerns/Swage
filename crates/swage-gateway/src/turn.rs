@@ -749,7 +749,7 @@ pub(crate) async fn process_turn_with_existing_turn(
             );
             crate::experimentation::VariantDecision {
                 variant: configured_assembly.clone(),
-                reason: crate::experimentation::SelectionReason::Disabled,
+                reason: crate::experimentation::SelectionReason::RecordUnavailable,
             }
         }
     };

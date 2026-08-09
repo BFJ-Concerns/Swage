@@ -103,30 +103,36 @@ pub fn assemble_named(
 
     let timeout = Duration::from_secs(config.timeout.max(1));
     match run_script(&source, elements, tokeniser, timeout) {
-        Ok(messages) if messages.is_empty() => fallback(
+        Ok((messages, _)) if messages.is_empty() => fallback(
             name,
             format!("assembly '{name}' produced no messages"),
             elements,
             config,
             tokeniser,
         ),
-        Ok(messages) => {
-            // The report describes what actually ran: the script's own
-            // composition. Element rows describe the inputs the script was
-            // given (real either way); everything the default assembly would
-            // have done — compaction, budget enforcement — did not happen
-            // here and is reported as such rather than inherited.
+        Ok((messages, added)) => {
+            // The report describes what actually ran: one element row per
+            // add() call, in composition order, attributed to the element
+            // the script added (or to the script itself for raw messages).
+            // Everything the default assembly would have done — compaction,
+            // budget enforcement — did not happen here and is reported as
+            // such rather than inherited.
             let started = Instant::now();
             let mut report = crate::report::AssemblyReport::new(name);
-            report.elements = elements
+            let mut offset = 0usize;
+            report.elements = added
                 .iter()
-                .map(|element| crate::report::ElementReport {
-                    name: element.name().to_string(),
-                    source: element.source(),
-                    token_count: element.token_count(tokeniser),
-                    preview: None,
-                    priority: element.priority(),
-                    named_assembly: None,
+                .map(|block| {
+                    let slice = &messages[offset..offset + block.message_count];
+                    offset += block.message_count;
+                    crate::report::ElementReport {
+                        name: block.name.clone(),
+                        source: block.source.clone(),
+                        token_count: tokeniser.count_messages(slice),
+                        preview: None,
+                        priority: block.priority,
+                        named_assembly: None,
+                    }
                 })
                 .collect();
             report.total_tokens = tokeniser.count_messages(&messages);
@@ -171,14 +177,25 @@ fn fallback(
     output
 }
 
+/// What one `add()` call contributed, for the report: the element's own
+/// identity when an element was added, or a script marker for raw messages.
+#[derive(serde::Deserialize)]
+struct AddedBlock {
+    name: String,
+    source: String,
+    priority: i32,
+    #[serde(rename = "messageCount")]
+    message_count: usize,
+}
+
 /// Execute the script against a read-only projection of the elements,
-/// returning the composed message list.
+/// returning the composed message list and per-add attribution.
 fn run_script(
     source: &str,
     elements: &[Box<dyn ContextElement>],
     tokeniser: &dyn Tokeniser,
     timeout: Duration,
-) -> Result<Vec<ChatMessage>, String> {
+) -> Result<(Vec<ChatMessage>, Vec<AddedBlock>), String> {
     let runtime = Runtime::new().map_err(|error| error.to_string())?;
     runtime.set_memory_limit(MEMORY_LIMIT_BYTES);
     runtime.set_max_stack_size(STACK_LIMIT_BYTES);
@@ -220,7 +237,7 @@ fn run_script(
     )
     .map_err(|error| error.to_string())?;
 
-    context.with(|ctx| -> Result<Vec<ChatMessage>, String> {
+    context.with(|ctx| -> Result<(Vec<ChatMessage>, Vec<AddedBlock>), String> {
         // The cage: no eval, no ambient nondeterminism. Assemblies must be
         // pure functions of their elements.
         ctx.eval::<(), _>(
@@ -232,8 +249,10 @@ fn run_script(
                 };
             }
             globalThis.__output = [];
+            globalThis.__added = [];
             globalThis.add = (value) => {
-                const messages = Array.isArray(value) ? value : value && value.messages;
+                const isElement = value && !Array.isArray(value) && Array.isArray(value.messages);
+                const messages = Array.isArray(value) ? value : isElement ? value.messages : null;
                 if (!Array.isArray(messages)) {
                     throw new Error("add() takes an element from `elements` or an array of {role, text} messages");
                 }
@@ -243,6 +262,12 @@ fn run_script(
                     }
                     globalThis.__output.push({ role: message.role, text: message.text });
                 }
+                globalThis.__added.push({
+                    name: isElement && typeof value.name === "string" ? value.name : "script",
+                    source: isElement && typeof value.source === "string" ? value.source : "composed by the assembly script",
+                    priority: isElement && typeof value.priority === "number" ? value.priority : 0,
+                    messageCount: messages.length,
+                });
             };
             "#,
         )
@@ -265,14 +290,22 @@ fn run_script(
             .map_err(|error| script_error(&ctx, error))?;
         let raw: Vec<RawMessage> =
             serde_json::from_str(&output_json).map_err(|error| error.to_string())?;
-        raw.into_iter()
+        let messages = raw
+            .into_iter()
             .map(|message| {
                 Ok(ChatMessage::new(
                     parse_role(&message.role)?,
                     &message.text,
                 ))
             })
-            .collect()
+            .collect::<Result<Vec<_>, String>>()?;
+
+        let added_json: String = ctx
+            .eval("JSON.stringify(globalThis.__added)")
+            .map_err(|error| script_error(&ctx, error))?;
+        let added: Vec<AddedBlock> =
+            serde_json::from_str(&added_json).map_err(|error| error.to_string())?;
+        Ok((messages, added))
     })
 }
 
@@ -356,6 +389,32 @@ mod tests {
             &WordTokeniser,
             Duration::from_secs(5),
         )
+        .map(|(messages, _)| messages)
+    }
+
+    /// The report attributes each add() to what was actually added, so a
+    /// scripted composition's stored account matches what ran.
+    #[test]
+    fn attribution_follows_the_script_not_the_inputs() {
+        let (messages, added) = run_script(
+            r#"
+            const byName = Object.fromEntries(elements.map(e => [e.name, e]));
+            add(byName.history);
+            add([{ role: "system", text: "inline note" }]);
+            "#,
+            &test_elements(),
+            &WordTokeniser,
+            Duration::from_secs(5),
+        )
+        .unwrap();
+
+        assert_eq!(messages.len(), 3);
+        assert_eq!(added.len(), 2);
+        assert_eq!(added[0].name, "history");
+        assert_eq!(added[0].message_count, 2);
+        assert_eq!(added[1].name, "script", "raw messages attribute to the script");
+        // The prompts element was never added and must not appear.
+        assert!(added.iter().all(|block| block.name != "prompts"));
     }
 
     /// The most important error boundary: a runaway script must abort at the
@@ -368,7 +427,8 @@ mod tests {
             &test_elements(),
             &WordTokeniser,
             Duration::from_millis(200),
-        );
+        )
+        .map(|(messages, _)| messages);
         assert!(result.is_err(), "an interrupted script is an error");
         assert!(
             started.elapsed() < Duration::from_secs(5),
