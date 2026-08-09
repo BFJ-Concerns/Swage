@@ -7,17 +7,16 @@ use crate::model::{
     ActiveSkillRecord, AgentMemoryRecord, AgentMessage, AppendMessage, ApprovalRequest,
     ApprovalState, Attachment, AttachmentStatus, AuditEvent, BackgroundJob, ChannelInboundMessage,
     ChannelLink, ConfigurationVersion, ContextSnapshotRecord, DeliveryRecord, DeviceRegistration,
-    EdgeEvaluation, InboundAudit, Material, Message,
+    InboundAudit, Material, Message,
     NewAgentMemoryRecord, NewAgentMessage, NewApprovalRequest, NewAttachment, NewAuditEvent,
     NewBackgroundJob, NewChannelInboundMessage, NewChannelLink, NewConfigurationVersion,
-    NewDeliveryRecord, NewDeviceRegistration, NewEdgeEvaluation, NewMaterial,
-    NewMessage, NewNodeExecution, NewNodeRetry, NewSchedule, NewScheduleRun, NewSecretRecord,
-    NewSession, NewSharedReferenceEvent, NewSpace, NewTeam, NewThread, NewToolCall, NewTopologyRun,
+    NewDeliveryRecord, NewDeviceRegistration, NewMaterial,
+    NewMessage, NewSchedule, NewScheduleRun, NewSecretRecord,
+    NewSession, NewSpace, NewThread, NewToolCall,
     NewTurn, NewWorkflowJournalIntent, NewWorkflowRun, NewWorkflowScript, NewWorkspaceAttachment,
-    NodeExecution, NodeExecutionState, NodeRetry, PendingChannelOrigin, Schedule, ScheduleRun,
-    ScheduleRunUpdate, SecretRecord, Session, SharedReferenceEvent, SharedReferenceKind, Space,
-    SpaceSlug, Team, Thread, ThreadBranch, ThreadState, ToolCallRecord, TopologyRun,
-    TopologyRunState, Turn, TurnState, UpdateSchedule, WorkflowJournalRecord, WorkflowRunRecord,
+    PendingChannelOrigin, Schedule, ScheduleRun, ScheduleRunUpdate, SecretRecord, Session, Space,
+    SpaceSlug, Thread, ThreadBranch, ThreadState, ToolCallRecord, Turn, TurnState, UpdateSchedule,
+    WorkflowJournalRecord, WorkflowRunRecord,
     WorkflowScriptRecord, WorkflowScriptVersion, WorkspaceAttachment,
 };
 
@@ -315,84 +314,6 @@ pub trait MaterialStore: Send + Sync {
 }
 
 #[async_trait]
-pub trait TeamStore: Send + Sync {
-    async fn create_team(&self, team: NewTeam) -> Result<Team, StorageError>;
-    async fn get_team(&self, id: Uuid) -> Result<Option<Team>, StorageError>;
-    async fn get_team_by_name(
-        &self,
-        space_id: Uuid,
-        name: &str,
-    ) -> Result<Option<Team>, StorageError>;
-    /// List teams in a space ordered by created_at ascending.
-    async fn list_teams_by_space(&self, space_id: Uuid) -> Result<Vec<Team>, StorageError>;
-    /// Partially update a team. Only `Some` fields are changed.
-    async fn update_team(
-        &self,
-        id: Uuid,
-        name: Option<String>,
-        description: Option<String>,
-        entry_agent_id: Option<String>,
-        agents: Option<Vec<crate::model::TeamAgentDefinition>>,
-        tasks: Option<Vec<crate::model::TeamTaskDefinition>>,
-    ) -> Result<Team, StorageError>;
-    /// Delete a team. Returns true if it existed and was removed.
-    async fn delete_team(&self, id: Uuid) -> Result<bool, StorageError>;
-}
-
-#[async_trait]
-pub trait TopologyTraceStore: Send + Sync {
-    async fn create_topology_run(&self, run: NewTopologyRun) -> Result<TopologyRun, StorageError>;
-    async fn get_topology_run(&self, id: Uuid) -> Result<Option<TopologyRun>, StorageError>;
-    async fn list_topology_runs_by_team(
-        &self,
-        team_id: Uuid,
-    ) -> Result<Vec<TopologyRun>, StorageError>;
-    async fn list_topology_runs_by_session(
-        &self,
-        session_id: Uuid,
-    ) -> Result<Vec<TopologyRun>, StorageError>;
-    async fn update_topology_run(
-        &self,
-        id: Uuid,
-        state: TopologyRunState,
-        final_output: Option<&serde_json::Value>,
-        error_message: Option<&str>,
-    ) -> Result<(), StorageError>;
-
-    async fn create_node_execution(
-        &self,
-        execution: NewNodeExecution,
-    ) -> Result<NodeExecution, StorageError>;
-    async fn get_node_execution(&self, id: Uuid) -> Result<Option<NodeExecution>, StorageError>;
-    async fn list_node_executions_by_run(
-        &self,
-        topology_run_id: Uuid,
-    ) -> Result<Vec<NodeExecution>, StorageError>;
-    async fn update_node_execution(
-        &self,
-        id: Uuid,
-        state: NodeExecutionState,
-        output_json: Option<&serde_json::Value>,
-        error_message: Option<&str>,
-    ) -> Result<(), StorageError>;
-
-    async fn create_edge_evaluation(
-        &self,
-        evaluation: NewEdgeEvaluation,
-    ) -> Result<EdgeEvaluation, StorageError>;
-    async fn list_edge_evaluations_by_run(
-        &self,
-        topology_run_id: Uuid,
-    ) -> Result<Vec<EdgeEvaluation>, StorageError>;
-
-    async fn create_node_retry(&self, retry: NewNodeRetry) -> Result<NodeRetry, StorageError>;
-    async fn list_node_retries(
-        &self,
-        node_execution_id: Uuid,
-    ) -> Result<Vec<NodeRetry>, StorageError>;
-}
-
-#[async_trait]
 pub trait TurnStore: Send + Sync {
     async fn create_turn(&self, turn: NewTurn) -> Result<Turn, StorageError>;
     async fn get_turn(&self, id: Uuid) -> Result<Option<Turn>, StorageError>;
@@ -531,19 +452,6 @@ pub trait ContextSnapshotStore: Send + Sync {
         space_id: Uuid,
         limit: usize,
     ) -> Result<Vec<ContextSnapshotRecord>, StorageError>;
-}
-
-#[async_trait]
-pub trait SharedReferenceStore: Send + Sync {
-    async fn create_shared_reference_event(
-        &self,
-        event: NewSharedReferenceEvent,
-    ) -> Result<SharedReferenceEvent, StorageError>;
-    async fn list_shared_reference_events(
-        &self,
-        object_kind: SharedReferenceKind,
-        object_id: &str,
-    ) -> Result<Vec<SharedReferenceEvent>, StorageError>;
 }
 
 /// Store for thread CRUD operations.
@@ -973,9 +881,7 @@ pub trait WorkflowStore: Send + Sync {
 /// `SpaceStore` is not included — it is independently available and consumers
 /// that need space operations import it separately.
 pub trait Storage:
-    TeamStore
-    + SessionStore
-    + LensStore
+    SessionStore
     + WorkspaceAttachmentStore
     + AttachmentStore
     + BackgroundJobStore
@@ -992,13 +898,11 @@ pub trait Storage:
     + MessageStore
     + ToolCallStore
     + ContextSnapshotStore
-    + SharedReferenceStore
     + SkillActivationStore
     + ApprovalStore
     + AgentMessageStore
     + ScheduleStore
     + ChannelQueueStore
-    + TopologyTraceStore
     + WorkflowStore
     + Send
     + Sync
@@ -1007,9 +911,7 @@ pub trait Storage:
 
 /// Blanket implementation so any type satisfying all sub-traits gets Storage for free.
 impl<T> Storage for T where
-    T: TeamStore
-        + SessionStore
-        + LensStore
+    T: SessionStore
         + WorkspaceAttachmentStore
         + AttachmentStore
         + BackgroundJobStore
@@ -1026,13 +928,11 @@ impl<T> Storage for T where
         + MessageStore
         + ToolCallStore
         + ContextSnapshotStore
-        + SharedReferenceStore
         + SkillActivationStore
         + ApprovalStore
         + AgentMessageStore
         + ScheduleStore
         + ChannelQueueStore
-        + TopologyTraceStore
         + WorkflowStore
         + Send
         + Sync
@@ -1129,45 +1029,6 @@ mod tests {
             _: &str,
             _: &str,
         ) -> Result<Option<Session>, StorageError> {
-            unimplemented!()
-        }
-    }
-
-    #[async_trait]
-    impl LensStore for StubStorage {
-        async fn get_active_lens(&self, _: Uuid) -> Result<LensPreference, StorageError> {
-            unimplemented!()
-        }
-
-        async fn set_active_lens(
-            &self,
-            _: Uuid,
-            _: AppLens,
-        ) -> Result<LensPreference, StorageError> {
-            unimplemented!()
-        }
-
-        async fn list_lenses(&self) -> Result<Vec<LensRecord>, StorageError> {
-            unimplemented!()
-        }
-
-        async fn get_lens(&self, _: &AppLens) -> Result<Option<LensRecord>, StorageError> {
-            unimplemented!()
-        }
-
-        async fn create_lens(&self, _: NewLensRecord) -> Result<LensRecord, StorageError> {
-            unimplemented!()
-        }
-
-        async fn update_lens(
-            &self,
-            _: &AppLens,
-            _: String,
-            _: String,
-            _: String,
-            _: Vec<String>,
-            _: Vec<String>,
-        ) -> Result<LensRecord, StorageError> {
             unimplemented!()
         }
     }
@@ -1600,112 +1461,6 @@ mod tests {
     }
 
     #[async_trait]
-    impl TeamStore for StubStorage {
-        async fn create_team(&self, _: NewTeam) -> Result<Team, StorageError> {
-            unimplemented!()
-        }
-        async fn get_team(&self, _: Uuid) -> Result<Option<Team>, StorageError> {
-            unimplemented!()
-        }
-        async fn get_team_by_name(&self, _: Uuid, _: &str) -> Result<Option<Team>, StorageError> {
-            unimplemented!()
-        }
-        async fn list_teams_by_space(&self, _: Uuid) -> Result<Vec<Team>, StorageError> {
-            unimplemented!()
-        }
-        async fn update_team(
-            &self,
-            _: Uuid,
-            _: Option<String>,
-            _: Option<String>,
-            _: Option<String>,
-            _: Option<Vec<crate::model::TeamAgentDefinition>>,
-            _: Option<Vec<crate::model::TeamTaskDefinition>>,
-        ) -> Result<Team, StorageError> {
-            unimplemented!()
-        }
-        async fn delete_team(&self, _: Uuid) -> Result<bool, StorageError> {
-            unimplemented!()
-        }
-    }
-
-    #[async_trait]
-    impl TopologyTraceStore for StubStorage {
-        async fn create_topology_run(
-            &self,
-            _: NewTopologyRun,
-        ) -> Result<TopologyRun, StorageError> {
-            unimplemented!()
-        }
-        async fn get_topology_run(&self, _: Uuid) -> Result<Option<TopologyRun>, StorageError> {
-            unimplemented!()
-        }
-        async fn list_topology_runs_by_team(
-            &self,
-            _: Uuid,
-        ) -> Result<Vec<TopologyRun>, StorageError> {
-            unimplemented!()
-        }
-        async fn list_topology_runs_by_session(
-            &self,
-            _: Uuid,
-        ) -> Result<Vec<TopologyRun>, StorageError> {
-            unimplemented!()
-        }
-        async fn update_topology_run(
-            &self,
-            _: Uuid,
-            _: TopologyRunState,
-            _: Option<&serde_json::Value>,
-            _: Option<&str>,
-        ) -> Result<(), StorageError> {
-            unimplemented!()
-        }
-        async fn create_node_execution(
-            &self,
-            _: NewNodeExecution,
-        ) -> Result<NodeExecution, StorageError> {
-            unimplemented!()
-        }
-        async fn get_node_execution(&self, _: Uuid) -> Result<Option<NodeExecution>, StorageError> {
-            unimplemented!()
-        }
-        async fn list_node_executions_by_run(
-            &self,
-            _: Uuid,
-        ) -> Result<Vec<NodeExecution>, StorageError> {
-            unimplemented!()
-        }
-        async fn update_node_execution(
-            &self,
-            _: Uuid,
-            _: NodeExecutionState,
-            _: Option<&serde_json::Value>,
-            _: Option<&str>,
-        ) -> Result<(), StorageError> {
-            unimplemented!()
-        }
-        async fn create_edge_evaluation(
-            &self,
-            _: NewEdgeEvaluation,
-        ) -> Result<EdgeEvaluation, StorageError> {
-            unimplemented!()
-        }
-        async fn list_edge_evaluations_by_run(
-            &self,
-            _: Uuid,
-        ) -> Result<Vec<EdgeEvaluation>, StorageError> {
-            unimplemented!()
-        }
-        async fn create_node_retry(&self, _: NewNodeRetry) -> Result<NodeRetry, StorageError> {
-            unimplemented!()
-        }
-        async fn list_node_retries(&self, _: Uuid) -> Result<Vec<NodeRetry>, StorageError> {
-            unimplemented!()
-        }
-    }
-
-    #[async_trait]
     impl TurnStore for StubStorage {
         async fn create_turn(&self, _: NewTurn) -> Result<Turn, StorageError> {
             unimplemented!()
@@ -1772,24 +1527,6 @@ mod tests {
             _space_id: Uuid,
             _limit: usize,
         ) -> Result<Vec<ContextSnapshotRecord>, StorageError> {
-            unimplemented!()
-        }
-    }
-
-    #[async_trait]
-    impl SharedReferenceStore for StubStorage {
-        async fn create_shared_reference_event(
-            &self,
-            _: NewSharedReferenceEvent,
-        ) -> Result<SharedReferenceEvent, StorageError> {
-            unimplemented!()
-        }
-
-        async fn list_shared_reference_events(
-            &self,
-            _: SharedReferenceKind,
-            _: &str,
-        ) -> Result<Vec<SharedReferenceEvent>, StorageError> {
             unimplemented!()
         }
     }
@@ -2280,32 +2017,6 @@ mod tests {
         _assert(&stub);
     }
 
-    /// Compile-time check: TopologyTraceStore has the expected methods.
-    #[test]
-    fn topology_trace_store_compile_check() {
-        fn _assert<T: TopologyTraceStore>(t: &T) {
-            std::mem::drop(t.get_topology_run(Uuid::new_v4()));
-            std::mem::drop(t.list_topology_runs_by_team(Uuid::new_v4()));
-            std::mem::drop(t.list_topology_runs_by_session(Uuid::new_v4()));
-            std::mem::drop(t.get_node_execution(Uuid::new_v4()));
-            std::mem::drop(t.list_node_executions_by_run(Uuid::new_v4()));
-            std::mem::drop(t.list_edge_evaluations_by_run(Uuid::new_v4()));
-            std::mem::drop(t.list_node_retries(Uuid::new_v4()));
-        }
-        let stub = StubStorage;
-        _assert(&stub);
-    }
-
-    /// Compile-time check: Storage implies TopologyTraceStore.
-    #[test]
-    fn storage_supertrait_includes_topology_trace_store() {
-        fn _assert<T: Storage>(t: &T) {
-            std::mem::drop(t.list_topology_runs_by_team(Uuid::new_v4()));
-        }
-        let stub = StubStorage;
-        _assert(&stub);
-    }
-
     /// Compile-time check: ApprovalStore has the expected methods.
     #[test]
     fn approval_store_compile_check() {
@@ -2371,8 +2082,6 @@ mod tests {
                 space_id: Uuid::new_v4(),
                 session_id: Uuid::new_v4(),
                 turn_id: Uuid::new_v4(),
-                topology_run_id: None,
-                node_execution_id: None,
                 agent_id: "agent-a".into(),
                 memory_kind: "insight".into(),
                 title: "Remember this".into(),
@@ -2403,12 +2112,12 @@ mod tests {
                 id,
                 space_id: Some(Uuid::new_v4()),
                 session_id: None,
-                entity_kind: "team".into(),
-                entity_id: "team-1".into(),
+                entity_kind: "space".into(),
+                entity_id: "space-1".into(),
                 version_number: 1,
-                operation_kind: "create_team".into(),
+                operation_kind: "create_space".into(),
                 source: "test".into(),
-                summary: "created team".into(),
+                summary: "created space".into(),
                 snapshot: serde_json::json!({"name": "workspace-core"}),
                 diff: serde_json::json!([]),
                 previous_version_id: None,
@@ -2416,8 +2125,8 @@ mod tests {
             }));
             std::mem::drop(t.get_configuration_version(id));
             std::mem::drop(t.list_configuration_versions(Some(Uuid::new_v4())));
-            std::mem::drop(t.list_configuration_versions_for_entity("team", "team-1"));
-            std::mem::drop(t.get_latest_configuration_version("team", "team-1"));
+            std::mem::drop(t.list_configuration_versions_for_entity("space", "space-1"));
+            std::mem::drop(t.get_latest_configuration_version("space", "space-1"));
         }
         let stub = StubStorage;
         _assert(&stub);

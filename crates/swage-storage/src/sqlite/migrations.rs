@@ -29,8 +29,6 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
         ("006_approval_requests", CREATE_APPROVAL_REQUESTS),
         ("007_agent_messages", CREATE_AGENT_MESSAGES),
         ("008_turn_parent_turn_id", ADD_TURN_PARENT_TURN_ID),
-        ("009_teams", CREATE_TEAMS),
-        ("010_topology_trace", CREATE_TOPOLOGY_TRACE),
         ("011_approval_memory", CREATE_APPROVAL_MEMORY),
         ("012_thread_branches", CREATE_THREAD_BRANCHES),
         ("013_message_turn_id", ADD_MESSAGE_TURN_ID),
@@ -46,12 +44,7 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
             CREATE_ATTACHMENT_AND_BACKGROUND_JOB_TABLES,
         ),
         ("025_materials", CREATE_MATERIAL_TABLES),
-        (
-            "027_shared_reference_events",
-            CREATE_SHARED_REFERENCE_EVENT_TABLE,
-        ),
         ("028_deduplicate_attachment_ingestion_content", ""),
-        ("030_team_agent_and_task_authoring", ""),
         (
             "031_configuration_versioning",
             CREATE_CONFIGURATION_VERSION_TABLE,
@@ -74,8 +67,8 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
             ADD_WORKSPACE_ATTACHMENT_ACTIVATION,
         ),
         (
-            "038_constrain_message_and_topology_enums",
-            CONSTRAIN_MESSAGE_AND_TOPOLOGY_ENUMS,
+            "038_constrain_message_enums",
+            CONSTRAIN_MESSAGE_ENUMS,
         ),
         ("040_session_selected_model", ADD_SESSION_SELECTED_MODEL),
         ("041_tool_call_model_replay", ADD_TOOL_CALL_MODEL_REPLAY),
@@ -109,20 +102,6 @@ const CREATE_WORKSPACE_ATTACHMENT_TABLE: &str = "
         ON workspace_attachments(space_id);
     CREATE UNIQUE INDEX IF NOT EXISTS idx_workspace_attachments_space_path
         ON workspace_attachments(space_id, path);
-";
-
-const CREATE_SHARED_REFERENCE_EVENT_TABLE: &str = "
-    CREATE TABLE IF NOT EXISTS shared_reference_events (
-        id           TEXT NOT NULL PRIMARY KEY,
-        object_kind  TEXT NOT NULL,
-        object_id    TEXT NOT NULL,
-        event_kind   TEXT NOT NULL,
-        payload_json TEXT NOT NULL,
-        created_at   TEXT NOT NULL
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_shared_reference_events_object
-        ON shared_reference_events(object_kind, object_id, created_at);
 ";
 
 const CREATE_DELIVERY_AND_AUDIT_TABLES: &str = "
@@ -236,77 +215,6 @@ const CREATE_DELIVERY_AND_AUDIT_TABLES: &str = "
         );
     END;
 
-    CREATE TRIGGER IF NOT EXISTS trg_topology_runs_state_audit
-    AFTER UPDATE OF state ON topology_runs
-    WHEN OLD.state <> NEW.state
-    BEGIN
-        INSERT INTO audit_events (
-            id, session_id, entity_kind, entity_id, event_kind, summary, metadata_json, created_at
-        ) VALUES (
-            lower(hex(randomblob(16))),
-            NEW.session_id,
-            'topology_run',
-            NEW.id,
-            'state_transition',
-            'topology run state ' || OLD.state || ' -> ' || NEW.state,
-            json_object(
-                'from_state', OLD.state,
-                'to_state', NEW.state,
-                'team_id', NEW.team_id,
-                'error_message', COALESCE(NEW.error_message, '')
-            ),
-            strftime('%Y-%m-%dT%H:%M:%fZ','now')
-        );
-    END;
-
-    CREATE TRIGGER IF NOT EXISTS trg_node_execution_created_audit
-    AFTER INSERT ON node_executions
-    BEGIN
-        INSERT INTO audit_events (
-            id, session_id, entity_kind, entity_id, event_kind, summary, metadata_json, created_at
-        ) VALUES (
-            lower(hex(randomblob(16))),
-            (SELECT session_id FROM topology_runs WHERE id = NEW.topology_run_id),
-            'node_execution',
-            NEW.id,
-            'node_activity',
-            'node execution created',
-            json_object(
-                'node_id', NEW.node_id,
-                'node_kind', NEW.node_kind,
-                'state', NEW.state,
-                'topology_run_id', NEW.topology_run_id
-            ),
-            strftime('%Y-%m-%dT%H:%M:%fZ','now')
-        );
-    END;
-
-    CREATE TRIGGER IF NOT EXISTS trg_node_execution_state_audit
-    AFTER UPDATE OF state ON node_executions
-    WHEN OLD.state <> NEW.state
-    BEGIN
-        INSERT INTO audit_events (
-            id, session_id, entity_kind, entity_id, event_kind, summary, metadata_json, created_at
-        ) VALUES (
-            lower(hex(randomblob(16))),
-            (
-                SELECT session_id FROM topology_runs WHERE id = NEW.topology_run_id
-            ),
-            'node_execution',
-            NEW.id,
-            'state_transition',
-            'node execution state ' || OLD.state || ' -> ' || NEW.state,
-            json_object(
-                'from_state', OLD.state,
-                'to_state', NEW.state,
-                'node_id', NEW.node_id,
-                'topology_run_id', NEW.topology_run_id,
-                'error_message', COALESCE(NEW.error_message, '')
-            ),
-            strftime('%Y-%m-%dT%H:%M:%fZ','now')
-        );
-    END;
-
     CREATE TRIGGER IF NOT EXISTS trg_delivery_record_audit
     AFTER INSERT ON delivery_records
     BEGIN
@@ -394,8 +302,6 @@ const CREATE_AGENT_MEMORY_TABLE: &str = "
         space_id        TEXT NOT NULL REFERENCES spaces(id) ON DELETE CASCADE,
         session_id        TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
         turn_id           TEXT NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
-        topology_run_id   TEXT REFERENCES topology_runs(id) ON DELETE SET NULL,
-        node_execution_id TEXT REFERENCES node_executions(id) ON DELETE SET NULL,
         agent_id          TEXT NOT NULL,
         memory_kind       TEXT NOT NULL,
         title             TEXT NOT NULL,
@@ -414,10 +320,6 @@ const CREATE_AGENT_MEMORY_TABLE: &str = "
         ON agent_memories(session_id, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_agent_memories_turn
         ON agent_memories(turn_id, created_at DESC);
-    CREATE INDEX IF NOT EXISTS idx_agent_memories_topology_run
-        ON agent_memories(topology_run_id, created_at DESC);
-    CREATE INDEX IF NOT EXISTS idx_agent_memories_node_execution
-        ON agent_memories(node_execution_id, created_at DESC);
 
     CREATE TRIGGER IF NOT EXISTS trg_agent_memories_created_audit
     AFTER INSERT ON agent_memories
@@ -434,8 +336,6 @@ const CREATE_AGENT_MEMORY_TABLE: &str = "
             json_object(
                 'space_id', NEW.space_id,
                 'turn_id', NEW.turn_id,
-                'topology_run_id', COALESCE(NEW.topology_run_id, ''),
-                'node_execution_id', COALESCE(NEW.node_execution_id, ''),
                 'agent_id', NEW.agent_id,
                 'memory_kind', NEW.memory_kind,
                 'title', NEW.title,
@@ -1083,96 +983,11 @@ const CREATE_ONE_IN_FLIGHT_TURN_INDEX: &str = "
         WHERE state IN ('pending', 'processing', 'awaiting_approval', 'delegating');
 ";
 
-/// Teams: the organisational unit for multi-agent orchestration.
-///
-/// A team belongs to a space and defines an entry agent (receives user
-/// messages) plus a member list. Teams link to topology definitions and
-/// are the scope boundary for budget controls.
-const CREATE_TEAMS: &str = "
-    CREATE TABLE IF NOT EXISTS teams (
-        id             TEXT NOT NULL PRIMARY KEY,
-        space_id     TEXT NOT NULL REFERENCES spaces(id) ON DELETE CASCADE,
-        name           TEXT NOT NULL,
-        description    TEXT NOT NULL DEFAULT '',
-        entry_agent_id TEXT NOT NULL,
-        members        TEXT NOT NULL DEFAULT '[]',
-        created_at     TEXT NOT NULL,
-        updated_at     TEXT NOT NULL,
-        UNIQUE(space_id, name)
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_teams_space_id ON teams(space_id);
-";
-
-/// Topology runs and execution traces for multi-agent team orchestration.
-const CREATE_TOPOLOGY_TRACE: &str = "
-    CREATE TABLE IF NOT EXISTS topology_runs (
-        id               TEXT NOT NULL PRIMARY KEY,
-        team_id          TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
-        session_id       TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-        source_turn_id   TEXT REFERENCES turns(id) ON DELETE SET NULL,
-        state            TEXT NOT NULL DEFAULT 'pending',
-        final_output_json TEXT,
-        error_message    TEXT,
-        created_at       TEXT NOT NULL,
-        completed_at     TEXT
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_topology_runs_team_id ON topology_runs(team_id);
-    CREATE INDEX IF NOT EXISTS idx_topology_runs_session_id ON topology_runs(session_id);
-    CREATE INDEX IF NOT EXISTS idx_topology_runs_source_turn_id ON topology_runs(source_turn_id);
-
-    CREATE TABLE IF NOT EXISTS node_executions (
-        id               TEXT NOT NULL PRIMARY KEY,
-        topology_run_id  TEXT NOT NULL REFERENCES topology_runs(id) ON DELETE CASCADE,
-        node_id          TEXT NOT NULL,
-        node_kind        TEXT NOT NULL CHECK (node_kind IN ('llm', 'deterministic', 'continuation')),
-        agent_id         TEXT,
-        task_name        TEXT,
-        state            TEXT NOT NULL DEFAULT 'pending',
-        input_json       TEXT,
-        output_json      TEXT,
-        error_message    TEXT,
-        created_at       TEXT NOT NULL,
-        completed_at     TEXT
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_node_executions_run_id ON node_executions(topology_run_id);
-    CREATE INDEX IF NOT EXISTS idx_node_executions_run_node_id ON node_executions(topology_run_id, node_id);
-
-    CREATE TABLE IF NOT EXISTS edge_evaluations (
-        id                       TEXT NOT NULL PRIMARY KEY,
-        topology_run_id          TEXT NOT NULL REFERENCES topology_runs(id) ON DELETE CASCADE,
-        source_node_execution_id TEXT NOT NULL REFERENCES node_executions(id) ON DELETE CASCADE,
-        edge_id                  TEXT NOT NULL,
-        target_node_id           TEXT NOT NULL,
-        condition_expression     TEXT,
-        matched                  INTEGER NOT NULL,
-        payload_json             TEXT,
-        created_at               TEXT NOT NULL
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_edge_evaluations_run_id ON edge_evaluations(topology_run_id);
-    CREATE INDEX IF NOT EXISTS idx_edge_evaluations_source_execution_id ON edge_evaluations(source_node_execution_id);
-
-    CREATE TABLE IF NOT EXISTS node_retries (
-        id                 TEXT NOT NULL PRIMARY KEY,
-        node_execution_id  TEXT NOT NULL REFERENCES node_executions(id) ON DELETE CASCADE,
-        attempt_number     INTEGER NOT NULL,
-        failure_kind       TEXT NOT NULL,
-        error_message      TEXT NOT NULL,
-        recovery_guidance  TEXT,
-        created_at         TEXT NOT NULL
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_node_retries_execution_id ON node_retries(node_execution_id);
-";
-
 /// Existing SQLite tables cannot gain `CHECK` constraints through `ALTER
 /// TABLE`, so already-migrated databases get equivalent write-boundary
 /// triggers. Fresh databases also receive the triggers; they are redundant
 /// with the table checks but keep enforcement consistent across installs.
-const CONSTRAIN_MESSAGE_AND_TOPOLOGY_ENUMS: &str = "
+const CONSTRAIN_MESSAGE_ENUMS: &str = "
     CREATE TRIGGER IF NOT EXISTS trg_messages_role_valid_insert
         BEFORE INSERT ON messages
         WHEN NEW.role NOT IN ('system', 'user', 'assistant', 'tool')
@@ -1187,19 +1002,6 @@ const CONSTRAIN_MESSAGE_AND_TOPOLOGY_ENUMS: &str = "
         SELECT RAISE(ABORT, 'messages.role must be one of system, user, assistant, tool');
     END;
 
-    CREATE TRIGGER IF NOT EXISTS trg_node_executions_kind_valid_insert
-        BEFORE INSERT ON node_executions
-        WHEN NEW.node_kind NOT IN ('llm', 'deterministic', 'continuation')
-    BEGIN
-        SELECT RAISE(ABORT, 'node_executions.node_kind must be one of llm, deterministic, continuation');
-    END;
-
-    CREATE TRIGGER IF NOT EXISTS trg_node_executions_kind_valid_update
-        BEFORE UPDATE OF node_kind ON node_executions
-        WHEN NEW.node_kind NOT IN ('llm', 'deterministic', 'continuation')
-    BEGIN
-        SELECT RAISE(ABORT, 'node_executions.node_kind must be one of llm, deterministic, continuation');
-    END;
 ";
 
 /// Session-scoped memory for approved tool requests.
@@ -1255,8 +1057,6 @@ pub fn run_migrations(conn: &Connection) -> Result<(), StorageError> {
             super::secret::migrate_managed_secret_storage(conn)?;
         } else if name == "028_deduplicate_attachment_ingestion_content" {
             super::attachment::migrate_attachment_ingested_markdown_dedup(conn)?;
-        } else if name == "030_team_agent_and_task_authoring" {
-            super::team::migrate_team_authoring_model(conn)?;
         } else if name == "041_tool_call_model_replay" {
             migrate_tool_call_model_replay(conn)?;
         } else {
@@ -1382,9 +1182,6 @@ mod tests {
             } else if name == "028_deduplicate_attachment_ingestion_content" {
                 super::super::attachment::migrate_attachment_ingested_markdown_dedup(&conn)
                     .expect("attachment dedup migration");
-            } else if name == "030_team_agent_and_task_authoring" {
-                super::super::team::migrate_team_authoring_model(&conn)
-                    .expect("team authoring migration");
             } else {
                 conn.execute_batch(&format!("BEGIN; {sql} COMMIT;"))
                     .unwrap_or_else(|error| panic!("migration {name} should apply: {error}"));
@@ -2259,83 +2056,6 @@ mod tests {
     }
 
     #[test]
-    fn topology_runs_table_created() {
-        let conn = open_migrated();
-        let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM topology_runs", [], |r| r.get(0))
-            .expect("topology_runs table should exist after migration");
-        assert_eq!(count, 0);
-    }
-
-    #[test]
-    fn node_executions_table_created() {
-        let conn = open_migrated();
-        let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM node_executions", [], |r| r.get(0))
-            .expect("node_executions table should exist after migration");
-        assert_eq!(count, 0);
-    }
-
-    #[test]
-    fn edge_evaluations_table_created() {
-        let conn = open_migrated();
-        let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM edge_evaluations", [], |r| r.get(0))
-            .expect("edge_evaluations table should exist after migration");
-        assert_eq!(count, 0);
-    }
-
-    #[test]
-    fn node_retries_table_created() {
-        let conn = open_migrated();
-        let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM node_retries", [], |r| r.get(0))
-            .expect("node_retries table should exist after migration");
-        assert_eq!(count, 0);
-    }
-
-    #[test]
-    fn node_executions_node_kind_rejects_unknown_values() {
-        let conn = open_migrated();
-        let space_id = default_space_id(&conn);
-        let now = chrono::Utc::now().to_rfc3339();
-        let session_id = insert_session(&conn, &space_id, &now);
-        let team_id = uuid::Uuid::new_v4().to_string();
-
-        conn.execute(
-            "INSERT INTO teams (id, space_id, name, description, entry_agent_id, members, created_at, updated_at)
-             VALUES (?1, ?2, 'trace-team', '', 'planner', '[\"planner\"]', ?3, ?3)",
-            rusqlite::params![team_id, space_id, now],
-        )
-        .expect("insert team");
-
-        let run_id = uuid::Uuid::new_v4().to_string();
-        conn.execute(
-            "INSERT INTO topology_runs (id, team_id, session_id, state, created_at)
-             VALUES (?1, ?2, ?3, 'running', ?4)",
-            rusqlite::params![run_id, team_id, session_id, now],
-        )
-        .expect("insert topology run");
-
-        conn.execute(
-            "INSERT INTO node_executions (id, topology_run_id, node_id, node_kind, state, created_at)
-             VALUES (?1, ?2, 'plan', 'llm', 'running', ?3)",
-            rusqlite::params![uuid::Uuid::new_v4().to_string(), run_id, now],
-        )
-        .expect("known node kind should insert");
-
-        let result = conn.execute(
-            "INSERT INTO node_executions (id, topology_run_id, node_id, node_kind, state, created_at)
-             VALUES (?1, ?2, 'review', 'map_reduce', 'running', ?3)",
-            rusqlite::params![uuid::Uuid::new_v4().to_string(), run_id, now],
-        );
-        assert!(
-            result.is_err(),
-            "unknown node_executions.node_kind should fail closed"
-        );
-    }
-
-    #[test]
     fn approval_memory_table_created() {
         let conn = open_migrated();
         let count: i64 = conn
@@ -2344,69 +2064,4 @@ mod tests {
         assert_eq!(count, 0);
     }
 
-    #[test]
-    fn topology_run_cascade_delete_removes_trace_rows() {
-        let conn = open_migrated();
-        let space_id = default_space_id(&conn);
-        let now = chrono::Utc::now().to_rfc3339();
-        let session_id = insert_session(&conn, &space_id, &now);
-        let team_id = uuid::Uuid::new_v4().to_string();
-
-        conn.execute(
-            "INSERT INTO teams (id, space_id, name, description, entry_agent_id, members, created_at, updated_at)
-             VALUES (?1, ?2, 'trace-team', '', 'planner', '[\"planner\"]', ?3, ?3)",
-            rusqlite::params![team_id, space_id, now],
-        )
-        .expect("insert team");
-
-        let run_id = uuid::Uuid::new_v4().to_string();
-        conn.execute(
-            "INSERT INTO topology_runs (id, team_id, session_id, state, created_at)
-             VALUES (?1, ?2, ?3, 'running', ?4)",
-            rusqlite::params![run_id, team_id, session_id, now],
-        )
-        .expect("insert topology run");
-
-        let execution_id = uuid::Uuid::new_v4().to_string();
-        conn.execute(
-            "INSERT INTO node_executions (id, topology_run_id, node_id, node_kind, state, created_at)
-             VALUES (?1, ?2, 'plan', 'llm', 'running', ?3)",
-            rusqlite::params![execution_id, run_id, now],
-        )
-        .expect("insert node execution");
-
-        conn.execute(
-            "INSERT INTO edge_evaluations (id, topology_run_id, source_node_execution_id, edge_id, target_node_id, matched, created_at)
-             VALUES (?1, ?2, ?3, 'edge-1', 'review', 1, ?4)",
-            rusqlite::params![uuid::Uuid::new_v4().to_string(), run_id, execution_id, now],
-        )
-        .expect("insert edge evaluation");
-
-        conn.execute(
-            "INSERT INTO node_retries (id, node_execution_id, attempt_number, failure_kind, error_message, created_at)
-             VALUES (?1, ?2, 1, 'timeout', 'timed out', ?3)",
-            rusqlite::params![uuid::Uuid::new_v4().to_string(), execution_id, now],
-        )
-        .expect("insert node retry");
-
-        conn.execute(
-            "DELETE FROM topology_runs WHERE id = ?1",
-            rusqlite::params![run_id],
-        )
-        .expect("delete topology run");
-
-        let remaining_nodes: i64 = conn
-            .query_row("SELECT COUNT(*) FROM node_executions", [], |r| r.get(0))
-            .expect("count node executions");
-        let remaining_edges: i64 = conn
-            .query_row("SELECT COUNT(*) FROM edge_evaluations", [], |r| r.get(0))
-            .expect("count edge evaluations");
-        let remaining_retries: i64 = conn
-            .query_row("SELECT COUNT(*) FROM node_retries", [], |r| r.get(0))
-            .expect("count node retries");
-
-        assert_eq!(remaining_nodes, 0);
-        assert_eq!(remaining_edges, 0);
-        assert_eq!(remaining_retries, 0);
-    }
 }

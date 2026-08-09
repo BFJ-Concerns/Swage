@@ -208,36 +208,6 @@ pub enum ServerEvent {
         target_agent_id: String,
         success: bool,
     },
-    /// A topology run has started for a session.
-    TopologyRunStarted {
-        session_id: Uuid,
-        topology_run_id: Uuid,
-        team_id: Uuid,
-    },
-    /// A topology node has started for a session.
-    TopologyNodeStarted {
-        session_id: Uuid,
-        topology_run_id: Uuid,
-        node_execution_id: Uuid,
-        node_id: String,
-    },
-    /// A topology node has finished for a session.
-    TopologyNodeCompleted {
-        session_id: Uuid,
-        topology_run_id: Uuid,
-        node_execution_id: Uuid,
-        node_id: String,
-        success: bool,
-    },
-    /// A topology run has finished for a session.
-    TopologyRunCompleted {
-        session_id: Uuid,
-        topology_run_id: Uuid,
-        success: bool,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        #[ts(optional, type = "unknown")]
-        final_output: Option<serde_json::Value>,
-    },
     /// A detached workflow run has started.
     WorkflowRunStarted {
         event: super::workflow::WorkflowRunStartedEvent,

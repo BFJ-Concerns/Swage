@@ -51,54 +51,6 @@ pub enum HookEvent {
     /// An agent has stopped execution.
     AgentStop { agent_id: String },
 
-    /// A topology run is starting.
-    TopologyStart {
-        topology_run_id: String,
-        team_id: String,
-        session_id: String,
-    },
-
-    /// A topology run has finished.
-    TopologyEnd {
-        topology_run_id: String,
-        team_id: String,
-        session_id: String,
-        success: bool,
-    },
-
-    /// A node within a topology run is starting execution.
-    NodeStart {
-        topology_run_id: String,
-        node_execution_id: String,
-        node_id: String,
-        agent_id: Option<String>,
-    },
-
-    /// A node within a topology run has finished.
-    NodeEnd {
-        topology_run_id: String,
-        node_execution_id: String,
-        node_id: String,
-        success: bool,
-        output: Option<Value>,
-    },
-
-    /// A fan-out edge has spawned branch activations.
-    FanOutSpawn {
-        topology_run_id: String,
-        source_node_execution_id: String,
-        edge_id: String,
-        branch_count: u32,
-    },
-
-    /// A fan-out edge has finished collecting its branch payloads.
-    FanOutCollect {
-        topology_run_id: String,
-        source_node_execution_id: String,
-        edge_id: String,
-        branch_count: u32,
-    },
-
     /// A message is about to be sent from one agent to another.
     ///
     /// Hooks can block this event to prevent the message from being created.
@@ -152,12 +104,6 @@ impl HookEvent {
             HookEvent::AfterResponse { .. } => "AfterResponse",
             HookEvent::PreCompact { .. } => "PreCompact",
             HookEvent::AgentStop { .. } => "AgentStop",
-            HookEvent::TopologyStart { .. } => "TopologyStart",
-            HookEvent::TopologyEnd { .. } => "TopologyEnd",
-            HookEvent::NodeStart { .. } => "NodeStart",
-            HookEvent::NodeEnd { .. } => "NodeEnd",
-            HookEvent::FanOutSpawn { .. } => "FanOutSpawn",
-            HookEvent::FanOutCollect { .. } => "FanOutCollect",
             HookEvent::MessageSend { .. } => "MessageSend",
             HookEvent::MessageDeliver { .. } => "MessageDeliver",
             HookEvent::MessageReceive { .. } => "MessageReceive",

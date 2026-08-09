@@ -72,7 +72,7 @@
 
       // A deep-linked conversation may belong to a space other than the one
       // currently in scope (or none, on first load). Bring the space into
-      // scope so the nav, conversation list, and lens runtime reflect it.
+      // scope so the navigation and conversation list reflect it.
       const conv = conversationStore.activeConversation;
       if (conv && spaceStore.currentSpace?.id !== conv.space_id) {
         await spaceStore.selectSpace(conv.space_id);
@@ -310,7 +310,7 @@
       await spaceStore.loadSpaces();
 
       // 2. Fetch global model settings. Space-scoped data (conversations,
-      //    lens runtime) loads when a space is opened — either via the
+      //    scoped runtime state loads when a space is opened — either via the
       //    picker or by a deep-linked conversation that selects its space.
       const settings = await fetchSettings().catch((error) => {
         console.error("Failed to load model settings:", error);

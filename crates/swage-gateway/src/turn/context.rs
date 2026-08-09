@@ -196,7 +196,7 @@ pub(crate) async fn load_active_skills_for_agent(
 
     // Agent-level skills are automatic for the current agent context. Store
     // them idempotently so the normal activation ordering and filtering path is
-    // shared by foreground, delegated, and topology turns.
+    // shared by foreground and delegated turns.
     if let Err(e) =
         SkillManager::auto_activate_agent_skills(session_id, &available, state.storage.as_ref())
             .await

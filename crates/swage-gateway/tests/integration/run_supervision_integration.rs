@@ -20,14 +20,11 @@ use swage_core::{
 use swage_gateway::{server::build_router, state::AppState};
 use swage_provider::LlmProvider;
 use swage_storage::{
-    NewNodeExecution, NewSchedule, NewScheduleRun, NewSession, NewTeam, NewThread, NewTopologyRun,
-    NewTurn, NodeExecutionState, ScheduleCreator, ScheduleKind, ScheduleRunState,
+    NewSchedule, NewScheduleRun, NewSession, NewThread, NewTurn, ScheduleCreator, ScheduleKind, ScheduleRunState,
     ScheduleRunTrigger, ScheduleRunUpdate, ScheduleStatus, SessionPolicy, SqliteStorage,
-    TopologyRunState, TurnState,
-    model::TopologyNodeRecordKind,
+    TurnState,
     store::{
-        ScheduleStore, SessionStore, SpaceStore, Storage, TeamStore, ThreadStore,
-        TopologyTraceStore, TurnStore,
+        ScheduleStore, SessionStore, SpaceStore, Storage, ThreadStore, TurnStore,
     },
 };
 
@@ -367,67 +364,6 @@ async fn operator_runs_survive_restart_with_durable_history() {
         .await
         .unwrap();
 
-    let team = storage
-        .create_team(NewTeam {
-            space_id: storage.get_or_create_default().await.unwrap().id,
-            name: "ops".into(),
-            description: "ops".into(),
-            entry_agent_id: "gateway".into(),
-            agents: vec![swage_storage::model::TeamAgentDefinition {
-                id: "gateway".into(),
-                display_name: "gateway".into(),
-                description: String::new(),
-                instructions: String::new(),
-                model: None,
-            }],
-            tasks: vec![],
-        })
-        .await
-        .unwrap();
-    let topology_run = storage
-        .create_topology_run(NewTopologyRun {
-            team_id: team.id,
-            session_id,
-            source_turn_id: Some(completed_turn.id),
-            state: TopologyRunState::Running,
-            final_output: None,
-            error_message: None,
-        })
-        .await
-        .unwrap();
-    let node_execution = storage
-        .create_node_execution(NewNodeExecution {
-            topology_run_id: topology_run.id,
-            node_id: "delegate-node".into(),
-            node_kind: TopologyNodeRecordKind::Llm,
-            agent_id: Some("delegate".into()),
-            task_name: Some("delegate task".into()),
-            state: NodeExecutionState::Running,
-            input_json: Some(json!({"work": "x"})),
-            output_json: None,
-            error_message: None,
-        })
-        .await
-        .unwrap();
-    storage
-        .update_node_execution(
-            node_execution.id,
-            NodeExecutionState::Failed,
-            None,
-            Some("node failed"),
-        )
-        .await
-        .unwrap();
-    storage
-        .update_topology_run(
-            topology_run.id,
-            TopologyRunState::Completed,
-            Some(&json!({"result": "complete"})),
-            None,
-        )
-        .await
-        .unwrap();
-
     drop(state);
     drop(storage);
 
@@ -455,9 +391,6 @@ async fn operator_runs_survive_restart_with_durable_history() {
     assert_eq!(runs[&completed_run.id].1, "completed");
     assert!(runs[&completed_run.id].2["completed_at"].is_string());
 
-    assert_eq!(runs[&node_execution.id].0, "node_execution");
-    assert_eq!(runs[&node_execution.id].1, "failed");
-    assert!(runs[&node_execution.id].2["completed_at"].is_string());
 }
 
 #[tokio::test(flavor = "multi_thread")]

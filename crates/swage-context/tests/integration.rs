@@ -83,16 +83,19 @@ fn default_assembly_preserves_legacy_prompt_shape() {
     )
     .unwrap();
 
-    // Load prompt rules from hierarchy
-    let space_path = root.path().join("spaces/test");
-    let levels = vec![
-        (swage_config::HierarchyLevel::Global, root.path()),
-        (swage_config::HierarchyLevel::Space, space_path.as_path()),
+    let mut rules = vec![
+        swage_config::prompt_rule::parse_prompt_rule_file(
+            &global_prompts.join("base.md"),
+            swage_config::HierarchyLevel::Global,
+        )
+        .unwrap(),
+        swage_config::prompt_rule::parse_prompt_rule_file(
+            &space_prompts.join("space.md"),
+            swage_config::HierarchyLevel::Space,
+        )
+        .unwrap(),
     ];
-
-    // Load prompt rules (sorted by priority)
-    let (rules, warnings) = swage_config::prompt_rule::load_prompt_rules(&levels);
-    assert!(warnings.is_empty(), "no warnings expected for valid rules");
+    rules.sort_by_key(|rule| std::cmp::Reverse(rule.priority));
     assert_eq!(rules.len(), 2, "should find rules at both levels");
 
     // The higher-priority space rule should come first
@@ -340,17 +343,24 @@ fn prompt_rules_merge_across_hierarchy_with_priority_ordering() {
     )
     .unwrap();
 
-    // Load rules from three levels (space has no prompts — silently skipped)
-    let space_path = root.path().join("spaces/test");
-    let agent_path = root.path().join("spaces/test/agents/default");
-    let levels = vec![
-        (swage_config::HierarchyLevel::Global, root.path()),
-        (swage_config::HierarchyLevel::Space, space_path.as_path()),
-        (swage_config::HierarchyLevel::Agent, agent_path.as_path()),
+    let mut rules = vec![
+        swage_config::prompt_rule::parse_prompt_rule_file(
+            &global_prompts.join("safety.md"),
+            swage_config::HierarchyLevel::Global,
+        )
+        .unwrap(),
+        swage_config::prompt_rule::parse_prompt_rule_file(
+            &global_prompts.join("defaults.md"),
+            swage_config::HierarchyLevel::Global,
+        )
+        .unwrap(),
+        swage_config::prompt_rule::parse_prompt_rule_file(
+            &agent_prompts.join("persona.md"),
+            swage_config::HierarchyLevel::Agent,
+        )
+        .unwrap(),
     ];
-
-    let (rules, warnings) = swage_config::prompt_rule::load_prompt_rules(&levels);
-    assert!(warnings.is_empty());
+    rules.sort_by_key(|rule| std::cmp::Reverse(rule.priority));
 
     // Expected order: safety (200) > defaults (5) > persona (0, agent-level tiebreak)
     assert_eq!(rules.len(), 3);
@@ -417,7 +427,6 @@ timeout = 10
     // Space config overrides the budget
     let space_dir = root.path().join("spaces/test");
     fs::create_dir_all(space_dir.join("agents/default")).unwrap();
-    fs::create_dir_all(root.path().join("lenses/default")).unwrap();
     fs::write(
         space_dir.join("config.toml"),
         r#"

@@ -22,20 +22,20 @@ use swage_storage::{
     model::{
         ActiveSkillRecord, AgentMessage, AppendMessage, ApprovalRequest, ApprovalState, Attachment,
         AttachmentScopeKind, AttachmentStatus, BackgroundJob, ChannelLink, DeviceRegistration,
-        EdgeEvaluation, Material, MaterialStatus, Message, NewAgentMessage, NewApprovalRequest,
-        NewAttachment, NewBackgroundJob, NewChannelLink, NewDeviceRegistration, NewEdgeEvaluation,
-        NewMaterial, NewMessage, NewNodeExecution, NewNodeRetry, NewSchedule, NewScheduleRun,
-        NewSession, NewSpace, NewTeam, NewThread, NewToolCall, NewTopologyRun, NewTurn,
-        NewWorkspaceAttachment, NodeExecution, NodeExecutionState, NodeRetry, Schedule,
+        Material, MaterialStatus, Message, NewAgentMessage, NewApprovalRequest,
+        NewAttachment, NewBackgroundJob, NewChannelLink, NewDeviceRegistration,
+        NewMaterial, NewMessage, NewSchedule, NewScheduleRun,
+        NewSession, NewSpace, NewThread, NewToolCall, NewTurn,
+        NewWorkspaceAttachment, Schedule,
         ScheduleRun, ScheduleRunState, ScheduleRunUpdate, ScheduleStatus, Session, Space,
-        SpaceSlug, Team, Thread, ThreadState, ToolCallRecord, TopologyRun, TopologyRunState, Turn,
+        SpaceSlug, Thread, ThreadState, ToolCallRecord, Turn,
         TurnState, UpdateSchedule, WorkspaceAttachment,
     },
     store::{
         AgentMessageStore, ApprovalStore, AttachmentStore, BackgroundJobStore, ChannelLinkStore,
         ContextSnapshotStore, DeviceStore, MaterialStore, MessageStore, ScheduleStore,
-        SessionStore, SkillActivationStore, SpaceStore, TeamStore, ThreadStore, ToolCallStore,
-        TopologyTraceStore, TurnStore, WorkspaceAttachmentStore,
+        SessionStore, SkillActivationStore, SpaceStore, ThreadStore, ToolCallStore, TurnStore,
+        WorkspaceAttachmentStore,
     },
 };
 
@@ -545,12 +545,7 @@ impl swage_storage::WorkflowStore for MockStorage {
 #[derive(Default)]
 pub(crate) struct InMemoryDb {
     pub(crate) spaces: HashMap<Uuid, Space>,
-    pub(crate) teams: HashMap<Uuid, Team>,
     pub(crate) thread_branches: Vec<swage_storage::ThreadBranch>,
-    pub(crate) topology_runs: HashMap<Uuid, TopologyRun>,
-    pub(crate) node_executions: HashMap<Uuid, NodeExecution>,
-    pub(crate) edge_evaluations: Vec<EdgeEvaluation>,
-    pub(crate) node_retries: Vec<NodeRetry>,
     pub(crate) approval_memory: std::collections::HashSet<(Uuid, String, String)>,
     pub(crate) sessions: HashMap<Uuid, Session>,
     pub(crate) devices: HashMap<String, DeviceRegistration>,
@@ -566,7 +561,6 @@ pub(crate) struct InMemoryDb {
     pub(crate) audit_events: Vec<swage_storage::AuditEvent>,
     pub(crate) agent_memories: Vec<swage_storage::AgentMemoryRecord>,
     pub(crate) configuration_versions: Vec<swage_storage::ConfigurationVersion>,
-    pub(crate) shared_reference_events: Vec<swage_storage::SharedReferenceEvent>,
     pub(crate) agent_messages: HashMap<Uuid, AgentMessage>,
     pub(crate) schedules: HashMap<Uuid, Schedule>,
     pub(crate) schedule_runs: HashMap<Uuid, ScheduleRun>,
@@ -707,362 +701,6 @@ impl SpaceStore for MockStorage {
             )),
             _ => Ok(db.spaces.remove(&id).is_some()),
         }
-    }
-}
-
-#[async_trait]
-impl TeamStore for MockStorage {
-    async fn create_team(&self, team: NewTeam) -> Result<Team, StorageError> {
-        let now = chrono::Utc::now();
-        let members = Team::member_ids_from_agents(&team.agents);
-        let created = Team {
-            id: Uuid::new_v4(),
-            space_id: team.space_id,
-            name: team.name,
-            description: team.description,
-            entry_agent_id: team.entry_agent_id,
-            members,
-            agents: team.agents,
-            tasks: team.tasks,
-            created_at: now,
-            updated_at: now,
-        };
-        self.db
-            .lock()
-            .await
-            .teams
-            .insert(created.id, created.clone());
-        Ok(created)
-    }
-
-    async fn get_team(&self, id: Uuid) -> Result<Option<Team>, StorageError> {
-        Ok(self.db.lock().await.teams.get(&id).cloned())
-    }
-
-    async fn get_team_by_name(
-        &self,
-        space_id: Uuid,
-        name: &str,
-    ) -> Result<Option<Team>, StorageError> {
-        Ok(self
-            .db
-            .lock()
-            .await
-            .teams
-            .values()
-            .find(|team| team.space_id == space_id && team.name == name)
-            .cloned())
-    }
-
-    async fn list_teams_by_space(&self, space_id: Uuid) -> Result<Vec<Team>, StorageError> {
-        let mut teams: Vec<Team> = self
-            .db
-            .lock()
-            .await
-            .teams
-            .values()
-            .filter(|team| team.space_id == space_id)
-            .cloned()
-            .collect();
-        teams.sort_by_key(|team| team.created_at);
-        Ok(teams)
-    }
-
-    async fn update_team(
-        &self,
-        id: Uuid,
-        name: Option<String>,
-        description: Option<String>,
-        entry_agent_id: Option<String>,
-        agents: Option<Vec<swage_storage::model::TeamAgentDefinition>>,
-        tasks: Option<Vec<swage_storage::model::TeamTaskDefinition>>,
-    ) -> Result<Team, StorageError> {
-        let mut db = self.db.lock().await;
-        match db.teams.get_mut(&id) {
-            None => Err(StorageError::NotFound {
-                entity: "Team".into(),
-                id: id.to_string(),
-            }),
-            Some(team) => {
-                if let Some(name) = name {
-                    team.name = name;
-                }
-                if let Some(description) = description {
-                    team.description = description;
-                }
-                if let Some(entry_agent_id) = entry_agent_id {
-                    team.entry_agent_id = entry_agent_id;
-                }
-                if let Some(agents) = agents {
-                    team.members = Team::member_ids_from_agents(&agents);
-                    team.agents = agents;
-                }
-                if let Some(tasks) = tasks {
-                    team.tasks = tasks;
-                }
-                team.updated_at = chrono::Utc::now();
-                Ok(team.clone())
-            }
-        }
-    }
-
-    async fn delete_team(&self, id: Uuid) -> Result<bool, StorageError> {
-        Ok(self.db.lock().await.teams.remove(&id).is_some())
-    }
-}
-
-#[async_trait]
-impl TopologyTraceStore for MockStorage {
-    async fn create_topology_run(&self, run: NewTopologyRun) -> Result<TopologyRun, StorageError> {
-        let now = chrono::Utc::now();
-        let created = TopologyRun {
-            id: Uuid::new_v4(),
-            team_id: run.team_id,
-            session_id: run.session_id,
-            source_turn_id: run.source_turn_id,
-            state: run.state.clone(),
-            final_output: run.final_output,
-            error_message: run.error_message,
-            created_at: now,
-            completed_at: if matches!(
-                run.state,
-                TopologyRunState::Completed
-                    | TopologyRunState::Failed
-                    | TopologyRunState::Interrupted
-            ) {
-                Some(now)
-            } else {
-                None
-            },
-        };
-        self.db
-            .lock()
-            .await
-            .topology_runs
-            .insert(created.id, created.clone());
-        Ok(created)
-    }
-
-    async fn get_topology_run(&self, id: Uuid) -> Result<Option<TopologyRun>, StorageError> {
-        Ok(self.db.lock().await.topology_runs.get(&id).cloned())
-    }
-
-    async fn list_topology_runs_by_team(
-        &self,
-        team_id: Uuid,
-    ) -> Result<Vec<TopologyRun>, StorageError> {
-        let mut runs: Vec<TopologyRun> = self
-            .db
-            .lock()
-            .await
-            .topology_runs
-            .values()
-            .filter(|run| run.team_id == team_id)
-            .cloned()
-            .collect();
-        runs.sort_by_key(|run| run.created_at);
-        Ok(runs)
-    }
-
-    async fn list_topology_runs_by_session(
-        &self,
-        session_id: Uuid,
-    ) -> Result<Vec<TopologyRun>, StorageError> {
-        let mut runs: Vec<TopologyRun> = self
-            .db
-            .lock()
-            .await
-            .topology_runs
-            .values()
-            .filter(|run| run.session_id == session_id)
-            .cloned()
-            .collect();
-        runs.sort_by_key(|run| run.created_at);
-        Ok(runs)
-    }
-
-    async fn update_topology_run(
-        &self,
-        id: Uuid,
-        state: TopologyRunState,
-        final_output: Option<&serde_json::Value>,
-        error_message: Option<&str>,
-    ) -> Result<(), StorageError> {
-        let mut db = self.db.lock().await;
-        let run = db
-            .topology_runs
-            .get_mut(&id)
-            .ok_or_else(|| StorageError::NotFound {
-                entity: "TopologyRun".into(),
-                id: id.to_string(),
-            })?;
-        run.state = state.clone();
-        if let Some(final_output) = final_output {
-            run.final_output = Some(final_output.clone());
-        }
-        if let Some(error_message) = error_message {
-            run.error_message = Some(error_message.to_string());
-        }
-        if matches!(
-            state,
-            TopologyRunState::Completed | TopologyRunState::Failed | TopologyRunState::Interrupted
-        ) {
-            run.completed_at = Some(chrono::Utc::now());
-        }
-        Ok(())
-    }
-
-    async fn create_node_execution(
-        &self,
-        execution: NewNodeExecution,
-    ) -> Result<NodeExecution, StorageError> {
-        let now = chrono::Utc::now();
-        let created = NodeExecution {
-            id: Uuid::new_v4(),
-            topology_run_id: execution.topology_run_id,
-            node_id: execution.node_id,
-            node_kind: execution.node_kind,
-            agent_id: execution.agent_id,
-            task_name: execution.task_name,
-            state: execution.state.clone(),
-            input_json: execution.input_json,
-            output_json: execution.output_json,
-            error_message: execution.error_message,
-            created_at: now,
-            completed_at: if matches!(
-                execution.state,
-                NodeExecutionState::Completed
-                    | NodeExecutionState::Failed
-                    | NodeExecutionState::Skipped
-            ) {
-                Some(now)
-            } else {
-                None
-            },
-        };
-        self.db
-            .lock()
-            .await
-            .node_executions
-            .insert(created.id, created.clone());
-        Ok(created)
-    }
-
-    async fn get_node_execution(&self, id: Uuid) -> Result<Option<NodeExecution>, StorageError> {
-        Ok(self.db.lock().await.node_executions.get(&id).cloned())
-    }
-
-    async fn list_node_executions_by_run(
-        &self,
-        topology_run_id: Uuid,
-    ) -> Result<Vec<NodeExecution>, StorageError> {
-        let mut executions: Vec<NodeExecution> = self
-            .db
-            .lock()
-            .await
-            .node_executions
-            .values()
-            .filter(|execution| execution.topology_run_id == topology_run_id)
-            .cloned()
-            .collect();
-        executions.sort_by_key(|execution| execution.created_at);
-        Ok(executions)
-    }
-
-    async fn update_node_execution(
-        &self,
-        id: Uuid,
-        state: NodeExecutionState,
-        output_json: Option<&serde_json::Value>,
-        error_message: Option<&str>,
-    ) -> Result<(), StorageError> {
-        let mut db = self.db.lock().await;
-        let execution = db
-            .node_executions
-            .get_mut(&id)
-            .ok_or_else(|| StorageError::NotFound {
-                entity: "NodeExecution".into(),
-                id: id.to_string(),
-            })?;
-        execution.state = state.clone();
-        if let Some(output_json) = output_json {
-            execution.output_json = Some(output_json.clone());
-        }
-        if let Some(error_message) = error_message {
-            execution.error_message = Some(error_message.to_string());
-        }
-        if matches!(
-            state,
-            NodeExecutionState::Completed
-                | NodeExecutionState::Failed
-                | NodeExecutionState::Skipped
-        ) {
-            execution.completed_at = Some(chrono::Utc::now());
-        }
-        Ok(())
-    }
-
-    async fn create_edge_evaluation(
-        &self,
-        evaluation: NewEdgeEvaluation,
-    ) -> Result<EdgeEvaluation, StorageError> {
-        let created = EdgeEvaluation {
-            id: Uuid::new_v4(),
-            topology_run_id: evaluation.topology_run_id,
-            source_node_execution_id: evaluation.source_node_execution_id,
-            edge_id: evaluation.edge_id,
-            target_node_id: evaluation.target_node_id,
-            condition_expression: evaluation.condition_expression,
-            matched: evaluation.matched,
-            payload_json: evaluation.payload_json,
-            created_at: chrono::Utc::now(),
-        };
-        self.db.lock().await.edge_evaluations.push(created.clone());
-        Ok(created)
-    }
-
-    async fn list_edge_evaluations_by_run(
-        &self,
-        topology_run_id: Uuid,
-    ) -> Result<Vec<EdgeEvaluation>, StorageError> {
-        Ok(self
-            .db
-            .lock()
-            .await
-            .edge_evaluations
-            .iter()
-            .filter(|evaluation| evaluation.topology_run_id == topology_run_id)
-            .cloned()
-            .collect())
-    }
-
-    async fn create_node_retry(&self, retry: NewNodeRetry) -> Result<NodeRetry, StorageError> {
-        let created = NodeRetry {
-            id: Uuid::new_v4(),
-            node_execution_id: retry.node_execution_id,
-            attempt_number: retry.attempt_number,
-            failure_kind: retry.failure_kind,
-            error_message: retry.error_message,
-            recovery_guidance: retry.recovery_guidance,
-            created_at: chrono::Utc::now(),
-        };
-        self.db.lock().await.node_retries.push(created.clone());
-        Ok(created)
-    }
-
-    async fn list_node_retries(
-        &self,
-        node_execution_id: Uuid,
-    ) -> Result<Vec<NodeRetry>, StorageError> {
-        Ok(self
-            .db
-            .lock()
-            .await
-            .node_retries
-            .iter()
-            .filter(|retry| retry.node_execution_id == node_execution_id)
-            .cloned()
-            .collect())
     }
 }
 
@@ -2344,6 +1982,7 @@ impl ThreadStore for MockStorage {
     }
 }
 
+
 #[async_trait]
 impl TurnStore for MockStorage {
     async fn create_turn(&self, turn: NewTurn) -> Result<Turn, StorageError> {
@@ -2517,45 +2156,6 @@ impl ContextSnapshotStore for MockStorage {
         records.sort_by_key(|record| std::cmp::Reverse(record.created_at));
         records.truncate(limit);
         Ok(records)
-    }
-}
-
-#[async_trait]
-impl swage_storage::store::SharedReferenceStore for MockStorage {
-    async fn create_shared_reference_event(
-        &self,
-        event: swage_storage::NewSharedReferenceEvent,
-    ) -> Result<swage_storage::SharedReferenceEvent, StorageError> {
-        let created = swage_storage::SharedReferenceEvent {
-            id: event.id,
-            object_kind: event.object_kind,
-            object_id: event.object_id,
-            event_kind: event.event_kind,
-            payload: event.payload,
-            created_at: chrono::Utc::now(),
-        };
-        self.db
-            .lock()
-            .await
-            .shared_reference_events
-            .push(created.clone());
-        Ok(created)
-    }
-
-    async fn list_shared_reference_events(
-        &self,
-        object_kind: swage_storage::SharedReferenceKind,
-        object_id: &str,
-    ) -> Result<Vec<swage_storage::SharedReferenceEvent>, StorageError> {
-        Ok(self
-            .db
-            .lock()
-            .await
-            .shared_reference_events
-            .iter()
-            .filter(|event| event.object_kind == object_kind && event.object_id == object_id)
-            .cloned()
-            .collect())
     }
 }
 
@@ -3063,8 +2663,6 @@ impl swage_storage::store::AgentMemoryStore for MockStorage {
             space_id: record.space_id,
             session_id: record.session_id,
             turn_id: record.turn_id,
-            topology_run_id: record.topology_run_id,
-            node_execution_id: record.node_execution_id,
             agent_id: record.agent_id,
             memory_kind: record.memory_kind,
             title: record.title,

@@ -18,8 +18,7 @@ use swage_sandbox::{ChildProcessManager, find_bwrap};
 
 use crate::runtime_resolver::{PythonRuntimeError, ResolvedPythonRuntime};
 use crate::worker_protocol::{
-    AssemblyExecutionPayload, AssemblyExecutionResult, ExecutePayload, HostToWorkerMessage,
-    TopologyExecutionPayload, WorkerToHostMessage, WorkerToolError,
+    ExecutePayload, HostToWorkerMessage, WorkerToHostMessage, WorkerToolError,
 };
 
 const BOOTSTRAP_SCRIPT: &str = include_str!("../resources/worker.py");
@@ -183,47 +182,6 @@ impl PythonWorkerRuntime {
             working_directory: execution_working_directory.display().to_string(),
         };
         self.run_payload(worker, payload, Some(tool_host)).await
-    }
-
-    pub async fn execute_assembly(
-        &self,
-        payload: AssemblyExecutionPayload,
-        timeout: Duration,
-    ) -> Result<AssemblyExecutionResult, PythonWorkerError> {
-        let mut worker = self.spawn_ready_worker(false).await?;
-        let execution = self
-            .run_payload_with_timeout(
-                &mut worker,
-                ExecutePayload::Assembly(payload),
-                timeout,
-                None,
-            )
-            .await?;
-
-        if let Some(traceback) = execution.traceback {
-            return Err(PythonWorkerError::Protocol(traceback));
-        }
-
-        let result = execution.result.ok_or_else(|| {
-            PythonWorkerError::Protocol("assembly worker returned no result".into())
-        })?;
-        serde_json::from_value(result)
-            .map_err(|error| PythonWorkerError::Protocol(error.to_string()))
-    }
-
-    pub async fn execute_topology(
-        &self,
-        payload: TopologyExecutionPayload,
-        timeout: Duration,
-    ) -> Result<PythonExecutionResult, PythonWorkerError> {
-        let mut worker = self.spawn_ready_worker(false).await?;
-        self.run_payload_with_timeout(
-            &mut worker,
-            ExecutePayload::Topology(payload),
-            timeout,
-            None,
-        )
-        .await
     }
 
     async fn run_payload(
@@ -582,10 +540,6 @@ mod tests {
     use async_trait::async_trait;
     use tempfile::TempDir;
 
-    use crate::worker_protocol::{
-        AssemblyExecutionPayload, AssemblyWorkerData, TopologyExecutionPayload,
-    };
-
     struct NoopToolHost;
 
     #[async_trait]
@@ -640,32 +594,6 @@ mod tests {
             .status()
             .map(|status| status.success())
             .unwrap_or(false)
-    }
-
-    fn empty_assembly_payload(code: &str) -> AssemblyExecutionPayload {
-        AssemblyExecutionPayload {
-            code: code.to_string(),
-            path: "<assembly-import-test>".to_string(),
-            budget: 1_000,
-            model: "test-model".to_string(),
-            agent_id: "test-agent".to_string(),
-            data: AssemblyWorkerData {
-                prompts_messages: vec![],
-                prompts_token_count: 0,
-                prompts_source: "prompts".to_string(),
-                skills_messages: vec![],
-                skills_token_count: 0,
-                skills_source: "skills".to_string(),
-                memory_messages: vec![],
-                memory_token_count: 0,
-                memory_source: "memory".to_string(),
-                history_messages: vec![],
-                history_token_count: 0,
-                history_source: "history".to_string(),
-                history_per_message_tokens: vec![],
-                search_levels: vec![],
-            },
-        }
     }
 
     #[test]
@@ -793,23 +721,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn assembly_execution_allows_standard_library_imports() {
-        let runtime = unsandboxed_test_runtime(5);
-
-        let result = runtime
-            .execute_assembly(empty_assembly_payload(
-                "import json\n\n\ndef assemble(ctx):\n    assert json.loads(\"[1, 2]\") == [1, 2]\n",
-            ), Duration::from_secs(5))
-            .await
-            .expect("assembly execution should succeed");
-
-        assert!(result.messages.is_empty());
-        assert!(result.element_reports.is_empty());
-        assert!(result.pending_compactions.is_empty());
-        assert!(result.warnings.is_empty());
-    }
-
-    #[tokio::test]
     async fn execution_timeout_force_kills_the_worker_before_returning() {
         let runtime = unsandboxed_test_runtime(1);
         let mut worker = runtime
@@ -820,11 +731,10 @@ mod tests {
         let execution = runtime
             .run_payload_with_timeout(
                 &mut worker,
-                ExecutePayload::Topology(TopologyExecutionPayload {
+                ExecutePayload::PythonExecute {
                     code: "while True:\n    pass\n".to_string(),
-                    path: "<timeout-test>".to_string(),
-                    catalog: Default::default(),
-                }),
+                    working_directory: "/tmp".to_string(),
+                },
                 Duration::from_secs(1),
                 None,
             )
