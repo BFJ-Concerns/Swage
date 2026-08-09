@@ -34,9 +34,7 @@ pub use model::{
 pub use error::{ConfigError, ConfigProblem, ConfigProblemKind};
 
 // Discovery
-pub use discovery::{
-    DiscoveredSpace, discover, effective_root_path, resolve_root,
-};
+pub use discovery::{DiscoveredSpace, discover, effective_root_path, resolve_root};
 
 // Merge types — PartialConfig for programmatic overlays (task definitions)
 pub use merge::PartialConfig;
@@ -45,6 +43,4 @@ pub use merge::PartialConfig;
 pub use task::TaskDefinition;
 
 // Resolution pipeline — primary public API
-pub use resolve::{
-    apply_overlay, load_resolved_config, load_resolved_config_from, validate_files,
-};
+pub use resolve::{apply_overlay, load_resolved_config, load_resolved_config_from, validate_files};

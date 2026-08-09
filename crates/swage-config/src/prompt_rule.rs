@@ -52,7 +52,10 @@ fn parse_frontmatter(raw: &str) -> Result<(i32, String), String> {
         .position(|line| *line == "---")
         .map(|index| index + 1)
         .ok_or_else(|| "frontmatter block is not closed (missing closing `---`)".to_string())?;
-    Ok((extract_priority(&lines[1..close].join("\n"))?, lines[close + 1..].join("\n")))
+    Ok((
+        extract_priority(&lines[1..close].join("\n"))?,
+        lines[close + 1..].join("\n"),
+    ))
 }
 
 fn extract_priority(block: &str) -> Result<i32, String> {
@@ -65,10 +68,12 @@ fn extract_priority(block: &str) -> Result<i32, String> {
             format!("malformed frontmatter line (expected `key: value`): {line:?}")
         })?;
         if line[..colon].trim() == "priority" {
-            priority = line[colon + 1..]
-                .trim()
-                .parse()
-                .map_err(|_| format!("priority must be an integer, got: {:?}", line[colon + 1..].trim()))?;
+            priority = line[colon + 1..].trim().parse().map_err(|_| {
+                format!(
+                    "priority must be an integer, got: {:?}",
+                    line[colon + 1..].trim()
+                )
+            })?;
         }
     }
     Ok(priority)

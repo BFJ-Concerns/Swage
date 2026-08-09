@@ -20,12 +20,10 @@ use swage_core::{
 use swage_gateway::{server::build_router, state::AppState};
 use swage_provider::LlmProvider;
 use swage_storage::{
-    NewSchedule, NewScheduleRun, NewSession, NewThread, NewTurn, ScheduleCreator, ScheduleKind, ScheduleRunState,
-    ScheduleRunTrigger, ScheduleRunUpdate, ScheduleStatus, SessionPolicy, SqliteStorage,
-    TurnState,
-    store::{
-        ScheduleStore, SessionStore, SpaceStore, Storage, ThreadStore, TurnStore,
-    },
+    NewSchedule, NewScheduleRun, NewSession, NewThread, NewTurn, ScheduleCreator, ScheduleKind,
+    ScheduleRunState, ScheduleRunTrigger, ScheduleRunUpdate, ScheduleStatus, SessionPolicy,
+    SqliteStorage, TurnState,
+    store::{ScheduleStore, SessionStore, SpaceStore, Storage, ThreadStore, TurnStore},
 };
 
 struct MockProvider;
@@ -390,7 +388,6 @@ async fn operator_runs_survive_restart_with_durable_history() {
     assert_eq!(runs[&completed_run.id].0, "schedule_run");
     assert_eq!(runs[&completed_run.id].1, "completed");
     assert!(runs[&completed_run.id].2["completed_at"].is_string());
-
 }
 
 #[tokio::test(flavor = "multi_thread")]

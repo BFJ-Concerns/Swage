@@ -75,10 +75,7 @@ impl ObservationStore for SqliteStorage {
                         "SELECT {OBSERVATION_COLUMNS} FROM source_observations
                          WHERE space_id = ?1 AND body_sha256 = ?2"
                     ),
-                    params![
-                        observation.space_id.to_string(),
-                        &observation.body_sha256
-                    ],
+                    params![observation.space_id.to_string(), &observation.body_sha256],
                     row_to_observation,
                 )
                 .optional()?
@@ -120,10 +117,7 @@ impl ObservationStore for SqliteStorage {
         .await
     }
 
-    async fn get_observation(
-        &self,
-        id: Uuid,
-    ) -> Result<Option<SourceObservation>, StorageError> {
+    async fn get_observation(&self, id: Uuid) -> Result<Option<SourceObservation>, StorageError> {
         self.with_conn(move |conn| {
             conn.query_row(
                 &format!("SELECT {OBSERVATION_COLUMNS} FROM source_observations WHERE id = ?1"),
@@ -358,7 +352,11 @@ mod tests {
             .unwrap();
         // Same bytes fetched again — different URL, same body hash.
         let second = storage
-            .record_observation(new_observation(space_id, "https://mirror.example/a", "aa11"))
+            .record_observation(new_observation(
+                space_id,
+                "https://mirror.example/a",
+                "aa11",
+            ))
             .await
             .unwrap();
 
@@ -379,10 +377,7 @@ mod tests {
         };
 
         let result = storage.record_observation(observation).await;
-        assert!(matches!(
-            result,
-            Err(StorageError::ConstraintViolation(_))
-        ));
+        assert!(matches!(result, Err(StorageError::ConstraintViolation(_))));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -429,7 +424,11 @@ mod tests {
     async fn search_finds_newest_derivation_and_locates_snippet() {
         let (storage, space_id) = storage_with_space().await;
         let observation = storage
-            .record_observation(new_observation(space_id, "https://example.org/iron", "cc33"))
+            .record_observation(new_observation(
+                space_id,
+                "https://example.org/iron",
+                "cc33",
+            ))
             .await
             .unwrap();
 

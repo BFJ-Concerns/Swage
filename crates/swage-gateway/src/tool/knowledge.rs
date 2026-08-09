@@ -337,9 +337,7 @@ mod tests {
         let tool = KnowledgeRecordTool;
         let ctx = swage_tool::context::MockToolContext::new("agent", "not-a-session");
 
-        let result = tool
-            .execute(json!({"content": "captured"}), &ctx)
-            .await;
+        let result = tool.execute(json!({"content": "captured"}), &ctx).await;
 
         let Err(ToolError::InvalidParameters { message, .. }) = result else {
             panic!("origin-less record should be invalid, got: {result:?}");
@@ -353,10 +351,7 @@ mod tests {
         let ctx = swage_tool::context::MockToolContext::new("agent", "not-a-session");
 
         let result = tool.execute(json!({"query": "  "}), &ctx).await;
-        assert!(matches!(
-            result,
-            Err(ToolError::InvalidParameters { .. })
-        ));
+        assert!(matches!(result, Err(ToolError::InvalidParameters { .. })));
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -5,22 +5,19 @@ use swage_core::StorageError;
 
 use crate::model::{
     ActiveSkillRecord, AgentDefinition, AgentMemoryRecord, AgentMessage, AppendMessage,
-    ApprovalRequest,
-    ApprovalState, Attachment, AttachmentStatus, AuditEvent, BackgroundJob, ChannelInboundMessage,
-    ChannelLink, ConfigurationVersion, ContextSnapshotRecord, DeliveryRecord, DeviceRegistration,
-    ExtractionDerivation, InboundAudit, KnowledgeSearchHit, Material, Message,
-    NewAgentDefinition, NewAgentMemoryRecord, NewAgentMessage, NewApprovalRequest, NewAttachment,
-    NewAuditEvent,
-    NewBackgroundJob, NewChannelInboundMessage, NewChannelLink, NewConfigurationVersion,
-    NewDeliveryRecord, NewDeviceRegistration, NewMaterial,
-    NewMessage, NewSchedule, NewScheduleRun, NewSecretRecord,
-    NewSession, NewSourceObservation, NewSpace, NewThread, NewToolCall,
-    NewTurn, NewWorkflowJournalIntent, NewWorkflowRun, NewWorkflowScript, NewWorkspaceAttachment,
-    PendingChannelOrigin, Schedule, ScheduleRun, ScheduleRunUpdate, SecretRecord, Session,
-    SourceObservation, Space,
-    SpaceSlug, Thread, ThreadBranch, ThreadState, ToolCallRecord, Turn, TurnState, UpdateSchedule,
-    WorkflowJournalRecord, WorkflowRunRecord,
-    WorkflowScriptRecord, WorkflowScriptVersion, WorkspaceAttachment,
+    ApprovalRequest, ApprovalState, Attachment, AttachmentStatus, AuditEvent, BackgroundJob,
+    ChannelInboundMessage, ChannelLink, ConfigurationVersion, ContextSnapshotRecord,
+    DeliveryRecord, DeviceRegistration, ExtractionDerivation, InboundAudit, KnowledgeSearchHit,
+    Material, Message, NewAgentDefinition, NewAgentMemoryRecord, NewAgentMessage,
+    NewApprovalRequest, NewAttachment, NewAuditEvent, NewBackgroundJob, NewChannelInboundMessage,
+    NewChannelLink, NewConfigurationVersion, NewDeliveryRecord, NewDeviceRegistration, NewMaterial,
+    NewMessage, NewSchedule, NewScheduleRun, NewSecretRecord, NewSession, NewSourceObservation,
+    NewSpace, NewThread, NewToolCall, NewTurn, NewWorkflowJournalIntent, NewWorkflowRun,
+    NewWorkflowScript, NewWorkspaceAttachment, PendingChannelOrigin, Schedule, ScheduleRun,
+    ScheduleRunUpdate, SecretRecord, Session, SourceObservation, Space, SpaceSlug, Thread,
+    ThreadBranch, ThreadState, ToolCallRecord, Turn, TurnState, UpdateSchedule,
+    WorkflowJournalRecord, WorkflowRunRecord, WorkflowScriptRecord, WorkflowScriptVersion,
+    WorkspaceAttachment,
 };
 
 // ---------------------------------------------------------------------------
@@ -242,10 +239,7 @@ pub trait ObservationStore: Send + Sync {
         observation: NewSourceObservation,
     ) -> Result<SourceObservation, StorageError>;
 
-    async fn get_observation(
-        &self,
-        id: Uuid,
-    ) -> Result<Option<SourceObservation>, StorageError>;
+    async fn get_observation(&self, id: Uuid) -> Result<Option<SourceObservation>, StorageError>;
 
     async fn list_observations_by_space(
         &self,

@@ -66,10 +66,7 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
             "036_workspace_attachment_activation",
             ADD_WORKSPACE_ATTACHMENT_ACTIVATION,
         ),
-        (
-            "038_constrain_message_enums",
-            CONSTRAIN_MESSAGE_ENUMS,
-        ),
+        ("038_constrain_message_enums", CONSTRAIN_MESSAGE_ENUMS),
         ("040_session_selected_model", ADD_SESSION_SELECTED_MODEL),
         ("041_tool_call_model_replay", ADD_TOOL_CALL_MODEL_REPLAY),
         ("042_tool_call_provider_round", ADD_TOOL_CALL_PROVIDER_ROUND),
@@ -2155,5 +2152,4 @@ mod tests {
             .expect("approval_memory table should exist after migration");
         assert_eq!(count, 0);
     }
-
 }
