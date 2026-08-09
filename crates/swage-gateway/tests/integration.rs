@@ -7,10 +7,6 @@ mod agent_task_authoring_integration;
 mod attachment_ingestion_integration;
 #[path = "integration/browser_journey_integration.rs"]
 mod browser_journey_integration;
-#[path = "integration/builder_authoring_integration.rs"]
-mod builder_authoring_integration;
-#[path = "integration/builder_runtime_integration.rs"]
-mod builder_runtime_integration;
 #[path = "integration/cli_run_integration.rs"]
 mod cli_run_integration;
 #[path = "integration/credential_governance_integration.rs"]
@@ -52,8 +48,6 @@ mod schedule_integration;
 
 #[path = "integration/schedule_tools_integration.rs"]
 mod schedule_tools_integration;
-#[path = "integration/shared_reference_integration.rs"]
-mod shared_reference_integration;
 #[path = "integration/skills_endpoint_integration.rs"]
 mod skills_endpoint_integration;
 #[path = "integration/skills_integration.rs"]
