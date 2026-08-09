@@ -11,6 +11,7 @@ pub mod file_list;
 pub mod file_read;
 pub mod file_search;
 pub mod file_write;
+pub mod knowledge;
 pub mod memory;
 pub mod nested_tool_runtime;
 pub mod plugin;

@@ -616,7 +616,8 @@ pub(crate) fn build_tool_dispatcher_with_browser(
     use crate::tool::{
         Tool, agent_memory::AgentMemoryTool, browser::browser_tools, file_edit::FileEditTool,
         file_list::FileListTool, file_read::FileReadTool, file_search::FileSearchTool,
-        file_write::FileWriteTool, memory::MemoryTool, plugin::discover_plugin_tools,
+        file_write::FileWriteTool, knowledge::KnowledgeRecordTool, knowledge::KnowledgeSearchTool,
+        memory::MemoryTool, plugin::discover_plugin_tools,
         python_execute::PythonExecuteTool, schedule::ScheduleTool, schedule::WakeMeLaterTool,
         shell::ShellTool, tool_result_read::ToolResultReadTool, url_fetch::UrlFetchTool,
         web_search::WebSearchTool,
@@ -656,6 +657,11 @@ pub(crate) fn build_tool_dispatcher_with_browser(
         // tool context; both are host-only (requires_device_execution).
         Arc::new(ScheduleTool),
         Arc::new(WakeMeLaterTool),
+        // Knowledge-base tools: the space's gathered external evidence.
+        // Host-only; separately grantable via the knowledge-read and
+        // knowledge-write bundles.
+        Arc::new(KnowledgeSearchTool),
+        Arc::new(KnowledgeRecordTool),
     ];
 
     let base_tools = if let Some(browser_host) = browser_host {
