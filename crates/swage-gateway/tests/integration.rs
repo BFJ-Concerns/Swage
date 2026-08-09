@@ -27,8 +27,6 @@ mod gateway_observability_integration;
 mod integration;
 #[path = "integration/inter_agent_messaging_integration.rs"]
 mod inter_agent_messaging_integration;
-#[path = "integration/lens_catalog_integration.rs"]
-mod lens_catalog_integration;
 #[path = "integration/material_management_integration.rs"]
 mod material_management_integration;
 #[path = "integration/onboarding_recovery_integration.rs"]

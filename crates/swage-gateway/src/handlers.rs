@@ -15,7 +15,6 @@ use uuid::Uuid;
 use swage_agent::approval::ApprovalDecisionValue;
 use swage_core::GatewayError;
 use swage_protocol::client::{channel as channel_wire, schedule as schedule_wire};
-use swage_storage::SharedReferenceKind;
 
 use crate::{
     attachment::{
@@ -46,10 +45,6 @@ use crate::{
     },
     device::{DeviceListResponse, DeviceResponse, RegisterDeviceRequest},
     error::ApiError,
-    lens::{
-        CreateLensRequest, InstallLensRequest, LensDescriptor, LensListResponse,
-        LensRuntimeResponse, UpdateLensRequest, UpdateLensRuntimeRequest,
-    },
     material::{
         CreateMaterialRequest, MaterialListResponse, MaterialResponse, PromoteMaterialRequest,
     },
@@ -316,78 +311,6 @@ pub async fn operator_usage(
     Query(query): Query<OperatorUsageQuery>,
 ) -> Result<Json<OperatorUsageResponse>, ApiError> {
     Ok(Json(crate::audit::operator_usage(&state, query).await?))
-}
-
-/// `GET /api/spaces/:id/lens-runtime` — inspect the active lens for a space.
-pub async fn get_lens_runtime(
-    State(state): State<AppState>,
-    Path(space_id): Path<Uuid>,
-) -> Result<Json<LensRuntimeResponse>, ApiError> {
-    Ok(Json(crate::lens::get_lens_runtime(&state, space_id).await?))
-}
-
-/// `GET /api/lenses` — list durable lens records.
-pub async fn list_lenses(
-    State(state): State<AppState>,
-) -> Result<Json<LensListResponse>, ApiError> {
-    Ok(Json(crate::lens::list_lenses(&state).await?))
-}
-
-/// `POST /api/lenses` — create an authored lens.
-pub async fn create_lens(
-    State(state): State<AppState>,
-    Json(request): Json<CreateLensRequest>,
-) -> Result<(StatusCode, Json<LensDescriptor>), ApiError> {
-    let service = BuilderConfigurationService::new(state.clone());
-    Ok((
-        StatusCode::CREATED,
-        Json(
-            service
-                .create_lens(request, None, None, "visual_builder")
-                .await?,
-        ),
-    ))
-}
-
-/// `PUT /api/lenses/:id` — update an authored or installed lens.
-pub async fn update_lens(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-    Json(request): Json<UpdateLensRequest>,
-) -> Result<Json<LensDescriptor>, ApiError> {
-    let service = BuilderConfigurationService::new(state.clone());
-    Ok(Json(
-        service
-            .update_lens(&id, request, None, None, "visual_builder")
-            .await?,
-    ))
-}
-
-/// `POST /api/lenses/install` — install a premade lens into durable storage.
-pub async fn install_lens(
-    State(state): State<AppState>,
-    Json(request): Json<InstallLensRequest>,
-) -> Result<(StatusCode, Json<LensDescriptor>), ApiError> {
-    let service = BuilderConfigurationService::new(state.clone());
-    Ok((
-        StatusCode::CREATED,
-        Json(
-            service
-                .install_lens_preset(request, None, None, "visual_builder")
-                .await?,
-        ),
-    ))
-}
-
-/// `PUT /api/spaces/:id/lens-runtime` — persist the active lens for a space.
-pub async fn update_lens_runtime(
-    State(state): State<AppState>,
-    Path(space_id): Path<Uuid>,
-    Json(request): Json<UpdateLensRuntimeRequest>,
-) -> Result<Json<LensRuntimeResponse>, ApiError> {
-    Ok(Json(
-        crate::lens::update_lens_runtime(&state, space_id, request).await?,
-    ))
 }
 
 /// `GET /api/shared-objects` — list shared reference objects for a space.

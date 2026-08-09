@@ -244,54 +244,6 @@ export type MessageView = Omit<WireMessageView, "role" | "tool_calls" | "thread_
 // Lens runtime types
 // -------------------------------------------------------------------------
 
-export type AppLens = string;
-export type LensSurface = "conversation" | "operator" | "builder";
-export type BuilderMode = "team" | "agent" | "context" | "lens" | "skill" | "tool";
-export type LensSourceKind = "built_in" | "authored" | "installed";
-
-export interface LensDescriptor {
-  id: AppLens;
-  title: string;
-  summary: string;
-  default_surface: LensSurface;
-  ui_modules: LensSurface[];
-  prominent_team_ids: string[];
-  source_kind: LensSourceKind;
-}
-
-export interface LensRuntimeResponse {
-  space_id: string;
-  active_lens: AppLens;
-  updated_at: string;
-  available_lenses: LensDescriptor[];
-  stage_modules: LensStageModulePlacement[];
-}
-
-export type LensStageModuleKind = "shared_reference" | "active_team_topology";
-
-export interface LensStageModulePlacement {
-  id: string;
-  kind: LensStageModuleKind;
-  title: string;
-  team_ids: string[];
-}
-
-export interface CreateLensRequest {
-  id: string;
-  title: string;
-  summary: string;
-  default_surface: LensSurface;
-  ui_modules: LensSurface[];
-  prominent_team_ids: string[];
-}
-
-export interface UpdateLensRequest {
-  title: string;
-  summary: string;
-  default_surface: LensSurface;
-  ui_modules: LensSurface[];
-  prominent_team_ids: string[];
-}
 
 // -------------------------------------------------------------------------
 // Builder authoring types

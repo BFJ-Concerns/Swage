@@ -268,16 +268,6 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/operator/overview", get(handlers::operator_overview))
         .route("/api/operator/search", get(handlers::operator_search))
         .route("/api/operator/usage", get(handlers::operator_usage))
-        .route(
-            "/api/lenses",
-            get(handlers::list_lenses).post(handlers::create_lens),
-        )
-        .route("/api/lenses/install", post(handlers::install_lens))
-        .route("/api/lenses/{id}", put(handlers::update_lens))
-        .route(
-            "/api/spaces/{id}/lens-runtime",
-            get(handlers::get_lens_runtime).put(handlers::update_lens_runtime),
-        )
         .route("/api/shared-objects", get(handlers::list_shared_objects))
         .route(
             "/api/shared-objects/{kind}/{id}",

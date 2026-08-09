@@ -576,42 +576,12 @@ pub(crate) struct InMemoryDb {
     pub(crate) workspace_attachments: HashMap<Uuid, WorkspaceAttachment>,
     pub(crate) secrets: HashMap<Uuid, swage_storage::SecretRecord>,
     pub(crate) managed_secret_values: HashMap<Uuid, String>,
-    pub(crate) active_lenses: HashMap<Uuid, swage_storage::AppLens>,
-    pub(crate) lenses: HashMap<String, swage_storage::LensRecord>,
 }
 
 impl MockStorage {
     pub(crate) fn new() -> Self {
-        let assistant = swage_storage::LensRecord {
-            id: swage_storage::AppLens::assistant(),
-            title: "Assistant lens".to_string(),
-            summary: "Conversation-first view".to_string(),
-            default_surface: "conversation".to_string(),
-            ui_modules: vec!["conversation".to_string(), "operator".to_string()],
-            prominent_team_ids: vec!["default".to_string()],
-            source_kind: swage_storage::LensSourceKind::BuiltIn,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-        };
-        let builder = swage_storage::LensRecord {
-            id: swage_storage::AppLens::builder(),
-            title: "Builder lens".to_string(),
-            summary: "Workspace-first view".to_string(),
-            default_surface: "builder".to_string(),
-            ui_modules: vec!["builder".to_string(), "conversation".to_string()],
-            prominent_team_ids: vec!["workspace-core".to_string()],
-            source_kind: swage_storage::LensSourceKind::BuiltIn,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-        };
         Self {
-            db: Mutex::new(InMemoryDb {
-                lenses: HashMap::from([
-                    (assistant.id.to_string(), assistant),
-                    (builder.id.to_string(), builder),
-                ]),
-                ..Default::default()
-            }),
+            db: Mutex::new(InMemoryDb::default()),
             fail_secret_reads: AtomicBool::new(false),
             fail_audit_writes: AtomicBool::new(false),
         }
@@ -1343,110 +1313,6 @@ impl WorkspaceAttachmentStore for MockStorage {
             .workspace_attachments
             .remove(&id)
             .is_some())
-    }
-}
-
-#[async_trait]
-impl swage_storage::store::LensStore for MockStorage {
-    async fn get_active_lens(
-        &self,
-        space_id: Uuid,
-    ) -> Result<swage_storage::LensPreference, StorageError> {
-        let active_lens = self
-            .db
-            .lock()
-            .await
-            .active_lenses
-            .get(&space_id)
-            .cloned()
-            .unwrap_or_else(swage_storage::AppLens::assistant);
-        Ok(swage_storage::LensPreference {
-            space_id,
-            active_lens,
-            updated_at: chrono::Utc::now(),
-        })
-    }
-
-    async fn set_active_lens(
-        &self,
-        space_id: Uuid,
-        lens: swage_storage::AppLens,
-    ) -> Result<swage_storage::LensPreference, StorageError> {
-        let mut db = self.db.lock().await;
-        if !db.lenses.contains_key(lens.as_str()) {
-            return Err(StorageError::NotFound {
-                entity: "lens".to_string(),
-                id: lens.to_string(),
-            });
-        }
-        db.active_lenses.insert(space_id, lens.clone());
-        Ok(swage_storage::LensPreference {
-            space_id,
-            active_lens: lens,
-            updated_at: chrono::Utc::now(),
-        })
-    }
-
-    async fn list_lenses(&self) -> Result<Vec<swage_storage::LensRecord>, StorageError> {
-        Ok(self.db.lock().await.lenses.values().cloned().collect())
-    }
-
-    async fn get_lens(
-        &self,
-        lens: &swage_storage::AppLens,
-    ) -> Result<Option<swage_storage::LensRecord>, StorageError> {
-        Ok(self.db.lock().await.lenses.get(lens.as_str()).cloned())
-    }
-
-    async fn create_lens(
-        &self,
-        lens: swage_storage::NewLensRecord,
-    ) -> Result<swage_storage::LensRecord, StorageError> {
-        let mut db = self.db.lock().await;
-        if db.lenses.contains_key(lens.id.as_str()) {
-            return Err(StorageError::ConstraintViolation(format!(
-                "lens {} already exists",
-                lens.id
-            )));
-        }
-        let record = swage_storage::LensRecord {
-            id: lens.id.clone(),
-            title: lens.title,
-            summary: lens.summary,
-            default_surface: lens.default_surface,
-            ui_modules: lens.ui_modules,
-            prominent_team_ids: lens.prominent_team_ids,
-            source_kind: lens.source_kind,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-        };
-        db.lenses.insert(record.id.to_string(), record.clone());
-        Ok(record)
-    }
-
-    async fn update_lens(
-        &self,
-        lens_id: &swage_storage::AppLens,
-        title: String,
-        summary: String,
-        default_surface: String,
-        ui_modules: Vec<String>,
-        prominent_team_ids: Vec<String>,
-    ) -> Result<swage_storage::LensRecord, StorageError> {
-        let mut db = self.db.lock().await;
-        let Some(existing) = db.lenses.get_mut(lens_id.as_str()) else {
-            return Err(StorageError::NotFound {
-                entity: "lens".to_string(),
-                id: lens_id.to_string(),
-            });
-        };
-        existing.title = title;
-        existing.summary = summary;
-        existing.default_surface = default_surface;
-        existing.ui_modules = ui_modules;
-        existing.prominent_team_ids = prominent_team_ids;
-        existing.updated_at = chrono::Utc::now();
-        Ok(existing.clone())
     }
 }
 

@@ -4,13 +4,13 @@ use uuid::Uuid;
 use swage_core::StorageError;
 
 use crate::model::{
-    ActiveSkillRecord, AgentMemoryRecord, AgentMessage, AppLens, AppendMessage, ApprovalRequest,
+    ActiveSkillRecord, AgentMemoryRecord, AgentMessage, AppendMessage, ApprovalRequest,
     ApprovalState, Attachment, AttachmentStatus, AuditEvent, BackgroundJob, ChannelInboundMessage,
     ChannelLink, ConfigurationVersion, ContextSnapshotRecord, DeliveryRecord, DeviceRegistration,
-    EdgeEvaluation, InboundAudit, LensPreference, LensRecord, Material, Message,
+    EdgeEvaluation, InboundAudit, Material, Message,
     NewAgentMemoryRecord, NewAgentMessage, NewApprovalRequest, NewAttachment, NewAuditEvent,
     NewBackgroundJob, NewChannelInboundMessage, NewChannelLink, NewConfigurationVersion,
-    NewDeliveryRecord, NewDeviceRegistration, NewEdgeEvaluation, NewLensRecord, NewMaterial,
+    NewDeliveryRecord, NewDeviceRegistration, NewEdgeEvaluation, NewMaterial,
     NewMessage, NewNodeExecution, NewNodeRetry, NewSchedule, NewScheduleRun, NewSecretRecord,
     NewSession, NewSharedReferenceEvent, NewSpace, NewTeam, NewThread, NewToolCall, NewTopologyRun,
     NewTurn, NewWorkflowJournalIntent, NewWorkflowRun, NewWorkflowScript, NewWorkspaceAttachment,
@@ -121,28 +121,6 @@ pub trait SessionStore: Send + Sync {
         account: &str,
         conversation: &str,
     ) -> Result<Option<Session>, StorageError>;
-}
-
-#[async_trait]
-pub trait LensStore: Send + Sync {
-    async fn get_active_lens(&self, space_id: Uuid) -> Result<LensPreference, StorageError>;
-    async fn set_active_lens(
-        &self,
-        space_id: Uuid,
-        lens: AppLens,
-    ) -> Result<LensPreference, StorageError>;
-    async fn list_lenses(&self) -> Result<Vec<LensRecord>, StorageError>;
-    async fn get_lens(&self, lens: &AppLens) -> Result<Option<LensRecord>, StorageError>;
-    async fn create_lens(&self, lens: NewLensRecord) -> Result<LensRecord, StorageError>;
-    async fn update_lens(
-        &self,
-        lens_id: &AppLens,
-        title: String,
-        summary: String,
-        default_surface: String,
-        ui_modules: Vec<String>,
-        prominent_team_ids: Vec<String>,
-    ) -> Result<LensRecord, StorageError>;
 }
 
 #[async_trait]
