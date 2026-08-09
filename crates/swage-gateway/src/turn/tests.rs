@@ -22,13 +22,11 @@ use swage_storage::{
     model::{
         ActiveSkillRecord, AgentMessage, AppendMessage, ApprovalRequest, ApprovalState, Attachment,
         AttachmentScopeKind, AttachmentStatus, BackgroundJob, ChannelLink, DeviceRegistration,
-        Material, MaterialStatus, Message, NewAgentMessage, NewApprovalRequest,
-        NewAttachment, NewBackgroundJob, NewChannelLink, NewDeviceRegistration,
-        NewMaterial, NewMessage, NewSchedule, NewScheduleRun,
-        NewSession, NewSpace, NewThread, NewToolCall, NewTurn,
-        NewWorkspaceAttachment, Schedule,
-        ScheduleRun, ScheduleRunState, ScheduleRunUpdate, ScheduleStatus, Session, Space,
-        SpaceSlug, Thread, ThreadState, ToolCallRecord, Turn,
+        Material, MaterialStatus, Message, NewAgentMessage, NewApprovalRequest, NewAttachment,
+        NewBackgroundJob, NewChannelLink, NewDeviceRegistration, NewMaterial, NewMessage,
+        NewSchedule, NewScheduleRun, NewSession, NewSpace, NewThread, NewToolCall, NewTurn,
+        NewWorkspaceAttachment, Schedule, ScheduleRun, ScheduleRunState, ScheduleRunUpdate,
+        ScheduleStatus, Session, Space, SpaceSlug, Thread, ThreadState, ToolCallRecord, Turn,
         TurnState, UpdateSchedule, WorkspaceAttachment,
     },
     store::{
@@ -1981,7 +1979,6 @@ impl ThreadStore for MockStorage {
             .cloned())
     }
 }
-
 
 #[async_trait]
 impl TurnStore for MockStorage {

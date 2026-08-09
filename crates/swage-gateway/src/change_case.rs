@@ -82,9 +82,7 @@ impl ChangeOperation {
             Self::UpsertAgentDefinition { definition } => {
                 (definition.id.as_str(), definition.space_id)
             }
-            Self::DeleteAgentDefinition { agent_id, space_id } => {
-                (agent_id.as_str(), *space_id)
-            }
+            Self::DeleteAgentDefinition { agent_id, space_id } => (agent_id.as_str(), *space_id),
         };
         scoped_entity_id(id, space_id)
     }
@@ -222,7 +220,11 @@ pub async fn apply_change(
             let scope = definition
                 .space_id
                 .map_or_else(|| "globally".to_string(), |id| format!("in space {id}"));
-            let action = if before.is_some() { "updated" } else { "created" };
+            let action = if before.is_some() {
+                "updated"
+            } else {
+                "created"
+            };
             state
                 .storage
                 .upsert_agent_definition(definition.clone())
@@ -390,10 +392,7 @@ async fn snapshot_agent_definition(
         .map(|definition| serde_json::to_value(definition).unwrap_or(serde_json::Value::Null)))
 }
 
-async fn record_case(
-    state: &AppState,
-    case: RecordCase<'_>,
-) -> Result<AppliedCase, GatewayError> {
+async fn record_case(state: &AppState, case: RecordCase<'_>) -> Result<AppliedCase, GatewayError> {
     let previous = state
         .storage
         .get_latest_configuration_version(case.entity_kind, case.entity_id)
@@ -477,10 +476,7 @@ fn derive_diff(
         let from = before_map.get(key).cloned().unwrap_or(Value::Null);
         let to = after_map.get(key).cloned().unwrap_or(Value::Null);
         if from != to {
-            diff.insert(
-                key.clone(),
-                serde_json::json!({ "from": from, "to": to }),
-            );
+            diff.insert(key.clone(), serde_json::json!({ "from": from, "to": to }));
         }
     }
     Value::Object(diff)
@@ -569,7 +565,10 @@ mod tests {
         assert_eq!(diff["instructions"]["from"], "old");
         assert_eq!(diff["instructions"]["to"], "new");
         assert!(diff.get("id").is_none(), "unchanged fields stay out");
-        assert!(diff.get("updated_at").is_none(), "timestamps carry no intent");
+        assert!(
+            diff.get("updated_at").is_none(),
+            "timestamps carry no intent"
+        );
     }
 
     #[test]

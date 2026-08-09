@@ -617,10 +617,9 @@ pub(crate) fn build_tool_dispatcher_with_browser(
         Tool, agent_memory::AgentMemoryTool, browser::browser_tools, file_edit::FileEditTool,
         file_list::FileListTool, file_read::FileReadTool, file_search::FileSearchTool,
         file_write::FileWriteTool, knowledge::KnowledgeRecordTool, knowledge::KnowledgeSearchTool,
-        memory::MemoryTool, plugin::discover_plugin_tools,
-        python_execute::PythonExecuteTool, schedule::ScheduleTool, schedule::WakeMeLaterTool,
-        shell::ShellTool, tool_result_read::ToolResultReadTool, url_fetch::UrlFetchTool,
-        web_search::WebSearchTool,
+        memory::MemoryTool, plugin::discover_plugin_tools, python_execute::PythonExecuteTool,
+        schedule::ScheduleTool, schedule::WakeMeLaterTool, shell::ShellTool,
+        tool_result_read::ToolResultReadTool, url_fetch::UrlFetchTool, web_search::WebSearchTool,
     };
     use std::time::Duration;
 

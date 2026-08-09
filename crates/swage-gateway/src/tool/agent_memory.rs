@@ -408,9 +408,7 @@ mod tests {
     use swage_storage::{
         NewAgentMemoryRecord, NewAuditEvent, NewSession, NewThread, NewTurn, SqliteStorage,
         TurnState,
-        store::{
-            AgentMemoryStore, AuditStore, SessionStore, SpaceStore, ThreadStore, TurnStore,
-        },
+        store::{AgentMemoryStore, AuditStore, SessionStore, SpaceStore, ThreadStore, TurnStore},
     };
     use swage_tool::context::MockToolContext;
 
@@ -497,7 +495,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(recalled["memories"].as_array().unwrap().len(), 1);
-        assert_eq!(recalled["memories"][0]["source_summary"], "conversation turn");
+        assert_eq!(
+            recalled["memories"][0]["source_summary"],
+            "conversation turn"
+        );
 
         let persisted = storage
             .list_agent_memories(space.id, Some("agent-a"), None, None, 10)

@@ -31,7 +31,10 @@ pub fn resolve_root() -> Result<PathBuf, ConfigProblem> {
             file_path: root.clone(),
             field_path: None,
             kind: ConfigProblemKind::DiscoveryError {
-                message: format!("failed to create Swage root directory '{}': {error}", root.display()),
+                message: format!(
+                    "failed to create Swage root directory '{}': {error}",
+                    root.display()
+                ),
             },
         });
     }
@@ -40,7 +43,10 @@ pub fn resolve_root() -> Result<PathBuf, ConfigProblem> {
             file_path: root.clone(),
             field_path: None,
             kind: ConfigProblemKind::DiscoveryError {
-                message: format!("Swage root path '{}' exists but is not a directory", root.display()),
+                message: format!(
+                    "Swage root path '{}' exists but is not a directory",
+                    root.display()
+                ),
             },
         });
     }

@@ -686,16 +686,10 @@ pub(crate) async fn process_turn_with_existing_turn(
     let (workspace_root, mut allowed_paths) =
         agent_workspace_from_policy(&workspace_policy, space_id, session.id);
 
-    let environment = build_session_environment(
-        &space,
-        Some(workspace_root.display().to_string()),
-        &session,
-    );
-    let available_skills = available_skills_for_agent(
-        &space_slug,
-        &session.agent_id,
-        swage_root_opt.as_deref(),
-    );
+    let environment =
+        build_session_environment(&space, Some(workspace_root.display().to_string()), &session);
+    let available_skills =
+        available_skills_for_agent(&space_slug, &session.agent_id, swage_root_opt.as_deref());
 
     let elements = build_assembly_elements(
         &config.instructions,

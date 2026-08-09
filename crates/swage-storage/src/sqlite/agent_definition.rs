@@ -88,10 +88,7 @@ impl AgentDefinitionStore for SqliteStorage {
                 .query_row(
                     "SELECT created_at FROM agent_definitions
                      WHERE id = ?1 AND space_id IS ?2",
-                    params![
-                        definition.id,
-                        definition.space_id.map(|id| id.to_string())
-                    ],
+                    params![definition.id, definition.space_id.map(|id| id.to_string())],
                     |row| row.get(0),
                 )
                 .optional()?;
@@ -141,10 +138,7 @@ impl AgentDefinitionStore for SqliteStorage {
                     "SELECT {DEFINITION_COLUMNS} FROM agent_definitions
                      WHERE id = ?1 AND space_id IS ?2"
                 ),
-                params![
-                    definition.id,
-                    definition.space_id.map(|id| id.to_string())
-                ],
+                params![definition.id, definition.space_id.map(|id| id.to_string())],
                 row_to_definition,
             )
         })
@@ -268,11 +262,7 @@ mod tests {
             .await
             .unwrap();
         storage
-            .upsert_agent_definition(definition(
-                "assistant",
-                Some(space.id),
-                "space character",
-            ))
+            .upsert_agent_definition(definition("assistant", Some(space.id), "space character"))
             .await
             .unwrap();
 

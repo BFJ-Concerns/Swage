@@ -412,7 +412,10 @@ mod tests {
         assert_eq!(added.len(), 2);
         assert_eq!(added[0].name, "history");
         assert_eq!(added[0].message_count, 2);
-        assert_eq!(added[1].name, "script", "raw messages attribute to the script");
+        assert_eq!(
+            added[1].name, "script",
+            "raw messages attribute to the script"
+        );
         // The prompts element was never added and must not appear.
         assert!(added.iter().all(|block| block.name != "prompts"));
     }
@@ -438,13 +441,11 @@ mod tests {
 
     #[test]
     fn script_composes_from_elements_in_call_order() {
-        let messages = run(
-            r#"
+        let messages = run(r#"
             const byName = Object.fromEntries(elements.map(e => [e.name, e]));
             add(byName.history);
             add(byName.prompts);
-            "#,
-        )
+            "#)
         .unwrap();
 
         // History first, prompts last — exactly the call order, however
@@ -456,11 +457,9 @@ mod tests {
 
     #[test]
     fn script_can_add_raw_messages() {
-        let messages = run(
-            r#"
+        let messages = run(r#"
             add([{ role: "system", text: "composed inline" }]);
-            "#,
-        )
+            "#)
         .unwrap();
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].role(), Role::System);
