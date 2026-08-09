@@ -33,7 +33,7 @@
 //! ```
 
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use rquickjs::{Context, Runtime};
 use swage_config::HierarchyLevel;
@@ -98,7 +98,8 @@ pub fn assemble_named(
         }
     };
 
-    match run_script(&source, elements, tokeniser) {
+    let timeout = Duration::from_secs(config.timeout.max(1));
+    match run_script(&source, elements, tokeniser, timeout) {
         Ok(messages) if messages.is_empty() => fallback(
             name,
             format!("assembly '{name}' produced no messages"),
@@ -150,10 +151,16 @@ fn run_script(
     source: &str,
     elements: &[Box<dyn ContextElement>],
     tokeniser: &dyn Tokeniser,
+    timeout: Duration,
 ) -> Result<Vec<ChatMessage>, String> {
     let runtime = Runtime::new().map_err(|error| error.to_string())?;
     runtime.set_memory_limit(MEMORY_LIMIT_BYTES);
     runtime.set_max_stack_size(STACK_LIMIT_BYTES);
+    // The deadline is the fail-open boundary a runaway script hits: the
+    // interrupt handler fires periodically during evaluation, and past the
+    // deadline the script is aborted so the default assembly can serve.
+    let deadline = Instant::now() + timeout;
+    runtime.set_interrupt_handler(Some(Box::new(move || Instant::now() >= deadline)));
     let context = Context::full(&runtime).map_err(|error| error.to_string())?;
 
     let elements_json = serde_json::to_string(
@@ -311,7 +318,30 @@ mod tests {
     }
 
     fn run(source: &str) -> Result<Vec<ChatMessage>, String> {
-        run_script(source, &test_elements(), &WordTokeniser)
+        run_script(
+            source,
+            &test_elements(),
+            &WordTokeniser,
+            Duration::from_secs(5),
+        )
+    }
+
+    /// The most important error boundary: a runaway script must abort at the
+    /// deadline and reach the fail-open path rather than hanging the turn.
+    #[test]
+    fn runaway_script_is_aborted_at_the_deadline() {
+        let started = Instant::now();
+        let result = run_script(
+            "while (true) {}",
+            &test_elements(),
+            &WordTokeniser,
+            Duration::from_millis(200),
+        );
+        assert!(result.is_err(), "an interrupted script is an error");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the deadline must abort the script promptly"
+        );
     }
 
     #[test]

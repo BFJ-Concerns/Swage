@@ -689,7 +689,7 @@ pub(crate) async fn process_turn_with_existing_turn(
     let environment = build_session_environment(
         &space,
         Some(workspace_root.display().to_string()),
-        session.metadata.as_ref(),
+        &session,
     );
     let available_skills = available_skills_for_agent(
         &space_slug,
@@ -728,14 +728,31 @@ pub(crate) async fn process_turn_with_existing_turn(
         &configured_assembly,
         prepared_turn_id,
     );
-    crate::experimentation::record_selection(
+    // An unrecorded draw must not shape behaviour: on recording failure the
+    // configured default serves instead of the drawn variant, so every
+    // variant that ever ran has a record.
+    let assembly_decision = match crate::experimentation::record_selection(
         state,
         crate::experimentation::LOCATION_CONTEXT_ASSEMBLY,
         &assembly_decision,
         Some(session_id),
         Some(prepared_turn_id),
     )
-    .await;
+    .await
+    {
+        Ok(()) => assembly_decision,
+        Err(error) => {
+            tracing::error!(
+                %error,
+                variant = %assembly_decision.variant,
+                "variant selection could not be recorded; serving the configured default"
+            );
+            crate::experimentation::VariantDecision {
+                variant: configured_assembly.clone(),
+                reason: crate::experimentation::SelectionReason::Disabled,
+            }
+        }
+    };
     let assembly_name = assembly_decision.variant.trim();
     let output = if assembly_name.is_empty() || assembly_name == "default" {
         swage_context::assembly::assemble(&elements, &config.context, &tokeniser)

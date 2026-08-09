@@ -26,13 +26,19 @@
   let errorMessage = $state("");
 
   $effect(() => {
+    // Pin the request to the turn that started it: when the user selects
+    // another turn before this response lands, the stale result is dropped
+    // rather than rendered against the wrong turn.
+    const requestedTurnId = turnId;
     loadState = "loading";
-    fetchTurnContext(turnId)
+    fetchTurnContext(requestedTurnId)
       .then((loaded) => {
+        if (requestedTurnId !== turnId) return;
         report = loaded;
         loadState = loaded === null ? "absent" : "loaded";
       })
       .catch((error: unknown) => {
+        if (requestedTurnId !== turnId) return;
         errorMessage = error instanceof Error ? error.message : String(error);
         loadState = "error";
       });
