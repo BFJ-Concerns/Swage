@@ -548,6 +548,29 @@ pub(crate) async fn process_turn_with_existing_turn(
     // startup config, but present invalid config fails the turn before any
     // user message is written.
     let config = load_session_config(state, &space_slug, &session.agent_id)?;
+
+    // A durable agent definition, when one exists for this agent, gives the
+    // session its character on top of the resolved file config: instructions
+    // append, the model preference fills an unselected default, and the
+    // permission overlay narrows grants. Resolution failure falls open to
+    // the file config — a broken definition must not brick the session.
+    let config = match state
+        .storage
+        .resolve_agent_definition(&session.agent_id, space_id)
+        .await
+    {
+        Ok(Some(definition)) => apply_agent_definition(config, &definition),
+        Ok(None) => config,
+        Err(error) => {
+            tracing::warn!(
+                agent_id = %session.agent_id,
+                %error,
+                "failed to resolve the agent definition; using file config alone"
+            );
+            config
+        }
+    };
+
     ensure_selected_model_available(
         state,
         &config,

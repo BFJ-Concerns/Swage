@@ -74,6 +74,7 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
         ("041_tool_call_model_replay", ADD_TOOL_CALL_MODEL_REPLAY),
         ("042_tool_call_provider_round", ADD_TOOL_CALL_PROVIDER_ROUND),
         ("043_knowledge_base", CREATE_KNOWLEDGE_BASE_TABLES),
+        ("044_agent_definitions", CREATE_AGENT_DEFINITION_TABLE),
     ]
 }
 
@@ -1091,6 +1092,33 @@ const CREATE_KNOWLEDGE_BASE_TABLES: &str = "
         INSERT INTO extraction_fts (extraction_fts, rowid, extracted_text)
         VALUES ('delete', OLD.rowid, OLD.extracted_text);
     END;
+";
+
+/// Durable agent definitions — the bundle that gives a session its entire
+/// character, selected at session start by agent id.
+///
+/// `id` is the stable agent id sessions already carry; `space_id` NULL means
+/// a global definition, and a space-scoped row with the same id shadows it.
+/// `tool_permissions_json` is a permission overlay that intersects with (and
+/// never expands) the resolved config's grants.
+const CREATE_AGENT_DEFINITION_TABLE: &str = "
+    CREATE TABLE IF NOT EXISTS agent_definitions (
+        id                    TEXT NOT NULL,
+        space_id              TEXT REFERENCES spaces(id) ON DELETE CASCADE,
+        display_name          TEXT NOT NULL,
+        description           TEXT NOT NULL DEFAULT '',
+        instructions          TEXT NOT NULL DEFAULT '',
+        model_id              TEXT,
+        tool_permissions_json TEXT,
+        created_at            TEXT NOT NULL,
+        updated_at            TEXT NOT NULL,
+        PRIMARY KEY (id, space_id)
+    );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_definitions_global
+        ON agent_definitions(id) WHERE space_id IS NULL;
+    CREATE INDEX IF NOT EXISTS idx_agent_definitions_space
+        ON agent_definitions(space_id);
 ";
 
 /// Apply all pending migrations to `conn`.

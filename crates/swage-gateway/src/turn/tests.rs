@@ -2817,6 +2817,40 @@ impl swage_storage::store::ConfigurationVersionStore for MockStorage {
 }
 
 #[async_trait]
+impl swage_storage::store::AgentDefinitionStore for MockStorage {
+    async fn upsert_agent_definition(
+        &self,
+        _: swage_storage::NewAgentDefinition,
+    ) -> Result<swage_storage::AgentDefinition, StorageError> {
+        unimplemented!("turn tests do not author agent definitions")
+    }
+
+    async fn resolve_agent_definition(
+        &self,
+        _: &str,
+        _: uuid::Uuid,
+    ) -> Result<Option<swage_storage::AgentDefinition>, StorageError> {
+        // Sessions without definitions are the ordinary mock case.
+        Ok(None)
+    }
+
+    async fn list_agent_definitions(
+        &self,
+        _: Option<uuid::Uuid>,
+    ) -> Result<Vec<swage_storage::AgentDefinition>, StorageError> {
+        Ok(vec![])
+    }
+
+    async fn delete_agent_definition(
+        &self,
+        _: &str,
+        _: Option<uuid::Uuid>,
+    ) -> Result<bool, StorageError> {
+        unimplemented!("turn tests do not author agent definitions")
+    }
+}
+
+#[async_trait]
 impl swage_storage::store::ObservationStore for MockStorage {
     async fn record_observation(
         &self,
