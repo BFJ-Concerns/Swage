@@ -7160,6 +7160,18 @@ fn permission_config_does_not_duplicate_already_denied_tools() {
     assert_eq!(file_write_count, 1, "file_write should appear once in deny");
 }
 
+/// Test-shaped orientation inputs: a bare environment for a non-channel
+/// session in an unnamed space.
+fn test_environment() -> swage_context::orientation::SessionEnvironment {
+    swage_context::orientation::SessionEnvironment {
+        space_name: String::new(),
+        space_description: String::new(),
+        working_directory: None,
+        started_at: chrono::Utc::now(),
+        channel: None,
+    }
+}
+
 /// The build_assembly_elements helper constructs the correct elements for
 /// the turn's context assembly. This function is tested directly to verify
 /// the wiring before it's used in process_turn.
@@ -7177,10 +7189,18 @@ fn build_assembly_elements_creates_prompts_skills_memory_and_history() {
         history,
         String::new(),
         "My Space".to_string(),
+        test_environment(),
+        vec![],
     );
 
-    // Should produce four elements: prompts, skills (empty), memory, and history.
-    assert_eq!(elements.len(), 4);
+    // Should produce five elements: orientation, prompts, skills (empty),
+    // memory, and history.
+    assert_eq!(elements.len(), 5);
+    let names: Vec<&str> = elements.iter().map(|e| e.name()).collect();
+    assert!(
+        names.contains(&"orientation"),
+        "should include the orientation baseline"
+    );
 
     let names: Vec<&str> = elements.iter().map(|e| e.name()).collect();
     assert!(names.contains(&"prompts"), "should include prompts element");
@@ -7200,10 +7220,15 @@ fn build_assembly_elements_with_empty_instructions() {
         vec![ChatMessage::new(Role::User, "Hello")],
         String::new(),
         "My Space".to_string(),
+        test_environment(),
+        vec![],
     );
 
-    assert_eq!(elements.len(), 4);
-    // PromptsElement with empty rules produces no messages.
+    assert_eq!(elements.len(), 5);
+    // PromptsElement with empty rules produces no messages; the orientation
+    // baseline is what keeps an unconfigured session's context non-empty.
+    let orientation = elements.iter().find(|e| e.name() == "orientation").unwrap();
+    assert!(!orientation.content().is_empty());
     let prompts = elements.iter().find(|e| e.name() == "prompts").unwrap();
     assert!(prompts.content().is_empty());
 }
@@ -7218,6 +7243,8 @@ fn build_assembly_elements_memory_element_contains_provided_content() {
         vec![],
         "Important space context".to_string(),
         "My Space".to_string(),
+        test_environment(),
+        vec![],
     );
 
     let memory = elements.iter().find(|e| e.name() == "memory").unwrap();

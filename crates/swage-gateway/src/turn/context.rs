@@ -2,6 +2,9 @@ use super::{
     ActiveSkill, AppState, ChatMessage, ContextElement, HierarchyLevel, HistoryElement,
     MemoryElement, Path, PathBuf, PromptRule, PromptsElement, SkillManager, SkillsElement, Uuid,
 };
+use swage_context::orientation::{
+    AvailableSkill, ChannelOrientation, OrientationElement, SessionEnvironment,
+};
 
 pub(super) fn delegated_target_instructions(
     target_instructions: &str,
@@ -58,6 +61,8 @@ pub(crate) fn delegated_target_instructions_for_space(
 /// Build the context assembly elements for a turn.
 ///
 /// Constructs typed elements from the resolved turn inputs:
+/// - `OrientationElement` — baseline identity, place, and capability; always
+///   produces content, so an empty configuration still orients the session
 /// - `PromptsElement` — from the merged instruction string
 /// - `SkillsElement`  — from the active skill set
 /// - `MemoryElement`  — from pre-loaded space memory content (may be empty)
@@ -65,7 +70,8 @@ pub(crate) fn delegated_target_instructions_for_space(
 ///
 /// The returned vec is suitable for passing to `swage_context::assembly::assemble()`.
 ///
-/// When instructions are empty the `PromptsElement` produces no messages.
+/// When instructions are empty the `PromptsElement` produces no messages;
+/// the orientation baseline is what keeps the assembled context non-empty.
 /// When `memory_content` is empty the `MemoryElement` produces no messages
 /// but is still present in the vec so custom assemblies can reference it.
 pub(crate) fn build_assembly_elements(
@@ -74,6 +80,8 @@ pub(crate) fn build_assembly_elements(
     history: Vec<ChatMessage>,
     memory_content: String,
     space_name: String,
+    environment: SessionEnvironment,
+    available_skills: Vec<AvailableSkill>,
 ) -> Vec<Box<dyn ContextElement>> {
     // Construct a single PromptRule from the resolved instructions string.
     // The config resolver has already merged hierarchy levels and assembled
@@ -91,11 +99,82 @@ pub(crate) fn build_assembly_elements(
     };
 
     vec![
+        Box::new(OrientationElement::new(environment, available_skills)),
         Box::new(PromptsElement::new(rules)),
         Box::new(SkillsElement::new(active_skills)),
         Box::new(MemoryElement::new(memory_content, space_name)),
         Box::new(HistoryElement::new(history)),
     ]
+}
+
+/// Build the session-environment half of orientation from what the turn
+/// already resolved: the space row, the sandbox workspace root, and the
+/// session's channel origin when it speaks through one.
+pub(crate) fn build_session_environment(
+    space: &swage_storage::Space,
+    working_directory: Option<String>,
+    session_metadata: Option<&serde_json::Value>,
+) -> SessionEnvironment {
+    // A channel session's origin was stamped at session creation; surface the
+    // integration by name so the model knows whose voice it uses. Constraints
+    // are stated per integration — Telegram is the only channel today.
+    let channel = session_metadata
+        .and_then(|metadata| metadata.get("channel_origin"))
+        .and_then(|origin| origin.get("integration"))
+        .and_then(|integration| integration.as_str())
+        .map(|integration| {
+            let constraints = if integration.eq_ignore_ascii_case("telegram") {
+                "Replies arrive as phone messages: keep them short, prefer \
+                 plain text, and avoid markdown tables and long code blocks."
+            } else {
+                "Prefer short plain-text replies unless the operator asks \
+                 for more."
+            };
+            ChannelOrientation {
+                channel_name: integration.to_string(),
+                constraints: constraints.to_string(),
+            }
+        });
+
+    SessionEnvironment {
+        space_name: if space.is_default {
+            String::new()
+        } else {
+            space.name.clone()
+        },
+        space_description: space.description.clone(),
+        working_directory,
+        started_at: chrono::Utc::now(),
+        channel,
+    }
+}
+
+/// List the skills a session could activate — the catalogue for the
+/// orientation element, distinct from the active set whose instructions the
+/// skills element carries.
+pub(crate) fn available_skills_for_agent(
+    space_slug: &str,
+    agent_id: &str,
+    swage_root: Option<&Path>,
+) -> Vec<AvailableSkill> {
+    let Some(root) = swage_root else {
+        return vec![];
+    };
+    let space_dir = root.join("spaces").join(space_slug);
+    let agent_dir = space_dir.join("agents").join(agent_id);
+    let agent_dir_opt = if agent_dir.is_dir() {
+        Some(agent_dir.as_path())
+    } else {
+        None
+    };
+    let (available, _warnings) = SkillManager::discover_available(root, &space_dir, agent_dir_opt);
+    available
+        .into_iter()
+        .map(|skill| AvailableSkill {
+            name: skill.name,
+            trigger: skill.description,
+        })
+        .collect()
 }
 
 /// Load space memory content by reading all `.md` files from the space's
