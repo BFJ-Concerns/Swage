@@ -73,6 +73,7 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
         ("040_session_selected_model", ADD_SESSION_SELECTED_MODEL),
         ("041_tool_call_model_replay", ADD_TOOL_CALL_MODEL_REPLAY),
         ("042_tool_call_provider_round", ADD_TOOL_CALL_PROVIDER_ROUND),
+        ("043_knowledge_base", CREATE_KNOWLEDGE_BASE_TABLES),
     ]
 }
 
@@ -1027,6 +1028,69 @@ const CREATE_THREAD_BRANCHES: &str = "
     );
 
     CREATE INDEX IF NOT EXISTS idx_thread_branches_parent_thread_id ON thread_branches(parent_thread_id);
+";
+
+/// The knowledge base: a space's cumulative store of gathered external
+/// evidence. The unit of storage is the source observation — one immutable
+/// capture of a source — with extracted text as separately versioned
+/// derivations so re-extraction never disturbs a version citations pin.
+///
+/// Unlike the rest of the schema, this family is NOT wipe-and-rebuild:
+/// observations are not regenerable (sources change and disappear), so
+/// later migrations here may reshape freely but must preserve raw bodies
+/// and origin metadata. Raw bodies live as content-addressed files under
+/// the space data root; these tables hold metadata and extractions only.
+///
+/// `extraction_fts` is an external-content FTS5 index over extraction
+/// text, kept in sync by triggers so no store method can forget it.
+const CREATE_KNOWLEDGE_BASE_TABLES: &str = "
+    CREATE TABLE IF NOT EXISTS source_observations (
+        id                TEXT NOT NULL PRIMARY KEY,
+        space_id          TEXT NOT NULL REFERENCES spaces(id) ON DELETE CASCADE,
+        origin_url        TEXT,
+        origin_local_path TEXT,
+        retrieved_at      TEXT NOT NULL,
+        body_sha256       TEXT NOT NULL,
+        body_bytes        INTEGER NOT NULL,
+        media_type        TEXT NOT NULL,
+        created_at        TEXT NOT NULL,
+        CHECK (origin_url IS NOT NULL OR origin_local_path IS NOT NULL)
+    );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_source_observations_space_body
+        ON source_observations(space_id, body_sha256);
+    CREATE INDEX IF NOT EXISTS idx_source_observations_space
+        ON source_observations(space_id, retrieved_at DESC);
+
+    CREATE TABLE IF NOT EXISTS extraction_derivations (
+        id             TEXT NOT NULL PRIMARY KEY,
+        observation_id TEXT NOT NULL REFERENCES source_observations(id) ON DELETE CASCADE,
+        version        INTEGER NOT NULL,
+        extracted_text TEXT NOT NULL,
+        extractor      TEXT NOT NULL,
+        created_at     TEXT NOT NULL,
+        UNIQUE (observation_id, version)
+    );
+
+    CREATE VIRTUAL TABLE IF NOT EXISTS extraction_fts USING fts5(
+        extracted_text,
+        content='extraction_derivations',
+        content_rowid='rowid'
+    );
+
+    CREATE TRIGGER IF NOT EXISTS trg_extraction_fts_insert
+    AFTER INSERT ON extraction_derivations
+    BEGIN
+        INSERT INTO extraction_fts (rowid, extracted_text)
+        VALUES (NEW.rowid, NEW.extracted_text);
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS trg_extraction_fts_delete
+    AFTER DELETE ON extraction_derivations
+    BEGIN
+        INSERT INTO extraction_fts (extraction_fts, rowid, extracted_text)
+        VALUES ('delete', OLD.rowid, OLD.extracted_text);
+    END;
 ";
 
 /// Apply all pending migrations to `conn`.

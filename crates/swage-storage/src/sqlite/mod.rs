@@ -12,6 +12,7 @@ pub mod device;
 pub mod material;
 pub mod message;
 pub mod migrations;
+pub mod observation;
 pub mod schedule;
 pub mod secret;
 pub mod session;

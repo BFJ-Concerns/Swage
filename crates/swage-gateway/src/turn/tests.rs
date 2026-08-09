@@ -2817,6 +2817,56 @@ impl swage_storage::store::ConfigurationVersionStore for MockStorage {
 }
 
 #[async_trait]
+impl swage_storage::store::ObservationStore for MockStorage {
+    async fn record_observation(
+        &self,
+        _: swage_storage::NewSourceObservation,
+    ) -> Result<swage_storage::SourceObservation, StorageError> {
+        unimplemented!("turn tests do not exercise the knowledge base")
+    }
+
+    async fn get_observation(
+        &self,
+        _: uuid::Uuid,
+    ) -> Result<Option<swage_storage::SourceObservation>, StorageError> {
+        unimplemented!("turn tests do not exercise the knowledge base")
+    }
+
+    async fn list_observations_by_space(
+        &self,
+        _: uuid::Uuid,
+    ) -> Result<Vec<swage_storage::SourceObservation>, StorageError> {
+        unimplemented!("turn tests do not exercise the knowledge base")
+    }
+
+    async fn add_extraction(
+        &self,
+        _: uuid::Uuid,
+        _: String,
+        _: String,
+    ) -> Result<swage_storage::ExtractionDerivation, StorageError> {
+        unimplemented!("turn tests do not exercise the knowledge base")
+    }
+
+    async fn get_extraction(
+        &self,
+        _: uuid::Uuid,
+        _: u32,
+    ) -> Result<Option<swage_storage::ExtractionDerivation>, StorageError> {
+        unimplemented!("turn tests do not exercise the knowledge base")
+    }
+
+    async fn search_extractions(
+        &self,
+        _: uuid::Uuid,
+        _: &str,
+        _: usize,
+    ) -> Result<Vec<swage_storage::KnowledgeSearchHit>, StorageError> {
+        unimplemented!("turn tests do not exercise the knowledge base")
+    }
+}
+
+#[async_trait]
 impl swage_storage::store::SecretStore for MockStorage {
     async fn create_secret(
         &self,

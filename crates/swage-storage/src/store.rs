@@ -7,14 +7,15 @@ use crate::model::{
     ActiveSkillRecord, AgentMemoryRecord, AgentMessage, AppendMessage, ApprovalRequest,
     ApprovalState, Attachment, AttachmentStatus, AuditEvent, BackgroundJob, ChannelInboundMessage,
     ChannelLink, ConfigurationVersion, ContextSnapshotRecord, DeliveryRecord, DeviceRegistration,
-    InboundAudit, Material, Message,
+    ExtractionDerivation, InboundAudit, KnowledgeSearchHit, Material, Message,
     NewAgentMemoryRecord, NewAgentMessage, NewApprovalRequest, NewAttachment, NewAuditEvent,
     NewBackgroundJob, NewChannelInboundMessage, NewChannelLink, NewConfigurationVersion,
     NewDeliveryRecord, NewDeviceRegistration, NewMaterial,
     NewMessage, NewSchedule, NewScheduleRun, NewSecretRecord,
-    NewSession, NewSpace, NewThread, NewToolCall,
+    NewSession, NewSourceObservation, NewSpace, NewThread, NewToolCall,
     NewTurn, NewWorkflowJournalIntent, NewWorkflowRun, NewWorkflowScript, NewWorkspaceAttachment,
-    PendingChannelOrigin, Schedule, ScheduleRun, ScheduleRunUpdate, SecretRecord, Session, Space,
+    PendingChannelOrigin, Schedule, ScheduleRun, ScheduleRunUpdate, SecretRecord, Session,
+    SourceObservation, Space,
     SpaceSlug, Thread, ThreadBranch, ThreadState, ToolCallRecord, Turn, TurnState, UpdateSchedule,
     WorkflowJournalRecord, WorkflowRunRecord,
     WorkflowScriptRecord, WorkflowScriptVersion, WorkspaceAttachment,
@@ -188,6 +189,58 @@ pub trait AgentMemoryStore: Send + Sync {
         query: Option<&str>,
         limit: usize,
     ) -> Result<Vec<AgentMemoryRecord>, StorageError>;
+}
+
+/// Store for a space's knowledge base: immutable source observations and
+/// their versioned text extractions, searched by full text.
+///
+/// Immutability is this store's contract, not a caller convention: nothing
+/// here updates or deletes an observation or derivation, and extensions
+/// (curation assertions, citations, orientation cards) must keep that shape
+/// — later state is always a new row.
+#[async_trait]
+pub trait ObservationStore: Send + Sync {
+    /// Record a capture. Identical bodies within a space deduplicate: the
+    /// existing observation is returned, so evidence identity never forks.
+    async fn record_observation(
+        &self,
+        observation: NewSourceObservation,
+    ) -> Result<SourceObservation, StorageError>;
+
+    async fn get_observation(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<SourceObservation>, StorageError>;
+
+    async fn list_observations_by_space(
+        &self,
+        space_id: Uuid,
+    ) -> Result<Vec<SourceObservation>, StorageError>;
+
+    /// Add the next extraction version for an observation. The store assigns
+    /// the version; existing derivations are never touched.
+    async fn add_extraction(
+        &self,
+        observation_id: Uuid,
+        extracted_text: String,
+        extractor: String,
+    ) -> Result<ExtractionDerivation, StorageError>;
+
+    async fn get_extraction(
+        &self,
+        observation_id: Uuid,
+        version: u32,
+    ) -> Result<Option<ExtractionDerivation>, StorageError>;
+
+    /// Full-text search across the space's newest derivation per
+    /// observation, best matches first. Each hit carries the derivation
+    /// version and snippet offsets a citation pins to.
+    async fn search_extractions(
+        &self,
+        space_id: Uuid,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<KnowledgeSearchHit>, StorageError>;
 }
 
 #[async_trait]
@@ -892,6 +945,7 @@ pub trait Storage:
     + AuditStore
     + AgentMemoryStore
     + ConfigurationVersionStore
+    + ObservationStore
     + SecretStore
     + ThreadStore
     + TurnStore
@@ -1233,6 +1287,56 @@ mod tests {
             _: &str,
             _: &str,
         ) -> Result<Option<ConfigurationVersion>, StorageError> {
+            unimplemented!()
+        }
+    }
+
+    #[async_trait]
+    impl ObservationStore for StubStorage {
+        async fn record_observation(
+            &self,
+            _: NewSourceObservation,
+        ) -> Result<SourceObservation, StorageError> {
+            unimplemented!()
+        }
+
+        async fn get_observation(
+            &self,
+            _: Uuid,
+        ) -> Result<Option<SourceObservation>, StorageError> {
+            unimplemented!()
+        }
+
+        async fn list_observations_by_space(
+            &self,
+            _: Uuid,
+        ) -> Result<Vec<SourceObservation>, StorageError> {
+            unimplemented!()
+        }
+
+        async fn add_extraction(
+            &self,
+            _: Uuid,
+            _: String,
+            _: String,
+        ) -> Result<ExtractionDerivation, StorageError> {
+            unimplemented!()
+        }
+
+        async fn get_extraction(
+            &self,
+            _: Uuid,
+            _: u32,
+        ) -> Result<Option<ExtractionDerivation>, StorageError> {
+            unimplemented!()
+        }
+
+        async fn search_extractions(
+            &self,
+            _: Uuid,
+            _: &str,
+            _: usize,
+        ) -> Result<Vec<KnowledgeSearchHit>, StorageError> {
             unimplemented!()
         }
     }
