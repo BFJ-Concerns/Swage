@@ -56,6 +56,7 @@ pub mod codex;
 pub mod context;
 pub mod device;
 pub mod error;
+pub mod experimentation;
 pub mod handlers;
 pub mod knowledge;
 pub mod lifecycle;
