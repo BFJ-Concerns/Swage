@@ -713,73 +713,18 @@ pub(crate) async fn process_turn_with_existing_turn(
     // including "experimentation is off" — lands in the audit trail. The
     // report and every model-facing surface stay function-named; the audit
     // record is the only place the variant id appears.
-    let configured_assembly = config.context.assembly.trim().to_owned();
-    let assembly_variants: Vec<&str> = vec![]; // registered by config as they earn their place
-    let assembly_decision = crate::experimentation::select_variant(
-        &config.experimentation,
-        crate::experimentation::LOCATION_CONTEXT_ASSEMBLY,
-        &assembly_variants,
-        &configured_assembly,
-        prepared_turn_id,
-    );
-    // An unrecorded draw must not shape behaviour: on recording failure the
-    // configured default serves instead of the drawn variant, so every
-    // variant that ever ran has a record.
-    let assembly_decision = match crate::experimentation::record_selection(
+    let output = execute_context_assembly(
         state,
-        crate::experimentation::LOCATION_CONTEXT_ASSEMBLY,
-        &assembly_decision,
-        Some(session_id),
-        Some(prepared_turn_id),
+        &config,
+        &elements,
+        &tokeniser,
+        swage_root_opt.as_deref(),
+        &space_slug,
+        &session.agent_id,
+        session_id,
+        prepared_turn_id,
     )
-    .await
-    {
-        Ok(()) => assembly_decision,
-        Err(error) => {
-            tracing::error!(
-                %error,
-                variant = %assembly_decision.variant,
-                "variant selection could not be recorded; serving the configured default"
-            );
-            crate::experimentation::VariantDecision {
-                variant: configured_assembly.clone(),
-                reason: crate::experimentation::SelectionReason::RecordUnavailable,
-            }
-        }
-    };
-    let assembly_name = assembly_decision.variant.trim();
-    let output = if assembly_name.is_empty() || assembly_name == "default" {
-        swage_context::assembly::assemble(&elements, &config.context, &tokeniser)
-    } else {
-        let search_levels: Vec<(swage_config::HierarchyLevel, PathBuf)> = swage_root_opt
-            .as_ref()
-            .map(|root| {
-                let space_dir = root.join("spaces").join(&space_slug);
-                let agent_dir = space_dir.join("agents").join(&session.agent_id);
-                let mut levels = vec![
-                    (swage_config::HierarchyLevel::Global, root.clone()),
-                    (swage_config::HierarchyLevel::Space, space_dir),
-                ];
-                if agent_dir.is_dir() {
-                    levels.push((swage_config::HierarchyLevel::Agent, agent_dir));
-                }
-                levels
-            })
-            .unwrap_or_default();
-        let level_refs: Vec<(swage_config::HierarchyLevel, &Path)> = search_levels
-            .iter()
-            .map(|(level, path)| (level.clone(), path.as_path()))
-            .collect();
-        let source_path =
-            swage_context::js_assembly::resolve_js_assembly(assembly_name, &level_refs);
-        swage_context::js_assembly::assemble_named(
-            assembly_name,
-            source_path.as_deref(),
-            &elements,
-            &config.context,
-            &tokeniser,
-        )
-    };
+    .await;
     let (assembled_messages, assembly_report) = (output.messages, output.report);
 
     tracing::debug!(
@@ -1388,6 +1333,83 @@ pub(crate) async fn process_turn_with_existing_turn(
     }
 
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_context_assembly(
+    state: &AppState,
+    config: &swage_config::ResolvedConfig,
+    elements: &[Box<dyn ContextElement>],
+    tokeniser: &TiktokenTokeniser,
+    swage_root: Option<&Path>,
+    space_slug: &str,
+    agent_id: &str,
+    session_id: Uuid,
+    turn_id: Uuid,
+) -> swage_context::report::AssemblyOutput {
+    let configured_assembly = config.context.assembly.trim().to_owned();
+    let assembly_variants: Vec<&str> = vec![];
+    let decision = crate::experimentation::select_variant(
+        &config.experimentation,
+        crate::experimentation::LOCATION_CONTEXT_ASSEMBLY,
+        &assembly_variants,
+        &configured_assembly,
+        turn_id,
+    );
+    let decision = match crate::experimentation::record_selection(
+        state,
+        crate::experimentation::LOCATION_CONTEXT_ASSEMBLY,
+        &decision,
+        Some(session_id),
+        Some(turn_id),
+    )
+    .await
+    {
+        Ok(()) => decision,
+        Err(error) => {
+            tracing::error!(
+                %error,
+                variant = %decision.variant,
+                "variant selection could not be recorded; serving the configured default"
+            );
+            crate::experimentation::VariantDecision {
+                variant: configured_assembly.clone(),
+                reason: crate::experimentation::SelectionReason::RecordUnavailable,
+            }
+        }
+    };
+
+    let assembly_name = decision.variant.trim();
+    if assembly_name.is_empty() || assembly_name == "default" {
+        return swage_context::assembly::assemble(elements, &config.context, tokeniser);
+    }
+
+    let search_levels: Vec<(swage_config::HierarchyLevel, PathBuf)> = swage_root
+        .map(|root| {
+            let space_dir = root.join("spaces").join(space_slug);
+            let agent_dir = space_dir.join("agents").join(agent_id);
+            let mut levels = vec![
+                (swage_config::HierarchyLevel::Global, root.to_path_buf()),
+                (swage_config::HierarchyLevel::Space, space_dir),
+            ];
+            if agent_dir.is_dir() {
+                levels.push((swage_config::HierarchyLevel::Agent, agent_dir));
+            }
+            levels
+        })
+        .unwrap_or_default();
+    let level_refs: Vec<(swage_config::HierarchyLevel, &Path)> = search_levels
+        .iter()
+        .map(|(level, path)| (level.clone(), path.as_path()))
+        .collect();
+    let source_path = swage_context::js_assembly::resolve_js_assembly(assembly_name, &level_refs);
+    swage_context::js_assembly::assemble_named(
+        assembly_name,
+        source_path.as_deref(),
+        elements,
+        &config.context,
+        tokeniser,
+    )
 }
 
 /// Cancel the active turn for a session.
