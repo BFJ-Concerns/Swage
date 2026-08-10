@@ -822,8 +822,8 @@ pub struct ExtractionDerivation {
 /// One full-text search hit over a space's knowledge base.
 ///
 /// Carries everything a citation needs: the observation, the derivation
-/// version the snippet was located in, and the snippet with its byte
-/// offsets in that derivation's text.
+/// version searched, and the matching passage. The offset is absent when a
+/// lossy search transformation prevents the passage being located exactly.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KnowledgeSearchHit {
     pub observation_id: Uuid,
@@ -832,8 +832,9 @@ pub struct KnowledgeSearchHit {
     pub retrieved_at: DateTime<Utc>,
     /// The matching passage, exactly as it appears in the derivation text.
     pub snippet: String,
-    /// Byte offset of `snippet` within the derivation's extracted text.
-    pub snippet_offset: usize,
+    /// Byte offset of `snippet` within the derivation's extracted text, when
+    /// the search-produced passage can be located exactly.
+    pub snippet_offset: Option<usize>,
 }
 
 /// An immutable citation pinned to one extraction derivation.

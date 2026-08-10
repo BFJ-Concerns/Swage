@@ -27,6 +27,30 @@ fn parse_dt(value: &str) -> rusqlite::Result<DateTime<Utc>> {
         })
 }
 
+fn usize_to_sql_integer(value: usize) -> rusqlite::Result<i64> {
+    i64::try_from(value).map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))
+}
+
+fn sql_integer_to_usize(column: usize, value: i64) -> rusqlite::Result<usize> {
+    usize::try_from(value).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            column,
+            rusqlite::types::Type::Integer,
+            Box::new(error),
+        )
+    })
+}
+
+fn sql_integer_to_u32(column: usize, value: i64) -> rusqlite::Result<u32> {
+    u32::try_from(value).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            column,
+            rusqlite::types::Type::Integer,
+            Box::new(error),
+        )
+    })
+}
+
 #[async_trait]
 impl CitationStore for SqliteStorage {
     async fn add_citation(
@@ -67,7 +91,14 @@ impl CitationStore for SqliteStorage {
                     |row| row.get::<_, String>(0),
                 )
                 .optional()?
-                .ok_or_else(|| rusqlite::Error::QueryReturnedNoRows)?;
+                .ok_or_else(|| {
+                    rusqlite::Error::ToSqlConversionFailure(
+                        format!(
+                            "extraction derivation version {derivation_version} does not exist for observation {observation_id}"
+                        )
+                        .into(),
+                    )
+                })?;
             let start_offset = extracted_text.find(&quoted_text).ok_or_else(|| {
                 rusqlite::Error::ToSqlConversionFailure(
                     "the quoted text does not occur in the pinned derivation".into(),
@@ -94,8 +125,8 @@ impl CitationStore for SqliteStorage {
                     record.space_id.to_string(),
                     record.observation_id.to_string(),
                     record.derivation_version,
-                    i64::try_from(record.start_offset).unwrap_or(i64::MAX),
-                    i64::try_from(record.end_offset).unwrap_or(i64::MAX),
+                    usize_to_sql_integer(record.start_offset)?,
+                    usize_to_sql_integer(record.end_offset)?,
                     record.quoted_text,
                     record.created_at.to_rfc3339(),
                 ],
@@ -117,10 +148,9 @@ impl CitationStore for SqliteStorage {
                         id: parse_uuid(&row.get::<_, String>(0)?)?,
                         space_id: parse_uuid(&row.get::<_, String>(1)?)?,
                         observation_id: parse_uuid(&row.get::<_, String>(2)?)?,
-                        derivation_version: u32::try_from(row.get::<_, i64>(3)?)
-                            .unwrap_or(u32::MAX),
-                        start_offset: usize::try_from(row.get::<_, i64>(4)?).unwrap_or(usize::MAX),
-                        end_offset: usize::try_from(row.get::<_, i64>(5)?).unwrap_or(usize::MAX),
+                        derivation_version: sql_integer_to_u32(3, row.get(3)?)?,
+                        start_offset: sql_integer_to_usize(4, row.get(4)?)?,
+                        end_offset: sql_integer_to_usize(5, row.get(5)?)?,
                         quoted_text: row.get(6)?,
                         created_at: parse_dt(&row.get::<_, String>(7)?)?,
                     })

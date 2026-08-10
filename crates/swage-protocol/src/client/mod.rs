@@ -5,6 +5,7 @@ pub mod approval;
 pub mod channel;
 pub mod conversation;
 pub mod delivery;
+pub mod knowledge;
 pub mod provider_signin;
 pub mod schedule;
 pub mod space;
@@ -39,6 +40,7 @@ pub struct ClientSurface {
     conversation_list: conversation::ConversationListResponse,
     conversation_detail: conversation::ConversationDetail,
     conversation_thread: conversation::ConversationThreadDetail,
+    knowledge_search: knowledge::KnowledgeSearchResponse,
     create_schedule_request: schedule::CreateScheduleRequest,
     update_schedule_request: schedule::UpdateScheduleRequest,
     schedule: schedule::Schedule,
