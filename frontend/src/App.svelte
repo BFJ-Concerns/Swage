@@ -172,6 +172,7 @@
   let activeSurface = $state<Surface>("conversation");
   let currentRoute = $state<Route>(router.currentRoute);
   let modelOptions = $state<string[]>([]);
+  let modelCatalogueReady = $state(false);
   let defaultModelId = $state<string | null>(null);
   const desktopRuntime = getDesktopRuntime();
 
@@ -311,12 +312,14 @@
       // 2. Fetch global model settings. Space-scoped data (conversations,
       //    scoped runtime state loads when a space is opened — either via the
       //    picker or by a deep-linked conversation that selects its space.
-      const settings = await fetchSettings().catch((error) => {
+      try {
+        const settings = await fetchSettings();
+        modelOptions = Object.keys(settings.models);
+        defaultModelId = settings.default_model;
+        modelCatalogueReady = true;
+      } catch (error) {
         console.error("Failed to load model settings:", error);
-        return null;
-      });
-      modelOptions = Object.keys(settings?.models ?? {});
-      defaultModelId = settings?.default_model ?? null;
+      }
 
       // 3. Apply the URL. If it points at a conversation, selectAndNavigate
       //    will bring its space into scope along the way.
@@ -382,6 +385,7 @@
     {displayPreferences}
     onSelectTheme={setThemeMode}
     {modelOptions}
+    {modelCatalogueReady}
     {defaultModelId}
     route={currentRoute}
     onNavigate={navigate}

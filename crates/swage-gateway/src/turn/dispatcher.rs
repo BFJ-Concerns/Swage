@@ -260,14 +260,27 @@ async fn build_turn_sandbox_for_backend_selection(
                     backend: SandboxBackend::Bubblewrap,
                 });
             }
-            Err(error) if !config.sandbox.allow_degraded_execution => return Err(error),
+            Err(error) if !config.sandbox.allow_degraded_execution => {
+                tracing::warn!(
+                    error = %error,
+                    "sandbox setup failed; refusing degraded execution without explicit permission"
+                );
+                return Err(error);
+            }
             Err(error) => {
                 degradation_reason = format!("sandbox_setup_failed: {error}");
                 tracing::warn!(error = %error, "sandbox setup failed; using explicitly permitted degraded execution")
             }
         }
     } else {
-        require_degraded_execution_opt_in(config)?;
+        if let Err(error) = require_degraded_execution_opt_in(config) {
+            tracing::warn!(
+                error = %error,
+                reason = "bubblewrap_unavailable",
+                "sandbox unavailable; refusing degraded execution without explicit permission"
+            );
+            return Err(error);
+        }
         degradation_reason = "bubblewrap_unavailable".into();
     }
 
@@ -432,6 +445,27 @@ mod tests {
     use super::*;
     use crate::turn::tests::{MockStorage, make_state_with_session, make_state_with_storage};
 
+    fn codex_config() -> swage_config::ResolvedConfig {
+        let mut config = swage_config::ResolvedConfig::default();
+        config.providers.entries.insert(
+            "codex".into(),
+            swage_config::ProviderEndpointConfig {
+                protocol: swage_config::Protocol::Codex,
+                ..Default::default()
+            },
+        );
+        config.models.default = "codex".into();
+        config.models.entries.insert(
+            "codex".into(),
+            swage_config::ModelEndpointConfig {
+                provider_id: "codex".into(),
+                model_id: "fake-codex".into(),
+                ..Default::default()
+            },
+        );
+        config
+    }
+
     #[test]
     fn degraded_execution_is_denied_by_default() {
         let config = swage_config::ResolvedConfig::default();
@@ -474,6 +508,28 @@ mod tests {
         assert_eq!(events[0].entity_id, turn_id.to_string());
         assert_eq!(events[0].event_kind, "execution_isolation_degraded");
         assert_eq!(events[0].metadata["execution_context"], "scheduled turn");
+    }
+
+    #[tokio::test]
+    async fn disabled_gateway_sandbox_remains_degraded() {
+        let (state, _session_id) = make_state_with_session(Vec::new()).await;
+        let workspace = tempfile::tempdir().unwrap();
+        let agent_config = AgentConfig::new("gateway")
+            .with_workspace(workspace.path(), vec![workspace.path().to_path_buf()]);
+        let mut config = swage_config::ResolvedConfig::default();
+        config.sandbox.enabled = false;
+        config.sandbox.allow_degraded_execution = true;
+
+        let build = build_turn_sandbox(&state, &config, &agent_config, None)
+            .await
+            .expect("explicitly opted-in non-Codex execution should remain available");
+
+        assert_eq!(
+            build.isolation,
+            ExecutionIsolation::Degraded {
+                reason: "sandbox_disabled_by_configuration".into(),
+            }
+        );
     }
 
     #[tokio::test]
@@ -559,5 +615,43 @@ mod tests {
         };
 
         assert!(error.to_string().contains("injected audit write failure"));
+    }
+
+    #[tokio::test]
+    async fn gateway_runtime_codex_dispatcher_requires_degraded_execution_opt_in() {
+        let (state, session_id) = make_state_with_session(Vec::new()).await;
+        let workspace = tempfile::tempdir().unwrap();
+        let agent_config = AgentConfig::new("gateway")
+            .with_workspace(workspace.path(), vec![workspace.path().to_path_buf()]);
+        let mut config = codex_config();
+        config.sandbox.enabled = false;
+        assert!(!config.sandbox.allow_degraded_execution);
+        let (ws_tx, _ws_rx) = mpsc::unbounded_channel();
+
+        let result = build_gateway_dispatcher_for_unattended_execution(
+            &state,
+            GatewayDispatcherRequest {
+                config: &config,
+                agent_config: &agent_config,
+                session_metadata: None,
+                space_id: None,
+                active_workspace_attachment_id: None,
+                ws_tx,
+                session_id: Some(session_id),
+                turn_id: Some(Uuid::new_v4()),
+            },
+            "delegated turn",
+        )
+        .await;
+
+        let Err(error) = result else {
+            panic!("gateway-runtime Codex execution must not inherit the App Server policy bypass");
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("allow_degraded_execution = true")
+        );
+        assert!(state.storage.list_audit_events().await.unwrap().is_empty());
     }
 }
