@@ -174,7 +174,7 @@ impl Tool for KnowledgeSearchTool {
                 observation_id: hit.observation_id,
                 version: hit.derivation_version,
                 source: hit.origin.url.or(hit.origin.local_path),
-                retrieved_at: hit.retrieved_at,
+                retrieved_at: hit.retrieved_at.to_rfc3339(),
                 passage: hit.snippet,
                 offset: hit.snippet_offset,
             })

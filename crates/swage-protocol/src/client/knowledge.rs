@@ -1,6 +1,5 @@
 //! Knowledge-base results returned by model-facing tools.
 
-use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
@@ -10,10 +9,8 @@ use uuid::Uuid;
 pub struct KnowledgeSearchResult {
     pub observation_id: Uuid,
     pub version: u32,
-    #[ts(optional)]
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
-    pub retrieved_at: DateTime<Utc>,
+    pub retrieved_at: String,
     pub passage: String,
     /// Byte offset of `passage` when it can be located in the derivation.
     #[ts(optional)]
@@ -38,7 +35,7 @@ mod tests {
                 observation_id: Uuid::nil(),
                 version: 1,
                 source: None,
-                retrieved_at: DateTime::UNIX_EPOCH,
+                retrieved_at: "1970-01-01T00:00:00+00:00".into(),
                 passage: "search-produced passage".into(),
                 offset: None,
             }],

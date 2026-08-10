@@ -880,8 +880,7 @@
           "type": "string"
         },
         "retrieved_at": {
-          "type": "string",
-          "format": "date-time"
+          "type": "string"
         },
         "source": {
           "type": [
