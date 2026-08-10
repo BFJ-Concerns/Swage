@@ -120,6 +120,16 @@ describe("createRouter initial state", () => {
 // ---------------------------------------------------------------------------
 
 describe("navigate", () => {
+  it("notifies its consumer with the new route", () => {
+    const onRouteChange = vi.fn();
+    const router = createRouter({ onRouteChange });
+
+    router.navigate("/settings/providers");
+
+    expect(onRouteChange).toHaveBeenCalledOnce();
+    expect(onRouteChange).toHaveBeenCalledWith(router.currentRoute);
+  });
+
   it("updates currentRoute to the new path", () => {
     const router = createRouter();
     router.navigate("/conversations/nav-test");
@@ -131,6 +141,19 @@ describe("navigate", () => {
     const before = window.history.length;
     router.navigate("/conversations/hist-test");
     expect(window.history.length).toBe(before + 1);
+  });
+
+  it("does not push the current path but still updates currentRoute", () => {
+    const router = createRouter();
+    router.navigate("/conversations/previous");
+    window.history.replaceState(null, "", "/");
+    const before = window.history.length;
+
+    router.navigate("/");
+
+    expect(window.history.length).toBe(before);
+    expect(router.currentRoute.path).toBe("/");
+    expect(router.currentRoute.conversationId).toBeNull();
   });
 
   it("updates currentRoute to root when navigating to '/'", () => {
@@ -147,6 +170,19 @@ describe("navigate", () => {
 // ---------------------------------------------------------------------------
 
 describe("popstate", () => {
+  it("notifies its consumer after browser navigation", async () => {
+    const onRouteChange = vi.fn();
+    const router = createRouter({ onRouteChange });
+    await router.init();
+    onRouteChange.mockClear();
+
+    window.history.replaceState(null, "", "/conversations/restored");
+    window.dispatchEvent(new PopStateEvent("popstate"));
+
+    expect(onRouteChange).toHaveBeenCalledOnce();
+    expect(onRouteChange).toHaveBeenCalledWith(router.currentRoute);
+  });
+
   it("updates currentRoute when the browser navigates back", () => {
     const router = createRouter();
     router.init();

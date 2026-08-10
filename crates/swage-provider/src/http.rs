@@ -1,10 +1,11 @@
 use bytes::Bytes;
-use futures::channel::mpsc;
 use futures::{Stream, StreamExt};
 use reqwest::header::HeaderMap;
 use serde::{Serialize, de::DeserializeOwned};
 use std::time::Duration;
 use swage_core::ProviderError;
+
+use crate::provider::spawn_stream_forwarder;
 
 // ---------------------------------------------------------------------------
 // SseEvent
@@ -116,16 +117,14 @@ impl HttpClient {
 fn sse_stream_from_bytes(
     byte_stream: impl Stream<Item = Result<Bytes, reqwest::Error>> + Send + 'static,
 ) -> impl Stream<Item = Result<SseEvent, ProviderError>> + Send + 'static {
-    let (tx, rx) = mpsc::unbounded();
-
-    tokio::spawn(async move {
+    spawn_stream_forwarder(move |tx| async move {
         let mut buffer = String::new();
         tokio::pin!(byte_stream);
 
         'outer: while let Some(chunk) = byte_stream.next().await {
             let bytes = match chunk {
                 Err(e) => {
-                    let _ = tx.unbounded_send(Err(ProviderError::StreamError(e.to_string())));
+                    let _ = tx.send(Err(ProviderError::StreamError(e.to_string())));
                     break;
                 }
                 Ok(b) => b,
@@ -134,7 +133,7 @@ fn sse_stream_from_bytes(
             let text = match std::str::from_utf8(&bytes) {
                 Ok(s) => s.to_owned(),
                 Err(e) => {
-                    let _ = tx.unbounded_send(Err(ProviderError::StreamError(format!(
+                    let _ = tx.send(Err(ProviderError::StreamError(format!(
                         "invalid UTF-8 in stream: {e}"
                     ))));
                     break;
@@ -153,15 +152,13 @@ fn sse_stream_from_bytes(
                     if event.data == "[DONE]" {
                         break 'outer;
                     }
-                    if tx.unbounded_send(Ok(event)).is_err() {
+                    if tx.send(Ok(event)).is_err() {
                         break 'outer; // Receiver dropped — stop processing.
                     }
                 }
             }
         }
-    });
-
-    rx
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -232,7 +229,32 @@ pub(crate) fn map_http_error(status: u16, body: String, retry_after: Option<u64>
 
 #[cfg(test)]
 mod tests {
+    use std::pin::Pin;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+    use std::task::{Context, Poll};
+
     use super::*;
+
+    struct PendingByteStream {
+        dropped: Arc<AtomicBool>,
+    }
+
+    impl Stream for PendingByteStream {
+        type Item = Result<Bytes, reqwest::Error>;
+
+        fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            Poll::Pending
+        }
+    }
+
+    impl Drop for PendingByteStream {
+        fn drop(&mut self) {
+            self.dropped.store(true, Ordering::SeqCst);
+        }
+    }
 
     // --- SSE parsing ---
 
@@ -304,6 +326,29 @@ mod tests {
         assert_eq!(events[0].data, "first");
         assert_eq!(events[1].data, "second");
         assert_eq!(events[2].data, "third");
+    }
+
+    #[tokio::test]
+    async fn dropping_sse_stream_drops_pending_byte_stream() {
+        let dropped = Arc::new(AtomicBool::new(false));
+
+        {
+            let stream = sse_stream_from_bytes(PendingByteStream {
+                dropped: Arc::clone(&dropped),
+            });
+            tokio::pin!(stream);
+            assert!(futures::poll!(stream.next()).is_pending());
+            tokio::task::yield_now().await;
+            assert!(!dropped.load(Ordering::SeqCst));
+        }
+
+        tokio::time::timeout(Duration::from_millis(100), async {
+            while !dropped.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("dropping the SSE stream must cancel its pending byte stream");
     }
 
     // --- HTTP error mapping ---

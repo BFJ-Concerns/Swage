@@ -7,7 +7,6 @@
 use std::pin::Pin;
 
 use async_trait::async_trait;
-use futures::channel::mpsc;
 use futures::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use swage_core::{
@@ -15,7 +14,7 @@ use swage_core::{
     Role, StreamChunk, ToolCall, ToolCompletionRequest, ToolCompletionResponse, ToolReplayPart,
 };
 
-use crate::provider::{LlmProvider, ProviderConfig};
+use crate::provider::{LlmProvider, ProviderConfig, spawn_stream_forwarder};
 
 // ---------------------------------------------------------------------------
 // Google Gemini wire types
@@ -664,9 +663,7 @@ impl LlmProvider for GoogleProvider {
         let _sanitised = Self::sanitised_url(&model, &self.config.base_url, true);
         let api_key = self.config.api_key.clone();
 
-        let (tx, rx) = mpsc::unbounded();
-
-        tokio::spawn(async move {
+        spawn_stream_forwarder(move |tx| async move {
             let client = reqwest::Client::new();
             let response = match client
                 .post(&url)
@@ -677,7 +674,7 @@ impl LlmProvider for GoogleProvider {
             {
                 Ok(r) => r,
                 Err(e) => {
-                    let _ = tx.unbounded_send(StreamChunk::Error {
+                    let _ = tx.send(StreamChunk::Error {
                         message: GoogleProvider::redact_api_key(&e.to_string(), api_key.as_deref()),
                     });
                     return;
@@ -691,7 +688,7 @@ impl LlmProvider for GoogleProvider {
                     api_key.as_deref(),
                 );
                 let err = crate::http::map_http_error(status, body_text, None);
-                let _ = tx.unbounded_send(StreamChunk::Error {
+                let _ = tx.send(StreamChunk::Error {
                     message: err.to_string(),
                 });
                 return;
@@ -705,7 +702,7 @@ impl LlmProvider for GoogleProvider {
             while let Some(chunk) = byte_stream.next().await {
                 let bytes = match chunk {
                     Err(e) => {
-                        let _ = tx.unbounded_send(StreamChunk::Error {
+                        let _ = tx.send(StreamChunk::Error {
                             message: e.to_string(),
                         });
                         break;
@@ -716,7 +713,7 @@ impl LlmProvider for GoogleProvider {
                 let text = match std::str::from_utf8(&bytes) {
                     Ok(s) => s.to_owned(),
                     Err(e) => {
-                        let _ = tx.unbounded_send(StreamChunk::Error {
+                        let _ = tx.send(StreamChunk::Error {
                             message: format!("invalid UTF-8: {e}"),
                         });
                         break;
@@ -749,7 +746,7 @@ impl LlmProvider for GoogleProvider {
 
                     if let Some(chunk) = GoogleProvider::parse_stream_event(&data) {
                         let is_done = matches!(chunk, StreamChunk::Done { .. });
-                        let _ = tx.unbounded_send(chunk);
+                        let _ = tx.send(chunk);
                         if is_done {
                             return;
                         }
@@ -758,12 +755,10 @@ impl LlmProvider for GoogleProvider {
             }
 
             // If we exit the loop without a Done chunk, emit one.
-            let _ = tx.unbounded_send(StreamChunk::Done {
+            let _ = tx.send(StreamChunk::Done {
                 finish_reason: Some(FinishReason::Unknown),
             });
-        });
-
-        Box::pin(rx)
+        })
     }
 }
 

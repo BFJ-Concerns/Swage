@@ -7,8 +7,11 @@ mod recovery;
 
 use sha2::{Digest, Sha256};
 
-pub use engine::{EngineLimits, WorkflowEngine, WorkflowEngineError};
-pub use host::{AgentCallRequest, AgentCallResult, EffectPayload, EffectReceipt, WorkflowHost};
+pub use engine::{EngineLimits, ScriptCapabilities, WorkflowEngine, WorkflowEngineError};
+pub use host::{
+    AgentCallRequest, AgentCallResult, EffectPayload, EffectReceipt, WorkflowCallRequest,
+    WorkflowHost,
+};
 pub use model::EffectKind;
 pub use recovery::{EffectRecoveryHost, recover_started_effect};
 

@@ -836,6 +836,59 @@ pub struct KnowledgeSearchHit {
     pub snippet_offset: usize,
 }
 
+/// The observation-level judgement recorded by a curation assertion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CurationAssertionKind {
+    DuplicateOf,
+    SupersededBy,
+    Stale,
+}
+
+impl std::fmt::Display for CurationAssertionKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::DuplicateOf => "duplicate-of",
+            Self::SupersededBy => "superseded-by",
+            Self::Stale => "stale",
+        })
+    }
+}
+
+impl std::str::FromStr for CurationAssertionKind {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "duplicate-of" => Ok(Self::DuplicateOf),
+            "superseded-by" => Ok(Self::SupersededBy),
+            "stale" => Ok(Self::Stale),
+            other => Err(format!("unknown curation assertion kind: {other}")),
+        }
+    }
+}
+
+/// An immutable observation-level curation judgement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CurationAssertion {
+    pub id: Uuid,
+    pub space_id: Uuid,
+    pub observation_id: Uuid,
+    pub kind: CurationAssertionKind,
+    /// The preferred or replacement observation for relationship assertions.
+    pub target_observation_id: Option<Uuid>,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Input for appending an observation-level curation judgement.
+#[derive(Debug, Clone)]
+pub struct NewCurationAssertion {
+    pub space_id: Uuid,
+    pub observation_id: Uuid,
+    pub kind: CurationAssertionKind,
+    pub target_observation_id: Option<Uuid>,
+}
+
 /// A durable agent definition — the bundle that gives a session its entire
 /// character, selected at session start by agent id.
 ///
@@ -1745,6 +1798,13 @@ pub struct WorkflowScriptVersion {
 pub struct WorkflowRunRecord {
     pub id: Uuid,
     pub space_id: Uuid,
+    /// Set on a child run started by a parent's `workflow()` call: the parent
+    /// run and the journal seq of the call that started it. The pair is what
+    /// makes composed-run recovery deterministic — a resumed parent finds its
+    /// existing child by (parent_run_id, parent_seq) instead of starting a
+    /// duplicate.
+    pub parent_run_id: Option<Uuid>,
+    pub parent_seq: Option<u64>,
     pub script_version_id: Option<Uuid>,
     pub script_id: Option<Uuid>,
     pub script_name: Option<String>,
@@ -1764,6 +1824,8 @@ pub struct WorkflowRunRecord {
 #[derive(Clone, Debug)]
 pub struct NewWorkflowRun {
     pub space_id: Uuid,
+    pub parent_run_id: Option<Uuid>,
+    pub parent_seq: Option<u64>,
     pub script_version_id: Option<Uuid>,
     pub source: Option<String>,
     pub source_hash: String,
