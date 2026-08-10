@@ -23,7 +23,7 @@ use swage_protocol::client::schedule as wire;
 use swage_storage::ScheduleCreator;
 use swage_tool::context::ToolContext;
 
-use crate::change_case::{ChangeOperation, apply_change};
+use crate::change_case::{ChangeOperation, apply_change, schedule_space_id};
 use crate::state::AppState;
 use crate::tool::Tool;
 use crate::tool_executor::GatewayToolContext;
@@ -395,10 +395,7 @@ impl ScheduleTool {
                 message: error.to_string(),
             })?
             .ok_or_else(|| invalid(SCHEDULE_TOOL, format!("no schedule with id {schedule_id}")))?;
-        let space_id = match schedule.session_policy {
-            swage_storage::SessionPolicy::Fresh { space_id, .. } => Some(space_id),
-            swage_storage::SessionPolicy::Continuation { .. } => None,
-        };
+        let space_id = schedule_space_id(&schedule.session_policy);
         let case = apply_change(
             state,
             ChangeOperation::DeleteSchedule {
