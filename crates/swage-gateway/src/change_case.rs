@@ -29,7 +29,10 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use swage_core::GatewayError;
-use swage_storage::{AgentDefinition, NewAgentDefinition, NewConfigurationVersion};
+use swage_storage::{
+    AgentDefinition, NewAgentDefinition, NewConfigurationVersion, NewSchedule, Schedule,
+    UpdateSchedule,
+};
 
 use crate::state::AppState;
 
@@ -52,6 +55,16 @@ pub enum ChangeOperation {
         agent_id: String,
         space_id: Option<Uuid>,
     },
+    /// Create a schedule from its complete intended state.
+    CreateSchedule { schedule: NewSchedule },
+    /// Replace every mutable field of an existing schedule.
+    UpdateSchedule { schedule: NewSchedule },
+    /// Replace a schedule with a complete paused state.
+    PauseSchedule { schedule: NewSchedule },
+    /// Replace a schedule with a complete re-armed state.
+    ResumeSchedule { schedule: NewSchedule },
+    /// Remove a schedule.
+    DeleteSchedule { schedule_id: Uuid },
 }
 
 /// How much scrutiny an operation kind warrants. Declared with the
@@ -71,6 +84,11 @@ impl ChangeOperation {
             Self::UpsertAgentDefinition { .. } | Self::DeleteAgentDefinition { .. } => {
                 "agent_definition"
             }
+            Self::CreateSchedule { .. }
+            | Self::UpdateSchedule { .. }
+            | Self::PauseSchedule { .. }
+            | Self::ResumeSchedule { .. }
+            | Self::DeleteSchedule { .. } => "schedule",
         }
     }
 
@@ -83,6 +101,11 @@ impl ChangeOperation {
                 (definition.id.as_str(), definition.space_id)
             }
             Self::DeleteAgentDefinition { agent_id, space_id } => (agent_id.as_str(), *space_id),
+            Self::CreateSchedule { schedule }
+            | Self::UpdateSchedule { schedule }
+            | Self::PauseSchedule { schedule }
+            | Self::ResumeSchedule { schedule } => return schedule.id.to_string(),
+            Self::DeleteSchedule { schedule_id } => return schedule_id.to_string(),
         };
         scoped_entity_id(id, space_id)
     }
@@ -91,6 +114,11 @@ impl ChangeOperation {
         match self {
             Self::UpsertAgentDefinition { .. } => "upsert_agent_definition",
             Self::DeleteAgentDefinition { .. } => "delete_agent_definition",
+            Self::CreateSchedule { .. } => "create_schedule",
+            Self::UpdateSchedule { .. } => "update_schedule",
+            Self::PauseSchedule { .. } => "pause_schedule",
+            Self::ResumeSchedule { .. } => "resume_schedule",
+            Self::DeleteSchedule { .. } => "delete_schedule",
         }
     }
 
@@ -98,6 +126,11 @@ impl ChangeOperation {
         match self {
             Self::UpsertAgentDefinition { definition } => definition.space_id,
             Self::DeleteAgentDefinition { space_id, .. } => *space_id,
+            Self::CreateSchedule { schedule }
+            | Self::UpdateSchedule { schedule }
+            | Self::PauseSchedule { schedule }
+            | Self::ResumeSchedule { schedule } => schedule_space_id(schedule),
+            Self::DeleteSchedule { .. } => None,
         }
     }
 
@@ -113,6 +146,11 @@ impl ChangeOperation {
                 }
             }
             Self::DeleteAgentDefinition { .. } => RiskBand::Routine,
+            Self::CreateSchedule { .. }
+            | Self::UpdateSchedule { .. }
+            | Self::PauseSchedule { .. }
+            | Self::ResumeSchedule { .. }
+            | Self::DeleteSchedule { .. } => RiskBand::Routine,
         }
     }
 
@@ -158,8 +196,47 @@ impl ChangeOperation {
                 }
                 Ok(())
             }
+            Self::CreateSchedule { schedule }
+            | Self::UpdateSchedule { schedule }
+            | Self::PauseSchedule { schedule }
+            | Self::ResumeSchedule { schedule } => validate_schedule_shape(schedule),
+            Self::DeleteSchedule { .. } => Ok(()),
         }
     }
+
+    async fn validate_for_apply(&self, state: &AppState) -> Result<(), GatewayError> {
+        self.validate()?;
+        match self {
+            Self::CreateSchedule { schedule }
+            | Self::UpdateSchedule { schedule }
+            | Self::PauseSchedule { schedule }
+            | Self::ResumeSchedule { schedule } => {
+                crate::schedule::validate_resolved_schedule(state, schedule).await
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
+fn schedule_space_id(schedule: &NewSchedule) -> Option<Uuid> {
+    match schedule.session_policy {
+        swage_storage::SessionPolicy::Fresh { space_id, .. } => Some(space_id),
+        swage_storage::SessionPolicy::Continuation { .. } => None,
+    }
+}
+
+fn validate_schedule_shape(schedule: &NewSchedule) -> Result<(), GatewayError> {
+    if schedule.message.trim().is_empty() {
+        return Err(GatewayError::ValidationError(
+            "schedule message must not be empty".into(),
+        ));
+    }
+    if schedule.expression.trim().is_empty() {
+        return Err(GatewayError::ValidationError(
+            "schedule expression must not be empty".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// One version-chain identity per (resource id, scope). The rendered form is
@@ -202,7 +279,7 @@ pub async fn apply_change(
     source: &str,
     session_id: Option<Uuid>,
 ) -> Result<AppliedCase, GatewayError> {
-    operation.validate()?;
+    operation.validate_for_apply(state).await?;
 
     let entity_kind = operation.entity_kind();
     let entity_id = operation.entity_id();
@@ -212,8 +289,7 @@ pub async fn apply_change(
     // after: the diff is derived, never supplied. Snapshots address the
     // resource by its bare id; the scoped entity_id is version-chain
     // identity only.
-    let agent_id = agent_id_from_entity(&entity_id).to_owned();
-    let before = snapshot_agent_definition(state, &agent_id, space_id).await?;
+    let before = snapshot_resource(state, entity_kind, &entity_id, space_id).await?;
 
     let summary = match &operation {
         ChangeOperation::UpsertAgentDefinition { definition } => {
@@ -243,9 +319,39 @@ pub async fn apply_change(
             }
             format!("deleted agent definition '{agent_id}'")
         }
+        ChangeOperation::CreateSchedule { schedule } => {
+            if before.is_some() {
+                return Err(GatewayError::ValidationError(format!(
+                    "schedule {} already exists",
+                    schedule.id
+                )));
+            }
+            state.storage.create_schedule(schedule.clone()).await?;
+            format!("created schedule '{}'", schedule.message)
+        }
+        ChangeOperation::UpdateSchedule { schedule } => {
+            apply_complete_schedule(state, schedule).await?;
+            format!("updated schedule '{}'", schedule.message)
+        }
+        ChangeOperation::PauseSchedule { schedule } => {
+            apply_complete_schedule(state, schedule).await?;
+            format!("paused schedule '{}'", schedule.message)
+        }
+        ChangeOperation::ResumeSchedule { schedule } => {
+            apply_complete_schedule(state, schedule).await?;
+            format!("resumed schedule '{}'", schedule.message)
+        }
+        ChangeOperation::DeleteSchedule { schedule_id } => {
+            if !state.storage.delete_schedule(*schedule_id).await? {
+                return Err(GatewayError::ValidationError(format!(
+                    "no schedule with id {schedule_id}"
+                )));
+            }
+            format!("deleted schedule {schedule_id}")
+        }
     };
 
-    let after = snapshot_agent_definition(state, &agent_id, space_id).await?;
+    let after = snapshot_resource(state, entity_kind, &entity_id, space_id).await?;
     record_case(
         state,
         RecordCase {
@@ -294,7 +400,7 @@ pub async fn rollback_to_version(
             GatewayError::ValidationError(format!("no recorded version {version_id}"))
         })?;
 
-    if version.entity_kind != "agent_definition" {
+    if version.entity_kind != "agent_definition" && version.entity_kind != "schedule" {
         return Err(GatewayError::ValidationError(format!(
             "no change-case handler is registered for '{}' resources",
             version.entity_kind
@@ -302,51 +408,78 @@ pub async fn rollback_to_version(
     }
 
     let space_id = version.space_id;
-    // The version chain's entity_id carries the scope; the store addresses
-    // the resource by its bare id.
-    let agent_id = agent_id_from_entity(&version.entity_id).to_owned();
-    let before = snapshot_agent_definition(state, &agent_id, space_id).await?;
+    let before =
+        snapshot_resource(state, &version.entity_kind, &version.entity_id, space_id).await?;
 
     // A null snapshot records "did not exist": rolling back to it deletes.
-    let summary = if version.snapshot.is_null() {
-        state
-            .storage
-            .delete_agent_definition(&agent_id, space_id)
-            .await?;
-        format!(
-            "rolled agent definition '{agent_id}' back to absence (version {})",
-            version.version_number
-        )
-    } else {
-        let definition: AgentDefinition = serde_json::from_value(version.snapshot.clone())
-            .map_err(|error| {
+    let summary = match version.entity_kind.as_str() {
+        "agent_definition" => {
+            let agent_id = agent_id_from_entity(&version.entity_id).to_owned();
+            if version.snapshot.is_null() {
+                state
+                    .storage
+                    .delete_agent_definition(&agent_id, space_id)
+                    .await?;
+                format!(
+                    "rolled agent definition '{agent_id}' back to absence (version {})",
+                    version.version_number
+                )
+            } else {
+                let definition: AgentDefinition =
+                    parse_snapshot(&version.snapshot, "agent definition")?;
+                state
+                    .storage
+                    .upsert_agent_definition(NewAgentDefinition {
+                        id: definition.id.clone(),
+                        space_id: definition.space_id,
+                        display_name: definition.display_name,
+                        description: definition.description,
+                        instructions: definition.instructions,
+                        model_id: definition.model_id,
+                        tool_permissions: definition.tool_permissions,
+                    })
+                    .await?;
+                format!(
+                    "rolled agent definition '{agent_id}' back to version {}",
+                    version.version_number
+                )
+            }
+        }
+        "schedule" => {
+            let schedule_id = Uuid::parse_str(&version.entity_id).map_err(|error| {
                 GatewayError::ValidationError(format!(
-                    "recorded snapshot no longer parses as an agent definition: {error}"
+                    "recorded schedule identity is invalid: {error}"
                 ))
             })?;
-        state
-            .storage
-            .upsert_agent_definition(NewAgentDefinition {
-                id: definition.id.clone(),
-                space_id: definition.space_id,
-                display_name: definition.display_name,
-                description: definition.description,
-                instructions: definition.instructions,
-                model_id: definition.model_id,
-                tool_permissions: definition.tool_permissions,
-            })
-            .await?;
-        format!(
-            "rolled agent definition '{agent_id}' back to version {}",
-            version.version_number
-        )
+            if version.snapshot.is_null() {
+                state.storage.delete_schedule(schedule_id).await?;
+                format!(
+                    "rolled schedule {schedule_id} back to absence (version {})",
+                    version.version_number
+                )
+            } else {
+                let schedule: Schedule = parse_snapshot(&version.snapshot, "schedule")?;
+                let intended = new_schedule_from_snapshot(schedule);
+                if state.storage.get_schedule(schedule_id).await?.is_some() {
+                    apply_complete_schedule(state, &intended).await?;
+                } else {
+                    state.storage.create_schedule(intended).await?;
+                }
+                format!(
+                    "rolled schedule {schedule_id} back to version {}",
+                    version.version_number
+                )
+            }
+        }
+        _ => unreachable!("entity kind checked above"),
     };
 
-    let after = snapshot_agent_definition(state, &agent_id, space_id).await?;
+    let after =
+        snapshot_resource(state, &version.entity_kind, &version.entity_id, space_id).await?;
     record_case(
         state,
         RecordCase {
-            entity_kind: "agent_definition",
+            entity_kind: &version.entity_kind,
             entity_id: &version.entity_id.clone(),
             operation_kind: "rollback",
             risk_band: RiskBand::Routine,
@@ -390,6 +523,82 @@ async fn snapshot_agent_definition(
         .into_iter()
         .find(|definition| definition.id == agent_id)
         .map(|definition| serde_json::to_value(definition).unwrap_or(serde_json::Value::Null)))
+}
+
+async fn snapshot_resource(
+    state: &AppState,
+    entity_kind: &str,
+    entity_id: &str,
+    space_id: Option<Uuid>,
+) -> Result<Option<serde_json::Value>, GatewayError> {
+    match entity_kind {
+        "agent_definition" => {
+            snapshot_agent_definition(state, agent_id_from_entity(entity_id), space_id).await
+        }
+        "schedule" => {
+            let id = Uuid::parse_str(entity_id).map_err(|error| {
+                GatewayError::ValidationError(format!("schedule identity is invalid: {error}"))
+            })?;
+            Ok(state
+                .storage
+                .get_schedule(id)
+                .await?
+                .map(|schedule| serde_json::to_value(schedule).unwrap_or(serde_json::Value::Null)))
+        }
+        other => Err(GatewayError::ValidationError(format!(
+            "no change-case handler is registered for '{other}' resources"
+        ))),
+    }
+}
+
+fn parse_snapshot<T: serde::de::DeserializeOwned>(
+    snapshot: &serde_json::Value,
+    kind: &str,
+) -> Result<T, GatewayError> {
+    serde_json::from_value(snapshot.clone()).map_err(|error| {
+        GatewayError::ValidationError(format!(
+            "recorded snapshot no longer parses as a {kind}: {error}"
+        ))
+    })
+}
+
+fn new_schedule_from_snapshot(schedule: Schedule) -> NewSchedule {
+    NewSchedule {
+        id: schedule.id,
+        message: schedule.message,
+        status: schedule.status,
+        kind: schedule.kind,
+        expression: schedule.expression,
+        session_policy: schedule.session_policy,
+        creator: schedule.creator,
+        delivery_routing: schedule.delivery_routing,
+        gate: schedule.gate,
+        next_run_at: schedule.next_run_at,
+        last_run_at: schedule.last_run_at,
+    }
+}
+
+async fn apply_complete_schedule(
+    state: &AppState,
+    schedule: &NewSchedule,
+) -> Result<Schedule, GatewayError> {
+    state
+        .storage
+        .update_schedule(
+            schedule.id,
+            UpdateSchedule {
+                message: Some(schedule.message.clone()),
+                status: Some(schedule.status),
+                kind: Some(schedule.kind),
+                expression: Some(schedule.expression.clone()),
+                delivery_routing: Some(schedule.delivery_routing.clone()),
+                gate: Some(schedule.gate.clone()),
+                next_run_at: Some(schedule.next_run_at),
+                last_run_at: Some(schedule.last_run_at),
+            },
+        )
+        .await
+        .map_err(Into::into)
 }
 
 async fn record_case(state: &AppState, case: RecordCase<'_>) -> Result<AppliedCase, GatewayError> {

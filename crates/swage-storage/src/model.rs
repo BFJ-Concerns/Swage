@@ -1625,8 +1625,11 @@ pub struct NewTurn {
 }
 
 /// Input for creating a durable schedule.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NewSchedule {
+    /// Chosen by the caller so recorded configuration cases can establish the
+    /// version-chain identity before the resource is written.
+    pub id: Uuid,
     pub message: String,
     pub status: ScheduleStatus,
     pub kind: ScheduleKind,
