@@ -472,6 +472,47 @@ impl Hook for BlockInboundHook {
     }
 }
 
+struct PausingPostToolHook {
+    reached: Arc<Notify>,
+    release: Arc<Notify>,
+}
+
+#[async_trait]
+impl Hook for PausingPostToolHook {
+    fn name(&self) -> &str {
+        "pause-post-tool"
+    }
+
+    async fn execute(&self, event: &HookEvent) -> HookOutcome {
+        if matches!(event, HookEvent::PostToolUse { .. }) {
+            self.reached.notify_one();
+            self.release.notified().await;
+        }
+        HookOutcome::Continue
+    }
+}
+
+struct ApprovePreToolHook;
+
+#[async_trait]
+impl Hook for ApprovePreToolHook {
+    fn name(&self) -> &str {
+        "approve-pre-tool"
+    }
+
+    async fn execute(&self, event: &HookEvent) -> HookOutcome {
+        if matches!(event, HookEvent::PreToolUse { .. }) {
+            HookOutcome::RequestApproval {
+                prompt: "Approve the test tool".to_string(),
+                context: None,
+                timeout: None,
+            }
+        } else {
+            HookOutcome::Continue
+        }
+    }
+}
+
 // -----------------------------------------------------------------------
 // Mock storage — in-memory Vec/HashMap backed, usable in tests.
 // -----------------------------------------------------------------------
@@ -3653,6 +3694,148 @@ async fn cancelled_turn_without_partial_stores_no_assistant_response() {
     .expect("reload-shaped conversation read should succeed");
     assert_eq!(conversation.messages.len(), 1, "only the user message");
     assert_eq!(conversation.messages[0].role, "user");
+}
+
+const COMPLETED_ROUND_PARTIAL: &str = "Text shown before the tool calls.";
+
+#[tokio::test]
+async fn cancelled_before_next_tool_persists_completed_round_text() {
+    let rounds = vec![vec![
+        StreamChunk::Delta {
+            content: COMPLETED_ROUND_PARTIAL.into(),
+        },
+        StreamChunk::ToolUse {
+            call_id: "first".into(),
+            name: "echo".into(),
+            arguments: serde_json::json!({ "text": "first" }),
+        },
+        StreamChunk::ToolUse {
+            call_id: "second".into(),
+            name: "echo".into(),
+            arguments: serde_json::json!({ "text": "second" }),
+        },
+        StreamChunk::Done {
+            finish_reason: None,
+        },
+    ]];
+    let (mut state, session_id) = make_state_with_tools(rounds).await;
+    let hook_reached = Arc::new(Notify::new());
+    let hook_release = Arc::new(Notify::new());
+    let mut hook_registry = HookRegistry::new();
+    hook_registry.register(HookRegistration::new(Arc::new(PausingPostToolHook {
+        reached: Arc::clone(&hook_reached),
+        release: Arc::clone(&hook_release),
+    })));
+    state.hook_registry = Some(Arc::new(hook_registry));
+    let state = Arc::new(state);
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let state_for_turn = Arc::clone(&state);
+    let turn_task = tokio::spawn(async move {
+        process_turn(
+            &state_for_turn,
+            session_id,
+            None,
+            "Use both tools".to_string(),
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
+        )
+        .await
+    });
+
+    hook_reached.notified().await;
+    cancel_turn(&state, session_id)
+        .await
+        .expect("cancel should succeed while the first tool's post-hook is open");
+    hook_release.notify_one();
+    turn_task
+        .await
+        .expect("turn task should not panic")
+        .expect("cancelled turn should settle cleanly");
+
+    let conversation = crate::service::ConversationService::new(
+        Arc::clone(&state.storage),
+        Arc::clone(&state.space_store),
+    )
+    .get_conversation(session_id)
+    .await
+    .expect("reload-shaped conversation read should succeed");
+    assert_eq!(conversation.messages.len(), 2, "user and partial assistant");
+    assert_eq!(conversation.messages[1].role, "assistant");
+    assert_eq!(conversation.messages[1].content, COMPLETED_ROUND_PARTIAL);
+    assert_eq!(
+        conversation.messages[1].turn_state,
+        Some(swage_protocol::client::conversation::TurnState::Interrupted)
+    );
+}
+
+#[tokio::test]
+async fn cancelled_hook_approval_persists_completed_round_text() {
+    let rounds = vec![vec![
+        StreamChunk::Delta {
+            content: COMPLETED_ROUND_PARTIAL.into(),
+        },
+        StreamChunk::ToolUse {
+            call_id: "approval".into(),
+            name: "echo".into(),
+            arguments: serde_json::json!({ "text": "gated" }),
+        },
+        StreamChunk::Done {
+            finish_reason: None,
+        },
+    ]];
+    let (mut state, session_id) = make_state_with_tools(rounds).await;
+    let mut hook_registry = HookRegistry::new();
+    hook_registry.register(HookRegistration::new(Arc::new(ApprovePreToolHook)));
+    state.hook_registry = Some(Arc::new(hook_registry));
+    let state = Arc::new(state);
+
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let state_for_turn = Arc::clone(&state);
+    let turn_task = tokio::spawn(async move {
+        process_turn(
+            &state_for_turn,
+            session_id,
+            None,
+            "Use the gated tool".to_string(),
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
+        )
+        .await
+    });
+
+    loop {
+        if matches!(
+            rx.recv().await.expect("approval event should be emitted"),
+            ServerEvent::ApprovalRequired { .. }
+        ) {
+            break;
+        }
+    }
+    cancel_turn(&state, session_id)
+        .await
+        .expect("cancel should succeed while hook approval is open");
+    turn_task
+        .await
+        .expect("turn task should not panic")
+        .expect("cancelled turn should settle cleanly");
+
+    let conversation = crate::service::ConversationService::new(
+        Arc::clone(&state.storage),
+        Arc::clone(&state.space_store),
+    )
+    .get_conversation(session_id)
+    .await
+    .expect("reload-shaped conversation read should succeed");
+    assert_eq!(conversation.messages.len(), 2, "user and partial assistant");
+    assert_eq!(conversation.messages[1].role, "assistant");
+    assert_eq!(conversation.messages[1].content, COMPLETED_ROUND_PARTIAL);
+    assert_eq!(
+        conversation.messages[1].turn_state,
+        Some(swage_protocol::client::conversation::TurnState::Interrupted)
+    );
 }
 
 #[tokio::test]
