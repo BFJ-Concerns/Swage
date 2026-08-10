@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use futures::{SinkExt, Stream, StreamExt};
+use futures::{Stream, StreamExt};
 use swage_core::{
     CompletionRequest, CompletionResponse, ProviderError, StreamChunk, ToolCompletionRequest,
     ToolCompletionResponse,
@@ -18,6 +18,7 @@ use tokio::time::Instant;
 
 use crate::provider::{
     LlmProvider, contains_user_visible_content, may_forward_before_attempt_commits,
+    spawn_stream_forwarder,
 };
 
 // ---------------------------------------------------------------------------
@@ -258,8 +259,8 @@ impl LlmProvider for FailoverProvider {
     /// and completion are held until the attempt commits, so accounting from
     /// a discarded provider cannot escape. An error before content causes
     /// failover; after content starts, an error is forwarded terminally.
-    /// Dropping the returned stream stops forwarding and drops the active
-    /// provider stream at the next produced chunk.
+    /// The first provider is not started until the returned stream is polled.
+    /// Dropping it cancels the active provider stream immediately.
     fn stream(
         &self,
         request: CompletionRequest,
@@ -267,9 +268,7 @@ impl LlmProvider for FailoverProvider {
         let providers = self.providers.clone();
         let cooldowns = Arc::clone(&self.cooldowns);
         let config = self.config.clone();
-        let (mut tx, rx) = futures::channel::mpsc::unbounded();
-
-        tokio::spawn(async move {
+        spawn_stream_forwarder(move |tx| async move {
             let order = {
                 let now = Instant::now();
                 let locked = cooldowns
@@ -305,7 +304,6 @@ impl LlmProvider for FailoverProvider {
                     .send(StreamChunk::Error {
                         message: "failover provider list is empty".into(),
                     })
-                    .await
                     .is_err()
                 {
                     return;
@@ -316,12 +314,18 @@ impl LlmProvider for FailoverProvider {
             let mut last_error_msg: Option<String> = None;
 
             for idx in order {
+                if tx.is_closed() {
+                    return;
+                }
                 let mut stream = providers[idx].stream(request.clone());
                 let mut output_started = false;
                 let mut pending_chunks = Vec::new();
                 let mut retryable_error = None;
 
-                while let Some(chunk) = stream.next().await {
+                while let Some(chunk) = tokio::select! {
+                    () = tx.closed() => return,
+                    chunk = stream.next() => chunk,
+                } {
                     match chunk {
                         StreamChunk::Error { message } if !output_started => {
                             retryable_error = Some(message);
@@ -332,28 +336,28 @@ impl LlmProvider for FailoverProvider {
                                 .lock()
                                 .expect("failover cooldown lock should not be poisoned")[idx] =
                                 Some(Instant::now());
-                            if tx.send(StreamChunk::Error { message }).await.is_err() {
+                            if tx.send(StreamChunk::Error { message }).is_err() {
                                 return;
                             }
                             return;
                         }
                         chunk => {
                             if output_started {
-                                if tx.send(chunk).await.is_err() {
+                                if tx.send(chunk).is_err() {
                                     return;
                                 }
                             } else if contains_user_visible_content(&chunk) {
                                 output_started = true;
                                 for pending_chunk in pending_chunks.drain(..) {
-                                    if tx.send(pending_chunk).await.is_err() {
+                                    if tx.send(pending_chunk).is_err() {
                                         return;
                                     }
                                 }
-                                if tx.send(chunk).await.is_err() {
+                                if tx.send(chunk).is_err() {
                                     return;
                                 }
                             } else if may_forward_before_attempt_commits(&chunk) {
-                                if tx.send(chunk).await.is_err() {
+                                if tx.send(chunk).is_err() {
                                     return;
                                 }
                             } else {
@@ -372,7 +376,7 @@ impl LlmProvider for FailoverProvider {
 
                 let Some(message) = retryable_error else {
                     for pending_chunk in pending_chunks {
-                        if tx.send(pending_chunk).await.is_err() {
+                        if tx.send(pending_chunk).is_err() {
                             return;
                         }
                     }
@@ -395,11 +399,8 @@ impl LlmProvider for FailoverProvider {
                     message: last_error_msg
                         .unwrap_or_else(|| "all failover providers failed".into()),
                 })
-                .await
                 .is_err();
-        });
-
-        Box::pin(rx)
+        })
     }
 }
 
@@ -432,7 +433,7 @@ mod tests {
     use std::task::{Context, Poll};
 
     use async_trait::async_trait;
-    use futures::StreamExt;
+    use futures::{SinkExt, StreamExt};
     use swage_core::{FinishReason, TokenUsage};
     use tokio::time::advance;
 
@@ -1082,6 +1083,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stream_does_not_fail_over_after_non_delta_content() {
+        let content_chunks = [
+            StreamChunk::Reasoning {
+                content: "working".into(),
+                details: None,
+            },
+            StreamChunk::ToolUse {
+                call_id: "call-1".into(),
+                name: "lookup".into(),
+                arguments: serde_json::json!({"query": "status"}),
+            },
+        ];
+
+        for content_chunk in content_chunks {
+            let primary = SequencedStreamProvider {
+                name: "p1",
+                call_count: Arc::new(StdMutex::new(0)),
+                attempts: StdMutex::new(vec![vec![
+                    content_chunk.clone(),
+                    StreamChunk::Error {
+                        message: "interrupted".into(),
+                    },
+                ]]),
+            };
+            let secondary_calls = Arc::new(StdMutex::new(0));
+            let secondary = SequencedStreamProvider {
+                name: "p2",
+                call_count: Arc::clone(&secondary_calls),
+                attempts: StdMutex::new(vec![vec![StreamChunk::Delta {
+                    content: "duplicate".into(),
+                }]]),
+            };
+            let failover =
+                FailoverProvider::with_defaults(vec![Arc::new(primary), Arc::new(secondary)]);
+
+            let chunks: Vec<_> = failover.stream(completion_req()).collect().await;
+
+            assert_eq!(
+                *secondary_calls.lock().unwrap(),
+                0,
+                "content must commit the primary attempt: {content_chunk:?}"
+            );
+            assert!(chunks.contains(&content_chunk));
+            assert!(matches!(
+                chunks.last(),
+                Some(StreamChunk::Error { message }) if message == "interrupted"
+            ));
+        }
+    }
+
+    #[tokio::test]
     async fn stream_reports_retry_before_failover_content_without_discarded_usage() {
         let primary_calls = Arc::new(StdMutex::new(0));
         let primary = SequencedStreamProvider {
@@ -1245,13 +1297,6 @@ mod tests {
         assert!(stream.next().await.is_some());
         drop(stream);
 
-        inner_tx
-            .send(StreamChunk::Delta {
-                content: "cancel checkpoint".into(),
-            })
-            .await
-            .unwrap();
-
         tokio::time::timeout(Duration::from_millis(100), async {
             while !dropped.load(Ordering::SeqCst) {
                 tokio::task::yield_now().await;
@@ -1259,6 +1304,23 @@ mod tests {
         })
         .await
         .expect("receiver closure must drop the active provider stream");
+    }
+
+    #[tokio::test]
+    async fn dropping_unpolled_stream_does_not_start_provider() {
+        let provider = SequencedProvider::new("p1", vec![Ok(ok_completion("unused"))]);
+        let call_count = Arc::clone(&provider.call_count);
+        let failover = FailoverProvider::with_defaults(vec![provider]);
+
+        let stream = failover.stream(completion_req());
+        drop(stream);
+        tokio::task::yield_now().await;
+
+        assert_eq!(
+            *call_count.lock().unwrap(),
+            0,
+            "an unpolled stream must not start a provider attempt"
+        );
     }
 
     // -----------------------------------------------------------------------

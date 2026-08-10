@@ -1,7 +1,7 @@
-use std::pin::Pin;
+use std::{future::Future, pin::Pin};
 
 use async_trait::async_trait;
-use futures::Stream;
+use futures::{Stream, StreamExt};
 use swage_config::MaskedString;
 use swage_core::{
     CompletionRequest, CompletionResponse, ProviderError, StreamChunk, ToolCompletionRequest,
@@ -43,6 +43,26 @@ pub(crate) fn may_forward_before_attempt_commits(chunk: &StreamChunk) -> bool {
         | StreamChunk::ProviderRetrySettled { .. } => true,
         StreamChunk::Usage(_) | StreamChunk::Done { .. } | StreamChunk::Error { .. } => false,
     }
+}
+
+/// Start a forwarding task when its returned stream is first polled.
+///
+/// The Tokio sender lets forwarding tasks wait for receiver closure alongside
+/// provider output or retry timers, so abandoning a stream cancels work even
+/// when no further output arrives.
+pub(crate) fn spawn_stream_forwarder<F, Fut>(
+    forwarder: F,
+) -> Pin<Box<dyn Stream<Item = StreamChunk> + Send>>
+where
+    F: FnOnce(tokio::sync::mpsc::UnboundedSender<StreamChunk>) -> Fut + Send + 'static,
+    Fut: Future<Output = ()> + Send + 'static,
+{
+    let lazy_receiver = futures::stream::once(async move {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(forwarder(tx));
+        futures::stream::poll_fn(move |cx| rx.poll_recv(cx))
+    });
+    Box::pin(lazy_receiver.flatten())
 }
 
 // ---------------------------------------------------------------------------
