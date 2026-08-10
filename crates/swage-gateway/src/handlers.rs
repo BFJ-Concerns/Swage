@@ -1541,6 +1541,9 @@ async fn execute_external_delegate_message(
         &delegate_msg.recipient_agent_id,
     );
 
+    // Delegated activity must not reach the parent WebSocket. Shared assembly
+    // still emits ContextAssembled into this silent channel; the stored child-
+    // turn snapshot is the delegated assembly's audit record.
     let (silent_ws_tx, silent_ws_rx) = tokio::sync::mpsc::unbounded_channel();
     drop(silent_ws_rx);
     let dispatcher_build = crate::turn::build_gateway_dispatcher_for_unattended_execution(
@@ -1551,7 +1554,7 @@ async fn execute_external_delegate_message(
             session_metadata: None,
             space_id: Some(space_id),
             active_workspace_attachment_id: None,
-            ws_tx: silent_ws_tx,
+            ws_tx: silent_ws_tx.clone(),
             session_id: None,
             turn_id: sender_turn_id,
         },
@@ -1575,6 +1578,14 @@ async fn execute_external_delegate_message(
         ))),
         router: router.clone(),
         active_delegations: swage_agent::active_delegations(),
+        context_assembler: Some(crate::turn::delegated_context_assembler(
+            state.clone(),
+            space.clone(),
+            target_resolved.clone(),
+            delegate_msg.recipient_agent_id.clone(),
+            target_agent_config.working_directory.display().to_string(),
+            silent_ws_tx,
+        )),
     };
 
     let result = executor
@@ -2023,6 +2034,7 @@ mod tests {
     use crate::{
         server::build_router,
         state::AppState,
+        test_support::SwageHomeGuard,
         turn::tests::{CapturingMultiRoundProvider, MockProvider, MockStorage},
         websocket::ServerEvent,
     };
@@ -2339,10 +2351,11 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn external_delegate_message_includes_target_instructions() {
+    async fn external_delegate_message_uses_shared_context_assembly() {
         use swage_agent::MessageRouter;
         use swage_core::{FinishReason, MessageKind, StreamChunk};
         use swage_storage::model::NewAgentMessage;
+        use swage_storage::store::{AuditStore, ContextSnapshotStore, ThreadStore, TurnStore};
 
         let (provider, captured_requests) = CapturingMultiRoundProvider::new(vec![vec![
             StreamChunk::Delta {
@@ -2358,6 +2371,16 @@ mod tests {
             .get_or_create_default()
             .await
             .expect("get default space");
+        let swage_home = SwageHomeGuard::new();
+        let target_skill_dir = swage_home
+            .path()
+            .join("spaces/default/agents/agent-b/skills/external-specialist");
+        std::fs::create_dir_all(&target_skill_dir).expect("create target skill directory");
+        std::fs::write(
+            target_skill_dir.join("SKILL.md"),
+            "---\ndescription: External specialist behaviour\n---\nUse the external specialist skill.\n",
+        )
+        .expect("write target skill");
         let config = swage_config::ResolvedConfig {
             instructions: "Use the external delegated specialist instructions.".to_string(),
             ..swage_config::ResolvedConfig::default()
@@ -2386,6 +2409,45 @@ mod tests {
             .await
             .expect("external delegation should complete");
 
+        let child_sessions = storage
+            .list_sessions_by_agent_id("agent-b")
+            .await
+            .expect("list child sessions");
+        assert_eq!(child_sessions.len(), 1, "expected one child session");
+        let child_threads = storage
+            .list_by_session(child_sessions[0].id)
+            .await
+            .expect("list child threads");
+        assert_eq!(child_threads.len(), 1, "expected one child thread");
+        let child_turns = storage
+            .list_turns_by_thread(child_threads[0].id)
+            .await
+            .expect("list child turns");
+        assert_eq!(child_turns.len(), 1, "expected one child turn");
+        let child_snapshot = storage
+            .get_snapshot(child_turns[0].id)
+            .await
+            .expect("read child context snapshot")
+            .expect("external delegated assembly report should be persisted");
+        let child_snapshot: serde_json::Value = serde_json::from_str(&child_snapshot)
+            .expect("external delegated context snapshot should be JSON");
+        assert!(
+            child_snapshot["elements"].is_array(),
+            "external delegated assembly report should contain its element decisions"
+        );
+        let child_audit = storage
+            .list_audit_events_by_session(child_sessions[0].id)
+            .await
+            .expect("list child audit events");
+        assert!(
+            child_audit.iter().any(|event| {
+                event.entity_id == crate::experimentation::LOCATION_CONTEXT_ASSEMBLY
+                    && event.event_kind == "variant_selected"
+                    && event.metadata["turn_id"] == serde_json::json!(child_turns[0].id)
+            }),
+            "external delegated assembly selection should be recorded against the child turn"
+        );
+
         let captured_requests = captured_requests.lock().unwrap();
         assert_eq!(captured_requests.len(), 1);
         let request_text = captured_requests[0]
@@ -2397,6 +2459,21 @@ mod tests {
         assert!(
             request_text.contains("Use the external delegated specialist instructions."),
             "external delegated provider request should include target agent instructions: {request_text}"
+        );
+        assert!(
+            request_text.contains("You are an agent running on Swage"),
+            "external delegated provider request should include platform identity: {request_text}"
+        );
+        assert!(
+            request_text.contains("Space: the default space")
+                && request_text.contains("Working directory:")
+                && request_text.contains("Session started:"),
+            "external delegated provider request should include the child session's place: {request_text}"
+        );
+        assert!(
+            request_text.contains("## Skills available in this session")
+                && request_text.contains("external-specialist — External specialist behaviour"),
+            "external delegated provider request should include the target skill catalogue: {request_text}"
         );
     }
 

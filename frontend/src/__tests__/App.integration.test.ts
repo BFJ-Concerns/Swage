@@ -432,14 +432,11 @@ describe("App", () => {
     component = mount(App, { target: document.body });
     await settleUi();
     // The app lands on the space picker — open the default space so the
-    // top bar (which holds the desktop shell stamp) renders.
+    // shell navigation and its runtime context render.
     await openSpaceFromPicker("default");
 
-    // The riso shell condenses runtime context into a top-bar "stamp": the
-    // managed/remote token replaces the older verbose "Desktop shell" panel.
-    const stamp = document.querySelector(".topbar .stamp");
-    expect(stamp).not.toBeNull();
-    expect(stamp!.textContent).toContain("MANAGED");
+    const surfaceNavigation = document.querySelector('nav[aria-label="Surface"]');
+    expect(surfaceNavigation?.parentElement?.textContent).toContain("MANAGED");
   });
 
   it("creates a conversation from the real app wiring and navigates to it", async () => {
@@ -627,7 +624,7 @@ describe("App", () => {
     expect(document.querySelector(".message-display")?.textContent).toContain("Streamed reply.");
   });
 
-  it("switches to the operator deck and renders the overview", async () => {
+  it("switches to the operator surface and renders the overview", async () => {
     const defaultSpace = makeSpace();
 
     vi.mocked(spacesApi.listSpaces).mockResolvedValueOnce([defaultSpace]);
@@ -639,9 +636,10 @@ describe("App", () => {
     await settleUi();
     await openSpaceFromPicker(defaultSpace.name);
 
+    const surfaceNavigation = document.querySelector('nav[aria-label="Surface"]');
     const operatorButton = Array.from(
-      document.querySelectorAll(".surface-switch button"),
-    ).find((button) => button.textContent?.toLowerCase().includes("operator")) as
+      surfaceNavigation?.querySelectorAll("button") ?? [],
+    ).find((button) => button.textContent?.trim() === "Operator") as
       | HTMLButtonElement
       | undefined;
 
