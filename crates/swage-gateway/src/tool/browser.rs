@@ -161,7 +161,7 @@ impl Tool for BrowserTypeTool {
             "properties": {
                 "ref": {"type": "string", "description": "A ref from the latest browser snapshot."},
                 "text": {"type": "string", "description": "Text to type, or a secret:// reference."},
-                "submit": {"type": "boolean", "default": false},
+                "submit": {"type": "boolean", "default": false, "description": "Press Enter after typing, submitting the form the field belongs to."},
                 "replace": {"type": "boolean", "default": true}
             },
             "required": ["ref", "text"]

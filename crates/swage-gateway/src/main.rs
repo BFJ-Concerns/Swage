@@ -25,7 +25,7 @@ impl Tool for EchoTool {
     }
 
     fn description(&self) -> &str {
-        "Returns its input parameters unchanged."
+        "Repeat the given parameters back unchanged."
     }
 
     fn parameters(&self) -> Value {
@@ -46,7 +46,7 @@ impl Tool for EnvReadTool {
     }
 
     fn description(&self) -> &str {
-        "Reads one environment variable by name for sandbox integration tests."
+        "Read one environment variable by name, returning null when it is unset."
     }
 
     fn parameters(&self) -> Value {

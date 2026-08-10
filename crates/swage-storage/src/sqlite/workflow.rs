@@ -362,6 +362,16 @@ impl WorkflowStore for SqliteStorage {
         self.with_conn(move |conn| { let tx=conn.unchecked_transaction()?; let run_id:String=tx.query_row("SELECT run_id FROM workflow_journal WHERE id=?1",[id.to_string()],|row|row.get(0))?; let order:i64=tx.query_row("SELECT COALESCE(MAX(completed_order),0)+1 FROM workflow_journal WHERE run_id=?1",[run_id],|row|row.get(0))?; tx.execute("UPDATE workflow_journal SET status='completed', result_json=?2, completed_order=?3, completed_at=?4 WHERE id=?1",params![id.to_string(),result,order,now.to_rfc3339()])?; tx.commit()?; conn.query_row(&format!("SELECT {JOURNAL_COLUMNS} FROM workflow_journal WHERE id=?1"),[id.to_string()],journal_row) }).await
     }
 
+    async fn fail_workflow_journal_entry(
+        &self,
+        id: Uuid,
+        error_message: &str,
+    ) -> Result<WorkflowJournalRecord, StorageError> {
+        let error_message = error_message.to_string();
+        let now = Utc::now();
+        self.with_conn(move |conn| { let tx=conn.unchecked_transaction()?; let run_id:String=tx.query_row("SELECT run_id FROM workflow_journal WHERE id=?1",[id.to_string()],|row|row.get(0))?; let order:i64=tx.query_row("SELECT COALESCE(MAX(completed_order),0)+1 FROM workflow_journal WHERE run_id=?1",[run_id],|row|row.get(0))?; tx.execute("UPDATE workflow_journal SET status='failed', error_message=?2, completed_order=?3, completed_at=?4 WHERE id=?1",params![id.to_string(),error_message,order,now.to_rfc3339()])?; tx.commit()?; conn.query_row(&format!("SELECT {JOURNAL_COLUMNS} FROM workflow_journal WHERE id=?1"),[id.to_string()],journal_row) }).await
+    }
+
     async fn list_workflow_journal(
         &self,
         run_id: Uuid,
@@ -410,6 +420,8 @@ mod tests {
         let run = storage
             .create_workflow_run(NewWorkflowRun {
                 space_id: space.id,
+                parent_run_id: None,
+                parent_seq: None,
                 script_version_id: Some(second.id),
                 source: None,
                 source_hash: "hash".into(),
