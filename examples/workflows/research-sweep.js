@@ -121,7 +121,10 @@ const organised = await agent(
     `observations of your own authorship) that summarise what this material ` +
     `covers and cite the observation ids they derive from. Where a new ` +
     `observation duplicates or supersedes existing material, assert that ` +
-    `with knowledge_curate - never delete anything. Return JSON only.`,
+    `with knowledge_curate - never delete anything. Zero notes or zero ` +
+    `assertions is a valid outcome when nothing warrants them. In "note", ` +
+    `summarise in one or two sentences what you did and anything that ` +
+    `needs a human eye. Return JSON only.`,
   {
     agent: "organiser",
     label: "Organise corpus",
@@ -147,9 +150,10 @@ const findings = await agent(
     `Purpose the findings must serve: ${purpose}\n\n` +
     `Work only from the space's knowledge base via knowledge_search - no ` +
     `fetching, no memory of this conversation. Every claim must be ` +
-    `traceable: cite the observation id and quote the exact supporting ` +
-    `text for each. A claim you cannot pin to an observation does not go ` +
-    `in the findings. Return JSON only.`,
+    `traceable: cite the observation id and quote the supporting text for ` +
+    `each - verbatim from the stored extraction, kept to the shortest span ` +
+    `that supports the claim. A claim you cannot pin to an observation ` +
+    `does not go in the findings. Return JSON only.`,
   {
     agent: "synthesist",
     label: "Synthesise findings",
