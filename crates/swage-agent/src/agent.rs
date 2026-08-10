@@ -355,6 +355,35 @@ impl Agent {
             for call in &round_tool_calls {
                 // Re-check cancellation before each tool execution.
                 if cancel_token.is_cancelled() {
+                    if !accumulated.is_empty() {
+                        let safe_content = self.scan_output(&accumulated);
+                        if let Err(error) = self
+                            .storage
+                            .append_message(swage_storage::model::AppendMessage {
+                                thread_id,
+                                turn_id: Some(turn.id),
+                                role: Role::Assistant,
+                                content: safe_content.clone(),
+                                agent_id: self.config.agent_id.clone(),
+                            })
+                            .await
+                        {
+                            tracing::warn!(
+                                turn_id = %turn.id,
+                                %error,
+                                "failed to persist cancelled turn's partial assistant message"
+                            );
+                        }
+                        if let Err(error) =
+                            self.storage.update_response(turn.id, &safe_content).await
+                        {
+                            tracing::warn!(
+                                turn_id = %turn.id,
+                                %error,
+                                "failed to persist cancelled turn's partial response"
+                            );
+                        }
+                    }
                     let _ = self
                         .storage
                         .update_turn_state(turn.id, TurnState::Interrupted)
