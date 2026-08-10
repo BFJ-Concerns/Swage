@@ -1,0 +1,295 @@
+use async_trait::async_trait;
+use chrono::Utc;
+use rusqlite::params;
+use uuid::Uuid;
+
+use swage_core::StorageError;
+
+use crate::model::{CurationAssertion, CurationAssertionKind, NewCurationAssertion};
+use crate::sqlite::SqliteStorage;
+use crate::store::{CurationAssertionStore, ObservationStore};
+
+#[async_trait]
+impl CurationAssertionStore for SqliteStorage {
+    async fn add_curation_assertion(
+        &self,
+        assertion: NewCurationAssertion,
+    ) -> Result<CurationAssertion, StorageError> {
+        let observation = self
+            .get_observation(assertion.observation_id)
+            .await?
+            .ok_or_else(|| StorageError::NotFound {
+                entity: "SourceObservation".into(),
+                id: assertion.observation_id.to_string(),
+            })?;
+        if observation.space_id != assertion.space_id {
+            return Err(StorageError::ConstraintViolation(
+                "the observation does not belong to the assertion's space".into(),
+            ));
+        }
+
+        match (assertion.kind, assertion.target_observation_id) {
+            (CurationAssertionKind::Stale, Some(_)) => {
+                return Err(StorageError::ConstraintViolation(
+                    "a stale assertion must not have a target observation".into(),
+                ));
+            }
+            (CurationAssertionKind::DuplicateOf | CurationAssertionKind::SupersededBy, None) => {
+                return Err(StorageError::ConstraintViolation(
+                    "relationship assertions need a target observation".into(),
+                ));
+            }
+            _ => {}
+        }
+
+        if let Some(target_id) = assertion.target_observation_id {
+            if target_id == assertion.observation_id {
+                return Err(StorageError::ConstraintViolation(
+                    "an observation cannot target itself".into(),
+                ));
+            }
+            let target =
+                self.get_observation(target_id)
+                    .await?
+                    .ok_or_else(|| StorageError::NotFound {
+                        entity: "SourceObservation".into(),
+                        id: target_id.to_string(),
+                    })?;
+            if target.space_id != assertion.space_id {
+                return Err(StorageError::ConstraintViolation(
+                    "the target observation does not belong to the assertion's space".into(),
+                ));
+            }
+        }
+
+        self.with_conn(move |conn| {
+            let record = CurationAssertion {
+                id: Uuid::new_v4(),
+                space_id: assertion.space_id,
+                observation_id: assertion.observation_id,
+                kind: assertion.kind,
+                target_observation_id: assertion.target_observation_id,
+                created_at: Utc::now(),
+            };
+            conn.execute(
+                "INSERT INTO knowledge_curation_assertions (
+                     id, space_id, observation_id, kind, target_observation_id, created_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    record.id.to_string(),
+                    record.space_id.to_string(),
+                    record.observation_id.to_string(),
+                    record.kind.to_string(),
+                    record.target_observation_id.map(|id| id.to_string()),
+                    record.created_at.to_rfc3339(),
+                ],
+            )?;
+            Ok(record)
+        })
+        .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{NewSourceObservation, NewSpace, ObservationOrigin};
+    use crate::store::{ObservationStore, SpaceStore};
+
+    async fn storage_with_space() -> (SqliteStorage, Uuid) {
+        let storage = SqliteStorage::in_memory().unwrap();
+        let space = storage
+            .create(NewSpace {
+                name: "research".into(),
+                slug: "research".into(),
+            })
+            .await
+            .unwrap();
+        (storage, space.id)
+    }
+
+    async fn observation(
+        storage: &SqliteStorage,
+        space_id: Uuid,
+        label: &str,
+    ) -> crate::model::SourceObservation {
+        storage
+            .record_observation(NewSourceObservation {
+                space_id,
+                origin: ObservationOrigin {
+                    url: Some(format!("https://example.test/{label}")),
+                    local_path: None,
+                },
+                retrieved_at: Utc::now(),
+                body_sha256: format!("hash-{label}"),
+                body_bytes: 20,
+                media_type: "text/plain".into(),
+            })
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn accepts_all_assertion_kinds() {
+        let (storage, space_id) = storage_with_space().await;
+        let subject = observation(&storage, space_id, "subject").await;
+        let target = observation(&storage, space_id, "target").await;
+
+        for kind in [
+            CurationAssertionKind::DuplicateOf,
+            CurationAssertionKind::SupersededBy,
+        ] {
+            storage
+                .add_curation_assertion(NewCurationAssertion {
+                    space_id,
+                    observation_id: subject.id,
+                    kind,
+                    target_observation_id: Some(target.id),
+                })
+                .await
+                .unwrap();
+        }
+        storage
+            .add_curation_assertion(NewCurationAssertion {
+                space_id,
+                observation_id: subject.id,
+                kind: CurationAssertionKind::Stale,
+                target_observation_id: None,
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn validates_relationship_targets_and_space_membership() {
+        let (storage, space_id) = storage_with_space().await;
+        let subject = observation(&storage, space_id, "subject").await;
+        let other_space = storage
+            .create(NewSpace {
+                name: "other".into(),
+                slug: "other".into(),
+            })
+            .await
+            .unwrap();
+        let foreign = observation(&storage, other_space.id, "foreign").await;
+
+        for invalid in [
+            NewCurationAssertion {
+                space_id,
+                observation_id: subject.id,
+                kind: CurationAssertionKind::DuplicateOf,
+                target_observation_id: None,
+            },
+            NewCurationAssertion {
+                space_id,
+                observation_id: subject.id,
+                kind: CurationAssertionKind::Stale,
+                target_observation_id: Some(subject.id),
+            },
+            NewCurationAssertion {
+                space_id,
+                observation_id: subject.id,
+                kind: CurationAssertionKind::SupersededBy,
+                target_observation_id: Some(foreign.id),
+            },
+        ] {
+            assert!(matches!(
+                storage.add_curation_assertion(invalid).await,
+                Err(StorageError::ConstraintViolation(_))
+            ));
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn superseded_observation_is_hidden_but_evidence_remains_unchanged() {
+        let (storage, space_id) = storage_with_space().await;
+        let subject = observation(&storage, space_id, "subject").await;
+        let replacement = observation(&storage, space_id, "replacement").await;
+        let derivation = storage
+            .add_extraction(
+                subject.id,
+                "a uniquely superseded passage".into(),
+                "test extractor".into(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            storage
+                .search_extractions(space_id, "uniquely superseded", 10)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        storage
+            .add_curation_assertion(NewCurationAssertion {
+                space_id,
+                observation_id: subject.id,
+                kind: CurationAssertionKind::SupersededBy,
+                target_observation_id: Some(replacement.id),
+            })
+            .await
+            .unwrap();
+
+        assert!(
+            storage
+                .search_extractions(space_id, "uniquely superseded", 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            storage
+                .get_observation(subject.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .id,
+            subject.id
+        );
+        assert_eq!(
+            storage
+                .get_observation(subject.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .body_sha256,
+            subject.body_sha256
+        );
+        let stored_derivation = storage
+            .get_extraction(subject.id, derivation.version)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored_derivation.id, derivation.id);
+        assert_eq!(stored_derivation.extracted_text, derivation.extracted_text);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn assertion_rows_reject_update_and_delete() {
+        let (storage, space_id) = storage_with_space().await;
+        let subject = observation(&storage, space_id, "subject").await;
+        let assertion = storage
+            .add_curation_assertion(NewCurationAssertion {
+                space_id,
+                observation_id: subject.id,
+                kind: CurationAssertionKind::Stale,
+                target_observation_id: None,
+            })
+            .await
+            .unwrap();
+
+        for sql in [
+            "UPDATE knowledge_curation_assertions SET kind = 'stale' WHERE id = ?1",
+            "DELETE FROM knowledge_curation_assertions WHERE id = ?1",
+        ] {
+            assert!(
+                storage
+                    .with_conn(|conn| conn.execute(sql, params![assertion.id.to_string()]))
+                    .await
+                    .is_err()
+            );
+        }
+    }
+}
