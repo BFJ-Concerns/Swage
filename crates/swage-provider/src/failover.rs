@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use futures::{Stream, StreamExt};
+use futures::{SinkExt, Stream, StreamExt};
 use swage_core::{
     CompletionRequest, CompletionResponse, ProviderError, StreamChunk, ToolCompletionRequest,
     ToolCompletionResponse,
@@ -252,9 +252,11 @@ impl LlmProvider for FailoverProvider {
 
     /// Route the streaming completion through the provider chain.
     ///
-    /// The inner stream is buffered. If a `StreamChunk::Error` appears, the
-    /// provider is put into cooldown and the next provider is tried. Only the
-    /// successful stream's chunks are returned to the caller.
+    /// Chunks are forwarded as they arrive. An error before any chunk from the
+    /// provider causes failover; after output starts, an error is forwarded
+    /// terminally so a replacement provider cannot duplicate partial output.
+    /// Dropping the returned stream stops forwarding and drops the active
+    /// provider stream at the next produced chunk.
     fn stream(
         &self,
         request: CompletionRequest,
@@ -262,86 +264,119 @@ impl LlmProvider for FailoverProvider {
         let providers = self.providers.clone();
         let cooldowns = Arc::clone(&self.cooldowns);
         let config = self.config.clone();
+        let (mut tx, rx) = futures::channel::mpsc::unbounded();
 
-        Box::pin(
-            futures::stream::once(async move {
-                let order = {
-                    let now = Instant::now();
-                    let locked = cooldowns
-                        .lock()
-                        .expect("failover cooldown lock should not be poisoned");
-                    let n = providers.len();
+        tokio::spawn(async move {
+            let order = {
+                let now = Instant::now();
+                let locked = cooldowns
+                    .lock()
+                    .expect("failover cooldown lock should not be poisoned");
+                let n = providers.len();
 
-                    let mut available: Vec<usize> = Vec::new();
-                    let mut still_cooled: Vec<(Instant, usize)> = Vec::new();
+                let mut available: Vec<usize> = Vec::new();
+                let mut still_cooled: Vec<(Instant, usize)> = Vec::new();
 
-                    for i in 0..n {
-                        match locked[i] {
-                            None => available.push(i),
-                            Some(since) => {
-                                if now.duration_since(since) >= config.cooldown_duration {
-                                    available.push(i);
-                                } else {
-                                    still_cooled.push((since, i));
-                                }
+                for i in 0..n {
+                    match locked[i] {
+                        None => available.push(i),
+                        Some(since) => {
+                            if now.duration_since(since) >= config.cooldown_duration {
+                                available.push(i);
+                            } else {
+                                still_cooled.push((since, i));
                             }
                         }
                     }
-
-                    still_cooled.sort_by_key(|(since, _)| *since);
-                    let mut o =
-                        prioritise_requested_model(&providers, available, request.model.as_deref());
-                    o.extend(still_cooled.into_iter().map(|(_, i)| i));
-                    o
-                };
-
-                if order.is_empty() {
-                    return vec![StreamChunk::Error {
-                        message: "failover provider list is empty".into(),
-                    }];
                 }
 
-                let mut last_error_msg: Option<String> = None;
+                still_cooled.sort_by_key(|(since, _)| *since);
+                let mut o =
+                    prioritise_requested_model(&providers, available, request.model.as_deref());
+                o.extend(still_cooled.into_iter().map(|(_, i)| i));
+                o
+            };
 
-                for idx in order {
-                    let chunks: Vec<StreamChunk> =
-                        providers[idx].stream(request.clone()).collect().await;
+            if order.is_empty() {
+                if tx
+                    .send(StreamChunk::Error {
+                        message: "failover provider list is empty".into(),
+                    })
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+                return;
+            }
 
-                    let error_msg = chunks.iter().find_map(|c| {
-                        if let StreamChunk::Error { message } = c {
-                            Some(message.clone())
-                        } else {
-                            None
+            let mut last_error_msg: Option<String> = None;
+
+            for idx in order {
+                let mut stream = providers[idx].stream(request.clone());
+                let mut output_started = false;
+                let mut retryable_error = None;
+
+                while let Some(chunk) = stream.next().await {
+                    match chunk {
+                        StreamChunk::Error { message } if !output_started => {
+                            retryable_error = Some(message);
+                            break;
                         }
-                    });
-
-                    match error_msg {
-                        None => {
-                            // Success — clear cooldown.
-                            cooldowns
-                                .lock()
-                                .expect("failover cooldown lock should not be poisoned")[idx] =
-                                None;
-                            return chunks;
-                        }
-                        Some(msg) => {
-                            // Treat all stream errors as transient for failover purposes.
+                        StreamChunk::Error { message } => {
                             cooldowns
                                 .lock()
                                 .expect("failover cooldown lock should not be poisoned")[idx] =
                                 Some(Instant::now());
-                            last_error_msg = Some(msg);
+                            if tx.send(StreamChunk::Error { message }).await.is_err() {
+                                return;
+                            }
+                            return;
+                        }
+                        chunk => {
+                            output_started = true;
+                            if tx.send(chunk).await.is_err() {
+                                return;
+                            }
                         }
                     }
                 }
 
-                vec![StreamChunk::Error {
+                if output_started {
+                    cooldowns
+                        .lock()
+                        .expect("failover cooldown lock should not be poisoned")[idx] = None;
+                    return;
+                }
+
+                let Some(message) = retryable_error else {
+                    cooldowns
+                        .lock()
+                        .expect("failover cooldown lock should not be poisoned")[idx] = None;
+                    return;
+                };
+
+                // Treat all pre-output stream errors as transient for failover purposes.
+                cooldowns
+                    .lock()
+                    .expect("failover cooldown lock should not be poisoned")[idx] =
+                    Some(Instant::now());
+                last_error_msg = Some(message);
+            }
+
+            if tx
+                .send(StreamChunk::Error {
                     message: last_error_msg
                         .unwrap_or_else(|| "all failover providers failed".into()),
-                }]
-            })
-            .flat_map(futures::stream::iter),
-        )
+                })
+                .await
+                .is_err()
+            {
+                return;
+            }
+        });
+
+        Box::pin(rx)
     }
 }
 
@@ -367,7 +402,11 @@ fn prioritise_requested_model(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex as StdMutex;
+    use std::sync::{
+        Mutex as StdMutex,
+        atomic::{AtomicBool, Ordering},
+    };
+    use std::task::{Context, Poll};
 
     use async_trait::async_trait;
     use futures::StreamExt;
@@ -375,6 +414,86 @@ mod tests {
     use tokio::time::advance;
 
     use super::*;
+
+    struct ControlledStream {
+        chunks: futures::channel::mpsc::UnboundedReceiver<StreamChunk>,
+        dropped: Arc<AtomicBool>,
+    }
+
+    impl Stream for ControlledStream {
+        type Item = StreamChunk;
+
+        fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            Pin::new(&mut self.chunks).poll_next(cx)
+        }
+    }
+
+    impl Drop for ControlledStream {
+        fn drop(&mut self) {
+            self.dropped.store(true, Ordering::SeqCst);
+        }
+    }
+
+    struct ControlledProvider {
+        name: &'static str,
+        chunks: StdMutex<Option<futures::channel::mpsc::UnboundedReceiver<StreamChunk>>>,
+        dropped: Arc<AtomicBool>,
+    }
+
+    impl ControlledProvider {
+        fn new(
+            name: &'static str,
+        ) -> (
+            Arc<Self>,
+            futures::channel::mpsc::UnboundedSender<StreamChunk>,
+            Arc<AtomicBool>,
+        ) {
+            let (tx, rx) = futures::channel::mpsc::unbounded();
+            let dropped = Arc::new(AtomicBool::new(false));
+            (
+                Arc::new(Self {
+                    name,
+                    chunks: StdMutex::new(Some(rx)),
+                    dropped: Arc::clone(&dropped),
+                }),
+                tx,
+                dropped,
+            )
+        }
+    }
+
+    #[async_trait]
+    impl LlmProvider for ControlledProvider {
+        fn model_id(&self) -> &str {
+            self.name
+        }
+
+        async fn complete(
+            &self,
+            _: CompletionRequest,
+        ) -> Result<CompletionResponse, ProviderError> {
+            unreachable!("controlled provider is streaming-only")
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, ProviderError> {
+            unreachable!("controlled provider is streaming-only")
+        }
+
+        fn stream(&self, _: CompletionRequest) -> Pin<Box<dyn Stream<Item = StreamChunk> + Send>> {
+            Box::pin(ControlledStream {
+                chunks: self
+                    .chunks
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .expect("controlled stream requested more than once"),
+                dropped: Arc::clone(&self.dropped),
+            })
+        }
+    }
 
     // -----------------------------------------------------------------------
     // Helpers
@@ -830,6 +949,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stream_forwards_first_chunk_before_provider_finishes() {
+        let (provider, mut inner_tx, _) = ControlledProvider::new("p1");
+        let failover = FailoverProvider::with_defaults(vec![provider]);
+        let mut stream = failover.stream(completion_req());
+
+        inner_tx
+            .send(StreamChunk::Delta {
+                content: "first".into(),
+            })
+            .await
+            .unwrap();
+
+        let first = tokio::time::timeout(Duration::from_millis(100), stream.next())
+            .await
+            .expect("first chunk must arrive while the provider stream remains open");
+        assert!(matches!(
+            first,
+            Some(StreamChunk::Delta { content }) if content == "first"
+        ));
+    }
+
+    #[tokio::test]
     async fn stream_returns_error_when_all_providers_fail() {
         let p1 = SequencedProvider::new("p1", vec![Err(ProviderError::StreamError("err1".into()))]);
         let p2 = SequencedProvider::new("p2", vec![Err(ProviderError::StreamError("err2".into()))]);
@@ -843,6 +984,74 @@ mod tests {
                 .any(|c| matches!(c, StreamChunk::Error { .. })),
             "expected an error chunk when all providers fail"
         );
+    }
+
+    #[tokio::test]
+    async fn stream_forwards_post_output_error_without_failover() {
+        let (primary, mut primary_tx, _) = ControlledProvider::new("p1");
+        let secondary = SequencedProvider::new("p2", vec![Ok(ok_completion("duplicate"))]);
+        let secondary_calls = Arc::clone(&secondary.call_count);
+        let failover = FailoverProvider::with_defaults(vec![primary, secondary]);
+        let mut stream = failover.stream(completion_req());
+
+        primary_tx
+            .send(StreamChunk::Delta {
+                content: "partial".into(),
+            })
+            .await
+            .unwrap();
+        primary_tx
+            .send(StreamChunk::Error {
+                message: "interrupted".into(),
+            })
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            stream.next().await,
+            Some(StreamChunk::Delta { content }) if content == "partial"
+        ));
+        assert!(matches!(
+            stream.next().await,
+            Some(StreamChunk::Error { message }) if message == "interrupted"
+        ));
+        assert!(stream.next().await.is_none());
+        assert_eq!(*secondary_calls.lock().unwrap(), 0);
+        assert!(
+            failover.cooldowns.lock().unwrap()[0].is_some(),
+            "the failed provider must still enter cooldown"
+        );
+    }
+
+    #[tokio::test]
+    async fn dropping_receiver_drops_active_provider_stream() {
+        let (provider, mut inner_tx, dropped) = ControlledProvider::new("p1");
+        let failover = FailoverProvider::with_defaults(vec![provider]);
+        let mut stream = failover.stream(completion_req());
+
+        inner_tx
+            .send(StreamChunk::Delta {
+                content: "first".into(),
+            })
+            .await
+            .unwrap();
+        assert!(stream.next().await.is_some());
+        drop(stream);
+
+        inner_tx
+            .send(StreamChunk::Delta {
+                content: "cancel checkpoint".into(),
+            })
+            .await
+            .unwrap();
+
+        tokio::time::timeout(Duration::from_millis(100), async {
+            while !dropped.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("receiver closure must drop the active provider stream");
     }
 
     // -----------------------------------------------------------------------
