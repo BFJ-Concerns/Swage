@@ -30,7 +30,10 @@ export interface ConversationStore {
   appendAssistantMessage(message: {
     content: string;
     timestamp: string;
-    turn_state: Extract<MessageView["turn_state"], "completed" | "interrupted">;
+    turn_state: Extract<
+      MessageView["turn_state"],
+      "completed" | "failed" | "interrupted"
+    >;
   }): void;
   refreshActiveConversation(): Promise<void>;
 }

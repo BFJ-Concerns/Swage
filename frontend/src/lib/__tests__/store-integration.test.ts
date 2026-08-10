@@ -162,11 +162,13 @@ describe("streaming store → conversation store: turn lifecycle", () => {
       code: "provider_error",
       message: "rate limited",
     });
+    expect(streamingStore.streamedContent).toBe("");
 
     const messages = conversationStore.activeConversation!.messages;
     const assistantMessages = messages.filter((m) => m.role === "assistant");
     expect(assistantMessages).toHaveLength(1);
     expect(assistantMessages[0].content).toBe("Svelte is");
+    expect(assistantMessages[0].turn_state).toBe("failed");
   });
 
   it("preserves partial response on cancellation", async () => {
@@ -185,11 +187,13 @@ describe("streaming store → conversation store: turn lifecycle", () => {
     streamingStore.handleServerEvent({ type: "cancelled" });
 
     expect(streamingStore.isStreaming).toBe(false);
+    expect(streamingStore.streamedContent).toBe("");
 
     const messages = conversationStore.activeConversation!.messages;
     const assistantMessages = messages.filter((m) => m.role === "assistant");
     expect(assistantMessages).toHaveLength(1);
     expect(assistantMessages[0].content).toBe("Here is the beginning");
+    expect(assistantMessages[0].turn_state).toBe("interrupted");
   });
 });
 

@@ -49,13 +49,14 @@ function makeAssistantMessage(
   content: string,
   tool_calls?: ToolCallView[],
   model?: string | null,
+  turnState: MessageView["turn_state"] = "completed",
 ): MessageView {
   _msgSeq += 1;
   return {
     role: "assistant",
     content,
     timestamp: `2026-03-20T10:00:${String(_msgSeq).padStart(2, "0")}Z`,
-    turn_state: "completed",
+    turn_state: turnState,
     ...(tool_calls ? { tool_calls } : {}),
     ...(model !== undefined ? { model } : {}),
   };
@@ -151,6 +152,22 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 
 describe("historical tool calls from committed messages", () => {
+  it("distinguishes interrupted and failed responses for the user", () => {
+    const store = makeConversationStore([
+      makeAssistantMessage("Stopped partial", undefined, undefined, "interrupted"),
+      makeAssistantMessage("Failed partial", undefined, undefined, "failed"),
+    ]);
+
+    component = mount(MessageDisplay, {
+      target: document.body,
+      props: { store, streamingStore: makeStreamingStore() },
+    });
+
+    expect(document.body.textContent).toContain("Response interrupted");
+    expect(document.body.textContent).toContain("Response failed");
+    expect(document.body.textContent?.match(/Response interrupted/g)).toHaveLength(1);
+  });
+
   it("renders a .tool-call element for each tool call on an assistant message", () => {
     const store = makeConversationStore([
       makeAssistantMessage("Here is the file:", [makeToolCall()]),
