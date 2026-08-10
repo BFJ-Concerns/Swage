@@ -252,9 +252,10 @@ impl LlmProvider for FailoverProvider {
 
     /// Route the streaming completion through the provider chain.
     ///
-    /// Chunks are forwarded as they arrive. An error before any chunk from the
-    /// provider causes failover; after output starts, an error is forwarded
-    /// terminally so a replacement provider cannot duplicate partial output.
+    /// Content chunks are forwarded as they arrive. Non-content chunks are
+    /// held until the attempt commits, so accounting and completion from a
+    /// discarded provider cannot escape. An error before content causes
+    /// failover; after content starts, an error is forwarded terminally.
     /// Dropping the returned stream stops forwarding and drops the active
     /// provider stream at the next produced chunk.
     fn stream(
@@ -315,6 +316,7 @@ impl LlmProvider for FailoverProvider {
             for idx in order {
                 let mut stream = providers[idx].stream(request.clone());
                 let mut output_started = false;
+                let mut pending_chunks = Vec::new();
                 let mut retryable_error = None;
 
                 while let Some(chunk) = stream.next().await {
@@ -334,9 +336,22 @@ impl LlmProvider for FailoverProvider {
                             return;
                         }
                         chunk => {
-                            output_started |= contains_user_visible_content(&chunk);
-                            if tx.send(chunk).await.is_err() {
-                                return;
+                            if output_started {
+                                if tx.send(chunk).await.is_err() {
+                                    return;
+                                }
+                            } else if contains_user_visible_content(&chunk) {
+                                output_started = true;
+                                for pending_chunk in pending_chunks.drain(..) {
+                                    if tx.send(pending_chunk).await.is_err() {
+                                        return;
+                                    }
+                                }
+                                if tx.send(chunk).await.is_err() {
+                                    return;
+                                }
+                            } else {
+                                pending_chunks.push(chunk);
                             }
                         }
                     }
@@ -350,6 +365,11 @@ impl LlmProvider for FailoverProvider {
                 }
 
                 let Some(message) = retryable_error else {
+                    for pending_chunk in pending_chunks {
+                        if tx.send(pending_chunk).await.is_err() {
+                            return;
+                        }
+                    }
                     cooldowns
                         .lock()
                         .expect("failover cooldown lock should not be poisoned")[idx] = None;
