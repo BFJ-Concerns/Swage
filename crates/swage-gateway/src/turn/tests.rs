@@ -3771,6 +3771,73 @@ async fn cancelled_before_next_tool_persists_completed_round_text() {
 }
 
 #[tokio::test]
+async fn cancelled_before_next_round_persists_completed_round_text() {
+    let rounds = vec![vec![
+        StreamChunk::Delta {
+            content: COMPLETED_ROUND_PARTIAL.into(),
+        },
+        StreamChunk::ToolUse {
+            call_id: "first".into(),
+            name: "echo".into(),
+            arguments: serde_json::json!({ "text": "first" }),
+        },
+        StreamChunk::Done {
+            finish_reason: None,
+        },
+    ]];
+    let (mut state, session_id) = make_state_with_tools(rounds).await;
+    let hook_reached = Arc::new(Notify::new());
+    let hook_release = Arc::new(Notify::new());
+    let mut hook_registry = HookRegistry::new();
+    hook_registry.register(HookRegistration::new(Arc::new(PausingPostToolHook {
+        reached: Arc::clone(&hook_reached),
+        release: Arc::clone(&hook_release),
+    })));
+    state.hook_registry = Some(Arc::new(hook_registry));
+    let state = Arc::new(state);
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let state_for_turn = Arc::clone(&state);
+    let turn_task = tokio::spawn(async move {
+        process_turn(
+            &state_for_turn,
+            session_id,
+            None,
+            "Use one tool".to_string(),
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
+        )
+        .await
+    });
+
+    hook_reached.notified().await;
+    cancel_turn(&state, session_id)
+        .await
+        .expect("cancel should succeed after the first round's tool completes");
+    hook_release.notify_one();
+    turn_task
+        .await
+        .expect("turn task should not panic")
+        .expect("cancelled turn should settle cleanly");
+
+    let conversation = crate::service::ConversationService::new(
+        Arc::clone(&state.storage),
+        Arc::clone(&state.space_store),
+    )
+    .get_conversation(session_id)
+    .await
+    .expect("reload-shaped conversation read should succeed");
+    assert_eq!(conversation.messages.len(), 2, "user and partial assistant");
+    assert_eq!(conversation.messages[1].role, "assistant");
+    assert_eq!(conversation.messages[1].content, COMPLETED_ROUND_PARTIAL);
+    assert_eq!(
+        conversation.messages[1].turn_state,
+        Some(swage_protocol::client::conversation::TurnState::Interrupted)
+    );
+}
+
+#[tokio::test]
 async fn cancelled_hook_approval_persists_completed_round_text() {
     let rounds = vec![vec![
         StreamChunk::Delta {
