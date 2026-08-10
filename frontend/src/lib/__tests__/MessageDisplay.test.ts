@@ -18,7 +18,11 @@ import { describe, it, expect, afterEach } from "vitest";
 import { mount, unmount } from "svelte";
 import MessageDisplay from "../components/MessageDisplay.svelte";
 import type { ConversationStore } from "../stores/conversations";
-import type { ProviderRetryState, StreamingStore } from "../stores/streaming";
+import {
+  createStreamingStore,
+  type ProviderRetryState,
+  type StreamingStore,
+} from "../stores/streaming";
 import type { ConversationDetail, MessageView, ToolCallView } from "../types";
 
 type MountedComponent = ReturnType<typeof mount>;
@@ -85,7 +89,9 @@ function makeConversationStore(messages: MessageView[]): ConversationStore {
     createConversation: async () => {},
     deleteConversation: async () => {},
     appendOptimisticUserMessage: () => {},
-    appendAssistantMessage: () => {},
+    appendAssistantMessage: (message) => {
+      messages.push({ role: "assistant", ...message });
+    },
     clearActiveConversation: () => {},
     refreshActiveConversation: async () => {},
   };
@@ -152,6 +158,28 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 
 describe("historical tool calls from committed messages", () => {
+  it("renders settled partial content only once after the turn ends", () => {
+    const partialContent = "The response reached this point";
+    const store = makeConversationStore([]);
+    const streamingStore = createStreamingStore({ conversationStore: store });
+
+    streamingStore.startTurn("Continue until stopped");
+    streamingStore.handleServerEvent({
+      type: "token",
+      content: partialContent,
+    });
+    streamingStore.handleServerEvent({ type: "cancelled" });
+
+    component = mount(MessageDisplay, {
+      target: document.body,
+      props: { store, streamingStore },
+    });
+
+    expect(
+      document.body.textContent?.match(new RegExp(partialContent, "g")),
+    ).toHaveLength(1);
+  });
+
   it("distinguishes interrupted and failed responses for the user", () => {
     const store = makeConversationStore([
       makeAssistantMessage("Stopped partial", undefined, undefined, "interrupted"),
