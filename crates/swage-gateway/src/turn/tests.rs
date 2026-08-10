@@ -4134,6 +4134,11 @@ async fn second_tool_round_request_keeps_structured_tool_messages() {
     assert_eq!(requests.len(), 2, "expected two provider requests");
 
     let second = &requests[1];
+    assert_eq!(second.messages.len(), 4);
+    assert_eq!(second.messages[0].role(), Role::System);
+    assert_eq!(second.messages[1].role(), Role::User);
+    assert_eq!(second.messages[2].role(), Role::Assistant);
+    assert_eq!(second.messages[3].role(), Role::User);
     assert!(
         second.messages.iter().any(|message| {
             message.role() == Role::System
@@ -5264,6 +5269,11 @@ async fn approval_resumption_keeps_structured_tool_messages() {
     assert_eq!(requests.len(), 2, "expected two provider requests");
 
     let second = &requests[1];
+    assert_eq!(second.messages.len(), 4);
+    assert_eq!(second.messages[0].role(), Role::System);
+    assert_eq!(second.messages[1].role(), Role::User);
+    assert_eq!(second.messages[2].role(), Role::Assistant);
+    assert_eq!(second.messages[3].role(), Role::User);
     assert!(
         second.messages.iter().any(|message| {
             message.role() == Role::System
@@ -5725,7 +5735,10 @@ async fn delegate_tool_detaches_child_and_persists_result_after_release() {
             .list_by_correlation(delegate_message_id)
             .await
             .expect("list correlated messages after release");
-        if !result_messages.is_empty() {
+        if result_messages
+            .iter()
+            .any(|message| message.status != MessageStatus::Pending)
+        {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
