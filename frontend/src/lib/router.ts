@@ -47,6 +47,7 @@ export interface RouterOptions {
   conversationStore?: {
     selectConversation(id: string): Promise<void>;
   };
+  onRouteChange?: (route: Route) => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -117,10 +118,15 @@ export function createRouter(options?: RouterOptions): Router {
   // Seed from the current URL so the initial state is always consistent.
   let currentRoute: Route = parseRoute(window.location.pathname);
 
+  function updateRoute(route: Route): void {
+    currentRoute = route;
+    options?.onRouteChange?.(route);
+  }
+
   // Called on every URL change (pushState + popstate).
   async function applyLocation(): Promise<void> {
     const route = parseRoute(window.location.pathname);
-    currentRoute = route;
+    updateRoute(route);
 
     if (route.conversationId && options?.conversationStore) {
       try {
@@ -130,14 +136,14 @@ export function createRouter(options?: RouterOptions): Router {
           // The ID in the URL is stale (conversation deleted or never existed).
           // Fall back to the root and flag the not-found state so the UI
           // can show an appropriate notice.
-          currentRoute = {
+          updateRoute({
             path: "/",
             conversationId: null,
             settingsTab: null,
             settingsSpaceSlug: null,
             settingsSpaceTab: null,
             notFound: true,
-          };
+          });
           window.history.replaceState(null, "", "/");
         } else {
           throw error;
@@ -156,7 +162,7 @@ export function createRouter(options?: RouterOptions): Router {
       // navigate() is always intentional — no async store call needed here.
       // The calling code (e.g. selectConversation in conversation list) has
       // already updated the store; we just sync the URL.
-      currentRoute = parseRoute(path);
+      updateRoute(parseRoute(path));
     },
 
     async init(): Promise<void> {
