@@ -73,6 +73,7 @@ pub(crate) struct GatewayDispatcherBuild {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ExecutionIsolation {
     Isolated,
+    AppServerPolicy,
     Degraded { reason: String },
 }
 
@@ -177,6 +178,13 @@ pub(super) async fn build_turn_sandbox(
     workspace_policy: Option<&TrustedWorkspacePolicy>,
 ) -> Result<TurnSandboxBuild, swage_core::SandboxError> {
     if !config.sandbox.enabled {
+        if config.default_provider_protocol() == swage_config::Protocol::Codex {
+            return Ok(TurnSandboxBuild {
+                sandbox: None,
+                isolation: ExecutionIsolation::AppServerPolicy,
+                backend: SandboxBackend::None,
+            });
+        }
         require_degraded_execution_opt_in(config)?;
         return Ok(TurnSandboxBuild {
             sandbox: None,
@@ -260,14 +268,27 @@ async fn build_turn_sandbox_for_backend_selection(
                     backend: SandboxBackend::Bubblewrap,
                 });
             }
-            Err(error) if !config.sandbox.allow_degraded_execution => return Err(error),
+            Err(error) if !config.sandbox.allow_degraded_execution => {
+                tracing::warn!(
+                    error = %error,
+                    "sandbox setup failed; refusing degraded execution without explicit permission"
+                );
+                return Err(error);
+            }
             Err(error) => {
                 degradation_reason = format!("sandbox_setup_failed: {error}");
                 tracing::warn!(error = %error, "sandbox setup failed; using explicitly permitted degraded execution")
             }
         }
     } else {
-        require_degraded_execution_opt_in(config)?;
+        if let Err(error) = require_degraded_execution_opt_in(config) {
+            tracing::warn!(
+                error = %error,
+                reason = "bubblewrap_unavailable",
+                "sandbox unavailable; refusing degraded execution without explicit permission"
+            );
+            return Err(error);
+        }
         degradation_reason = "bubblewrap_unavailable".into();
     }
 
@@ -432,6 +453,27 @@ mod tests {
     use super::*;
     use crate::turn::tests::{MockStorage, make_state_with_session, make_state_with_storage};
 
+    fn codex_config() -> swage_config::ResolvedConfig {
+        let mut config = swage_config::ResolvedConfig::default();
+        config.providers.entries.insert(
+            "codex".into(),
+            swage_config::ProviderEndpointConfig {
+                protocol: swage_config::Protocol::Codex,
+                ..Default::default()
+            },
+        );
+        config.models.default = "codex".into();
+        config.models.entries.insert(
+            "codex".into(),
+            swage_config::ModelEndpointConfig {
+                provider_id: "codex".into(),
+                model_id: "fake-codex".into(),
+                ..Default::default()
+            },
+        );
+        config
+    }
+
     #[test]
     fn degraded_execution_is_denied_by_default() {
         let config = swage_config::ResolvedConfig::default();
@@ -474,6 +516,58 @@ mod tests {
         assert_eq!(events[0].entity_id, turn_id.to_string());
         assert_eq!(events[0].event_kind, "execution_isolation_degraded");
         assert_eq!(events[0].metadata["execution_context"], "scheduled turn");
+    }
+
+    #[tokio::test]
+    async fn disabled_gateway_sandbox_for_codex_uses_app_server_policy_without_degradation() {
+        let (state, session_id) = make_state_with_session(Vec::new()).await;
+        let workspace = tempfile::tempdir().unwrap();
+        let agent_config = AgentConfig::new("gateway")
+            .with_workspace(workspace.path(), vec![workspace.path().to_path_buf()]);
+        let mut config = codex_config();
+        config.sandbox.enabled = false;
+        assert!(!config.sandbox.allow_degraded_execution);
+
+        let build = build_turn_sandbox(&state, &config, &agent_config, None)
+            .await
+            .expect("Codex App Server policy should not require degraded execution opt-in");
+
+        assert_eq!(build.backend, SandboxBackend::None);
+        assert!(build.sandbox.is_none());
+        assert_eq!(build.isolation, ExecutionIsolation::AppServerPolicy);
+
+        record_degraded_execution(
+            &state,
+            &build.isolation,
+            "interactive turn",
+            Some(session_id),
+            Some(Uuid::new_v4()),
+        )
+        .await
+        .expect("App Server policy should not create a degradation audit event");
+        assert!(state.storage.list_audit_events().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn disabled_gateway_sandbox_for_non_codex_remains_degraded() {
+        let (state, _session_id) = make_state_with_session(Vec::new()).await;
+        let workspace = tempfile::tempdir().unwrap();
+        let agent_config = AgentConfig::new("gateway")
+            .with_workspace(workspace.path(), vec![workspace.path().to_path_buf()]);
+        let mut config = swage_config::ResolvedConfig::default();
+        config.sandbox.enabled = false;
+        config.sandbox.allow_degraded_execution = true;
+
+        let build = build_turn_sandbox(&state, &config, &agent_config, None)
+            .await
+            .expect("explicitly opted-in non-Codex execution should remain available");
+
+        assert_eq!(
+            build.isolation,
+            ExecutionIsolation::Degraded {
+                reason: "sandbox_disabled_by_configuration".into(),
+            }
+        );
     }
 
     #[tokio::test]
