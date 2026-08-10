@@ -64,7 +64,10 @@ pub enum ChangeOperation {
     /// Replace a schedule with a complete re-armed state.
     ResumeSchedule { schedule: NewSchedule },
     /// Remove a schedule.
-    DeleteSchedule { schedule_id: Uuid },
+    DeleteSchedule {
+        schedule_id: Uuid,
+        space_id: Option<Uuid>,
+    },
 }
 
 /// How much scrutiny an operation kind warrants. Declared with the
@@ -76,6 +79,15 @@ pub enum RiskBand {
     Routine,
     /// Changes that alter what an agent is allowed to do.
     Sensitive,
+}
+
+impl RiskBand {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Routine => "routine",
+            Self::Sensitive => "sensitive",
+        }
+    }
 }
 
 impl ChangeOperation {
@@ -105,7 +117,7 @@ impl ChangeOperation {
             | Self::UpdateSchedule { schedule }
             | Self::PauseSchedule { schedule }
             | Self::ResumeSchedule { schedule } => return schedule.id.to_string(),
-            Self::DeleteSchedule { schedule_id } => return schedule_id.to_string(),
+            Self::DeleteSchedule { schedule_id, .. } => return schedule_id.to_string(),
         };
         scoped_entity_id(id, space_id)
     }
@@ -130,12 +142,12 @@ impl ChangeOperation {
             | Self::UpdateSchedule { schedule }
             | Self::PauseSchedule { schedule }
             | Self::ResumeSchedule { schedule } => schedule_space_id(schedule),
-            Self::DeleteSchedule { .. } => None,
+            Self::DeleteSchedule { space_id, .. } => *space_id,
         }
     }
 
-    /// Risk bands live with the operation kind: permission-bearing changes
-    /// are sensitive, the rest routine.
+    /// Risk bands live with the operation kind so audit and later review can
+    /// distinguish standing authority changes from ordinary state changes.
     pub fn risk_band(&self) -> RiskBand {
         match self {
             Self::UpsertAgentDefinition { definition } => {
@@ -146,11 +158,10 @@ impl ChangeOperation {
                 }
             }
             Self::DeleteAgentDefinition { .. } => RiskBand::Routine,
-            Self::CreateSchedule { .. }
-            | Self::UpdateSchedule { .. }
+            Self::CreateSchedule { .. } | Self::DeleteSchedule { .. } => RiskBand::Sensitive,
+            Self::UpdateSchedule { .. }
             | Self::PauseSchedule { .. }
-            | Self::ResumeSchedule { .. }
-            | Self::DeleteSchedule { .. } => RiskBand::Routine,
+            | Self::ResumeSchedule { .. } => RiskBand::Routine,
         }
     }
 
@@ -341,7 +352,7 @@ pub async fn apply_change(
             apply_complete_schedule(state, schedule).await?;
             format!("resumed schedule '{}'", schedule.message)
         }
-        ChangeOperation::DeleteSchedule { schedule_id } => {
+        ChangeOperation::DeleteSchedule { schedule_id, .. } => {
             if !state.storage.delete_schedule(*schedule_id).await? {
                 return Err(GatewayError::ValidationError(format!(
                     "no schedule with id {schedule_id}"

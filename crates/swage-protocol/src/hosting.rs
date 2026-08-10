@@ -84,6 +84,22 @@ pub struct ApprovalDecisionRequest {
     pub reason: Option<String>,
 }
 
+/// Ask the operator control plane to restore a recorded configuration version.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+pub struct RollbackConfigurationRequest {
+    pub version_id: Uuid,
+}
+
+/// The new change-case record produced by a configuration rollback.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+pub struct ConfigurationChangeResponse {
+    pub version_id: Uuid,
+    pub entity_kind: String,
+    pub entity_id: String,
+    pub summary: String,
+    pub risk_band: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
 pub struct OperatorGatewaySummary {
     pub status: String,
@@ -143,6 +159,8 @@ pub struct HostingSurface {
     heartbeat: MachineHeartbeatRequest,
     approvals: ApprovalListResponse,
     approval_decision: ApprovalDecisionRequest,
+    rollback_configuration: RollbackConfigurationRequest,
+    configuration_change: ConfigurationChangeResponse,
     operator_overview: OperatorOverviewResponse,
     devices: device::DeviceListResponse,
 }

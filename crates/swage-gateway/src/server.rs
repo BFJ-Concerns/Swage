@@ -285,6 +285,10 @@ pub fn build_router(state: AppState) -> Router {
             "/api/schedules/{id}/runs",
             get(handlers::list_schedule_runs),
         )
+        .route(
+            "/api/operator/configuration/rollback",
+            post(handlers::rollback_configuration),
+        )
         // Runtime presence and liveness.
         .route("/api/presence", get(handlers::presence_snapshot))
         .route(

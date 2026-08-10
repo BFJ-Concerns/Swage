@@ -23,7 +23,7 @@ use swage_protocol::client::schedule as wire;
 use swage_storage::ScheduleCreator;
 use swage_tool::context::ToolContext;
 
-use crate::change_case::{ChangeOperation, apply_change, rollback_to_version};
+use crate::change_case::{ChangeOperation, apply_change};
 use crate::state::AppState;
 use crate::tool::Tool;
 use crate::tool_executor::GatewayToolContext;
@@ -129,7 +129,7 @@ impl Tool for ScheduleTool {
     fn description(&self) -> &str {
         "Create and manage standing schedules — recurring or one-off background work the \
          gateway runs on its own clock, whether or not this conversation is still open. Set \
-         `action` to create, list, update, pause, resume, remove, or rollback.\n\n\
+         `action` to create, list, update, pause, resume, or remove.\n\n\
          You choose where each run executes with `session` (required on create). Almost always \
          set it to `fresh`: every run gets its own new session, opened with just the task and the \
          previous run's outcome — a clean, minimal context each time, not the entire history of \
@@ -149,7 +149,7 @@ impl Tool for ScheduleTool {
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["create", "list", "update", "pause", "resume", "remove", "rollback"],
+                    "enum": ["create", "list", "update", "pause", "resume", "remove"],
                     "description": "create: define a new schedule. list: return every schedule \
                                     with its status, next run time, and creator. update: change an \
                                     existing schedule's task, timing, or gate. pause: stop future \
@@ -162,10 +162,6 @@ impl Tool for ScheduleTool {
                     "description": "The schedule's UUID, from a create result or a list entry. \
                                     Required for update, pause, resume, and remove; ignored \
                                     otherwise."
-                },
-                "version_id": {
-                    "type": "string",
-                    "description": "For rollback: the version UUID returned by an earlier schedule mutation."
                 },
                 "message": {
                     "type": "string",
@@ -276,7 +272,6 @@ impl Tool for ScheduleTool {
             "pause" => self.pause(state, &params, session_id).await,
             "resume" => self.resume(state, &params, session_id).await,
             "remove" => self.remove(state, &params, session_id).await,
-            "rollback" => self.rollback(state, &params, session_id).await,
             other => Err(invalid(
                 SCHEDULE_TOOL,
                 format!(
@@ -391,9 +386,25 @@ impl ScheduleTool {
         session_id: Uuid,
     ) -> Result<Value, ToolError> {
         let schedule_id = schedule_id(params)?;
+        let schedule = state
+            .storage
+            .get_schedule(schedule_id)
+            .await
+            .map_err(|error| ToolError::ExecutionFailed {
+                name: SCHEDULE_TOOL.into(),
+                message: error.to_string(),
+            })?
+            .ok_or_else(|| invalid(SCHEDULE_TOOL, format!("no schedule with id {schedule_id}")))?;
+        let space_id = match schedule.session_policy {
+            swage_storage::SessionPolicy::Fresh { space_id, .. } => Some(space_id),
+            swage_storage::SessionPolicy::Continuation { .. } => None,
+        };
         let case = apply_change(
             state,
-            ChangeOperation::DeleteSchedule { schedule_id },
+            ChangeOperation::DeleteSchedule {
+                schedule_id,
+                space_id,
+            },
             SCHEDULE_TOOL,
             Some(session_id),
         )
@@ -447,33 +458,6 @@ impl ScheduleTool {
         let schedule = crate::schedule::get_schedule_wire(state, schedule_id)
             .await
             .map_err(|error| map_service_error(SCHEDULE_TOOL, error))?;
-        Ok(json!({ "schedule": schedule, "change_case": case }))
-    }
-
-    async fn rollback(
-        &self,
-        state: &AppState,
-        params: &Value,
-        session_id: Uuid,
-    ) -> Result<Value, ToolError> {
-        let version_id = parse_uuid(
-            SCHEDULE_TOOL,
-            "version_id",
-            required_str(SCHEDULE_TOOL, params, "version_id")?,
-        )?;
-        let case = rollback_to_version(state, version_id, SCHEDULE_TOOL, Some(session_id))
-            .await
-            .map_err(|error| map_service_error(SCHEDULE_TOOL, error))?;
-        let schedule_id = Uuid::parse_str(&case.entity_id)
-            .map_err(|_| invalid(SCHEDULE_TOOL, "recorded change was not for a schedule"))?;
-        let schedule = state
-            .storage
-            .get_schedule(schedule_id)
-            .await
-            .map_err(|error| ToolError::ExecutionFailed {
-                name: SCHEDULE_TOOL.into(),
-                message: error.to_string(),
-            })?;
         Ok(json!({ "schedule": schedule, "change_case": case }))
     }
 }
