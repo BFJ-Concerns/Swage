@@ -23,6 +23,7 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use swage_core::ToolError;
+use swage_protocol::client::knowledge::{KnowledgeSearchResponse, KnowledgeSearchResult};
 use swage_storage::{
     CurationAssertionKind, NewCurationAssertion, NewKnowledgeCitation, NewSourceObservation,
     ObservationOrigin,
@@ -167,36 +168,31 @@ impl Tool for KnowledgeSearchTool {
             .await
             .map_err(|error| failed(SEARCH_TOOL, error))?;
 
-        let results: Vec<Value> = hits
-            .iter()
-            .map(|hit| {
-                json!({
-                    "observation_id": hit.observation_id,
-                    "version": hit.derivation_version,
-                    "source": hit.origin.url.as_deref()
-                        .or(hit.origin.local_path.as_deref()),
-                    "retrieved_at": hit.retrieved_at.to_rfc3339(),
-                    "passage": hit.snippet,
-                    "offset": hit.snippet_offset,
-                })
+        let results: Vec<KnowledgeSearchResult> = hits
+            .into_iter()
+            .map(|hit| KnowledgeSearchResult {
+                observation_id: hit.observation_id,
+                version: hit.derivation_version,
+                source: hit.origin.url.or(hit.origin.local_path),
+                retrieved_at: hit.retrieved_at,
+                passage: hit.snippet,
+                offset: hit.snippet_offset,
             })
             .collect();
-
-        Ok(json!({
-            "results": results,
-            "guidance": if results_empty(&results) {
+        let response = KnowledgeSearchResponse {
+            guidance: if results.is_empty() {
                 "No evidence matched. The knowledge base only holds what has \
                  been captured into it — an empty result means not gathered, \
                  not nonexistent."
             } else {
-                "Cite a passage by its observation_id, version, and offset."
-            },
-        }))
+                "Cite a passage by its observation_id, version, and exact quote. An offset is \
+                 included only when the search passage was located exactly."
+            }
+            .into(),
+            results,
+        };
+        serde_json::to_value(response).map_err(|error| failed(SEARCH_TOOL, error))
     }
-}
-
-fn results_empty(results: &[Value]) -> bool {
-    results.is_empty()
 }
 
 // ---------------------------------------------------------------------------

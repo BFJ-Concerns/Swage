@@ -284,7 +284,7 @@ impl ObservationStore for SqliteStorage {
                     // it so the stored passage is text that literally occurs in
                     // the derivation, then locate its byte offset there.
                     let passage = snippet.trim_matches('…').to_string();
-                    let snippet_offset = locate_search_passage(&full_text, &passage)?;
+                    let snippet_offset = full_text.find(&passage);
                     Ok(KnowledgeSearchHit {
                         observation_id,
                         derivation_version: version,
@@ -304,35 +304,11 @@ impl ObservationStore for SqliteStorage {
     }
 }
 
-fn locate_search_passage(full_text: &str, passage: &str) -> rusqlite::Result<usize> {
-    full_text.find(passage).ok_or_else(|| {
-        rusqlite::Error::FromSqlConversionFailure(
-            5,
-            rusqlite::types::Type::Text,
-            Box::new(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "search returned a passage absent from its extraction derivation",
-            )),
-        )
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::model::{CurationAssertionKind, NewCurationAssertion, NewSpace};
     use crate::store::{CurationAssertionStore, SpaceStore};
-
-    #[test]
-    fn unlocatable_search_passage_fails_instead_of_claiming_offset_zero() {
-        let error = locate_search_passage("real derivation text", "fabricated passage")
-            .expect_err("an absent passage must fail closed");
-        assert!(
-            error
-                .to_string()
-                .contains("absent from its extraction derivation")
-        );
-    }
 
     async fn storage_with_space() -> (SqliteStorage, Uuid) {
         let storage = SqliteStorage::in_memory().unwrap();
@@ -505,7 +481,8 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(
-            &derivation.extracted_text[hit.snippet_offset..hit.snippet_offset + hit.snippet.len()],
+            &derivation.extracted_text
+                [hit.snippet_offset.unwrap()..hit.snippet_offset.unwrap() + hit.snippet.len()],
             hit.snippet
         );
     }
