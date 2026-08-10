@@ -364,16 +364,13 @@ impl LlmProvider for FailoverProvider {
                 last_error_msg = Some(message);
             }
 
-            if tx
+            let _receiver_closed = tx
                 .send(StreamChunk::Error {
                     message: last_error_msg
                         .unwrap_or_else(|| "all failover providers failed".into()),
                 })
                 .await
-                .is_err()
-            {
-                return;
-            }
+                .is_err();
         });
 
         Box::pin(rx)
