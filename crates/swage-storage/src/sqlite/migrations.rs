@@ -76,8 +76,50 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
             "045_knowledge_curation_assertions",
             CREATE_KNOWLEDGE_CURATION_ASSERTIONS,
         ),
+        ("046_workflow_run_parentage", ADD_WORKFLOW_RUN_PARENTAGE),
     ]
 }
+
+/// Composed workflow runs: a child run started by a parent's `workflow()`
+/// call records which parent and which journal seq started it, so a resumed
+/// parent finds its existing child instead of starting a duplicate.
+const ADD_WORKFLOW_RUN_PARENTAGE: &str = "
+    ALTER TABLE workflow_runs
+        ADD COLUMN parent_run_id TEXT REFERENCES workflow_runs(id);
+    ALTER TABLE workflow_runs
+        ADD COLUMN parent_seq INTEGER;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_workflow_runs_parent_call
+        ON workflow_runs(parent_run_id, parent_seq)
+        WHERE parent_run_id IS NOT NULL;
+
+    -- The journal gains two host-call kinds (workflow_call, timer); SQLite
+    -- cannot widen a CHECK in place, so the table is rebuilt. Existing rows
+    -- carry over unchanged.
+    CREATE TABLE workflow_journal_new (
+        id                TEXT NOT NULL PRIMARY KEY,
+        run_id            TEXT NOT NULL REFERENCES workflow_runs(id) ON DELETE CASCADE,
+        seq               INTEGER NOT NULL,
+        completed_order   INTEGER,
+        kind              TEXT NOT NULL CHECK (kind IN ('agent_call', 'effect', 'log', 'phase', 'workflow_call', 'timer')),
+        status            TEXT NOT NULL CHECK (status IN ('started', 'completed', 'failed')),
+        args_hash         TEXT NOT NULL,
+        request_json      TEXT NOT NULL,
+        result_json       TEXT,
+        error_message     TEXT,
+        effect_kind       TEXT,
+        idempotency_key   TEXT,
+        target_kind       TEXT,
+        started_at        TEXT NOT NULL,
+        completed_at      TEXT,
+        UNIQUE (run_id, seq),
+        UNIQUE (run_id, completed_order)
+    );
+    INSERT INTO workflow_journal_new SELECT * FROM workflow_journal;
+    DROP TABLE workflow_journal;
+    ALTER TABLE workflow_journal_new RENAME TO workflow_journal;
+    CREATE INDEX IF NOT EXISTS idx_workflow_journal_run_seq
+        ON workflow_journal(run_id, seq);
+";
 
 /// Per-turn context assembly report, stored as raw JSON to avoid coupling the
 /// storage layer to the AssemblyReport type definition.
