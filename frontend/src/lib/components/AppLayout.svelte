@@ -35,6 +35,7 @@
     displayPreferences?: DisplayPreferences;
     onSelectTheme?: (mode: ThemeMode) => void;
     modelOptions?: string[];
+    modelCatalogueReady?: boolean;
     defaultModelId?: string | null;
     route?: Route;
     onNavigate?: (path: string) => void;
@@ -54,6 +55,7 @@
     displayPreferences,
     onSelectTheme,
     modelOptions = [],
+    modelCatalogueReady = false,
     defaultModelId = null,
     route,
     onNavigate,
@@ -116,7 +118,7 @@
       {#if streamingStore.pendingApproval}
         <ApprovalCard approval={streamingStore.pendingApproval} />
       {:else}
-        <MessageInput store={streamingStore} {modelOptions} selectedModelId={activeConversation?.selected_model_id ?? defaultModelId} />
+        <MessageInput store={streamingStore} {modelOptions} {modelCatalogueReady} selectedModelId={activeConversation?.selected_model_id ?? defaultModelId} {onNavigate} />
       {/if}
     </section>
   </main>
