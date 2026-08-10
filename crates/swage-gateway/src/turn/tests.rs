@@ -5497,6 +5497,31 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
         child_turns[0].assistant_response.as_deref(),
         Some("Delegate answer")
     );
+    let child_snapshot = state
+        .storage
+        .get_snapshot(child_turns[0].id)
+        .await
+        .expect("read child context snapshot")
+        .expect("delegated assembly report should be persisted");
+    let child_snapshot: serde_json::Value =
+        serde_json::from_str(&child_snapshot).expect("child context snapshot should be JSON");
+    assert!(
+        child_snapshot["elements"].is_array(),
+        "delegated assembly report should contain its element decisions"
+    );
+    let child_audit = state
+        .storage
+        .list_audit_events_by_session(child_sessions[0].id)
+        .await
+        .expect("list child audit events");
+    assert!(
+        child_audit.iter().any(|event| {
+            event.entity_id == crate::experimentation::LOCATION_CONTEXT_ASSEMBLY
+                && event.event_kind == "variant_selected"
+                && event.metadata["turn_id"] == serde_json::json!(child_turns[0].id)
+        }),
+        "delegated assembly selection should be recorded against the child turn"
+    );
 
     let captured_requests = captured_requests.lock().unwrap();
     assert_eq!(
