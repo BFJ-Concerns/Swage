@@ -4398,8 +4398,11 @@ async fn unknown_tool_returns_error_to_model() {
 }
 
 #[tokio::test]
-async fn cancelling_during_tool_execution_interrupts_without_waiting_for_tool_completion() {
+async fn cancelled_during_tool_dispatch_persists_partial_without_waiting() {
     let round_1 = vec![
+        StreamChunk::Delta {
+            content: COMPLETED_ROUND_PARTIAL.into(),
+        },
         StreamChunk::ToolUse {
             call_id: "call_block".into(),
             name: "block".into(),
@@ -4497,6 +4500,25 @@ async fn cancelling_during_tool_execution_interrupts_without_waiting_for_tool_co
     let thread_id = threads[0].id;
     let turns = state.storage.list_turns_by_thread(thread_id).await.unwrap();
     assert_eq!(turns[0].state, TurnState::Interrupted);
+    assert_eq!(
+        turns[0].assistant_response.as_deref(),
+        Some(COMPLETED_ROUND_PARTIAL)
+    );
+
+    let conversation = crate::service::ConversationService::new(
+        Arc::clone(&state.storage),
+        Arc::clone(&state.space_store),
+    )
+    .get_conversation(session_id)
+    .await
+    .expect("reload-shaped conversation read should succeed");
+    assert_eq!(conversation.messages.len(), 2, "user and partial assistant");
+    assert_eq!(conversation.messages[1].role, "assistant");
+    assert_eq!(conversation.messages[1].content, COMPLETED_ROUND_PARTIAL);
+    assert_eq!(
+        conversation.messages[1].turn_state,
+        Some(swage_protocol::client::conversation::TurnState::Interrupted)
+    );
 
     let thread = ThreadStore::get(&*state.storage, thread_id)
         .await
