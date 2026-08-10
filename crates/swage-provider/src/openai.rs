@@ -7,7 +7,6 @@
 use std::pin::Pin;
 
 use async_trait::async_trait;
-use futures::channel::mpsc;
 use futures::{Stream, StreamExt};
 use reqwest::header::{HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
@@ -17,7 +16,7 @@ use swage_core::{
 };
 
 use crate::http::{HttpClient, SseEvent};
-use crate::provider::{LlmProvider, ProviderConfig};
+use crate::provider::{LlmProvider, ProviderConfig, spawn_stream_forwarder};
 
 // ---------------------------------------------------------------------------
 // OpenAI wire types
@@ -751,18 +750,17 @@ impl LlmProvider for OpenAiProvider {
         &self,
         request: CompletionRequest,
     ) -> Pin<Box<dyn Stream<Item = StreamChunk> + Send>> {
-        let (tx, rx) = mpsc::unbounded();
         let body = self.build_request(&request, true);
         let client = self.make_http_client();
 
-        tokio::spawn(async move {
+        spawn_stream_forwarder(move |tx| async move {
             let sse_stream = match client
                 .post_stream("/chat/completions", &body, HeaderMap::new())
                 .await
             {
                 Ok(s) => s,
                 Err(e) => {
-                    let _ = tx.unbounded_send(StreamChunk::Error {
+                    let _ = tx.send(StreamChunk::Error {
                         message: e.to_string(),
                     });
                     return;
@@ -775,7 +773,7 @@ impl LlmProvider for OpenAiProvider {
             'events: while let Some(result) = sse_stream.next().await {
                 let event = match result {
                     Err(e) => {
-                        let _ = tx.unbounded_send(StreamChunk::Error {
+                        let _ = tx.send(StreamChunk::Error {
                             message: e.to_string(),
                         });
                         break;
@@ -791,7 +789,7 @@ impl LlmProvider for OpenAiProvider {
                     if is_done {
                         let remaining = tool_acc.take();
                         for tc in remaining {
-                            let _ = tx.unbounded_send(StreamChunk::ToolUse {
+                            let _ = tx.send(StreamChunk::ToolUse {
                                 call_id: tc.call_id,
                                 name: tc.name,
                                 arguments: tc.arguments,
@@ -799,15 +797,13 @@ impl LlmProvider for OpenAiProvider {
                         }
                     }
 
-                    let _ = tx.unbounded_send(chunk);
+                    let _ = tx.send(chunk);
                     if is_done {
                         break 'events;
                     }
                 }
             }
-        });
-
-        Box::pin(rx)
+        })
     }
 }
 
