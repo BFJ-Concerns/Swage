@@ -363,8 +363,9 @@ async fn run_ephemeral_agent_call(
                 turn.id
             ));
         }
-        (None, structured) => structured
-            .unwrap_or_else(|| Value::String(turn.assistant_response.unwrap_or_default())),
+        (None, structured) => {
+            structured.unwrap_or_else(|| Value::String(turn.assistant_response.unwrap_or_default()))
+        }
     };
     Ok(AgentCallResult {
         output,
@@ -692,45 +693,44 @@ async fn run_host_commands_inner(
                 // honesty is a fresh full wait, not a guessed remainder. The
                 // intent is written here, in the loop, so timer_entries is
                 // populated before any ConfirmTimer can arrive.
-                let entry_id = match replay.get(current_seq as usize) {
-                    Some(entry) if entry.args_hash != hash => {
-                        let _ = reply.send(Err("NondeterministicReplayError".into()));
-                        continue;
-                    }
-                    Some(entry) if entry.status == "completed" => {
-                        timer_entries.insert(timer_id, None);
-                        let _ = reply.send(
-                            entry
-                                .result
-                                .clone()
-                                .ok_or_else(|| "completed timer entry has no result".to_string()),
-                        );
-                        continue;
-                    }
-                    Some(entry) => entry.id,
-                    None => {
-                        match state
-                            .storage
-                            .create_workflow_journal_intent(NewWorkflowJournalIntent {
-                                run_id,
-                                seq: current_seq,
-                                kind: "timer".into(),
-                                args_hash: hash,
-                                request: request_json,
-                                effect_kind: None,
-                                idempotency_key: None,
-                                target_kind: None,
-                            })
-                            .await
-                        {
-                            Ok(intent) => intent.id,
-                            Err(error) => {
-                                let _ = reply.send(Err(error.to_string()));
-                                continue;
+                let entry_id =
+                    match replay.get(current_seq as usize) {
+                        Some(entry) if entry.args_hash != hash => {
+                            let _ = reply.send(Err("NondeterministicReplayError".into()));
+                            continue;
+                        }
+                        Some(entry) if entry.status == "completed" => {
+                            timer_entries.insert(timer_id, None);
+                            let _ =
+                                reply.send(entry.result.clone().ok_or_else(|| {
+                                    "completed timer entry has no result".to_string()
+                                }));
+                            continue;
+                        }
+                        Some(entry) => entry.id,
+                        None => {
+                            match state
+                                .storage
+                                .create_workflow_journal_intent(NewWorkflowJournalIntent {
+                                    run_id,
+                                    seq: current_seq,
+                                    kind: "timer".into(),
+                                    args_hash: hash,
+                                    request: request_json,
+                                    effect_kind: None,
+                                    idempotency_key: None,
+                                    target_kind: None,
+                                })
+                                .await
+                            {
+                                Ok(intent) => intent.id,
+                                Err(error) => {
+                                    let _ = reply.send(Err(error.to_string()));
+                                    continue;
+                                }
                             }
                         }
-                    }
-                };
+                    };
                 timer_entries.insert(timer_id, Some(entry_id));
                 let abandon = CancellationToken::new();
                 pending_timers.insert(timer_id, abandon.clone());
@@ -760,7 +760,10 @@ async fn run_host_commands_inner(
                     Some(None) => Ok(()),
                     Some(Some(entry_id)) => state
                         .storage
-                        .complete_workflow_journal_entry(*entry_id, serde_json::json!({"fired": true}))
+                        .complete_workflow_journal_entry(
+                            *entry_id,
+                            serde_json::json!({"fired": true}),
+                        )
                         .await
                         .map(|_| ())
                         .map_err(|error| error.to_string()),
