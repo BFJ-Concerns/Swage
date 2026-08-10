@@ -2906,20 +2906,6 @@ impl swage_storage::store::CurationAssertionStore for MockStorage {
     ) -> Result<swage_storage::CurationAssertion, StorageError> {
         unimplemented!("turn tests do not exercise knowledge curation")
     }
-
-    async fn list_curation_assertions(
-        &self,
-        _: uuid::Uuid,
-    ) -> Result<Vec<swage_storage::CurationAssertion>, StorageError> {
-        unimplemented!("turn tests do not exercise knowledge curation")
-    }
-
-    async fn get_effective_curation_assertion(
-        &self,
-        _: uuid::Uuid,
-    ) -> Result<Option<swage_storage::CurationAssertion>, StorageError> {
-        unimplemented!("turn tests do not exercise knowledge curation")
-    }
 }
 
 #[async_trait]

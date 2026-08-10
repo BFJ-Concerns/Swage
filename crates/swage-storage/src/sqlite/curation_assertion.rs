@@ -1,6 +1,6 @@
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
-use rusqlite::{OptionalExtension, params};
+use chrono::Utc;
+use rusqlite::params;
 use uuid::Uuid;
 
 use swage_core::StorageError;
@@ -8,51 +8,6 @@ use swage_core::StorageError;
 use crate::model::{CurationAssertion, CurationAssertionKind, NewCurationAssertion};
 use crate::sqlite::SqliteStorage;
 use crate::store::{CurationAssertionStore, ObservationStore};
-
-const ASSERTION_COLUMNS: &str =
-    "id, space_id, observation_id, kind, target_observation_id, created_at";
-
-fn parse_uuid(value: &str) -> rusqlite::Result<Uuid> {
-    value.parse().map_err(|error| {
-        rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(error))
-    })
-}
-
-fn parse_datetime(value: &str) -> rusqlite::Result<DateTime<Utc>> {
-    DateTime::parse_from_rfc3339(value)
-        .map(|value| value.with_timezone(&Utc))
-        .map_err(|error| {
-            rusqlite::Error::FromSqlConversionFailure(
-                0,
-                rusqlite::types::Type::Text,
-                Box::new(error),
-            )
-        })
-}
-
-fn row_to_assertion(row: &rusqlite::Row<'_>) -> rusqlite::Result<CurationAssertion> {
-    let kind = row
-        .get::<_, String>(3)?
-        .parse::<CurationAssertionKind>()
-        .map_err(|error| {
-            rusqlite::Error::FromSqlConversionFailure(
-                3,
-                rusqlite::types::Type::Text,
-                Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, error)),
-            )
-        })?;
-    Ok(CurationAssertion {
-        id: parse_uuid(&row.get::<_, String>(0)?)?,
-        space_id: parse_uuid(&row.get::<_, String>(1)?)?,
-        observation_id: parse_uuid(&row.get::<_, String>(2)?)?,
-        kind,
-        target_observation_id: row
-            .get::<_, Option<String>>(4)?
-            .map(|value| parse_uuid(&value))
-            .transpose()?,
-        created_at: parse_datetime(&row.get::<_, String>(5)?)?,
-    })
-}
 
 #[async_trait]
 impl CurationAssertionStore for SqliteStorage {
@@ -79,7 +34,7 @@ impl CurationAssertionStore for SqliteStorage {
                     "a stale assertion must not have a target observation".into(),
                 ));
             }
-            (CurationAssertionKind::DuplicateOf | CurationAssertionKind::Supersedes, None) => {
+            (CurationAssertionKind::DuplicateOf | CurationAssertionKind::SupersededBy, None) => {
                 return Err(StorageError::ConstraintViolation(
                     "relationship assertions need a target observation".into(),
                 ));
@@ -133,44 +88,6 @@ impl CurationAssertionStore for SqliteStorage {
         })
         .await
     }
-
-    async fn list_curation_assertions(
-        &self,
-        observation_id: Uuid,
-    ) -> Result<Vec<CurationAssertion>, StorageError> {
-        self.with_conn(move |conn| {
-            let mut statement = conn.prepare(&format!(
-                "SELECT {ASSERTION_COLUMNS} FROM knowledge_curation_assertions
-                 WHERE observation_id = ?1 ORDER BY created_at, rowid"
-            ))?;
-            statement
-                .query_map(params![observation_id.to_string()], row_to_assertion)?
-                .collect()
-        })
-        .await
-    }
-
-    async fn get_effective_curation_assertion(
-        &self,
-        observation_id: Uuid,
-    ) -> Result<Option<CurationAssertion>, StorageError> {
-        self.with_conn(move |conn| {
-            // Latest-wins gives one intelligible state per observation while
-            // retaining the complete judgement history. A later assertion of
-            // another kind supersedes the earlier judgement; no row is edited.
-            conn.query_row(
-                &format!(
-                    "SELECT {ASSERTION_COLUMNS} FROM knowledge_curation_assertions
-                     WHERE observation_id = ?1
-                     ORDER BY rowid DESC LIMIT 1"
-                ),
-                params![observation_id.to_string()],
-                row_to_assertion,
-            )
-            .optional()
-        })
-        .await
-    }
 }
 
 #[cfg(test)]
@@ -213,14 +130,14 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn accepts_all_assertion_kinds_and_latest_append_wins() {
+    async fn accepts_all_assertion_kinds() {
         let (storage, space_id) = storage_with_space().await;
         let subject = observation(&storage, space_id, "subject").await;
         let target = observation(&storage, space_id, "target").await;
 
         for kind in [
             CurationAssertionKind::DuplicateOf,
-            CurationAssertionKind::Supersedes,
+            CurationAssertionKind::SupersededBy,
         ] {
             storage
                 .add_curation_assertion(NewCurationAssertion {
@@ -232,7 +149,7 @@ mod tests {
                 .await
                 .unwrap();
         }
-        let stale = storage
+        storage
             .add_curation_assertion(NewCurationAssertion {
                 space_id,
                 observation_id: subject.id,
@@ -241,16 +158,6 @@ mod tests {
             })
             .await
             .unwrap();
-
-        let history = storage.list_curation_assertions(subject.id).await.unwrap();
-        assert_eq!(history.len(), 3);
-        assert_eq!(
-            storage
-                .get_effective_curation_assertion(subject.id)
-                .await
-                .unwrap(),
-            Some(stale)
-        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -282,7 +189,7 @@ mod tests {
             NewCurationAssertion {
                 space_id,
                 observation_id: subject.id,
-                kind: CurationAssertionKind::Supersedes,
+                kind: CurationAssertionKind::SupersededBy,
                 target_observation_id: Some(foreign.id),
             },
         ] {
@@ -319,7 +226,7 @@ mod tests {
             .add_curation_assertion(NewCurationAssertion {
                 space_id,
                 observation_id: subject.id,
-                kind: CurationAssertionKind::Supersedes,
+                kind: CurationAssertionKind::SupersededBy,
                 target_observation_id: Some(replacement.id),
             })
             .await
@@ -384,13 +291,5 @@ mod tests {
                     .is_err()
             );
         }
-        assert_eq!(
-            storage
-                .list_curation_assertions(subject.id)
-                .await
-                .unwrap()
-                .len(),
-            1
-        );
     }
 }

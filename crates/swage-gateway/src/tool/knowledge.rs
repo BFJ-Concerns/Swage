@@ -12,7 +12,7 @@
 //! - **`knowledge_curate`** — append an observation-level judgement without
 //!   changing the gathered evidence.
 //!
-//! Both are host-only (`requires_device_execution`): they reach live gateway
+//! All three are host-only (`requires_device_execution`): they reach live gateway
 //! state and the space's body files. Knowledge content returns as tool
 //! results only — it is gathered external data, never instructions.
 
@@ -354,17 +354,17 @@ impl Tool for KnowledgeCurateTool {
             "properties": {
                 "observation_id": {
                     "type": "string",
-                    "description": "The observation being judged."
+                    "description": "The observation being retired from default retrieval."
                 },
                 "kind": {
                     "type": "string",
-                    "enum": ["duplicate-of", "supersedes", "stale"],
+                    "enum": ["duplicate-of", "superseded-by", "stale"],
                     "description": "The judgement to record."
                 },
                 "target_observation_id": {
                     "type": "string",
-                    "description": "The preferred or replacement observation. Required \
-                                    for duplicate-of and supersedes; omit for stale."
+                    "description": "The observation to prefer instead. Required for \
+                                    duplicate-of and superseded-by; omit for stale."
                 }
             },
             "required": ["observation_id", "kind"]
@@ -385,7 +385,7 @@ impl Tool for KnowledgeCurateTool {
             .map_err(|_| {
                 invalid(
                     CURATE_TOOL,
-                    "'kind' must be duplicate-of, supersedes, or stale",
+                    "'kind' must be duplicate-of, superseded-by, or stale",
                 )
             })?;
         let target_observation_id = params
@@ -402,7 +402,7 @@ impl Tool for KnowledgeCurateTool {
             (CurationAssertionKind::Stale, Some(_)) => {
                 return Err(invalid(CURATE_TOOL, "'stale' must not have a target"));
             }
-            (CurationAssertionKind::DuplicateOf | CurationAssertionKind::Supersedes, None) => {
+            (CurationAssertionKind::DuplicateOf | CurationAssertionKind::SupersededBy, None) => {
                 return Err(invalid(CURATE_TOOL, "this judgement requires a target"));
             }
             _ => {}
@@ -443,8 +443,7 @@ mod tests {
     use crate::turn::tests::MockProvider;
     use swage_provider::LlmProvider;
     use swage_storage::{
-        CurationAssertionStore, NewSession, NewSourceObservation, ObservationStore, SessionStore,
-        SpaceStore, SqliteStorage,
+        NewSession, NewSourceObservation, ObservationStore, SessionStore, SpaceStore, SqliteStorage,
     };
 
     // The tools' host halves (session→space resolution, storage, body files)
@@ -479,7 +478,7 @@ mod tests {
         let schema = KnowledgeCurateTool.parameters();
         assert_eq!(
             schema["properties"]["kind"]["enum"],
-            json!(["duplicate-of", "supersedes", "stale"])
+            json!(["duplicate-of", "superseded-by", "stale"])
         );
         assert_eq!(schema["required"], json!(["observation_id", "kind"]));
     }
@@ -507,7 +506,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn curate_resolves_the_session_space_and_records_an_assertion() {
+    async fn supersession_retires_the_subject_and_preserves_the_preferred_target() {
         let storage = Arc::new(SqliteStorage::in_memory().unwrap());
         let space = storage.get_or_create_default().await.unwrap();
         let session = storage
@@ -533,6 +532,36 @@ mod tests {
             })
             .await
             .unwrap();
+        let target = storage
+            .record_observation(NewSourceObservation {
+                space_id: space.id,
+                origin: ObservationOrigin {
+                    url: Some("https://example.test/target".into()),
+                    local_path: None,
+                },
+                retrieved_at: Utc::now(),
+                body_sha256: "target-hash".into(),
+                body_bytes: 10,
+                media_type: "text/plain".into(),
+            })
+            .await
+            .unwrap();
+        storage
+            .add_extraction(
+                subject.id,
+                "Zorbulator manual 2019 edition".into(),
+                "test".into(),
+            )
+            .await
+            .unwrap();
+        storage
+            .add_extraction(
+                target.id,
+                "Zorbulator manual 2026 edition".into(),
+                "test".into(),
+            )
+            .await
+            .unwrap();
         let provider = Arc::new(MockProvider::new(vec![]));
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn swage_storage::Storage>,
@@ -552,18 +581,27 @@ mod tests {
         .with_app_state(Some(state));
 
         let result = KnowledgeCurateTool
-            .execute(json!({"observation_id": subject.id, "kind": "stale"}), &ctx)
+            .execute(
+                json!({
+                    "observation_id": subject.id,
+                    "kind": "superseded-by",
+                    "target_observation_id": target.id
+                }),
+                &ctx,
+            )
             .await
             .unwrap();
 
         assert_eq!(result["observation_id"], json!(subject.id));
-        let assertion = storage
-            .get_effective_curation_assertion(subject.id)
+        assert_eq!(result["target_observation_id"], json!(target.id));
+        assert_eq!(result["kind"], json!("superseded-by"));
+
+        let hits = storage
+            .search_extractions(space.id, "Zorbulator", 10)
             .await
-            .unwrap()
             .unwrap();
-        assert_eq!(assertion.space_id, space.id);
-        assert_eq!(assertion.kind, CurationAssertionKind::Stale);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].observation_id, target.id);
     }
 
     #[tokio::test(flavor = "multi_thread")]

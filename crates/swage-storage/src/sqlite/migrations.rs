@@ -71,11 +71,11 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
         ("041_tool_call_model_replay", ADD_TOOL_CALL_MODEL_REPLAY),
         ("042_tool_call_provider_round", ADD_TOOL_CALL_PROVIDER_ROUND),
         ("043_knowledge_base", CREATE_KNOWLEDGE_BASE_TABLES),
+        ("044_agent_definitions", CREATE_AGENT_DEFINITION_TABLE),
         (
-            "044_knowledge_curation_assertions",
+            "045_knowledge_curation_assertions",
             CREATE_KNOWLEDGE_CURATION_ASSERTIONS,
         ),
-        ("044_agent_definitions", CREATE_AGENT_DEFINITION_TABLE),
     ]
 }
 
@@ -1103,12 +1103,12 @@ const CREATE_KNOWLEDGE_CURATION_ASSERTIONS: &str = "
         id                    TEXT NOT NULL PRIMARY KEY,
         space_id              TEXT NOT NULL REFERENCES spaces(id),
         observation_id        TEXT NOT NULL REFERENCES source_observations(id),
-        kind                   TEXT NOT NULL CHECK (kind IN ('duplicate-of', 'supersedes', 'stale')),
+        kind                   TEXT NOT NULL CHECK (kind IN ('duplicate-of', 'superseded-by', 'stale')),
         target_observation_id TEXT REFERENCES source_observations(id),
         created_at             TEXT NOT NULL,
         CHECK (
             (kind = 'stale' AND target_observation_id IS NULL) OR
-            (kind IN ('duplicate-of', 'supersedes') AND target_observation_id IS NOT NULL)
+            (kind IN ('duplicate-of', 'superseded-by') AND target_observation_id IS NOT NULL)
         ),
         CHECK (target_observation_id IS NULL OR target_observation_id <> observation_id)
     );

@@ -261,7 +261,7 @@ impl ObservationStore for SqliteStorage {
                              FROM knowledge_curation_assertions latest
                              WHERE latest.observation_id = o.id
                          )
-                         AND a.kind IN ('duplicate-of', 'supersedes')
+                         AND a.kind IN ('duplicate-of', 'superseded-by')
                    )
                  ORDER BY bm25(extraction_fts)
                  LIMIT ?3",
