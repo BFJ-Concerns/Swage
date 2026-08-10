@@ -447,11 +447,19 @@ pub async fn undo_case(
         "agent_definition" => {
             let agent_id = agent_id_from_entity(&selected_case.entity_id).to_owned();
             if target_snapshot.is_null() {
-                state
+                let removed = state
                     .storage
                     .delete_agent_definition(&agent_id, space_id)
                     .await?;
-                format!("undid configuration case {case_id}: removed agent definition '{agent_id}'")
+                if removed {
+                    format!(
+                        "undid configuration case {case_id}: removed agent definition '{agent_id}'"
+                    )
+                } else {
+                    format!(
+                        "undid configuration case {case_id}: agent definition '{agent_id}' was already absent; nothing was removed"
+                    )
+                }
             } else {
                 let definition: AgentDefinition =
                     parse_snapshot(&target_snapshot, "agent definition")?;
@@ -479,8 +487,14 @@ pub async fn undo_case(
                 ))
             })?;
             if target_snapshot.is_null() {
-                state.storage.delete_schedule(schedule_id).await?;
-                format!("undid configuration case {case_id}: removed schedule {schedule_id}")
+                let removed = state.storage.delete_schedule(schedule_id).await?;
+                if removed {
+                    format!("undid configuration case {case_id}: removed schedule {schedule_id}")
+                } else {
+                    format!(
+                        "undid configuration case {case_id}: schedule {schedule_id} was already absent; nothing was removed"
+                    )
+                }
             } else {
                 let schedule: Schedule = parse_snapshot(&target_snapshot, "schedule")?;
                 let intended = new_schedule_from_snapshot(schedule);
