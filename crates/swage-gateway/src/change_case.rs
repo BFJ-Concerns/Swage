@@ -141,7 +141,7 @@ impl ChangeOperation {
             Self::CreateSchedule { schedule }
             | Self::UpdateSchedule { schedule }
             | Self::PauseSchedule { schedule }
-            | Self::ResumeSchedule { schedule } => schedule_space_id(schedule),
+            | Self::ResumeSchedule { schedule } => schedule_space_id(&schedule.session_policy),
             Self::DeleteSchedule { space_id, .. } => *space_id,
         }
     }
@@ -229,9 +229,9 @@ impl ChangeOperation {
     }
 }
 
-fn schedule_space_id(schedule: &NewSchedule) -> Option<Uuid> {
-    match schedule.session_policy {
-        swage_storage::SessionPolicy::Fresh { space_id, .. } => Some(space_id),
+pub(crate) fn schedule_space_id(session_policy: &swage_storage::SessionPolicy) -> Option<Uuid> {
+    match session_policy {
+        swage_storage::SessionPolicy::Fresh { space_id, .. } => Some(*space_id),
         swage_storage::SessionPolicy::Continuation { .. } => None,
     }
 }
