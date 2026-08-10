@@ -15,7 +15,7 @@ use swage_core::{
     ToolCompletionResponse,
 };
 
-use crate::provider::LlmProvider;
+use crate::provider::{LlmProvider, contains_user_visible_content};
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -218,7 +218,7 @@ impl LlmProvider for RetryProvider {
                             return;
                         }
                         chunk => {
-                            if !output_started {
+                            if !output_started && contains_user_visible_content(&chunk) {
                                 output_started = true;
                                 if let Some(retry_attempt) = active_retry.take()
                                     && tx

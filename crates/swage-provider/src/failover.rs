@@ -16,7 +16,7 @@ use swage_core::{
 };
 use tokio::time::Instant;
 
-use crate::provider::LlmProvider;
+use crate::provider::{LlmProvider, contains_user_visible_content};
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -334,7 +334,7 @@ impl LlmProvider for FailoverProvider {
                             return;
                         }
                         chunk => {
-                            output_started = true;
+                            output_started |= contains_user_visible_content(&chunk);
                             if tx.send(chunk).await.is_err() {
                                 return;
                             }
@@ -411,6 +411,7 @@ mod tests {
     use tokio::time::advance;
 
     use super::*;
+    use crate::retry::{RetryConfig, RetryProvider};
 
     struct ControlledStream {
         chunks: futures::channel::mpsc::UnboundedReceiver<StreamChunk>,
@@ -1017,6 +1018,45 @@ mod tests {
         assert!(
             failover.cooldowns.lock().unwrap()[0].is_some(),
             "the failed provider must still enter cooldown"
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_fails_over_after_retry_exhausts_before_content() {
+        let primary_calls = Arc::new(StdMutex::new(0));
+        let primary = SequencedProvider {
+            name: "p1",
+            call_count: Arc::clone(&primary_calls),
+            results: StdMutex::new(vec![
+                Err(ProviderError::StreamError("p1 down".into())),
+                Err(ProviderError::StreamError("p1 down".into())),
+            ]),
+        };
+        let secondary_calls = Arc::new(StdMutex::new(0));
+        let secondary = SequencedProvider {
+            name: "p2",
+            call_count: Arc::clone(&secondary_calls),
+            results: StdMutex::new(vec![Ok(ok_completion("hello from p2"))]),
+        };
+        let retry_config = RetryConfig {
+            max_retries: 1,
+            initial_backoff: Duration::ZERO,
+            max_backoff: Duration::ZERO,
+        };
+        let failover = FailoverProvider::with_defaults(vec![
+            Arc::new(RetryProvider::new(primary, retry_config.clone())),
+            Arc::new(RetryProvider::new(secondary, retry_config)),
+        ]);
+
+        let chunks: Vec<_> = failover.stream(completion_req()).collect().await;
+
+        assert_eq!(*primary_calls.lock().unwrap(), 2);
+        assert_eq!(*secondary_calls.lock().unwrap(), 1);
+        assert!(
+            chunks.iter().any(
+                |chunk| matches!(chunk, StreamChunk::Delta { content } if content == "hello from p2")
+            ),
+            "secondary content must reach the caller after the primary exhausts pre-content retries: {chunks:?}"
         );
     }
 
