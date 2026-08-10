@@ -753,7 +753,29 @@ impl Agent {
         loop {
             tokio::select! {
                 _ = cancel_token.cancelled() => {
-                    let _ = self.storage.update_response(execution.turn_id, &text).await;
+                    if !text.is_empty() {
+                        let safe_content = self.scan_output(&text);
+                        if let Err(error) = self.storage.append_message(swage_storage::model::AppendMessage {
+                            thread_id: execution.thread_id,
+                            turn_id: Some(execution.turn_id),
+                            role: Role::Assistant,
+                            content: safe_content.clone(),
+                            agent_id: self.config.agent_id.clone(),
+                        }).await {
+                            tracing::warn!(
+                                turn_id = %execution.turn_id,
+                                %error,
+                                "failed to persist cancelled turn's partial assistant message"
+                            );
+                        }
+                        if let Err(error) = self.storage.update_response(execution.turn_id, &safe_content).await {
+                            tracing::warn!(
+                                turn_id = %execution.turn_id,
+                                %error,
+                                "failed to persist cancelled turn's partial response"
+                            );
+                        }
+                    }
                     let _ = self.storage.update_turn_state(execution.turn_id, TurnState::Interrupted).await;
                     let _ = self.storage.update_state(execution.thread_id, ThreadState::Idle).await;
                     return Err(AgentError::Cancelled);
