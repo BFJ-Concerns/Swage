@@ -338,6 +338,60 @@ describe("App", () => {
     expect(document.querySelector(".message-display")?.textContent).toContain("Restored from URL");
   });
 
+  it("renders the conversation and removes Settings after browser Back", async () => {
+    const defaultSpace = makeSpace();
+    const linkedConversation = makeConversationSummary({
+      id: "conv-settings-back",
+      message_preview: "Settings return journey",
+    });
+
+    vi.mocked(spacesApi.listSpaces).mockResolvedValueOnce([defaultSpace]);
+    vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([
+      linkedConversation,
+    ]);
+    vi.mocked(conversationsApi.getConversation).mockResolvedValue(
+      makeConversationDetail({
+        id: linkedConversation.id,
+        messages: [
+          {
+            role: "assistant",
+            content: "Conversation restored after Back",
+            timestamp: "2026-04-07T12:01:00Z",
+            turn_state: "completed",
+          },
+        ],
+      }),
+    );
+
+    window.history.pushState(null, "", `/conversations/${linkedConversation.id}`);
+    component = mount(App, { target: document.body });
+    await settleUi();
+
+    const settingsButton = Array.from(document.querySelectorAll("button")).find(
+      (button) => button.textContent?.trim() === "Settings",
+    );
+    expect(settingsButton).toBeDefined();
+    flushSync(() => settingsButton!.click());
+    await settleUi();
+
+    expect(window.location.pathname).toBe("/settings/providers");
+    expect(document.querySelector('[aria-label="Settings"]')).not.toBeNull();
+
+    const popped = new Promise<void>((resolve) => {
+      window.addEventListener("popstate", () => resolve(), { once: true });
+    });
+    window.history.back();
+    await popped;
+    await settleUi();
+
+    expect(window.location.pathname).toBe(`/conversations/${linkedConversation.id}`);
+    expect(document.querySelector('[aria-label="Conversation"]')).not.toBeNull();
+    expect(document.querySelector(".message-display")?.textContent).toContain(
+      "Conversation restored after Back",
+    );
+    expect(document.querySelector('[aria-label="Settings"]')).toBeNull();
+  });
+
   it("shows desktop shell context when the electron bridge is present", async () => {
     window.swageDesktop = {
       shell: "electron",
