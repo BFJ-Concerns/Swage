@@ -77,6 +77,7 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
             CREATE_KNOWLEDGE_CURATION_ASSERTIONS,
         ),
         ("046_workflow_run_parentage", ADD_WORKFLOW_RUN_PARENTAGE),
+        ("047_knowledge_citations", CREATE_KNOWLEDGE_CITATIONS),
     ]
 }
 
@@ -1168,6 +1169,37 @@ const CREATE_KNOWLEDGE_CURATION_ASSERTIONS: &str = "
     BEFORE DELETE ON knowledge_curation_assertions
     BEGIN
         SELECT RAISE(ABORT, 'knowledge curation assertions are append-only');
+    END;
+";
+
+/// Append-only citations pinned to an exact extraction derivation.
+const CREATE_KNOWLEDGE_CITATIONS: &str = "
+    CREATE TABLE IF NOT EXISTS knowledge_citations (
+        id                 TEXT NOT NULL PRIMARY KEY,
+        space_id           TEXT NOT NULL REFERENCES spaces(id),
+        observation_id     TEXT NOT NULL,
+        derivation_version INTEGER NOT NULL,
+        start_offset       INTEGER NOT NULL CHECK (start_offset >= 0),
+        end_offset         INTEGER NOT NULL CHECK (end_offset > start_offset),
+        quoted_text        TEXT NOT NULL CHECK (length(quoted_text) > 0),
+        created_at         TEXT NOT NULL,
+        FOREIGN KEY (observation_id, derivation_version)
+            REFERENCES extraction_derivations(observation_id, version)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_knowledge_citations_observation
+        ON knowledge_citations(observation_id, derivation_version, created_at DESC);
+
+    CREATE TRIGGER IF NOT EXISTS trg_knowledge_citations_no_update
+    BEFORE UPDATE ON knowledge_citations
+    BEGIN
+        SELECT RAISE(ABORT, 'knowledge citations are append-only');
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS trg_knowledge_citations_no_delete
+    BEFORE DELETE ON knowledge_citations
+    BEGIN
+        SELECT RAISE(ABORT, 'knowledge citations are append-only');
     END;
 ";
 

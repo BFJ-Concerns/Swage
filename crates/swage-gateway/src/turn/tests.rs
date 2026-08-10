@@ -3061,6 +3061,23 @@ impl swage_storage::store::CurationAssertionStore for MockStorage {
 }
 
 #[async_trait]
+impl swage_storage::store::CitationStore for MockStorage {
+    async fn add_citation(
+        &self,
+        _: swage_storage::NewKnowledgeCitation,
+    ) -> Result<swage_storage::KnowledgeCitation, StorageError> {
+        unimplemented!("turn tests do not exercise knowledge citations")
+    }
+
+    async fn get_citation(
+        &self,
+        _: uuid::Uuid,
+    ) -> Result<Option<swage_storage::KnowledgeCitation>, StorageError> {
+        unimplemented!("turn tests do not exercise knowledge citations")
+    }
+}
+
+#[async_trait]
 impl swage_storage::store::SecretStore for MockStorage {
     async fn create_secret(
         &self,
