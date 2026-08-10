@@ -158,6 +158,10 @@ enum HostCommand {
     AbandonTimer {
         timer_id: u64,
     },
+    ConfirmTimer {
+        timer_id: u64,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
 }
 
 struct ChannelWorkflowHost {
@@ -260,6 +264,16 @@ impl WorkflowHost for ChannelWorkflowHost {
 
     fn abandon_timer(&self, timer_id: u64) {
         let _ = self.tx.send(HostCommand::AbandonTimer { timer_id });
+    }
+
+    async fn confirm_timer(&self, timer_id: u64) -> Result<(), String> {
+        let (reply, receive) = oneshot::channel();
+        self.tx
+            .send(HostCommand::ConfirmTimer { timer_id, reply })
+            .map_err(|_| "workflow host stopped".to_string())?;
+        receive
+            .await
+            .map_err(|_| "workflow host dropped timer confirmation".to_string())?
     }
 }
 
@@ -377,10 +391,15 @@ async fn run_host_commands(
     );
     let replay_release_rank = Arc::new(AtomicU64::new(0));
     let replay_release_notify = Arc::new(Notify::new());
-    // Pending wait() timers by script-assigned timer id. Abandonment cancels
-    // the armed sleep so a beaten timer can never fire later and complete its
-    // journal entry — a completed timer entry must always mean the timer won.
+    // Pending wait() timers by script-assigned timer id. Firing never writes
+    // the journal; the race's verdict does — ConfirmTimer completes the
+    // entry (timer won), AbandonTimer cancels the armed sleep and leaves it
+    // `started` (timer beaten) — so a completed timer entry always means the
+    // timer won a wait, however close the race. The entry id is None when
+    // replay found the entry already completed (confirm is then a no-op).
     let mut pending_timers: std::collections::HashMap<u64, CancellationToken> =
+        std::collections::HashMap::new();
+    let mut timer_entries: std::collections::HashMap<u64, Option<Uuid>> =
         std::collections::HashMap::new();
     while let Some(command) = commands.recv().await {
         match command {
@@ -460,6 +479,14 @@ async fn run_host_commands(
                     let result = if let Some(entry) = existing {
                         if entry.args_hash != hash {
                             Err("NondeterministicReplayError".into())
+                        } else if entry.status == "failed" {
+                            // The original run observed this failure (and may
+                            // have caught it); replay returns the recorded
+                            // error rather than re-executing the call.
+                            Err(entry
+                                .error_message
+                                .clone()
+                                .unwrap_or_else(|| "recorded agent failure".to_string()))
                         } else if entry.status == "completed" {
                             let result = entry
                                 .result
@@ -598,78 +625,85 @@ async fn run_host_commands(
                 cancellation,
                 reply,
             } => {
-                let abandon = CancellationToken::new();
-                pending_timers.insert(timer_id, abandon.clone());
                 let current_seq = seq.fetch_add(1, Ordering::SeqCst);
                 let request_json = serde_json::json!({ "ms": ms });
                 let hash = journal_args_hash(&request_json);
-                let existing = replay.get(current_seq as usize).cloned();
-                let state = state.clone();
                 // A completed timer entry replays instantly, so a wait the
                 // timer won wakes the same way on resume. A started entry is
                 // re-armed whole: the original firing was never recorded, so
-                // honesty is a fresh full wait, not a guessed remainder.
-                tokio::spawn(async move {
-                    let entry_id = match existing {
-                        Some(entry) if entry.args_hash != hash => {
-                            let _ = reply.send(Err("NondeterministicReplayError".into()));
-                            return;
-                        }
-                        Some(entry) if entry.status == "completed" => {
-                            let _ = reply.send(
-                                entry
-                                    .result
-                                    .clone()
-                                    .ok_or_else(|| "completed timer entry has no result".to_string()),
-                            );
-                            return;
-                        }
-                        Some(entry) => entry.id,
-                        None => {
-                            match state
-                                .storage
-                                .create_workflow_journal_intent(NewWorkflowJournalIntent {
-                                    run_id,
-                                    seq: current_seq,
-                                    kind: "timer".into(),
-                                    args_hash: hash,
-                                    request: request_json,
-                                    effect_kind: None,
-                                    idempotency_key: None,
-                                    target_kind: None,
-                                })
-                                .await
-                            {
-                                Ok(intent) => intent.id,
-                                Err(error) => {
-                                    let _ = reply.send(Err(error.to_string()));
-                                    return;
-                                }
+                // honesty is a fresh full wait, not a guessed remainder. The
+                // intent is written here, in the loop, so timer_entries is
+                // populated before any ConfirmTimer can arrive.
+                let entry_id = match replay.get(current_seq as usize) {
+                    Some(entry) if entry.args_hash != hash => {
+                        let _ = reply.send(Err("NondeterministicReplayError".into()));
+                        continue;
+                    }
+                    Some(entry) if entry.status == "completed" => {
+                        timer_entries.insert(timer_id, None);
+                        let _ = reply.send(
+                            entry
+                                .result
+                                .clone()
+                                .ok_or_else(|| "completed timer entry has no result".to_string()),
+                        );
+                        continue;
+                    }
+                    Some(entry) => entry.id,
+                    None => {
+                        match state
+                            .storage
+                            .create_workflow_journal_intent(NewWorkflowJournalIntent {
+                                run_id,
+                                seq: current_seq,
+                                kind: "timer".into(),
+                                args_hash: hash,
+                                request: request_json,
+                                effect_kind: None,
+                                idempotency_key: None,
+                                target_kind: None,
+                            })
+                            .await
+                        {
+                            Ok(intent) => intent.id,
+                            Err(error) => {
+                                let _ = reply.send(Err(error.to_string()));
+                                continue;
                             }
                         }
-                    };
+                    }
+                };
+                timer_entries.insert(timer_id, Some(entry_id));
+                let abandon = CancellationToken::new();
+                pending_timers.insert(timer_id, abandon.clone());
+                // The firing only reports; it writes nothing. The journal
+                // settles on the race's verdict via ConfirmTimer.
+                tokio::spawn(async move {
                     tokio::select! {
-                        () = tokio::time::sleep(std::time::Duration::from_millis(ms)) => {}
-                        () = abandon.cancelled() => {
-                            // Beaten by a completion: the entry stays
-                            // `started` and the reply is never consumed —
-                            // wait() already resolved on the winner.
-                            return;
+                        () = tokio::time::sleep(std::time::Duration::from_millis(ms)) => {
+                            let _ = reply.send(Ok(serde_json::json!({ "fired": true })));
                         }
+                        () = abandon.cancelled() => {}
                         () = cancellation.cancelled() => {
                             let _ = reply.send(Err("WorkflowCancelledError: timer cancelled".into()));
-                            return;
                         }
                     }
-                    let fired = serde_json::json!({ "fired": true });
-                    let result = state
-                        .storage
-                        .complete_workflow_journal_entry(entry_id, fired.clone())
-                        .await
-                        .map(|_| fired)
-                        .map_err(|error| error.to_string());
-                    let _ = reply.send(result);
                 });
+            }
+            HostCommand::ConfirmTimer { timer_id, reply } => {
+                pending_timers.remove(&timer_id);
+                let result = match timer_entries.get(&timer_id) {
+                    // Replayed-completed: nothing to write.
+                    Some(None) => Ok(()),
+                    Some(Some(entry_id)) => state
+                        .storage
+                        .complete_workflow_journal_entry(*entry_id, serde_json::json!({"fired": true}))
+                        .await
+                        .map(|_| ())
+                        .map_err(|error| error.to_string()),
+                    None => Err("WaitTimerError: unknown timer id".into()),
+                };
+                let _ = reply.send(result);
             }
             HostCommand::Deliver {
                 payload,
@@ -797,16 +831,33 @@ async fn complete_agent_entry(
     request: AgentCallRequest,
     cancellation: CancellationToken,
 ) -> Result<AgentCallResult, String> {
-    let result = run_ephemeral_agent_call(state, space_id, request, cancellation).await?;
-    state
-        .storage
-        .complete_workflow_journal_entry(
-            entry_id,
-            serde_json::to_value(&result).expect("agent result serialises"),
-        )
-        .await
-        .map_err(|error| error.to_string())?;
-    Ok(result)
+    match run_ephemeral_agent_call(state, space_id, request, cancellation).await {
+        Ok(result) => {
+            state
+                .storage
+                .complete_workflow_journal_entry(
+                    entry_id,
+                    serde_json::to_value(&result).expect("agent result serialises"),
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+            Ok(result)
+        }
+        // A failure the script observes (and may catch in parallel/pipeline)
+        // must settle durably too, or replay treats the entry as live work
+        // and re-executes the call — which may then succeed and change the
+        // resumed path. Cancellation is the exception: an interrupted run's
+        // in-flight calls are legitimately re-run on resume.
+        Err(error) => {
+            if !error.starts_with("WorkflowCancelledError") {
+                let _ = state
+                    .storage
+                    .fail_workflow_journal_entry(entry_id, &error)
+                    .await;
+            }
+            Err(error)
+        }
+    }
 }
 
 /// Runs a parent's `workflow()` call as a real child run and journals its
@@ -850,7 +901,20 @@ async fn complete_workflow_call_entry(
         Some(child) => match child.state.as_str() {
             "completed" => child,
             "interrupted" => {
-                let source = version.source.clone();
+                // Resume with the child's own recorded version, not the
+                // script's current head: the record's script_version_id and
+                // source_hash identify what ran, and a script update between
+                // crash and resume must not swap the source underneath them.
+                let recorded_version_id = child
+                    .script_version_id
+                    .ok_or_else(|| "child workflow run has no script version".to_string())?;
+                let source = state
+                    .storage
+                    .get_workflow_script_version(recorded_version_id)
+                    .await
+                    .map_err(|error| error.to_string())?
+                    .ok_or_else(|| "child workflow script version is missing".to_string())?
+                    .source;
                 let grant = script.delivery_grant.clone();
                 state
                     .storage
@@ -2119,6 +2183,36 @@ mod tests {
         assert_eq!(timer.status, "completed");
         assert_eq!(timer.result, Some(serde_json::json!({"fired": true})));
         assert_eq!(timer.request, serde_json::json!({"ms": 10}));
+
+        // Genuine replay: interrupt the finished run and resume it. The
+        // completed timer entry must replay instantly to the same winner,
+        // adding no second timer entry to the journal.
+        storage
+            .update_workflow_run_state(started.id, "interrupted", None, None)
+            .await
+            .expect("simulate restart");
+        let _resumed = resume_run(State(state.clone()), Path(started.id))
+            .await
+            .expect("resume");
+        wait_for_terminal(&state, started.id).await;
+        let replayed = storage
+            .get_workflow_run(started.id)
+            .await
+            .expect("run")
+            .expect("present");
+        assert_eq!(replayed.state, "completed");
+        assert_eq!(replayed.final_output, Some(serde_json::json!("timer")));
+        let replay_journal = storage
+            .list_workflow_journal(started.id)
+            .await
+            .expect("journal");
+        assert_eq!(
+            replay_journal
+                .iter()
+                .filter(|entry| entry.kind == "timer")
+                .count(),
+            1
+        );
     }
 
     async fn wait_for_terminal(state: &AppState, id: Uuid) {

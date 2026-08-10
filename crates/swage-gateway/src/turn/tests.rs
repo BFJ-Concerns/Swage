@@ -509,6 +509,13 @@ impl swage_storage::WorkflowStore for MockStorage {
     ) -> Result<Option<swage_storage::WorkflowRunRecord>, StorageError> {
         unimplemented!()
     }
+    async fn fail_workflow_journal_entry(
+        &self,
+        _: Uuid,
+        _: &str,
+    ) -> Result<swage_storage::WorkflowJournalRecord, StorageError> {
+        unimplemented!()
+    }
     async fn list_workflow_runs(
         &self,
         _: Uuid,

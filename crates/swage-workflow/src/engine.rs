@@ -53,10 +53,11 @@ pub struct ScriptCapabilities {
 /// Splits an optional `export const defaults = { … };` header off a script
 /// body. The body is wrapped in an async function before evaluation, where
 /// `export` is a syntax error — so the header can only be the first
-/// statement, and an existing script cannot already contain one.
+/// statement (comments permitted before it), and an existing script cannot
+/// already contain one.
 fn extract_defaults(source: &str) -> Result<(Option<String>, &str), String> {
-    let trimmed_start = source.len() - source.trim_start().len();
-    let rest = &source[trimmed_start..];
+    let header_end = skip_whitespace_and_comments(source);
+    let rest = &source[header_end..];
     let Some(after_keyword) = rest.strip_prefix("export") else {
         return Ok((None, source));
     };
@@ -83,6 +84,34 @@ fn extract_defaults(source: &str) -> Result<(Option<String>, &str), String> {
         body = after_semicolon;
     }
     Ok((Some(literal.to_string()), body))
+}
+
+/// Byte offset of the first token past leading whitespace and `//`/`/* */`
+/// comments — where a `defaults` header may legitimately start.
+fn skip_whitespace_and_comments(source: &str) -> usize {
+    let bytes = source.as_bytes();
+    let mut index = 0usize;
+    loop {
+        while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+            index += 1;
+        }
+        if bytes[index..].starts_with(b"//") {
+            while index < bytes.len() && bytes[index] != b'\n' {
+                index += 1;
+            }
+            continue;
+        }
+        if bytes[index..].starts_with(b"/*") {
+            match source[index + 2..].find("*/") {
+                Some(end) => {
+                    index += 2 + end + 2;
+                    continue;
+                }
+                None => return index,
+            }
+        }
+        return index;
+    }
 }
 
 /// Finds the closing brace of an object literal starting at byte 0, skipping
@@ -367,6 +396,26 @@ impl WorkflowEngine {
                     })
                     .map_err(|error| error.to_string())?;
                     ctx.globals().set("__abandonTimer", abandon).map_err(|error| error.to_string())?;
+                    let confirm_host = Arc::clone(&host);
+                    let confirm = Function::new(
+                        ctx.clone(),
+                        Async(move |timer_id: f64| {
+                            let host = Arc::clone(&confirm_host);
+                            async move {
+                                match host.confirm_timer(timer_id as u64).await {
+                                    Ok(()) => serde_json::json!({"ok": true, "value": null}).to_string(),
+                                    Err(error) => {
+                                        let (name, message) = named_host_error(&error, "WaitTimerError");
+                                        serde_json::json!({
+                                            "ok": false,
+                                            "error": {"name": name, "message": message}
+                                        }).to_string()
+                                    }
+                                }
+                            }
+                        }),
+                    ).map_err(|error| error.to_string())?;
+                    ctx.globals().set("__confirmTimer", confirm).map_err(|error| error.to_string())?;
 
                     if capabilities.delivery {
                         let delivery_host = Arc::clone(&host);
@@ -475,9 +524,12 @@ impl WorkflowEngine {
                         // timer. Resolves {wake:"completion", handle, value}
                         // or {wake:"timer"}. A watched call's own failure is
                         // reported as its wake so the script can act on it.
-                        // A completion win stands the timer down, leaving its
-                        // journal entry `started` — so the journal names the
-                        // real wake: completed timer entry = timer won.
+                        // The journal entry settles on the RACE's verdict,
+                        // not the firing: a timer wake is confirmed (entry
+                        // completed) before wait() returns, and a beaten
+                        // timer is stood down (entry stays started) — so a
+                        // completed timer entry means exactly "the timer won
+                        // a wait", and replay repeats the winner.
                         let __timerSeq = 0;
                         globalThis.wait = async ({ watches = [], timerMs = null } = {}) => {
                             const legs = watches.map((handle) => handle.result.then(
@@ -502,8 +554,12 @@ impl WorkflowEngine {
                                 throw error;
                             }
                             const wake = await Promise.race(legs);
-                            if (timerId !== null && wake.wake !== "timer") {
-                                __abandonTimer(timerId);
+                            if (timerId !== null) {
+                                if (wake.wake === "timer") {
+                                    unwrapHostResponse(await __confirmTimer(timerId));
+                                } else {
+                                    __abandonTimer(timerId);
+                                }
                             }
                             return wake;
                         };
@@ -768,6 +824,10 @@ mod tests {
                 unreachable!("pending timer never settles")
             }
         }
+
+        async fn confirm_timer(&self, _: u64) -> Result<(), String> {
+            Ok(())
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -802,11 +862,13 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn pipeline_runs_stages_per_item_and_collapses_failures_to_null() {
         let host = Arc::new(SurfaceHost::new());
+        // Stage-1 calls are made in item order (the map runs synchronously to
+        // its first await), so the scripted queue maps: one → ok, two → fail,
+        // three → ok.
         host.agent_outputs.lock().unwrap().extend([
             Ok(json!("one-gathered")),
-            Ok(json!("two-gathered")),
             Err("provider unavailable".into()),
-            Ok(json!("one-filed")),
+            Ok(json!("three-gathered")),
         ]);
         let output = WorkflowEngine::new(EngineLimits::default())
             .execute_hosted(
@@ -814,7 +876,10 @@ mod tests {
                 const results = await pipeline(
                     ["one", "two", "three"],
                     (item) => agent(`gather ${item}`, { agent: "gatherer" }),
-                    (previous, item) => agent(`file ${previous} for ${item}`, { agent: "organiser" }),
+                    // A pure second stage pins per-item chaining positionally:
+                    // it sees the SAME item's stage-1 value plus the original
+                    // item and index.
+                    (previous, item, index) => `${previous}|${item}|${index}`,
                 );
                 return results;
                 "#,
@@ -825,13 +890,13 @@ mod tests {
             )
             .await
             .expect("pipeline run");
-        let value: Value = serde_json::from_str(&output).expect("output");
-        // Item ordering is preserved; the failed item is null, the survivor
-        // carried its first stage's value into the second.
-        let values = value.as_array().expect("array");
-        assert_eq!(values.len(), 3);
-        assert!(values.contains(&json!("one-filed")));
-        assert!(values.contains(&Value::Null));
+        // Exact positional assertion: ordering preserved, the failed item is
+        // null at its own slot with its later stage skipped, and each
+        // survivor's stage 2 received its own stage-1 output.
+        assert_eq!(
+            serde_json::from_str::<Value>(&output).expect("output"),
+            json!(["one-gathered|one|0", null, "three-gathered|three|2"])
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
