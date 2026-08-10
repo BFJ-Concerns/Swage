@@ -966,6 +966,13 @@ pub trait WorkflowStore: Send + Sync {
         id: Uuid,
         result: serde_json::Value,
     ) -> Result<WorkflowJournalRecord, StorageError>;
+    /// Settles an entry as `failed`, preserving the failure's own message so
+    /// replay returns the recorded error instead of re-executing the call.
+    async fn fail_workflow_journal_entry(
+        &self,
+        id: Uuid,
+        error_message: &str,
+    ) -> Result<WorkflowJournalRecord, StorageError>;
     async fn list_workflow_journal(
         &self,
         run_id: Uuid,
@@ -2085,6 +2092,13 @@ mod tests {
             &self,
             _: Uuid,
             _: serde_json::Value,
+        ) -> Result<WorkflowJournalRecord, StorageError> {
+            unimplemented!()
+        }
+        async fn fail_workflow_journal_entry(
+            &self,
+            _: Uuid,
+            _: &str,
         ) -> Result<WorkflowJournalRecord, StorageError> {
             unimplemented!()
         }
