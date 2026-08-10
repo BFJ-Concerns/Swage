@@ -281,16 +281,6 @@ pub trait CurationAssertionStore: Send + Sync {
         &self,
         assertion: NewCurationAssertion,
     ) -> Result<CurationAssertion, StorageError>;
-
-    async fn list_curation_assertions(
-        &self,
-        observation_id: Uuid,
-    ) -> Result<Vec<CurationAssertion>, StorageError>;
-
-    async fn get_effective_curation_assertion(
-        &self,
-        observation_id: Uuid,
-    ) -> Result<Option<CurationAssertion>, StorageError>;
 }
 
 #[async_trait]
@@ -1435,20 +1425,6 @@ mod tests {
             &self,
             _: NewCurationAssertion,
         ) -> Result<CurationAssertion, StorageError> {
-            unimplemented!()
-        }
-
-        async fn list_curation_assertions(
-            &self,
-            _: Uuid,
-        ) -> Result<Vec<CurationAssertion>, StorageError> {
-            unimplemented!()
-        }
-
-        async fn get_effective_curation_assertion(
-            &self,
-            _: Uuid,
-        ) -> Result<Option<CurationAssertion>, StorageError> {
             unimplemented!()
         }
     }

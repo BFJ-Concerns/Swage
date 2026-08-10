@@ -841,7 +841,7 @@ pub struct KnowledgeSearchHit {
 #[serde(rename_all = "kebab-case")]
 pub enum CurationAssertionKind {
     DuplicateOf,
-    Supersedes,
+    SupersededBy,
     Stale,
 }
 
@@ -849,7 +849,7 @@ impl std::fmt::Display for CurationAssertionKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             Self::DuplicateOf => "duplicate-of",
-            Self::Supersedes => "supersedes",
+            Self::SupersededBy => "superseded-by",
             Self::Stale => "stale",
         })
     }
@@ -861,7 +861,7 @@ impl std::str::FromStr for CurationAssertionKind {
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value {
             "duplicate-of" => Ok(Self::DuplicateOf),
-            "supersedes" => Ok(Self::Supersedes),
+            "superseded-by" => Ok(Self::SupersededBy),
             "stale" => Ok(Self::Stale),
             other => Err(format!("unknown curation assertion kind: {other}")),
         }
