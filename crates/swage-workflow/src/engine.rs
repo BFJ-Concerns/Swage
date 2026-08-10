@@ -127,7 +127,9 @@ fn find_balanced_object_end(source: &str) -> Result<usize, String> {
                 depth -= 1;
                 if depth == 0 {
                     if bytes[index] != b'}' {
-                        return Err("workflow defaults object closed with the wrong delimiter".into());
+                        return Err(
+                            "workflow defaults object closed with the wrong delimiter".into()
+                        );
                     }
                     return Ok(index);
                 }
@@ -152,12 +154,10 @@ fn find_balanced_object_end(source: &str) -> Result<usize, String> {
                 }
                 continue;
             }
-            b'/' if bytes.get(index + 1) == Some(&b'*') => {
-                match source[index + 2..].find("*/") {
-                    Some(end) => index += 2 + end + 1,
-                    None => return Err("workflow defaults comment is not terminated".into()),
-                }
-            }
+            b'/' if bytes.get(index + 1) == Some(&b'*') => match source[index + 2..].find("*/") {
+                Some(end) => index += 2 + end + 1,
+                None => return Err("workflow defaults comment is not terminated".into()),
+            },
             _ => {}
         }
         index += 1;
@@ -775,10 +775,7 @@ mod tests {
             request: AgentCallRequest,
             _: CancellationToken,
         ) -> Result<AgentCallResult, String> {
-            self.agent_requests
-                .lock()
-                .expect("requests")
-                .push(request);
+            self.agent_requests.lock().expect("requests").push(request);
             if self.agent_delay_ms > 0 {
                 tokio::time::sleep(std::time::Duration::from_millis(self.agent_delay_ms)).await;
             }
@@ -903,7 +900,10 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn wait_wakes_on_completion_before_the_timer() {
         let host = Arc::new(SurfaceHost::new());
-        host.agent_outputs.lock().unwrap().extend([Ok(json!("done"))]);
+        host.agent_outputs
+            .lock()
+            .unwrap()
+            .extend([Ok(json!("done"))]);
         let output = WorkflowEngine::new(EngineLimits::default())
             .execute_hosted(
                 r#"
@@ -933,7 +933,10 @@ mod tests {
             agent_delay_ms: 5000,
             ..SurfaceHost::new()
         });
-        slow.agent_outputs.lock().unwrap().extend([Ok(json!("slow"))]);
+        slow.agent_outputs
+            .lock()
+            .unwrap()
+            .extend([Ok(json!("slow"))]);
         let output = WorkflowEngine::new(EngineLimits::default())
             .execute_hosted(
                 r#"
