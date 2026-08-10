@@ -353,14 +353,13 @@ impl DelegationExecutor {
         // Execute — the agent creates its own turn internally via process_turn_streaming.
         let result = agent.process_turn_streaming(turn_request, event_tx).await;
 
-        if let Some(report) = assembly_report {
-            if let Err(error) = self
+        if let Some(report) = assembly_report
+            && let Err(error) = self
                 .storage
                 .store_snapshot(turn_id, &report.to_string())
                 .await
-            {
-                tracing::warn!(%turn_id, %error, "failed to persist delegated context snapshot");
-            }
+        {
+            tracing::warn!(%turn_id, %error, "failed to persist delegated context snapshot");
         }
 
         // DelegationGuard handles deregistration on drop (including mid-
