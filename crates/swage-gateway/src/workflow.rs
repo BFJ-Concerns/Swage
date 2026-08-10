@@ -11,6 +11,7 @@ use axum::{
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use swage_core::StorageError;
 use swage_protocol::client::workflow::{
     CreateWorkflowScriptRequest, StartInlineWorkflowRunRequest, StartWorkflowRunRequest,
     UpdateWorkflowScriptRequest, WorkflowBudget, WorkflowRun, WorkflowRunDetailResponse,
@@ -37,6 +38,135 @@ use crate::{
     websocket::ServerEvent,
     workflow_delivery::{DeliveryCapability, capability_from_grant},
 };
+
+impl AppState {
+    async fn create_workflow_journal_intent(
+        &self,
+        intent: NewWorkflowJournalIntent,
+    ) -> Result<WorkflowJournalRecord, StorageError> {
+        let entry = self.storage.create_workflow_journal_intent(intent).await?;
+        if let Ok(wire) = journal_wire(entry.clone()) {
+            let _ = self.broadcast.send(ServerEvent::WorkflowEntryStarted {
+                event: swage_protocol::client::workflow::WorkflowEntryEvent {
+                    run_id: entry.run_id,
+                    entry: wire,
+                },
+            });
+        }
+        Ok(entry)
+    }
+
+    async fn complete_workflow_journal_entry(
+        &self,
+        id: Uuid,
+        result: Value,
+    ) -> Result<WorkflowJournalRecord, StorageError> {
+        let entry = self
+            .storage
+            .complete_workflow_journal_entry(id, result)
+            .await?;
+        self.broadcast_terminal_workflow_entry(&entry);
+        Ok(entry)
+    }
+
+    async fn fail_workflow_journal_entry(
+        &self,
+        id: Uuid,
+        error: &str,
+    ) -> Result<WorkflowJournalRecord, StorageError> {
+        let entry = self.storage.fail_workflow_journal_entry(id, error).await?;
+        self.broadcast_terminal_workflow_entry(&entry);
+        Ok(entry)
+    }
+
+    fn broadcast_terminal_workflow_entry(&self, entry: &WorkflowJournalRecord) {
+        if let Ok(wire) = journal_wire(entry.clone()) {
+            let _ = self.broadcast.send(ServerEvent::WorkflowEntryCompleted {
+                event: swage_protocol::client::workflow::WorkflowEntryEvent {
+                    run_id: entry.run_id,
+                    entry: wire,
+                },
+            });
+        }
+    }
+}
+
+fn journal_wire(
+    entry: WorkflowJournalRecord,
+) -> Result<swage_protocol::client::workflow::WorkflowJournalEntry, String> {
+    use swage_protocol::client::workflow::{
+        WorkflowAgentCallDetail, WorkflowEffectDetail, WorkflowJournalEntry,
+        WorkflowJournalEntryKind, WorkflowJournalEntryStatus,
+    };
+    let kind = match entry.kind.as_str() {
+        "agent_call" => WorkflowJournalEntryKind::AgentCall,
+        "effect" => WorkflowJournalEntryKind::Effect,
+        "log" => WorkflowJournalEntryKind::Log,
+        "phase" => WorkflowJournalEntryKind::Phase,
+        "workflow_call" => WorkflowJournalEntryKind::WorkflowCall,
+        "timer" => WorkflowJournalEntryKind::Timer,
+        other => return Err(format!("unknown workflow entry kind: {other}")),
+    };
+    let status = match entry.status.as_str() {
+        "started" => WorkflowJournalEntryStatus::Started,
+        "completed" => WorkflowJournalEntryStatus::Completed,
+        "failed" => WorkflowJournalEntryStatus::Failed,
+        other => return Err(format!("unknown workflow entry status: {other}")),
+    };
+    let effect = entry
+        .idempotency_key
+        .map(|idempotency_key| WorkflowEffectDetail {
+            effect_kind: entry.effect_kind.unwrap_or_default(),
+            target_kind: entry.target_kind.unwrap_or_default(),
+            idempotency_key,
+        });
+    let agent_call = (entry.kind == "agent_call").then(|| {
+        let result = entry.result.as_ref();
+        WorkflowAgentCallDetail {
+            agent_id: entry
+                .request
+                .get("agent")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            session_id: result
+                .and_then(|v| v.get("session_id"))
+                .and_then(|v| serde_json::from_value(v.clone()).ok()),
+            thread_id: result
+                .and_then(|v| v.get("thread_id"))
+                .and_then(|v| serde_json::from_value(v.clone()).ok()),
+            turn_id: result
+                .and_then(|v| v.get("turn_id"))
+                .and_then(|v| serde_json::from_value(v.clone()).ok()),
+            input_tokens: result
+                .and_then(|v| v.get("input_tokens"))
+                .and_then(Value::as_u64),
+            output_tokens: result
+                .and_then(|v| v.get("output_tokens"))
+                .and_then(Value::as_u64),
+        }
+    });
+    let label = entry
+        .request
+        .get("label")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    Ok(WorkflowJournalEntry {
+        id: entry.id,
+        seq: entry.seq,
+        completed_order: entry.completed_order,
+        kind,
+        status,
+        label,
+        request: entry.request,
+        result: entry.result,
+        error_message: entry.error_message,
+        agent_call,
+        effect,
+        started_at: entry.started_at,
+        completed_at: entry.completed_at,
+    })
+}
 
 #[async_trait::async_trait]
 pub trait WorkflowLauncher: Send + Sync {
@@ -415,6 +545,13 @@ async fn run_host_commands_inner(
     spent_tokens: Arc<AtomicU64>,
     mut commands: mpsc::UnboundedReceiver<HostCommand>,
 ) {
+    // A token-limited call reserves all capacity still available at its
+    // deterministic channel admission point. Calls do not declare an output
+    // limit, so a narrower estimate would pretend to know a bound the provider
+    // contract does not supply. Settlement replaces this conservative hold
+    // with actual usage, allowing later calls through without allowing several
+    // unknown-cost calls to overbook the same capacity concurrently.
+    let reserved_tokens = Arc::new(AtomicU64::new(0));
     let effect_seq = Arc::new(AtomicU64::new(
         replay
             .iter()
@@ -466,7 +603,6 @@ async fn run_host_commands_inner(
                     continue;
                 }
                 if let Ok(intent) = state
-                    .storage
                     .create_workflow_journal_intent(NewWorkflowJournalIntent {
                         run_id,
                         seq: current_seq,
@@ -480,7 +616,6 @@ async fn run_host_commands_inner(
                     .await
                 {
                     let _ = state
-                        .storage
                         .complete_workflow_journal_entry(intent.id, Value::Null)
                         .await;
                 }
@@ -492,6 +627,7 @@ async fn run_host_commands_inner(
             } => {
                 let current_seq = seq.load(Ordering::SeqCst);
                 let existing_call = replay.get(current_seq as usize);
+                let mut token_reservation = 0;
                 if existing_call.is_none() {
                     if budget
                         .max_agent_calls
@@ -501,12 +637,24 @@ async fn run_host_commands_inner(
                             reply.send(Err("BudgetExceededError: agent call limit reached".into()));
                         continue;
                     }
-                    if budget
-                        .max_total_tokens
-                        .is_some_and(|limit| spent_tokens.load(Ordering::SeqCst) >= limit)
-                    {
-                        let _ = reply.send(Err("BudgetExceededError: token limit reached".into()));
-                        continue;
+                    if let Some(limit) = budget.max_total_tokens {
+                        let spent = spent_tokens.load(Ordering::SeqCst);
+                        let reserved = reserved_tokens.load(Ordering::SeqCst);
+                        token_reservation = limit.saturating_sub(spent.saturating_add(reserved));
+                        if token_reservation == 0
+                            || reserved_tokens
+                                .compare_exchange(
+                                    reserved,
+                                    reserved.saturating_add(token_reservation),
+                                    Ordering::SeqCst,
+                                    Ordering::SeqCst,
+                                )
+                                .is_err()
+                        {
+                            let _ =
+                                reply.send(Err("BudgetExceededError: token limit reached".into()));
+                            continue;
+                        }
                     }
                     agent_calls.fetch_add(1, Ordering::SeqCst);
                 }
@@ -516,6 +664,7 @@ async fn run_host_commands_inner(
                 let state = state.clone();
                 let replay = Arc::clone(&replay);
                 let spent = Arc::clone(&spent_tokens);
+                let reserved = Arc::clone(&reserved_tokens);
                 let semaphore = Arc::clone(&semaphore);
                 let replay_agent_ranks = Arc::clone(&replay_agent_ranks);
                 let replay_release_rank = Arc::clone(&replay_release_rank);
@@ -569,7 +718,6 @@ async fn run_host_commands_inner(
                         }
                     } else {
                         match state
-                            .storage
                             .create_workflow_journal_intent(NewWorkflowJournalIntent {
                                 run_id,
                                 seq: current_seq,
@@ -595,6 +743,9 @@ async fn run_host_commands_inner(
                             Err(error) => Err(error.to_string()),
                         }
                     };
+                    if token_reservation != 0 {
+                        reserved.fetch_sub(token_reservation, Ordering::SeqCst);
+                    }
                     if !completed_replay && let Ok(result) = &result {
                         spent.fetch_add(
                             result.input_tokens + result.output_tokens,
@@ -641,7 +792,6 @@ async fn run_host_commands_inner(
                         }
                         None => {
                             match state
-                                .storage
                                 .create_workflow_journal_intent(NewWorkflowJournalIntent {
                                     run_id,
                                     seq: current_seq,
@@ -710,7 +860,6 @@ async fn run_host_commands_inner(
                         Some(entry) => entry.id,
                         None => {
                             match state
-                                .storage
                                 .create_workflow_journal_intent(NewWorkflowJournalIntent {
                                     run_id,
                                     seq: current_seq,
@@ -759,7 +908,6 @@ async fn run_host_commands_inner(
                     // Replayed-completed: nothing to write.
                     Some(None) => Ok(()),
                     Some(Some(entry_id)) => state
-                        .storage
                         .complete_workflow_journal_entry(
                             *entry_id,
                             serde_json::json!({"fired": true}),
@@ -840,7 +988,6 @@ async fn run_host_commands_inner(
                         swage_workflow::EffectKind::CheckBeforeRedo => "check_before_redo",
                     };
                     match state
-                        .storage
                         .create_workflow_journal_intent(NewWorkflowJournalIntent {
                             run_id,
                             seq: current_seq,
@@ -900,7 +1047,6 @@ async fn complete_agent_entry(
     match run_ephemeral_agent_call(state, space_id, request, cancellation).await {
         Ok(result) => {
             state
-                .storage
                 .complete_workflow_journal_entry(
                     entry_id,
                     serde_json::to_value(&result).expect("agent result serialises"),
@@ -916,10 +1062,7 @@ async fn complete_agent_entry(
         // in-flight calls are legitimately re-run on resume.
         Err(error) => {
             if !error.starts_with("WorkflowCancelledError") {
-                let _ = state
-                    .storage
-                    .fail_workflow_journal_entry(entry_id, &error)
-                    .await;
+                let _ = state.fail_workflow_journal_entry(entry_id, &error).await;
             }
             Err(error)
         }
@@ -1063,7 +1206,6 @@ async fn complete_workflow_call_entry(
         "completed" => {
             let output = record.final_output.unwrap_or(Value::Null);
             state
-                .storage
                 .complete_workflow_journal_entry(entry_id, output.clone())
                 .await
                 .map_err(|error| error.to_string())?;
@@ -1094,18 +1236,30 @@ async fn complete_effect_entry(
         effect_seq,
         cancellation,
     };
-    let receipt = recover_started_effect(capability.effect_kind(), key, &request, &recovery_host)
+    let result = recover_started_effect(capability.effect_kind(), key, &request, &recovery_host)
         .await
-        .and_then(|value| serde_json::from_value(value).map_err(|error| error.to_string()))?;
-    state
-        .storage
-        .complete_workflow_journal_entry(
-            entry_id,
-            serde_json::to_value(&receipt).expect("receipt serialises"),
-        )
-        .await
-        .map_err(|error| error.to_string())?;
-    Ok(receipt)
+        .and_then(|value| serde_json::from_value(value).map_err(|error| error.to_string()));
+    match result {
+        Ok(receipt) => {
+            let serialised = serde_json::to_value(&receipt).expect("receipt serialises");
+            match state
+                .complete_workflow_journal_entry(entry_id, serialised)
+                .await
+            {
+                Ok(_) => Ok(receipt),
+                Err(error) => {
+                    let error = error.to_string();
+                    let _ = state.fail_workflow_journal_entry(entry_id, &error).await;
+                    Err(error)
+                }
+            }
+        }
+        Err(error) if error.starts_with("WorkflowCancelledError") => Err(error),
+        Err(error) => {
+            let _ = state.fail_workflow_journal_entry(entry_id, &error).await;
+            Err(error)
+        }
+    }
 }
 
 struct GatewayEffectRecoveryHost {
@@ -1731,6 +1885,37 @@ mod tests {
         deliveries: AtomicUsize,
     }
 
+    struct FailingDeliveryCapability {
+        error: &'static str,
+    }
+
+    #[async_trait::async_trait]
+    impl DeliveryCapability for FailingDeliveryCapability {
+        fn kind(&self) -> &'static str {
+            "failing"
+        }
+        fn effect_kind(&self) -> swage_workflow::EffectKind {
+            swage_workflow::EffectKind::IdempotencyKey
+        }
+        async fn deliver(
+            &self,
+            _key: Uuid,
+            _payload: EffectPayload,
+            _effect_seq: u64,
+            _cancellation: CancellationToken,
+        ) -> Result<EffectReceipt, String> {
+            Err(self.error.into())
+        }
+
+        async fn probe(
+            &self,
+            _key: Uuid,
+            _payload: &EffectPayload,
+        ) -> Result<Option<EffectReceipt>, String> {
+            Err(self.error.into())
+        }
+    }
+
     #[async_trait::async_trait]
     impl DeliveryCapability for RecordingDeliveryCapability {
         fn kind(&self) -> &'static str {
@@ -1766,7 +1951,7 @@ mod tests {
         }
     }
 
-    async fn started_effect_entry() -> (AppState, Uuid) {
+    async fn started_effect_entry() -> (AppState, Uuid, Uuid) {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
         let space = storage.get_or_create_default().await.expect("space");
         let run = storage
@@ -1804,7 +1989,7 @@ mod tests {
             crate::tool::ToolDispatcher::allow_all(vec![]),
             None,
         );
-        (state, entry.id)
+        (state, run.id, entry.id)
     }
 
     fn recovery_payload() -> EffectPayload {
@@ -1817,7 +2002,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn started_idempotency_key_effect_resends_once_without_probing() {
-        let (state, entry_id) = started_effect_entry().await;
+        let (state, _, entry_id) = started_effect_entry().await;
         let capability = Arc::new(RecordingDeliveryCapability {
             effect_kind: swage_workflow::EffectKind::IdempotencyKey,
             probe_result: None,
@@ -1845,7 +2030,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn started_check_before_redo_effect_uses_probe_receipt_without_resending() {
-        let (state, entry_id) = started_effect_entry().await;
+        let (state, _, entry_id) = started_effect_entry().await;
         let capability = Arc::new(RecordingDeliveryCapability {
             effect_kind: swage_workflow::EffectKind::CheckBeforeRedo,
             probe_result: Some(EffectReceipt {
@@ -1877,7 +2062,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn started_check_before_redo_effect_resends_once_after_probe_miss() {
-        let (state, entry_id) = started_effect_entry().await;
+        let (state, _, entry_id) = started_effect_entry().await;
         let capability = Arc::new(RecordingDeliveryCapability {
             effect_kind: swage_workflow::EffectKind::CheckBeforeRedo,
             probe_result: None,
@@ -1901,6 +2086,157 @@ mod tests {
         assert_eq!(receipt.effect_seq, 7);
         assert_eq!(capability.probes.load(Ordering::SeqCst), 1);
         assert_eq!(capability.deliveries.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn failed_effect_settles_with_its_error_but_cancellation_stays_started() {
+        for (error, expected_status) in [
+            ("DeliveryError: receiver refused", "failed"),
+            ("WorkflowCancelledError: run cancelled", "started"),
+        ] {
+            let (state, run_id, entry_id) = started_effect_entry().await;
+            let result = complete_effect_entry(
+                &state,
+                Arc::new(FailingDeliveryCapability { error }),
+                entry_id,
+                recovery_payload(),
+                CancellationToken::new(),
+                0,
+                Uuid::new_v4(),
+            )
+            .await;
+            assert_eq!(result.expect_err("effect fails"), error);
+            let entry = state
+                .storage
+                .list_workflow_journal(run_id)
+                .await
+                .expect("journal")
+                .into_iter()
+                .find(|entry| entry.id == entry_id)
+                .expect("entry");
+            assert_eq!(entry.status, expected_status);
+            assert_eq!(
+                entry.error_message.as_deref(),
+                (expected_status == "failed").then_some(error)
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn journal_lifecycle_broadcasts_match_persisted_entry() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let mut events = state.broadcast.subscribe();
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(space.id),
+            Json(StartInlineWorkflowRunRequest {
+                source: "console.log('visible'); return null".into(),
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start");
+        wait_for_terminal(&state, started.id).await;
+        let mut observed = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            match event {
+                ServerEvent::WorkflowEntryStarted { event }
+                | ServerEvent::WorkflowEntryCompleted { event } => observed.push(event.entry),
+                _ => {}
+            }
+        }
+        assert_eq!(observed.len(), 2);
+        assert_eq!(observed[0].id, observed[1].id);
+        let Json(detail) = get_run(State(state), Path(started.id))
+            .await
+            .expect("detail");
+        assert_eq!(observed[1].status, detail.journal[0].status);
+        assert_eq!(
+            observed[1].completed_order,
+            detail.journal[0].completed_order
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn token_reservation_refuses_a_concurrent_call_at_admission() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let run = storage
+            .create_workflow_run(NewWorkflowRun {
+                space_id: space.id,
+                parent_run_id: None,
+                parent_seq: None,
+                script_version_id: None,
+                source: Some("return null".into()),
+                source_hash: source_hash("return null"),
+                args: Value::Null,
+                budget: serde_json::json!({}),
+                engine_version: "test".into(),
+            })
+            .await
+            .expect("run");
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let (tx, rx) = mpsc::unbounded_channel();
+        let task = tokio::spawn(run_host_commands(
+            state,
+            run.id,
+            space.id,
+            None,
+            WorkflowBudget {
+                max_agent_calls: None,
+                max_total_tokens: Some(10),
+                max_concurrent_agent_calls: Some(2),
+            },
+            vec![],
+            Arc::new(AtomicU32::new(0)),
+            Arc::new(AtomicU64::new(0)),
+            rx,
+        ));
+        let request = AgentCallRequest {
+            prompt: "hold capacity".into(),
+            agent: "default".into(),
+            model: None,
+            schema: None,
+            max_attempts: 1,
+            label: None,
+        };
+        let (first_reply, _first_receive) = oneshot::channel();
+        tx.send(HostCommand::Agent {
+            request: request.clone(),
+            cancellation: CancellationToken::new(),
+            reply: first_reply,
+        })
+        .expect("first call");
+        let (second_reply, second_receive) = oneshot::channel();
+        tx.send(HostCommand::Agent {
+            request,
+            cancellation: CancellationToken::new(),
+            reply: second_reply,
+        })
+        .expect("second call");
+        assert_eq!(
+            second_receive.await.expect("reply").expect_err("refused"),
+            "BudgetExceededError: token limit reached"
+        );
+        drop(tx);
+        task.await.expect("host loop");
     }
 
     #[tokio::test(flavor = "multi_thread")]
