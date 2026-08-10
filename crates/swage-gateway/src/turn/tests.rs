@@ -14,6 +14,7 @@ use tokio::sync::{Mutex, Notify, mpsc};
 use swage_core::{
     ChatMessage, CompletionRequest, CompletionResponse, DelegateCompletionMode, MessageStatus,
     ProviderError, SandboxError, StreamChunk, ToolCompletionRequest, ToolCompletionResponse,
+    ToolReplayPart,
 };
 use swage_core::{FinishReason, StorageError};
 use swage_hook::{Hook, HookOutcome, HookRegistration, HookRegistry};
@@ -4133,15 +4134,54 @@ async fn second_tool_round_request_keeps_structured_tool_messages() {
     assert_eq!(requests.len(), 2, "expected two provider requests");
 
     let second = &requests[1];
-    assert_eq!(second.messages.len(), 3);
-    assert_eq!(second.messages[1].role(), Role::Assistant);
     assert!(
-        second.messages[1].tool_replay().is_some(),
+        second.messages.iter().any(|message| {
+            message.role() == Role::System
+                && message
+                    .text_content()
+                    .contains("You are an agent running on Swage")
+        }),
+        "second request should retain orientation"
+    );
+    let assistant_replay = second
+        .messages
+        .iter()
+        .find(|message| {
+            message.role() == Role::Assistant
+                && message.tool_replay().is_some_and(|replay| {
+                    replay.iter().any(|part| {
+                        matches!(
+                            part,
+                            ToolReplayPart::ToolCall { call_id, name, arguments }
+                                if call_id == "c1" && name == "echo"
+                                    && arguments == &serde_json::json!({ "text": "first" })
+                        )
+                    })
+                })
+        })
+        .expect("assistant tool-use message should retain the structured echo call");
+    assert!(
+        assistant_replay.tool_replay().is_some(),
         "assistant tool-use message should retain canonical replay"
     );
-    assert_eq!(second.messages[2].role(), Role::User);
+    let user_replay = second
+        .messages
+        .iter()
+        .find(|message| {
+            message.role() == Role::User
+                && message.tool_replay().is_some_and(|replay| {
+                    replay.iter().any(|part| {
+                        matches!(
+                            part,
+                            ToolReplayPart::ToolResult { call_id, is_error, .. }
+                                if call_id == "c1" && !is_error
+                        )
+                    })
+                })
+        })
+        .expect("user tool-result message should retain the structured echo result");
     assert!(
-        second.messages[2].tool_replay().is_some(),
+        user_replay.tool_replay().is_some(),
         "tool-result message should retain canonical replay"
     );
 }
@@ -5224,15 +5264,54 @@ async fn approval_resumption_keeps_structured_tool_messages() {
     assert_eq!(requests.len(), 2, "expected two provider requests");
 
     let second = &requests[1];
-    assert_eq!(second.messages.len(), 3);
-    assert_eq!(second.messages[1].role(), Role::Assistant);
     assert!(
-        second.messages[1].tool_replay().is_some(),
+        second.messages.iter().any(|message| {
+            message.role() == Role::System
+                && message
+                    .text_content()
+                    .contains("You are an agent running on Swage")
+        }),
+        "resumed request should retain orientation"
+    );
+    let assistant_replay = second
+        .messages
+        .iter()
+        .find(|message| {
+            message.role() == Role::Assistant
+                && message.tool_replay().is_some_and(|replay| {
+                    replay.iter().any(|part| {
+                        matches!(
+                            part,
+                            ToolReplayPart::ToolCall { call_id, name, arguments }
+                                if call_id == "c1" && name == "echo"
+                                    && arguments == &serde_json::json!({ "text": "first" })
+                        )
+                    })
+                })
+        })
+        .expect("assistant tool-use message should retain the structured echo call after approval");
+    assert!(
+        assistant_replay.tool_replay().is_some(),
         "assistant tool-use message should retain canonical replay after approval"
     );
-    assert_eq!(second.messages[2].role(), Role::User);
+    let user_replay = second
+        .messages
+        .iter()
+        .find(|message| {
+            message.role() == Role::User
+                && message.tool_replay().is_some_and(|replay| {
+                    replay.iter().any(|part| {
+                        matches!(
+                            part,
+                            ToolReplayPart::ToolResult { call_id, is_error, .. }
+                                if call_id == "c1" && !is_error
+                        )
+                    })
+                })
+        })
+        .expect("user tool-result message should retain the structured echo result after approval");
     assert!(
-        second.messages[2].tool_replay().is_some(),
+        user_replay.tool_replay().is_some(),
         "tool-result message should retain canonical replay after approval"
     );
 }
