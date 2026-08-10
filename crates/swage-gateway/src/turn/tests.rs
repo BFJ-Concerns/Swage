@@ -14,6 +14,7 @@ use tokio::sync::{Mutex, Notify, mpsc};
 use swage_core::{
     ChatMessage, CompletionRequest, CompletionResponse, DelegateCompletionMode, MessageStatus,
     ProviderError, SandboxError, StreamChunk, ToolCompletionRequest, ToolCompletionResponse,
+    ToolReplayPart,
 };
 use swage_core::{FinishReason, StorageError};
 use swage_hook::{Hook, HookOutcome, HookRegistration, HookRegistry};
@@ -3242,9 +3243,108 @@ pub(crate) async fn make_state_with_config(
     (state, session_id)
 }
 
+fn codex_turn_config() -> swage_config::ResolvedConfig {
+    let mut config = swage_config::ResolvedConfig::default();
+    config.providers.entries.insert(
+        "codex".into(),
+        swage_config::ProviderEndpointConfig {
+            protocol: swage_config::Protocol::Codex,
+            ..Default::default()
+        },
+    );
+    config.models.default = "codex".into();
+    config.models.entries.insert(
+        "codex".into(),
+        swage_config::ModelEndpointConfig {
+            provider_id: "codex".into(),
+            model_id: "fake-codex".into(),
+            ..Default::default()
+        },
+    );
+    config
+}
+
 // -----------------------------------------------------------------------
 // Tests
 // -----------------------------------------------------------------------
+
+#[tokio::test]
+async fn fresh_codex_turn_completes_without_degraded_execution_opt_in_or_audit() {
+    let _guard = SwageHomeGuard::isolate();
+    let config = codex_turn_config();
+    assert!(!config.sandbox.allow_degraded_execution);
+    let (mut state, session_id) = make_state_with_config(Vec::new(), config).await;
+
+    let (client_side, server_side) = tokio::io::duplex(64 * 1024);
+    let (client_read, client_write) = tokio::io::split(client_side);
+    let (server_read, server_write) = tokio::io::split(server_side);
+    let client = swage_codex::AppServerClient::new(
+        client_write,
+        client_read,
+        std::time::Duration::from_secs(2),
+    );
+    state.codex_supervisor = swage_codex::AppServerSupervisor::with_client(
+        swage_codex::AppServerConfig::codex("/tmp/swage-codex-turn-scenario".into()),
+        client,
+    );
+    let scenario = serde_json::json!({"keepOpen":true,"steps":[
+        {
+            "receive":{"method":"thread/start"},
+            "send":[{"jsonrpc":"2.0","id":"$request_id","result":{"thread":{"id":"fake-thread"}}}]
+        },
+        {
+            "receive":{"method":"turn/start","params":{"sandboxPolicy":{"type":"readOnly","networkAccess":false}}},
+            "send":[
+                {"jsonrpc":"2.0","id":"$request_id","result":{"turn":{"id":"fake-turn"}}},
+                {"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"delta":"done"}},
+                {"jsonrpc":"2.0","method":"turn/completed","params":{"turn":{"id":"fake-turn","status":"completed","error":null}}}
+            ]
+        }
+    ]});
+    let server = tokio::spawn(async move {
+        swage_codex::fake::run_scenario(
+            &scenario,
+            tokio::io::BufReader::new(server_read),
+            server_write,
+        )
+        .await
+    });
+    let (tx, mut rx) = mpsc::unbounded_channel();
+
+    process_turn(
+        &state,
+        session_id,
+        None,
+        "Hello Codex".into(),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .expect("a fresh Codex turn should complete under App Server sandbox policy");
+
+    let events: Vec<ServerEvent> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, ServerEvent::TurnComplete { .. })),
+        "expected a completed Codex turn, got {events:?}"
+    );
+    let audit_events = state.storage.list_audit_events().await.unwrap();
+    assert!(
+        audit_events
+            .iter()
+            .all(|event| { event.metadata["reason"] != "sandbox_disabled_by_configuration" }),
+        "App Server policy must not be recorded as degraded execution: {audit_events:?}"
+    );
+    server.abort();
+    assert!(
+        server
+            .await
+            .expect_err("fake App Server should be stopped after the turn")
+            .is_cancelled()
+    );
+}
 
 #[tokio::test]
 async fn full_turn_stores_messages_and_completes() {
@@ -4143,14 +4243,30 @@ async fn second_tool_round_request_keeps_structured_tool_messages() {
     );
     assert_eq!(second.messages[1].role(), Role::User);
     assert_eq!(second.messages[2].role(), Role::Assistant);
+    let assistant_replay = second.messages[2]
+        .tool_replay()
+        .expect("assistant tool-use message should retain canonical replay");
     assert!(
-        second.messages[2].tool_replay().is_some(),
-        "assistant tool-use message should retain canonical replay"
+        assistant_replay.iter().any(|part| matches!(
+            part,
+            ToolReplayPart::ToolCall { call_id, name, arguments }
+                if call_id == "c1"
+                    && name == "echo"
+                    && arguments == &serde_json::json!({ "text": "first" })
+        )),
+        "assistant tool-use message should retain the structured echo call"
     );
     assert_eq!(second.messages[3].role(), Role::User);
+    let user_replay = second.messages[3]
+        .tool_replay()
+        .expect("tool-result message should retain canonical replay");
     assert!(
-        second.messages[3].tool_replay().is_some(),
-        "tool-result message should retain canonical replay"
+        user_replay.iter().any(|part| matches!(
+            part,
+            ToolReplayPart::ToolResult { call_id, is_error, .. }
+                if call_id == "c1" && !is_error
+        )),
+        "user tool-result message should retain the structured echo result"
     );
 }
 
@@ -5242,14 +5358,30 @@ async fn approval_resumption_keeps_structured_tool_messages() {
     );
     assert_eq!(second.messages[1].role(), Role::User);
     assert_eq!(second.messages[2].role(), Role::Assistant);
+    let assistant_replay = second.messages[2]
+        .tool_replay()
+        .expect("assistant tool-use message should retain canonical replay after approval");
     assert!(
-        second.messages[2].tool_replay().is_some(),
-        "assistant tool-use message should retain canonical replay after approval"
+        assistant_replay.iter().any(|part| matches!(
+            part,
+            ToolReplayPart::ToolCall { call_id, name, arguments }
+                if call_id == "c1"
+                    && name == "echo"
+                    && arguments == &serde_json::json!({ "text": "first" })
+        )),
+        "assistant tool-use message should retain the structured echo call after approval"
     );
     assert_eq!(second.messages[3].role(), Role::User);
+    let user_replay = second.messages[3]
+        .tool_replay()
+        .expect("tool-result message should retain canonical replay after approval");
     assert!(
-        second.messages[3].tool_replay().is_some(),
-        "tool-result message should retain canonical replay after approval"
+        user_replay.iter().any(|part| matches!(
+            part,
+            ToolReplayPart::ToolResult { call_id, is_error, .. }
+                if call_id == "c1" && !is_error
+        )),
+        "user tool-result message should retain the structured echo result after approval"
     );
 }
 
