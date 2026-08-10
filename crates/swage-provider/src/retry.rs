@@ -9,13 +9,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use futures::{SinkExt, Stream, StreamExt};
+use futures::{Stream, StreamExt};
 use swage_core::{
     CompletionRequest, CompletionResponse, ProviderError, StreamChunk, ToolCompletionRequest,
     ToolCompletionResponse,
 };
 
-use crate::provider::LlmProvider;
+use crate::provider::{
+    LlmProvider, contains_user_visible_content, may_forward_before_attempt_commits,
+    spawn_stream_forwarder,
+};
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -53,11 +56,9 @@ impl Default for RetryConfig {
 /// without retrying. `RateLimited` errors honour the provider's `retry_after`
 /// hint — the decorator always waits at least that long before retrying.
 ///
-/// For streaming: if the inner stream contains a `StreamChunk::Error`, the
-/// entire request is retried from the beginning. Chunks from failed attempts
-/// are discarded; the caller only sees chunks from the successful run. This
-/// means the first bytes are delayed by retry latency when the initial attempt
-/// fails, but the caller is never exposed to partial-then-interrupted output.
+/// For streaming, errors are retried only until an inner chunk has been
+/// forwarded. Once output starts, chunks are delivered incrementally and any
+/// later error terminates the stream rather than replaying the request.
 pub struct RetryProvider {
     inner: Arc<dyn LlmProvider>,
     config: RetryConfig,
@@ -182,12 +183,13 @@ impl LlmProvider for RetryProvider {
         }
     }
 
-    /// Start a streaming completion, retrying the entire request on stream errors.
+    /// Start a streaming completion, retrying errors that precede all output.
     ///
-    /// The inner stream is buffered internally. If a `StreamChunk::Error`
-    /// appears before `Done`, the attempt is discarded and the request is
-    /// retried from scratch. Once an attempt completes without errors, all
-    /// its chunks are yielded to the caller in order.
+    /// Content and live progress chunks are forwarded as they arrive. Usage
+    /// and completion are held until the attempt commits, so accounting from a
+    /// discarded attempt cannot escape. After the first content chunk is
+    /// forwarded, a later error is terminal and the request is not replayed.
+    /// Dropping the returned stream cancels an active attempt or retry wait.
     fn stream(
         &self,
         request: CompletionRequest,
@@ -195,75 +197,132 @@ impl LlmProvider for RetryProvider {
         let inner = Arc::clone(&self.inner);
         let config = self.config.clone();
         let provider = inner.model_id().to_string();
-        let (mut tx, rx) = futures::channel::mpsc::unbounded();
-
-        tokio::spawn(async move {
+        spawn_stream_forwarder(move |tx| async move {
             let mut attempt = 0u32;
             let mut active_retry: Option<u32> = None;
 
             loop {
-                let chunks: Vec<StreamChunk> = inner.stream(request.clone()).collect().await;
+                if tx.is_closed() {
+                    return;
+                }
+                let mut stream = inner.stream(request.clone());
+                let mut output_started = false;
+                let mut pending_chunks = Vec::new();
+                let mut retryable_error = None;
 
-                let error_msg = chunks.iter().find_map(|chunk| {
-                    if let StreamChunk::Error { message } = chunk {
-                        Some(message.clone())
-                    } else {
-                        None
+                while let Some(chunk) = tokio::select! {
+                    () = tx.closed() => return,
+                    chunk = stream.next() => chunk,
+                } {
+                    match chunk {
+                        StreamChunk::Error { message } if !output_started => {
+                            retryable_error = Some(message);
+                            break;
+                        }
+                        StreamChunk::Error { message } => {
+                            if tx.send(StreamChunk::Error { message }).is_err() {
+                                return;
+                            }
+                            return;
+                        }
+                        chunk => {
+                            if output_started {
+                                if tx.send(chunk).is_err() {
+                                    return;
+                                }
+                            } else if contains_user_visible_content(&chunk) {
+                                output_started = true;
+                                if let Some(retry_attempt) = active_retry.take()
+                                    && tx
+                                        .send(StreamChunk::ProviderRetrySettled {
+                                            attempt: retry_attempt,
+                                            max_retries: config.max_retries,
+                                            provider: provider.clone(),
+                                            success: true,
+                                        })
+                                        .is_err()
+                                {
+                                    return;
+                                }
+                                for pending_chunk in pending_chunks.drain(..) {
+                                    if tx.send(pending_chunk).is_err() {
+                                        return;
+                                    }
+                                }
+                                if tx.send(chunk).is_err() {
+                                    return;
+                                }
+                            } else if may_forward_before_attempt_commits(&chunk) {
+                                if tx.send(chunk).is_err() {
+                                    return;
+                                }
+                            } else {
+                                pending_chunks.push(chunk);
+                            }
+                        }
                     }
-                });
+                }
 
-                if error_msg.is_none() {
-                    if let Some(retry_attempt) = active_retry.take() {
-                        let _ = tx
+                let Some(message) = retryable_error else {
+                    if let Some(retry_attempt) = active_retry.take()
+                        && tx
                             .send(StreamChunk::ProviderRetrySettled {
                                 attempt: retry_attempt,
                                 max_retries: config.max_retries,
                                 provider: provider.clone(),
                                 success: true,
                             })
-                            .await;
+                            .is_err()
+                    {
+                        return;
                     }
-                    for chunk in chunks {
-                        let _ = tx.send(chunk).await;
+                    for pending_chunk in pending_chunks {
+                        if tx.send(pending_chunk).is_err() {
+                            return;
+                        }
                     }
-                    break;
-                }
-
-                let Some(message) = error_msg else {
-                    unreachable!("checked above");
+                    return;
                 };
 
                 if attempt >= config.max_retries {
-                    if let Some(retry_attempt) = active_retry.take() {
-                        let _ = tx
+                    if let Some(retry_attempt) = active_retry.take()
+                        && tx
                             .send(StreamChunk::ProviderRetrySettled {
                                 attempt: retry_attempt,
                                 max_retries: config.max_retries,
                                 provider: provider.clone(),
                                 success: false,
                             })
-                            .await;
+                            .is_err()
+                    {
+                        return;
                     }
-                    let _ = tx.send(StreamChunk::Error { message }).await;
-                    break;
+                    if tx.send(StreamChunk::Error { message }).is_err() {
+                        return;
+                    }
+                    return;
                 }
 
                 attempt += 1;
                 active_retry = Some(attempt);
                 let delay = RetryProvider::jittered_backoff(&config, attempt - 1);
-                let _ = tx
+                if tx
                     .send(StreamChunk::ProviderRetryStarted {
                         attempt,
                         max_retries: config.max_retries,
                         provider: provider.clone(),
                         wait_ms: delay.as_millis().min(u128::from(u64::MAX)) as u64,
                     })
-                    .await;
-                tokio::time::sleep(delay).await;
+                    .is_err()
+                {
+                    return;
+                }
+                tokio::select! {
+                    () = tx.closed() => return,
+                    () = tokio::time::sleep(delay) => {}
+                }
             }
-        });
-
-        Box::pin(rx)
+        })
     }
 }
 
@@ -273,13 +332,93 @@ impl LlmProvider for RetryProvider {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
+    use std::sync::{
+        Mutex,
+        atomic::{AtomicBool, Ordering},
+    };
+    use std::task::{Context, Poll};
 
     use async_trait::async_trait;
-    use futures::StreamExt;
-    use swage_core::FinishReason;
+    use futures::{SinkExt, StreamExt};
+    use swage_core::{FinishReason, TokenUsage};
 
     use super::*;
+
+    struct ControlledStream {
+        chunks: futures::channel::mpsc::UnboundedReceiver<StreamChunk>,
+        dropped: Arc<AtomicBool>,
+    }
+
+    impl Stream for ControlledStream {
+        type Item = StreamChunk;
+
+        fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            Pin::new(&mut self.chunks).poll_next(cx)
+        }
+    }
+
+    impl Drop for ControlledStream {
+        fn drop(&mut self) {
+            self.dropped.store(true, Ordering::SeqCst);
+        }
+    }
+
+    struct ControlledProvider {
+        chunks: Mutex<Option<futures::channel::mpsc::UnboundedReceiver<StreamChunk>>>,
+        dropped: Arc<AtomicBool>,
+    }
+
+    impl ControlledProvider {
+        fn new() -> (
+            Self,
+            futures::channel::mpsc::UnboundedSender<StreamChunk>,
+            Arc<AtomicBool>,
+        ) {
+            let (tx, rx) = futures::channel::mpsc::unbounded();
+            let dropped = Arc::new(AtomicBool::new(false));
+            (
+                Self {
+                    chunks: Mutex::new(Some(rx)),
+                    dropped: Arc::clone(&dropped),
+                },
+                tx,
+                dropped,
+            )
+        }
+    }
+
+    #[async_trait]
+    impl LlmProvider for ControlledProvider {
+        fn model_id(&self) -> &str {
+            "controlled"
+        }
+
+        async fn complete(
+            &self,
+            _: CompletionRequest,
+        ) -> Result<CompletionResponse, ProviderError> {
+            unreachable!("controlled provider is streaming-only")
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, ProviderError> {
+            unreachable!("controlled provider is streaming-only")
+        }
+
+        fn stream(&self, _: CompletionRequest) -> Pin<Box<dyn Stream<Item = StreamChunk> + Send>> {
+            Box::pin(ControlledStream {
+                chunks: self
+                    .chunks
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .expect("controlled stream requested more than once"),
+                dropped: Arc::clone(&self.dropped),
+            })
+        }
+    }
 
     // -----------------------------------------------------------------------
     // Helpers
@@ -415,6 +554,39 @@ mod tests {
     struct AlwaysFail {
         call_count: Arc<Mutex<u32>>,
         error: ProviderError,
+    }
+
+    struct SequencedStreamProvider {
+        call_count: Arc<Mutex<u32>>,
+        attempts: Mutex<Vec<Vec<StreamChunk>>>,
+    }
+
+    #[async_trait]
+    impl LlmProvider for SequencedStreamProvider {
+        fn model_id(&self) -> &str {
+            "sequenced-stream"
+        }
+
+        async fn complete(
+            &self,
+            _: CompletionRequest,
+        ) -> Result<CompletionResponse, ProviderError> {
+            unreachable!("sequenced stream provider is streaming-only")
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, ProviderError> {
+            unreachable!("sequenced stream provider is streaming-only")
+        }
+
+        fn stream(&self, _: CompletionRequest) -> Pin<Box<dyn Stream<Item = StreamChunk> + Send>> {
+            *self.call_count.lock().unwrap() += 1;
+            Box::pin(futures::stream::iter(
+                self.attempts.lock().unwrap().remove(0),
+            ))
+        }
     }
 
     impl AlwaysFail {
@@ -628,6 +800,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stream_forwards_first_chunk_before_inner_stream_finishes() {
+        let (inner, mut inner_tx, _) = ControlledProvider::new();
+        let retry = RetryProvider::new(inner, zero_backoff());
+        let mut stream = retry.stream(completion_req());
+
+        inner_tx
+            .send(StreamChunk::Delta {
+                content: "first".into(),
+            })
+            .await
+            .unwrap();
+
+        let first = tokio::time::timeout(Duration::from_millis(100), stream.next())
+            .await
+            .expect("first chunk must arrive while the inner stream remains open");
+        assert!(matches!(
+            first,
+            Some(StreamChunk::Delta { content }) if content == "first"
+        ));
+    }
+
+    #[tokio::test]
     async fn stream_retries_twice_and_returns_successful_chunks() {
         // First two stream attempts return an error chunk; third succeeds.
         // Caller must see retry progress plus the successful attempt's chunks.
@@ -668,6 +862,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stream_retries_after_pre_content_accounting_chunk() {
+        let call_count = Arc::new(Mutex::new(0));
+        let retry = RetryProvider::new(
+            SequencedStreamProvider {
+                call_count: Arc::clone(&call_count),
+                attempts: Mutex::new(vec![
+                    vec![
+                        StreamChunk::Usage(TokenUsage {
+                            input_tokens: 100,
+                            output_tokens: 50,
+                        }),
+                        StreamChunk::Error {
+                            message: "first attempt failed".into(),
+                        },
+                    ],
+                    vec![
+                        StreamChunk::Delta {
+                            content: "success".into(),
+                        },
+                        StreamChunk::Usage(TokenUsage {
+                            input_tokens: 10,
+                            output_tokens: 5,
+                        }),
+                        StreamChunk::Done {
+                            finish_reason: None,
+                        },
+                    ],
+                ]),
+            },
+            RetryConfig {
+                max_retries: 1,
+                initial_backoff: Duration::ZERO,
+                max_backoff: Duration::ZERO,
+            },
+        );
+
+        let chunks: Vec<_> = retry.stream(completion_req()).collect().await;
+
+        assert_eq!(*call_count.lock().unwrap(), 2);
+        assert!(
+            chunks.iter().any(
+                |chunk| matches!(chunk, StreamChunk::Delta { content } if content == "success")
+            )
+        );
+        let usage: Vec<_> = chunks
+            .iter()
+            .filter_map(|chunk| match chunk {
+                StreamChunk::Usage(usage) => Some(usage),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(usage.len(), 1, "discarded attempts must not report usage");
+        assert_eq!(usage[0].input_tokens, 10);
+        assert_eq!(usage[0].output_tokens, 5);
+    }
+
+    #[tokio::test]
     async fn stream_returns_error_chunk_after_retries_exhausted() {
         // All attempts fail — after max_retries, an error chunk is emitted.
         let retry = RetryProvider::new(
@@ -688,5 +939,139 @@ mod tests {
                 .any(|c| { matches!(c, StreamChunk::ProviderRetrySettled { success: false, .. }) }),
             "expected retry failure to settle before final error"
         );
+    }
+
+    #[tokio::test]
+    async fn stream_forwards_post_output_error_without_retrying() {
+        let (inner, mut inner_tx, _) = ControlledProvider::new();
+        let retry = RetryProvider::new(inner, zero_backoff());
+        let mut stream = retry.stream(completion_req());
+
+        inner_tx
+            .send(StreamChunk::Delta {
+                content: "partial".into(),
+            })
+            .await
+            .unwrap();
+        inner_tx
+            .send(StreamChunk::Error {
+                message: "interrupted".into(),
+            })
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            stream.next().await,
+            Some(StreamChunk::Delta { content }) if content == "partial"
+        ));
+        assert!(matches!(
+            stream.next().await,
+            Some(StreamChunk::Error { message }) if message == "interrupted"
+        ));
+        assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn stream_does_not_retry_after_non_delta_content() {
+        let content_chunks = [
+            StreamChunk::Reasoning {
+                content: "working".into(),
+                details: None,
+            },
+            StreamChunk::ToolUse {
+                call_id: "call-1".into(),
+                name: "lookup".into(),
+                arguments: serde_json::json!({"query": "status"}),
+            },
+        ];
+
+        for content_chunk in content_chunks {
+            let call_count = Arc::new(Mutex::new(0));
+            let retry = RetryProvider::new(
+                SequencedStreamProvider {
+                    call_count: Arc::clone(&call_count),
+                    attempts: Mutex::new(vec![
+                        vec![
+                            content_chunk.clone(),
+                            StreamChunk::Error {
+                                message: "interrupted".into(),
+                            },
+                        ],
+                        vec![StreamChunk::Delta {
+                            content: "duplicate".into(),
+                        }],
+                    ]),
+                },
+                zero_backoff(),
+            );
+
+            let chunks: Vec<_> = retry.stream(completion_req()).collect().await;
+
+            assert_eq!(
+                *call_count.lock().unwrap(),
+                1,
+                "content must commit the first attempt: {content_chunk:?}"
+            );
+            assert!(chunks.contains(&content_chunk));
+            assert!(matches!(
+                chunks.last(),
+                Some(StreamChunk::Error { message }) if message == "interrupted"
+            ));
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn dropping_receiver_during_backoff_prevents_retry() {
+        let inner = FailN::new(2, ProviderError::StreamError("transient".into()));
+        let call_count = Arc::clone(&inner.call_count);
+        let retry = RetryProvider::new(
+            inner,
+            RetryConfig {
+                max_retries: 1,
+                initial_backoff: Duration::from_secs(60),
+                max_backoff: Duration::from_secs(60),
+            },
+        );
+        let mut stream = retry.stream(completion_req());
+
+        assert!(matches!(
+            stream.next().await,
+            Some(StreamChunk::ProviderRetryStarted { attempt: 1, .. })
+        ));
+        assert_eq!(*call_count.lock().unwrap(), 1);
+        drop(stream);
+
+        tokio::time::advance(Duration::from_secs(61)).await;
+        tokio::task::yield_now().await;
+
+        assert_eq!(
+            *call_count.lock().unwrap(),
+            1,
+            "abandoning the stream during backoff must cancel the retry"
+        );
+    }
+
+    #[tokio::test]
+    async fn dropping_receiver_drops_active_inner_stream() {
+        let (inner, mut inner_tx, dropped) = ControlledProvider::new();
+        let retry = RetryProvider::new(inner, zero_backoff());
+        let mut stream = retry.stream(completion_req());
+
+        inner_tx
+            .send(StreamChunk::Delta {
+                content: "first".into(),
+            })
+            .await
+            .unwrap();
+        assert!(stream.next().await.is_some());
+        drop(stream);
+
+        tokio::time::timeout(Duration::from_millis(100), async {
+            while !dropped.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("receiver closure must drop the active inner stream");
     }
 }

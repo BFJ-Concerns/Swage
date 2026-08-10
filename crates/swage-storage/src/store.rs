@@ -7,17 +7,17 @@ use crate::model::{
     ActiveSkillRecord, AgentDefinition, AgentMemoryRecord, AgentMessage, AppendMessage,
     ApprovalRequest, ApprovalState, Attachment, AttachmentStatus, AuditEvent, BackgroundJob,
     ChannelInboundMessage, ChannelLink, ConfigurationVersion, ContextSnapshotRecord,
-    DeliveryRecord, DeviceRegistration, ExtractionDerivation, InboundAudit, KnowledgeSearchHit,
-    Material, Message, NewAgentDefinition, NewAgentMemoryRecord, NewAgentMessage,
-    NewApprovalRequest, NewAttachment, NewAuditEvent, NewBackgroundJob, NewChannelInboundMessage,
-    NewChannelLink, NewConfigurationVersion, NewDeliveryRecord, NewDeviceRegistration, NewMaterial,
-    NewMessage, NewSchedule, NewScheduleRun, NewSecretRecord, NewSession, NewSourceObservation,
-    NewSpace, NewThread, NewToolCall, NewTurn, NewWorkflowJournalIntent, NewWorkflowRun,
-    NewWorkflowScript, NewWorkspaceAttachment, PendingChannelOrigin, Schedule, ScheduleRun,
-    ScheduleRunUpdate, SecretRecord, Session, SourceObservation, Space, SpaceSlug, Thread,
-    ThreadBranch, ThreadState, ToolCallRecord, Turn, TurnState, UpdateSchedule,
-    WorkflowJournalRecord, WorkflowRunRecord, WorkflowScriptRecord, WorkflowScriptVersion,
-    WorkspaceAttachment,
+    CurationAssertion, DeliveryRecord, DeviceRegistration, ExtractionDerivation, InboundAudit,
+    KnowledgeSearchHit, Material, Message, NewAgentDefinition, NewAgentMemoryRecord,
+    NewAgentMessage, NewApprovalRequest, NewAttachment, NewAuditEvent, NewBackgroundJob,
+    NewChannelInboundMessage, NewChannelLink, NewConfigurationVersion, NewCurationAssertion,
+    NewDeliveryRecord, NewDeviceRegistration, NewMaterial, NewMessage, NewSchedule, NewScheduleRun,
+    NewSecretRecord, NewSession, NewSourceObservation, NewSpace, NewThread, NewToolCall, NewTurn,
+    NewWorkflowJournalIntent, NewWorkflowRun, NewWorkflowScript, NewWorkspaceAttachment,
+    PendingChannelOrigin, Schedule, ScheduleRun, ScheduleRunUpdate, SecretRecord, Session,
+    SourceObservation, Space, SpaceSlug, Thread, ThreadBranch, ThreadState, ToolCallRecord, Turn,
+    TurnState, UpdateSchedule, WorkflowJournalRecord, WorkflowRunRecord, WorkflowScriptRecord,
+    WorkflowScriptVersion, WorkspaceAttachment,
 };
 
 // ---------------------------------------------------------------------------
@@ -270,6 +270,17 @@ pub trait ObservationStore: Send + Sync {
         query: &str,
         limit: usize,
     ) -> Result<Vec<KnowledgeSearchHit>, StorageError>;
+}
+
+/// Append-only observation-level curation judgements.
+#[async_trait]
+pub trait CurationAssertionStore: Send + Sync {
+    /// Append a curation judgement. Existing assertions and evidence are never
+    /// changed.
+    async fn add_curation_assertion(
+        &self,
+        assertion: NewCurationAssertion,
+    ) -> Result<CurationAssertion, StorageError>;
 }
 
 #[async_trait]
@@ -927,6 +938,13 @@ pub trait WorkflowStore: Send + Sync {
         run: NewWorkflowRun,
     ) -> Result<WorkflowRunRecord, StorageError>;
     async fn get_workflow_run(&self, id: Uuid) -> Result<Option<WorkflowRunRecord>, StorageError>;
+    /// The child run a parent's journalled `workflow()` call already started,
+    /// if any — how a resumed parent finds its child instead of duplicating it.
+    async fn find_child_workflow_run(
+        &self,
+        parent_run_id: Uuid,
+        parent_seq: u64,
+    ) -> Result<Option<WorkflowRunRecord>, StorageError>;
     async fn list_workflow_runs(
         &self,
         space_id: Uuid,
@@ -947,6 +965,13 @@ pub trait WorkflowStore: Send + Sync {
         &self,
         id: Uuid,
         result: serde_json::Value,
+    ) -> Result<WorkflowJournalRecord, StorageError>;
+    /// Settles an entry as `failed`, preserving the failure's own message so
+    /// replay returns the recorded error instead of re-executing the call.
+    async fn fail_workflow_journal_entry(
+        &self,
+        id: Uuid,
+        error_message: &str,
     ) -> Result<WorkflowJournalRecord, StorageError>;
     async fn list_workflow_journal(
         &self,
@@ -976,6 +1001,7 @@ pub trait Storage:
     + AgentDefinitionStore
     + ConfigurationVersionStore
     + ObservationStore
+    + CurationAssertionStore
     + SecretStore
     + ThreadStore
     + TurnStore
@@ -1008,6 +1034,7 @@ impl<T> Storage for T where
         + AgentDefinitionStore
         + ConfigurationVersionStore
         + ObservationStore
+        + CurationAssertionStore
         + SecretStore
         + ThreadStore
         + TurnStore
@@ -1402,6 +1429,16 @@ mod tests {
             _: &str,
             _: usize,
         ) -> Result<Vec<KnowledgeSearchHit>, StorageError> {
+            unimplemented!()
+        }
+    }
+
+    #[async_trait]
+    impl CurationAssertionStore for StubStorage {
+        async fn add_curation_assertion(
+            &self,
+            _: NewCurationAssertion,
+        ) -> Result<CurationAssertion, StorageError> {
             unimplemented!()
         }
     }
@@ -2020,6 +2057,13 @@ mod tests {
         ) -> Result<Option<WorkflowRunRecord>, StorageError> {
             unimplemented!()
         }
+        async fn find_child_workflow_run(
+            &self,
+            _: Uuid,
+            _: u64,
+        ) -> Result<Option<WorkflowRunRecord>, StorageError> {
+            unimplemented!()
+        }
         async fn list_workflow_runs(
             &self,
             _: Uuid,
@@ -2048,6 +2092,13 @@ mod tests {
             &self,
             _: Uuid,
             _: serde_json::Value,
+        ) -> Result<WorkflowJournalRecord, StorageError> {
+            unimplemented!()
+        }
+        async fn fail_workflow_journal_entry(
+            &self,
+            _: Uuid,
+            _: &str,
         ) -> Result<WorkflowJournalRecord, StorageError> {
             unimplemented!()
         }

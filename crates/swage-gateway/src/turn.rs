@@ -662,18 +662,21 @@ pub(crate) async fn process_turn_with_existing_turn(
         .await?;
 
     // Steps 8–9: Assemble context via the swage-context assembly engine.
-    // Loads thread history, space memory, and constructs typed elements.
-    // Runs fail-open assembly: custom Python configs when configured, built-in
+    // Loads thread history and constructs the typed elements used by the
+    // selected assembly.
+    // Runs fail-open assembly: custom JavaScript configs when configured, built-in
     // default otherwise. The LLM provider is passed for two-phase compaction.
     let history_messages =
         rebuild_thread_history_messages(state.storage.as_ref(), thread_id).await?;
 
-    // Load space memory from the filesystem. Returns an empty string when
-    // no memory directory or files exist — MemoryElement handles empty content.
-    let memory_content = match swage_root_opt.as_deref() {
-        Some(root) => load_space_memory(root, &space_slug).await,
-        None => String::new(),
-    };
+    let assembly_name = select_context_assembly(state, &config, session_id, prepared_turn_id).await;
+    let memory_content = load_memory_for_assembly(&assembly_name, || async {
+        match swage_root_opt.as_deref() {
+            Some(root) => load_space_memory(root, &space_slug).await,
+            None => String::new(),
+        }
+    })
+    .await;
 
     // The workspace root doubles as the session's working directory in the
     // orientation baseline, so it is resolved before elements are built.
@@ -695,8 +698,7 @@ pub(crate) async fn process_turn_with_existing_turn(
         &config.instructions,
         active_skills,
         history_messages,
-        memory_content,
-        space.name.clone(),
+        memory_content.map(|content| (content, space.name.clone())),
         environment,
         available_skills,
     );
@@ -706,80 +708,15 @@ pub(crate) async fn process_turn_with_existing_turn(
     // assembly from the config hierarchy; "default" (or empty) runs the
     // built-in implementation. JS assemblies fail open to the default with
     // the error recorded in the report.
-    //
-    // The assembly name is an experiment location: when variants are
-    // registered for it, the selection loop chooses which serves this turn
-    // (honouring the kill switch and forced pins), and every decision —
-    // including "experimentation is off" — lands in the audit trail. The
-    // report and every model-facing surface stay function-named; the audit
-    // record is the only place the variant id appears.
-    let configured_assembly = config.context.assembly.trim().to_owned();
-    let assembly_variants: Vec<&str> = vec![]; // registered by config as they earn their place
-    let assembly_decision = crate::experimentation::select_variant(
-        &config.experimentation,
-        crate::experimentation::LOCATION_CONTEXT_ASSEMBLY,
-        &assembly_variants,
-        &configured_assembly,
-        prepared_turn_id,
+    let output = execute_context_assembly(
+        &assembly_name,
+        &config,
+        &elements,
+        &tokeniser,
+        swage_root_opt.as_deref(),
+        &space_slug,
+        &session.agent_id,
     );
-    // An unrecorded draw must not shape behaviour: on recording failure the
-    // configured default serves instead of the drawn variant, so every
-    // variant that ever ran has a record.
-    let assembly_decision = match crate::experimentation::record_selection(
-        state,
-        crate::experimentation::LOCATION_CONTEXT_ASSEMBLY,
-        &assembly_decision,
-        Some(session_id),
-        Some(prepared_turn_id),
-    )
-    .await
-    {
-        Ok(()) => assembly_decision,
-        Err(error) => {
-            tracing::error!(
-                %error,
-                variant = %assembly_decision.variant,
-                "variant selection could not be recorded; serving the configured default"
-            );
-            crate::experimentation::VariantDecision {
-                variant: configured_assembly.clone(),
-                reason: crate::experimentation::SelectionReason::RecordUnavailable,
-            }
-        }
-    };
-    let assembly_name = assembly_decision.variant.trim();
-    let output = if assembly_name.is_empty() || assembly_name == "default" {
-        swage_context::assembly::assemble(&elements, &config.context, &tokeniser)
-    } else {
-        let search_levels: Vec<(swage_config::HierarchyLevel, PathBuf)> = swage_root_opt
-            .as_ref()
-            .map(|root| {
-                let space_dir = root.join("spaces").join(&space_slug);
-                let agent_dir = space_dir.join("agents").join(&session.agent_id);
-                let mut levels = vec![
-                    (swage_config::HierarchyLevel::Global, root.clone()),
-                    (swage_config::HierarchyLevel::Space, space_dir),
-                ];
-                if agent_dir.is_dir() {
-                    levels.push((swage_config::HierarchyLevel::Agent, agent_dir));
-                }
-                levels
-            })
-            .unwrap_or_default();
-        let level_refs: Vec<(swage_config::HierarchyLevel, &Path)> = search_levels
-            .iter()
-            .map(|(level, path)| (level.clone(), path.as_path()))
-            .collect();
-        let source_path =
-            swage_context::js_assembly::resolve_js_assembly(assembly_name, &level_refs);
-        swage_context::js_assembly::assemble_named(
-            assembly_name,
-            source_path.as_deref(),
-            &elements,
-            &config.context,
-            &tokeniser,
-        )
-    };
     let (assembled_messages, assembly_report) = (output.messages, output.report);
 
     tracing::debug!(
@@ -819,15 +756,9 @@ pub(crate) async fn process_turn_with_existing_turn(
     // enabled, this also spawns the per-turn sandbox and returns its cleanup
     // guard to this turn scope.
     let is_codex_turn = config.default_provider_protocol() == swage_config::Protocol::Codex;
-    let mut dispatcher_config = config.clone();
-    if is_codex_turn {
-        // Bridged tools remain gateway-hosted. Codex-native actions are
-        // isolated by the App Server sandbox policy instead.
-        dispatcher_config.sandbox.enabled = false;
-    }
     let dispatcher_build = match build_gateway_dispatcher(
         state,
-        &dispatcher_config,
+        &config,
         &agent_config,
         session.metadata.as_ref(),
         Some(space_id),
@@ -837,9 +768,7 @@ pub(crate) async fn process_turn_with_existing_turn(
     .await
     {
         Ok(build) => build,
-        Err(error)
-            if dispatcher_config.sandbox.enabled && attendance == TurnAttendance::Attended =>
-        {
+        Err(error) if config.sandbox.enabled && attendance == TurnAttendance::Attended => {
             let detected_degradation = ExecutionIsolation::Degraded {
                 reason: format!("sandbox_setup_failed: {error}"),
             };
@@ -1396,6 +1325,95 @@ pub(crate) async fn process_turn_with_existing_turn(
     }
 
     Ok(())
+}
+
+async fn select_context_assembly(
+    state: &AppState,
+    config: &swage_config::ResolvedConfig,
+    session_id: Uuid,
+    turn_id: Uuid,
+) -> String {
+    // The assembly name is an experiment location: when variants are
+    // registered for it, the selection loop chooses which serves this turn
+    // (honouring the kill switch and forced pins), and every decision —
+    // including "experimentation is off" — lands in the audit trail. The
+    // report and every model-facing surface stay function-named; the audit
+    // record is the only place the variant id appears.
+    let configured_assembly = config.context.assembly.trim().to_owned();
+    let assembly_variants: Vec<&str> = vec![];
+    let decision = crate::experimentation::select_variant(
+        &config.experimentation,
+        crate::experimentation::LOCATION_CONTEXT_ASSEMBLY,
+        &assembly_variants,
+        &configured_assembly,
+        turn_id,
+    );
+    let decision = match crate::experimentation::record_selection(
+        state,
+        crate::experimentation::LOCATION_CONTEXT_ASSEMBLY,
+        &decision,
+        Some(session_id),
+        Some(turn_id),
+    )
+    .await
+    {
+        Ok(()) => decision,
+        Err(error) => {
+            tracing::error!(
+                %error,
+                variant = %decision.variant,
+                "variant selection could not be recorded; serving the configured default"
+            );
+            crate::experimentation::VariantDecision {
+                variant: configured_assembly.clone(),
+                reason: crate::experimentation::SelectionReason::RecordUnavailable,
+            }
+        }
+    };
+
+    decision.variant
+}
+
+fn execute_context_assembly(
+    assembly_name: &str,
+    config: &swage_config::ResolvedConfig,
+    elements: &[Box<dyn ContextElement>],
+    tokeniser: &TiktokenTokeniser,
+    swage_root: Option<&Path>,
+    space_slug: &str,
+    agent_id: &str,
+) -> swage_context::report::AssemblyOutput {
+    let assembly_name = assembly_name.trim();
+    if is_default_context_assembly(assembly_name) {
+        return swage_context::assembly::assemble(elements, &config.context, tokeniser);
+    }
+
+    let search_levels: Vec<(swage_config::HierarchyLevel, PathBuf)> = swage_root
+        .map(|root| {
+            let space_dir = root.join("spaces").join(space_slug);
+            let agent_dir = space_dir.join("agents").join(agent_id);
+            let mut levels = vec![
+                (swage_config::HierarchyLevel::Global, root.to_path_buf()),
+                (swage_config::HierarchyLevel::Space, space_dir),
+            ];
+            if agent_dir.is_dir() {
+                levels.push((swage_config::HierarchyLevel::Agent, agent_dir));
+            }
+            levels
+        })
+        .unwrap_or_default();
+    let level_refs: Vec<(swage_config::HierarchyLevel, &Path)> = search_levels
+        .iter()
+        .map(|(level, path)| (level.clone(), path.as_path()))
+        .collect();
+    let source_path = swage_context::js_assembly::resolve_js_assembly(assembly_name, &level_refs);
+    swage_context::js_assembly::assemble_named(
+        assembly_name,
+        source_path.as_deref(),
+        elements,
+        &config.context,
+        tokeniser,
+    )
 }
 
 /// Cancel the active turn for a session.

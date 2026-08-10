@@ -69,7 +69,16 @@ calls pause for approval before running — the platform is asking your \
 operator, not reporting an error: wait for the outcome rather than \
 retrying, and continue with the approved result or work around a \
 rejection. File paths in tool calls resolve against your working \
-directory unless a tool says otherwise.";
+directory unless a tool says otherwise.
+
+Where tools overlap, prefer the specific one. The space's memory is yours \
+to use — reach for `agent_memory` to remember and recall what you learn \
+across sessions, and `memory` only to work with the space's memory files \
+directly. Use `web_search` to find pages and `url_fetch` to read a URL \
+you already have. Use `workflow_run` for a saved, journalled multi-step \
+job and `delegate` for a one-off child task. Prefer your native \
+file and shell tools over `python_execute` unless the task is genuinely \
+computation.";
 
 /// The context element carrying baseline orientation.
 ///

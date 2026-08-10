@@ -63,47 +63,50 @@ fn version_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkflowScriptVersio
 }
 
 fn run_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkflowRunRecord> {
-    let script_version_id: Option<String> = row.get(2)?;
-    let script_id: Option<String> = row.get(3)?;
-    let final_output: Option<String> = row.get(11)?;
-    let completed_at: Option<String> = row.get(15)?;
+    let parent_run_id: Option<String> = row.get(2)?;
+    let script_version_id: Option<String> = row.get(4)?;
+    let script_id: Option<String> = row.get(5)?;
+    let final_output: Option<String> = row.get(13)?;
+    let completed_at: Option<String> = row.get(17)?;
     Ok(WorkflowRunRecord {
         id: uuid(row.get(0)?)?,
         space_id: uuid(row.get(1)?)?,
+        parent_run_id: parent_run_id.map(uuid).transpose()?,
+        parent_seq: row.get::<_, Option<i64>>(3)?.map(|value| value as u64),
         script_version_id: script_version_id.map(uuid).transpose()?,
         script_id: script_id.map(uuid).transpose()?,
-        script_name: row.get(4)?,
-        script_version: row.get::<_, Option<i64>>(5)?.map(|value| value as u32),
-        source: row.get(6)?,
-        source_hash: row.get(7)?,
-        args: serde_json::from_str(&row.get::<_, String>(8)?).map_err(|error| {
+        script_name: row.get(6)?,
+        script_version: row.get::<_, Option<i64>>(7)?.map(|value| value as u32),
+        source: row.get(8)?,
+        source_hash: row.get(9)?,
+        args: serde_json::from_str(&row.get::<_, String>(10)?).map_err(|error| {
             rusqlite::Error::FromSqlConversionFailure(
-                8,
+                10,
                 rusqlite::types::Type::Text,
                 Box::new(error),
             )
         })?,
-        budget: serde_json::from_str(&row.get::<_, String>(9)?).map_err(|error| {
+        budget: serde_json::from_str(&row.get::<_, String>(11)?).map_err(|error| {
             rusqlite::Error::FromSqlConversionFailure(
-                9,
+                11,
                 rusqlite::types::Type::Text,
                 Box::new(error),
             )
         })?,
-        state: row.get(10)?,
+        state: row.get(12)?,
         final_output: final_output
             .map(|value| serde_json::from_str(&value))
             .transpose()
             .map_err(|error| {
                 rusqlite::Error::FromSqlConversionFailure(
-                    11,
+                    13,
                     rusqlite::types::Type::Text,
                     Box::new(error),
                 )
             })?,
-        error_message: row.get(12)?,
-        engine_version: row.get(13)?,
-        created_at: time(row.get(14)?)?,
+        error_message: row.get(14)?,
+        engine_version: row.get(15)?,
+        created_at: time(row.get(16)?)?,
         completed_at: completed_at.map(time).transpose()?,
     })
 }
@@ -111,7 +114,7 @@ fn run_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkflowRunRecord> {
 const SCRIPT_COLUMNS: &str =
     "id, space_id, name, description, delivery_grant_json, created_at, updated_at";
 const VERSION_COLUMNS: &str = "id, script_id, version, source, created_at";
-const RUN_COLUMNS: &str = "id, space_id, script_version_id, \
+const RUN_COLUMNS: &str = "id, space_id, parent_run_id, parent_seq, script_version_id, \
     (SELECT script_id FROM workflow_script_versions WHERE id = workflow_runs.script_version_id), \
     (SELECT name FROM workflow_scripts WHERE id = (SELECT script_id FROM workflow_script_versions WHERE id = workflow_runs.script_version_id)), \
     (SELECT version FROM workflow_script_versions WHERE id = workflow_runs.script_version_id), \
@@ -279,7 +282,7 @@ impl WorkflowStore for SqliteStorage {
             .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
         let budget = serde_json::to_string(&run.budget)
             .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
-        self.with_conn(move |conn| { conn.execute("INSERT INTO workflow_runs (id, space_id, script_version_id, source, source_hash, args_json, budget_json, state, engine_version, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'running', ?8, ?9)", params![id.to_string(), run.space_id.to_string(), run.script_version_id.map(|v| v.to_string()), run.source, run.source_hash, args, budget, run.engine_version, now.to_rfc3339()])?; conn.query_row(&format!("SELECT {RUN_COLUMNS} FROM workflow_runs WHERE id = ?1"), [id.to_string()], run_row) }).await
+        self.with_conn(move |conn| { conn.execute("INSERT INTO workflow_runs (id, space_id, parent_run_id, parent_seq, script_version_id, source, source_hash, args_json, budget_json, state, engine_version, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'running', ?10, ?11)", params![id.to_string(), run.space_id.to_string(), run.parent_run_id.map(|v| v.to_string()), run.parent_seq.map(|v| v as i64), run.script_version_id.map(|v| v.to_string()), run.source, run.source_hash, args, budget, run.engine_version, now.to_rfc3339()])?; conn.query_row(&format!("SELECT {RUN_COLUMNS} FROM workflow_runs WHERE id = ?1"), [id.to_string()], run_row) }).await
     }
 
     async fn get_workflow_run(&self, id: Uuid) -> Result<Option<WorkflowRunRecord>, StorageError> {
@@ -293,6 +296,24 @@ impl WorkflowStore for SqliteStorage {
         })
         .await
     }
+    async fn find_child_workflow_run(
+        &self,
+        parent_run_id: Uuid,
+        parent_seq: u64,
+    ) -> Result<Option<WorkflowRunRecord>, StorageError> {
+        self.with_conn(move |conn| {
+            conn.query_row(
+                &format!(
+                    "SELECT {RUN_COLUMNS} FROM workflow_runs WHERE parent_run_id = ?1 AND parent_seq = ?2"
+                ),
+                params![parent_run_id.to_string(), parent_seq as i64],
+                run_row,
+            )
+            .optional()
+        })
+        .await
+    }
+
     async fn list_workflow_runs(
         &self,
         space_id: Uuid,
@@ -339,6 +360,16 @@ impl WorkflowStore for SqliteStorage {
             serde_json::to_string(&result).map_err(|e| StorageError::QueryFailed(e.to_string()))?;
         let now = Utc::now();
         self.with_conn(move |conn| { let tx=conn.unchecked_transaction()?; let run_id:String=tx.query_row("SELECT run_id FROM workflow_journal WHERE id=?1",[id.to_string()],|row|row.get(0))?; let order:i64=tx.query_row("SELECT COALESCE(MAX(completed_order),0)+1 FROM workflow_journal WHERE run_id=?1",[run_id],|row|row.get(0))?; tx.execute("UPDATE workflow_journal SET status='completed', result_json=?2, completed_order=?3, completed_at=?4 WHERE id=?1",params![id.to_string(),result,order,now.to_rfc3339()])?; tx.commit()?; conn.query_row(&format!("SELECT {JOURNAL_COLUMNS} FROM workflow_journal WHERE id=?1"),[id.to_string()],journal_row) }).await
+    }
+
+    async fn fail_workflow_journal_entry(
+        &self,
+        id: Uuid,
+        error_message: &str,
+    ) -> Result<WorkflowJournalRecord, StorageError> {
+        let error_message = error_message.to_string();
+        let now = Utc::now();
+        self.with_conn(move |conn| { let tx=conn.unchecked_transaction()?; let run_id:String=tx.query_row("SELECT run_id FROM workflow_journal WHERE id=?1",[id.to_string()],|row|row.get(0))?; let order:i64=tx.query_row("SELECT COALESCE(MAX(completed_order),0)+1 FROM workflow_journal WHERE run_id=?1",[run_id],|row|row.get(0))?; tx.execute("UPDATE workflow_journal SET status='failed', error_message=?2, completed_order=?3, completed_at=?4 WHERE id=?1",params![id.to_string(),error_message,order,now.to_rfc3339()])?; tx.commit()?; conn.query_row(&format!("SELECT {JOURNAL_COLUMNS} FROM workflow_journal WHERE id=?1"),[id.to_string()],journal_row) }).await
     }
 
     async fn list_workflow_journal(
@@ -389,6 +420,8 @@ mod tests {
         let run = storage
             .create_workflow_run(NewWorkflowRun {
                 space_id: space.id,
+                parent_run_id: None,
+                parent_seq: None,
                 script_version_id: Some(second.id),
                 source: None,
                 source_hash: "hash".into(),

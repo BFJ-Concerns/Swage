@@ -14,6 +14,7 @@ use tokio::sync::{Mutex, Notify, mpsc};
 use swage_core::{
     ChatMessage, CompletionRequest, CompletionResponse, DelegateCompletionMode, MessageStatus,
     ProviderError, SandboxError, StreamChunk, ToolCompletionRequest, ToolCompletionResponse,
+    ToolReplayPart,
 };
 use swage_core::{FinishReason, StorageError};
 use swage_hook::{Hook, HookOutcome, HookRegistration, HookRegistry};
@@ -499,6 +500,20 @@ impl swage_storage::WorkflowStore for MockStorage {
         &self,
         _: Uuid,
     ) -> Result<Option<swage_storage::WorkflowRunRecord>, StorageError> {
+        unimplemented!()
+    }
+    async fn find_child_workflow_run(
+        &self,
+        _: Uuid,
+        _: u64,
+    ) -> Result<Option<swage_storage::WorkflowRunRecord>, StorageError> {
+        unimplemented!()
+    }
+    async fn fail_workflow_journal_entry(
+        &self,
+        _: Uuid,
+        _: &str,
+    ) -> Result<swage_storage::WorkflowJournalRecord, StorageError> {
         unimplemented!()
     }
     async fn list_workflow_runs(
@@ -2898,6 +2913,16 @@ impl swage_storage::store::ObservationStore for MockStorage {
 }
 
 #[async_trait]
+impl swage_storage::store::CurationAssertionStore for MockStorage {
+    async fn add_curation_assertion(
+        &self,
+        _: swage_storage::NewCurationAssertion,
+    ) -> Result<swage_storage::CurationAssertion, StorageError> {
+        unimplemented!("turn tests do not exercise knowledge curation")
+    }
+}
+
+#[async_trait]
 impl swage_storage::store::SecretStore for MockStorage {
     async fn create_secret(
         &self,
@@ -3242,9 +3267,108 @@ pub(crate) async fn make_state_with_config(
     (state, session_id)
 }
 
+fn codex_turn_config() -> swage_config::ResolvedConfig {
+    let mut config = swage_config::ResolvedConfig::default();
+    config.providers.entries.insert(
+        "codex".into(),
+        swage_config::ProviderEndpointConfig {
+            protocol: swage_config::Protocol::Codex,
+            ..Default::default()
+        },
+    );
+    config.models.default = "codex".into();
+    config.models.entries.insert(
+        "codex".into(),
+        swage_config::ModelEndpointConfig {
+            provider_id: "codex".into(),
+            model_id: "fake-codex".into(),
+            ..Default::default()
+        },
+    );
+    config
+}
+
 // -----------------------------------------------------------------------
 // Tests
 // -----------------------------------------------------------------------
+
+#[tokio::test]
+async fn fresh_codex_turn_completes_without_degraded_execution_opt_in_or_audit() {
+    let _guard = SwageHomeGuard::isolate();
+    let config = codex_turn_config();
+    assert!(!config.sandbox.allow_degraded_execution);
+    let (mut state, session_id) = make_state_with_config(Vec::new(), config).await;
+
+    let (client_side, server_side) = tokio::io::duplex(64 * 1024);
+    let (client_read, client_write) = tokio::io::split(client_side);
+    let (server_read, server_write) = tokio::io::split(server_side);
+    let client = swage_codex::AppServerClient::new(
+        client_write,
+        client_read,
+        std::time::Duration::from_secs(2),
+    );
+    state.codex_supervisor = swage_codex::AppServerSupervisor::with_client(
+        swage_codex::AppServerConfig::codex("/tmp/swage-codex-turn-scenario".into()),
+        client,
+    );
+    let scenario = serde_json::json!({"keepOpen":true,"steps":[
+        {
+            "receive":{"method":"thread/start"},
+            "send":[{"jsonrpc":"2.0","id":"$request_id","result":{"thread":{"id":"fake-thread"}}}]
+        },
+        {
+            "receive":{"method":"turn/start","params":{"sandboxPolicy":{"type":"readOnly","networkAccess":false}}},
+            "send":[
+                {"jsonrpc":"2.0","id":"$request_id","result":{"turn":{"id":"fake-turn"}}},
+                {"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"delta":"done"}},
+                {"jsonrpc":"2.0","method":"turn/completed","params":{"turn":{"id":"fake-turn","status":"completed","error":null}}}
+            ]
+        }
+    ]});
+    let server = tokio::spawn(async move {
+        swage_codex::fake::run_scenario(
+            &scenario,
+            tokio::io::BufReader::new(server_read),
+            server_write,
+        )
+        .await
+    });
+    let (tx, mut rx) = mpsc::unbounded_channel();
+
+    process_turn(
+        &state,
+        session_id,
+        None,
+        "Hello Codex".into(),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .expect("a fresh Codex turn should complete under App Server sandbox policy");
+
+    let events: Vec<ServerEvent> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, ServerEvent::TurnComplete { .. })),
+        "expected a completed Codex turn, got {events:?}"
+    );
+    let audit_events = state.storage.list_audit_events().await.unwrap();
+    assert!(
+        audit_events
+            .iter()
+            .all(|event| { event.metadata["reason"] != "sandbox_disabled_by_configuration" }),
+        "App Server policy must not be recorded as degraded execution: {audit_events:?}"
+    );
+    server.abort();
+    assert!(
+        server
+            .await
+            .expect_err("fake App Server should be stopped after the turn")
+            .is_cancelled()
+    );
+}
 
 #[tokio::test]
 async fn full_turn_stores_messages_and_completes() {
@@ -3265,7 +3389,7 @@ async fn full_turn_stores_messages_and_completes() {
     let (state, session_id) = make_state_with_session(chunks).await;
     let (tx, mut rx) = mpsc::unbounded_channel();
 
-    process_turn(
+    let (turn_result, memory_loads) = Box::pin(observe_space_memory_loads(process_turn(
         &state,
         session_id,
         None,
@@ -3273,9 +3397,13 @@ async fn full_turn_stores_messages_and_completes() {
         tx,
         Arc::new(Mutex::new(SubscriptionState::new(true))),
         None,
-    )
-    .await
-    .expect("turn should complete without error");
+    )))
+    .await;
+    turn_result.expect("turn should complete without error");
+    assert_eq!(
+        memory_loads, 0,
+        "a full turn using the default assembly must not reach the space-memory loading seam"
+    );
 
     let events: Vec<ServerEvent> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
 
@@ -4133,15 +4261,59 @@ async fn second_tool_round_request_keeps_structured_tool_messages() {
     assert_eq!(requests.len(), 2, "expected two provider requests");
 
     let second = &requests[1];
-    assert_eq!(second.messages.len(), 3);
-    assert_eq!(second.messages[1].role(), Role::Assistant);
+    assert_eq!(second.messages.len(), 4);
+    assert_eq!(second.messages[0].role(), Role::System);
+    assert_eq!(second.messages[1].role(), Role::User);
+    assert_eq!(second.messages[2].role(), Role::Assistant);
+    assert_eq!(second.messages[3].role(), Role::User);
     assert!(
-        second.messages[1].tool_replay().is_some(),
+        second.messages.iter().any(|message| {
+            message.role() == Role::System
+                && message
+                    .text_content()
+                    .contains("You are an agent running on Swage")
+        }),
+        "second request should retain orientation"
+    );
+    let assistant_replay = second
+        .messages
+        .iter()
+        .find(|message| {
+            message.role() == Role::Assistant
+                && message.tool_replay().is_some_and(|replay| {
+                    replay.iter().any(|part| {
+                        matches!(
+                            part,
+                            ToolReplayPart::ToolCall { call_id, name, arguments }
+                                if call_id == "c1" && name == "echo"
+                                    && arguments == &serde_json::json!({ "text": "first" })
+                        )
+                    })
+                })
+        })
+        .expect("assistant tool-use message should retain the structured echo call");
+    assert!(
+        assistant_replay.tool_replay().is_some(),
         "assistant tool-use message should retain canonical replay"
     );
-    assert_eq!(second.messages[2].role(), Role::User);
+    let user_replay = second
+        .messages
+        .iter()
+        .find(|message| {
+            message.role() == Role::User
+                && message.tool_replay().is_some_and(|replay| {
+                    replay.iter().any(|part| {
+                        matches!(
+                            part,
+                            ToolReplayPart::ToolResult { call_id, is_error, .. }
+                                if call_id == "c1" && !is_error
+                        )
+                    })
+                })
+        })
+        .expect("user tool-result message should retain the structured echo result");
     assert!(
-        second.messages[2].tool_replay().is_some(),
+        user_replay.tool_replay().is_some(),
         "tool-result message should retain canonical replay"
     );
 }
@@ -5224,15 +5396,59 @@ async fn approval_resumption_keeps_structured_tool_messages() {
     assert_eq!(requests.len(), 2, "expected two provider requests");
 
     let second = &requests[1];
-    assert_eq!(second.messages.len(), 3);
-    assert_eq!(second.messages[1].role(), Role::Assistant);
+    assert_eq!(second.messages.len(), 4);
+    assert_eq!(second.messages[0].role(), Role::System);
+    assert_eq!(second.messages[1].role(), Role::User);
+    assert_eq!(second.messages[2].role(), Role::Assistant);
+    assert_eq!(second.messages[3].role(), Role::User);
     assert!(
-        second.messages[1].tool_replay().is_some(),
+        second.messages.iter().any(|message| {
+            message.role() == Role::System
+                && message
+                    .text_content()
+                    .contains("You are an agent running on Swage")
+        }),
+        "resumed request should retain orientation"
+    );
+    let assistant_replay = second
+        .messages
+        .iter()
+        .find(|message| {
+            message.role() == Role::Assistant
+                && message.tool_replay().is_some_and(|replay| {
+                    replay.iter().any(|part| {
+                        matches!(
+                            part,
+                            ToolReplayPart::ToolCall { call_id, name, arguments }
+                                if call_id == "c1" && name == "echo"
+                                    && arguments == &serde_json::json!({ "text": "first" })
+                        )
+                    })
+                })
+        })
+        .expect("assistant tool-use message should retain the structured echo call after approval");
+    assert!(
+        assistant_replay.tool_replay().is_some(),
         "assistant tool-use message should retain canonical replay after approval"
     );
-    assert_eq!(second.messages[2].role(), Role::User);
+    let user_replay = second
+        .messages
+        .iter()
+        .find(|message| {
+            message.role() == Role::User
+                && message.tool_replay().is_some_and(|replay| {
+                    replay.iter().any(|part| {
+                        matches!(
+                            part,
+                            ToolReplayPart::ToolResult { call_id, is_error, .. }
+                                if call_id == "c1" && !is_error
+                        )
+                    })
+                })
+        })
+        .expect("user tool-result message should retain the structured echo result after approval");
     assert!(
-        second.messages[2].tool_replay().is_some(),
+        user_replay.tool_replay().is_some(),
         "tool-result message should retain canonical replay after approval"
     );
 }
@@ -5418,6 +5634,31 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
         child_turns[0].assistant_response.as_deref(),
         Some("Delegate answer")
     );
+    let child_snapshot = state
+        .storage
+        .get_snapshot(child_turns[0].id)
+        .await
+        .expect("read child context snapshot")
+        .expect("delegated assembly report should be persisted");
+    let child_snapshot: serde_json::Value =
+        serde_json::from_str(&child_snapshot).expect("child context snapshot should be JSON");
+    assert!(
+        child_snapshot["elements"].is_array(),
+        "delegated assembly report should contain its element decisions"
+    );
+    let child_audit = state
+        .storage
+        .list_audit_events_by_session(child_sessions[0].id)
+        .await
+        .expect("list child audit events");
+    assert!(
+        child_audit.iter().any(|event| {
+            event.entity_id == crate::experimentation::LOCATION_CONTEXT_ASSEMBLY
+                && event.event_kind == "variant_selected"
+                && event.metadata["turn_id"] == serde_json::json!(child_turns[0].id)
+        }),
+        "delegated assembly selection should be recorded against the child turn"
+    );
 
     let captured_requests = captured_requests.lock().unwrap();
     assert_eq!(
@@ -5442,6 +5683,21 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
         .collect::<Vec<_>>()
         .join("\n\n");
     assert!(
+        child_request_text.contains("You are an agent running on Swage"),
+        "delegated provider request should include platform identity: {child_request_text}"
+    );
+    assert!(
+        child_request_text.contains("Space: the default space")
+            && child_request_text.contains("Working directory:")
+            && child_request_text.contains("Session started:"),
+        "delegated provider request should include the child session's place: {child_request_text}"
+    );
+    assert!(
+        child_request_text.contains("## Skills available in this session")
+            && child_request_text.contains("delegated-specialist — Delegated specialist behaviour"),
+        "delegated provider request should include the target skill catalogue: {child_request_text}"
+    );
+    assert!(
         child_request_text.contains("Inherited Background Context"),
         "delegated provider request should include transferred context: {child_request_text}"
     );
@@ -5452,10 +5708,6 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
     assert!(
         child_request_text.contains("Delegated Task\n\nSummarise this request"),
         "delegated provider request should fence the task separately: {child_request_text}"
-    );
-    assert!(
-        child_request_text.contains("Active Skills"),
-        "delegated provider request should include target agent active skills: {child_request_text}"
     );
     assert!(
         child_request_text.contains("Use the delegated specialist skill."),
@@ -5601,6 +5853,33 @@ async fn delegate_tool_detaches_child_and_persists_result_after_release() {
         "child result should not exist until the gated provider is released"
     );
 
+    let child_session_id = detached_output["child_session_id"]
+        .as_str()
+        .expect("child session id should be a string")
+        .parse::<Uuid>()
+        .expect("child session id should be a uuid");
+    let child_threads = state
+        .storage
+        .list_by_session(child_session_id)
+        .await
+        .expect("list child threads before release");
+    assert_eq!(child_threads.len(), 1, "expected one child thread");
+    let child_turns = state
+        .storage
+        .list_turns_by_thread(child_threads[0].id)
+        .await
+        .expect("list child turns before release");
+    assert_eq!(child_turns.len(), 1, "expected one child turn");
+    assert!(
+        state
+            .storage
+            .get_snapshot(child_turns[0].id)
+            .await
+            .expect("read child context snapshot before release")
+            .is_some(),
+        "delegated assembly snapshot should be persisted before provider execution finishes"
+    );
+
     child_release.notify_one();
 
     let mut result_messages = Vec::new();
@@ -5610,7 +5889,10 @@ async fn delegate_tool_detaches_child_and_persists_result_after_release() {
             .list_by_correlation(delegate_message_id)
             .await
             .expect("list correlated messages after release");
-        if !result_messages.is_empty() {
+        if result_messages
+            .iter()
+            .any(|message| message.status != MessageStatus::Pending)
+        {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -5621,17 +5903,6 @@ async fn delegate_tool_detaches_child_and_persists_result_after_release() {
     assert_eq!(result_message.status, MessageStatus::Delivered);
     assert_eq!(result_message.payload["response"], "Detached child answer");
 
-    let child_session_id = detached_output["child_session_id"]
-        .as_str()
-        .expect("child session id should be a string")
-        .parse::<Uuid>()
-        .expect("child session id should be a uuid");
-    let child_threads = state
-        .storage
-        .list_by_session(child_session_id)
-        .await
-        .expect("list child threads");
-    assert_eq!(child_threads.len(), 1, "expected one child thread");
     let child_turns = state
         .storage
         .list_turns_by_thread(child_threads[0].id)
@@ -7207,7 +7478,7 @@ fn test_environment() -> swage_context::orientation::SessionEnvironment {
 /// the turn's context assembly. This function is tested directly to verify
 /// the wiring before it's used in process_turn.
 #[test]
-fn build_assembly_elements_creates_prompts_skills_memory_and_history() {
+fn named_assembly_elements_include_prompts_skills_memory_and_history() {
     let instructions = "Be helpful.";
     let history = vec![
         ChatMessage::new(Role::User, "Hi"),
@@ -7218,8 +7489,7 @@ fn build_assembly_elements_creates_prompts_skills_memory_and_history() {
         instructions,
         vec![],
         history,
-        String::new(),
-        "My Space".to_string(),
+        Some((String::new(), "My Space".to_string())),
         test_environment(),
         vec![],
     );
@@ -7241,27 +7511,93 @@ fn build_assembly_elements_creates_prompts_skills_memory_and_history() {
 }
 
 /// When instructions are empty, build_assembly_elements still includes the
-/// prompts element (which will produce no system message), the skills
-/// element, memory, and history.
+/// prompts element (which will produce no system message), the skills element,
+/// and history. A default assembly does not receive a memory element.
 #[test]
-fn build_assembly_elements_with_empty_instructions() {
+fn default_assembly_elements_exclude_memory() {
     let elements = build_assembly_elements(
         "",
         vec![],
         vec![ChatMessage::new(Role::User, "Hello")],
-        String::new(),
-        "My Space".to_string(),
+        None,
         test_environment(),
         vec![],
     );
 
-    assert_eq!(elements.len(), 5);
+    assert_eq!(elements.len(), 4);
     // PromptsElement with empty rules produces no messages; the orientation
     // baseline is what keeps an unconfigured session's context non-empty.
     let orientation = elements.iter().find(|e| e.name() == "orientation").unwrap();
     assert!(!orientation.content().is_empty());
     let prompts = elements.iter().find(|e| e.name() == "prompts").unwrap();
     assert!(prompts.content().is_empty());
+    assert!(
+        elements.iter().all(|element| element.name() != "memory"),
+        "default element construction should omit memory"
+    );
+}
+
+#[tokio::test]
+async fn default_assembly_does_not_invoke_memory_loader() {
+    let invoked = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let loader_invoked = invoked.clone();
+
+    let memory = load_memory_for_assembly("default", || async move {
+        loader_invoked.store(true, std::sync::atomic::Ordering::SeqCst);
+        "should not be loaded".to_string()
+    })
+    .await;
+
+    assert!(
+        memory.is_none(),
+        "default assembly should not receive memory"
+    );
+    assert!(
+        !invoked.load(std::sync::atomic::Ordering::SeqCst),
+        "default assembly must not invoke the memory-loading seam"
+    );
+}
+
+#[tokio::test]
+async fn named_assembly_loads_memory_and_can_compose_it() {
+    let memory = load_memory_for_assembly("memory-aware", || async {
+        "Important space context".to_string()
+    })
+    .await;
+    let elements = build_assembly_elements(
+        "Be helpful.",
+        vec![],
+        vec![],
+        memory.map(|content| (content, "My Space".to_string())),
+        test_environment(),
+        vec![],
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let assembly_path = dir.path().join("memory-aware.js");
+    std::fs::write(
+        &assembly_path,
+        r#"
+        const byName = Object.fromEntries(elements.map(element => [element.name, element]));
+        add(byName.memory);
+        "#,
+    )
+    .unwrap();
+    let output = swage_context::js_assembly::assemble_named(
+        "memory-aware",
+        Some(&assembly_path),
+        &elements,
+        &swage_config::model::ContextConfig::default(),
+        &TiktokenTokeniser::new("gpt-5"),
+    );
+
+    assert!(
+        output.messages[0]
+            .text_content()
+            .contains("Important space context"),
+        "a named assembly should be able to compose the loaded memory element"
+    );
+    assert_eq!(output.report.assembly_name, "memory-aware");
 }
 
 /// When memory_content is non-empty, the memory element produces a system
@@ -7272,8 +7608,10 @@ fn build_assembly_elements_memory_element_contains_provided_content() {
         "Be helpful.",
         vec![],
         vec![],
-        "Important space context".to_string(),
-        "My Space".to_string(),
+        Some((
+            "Important space context".to_string(),
+            "My Space".to_string(),
+        )),
         test_environment(),
         vec![],
     );
