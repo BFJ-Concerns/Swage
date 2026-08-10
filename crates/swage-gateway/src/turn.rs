@@ -819,15 +819,9 @@ pub(crate) async fn process_turn_with_existing_turn(
     // enabled, this also spawns the per-turn sandbox and returns its cleanup
     // guard to this turn scope.
     let is_codex_turn = config.default_provider_protocol() == swage_config::Protocol::Codex;
-    let mut dispatcher_config = config.clone();
-    if is_codex_turn {
-        // Bridged tools remain gateway-hosted. Codex-native actions are
-        // isolated by the App Server sandbox policy instead.
-        dispatcher_config.sandbox.enabled = false;
-    }
     let dispatcher_build = match build_gateway_dispatcher(
         state,
-        &dispatcher_config,
+        &config,
         &agent_config,
         session.metadata.as_ref(),
         Some(space_id),
@@ -837,9 +831,7 @@ pub(crate) async fn process_turn_with_existing_turn(
     .await
     {
         Ok(build) => build,
-        Err(error)
-            if dispatcher_config.sandbox.enabled && attendance == TurnAttendance::Attended =>
-        {
+        Err(error) if config.sandbox.enabled && attendance == TurnAttendance::Attended => {
             let detected_degradation = ExecutionIsolation::Degraded {
                 reason: format!("sandbox_setup_failed: {error}"),
             };
