@@ -7474,7 +7474,7 @@ fn test_environment() -> swage_context::orientation::SessionEnvironment {
 /// the turn's context assembly. This function is tested directly to verify
 /// the wiring before it's used in process_turn.
 #[test]
-fn build_assembly_elements_creates_prompts_skills_memory_and_history() {
+fn named_assembly_elements_include_prompts_skills_memory_and_history() {
     let instructions = "Be helpful.";
     let history = vec![
         ChatMessage::new(Role::User, "Hi"),
@@ -7485,8 +7485,7 @@ fn build_assembly_elements_creates_prompts_skills_memory_and_history() {
         instructions,
         vec![],
         history,
-        String::new(),
-        "My Space".to_string(),
+        Some((String::new(), "My Space".to_string())),
         test_environment(),
         vec![],
     );
@@ -7508,27 +7507,93 @@ fn build_assembly_elements_creates_prompts_skills_memory_and_history() {
 }
 
 /// When instructions are empty, build_assembly_elements still includes the
-/// prompts element (which will produce no system message), the skills
-/// element, memory, and history.
+/// prompts element (which will produce no system message), the skills element,
+/// and history. A default assembly does not receive a memory element.
 #[test]
-fn build_assembly_elements_with_empty_instructions() {
+fn default_assembly_elements_exclude_memory() {
     let elements = build_assembly_elements(
         "",
         vec![],
         vec![ChatMessage::new(Role::User, "Hello")],
-        String::new(),
-        "My Space".to_string(),
+        None,
         test_environment(),
         vec![],
     );
 
-    assert_eq!(elements.len(), 5);
+    assert_eq!(elements.len(), 4);
     // PromptsElement with empty rules produces no messages; the orientation
     // baseline is what keeps an unconfigured session's context non-empty.
     let orientation = elements.iter().find(|e| e.name() == "orientation").unwrap();
     assert!(!orientation.content().is_empty());
     let prompts = elements.iter().find(|e| e.name() == "prompts").unwrap();
     assert!(prompts.content().is_empty());
+    assert!(
+        elements.iter().all(|element| element.name() != "memory"),
+        "the default assembly report must have no discarded memory element"
+    );
+}
+
+#[tokio::test]
+async fn default_assembly_does_not_invoke_memory_loader() {
+    let invoked = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let loader_invoked = invoked.clone();
+
+    let memory = load_memory_for_assembly("default", || async move {
+        loader_invoked.store(true, std::sync::atomic::Ordering::SeqCst);
+        "should not be loaded".to_string()
+    })
+    .await;
+
+    assert!(
+        memory.is_none(),
+        "default assembly should not receive memory"
+    );
+    assert!(
+        !invoked.load(std::sync::atomic::Ordering::SeqCst),
+        "default assembly must not invoke the memory-loading seam"
+    );
+}
+
+#[tokio::test]
+async fn named_assembly_loads_memory_and_can_compose_it() {
+    let memory = load_memory_for_assembly("memory-aware", || async {
+        "Important space context".to_string()
+    })
+    .await;
+    let elements = build_assembly_elements(
+        "Be helpful.",
+        vec![],
+        vec![],
+        memory.map(|content| (content, "My Space".to_string())),
+        test_environment(),
+        vec![],
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let assembly_path = dir.path().join("memory-aware.js");
+    std::fs::write(
+        &assembly_path,
+        r#"
+        const byName = Object.fromEntries(elements.map(element => [element.name, element]));
+        add(byName.memory);
+        "#,
+    )
+    .unwrap();
+    let output = swage_context::js_assembly::assemble_named(
+        "memory-aware",
+        Some(&assembly_path),
+        &elements,
+        &swage_config::model::ContextConfig::default(),
+        &TiktokenTokeniser::new("gpt-5"),
+    );
+
+    assert!(
+        output.messages[0]
+            .text_content()
+            .contains("Important space context"),
+        "a named assembly should be able to compose the loaded memory element"
+    );
+    assert_eq!(output.report.assembly_name, "memory-aware");
 }
 
 /// When memory_content is non-empty, the memory element produces a system
@@ -7539,8 +7604,10 @@ fn build_assembly_elements_memory_element_contains_provided_content() {
         "Be helpful.",
         vec![],
         vec![],
-        "Important space context".to_string(),
-        "My Space".to_string(),
+        Some((
+            "Important space context".to_string(),
+            "My Space".to_string(),
+        )),
         test_environment(),
         vec![],
     );
