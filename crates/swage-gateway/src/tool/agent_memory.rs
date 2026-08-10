@@ -18,7 +18,7 @@ impl Tool for AgentMemoryTool {
     }
 
     fn description(&self) -> &str {
-        "Record and recall durable agent memories with run provenance and filtered audit history."
+        "Remember things across sessions and recall them later: save an insight, preference, procedure, or outcome now, search for it in any future session, or review how a remembered item changed over time."
     }
 
     fn parameters(&self) -> Value {
