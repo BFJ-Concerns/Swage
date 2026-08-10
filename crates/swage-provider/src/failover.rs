@@ -1180,6 +1180,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stream_discards_pre_content_usage_from_failed_provider() {
+        let primary = SequencedStreamProvider {
+            name: "p1",
+            call_count: Arc::new(StdMutex::new(0)),
+            attempts: StdMutex::new(vec![vec![
+                StreamChunk::Usage(TokenUsage {
+                    input_tokens: 100,
+                    output_tokens: 50,
+                }),
+                StreamChunk::Error {
+                    message: "p1 down".into(),
+                },
+            ]]),
+        };
+        let secondary = SequencedStreamProvider {
+            name: "p2",
+            call_count: Arc::new(StdMutex::new(0)),
+            attempts: StdMutex::new(vec![vec![
+                StreamChunk::Delta {
+                    content: "hello from p2".into(),
+                },
+                StreamChunk::Usage(TokenUsage {
+                    input_tokens: 10,
+                    output_tokens: 5,
+                }),
+                StreamChunk::Done {
+                    finish_reason: None,
+                },
+            ]]),
+        };
+        let failover =
+            FailoverProvider::with_defaults(vec![Arc::new(primary), Arc::new(secondary)]);
+
+        let chunks: Vec<_> = failover.stream(completion_req()).collect().await;
+
+        assert!(chunks.iter().any(
+            |chunk| matches!(chunk, StreamChunk::Delta { content } if content == "hello from p2")
+        ));
+        let usage: Vec<_> = chunks
+            .iter()
+            .filter_map(|chunk| match chunk {
+                StreamChunk::Usage(usage) => Some(usage),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(usage.len(), 1, "failed provider usage must be discarded");
+        assert_eq!(usage[0].input_tokens, 10);
+        assert_eq!(usage[0].output_tokens, 5);
+    }
+
+    #[tokio::test]
     async fn dropping_receiver_drops_active_provider_stream() {
         let (provider, mut inner_tx, dropped) = ControlledProvider::new("p1");
         let failover = FailoverProvider::with_defaults(vec![provider]);
