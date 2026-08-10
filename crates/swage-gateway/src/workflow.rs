@@ -168,6 +168,49 @@ fn journal_wire(
     })
 }
 
+#[derive(Default)]
+struct TokenBudgetState {
+    spent: u64,
+    reserved: u64,
+}
+
+fn token_reservation_per_call(budget: &WorkflowBudget) -> Option<u64> {
+    let limit = budget.max_total_tokens?;
+    let calls = budget
+        .max_agent_calls
+        .filter(|calls| *calls != 0)
+        .unwrap_or_else(|| budget.max_concurrent_agent_calls.unwrap_or(4).max(1));
+    Some((limit / u64::from(calls)).max(1))
+}
+
+async fn record_agent_budget_refusal(
+    state: &AppState,
+    run_id: Uuid,
+    seq: u64,
+    request: &AgentCallRequest,
+    error: &str,
+) -> Result<(), String> {
+    let request = serde_json::to_value(request).expect("agent request serialises");
+    let intent = state
+        .create_workflow_journal_intent(NewWorkflowJournalIntent {
+            run_id,
+            seq,
+            kind: "agent_call".into(),
+            args_hash: journal_args_hash(&request),
+            request,
+            effect_kind: None,
+            idempotency_key: None,
+            target_kind: None,
+        })
+        .await
+        .map_err(|problem| problem.to_string())?;
+    state
+        .fail_workflow_journal_entry(intent.id, error)
+        .await
+        .map_err(|problem| problem.to_string())?;
+    Ok(())
+}
+
 #[async_trait::async_trait]
 pub trait WorkflowLauncher: Send + Sync {
     async fn start_by_name(
@@ -545,13 +588,16 @@ async fn run_host_commands_inner(
     spent_tokens: Arc<AtomicU64>,
     mut commands: mpsc::UnboundedReceiver<HostCommand>,
 ) {
-    // A token-limited call reserves all capacity still available at its
-    // deterministic channel admission point. Calls do not declare an output
-    // limit, so a narrower estimate would pretend to know a bound the provider
-    // contract does not supply. Settlement replaces this conservative hold
-    // with actual usage, allowing later calls through without allowing several
-    // unknown-cost calls to overbook the same capacity concurrently.
-    let reserved_tokens = Arc::new(AtomicU64::new(0));
+    // Reserve one equal share of the run budget per declared call, or per
+    // concurrency slot when no total call count is declared. This is an
+    // estimate, not a provider cap: actual usage can exceed it. Admission and
+    // settlement share one lock so actual spend replaces the reservation
+    // without exposing a stale gap between separate counters.
+    let token_reservation = token_reservation_per_call(&budget);
+    let token_budget = Arc::new(Mutex::new(TokenBudgetState {
+        spent: spent_tokens.load(Ordering::SeqCst),
+        reserved: 0,
+    }));
     let effect_seq = Arc::new(AtomicU64::new(
         replay
             .iter()
@@ -627,34 +673,50 @@ async fn run_host_commands_inner(
             } => {
                 let current_seq = seq.load(Ordering::SeqCst);
                 let existing_call = replay.get(current_seq as usize);
-                let mut token_reservation = 0;
+                let mut call_reservation = 0;
                 if existing_call.is_none() {
                     if budget
                         .max_agent_calls
                         .is_some_and(|limit| agent_calls.load(Ordering::SeqCst) >= limit)
                     {
-                        let _ =
-                            reply.send(Err("BudgetExceededError: agent call limit reached".into()));
+                        let error = "BudgetExceededError: agent call limit reached";
+                        seq.fetch_add(1, Ordering::SeqCst);
+                        let result = record_agent_budget_refusal(
+                            &state,
+                            run_id,
+                            current_seq,
+                            &request,
+                            error,
+                        )
+                        .await
+                        .map_or_else(Err, |_| Err(error.into()));
+                        let _ = reply.send(result);
                         continue;
                     }
-                    if let Some(limit) = budget.max_total_tokens {
-                        let spent = spent_tokens.load(Ordering::SeqCst);
-                        let reserved = reserved_tokens.load(Ordering::SeqCst);
-                        token_reservation = limit.saturating_sub(spent.saturating_add(reserved));
-                        if token_reservation == 0
-                            || reserved_tokens
-                                .compare_exchange(
-                                    reserved,
-                                    reserved.saturating_add(token_reservation),
-                                    Ordering::SeqCst,
-                                    Ordering::SeqCst,
-                                )
-                                .is_err()
-                        {
-                            let _ =
-                                reply.send(Err("BudgetExceededError: token limit reached".into()));
+                    if let (Some(limit), Some(reservation)) =
+                        (budget.max_total_tokens, token_reservation)
+                    {
+                        let mut accounting = token_budget.lock().await;
+                        let available = limit
+                            .saturating_sub(accounting.spent.saturating_add(accounting.reserved));
+                        if available < reservation {
+                            drop(accounting);
+                            let error = "BudgetExceededError: token limit reached";
+                            seq.fetch_add(1, Ordering::SeqCst);
+                            let result = record_agent_budget_refusal(
+                                &state,
+                                run_id,
+                                current_seq,
+                                &request,
+                                error,
+                            )
+                            .await
+                            .map_or_else(Err, |_| Err(error.into()));
+                            let _ = reply.send(result);
                             continue;
                         }
+                        accounting.reserved = accounting.reserved.saturating_add(reservation);
+                        call_reservation = reservation;
                     }
                     agent_calls.fetch_add(1, Ordering::SeqCst);
                 }
@@ -664,7 +726,7 @@ async fn run_host_commands_inner(
                 let state = state.clone();
                 let replay = Arc::clone(&replay);
                 let spent = Arc::clone(&spent_tokens);
-                let reserved = Arc::clone(&reserved_tokens);
+                let token_budget = Arc::clone(&token_budget);
                 let semaphore = Arc::clone(&semaphore);
                 let replay_agent_ranks = Arc::clone(&replay_agent_ranks);
                 let replay_release_rank = Arc::clone(&replay_release_rank);
@@ -743,14 +805,21 @@ async fn run_host_commands_inner(
                             Err(error) => Err(error.to_string()),
                         }
                     };
-                    if token_reservation != 0 {
-                        reserved.fetch_sub(token_reservation, Ordering::SeqCst);
-                    }
-                    if !completed_replay && let Ok(result) = &result {
-                        spent.fetch_add(
-                            result.input_tokens + result.output_tokens,
-                            Ordering::SeqCst,
-                        );
+                    if call_reservation != 0 {
+                        let actual = if !completed_replay {
+                            result
+                                .as_ref()
+                                .map(|result| {
+                                    result.input_tokens.saturating_add(result.output_tokens)
+                                })
+                                .unwrap_or(0)
+                        } else {
+                            0
+                        };
+                        let mut accounting = token_budget.lock().await;
+                        accounting.spent = accounting.spent.saturating_add(actual);
+                        spent.store(accounting.spent, Ordering::SeqCst);
+                        accounting.reserved = accounting.reserved.saturating_sub(call_reservation);
                     }
                     let _ = reply.send(result);
                 });
@@ -1522,7 +1591,13 @@ async fn launch_existing_run(
         .map_err(internal)?;
     let initial_agent_calls = replay
         .iter()
-        .filter(|entry| entry.kind == "agent_call")
+        .filter(|entry| {
+            entry.kind == "agent_call"
+                && !entry
+                    .error_message
+                    .as_deref()
+                    .is_some_and(|error| error.starts_with("BudgetExceededError:"))
+        })
         .count() as u32;
     let initial_spent_tokens = replay
         .iter()
@@ -1698,81 +1773,7 @@ pub async fn get_run(
         .await
         .map_err(internal)?
         .into_iter()
-        .map(|entry| {
-            use swage_protocol::client::workflow::{
-                WorkflowEffectDetail, WorkflowJournalEntry, WorkflowJournalEntryKind,
-                WorkflowJournalEntryStatus,
-            };
-            let kind = match entry.kind.as_str() {
-                "agent_call" => WorkflowJournalEntryKind::AgentCall,
-                "effect" => WorkflowJournalEntryKind::Effect,
-                "log" => WorkflowJournalEntryKind::Log,
-                "phase" => WorkflowJournalEntryKind::Phase,
-                "workflow_call" => WorkflowJournalEntryKind::WorkflowCall,
-                "timer" => WorkflowJournalEntryKind::Timer,
-                other => return Err(internal(format!("unknown workflow entry kind: {other}"))),
-            };
-            let status = match entry.status.as_str() {
-                "started" => WorkflowJournalEntryStatus::Started,
-                "completed" => WorkflowJournalEntryStatus::Completed,
-                "failed" => WorkflowJournalEntryStatus::Failed,
-                other => return Err(internal(format!("unknown workflow entry status: {other}"))),
-            };
-            let effect = entry
-                .idempotency_key
-                .map(|idempotency_key| WorkflowEffectDetail {
-                    effect_kind: entry.effect_kind.unwrap_or_default(),
-                    target_kind: entry.target_kind.unwrap_or_default(),
-                    idempotency_key,
-                });
-            let agent_call = (entry.kind == "agent_call").then(|| {
-                use swage_protocol::client::workflow::WorkflowAgentCallDetail;
-                let result = entry.result.as_ref();
-                WorkflowAgentCallDetail {
-                    agent_id: entry
-                        .request
-                        .get("agent")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_string(),
-                    session_id: result
-                        .and_then(|value| value.get("session_id"))
-                        .and_then(|value| serde_json::from_value(value.clone()).ok()),
-                    thread_id: result
-                        .and_then(|value| value.get("thread_id"))
-                        .and_then(|value| serde_json::from_value(value.clone()).ok()),
-                    turn_id: result
-                        .and_then(|value| value.get("turn_id"))
-                        .and_then(|value| serde_json::from_value(value.clone()).ok()),
-                    input_tokens: result
-                        .and_then(|value| value.get("input_tokens"))
-                        .and_then(Value::as_u64),
-                    output_tokens: result
-                        .and_then(|value| value.get("output_tokens"))
-                        .and_then(Value::as_u64),
-                }
-            });
-            let label = entry
-                .request
-                .get("label")
-                .and_then(Value::as_str)
-                .map(str::to_string);
-            Ok(WorkflowJournalEntry {
-                id: entry.id,
-                seq: entry.seq,
-                completed_order: entry.completed_order,
-                kind,
-                status,
-                label,
-                request: entry.request,
-                result: entry.result,
-                error_message: entry.error_message,
-                agent_call,
-                effect,
-                started_at: entry.started_at,
-                completed_at: entry.completed_at,
-            })
-        })
+        .map(|entry| journal_wire(entry).map_err(internal))
         .collect::<Result<Vec<_>, ApiError>>()?;
     Ok(Json(WorkflowRunDetailResponse {
         run: run_wire(run)?,
@@ -2188,7 +2189,7 @@ mod tests {
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn SpaceStore>,
-            Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            Arc::new(crate::turn::tests::PendingProvider),
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
             None,
@@ -2217,26 +2218,137 @@ mod tests {
             max_attempts: 1,
             label: None,
         };
-        let (first_reply, _first_receive) = oneshot::channel();
+        let first_cancellation = CancellationToken::new();
+        let (first_reply, first_receive) = oneshot::channel();
         tx.send(HostCommand::Agent {
             request: request.clone(),
-            cancellation: CancellationToken::new(),
+            cancellation: first_cancellation.clone(),
             reply: first_reply,
         })
         .expect("first call");
+        let second_cancellation = CancellationToken::new();
         let (second_reply, second_receive) = oneshot::channel();
         tx.send(HostCommand::Agent {
-            request,
-            cancellation: CancellationToken::new(),
+            request: request.clone(),
+            cancellation: second_cancellation.clone(),
             reply: second_reply,
         })
         .expect("second call");
+        let (third_reply, third_receive) = oneshot::channel();
+        tx.send(HostCommand::Agent {
+            request,
+            cancellation: CancellationToken::new(),
+            reply: third_reply,
+        })
+        .expect("third call");
         assert_eq!(
-            second_receive.await.expect("reply").expect_err("refused"),
+            third_receive.await.expect("reply").expect_err("refused"),
             "BudgetExceededError: token limit reached"
         );
+        let journal = storage
+            .list_workflow_journal(run.id)
+            .await
+            .expect("journal");
+        assert_eq!(journal.len(), 3);
+        assert_eq!(journal[2].status, "failed");
+        assert_eq!(
+            journal[2].error_message.as_deref(),
+            Some("BudgetExceededError: token limit reached")
+        );
+        first_cancellation.cancel();
+        second_cancellation.cancel();
+        first_receive
+            .await
+            .expect("first reply")
+            .expect_err("cancelled");
+        second_receive
+            .await
+            .expect("second reply")
+            .expect_err("cancelled");
         drop(tx);
         task.await.expect("host loop");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn journalled_budget_refusal_replays_without_executing_the_call() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let run = storage
+            .create_workflow_run(NewWorkflowRun {
+                space_id: space.id,
+                parent_run_id: None,
+                parent_seq: None,
+                script_version_id: None,
+                source: Some("return null".into()),
+                source_hash: source_hash("return null"),
+                args: Value::Null,
+                budget: serde_json::json!({}),
+                engine_version: "test".into(),
+            })
+            .await
+            .expect("run");
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::new(crate::turn::tests::PendingProvider),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let budget = WorkflowBudget {
+            max_agent_calls: Some(0),
+            max_total_tokens: Some(1_000_000),
+            max_concurrent_agent_calls: Some(4),
+        };
+        let request = AgentCallRequest {
+            prompt: "must not execute".into(),
+            agent: "default".into(),
+            model: None,
+            schema: None,
+            max_attempts: 1,
+            label: None,
+        };
+
+        for replay_pass in 0..2 {
+            let replay = if replay_pass == 0 {
+                vec![]
+            } else {
+                storage
+                    .list_workflow_journal(run.id)
+                    .await
+                    .expect("journal")
+            };
+            let (tx, rx) = mpsc::unbounded_channel();
+            let task = tokio::spawn(run_host_commands(
+                state.clone(),
+                run.id,
+                space.id,
+                None,
+                budget.clone(),
+                replay,
+                Arc::new(AtomicU32::new(0)),
+                Arc::new(AtomicU64::new(0)),
+                rx,
+            ));
+            let (reply, receive) = oneshot::channel();
+            tx.send(HostCommand::Agent {
+                request: request.clone(),
+                cancellation: CancellationToken::new(),
+                reply,
+            })
+            .expect("call");
+            assert_eq!(
+                receive.await.expect("reply").expect_err("refused"),
+                "BudgetExceededError: agent call limit reached"
+            );
+            drop(tx);
+            task.await.expect("host loop");
+        }
+        let journal = storage
+            .list_workflow_journal(run.id)
+            .await
+            .expect("journal");
+        assert_eq!(journal.len(), 1, "replay must not append a second refusal");
     }
 
     #[tokio::test(flavor = "multi_thread")]
