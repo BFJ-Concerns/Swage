@@ -4235,38 +4235,58 @@ async fn second_tool_round_request_keeps_structured_tool_messages() {
     let second = &requests[1];
     assert_eq!(second.messages.len(), 4);
     assert_eq!(second.messages[0].role(), Role::System);
-    assert!(
-        second.messages[0]
-            .text_content()
-            .contains("You are an agent running on Swage"),
-        "second round should retain the session orientation"
-    );
     assert_eq!(second.messages[1].role(), Role::User);
     assert_eq!(second.messages[2].role(), Role::Assistant);
-    let assistant_replay = second.messages[2]
-        .tool_replay()
-        .expect("assistant tool-use message should retain canonical replay");
-    assert!(
-        assistant_replay.iter().any(|part| matches!(
-            part,
-            ToolReplayPart::ToolCall { call_id, name, arguments }
-                if call_id == "c1"
-                    && name == "echo"
-                    && arguments == &serde_json::json!({ "text": "first" })
-        )),
-        "assistant tool-use message should retain the structured echo call"
-    );
     assert_eq!(second.messages[3].role(), Role::User);
-    let user_replay = second.messages[3]
-        .tool_replay()
-        .expect("tool-result message should retain canonical replay");
     assert!(
-        user_replay.iter().any(|part| matches!(
-            part,
-            ToolReplayPart::ToolResult { call_id, is_error, .. }
-                if call_id == "c1" && !is_error
-        )),
-        "user tool-result message should retain the structured echo result"
+        second.messages.iter().any(|message| {
+            message.role() == Role::System
+                && message
+                    .text_content()
+                    .contains("You are an agent running on Swage")
+        }),
+        "second request should retain orientation"
+    );
+    let assistant_replay = second
+        .messages
+        .iter()
+        .find(|message| {
+            message.role() == Role::Assistant
+                && message.tool_replay().is_some_and(|replay| {
+                    replay.iter().any(|part| {
+                        matches!(
+                            part,
+                            ToolReplayPart::ToolCall { call_id, name, arguments }
+                                if call_id == "c1" && name == "echo"
+                                    && arguments == &serde_json::json!({ "text": "first" })
+                        )
+                    })
+                })
+        })
+        .expect("assistant tool-use message should retain the structured echo call");
+    assert!(
+        assistant_replay.tool_replay().is_some(),
+        "assistant tool-use message should retain canonical replay"
+    );
+    let user_replay = second
+        .messages
+        .iter()
+        .find(|message| {
+            message.role() == Role::User
+                && message.tool_replay().is_some_and(|replay| {
+                    replay.iter().any(|part| {
+                        matches!(
+                            part,
+                            ToolReplayPart::ToolResult { call_id, is_error, .. }
+                                if call_id == "c1" && !is_error
+                        )
+                    })
+                })
+        })
+        .expect("user tool-result message should retain the structured echo result");
+    assert!(
+        user_replay.tool_replay().is_some(),
+        "tool-result message should retain canonical replay"
     );
 }
 
@@ -5350,38 +5370,58 @@ async fn approval_resumption_keeps_structured_tool_messages() {
     let second = &requests[1];
     assert_eq!(second.messages.len(), 4);
     assert_eq!(second.messages[0].role(), Role::System);
-    assert!(
-        second.messages[0]
-            .text_content()
-            .contains("You are an agent running on Swage"),
-        "approval resumption should retain the session orientation"
-    );
     assert_eq!(second.messages[1].role(), Role::User);
     assert_eq!(second.messages[2].role(), Role::Assistant);
-    let assistant_replay = second.messages[2]
-        .tool_replay()
-        .expect("assistant tool-use message should retain canonical replay after approval");
-    assert!(
-        assistant_replay.iter().any(|part| matches!(
-            part,
-            ToolReplayPart::ToolCall { call_id, name, arguments }
-                if call_id == "c1"
-                    && name == "echo"
-                    && arguments == &serde_json::json!({ "text": "first" })
-        )),
-        "assistant tool-use message should retain the structured echo call after approval"
-    );
     assert_eq!(second.messages[3].role(), Role::User);
-    let user_replay = second.messages[3]
-        .tool_replay()
-        .expect("tool-result message should retain canonical replay after approval");
     assert!(
-        user_replay.iter().any(|part| matches!(
-            part,
-            ToolReplayPart::ToolResult { call_id, is_error, .. }
-                if call_id == "c1" && !is_error
-        )),
-        "user tool-result message should retain the structured echo result after approval"
+        second.messages.iter().any(|message| {
+            message.role() == Role::System
+                && message
+                    .text_content()
+                    .contains("You are an agent running on Swage")
+        }),
+        "resumed request should retain orientation"
+    );
+    let assistant_replay = second
+        .messages
+        .iter()
+        .find(|message| {
+            message.role() == Role::Assistant
+                && message.tool_replay().is_some_and(|replay| {
+                    replay.iter().any(|part| {
+                        matches!(
+                            part,
+                            ToolReplayPart::ToolCall { call_id, name, arguments }
+                                if call_id == "c1" && name == "echo"
+                                    && arguments == &serde_json::json!({ "text": "first" })
+                        )
+                    })
+                })
+        })
+        .expect("assistant tool-use message should retain the structured echo call after approval");
+    assert!(
+        assistant_replay.tool_replay().is_some(),
+        "assistant tool-use message should retain canonical replay after approval"
+    );
+    let user_replay = second
+        .messages
+        .iter()
+        .find(|message| {
+            message.role() == Role::User
+                && message.tool_replay().is_some_and(|replay| {
+                    replay.iter().any(|part| {
+                        matches!(
+                            part,
+                            ToolReplayPart::ToolResult { call_id, is_error, .. }
+                                if call_id == "c1" && !is_error
+                        )
+                    })
+                })
+        })
+        .expect("user tool-result message should retain the structured echo result after approval");
+    assert!(
+        user_replay.tool_replay().is_some(),
+        "tool-result message should retain canonical replay after approval"
     );
 }
 
@@ -5566,6 +5606,31 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
         child_turns[0].assistant_response.as_deref(),
         Some("Delegate answer")
     );
+    let child_snapshot = state
+        .storage
+        .get_snapshot(child_turns[0].id)
+        .await
+        .expect("read child context snapshot")
+        .expect("delegated assembly report should be persisted");
+    let child_snapshot: serde_json::Value =
+        serde_json::from_str(&child_snapshot).expect("child context snapshot should be JSON");
+    assert!(
+        child_snapshot["elements"].is_array(),
+        "delegated assembly report should contain its element decisions"
+    );
+    let child_audit = state
+        .storage
+        .list_audit_events_by_session(child_sessions[0].id)
+        .await
+        .expect("list child audit events");
+    assert!(
+        child_audit.iter().any(|event| {
+            event.entity_id == crate::experimentation::LOCATION_CONTEXT_ASSEMBLY
+                && event.event_kind == "variant_selected"
+                && event.metadata["turn_id"] == serde_json::json!(child_turns[0].id)
+        }),
+        "delegated assembly selection should be recorded against the child turn"
+    );
 
     let captured_requests = captured_requests.lock().unwrap();
     assert_eq!(
@@ -5590,6 +5655,21 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
         .collect::<Vec<_>>()
         .join("\n\n");
     assert!(
+        child_request_text.contains("You are an agent running on Swage"),
+        "delegated provider request should include platform identity: {child_request_text}"
+    );
+    assert!(
+        child_request_text.contains("Space: the default space")
+            && child_request_text.contains("Working directory:")
+            && child_request_text.contains("Session started:"),
+        "delegated provider request should include the child session's place: {child_request_text}"
+    );
+    assert!(
+        child_request_text.contains("## Skills available in this session")
+            && child_request_text.contains("delegated-specialist — Delegated specialist behaviour"),
+        "delegated provider request should include the target skill catalogue: {child_request_text}"
+    );
+    assert!(
         child_request_text.contains("Inherited Background Context"),
         "delegated provider request should include transferred context: {child_request_text}"
     );
@@ -5600,10 +5680,6 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
     assert!(
         child_request_text.contains("Delegated Task\n\nSummarise this request"),
         "delegated provider request should fence the task separately: {child_request_text}"
-    );
-    assert!(
-        child_request_text.contains("Active Skills"),
-        "delegated provider request should include target agent active skills: {child_request_text}"
     );
     assert!(
         child_request_text.contains("Use the delegated specialist skill."),
@@ -5749,6 +5825,33 @@ async fn delegate_tool_detaches_child_and_persists_result_after_release() {
         "child result should not exist until the gated provider is released"
     );
 
+    let child_session_id = detached_output["child_session_id"]
+        .as_str()
+        .expect("child session id should be a string")
+        .parse::<Uuid>()
+        .expect("child session id should be a uuid");
+    let child_threads = state
+        .storage
+        .list_by_session(child_session_id)
+        .await
+        .expect("list child threads before release");
+    assert_eq!(child_threads.len(), 1, "expected one child thread");
+    let child_turns = state
+        .storage
+        .list_turns_by_thread(child_threads[0].id)
+        .await
+        .expect("list child turns before release");
+    assert_eq!(child_turns.len(), 1, "expected one child turn");
+    assert!(
+        state
+            .storage
+            .get_snapshot(child_turns[0].id)
+            .await
+            .expect("read child context snapshot before release")
+            .is_some(),
+        "delegated assembly snapshot should be persisted before provider execution finishes"
+    );
+
     child_release.notify_one();
 
     let mut result_messages = Vec::new();
@@ -5772,17 +5875,6 @@ async fn delegate_tool_detaches_child_and_persists_result_after_release() {
     assert_eq!(result_message.status, MessageStatus::Delivered);
     assert_eq!(result_message.payload["response"], "Detached child answer");
 
-    let child_session_id = detached_output["child_session_id"]
-        .as_str()
-        .expect("child session id should be a string")
-        .parse::<Uuid>()
-        .expect("child session id should be a uuid");
-    let child_threads = state
-        .storage
-        .list_by_session(child_session_id)
-        .await
-        .expect("list child threads");
-    assert_eq!(child_threads.len(), 1, "expected one child thread");
     let child_turns = state
         .storage
         .list_turns_by_thread(child_threads[0].id)
