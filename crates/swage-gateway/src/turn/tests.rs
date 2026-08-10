@@ -8,7 +8,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use futures::stream;
+use futures::{StreamExt, stream};
 use tokio::sync::{Mutex, Notify, mpsc};
 
 use swage_core::{
@@ -382,7 +382,9 @@ impl LlmProvider for DetachedGatedProvider {
     }
 }
 
-/// A mock provider whose stream blocks forever.
+const INTERRUPTED_PARTIAL: &str = "The response shown before cancellation.";
+
+/// A mock provider whose stream emits a known partial response, then blocks forever.
 pub(crate) struct PendingProvider;
 
 #[async_trait]
@@ -409,7 +411,14 @@ impl LlmProvider for PendingProvider {
         &self,
         _request: CompletionRequest,
     ) -> Pin<Box<dyn futures::Stream<Item = StreamChunk> + Send>> {
-        Box::pin(futures::stream::pending())
+        Box::pin(
+            futures::stream::once(async {
+                StreamChunk::Delta {
+                    content: INTERRUPTED_PARTIAL.to_string(),
+                }
+            })
+            .chain(futures::stream::pending()),
+        )
     }
 }
 
@@ -3473,17 +3482,15 @@ async fn cancelled_turn_stores_partial_and_marks_interrupted() {
         .await
     });
 
-    for _ in 0..50 {
-        tokio::task::yield_now().await;
-        if state.active_turns.lock().await.contains_key(&session_id) {
-            break;
+    loop {
+        match rx.recv().await.expect("partial token should be emitted") {
+            ServerEvent::Token { content } => {
+                assert_eq!(content, INTERRUPTED_PARTIAL);
+                break;
+            }
+            _ => continue,
         }
     }
-
-    assert!(
-        state.active_turns.lock().await.contains_key(&session_id),
-        "turn should be active before cancel"
-    );
 
     cancel_turn(&state, session_id)
         .await
@@ -3507,6 +3514,10 @@ async fn cancelled_turn_stores_partial_and_marks_interrupted() {
     let thread_id = threads[0].id;
     let turns = state.storage.list_turns_by_thread(thread_id).await.unwrap();
     assert_eq!(turns[0].state, TurnState::Interrupted);
+    assert_eq!(
+        turns[0].assistant_response.as_deref(),
+        Some(INTERRUPTED_PARTIAL)
+    );
 }
 
 #[tokio::test]
