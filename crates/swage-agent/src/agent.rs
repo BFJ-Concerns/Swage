@@ -753,6 +753,7 @@ impl Agent {
         loop {
             tokio::select! {
                 _ = cancel_token.cancelled() => {
+                    let _ = self.storage.update_response(execution.turn_id, &text).await;
                     let _ = self.storage.update_turn_state(execution.turn_id, TurnState::Interrupted).await;
                     let _ = self.storage.update_state(execution.thread_id, ThreadState::Idle).await;
                     return Err(AgentError::Cancelled);
