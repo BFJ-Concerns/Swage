@@ -1333,6 +1333,12 @@ async fn select_context_assembly(
     session_id: Uuid,
     turn_id: Uuid,
 ) -> String {
+    // The assembly name is an experiment location: when variants are
+    // registered for it, the selection loop chooses which serves this turn
+    // (honouring the kill switch and forced pins), and every decision —
+    // including "experimentation is off" — lands in the audit trail. The
+    // report and every model-facing surface stay function-named; the audit
+    // record is the only place the variant id appears.
     let configured_assembly = config.context.assembly.trim().to_owned();
     let assembly_variants: Vec<&str> = vec![];
     let decision = crate::experimentation::select_variant(
@@ -1378,7 +1384,7 @@ fn execute_context_assembly(
     agent_id: &str,
 ) -> swage_context::report::AssemblyOutput {
     let assembly_name = assembly_name.trim();
-    if assembly_name.is_empty() || assembly_name == "default" {
+    if is_default_context_assembly(assembly_name) {
         return swage_context::assembly::assemble(elements, &config.context, tokeniser);
     }
 

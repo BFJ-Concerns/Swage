@@ -6,6 +6,11 @@ use swage_context::orientation::{
     AvailableSkill, ChannelOrientation, OrientationElement, SessionEnvironment,
 };
 
+#[cfg(test)]
+tokio::task_local! {
+    static SPACE_MEMORY_LOAD_COUNT: std::cell::Cell<usize>;
+}
+
 pub(super) fn delegated_target_instructions(
     target_instructions: &str,
     available_skills: &[swage_config::skill::SkillDefinition],
@@ -124,11 +129,16 @@ where
     F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = String>,
 {
-    if assembly_name.trim().is_empty() || assembly_name.trim() == "default" {
+    if is_default_context_assembly(assembly_name) {
         None
     } else {
         Some(loader().await)
     }
+}
+
+pub(crate) fn is_default_context_assembly(assembly_name: &str) -> bool {
+    let assembly_name = assembly_name.trim();
+    assembly_name.is_empty() || assembly_name == "default"
 }
 
 /// Build the session-environment half of orientation from what the turn
@@ -212,6 +222,11 @@ pub(crate) fn available_skills_for_agent(
 /// between entries. Returns an empty string when the directory is absent or
 /// contains no `.md` files, so callers receive a valid `String` in all cases.
 pub(crate) async fn load_space_memory(swage_root: &Path, space_slug: &str) -> String {
+    #[cfg(test)]
+    SPACE_MEMORY_LOAD_COUNT
+        .try_with(|count| count.set(count.get() + 1))
+        .ok();
+
     let memory_dir = swage_root.join("spaces").join(space_slug).join("memory");
 
     let mut entries = match tokio::fs::read_dir(&memory_dir).await {
@@ -266,6 +281,20 @@ pub(crate) async fn load_space_memory(swage_root: &Path, space_slug: &str) -> St
     }
 
     parts.join("\n\n")
+}
+
+#[cfg(test)]
+pub(crate) async fn observe_space_memory_loads<F>(future: F) -> (F::Output, usize)
+where
+    F: std::future::Future,
+{
+    SPACE_MEMORY_LOAD_COUNT
+        .scope(std::cell::Cell::new(0), async move {
+            let output = future.await;
+            let count = SPACE_MEMORY_LOAD_COUNT.with(std::cell::Cell::get);
+            (output, count)
+        })
+        .await
 }
 
 pub(crate) fn resolve_swage_root() -> Option<PathBuf> {
