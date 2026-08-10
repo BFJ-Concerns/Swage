@@ -1,12 +1,81 @@
-use std::pin::Pin;
+use std::{future::Future, pin::Pin};
 
 use async_trait::async_trait;
-use futures::Stream;
+use futures::{Stream, StreamExt};
 use swage_config::MaskedString;
 use swage_core::{
     CompletionRequest, CompletionResponse, ProviderError, StreamChunk, ToolCompletionRequest,
     ToolCompletionResponse,
 };
+
+/// Whether a stream chunk commits the current provider attempt because response
+/// content the user could observe has escaped the reliability wrappers.
+///
+/// Forwarding before commitment is a separate decision: progress can escape
+/// immediately, while accounting must wait. Keep this match exhaustive so
+/// every new chunk kind must make the commitment decision deliberately.
+pub(crate) fn contains_user_visible_content(chunk: &StreamChunk) -> bool {
+    match chunk {
+        StreamChunk::Delta { .. } | StreamChunk::Reasoning { .. } | StreamChunk::ToolUse { .. } => {
+            true
+        }
+        StreamChunk::Usage(_)
+        | StreamChunk::Done { .. }
+        | StreamChunk::ProviderRetryStarted { .. }
+        | StreamChunk::ProviderRetrySettled { .. }
+        | StreamChunk::Error { .. } => false,
+    }
+}
+
+/// Whether a stream chunk may reach the caller before the current provider
+/// attempt commits.
+///
+/// Content and live progress are useful immediately. Usage and completion are
+/// accounting for an attempt that may still be discarded, so they must wait.
+/// Keep this match exhaustive so every new chunk kind must make the forwarding
+/// decision deliberately.
+pub(crate) fn may_forward_before_attempt_commits(chunk: &StreamChunk) -> bool {
+    match chunk {
+        StreamChunk::Delta { .. }
+        | StreamChunk::Reasoning { .. }
+        | StreamChunk::ToolUse { .. }
+        | StreamChunk::ProviderRetryStarted { .. }
+        | StreamChunk::ProviderRetrySettled { .. } => true,
+        StreamChunk::Usage(_) | StreamChunk::Done { .. } | StreamChunk::Error { .. } => false,
+    }
+}
+
+/// Abort a spawned forwarder instead of detaching it when its stream is gone.
+struct AbortTaskOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortTaskOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// Start a forwarding task when its returned stream is first polled.
+///
+/// The task belongs to the returned stream: dropping the stream aborts the
+/// forwarder even when it is waiting for provider output or a retry timer.
+pub(crate) fn spawn_stream_forwarder<T, F, Fut>(
+    forwarder: F,
+) -> Pin<Box<dyn Stream<Item = T> + Send>>
+where
+    T: Send + 'static,
+    F: FnOnce(tokio::sync::mpsc::UnboundedSender<T>) -> Fut + Send + 'static,
+    Fut: Future<Output = ()> + Send + 'static,
+{
+    let lazy_receiver = futures::stream::once(async move {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let task = AbortTaskOnDrop(tokio::spawn(forwarder(tx)));
+        futures::stream::poll_fn(move |cx| {
+            let _keep_task_until_stream_is_dropped = &task;
+            rx.poll_recv(cx)
+        })
+    });
+    Box::pin(lazy_receiver.flatten())
+}
 
 // ---------------------------------------------------------------------------
 // ProviderConfig

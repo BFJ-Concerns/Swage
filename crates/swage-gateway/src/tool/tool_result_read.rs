@@ -24,7 +24,7 @@ impl Tool for ToolResultReadTool {
     }
 
     fn description(&self) -> &str {
-        "Read the full stored result for a compact tool-result reference."
+        "Fetch the complete output of an earlier tool call when the conversation shows only a truncated version with a reference id."
     }
 
     fn parameters(&self) -> Value {
@@ -33,7 +33,7 @@ impl Tool for ToolResultReadTool {
             "properties": {
                 "reference": {
                     "type": "string",
-                    "description": "A full_result_ref value from compact tool replay."
+                    "description": "The full_result_ref id shown alongside a truncated tool result."
                 }
             },
             "required": ["reference"]

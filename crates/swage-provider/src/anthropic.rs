@@ -1,7 +1,6 @@
 use std::pin::Pin;
 
 use async_trait::async_trait;
-use futures::channel::mpsc;
 use futures::{Stream, StreamExt};
 use reqwest::header::{HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
@@ -14,7 +13,7 @@ use swage_core::{
 };
 
 use crate::http::{HttpClient, SseEvent};
-use crate::provider::{LlmProvider, ProviderConfig};
+use crate::provider::{LlmProvider, ProviderConfig, spawn_stream_forwarder};
 
 const ANTHROPIC_API_VERSION: &str = "2023-06-01";
 const ANTHROPIC_BASE_URL: &str = "https://api.anthropic.com";
@@ -499,18 +498,17 @@ impl AnthropicProvider {
         &self,
         request: &LlmRequest,
     ) -> Pin<Box<dyn Stream<Item = StreamChunk> + Send>> {
-        let (tx, rx) = mpsc::unbounded();
         let body = self.build_messages_request(request, true);
         let client = self.make_http_client();
 
-        tokio::spawn(async move {
+        spawn_stream_forwarder(move |tx| async move {
             let sse_stream = match client
                 .post_stream("/v1/messages", &body, HeaderMap::new())
                 .await
             {
                 Ok(s) => s,
                 Err(e) => {
-                    let _ = tx.unbounded_send(StreamChunk::Error {
+                    let _ = tx.send(StreamChunk::Error {
                         message: e.to_string(),
                     });
                     return;
@@ -523,7 +521,7 @@ impl AnthropicProvider {
             while let Some(result) = sse_stream.next().await {
                 let event = match result {
                     Err(e) => {
-                        let _ = tx.unbounded_send(StreamChunk::Error {
+                        let _ = tx.send(StreamChunk::Error {
                             message: e.to_string(),
                         });
                         break;
@@ -532,21 +530,19 @@ impl AnthropicProvider {
                 };
 
                 if let Some(chunk) = tool_acc.process_event(&event) {
-                    let _ = tx.unbounded_send(chunk);
+                    let _ = tx.send(chunk);
                     continue;
                 }
 
                 if let Some(chunk) = AnthropicProvider::parse_sse_event(&event) {
                     let is_done = matches!(chunk, StreamChunk::Done { .. });
-                    let _ = tx.unbounded_send(chunk);
+                    let _ = tx.send(chunk);
                     if is_done {
                         break;
                     }
                 }
             }
-        });
-
-        Box::pin(rx)
+        })
     }
 }
 
@@ -850,18 +846,17 @@ impl LlmProvider for AnthropicProvider {
         // stream() is synchronous, so we spawn a task that drives the async
         // SSE stream and forwards chunks to the caller via a channel — the
         // same pattern used by the legacy stream_message().
-        let (tx, rx) = mpsc::unbounded();
         let body = self.build_request_for_completion(&request, true);
         let client = self.make_http_client();
 
-        tokio::spawn(async move {
+        spawn_stream_forwarder(move |tx| async move {
             let sse_stream = match client
                 .post_stream("/v1/messages", &body, HeaderMap::new())
                 .await
             {
                 Ok(s) => s,
                 Err(e) => {
-                    let _ = tx.unbounded_send(StreamChunk::Error {
+                    let _ = tx.send(StreamChunk::Error {
                         message: e.to_string(),
                     });
                     return;
@@ -874,7 +869,7 @@ impl LlmProvider for AnthropicProvider {
             while let Some(result) = sse_stream.next().await {
                 let event = match result {
                     Err(e) => {
-                        let _ = tx.unbounded_send(StreamChunk::Error {
+                        let _ = tx.send(StreamChunk::Error {
                             message: e.to_string(),
                         });
                         break;
@@ -885,21 +880,19 @@ impl LlmProvider for AnthropicProvider {
                 // Tool_use blocks span multiple events — accumulator handles
                 // the three-event sequence and emits a single ToolUse chunk.
                 if let Some(chunk) = tool_acc.process_event(&event) {
-                    let _ = tx.unbounded_send(chunk);
+                    let _ = tx.send(chunk);
                     continue;
                 }
 
                 if let Some(chunk) = AnthropicProvider::parse_sse_event(&event) {
                     let is_done = matches!(chunk, StreamChunk::Done { .. });
-                    let _ = tx.unbounded_send(chunk);
+                    let _ = tx.send(chunk);
                     if is_done {
                         break;
                     }
                 }
             }
-        });
-
-        Box::pin(rx)
+        })
     }
 }
 

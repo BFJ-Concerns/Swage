@@ -616,10 +616,11 @@ pub(crate) fn build_tool_dispatcher_with_browser(
     use crate::tool::{
         Tool, agent_memory::AgentMemoryTool, browser::browser_tools, file_edit::FileEditTool,
         file_list::FileListTool, file_read::FileReadTool, file_search::FileSearchTool,
-        file_write::FileWriteTool, knowledge::KnowledgeRecordTool, knowledge::KnowledgeSearchTool,
-        memory::MemoryTool, plugin::discover_plugin_tools, python_execute::PythonExecuteTool,
-        schedule::ScheduleTool, schedule::WakeMeLaterTool, shell::ShellTool,
-        tool_result_read::ToolResultReadTool, url_fetch::UrlFetchTool, web_search::WebSearchTool,
+        file_write::FileWriteTool, knowledge::KnowledgeCurateTool, knowledge::KnowledgeRecordTool,
+        knowledge::KnowledgeSearchTool, memory::MemoryTool, plugin::discover_plugin_tools,
+        python_execute::PythonExecuteTool, schedule::ScheduleTool, schedule::WakeMeLaterTool,
+        shell::ShellTool, tool_result_read::ToolResultReadTool, url_fetch::UrlFetchTool,
+        web_search::WebSearchTool,
     };
     use std::time::Duration;
 
@@ -657,10 +658,11 @@ pub(crate) fn build_tool_dispatcher_with_browser(
         Arc::new(ScheduleTool),
         Arc::new(WakeMeLaterTool),
         // Knowledge-base tools: the space's gathered external evidence.
-        // Host-only; separately grantable via the knowledge-read and
-        // knowledge-write bundles.
+        // Host-only; read, capture authoring, and curation authoring are
+        // separately grantable.
         Arc::new(KnowledgeSearchTool),
         Arc::new(KnowledgeRecordTool),
+        Arc::new(KnowledgeCurateTool),
     ];
 
     let base_tools = if let Some(browser_host) = browser_host {
@@ -860,6 +862,7 @@ async fn create_provider_with_retry(
     }
 
     let mut providers = Vec::new();
+    let mut has_codex_provider = false;
     for model_id in ordered_runtime_model_ids(config) {
         let Some(model_endpoint) = config.models.entries.get(&model_id) else {
             continue;
@@ -877,6 +880,7 @@ async fn create_provider_with_retry(
         // Codex is thread/turn-shaped and runs below the provider-parity
         // selection surface. It must never enter the completion failover chain.
         if provider_endpoint.protocol == swage_config::Protocol::Codex {
+            has_codex_provider = true;
             continue;
         }
 
@@ -909,6 +913,11 @@ async fn create_provider_with_retry(
     }
 
     if providers.is_empty() {
+        if has_codex_provider {
+            return Arc::new(swage_provider::UnsupportedLlmProvider::new(
+                "Codex turns run through the App Server harness",
+            ));
+        }
         tracing::warn!(
             "No usable provider/model pairs are configured. \
              Messaging will fail until configuration is fixed."
@@ -1001,14 +1010,44 @@ mod tests {
     use super::*;
     use axum::{Json, Router, http::StatusCode, response::IntoResponse, routing::post};
     use serde_json::{Value, json};
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
     use swage_config::{
         LogLevel, ModelCatalogConfig, ModelEndpointConfig, Protocol, ProviderCatalogConfig,
         ProviderEndpointConfig,
     };
     use swage_storage::store::AuditStore;
     use tokio::net::TcpListener;
+    use tracing_subscriber::{Registry, layer::SubscriberExt};
+
+    #[derive(Clone, Default)]
+    struct RecordedEvents(Arc<Mutex<Vec<String>>>);
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for RecordedEvents {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            struct MessageVisitor<'a>(&'a mut String);
+
+            impl tracing::field::Visit for MessageVisitor<'_> {
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    if field.name() == "message" {
+                        *self.0 = format!("{value:?}");
+                    }
+                }
+            }
+
+            let mut message = String::new();
+            event.record(&mut MessageVisitor(&mut message));
+            self.0.lock().unwrap().push(message);
+        }
+    }
 
     #[test]
     fn swage_database_path_uses_swage_root() {
@@ -1256,6 +1295,111 @@ mod tests {
         assert_eq!(response.content, "secondary response");
         assert_eq!(primary_calls.load(Ordering::SeqCst), 1);
         assert_eq!(secondary_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn codex_only_configuration_does_not_emit_no_provider_warning() {
+        let storage =
+            Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
+        let secret_manager = crate::secret::SecretManager::new(
+            Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
+        );
+        let config = swage_config::ResolvedConfig {
+            providers: ProviderCatalogConfig {
+                default: "codex".to_string(),
+                entries: [(
+                    "codex".to_string(),
+                    ProviderEndpointConfig {
+                        protocol: Protocol::Codex,
+                        api_key_secret_ref: None,
+                        api_key_env: None,
+                        base_url: None,
+                        command: None,
+                        state_dir: None,
+                    },
+                )]
+                .into_iter()
+                .collect(),
+            },
+            models: ModelCatalogConfig {
+                default: "codex".to_string(),
+                entries: [("codex".to_string(), model("codex", "gpt-5.6-codex"))]
+                    .into_iter()
+                    .collect(),
+            },
+            ..Default::default()
+        };
+        let events = RecordedEvents::default();
+        let captured = Arc::clone(&events.0);
+        let subscriber = Registry::default().with(events);
+
+        let (provider_model, completion_error) =
+            tracing::subscriber::with_default(subscriber, || {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(async {
+                        let provider = create_provider(&config, &secret_manager).await;
+                        let provider_model = provider.model_id().to_string();
+                        let completion_error = provider
+                            .complete(swage_core::CompletionRequest {
+                                messages: vec![],
+                                model: None,
+                                max_tokens: None,
+                                temperature: None,
+                                stop_sequences: None,
+                                metadata: None,
+                                tool_definitions: vec![],
+                            })
+                            .await
+                            .expect_err("Codex-only configuration must fail closed on completion");
+                        (provider_model, completion_error)
+                    })
+            });
+
+        let events = captured.lock().unwrap();
+        assert!(
+            !events
+                .iter()
+                .any(|event| event.contains("No usable provider/model pairs are configured")),
+            "Codex-only configuration emitted a false no-provider warning: {events:?}"
+        );
+        assert_eq!(provider_model, "unavailable");
+        assert!(matches!(
+            completion_error,
+            swage_core::ProviderError::InvalidConfig { message }
+                if message == "Codex turns run through the App Server harness"
+        ));
+    }
+
+    #[test]
+    fn unusable_configuration_retains_provider_configuration_warning() {
+        let storage =
+            Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
+        let secret_manager = crate::secret::SecretManager::new(
+            Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
+        );
+        let config = swage_config::ResolvedConfig::default();
+        let events = RecordedEvents::default();
+        let captured = Arc::clone(&events.0);
+        let subscriber = Registry::default().with(events);
+
+        tracing::subscriber::with_default(subscriber, || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(create_provider(&config, &secret_manager));
+        });
+
+        let events = captured.lock().unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|event| event.contains("No default provider/model pair is configured")),
+            "genuinely unusable configuration omitted the warning: {events:?}"
+        );
     }
 
     #[test]

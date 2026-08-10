@@ -8,6 +8,7 @@ pub mod channel_link;
 pub mod channel_queue;
 pub mod config_version;
 pub mod context_snapshot;
+pub mod curation_assertion;
 pub mod delivery;
 pub mod device;
 pub mod material;
