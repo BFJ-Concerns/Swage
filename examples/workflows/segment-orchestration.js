@@ -72,7 +72,7 @@ for (let segment = 0; segment < maxSegments; segment += 1) {
       `until the helper completes or the fallback timer lapses. List ` +
       `anything you needed at startup that was not supplied. Set done only ` +
       `when the brief itself is discharged. Return JSON only.`,
-    { label: `Segment ${segment + 1}` },
+    { label: `Segment ${segment + 1}`, schema: segmentSchema },
   );
   if (outcome === null) {
     throw new Error(`segment ${segment + 1} produced no valid outcome`);
