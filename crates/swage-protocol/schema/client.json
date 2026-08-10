@@ -37,6 +37,9 @@
     "create_workspace_attachment_request": {
       "$ref": "#/$defs/CreateWorkspaceAttachmentRequest"
     },
+    "knowledge_search": {
+      "$ref": "#/$defs/KnowledgeSearchResponse"
+    },
     "provider_sign_in_state": {
       "$ref": "#/$defs/ProviderSignInState"
     },
@@ -130,6 +133,7 @@
     "conversation_list",
     "conversation_detail",
     "conversation_thread",
+    "knowledge_search",
     "create_schedule_request",
     "update_schedule_request",
     "schedule",
@@ -836,6 +840,65 @@
       "enum": [
         "run",
         "skip"
+      ]
+    },
+    "KnowledgeSearchResponse": {
+      "type": "object",
+      "properties": {
+        "guidance": {
+          "type": "string"
+        },
+        "results": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/KnowledgeSearchResult"
+          }
+        }
+      },
+      "required": [
+        "results",
+        "guidance"
+      ]
+    },
+    "KnowledgeSearchResult": {
+      "type": "object",
+      "properties": {
+        "observation_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "offset": {
+          "description": "Byte offset of `passage` when it can be located in the derivation.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        },
+        "passage": {
+          "type": "string"
+        },
+        "retrieved_at": {
+          "type": "string"
+        },
+        "source": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "version": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "observation_id",
+        "version",
+        "retrieved_at",
+        "passage"
       ]
     },
     "MessageView": {
