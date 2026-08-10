@@ -10,9 +10,19 @@
     store?: StreamingStore;
     selectedModelId?: string | null;
     modelOptions?: string[];
+    modelCatalogueReady?: boolean;
+    onNavigate?: (path: string) => void;
   }
 
-  let { store, selectedModelId = null, modelOptions = [] }: Props = $props();
+  let {
+    store,
+    selectedModelId = null,
+    modelOptions = [],
+    modelCatalogueReady = false,
+    onNavigate,
+  }: Props = $props();
+
+  const hasNoConfiguredModels = $derived(modelCatalogueReady && modelOptions.length === 0);
 
   // Local draft content — cleared after every successful send.
   let content = $state("");
@@ -43,7 +53,7 @@
   function send() {
     const trimmed = content.trim();
     // Guard: no-op when there is nothing to send or a turn is in progress.
-    if (!store || !trimmed || store.isStreaming) return;
+    if (!store || !trimmed || store.isStreaming || hasNoConfiguredModels) return;
 
     store.startTurn(trimmed, selectedModel || null);
 
@@ -93,6 +103,11 @@
           {/each}
         </select>
       </div>
+    {:else if hasNoConfiguredModels}
+      <p class="model-guidance">
+        No models are configured. Add a provider in
+        <button type="button" onclick={() => onNavigate?.("/settings/providers")}>Settings</button>.
+      </p>
     {/if}
   </div>
 
@@ -104,7 +119,7 @@
     <button
       class="action send"
       onclick={send}
-      disabled={!content.trim() || !store}
+      disabled={!content.trim() || !store || hasNoConfiguredModels}
     >
       Send
     </button>
@@ -171,6 +186,25 @@
     font-size: 0.72rem;
     letter-spacing: 0.04em;
     padding: 3px 6px;
+    cursor: pointer;
+  }
+
+  .model-guidance {
+    margin: 0;
+    padding: 7px 14px;
+    border-top: 1px dotted var(--rule-soft);
+    color: var(--ink-soft);
+    font-family: var(--font-body);
+    font-size: 0.8rem;
+  }
+
+  .model-guidance button {
+    border: 0;
+    padding: 0;
+    background: none;
+    color: var(--ink);
+    font: inherit;
+    text-decoration: underline;
     cursor: pointer;
   }
 

@@ -22,8 +22,9 @@ use swage_storage::{
     NewWorkflowScript, ThreadStore, WorkflowRunRecord, WorkflowScriptRecord,
 };
 use swage_workflow::{
-    AgentCallRequest, AgentCallResult, EffectPayload, EffectReceipt, EngineLimits, WorkflowEngine,
-    WorkflowHost, journal_args_hash,
+    AgentCallRequest, AgentCallResult, EffectPayload, EffectReceipt, EffectRecoveryHost,
+    EngineLimits, ScriptCapabilities, WorkflowCallRequest, WorkflowEngine, WorkflowHost,
+    journal_args_hash, recover_started_effect,
 };
 use tokio::sync::{Mutex, Notify, Semaphore, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -143,6 +144,20 @@ enum HostCommand {
         cancellation: CancellationToken,
         reply: oneshot::Sender<Result<EffectReceipt, String>>,
     },
+    Workflow {
+        request: WorkflowCallRequest,
+        cancellation: CancellationToken,
+        reply: oneshot::Sender<Result<Value, String>>,
+    },
+    Timer {
+        ms: u64,
+        timer_id: u64,
+        cancellation: CancellationToken,
+        reply: oneshot::Sender<Result<Value, String>>,
+    },
+    AbandonTimer {
+        timer_id: u64,
+    },
 }
 
 struct ChannelWorkflowHost {
@@ -203,6 +218,48 @@ impl WorkflowHost for ChannelWorkflowHost {
         receive
             .await
             .map_err(|_| "workflow host dropped delivery reply".to_string())?
+    }
+
+    async fn run_workflow_call(
+        &self,
+        request: WorkflowCallRequest,
+        cancellation: CancellationToken,
+    ) -> Result<Value, String> {
+        let (reply, receive) = oneshot::channel();
+        self.tx
+            .send(HostCommand::Workflow {
+                request,
+                cancellation,
+                reply,
+            })
+            .map_err(|_| "workflow host stopped".to_string())?;
+        receive
+            .await
+            .map_err(|_| "workflow host dropped workflow reply".to_string())?
+    }
+
+    async fn timer(
+        &self,
+        ms: u64,
+        timer_id: u64,
+        cancellation: CancellationToken,
+    ) -> Result<Value, String> {
+        let (reply, receive) = oneshot::channel();
+        self.tx
+            .send(HostCommand::Timer {
+                ms,
+                timer_id,
+                cancellation,
+                reply,
+            })
+            .map_err(|_| "workflow host stopped".to_string())?;
+        receive
+            .await
+            .map_err(|_| "workflow host dropped timer reply".to_string())?
+    }
+
+    fn abandon_timer(&self, timer_id: u64) {
+        let _ = self.tx.send(HostCommand::AbandonTimer { timer_id });
     }
 }
 
@@ -320,6 +377,11 @@ async fn run_host_commands(
     );
     let replay_release_rank = Arc::new(AtomicU64::new(0));
     let replay_release_notify = Arc::new(Notify::new());
+    // Pending wait() timers by script-assigned timer id. Abandonment cancels
+    // the armed sleep so a beaten timer can never fire later and complete its
+    // journal entry — a completed timer entry must always mean the timer won.
+    let mut pending_timers: std::collections::HashMap<u64, CancellationToken> =
+        std::collections::HashMap::new();
     while let Some(command) = commands.recv().await {
         match command {
             HostCommand::Record { kind, message } => {
@@ -453,6 +515,159 @@ async fn run_host_commands(
                             Ordering::SeqCst,
                         );
                     }
+                    let _ = reply.send(result);
+                });
+            }
+            HostCommand::Workflow {
+                request,
+                cancellation,
+                reply,
+            } => {
+                let current_seq = seq.fetch_add(1, Ordering::SeqCst);
+                let request_json =
+                    serde_json::to_value(&request).expect("workflow request serialises");
+                let hash = journal_args_hash(&request_json);
+                let existing = replay.get(current_seq as usize).cloned();
+                let state = state.clone();
+                // Spawned so a slow child run does not block the host loop —
+                // log records and timer arms must keep flowing while a child
+                // works. Seq was assigned at the channel boundary above.
+                tokio::spawn(async move {
+                    let result = match existing {
+                        Some(entry) if entry.args_hash != hash => {
+                            Err("NondeterministicReplayError".into())
+                        }
+                        Some(entry) if entry.status == "completed" => entry
+                            .result
+                            .clone()
+                            .ok_or_else(|| "completed workflow entry has no result".to_string()),
+                        Some(entry) => {
+                            complete_workflow_call_entry(
+                                &state,
+                                run_id,
+                                space_id,
+                                entry.id,
+                                current_seq,
+                                request,
+                                cancellation,
+                            )
+                            .await
+                        }
+                        None => {
+                            match state
+                                .storage
+                                .create_workflow_journal_intent(NewWorkflowJournalIntent {
+                                    run_id,
+                                    seq: current_seq,
+                                    kind: "workflow_call".into(),
+                                    args_hash: hash,
+                                    request: request_json,
+                                    effect_kind: None,
+                                    idempotency_key: None,
+                                    target_kind: None,
+                                })
+                                .await
+                            {
+                                Ok(intent) => {
+                                    complete_workflow_call_entry(
+                                        &state,
+                                        run_id,
+                                        space_id,
+                                        intent.id,
+                                        current_seq,
+                                        request,
+                                        cancellation,
+                                    )
+                                    .await
+                                }
+                                Err(error) => Err(error.to_string()),
+                            }
+                        }
+                    };
+                    let _ = reply.send(result);
+                });
+            }
+            HostCommand::AbandonTimer { timer_id } => {
+                if let Some(token) = pending_timers.remove(&timer_id) {
+                    token.cancel();
+                }
+            }
+            HostCommand::Timer {
+                ms,
+                timer_id,
+                cancellation,
+                reply,
+            } => {
+                let abandon = CancellationToken::new();
+                pending_timers.insert(timer_id, abandon.clone());
+                let current_seq = seq.fetch_add(1, Ordering::SeqCst);
+                let request_json = serde_json::json!({ "ms": ms });
+                let hash = journal_args_hash(&request_json);
+                let existing = replay.get(current_seq as usize).cloned();
+                let state = state.clone();
+                // A completed timer entry replays instantly, so a wait the
+                // timer won wakes the same way on resume. A started entry is
+                // re-armed whole: the original firing was never recorded, so
+                // honesty is a fresh full wait, not a guessed remainder.
+                tokio::spawn(async move {
+                    let entry_id = match existing {
+                        Some(entry) if entry.args_hash != hash => {
+                            let _ = reply.send(Err("NondeterministicReplayError".into()));
+                            return;
+                        }
+                        Some(entry) if entry.status == "completed" => {
+                            let _ = reply.send(
+                                entry
+                                    .result
+                                    .clone()
+                                    .ok_or_else(|| "completed timer entry has no result".to_string()),
+                            );
+                            return;
+                        }
+                        Some(entry) => entry.id,
+                        None => {
+                            match state
+                                .storage
+                                .create_workflow_journal_intent(NewWorkflowJournalIntent {
+                                    run_id,
+                                    seq: current_seq,
+                                    kind: "timer".into(),
+                                    args_hash: hash,
+                                    request: request_json,
+                                    effect_kind: None,
+                                    idempotency_key: None,
+                                    target_kind: None,
+                                })
+                                .await
+                            {
+                                Ok(intent) => intent.id,
+                                Err(error) => {
+                                    let _ = reply.send(Err(error.to_string()));
+                                    return;
+                                }
+                            }
+                        }
+                    };
+                    tokio::select! {
+                        () = tokio::time::sleep(std::time::Duration::from_millis(ms)) => {}
+                        () = abandon.cancelled() => {
+                            // Beaten by a completion: the entry stays
+                            // `started` and the reply is never consumed —
+                            // wait() already resolved on the winner.
+                            return;
+                        }
+                        () = cancellation.cancelled() => {
+                            let _ = reply.send(Err("WorkflowCancelledError: timer cancelled".into()));
+                            return;
+                        }
+                    }
+                    let fired = serde_json::json!({ "fired": true });
+                    let result = state
+                        .storage
+                        .complete_workflow_journal_entry(entry_id, fired.clone())
+                        .await
+                        .map(|_| fired)
+                        .map_err(|error| error.to_string());
                     let _ = reply.send(result);
                 });
             }
@@ -594,6 +809,134 @@ async fn complete_agent_entry(
     Ok(result)
 }
 
+/// Runs a parent's `workflow()` call as a real child run and journals its
+/// final output. Recovery is by parentage, not re-execution: a child the
+/// parent already started is found via (parent_run_id, parent_seq) and its
+/// recorded outcome is used — resumed if interrupted, never duplicated.
+async fn complete_workflow_call_entry(
+    state: &AppState,
+    parent_run_id: Uuid,
+    space_id: Uuid,
+    entry_id: Uuid,
+    parent_seq: u64,
+    request: WorkflowCallRequest,
+    cancellation: CancellationToken,
+) -> Result<Value, String> {
+    let script = state
+        .storage
+        .list_workflow_scripts(space_id)
+        .await
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .find(|script| script.name == request.name)
+        .ok_or_else(|| {
+            format!(
+                "WorkflowCompositionError: workflow script {:?} was not found",
+                request.name
+            )
+        })?;
+    let version = state
+        .storage
+        .get_workflow_script_head(script.id)
+        .await
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "WorkflowCompositionError: workflow script has no version".to_string())?;
+    let existing_child = state
+        .storage
+        .find_child_workflow_run(parent_run_id, parent_seq)
+        .await
+        .map_err(|error| error.to_string())?;
+    let child = match existing_child {
+        Some(child) => match child.state.as_str() {
+            "completed" => child,
+            "interrupted" => {
+                let source = version.source.clone();
+                let grant = script.delivery_grant.clone();
+                state
+                    .storage
+                    .update_workflow_run_state(child.id, "running", None, None)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                let running = state
+                    .storage
+                    .get_workflow_run(child.id)
+                    .await
+                    .map_err(|error| error.to_string())?
+                    .ok_or_else(|| "child workflow run disappeared".to_string())?;
+                launch_existing_run(state.clone(), running, source, grant)
+                    .await
+                    .map_err(|error| error.0.to_string())?;
+                child
+            }
+            _ => child,
+        },
+        None => {
+            let record = state
+                .storage
+                .create_workflow_run(NewWorkflowRun {
+                    space_id,
+                    parent_run_id: Some(parent_run_id),
+                    parent_seq: Some(parent_seq),
+                    script_version_id: Some(version.id),
+                    source: None,
+                    source_hash: source_hash(&version.source),
+                    args: request.args.clone(),
+                    budget: serde_json::to_value(WorkflowBudget::default())
+                        .map_err(|error| error.to_string())?,
+                    engine_version: "rquickjs-0.12.0".into(),
+                })
+                .await
+                .map_err(|error| error.to_string())?;
+            launch_existing_run(
+                state.clone(),
+                record.clone(),
+                version.source.clone(),
+                script.delivery_grant.clone(),
+            )
+            .await
+            .map_err(|error| error.0.to_string())?;
+            record
+        }
+    };
+    let record = loop {
+        let record = state
+            .storage
+            .get_workflow_run(child.id)
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "child workflow run disappeared".to_string())?;
+        if record.state != "running" {
+            break record;
+        }
+        tokio::select! {
+            () = tokio::time::sleep(std::time::Duration::from_millis(50)) => {}
+            () = cancellation.cancelled() => {
+                if let Some(token) = state.active_workflow_runs.lock().await.get(&child.id) {
+                    token.cancel();
+                }
+                return Err("WorkflowCancelledError: parent run cancelled".into());
+            }
+        }
+    };
+    match record.state.as_str() {
+        "completed" => {
+            let output = record.final_output.unwrap_or(Value::Null);
+            state
+                .storage
+                .complete_workflow_journal_entry(entry_id, output.clone())
+                .await
+                .map_err(|error| error.to_string())?;
+            Ok(output)
+        }
+        other => Err(format!(
+            "WorkflowCompositionError: child workflow run {} {}: {}",
+            record.id,
+            other,
+            record.error_message.unwrap_or_default()
+        )),
+    }
+}
+
 async fn complete_effect_entry(
     state: &AppState,
     capability: Arc<dyn DeliveryCapability>,
@@ -603,22 +946,16 @@ async fn complete_effect_entry(
     effect_seq: u64,
     key: Uuid,
 ) -> Result<EffectReceipt, String> {
-    let receipt = match capability.effect_kind() {
-        swage_workflow::EffectKind::IdempotencyKey => {
-            capability
-                .deliver(key, payload, effect_seq, cancellation)
-                .await?
-        }
-        swage_workflow::EffectKind::CheckBeforeRedo => {
-            if let Some(receipt) = capability.probe(key, &payload).await? {
-                receipt
-            } else {
-                capability
-                    .deliver(key, payload, effect_seq, cancellation)
-                    .await?
-            }
-        }
+    let request = serde_json::to_value(&payload).expect("effect payload serialises");
+    let recovery_host = GatewayEffectRecoveryHost {
+        capability: Arc::clone(&capability),
+        payload,
+        effect_seq,
+        cancellation,
     };
+    let receipt = recover_started_effect(capability.effect_kind(), key, &request, &recovery_host)
+        .await
+        .and_then(|value| serde_json::from_value(value).map_err(|error| error.to_string()))?;
     state
         .storage
         .complete_workflow_journal_entry(
@@ -628,6 +965,40 @@ async fn complete_effect_entry(
         .await
         .map_err(|error| error.to_string())?;
     Ok(receipt)
+}
+
+struct GatewayEffectRecoveryHost {
+    capability: Arc<dyn DeliveryCapability>,
+    payload: EffectPayload,
+    effect_seq: u64,
+    cancellation: CancellationToken,
+}
+
+#[async_trait::async_trait]
+impl EffectRecoveryHost for GatewayEffectRecoveryHost {
+    async fn resend(&self, key: Uuid, _request: &Value) -> Result<Value, String> {
+        self.capability
+            .deliver(
+                key,
+                self.payload.clone(),
+                self.effect_seq,
+                self.cancellation.clone(),
+            )
+            .await
+            .and_then(|receipt| serde_json::to_value(receipt).map_err(|error| error.to_string()))
+    }
+
+    async fn probe(&self, key: Uuid, _request: &Value) -> Result<Option<Value>, String> {
+        self.capability
+            .probe(key, &self.payload)
+            .await
+            .and_then(|receipt| {
+                receipt
+                    .map(serde_json::to_value)
+                    .transpose()
+                    .map_err(|error| error.to_string())
+            })
+    }
 }
 
 fn internal(error: impl std::fmt::Display) -> ApiError {
@@ -800,6 +1171,8 @@ async fn start_run(
         .storage
         .create_workflow_run(NewWorkflowRun {
             space_id,
+            parent_run_id: None,
+            parent_seq: None,
             script_version_id,
             source: script_version_id.is_none().then(|| source.clone()),
             source_hash: source_hash(&source),
@@ -890,7 +1263,12 @@ async fn launch_existing_run(
         max_total_tokens: run_budget.max_total_tokens,
     });
     let args_json = serde_json::to_string(&record.args).map_err(internal)?;
-    let delivery_granted = delivery_grant.is_some();
+    // Composition is a top-level capability only: a child run (one carrying
+    // parentage) gets no `workflow()`, which bounds nesting to one level.
+    let capabilities = ScriptCapabilities {
+        delivery: delivery_grant.is_some(),
+        composition: record.parent_run_id.is_none(),
+    };
     std::thread::Builder::new()
         .name(format!("workflow-{}", record.id))
         .spawn(move || {
@@ -904,7 +1282,7 @@ async fn launch_existing_run(
                     &args_json,
                     cancellation,
                     Some(host),
-                    delivery_granted,
+                    capabilities,
                 ));
             let _ = result_tx.send(result);
         })
@@ -1035,6 +1413,8 @@ pub async fn get_run(
                 "effect" => WorkflowJournalEntryKind::Effect,
                 "log" => WorkflowJournalEntryKind::Log,
                 "phase" => WorkflowJournalEntryKind::Phase,
+                "workflow_call" => WorkflowJournalEntryKind::WorkflowCall,
+                "timer" => WorkflowJournalEntryKind::Timer,
                 other => return Err(internal(format!("unknown workflow entry kind: {other}"))),
             };
             let status = match entry.status.as_str() {
@@ -1202,6 +1582,185 @@ mod tests {
 
     use super::*;
     use swage_storage::{SpaceStore, SqliteStorage, Storage, WorkflowStore};
+
+    struct RecordingDeliveryCapability {
+        effect_kind: swage_workflow::EffectKind,
+        probe_result: Option<EffectReceipt>,
+        probes: AtomicUsize,
+        deliveries: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl DeliveryCapability for RecordingDeliveryCapability {
+        fn kind(&self) -> &'static str {
+            "recording"
+        }
+
+        fn effect_kind(&self) -> swage_workflow::EffectKind {
+            self.effect_kind
+        }
+
+        async fn deliver(
+            &self,
+            _key: Uuid,
+            _payload: EffectPayload,
+            effect_seq: u64,
+            _cancellation: CancellationToken,
+        ) -> Result<EffectReceipt, String> {
+            self.deliveries.fetch_add(1, Ordering::SeqCst);
+            Ok(EffectReceipt {
+                delivered: true,
+                target: "delivered".into(),
+                effect_seq,
+            })
+        }
+
+        async fn probe(
+            &self,
+            _key: Uuid,
+            _payload: &EffectPayload,
+        ) -> Result<Option<EffectReceipt>, String> {
+            self.probes.fetch_add(1, Ordering::SeqCst);
+            Ok(self.probe_result.clone())
+        }
+    }
+
+    async fn started_effect_entry() -> (AppState, Uuid) {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let run = storage
+            .create_workflow_run(NewWorkflowRun {
+                space_id: space.id,
+                parent_run_id: None,
+                parent_seq: None,
+                script_version_id: None,
+                source: Some("return null".into()),
+                source_hash: source_hash("return null"),
+                args: Value::Null,
+                budget: serde_json::json!({}),
+                engine_version: "test".into(),
+            })
+            .await
+            .expect("run");
+        let entry = storage
+            .create_workflow_journal_intent(NewWorkflowJournalIntent {
+                run_id: run.id,
+                seq: 0,
+                kind: "effect".into(),
+                args_hash: journal_args_hash(&Value::Null),
+                request: Value::Null,
+                effect_kind: Some("test".into()),
+                idempotency_key: Some(Uuid::new_v4()),
+                target_kind: Some("recording".into()),
+            })
+            .await
+            .expect("started entry");
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        (state, entry.id)
+    }
+
+    fn recovery_payload() -> EffectPayload {
+        EffectPayload {
+            content: "recover me".into(),
+            metadata: None,
+            target: None,
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn started_idempotency_key_effect_resends_once_without_probing() {
+        let (state, entry_id) = started_effect_entry().await;
+        let capability = Arc::new(RecordingDeliveryCapability {
+            effect_kind: swage_workflow::EffectKind::IdempotencyKey,
+            probe_result: None,
+            probes: AtomicUsize::new(0),
+            deliveries: AtomicUsize::new(0),
+        });
+
+        let receipt = complete_effect_entry(
+            &state,
+            Arc::clone(&capability) as Arc<dyn DeliveryCapability>,
+            entry_id,
+            recovery_payload(),
+            CancellationToken::new(),
+            7,
+            Uuid::new_v4(),
+        )
+        .await
+        .expect("recover");
+
+        assert_eq!(receipt.target, "delivered");
+        assert_eq!(receipt.effect_seq, 7);
+        assert_eq!(capability.probes.load(Ordering::SeqCst), 0);
+        assert_eq!(capability.deliveries.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn started_check_before_redo_effect_uses_probe_receipt_without_resending() {
+        let (state, entry_id) = started_effect_entry().await;
+        let capability = Arc::new(RecordingDeliveryCapability {
+            effect_kind: swage_workflow::EffectKind::CheckBeforeRedo,
+            probe_result: Some(EffectReceipt {
+                delivered: true,
+                target: "already-delivered".into(),
+                effect_seq: 3,
+            }),
+            probes: AtomicUsize::new(0),
+            deliveries: AtomicUsize::new(0),
+        });
+
+        let receipt = complete_effect_entry(
+            &state,
+            Arc::clone(&capability) as Arc<dyn DeliveryCapability>,
+            entry_id,
+            recovery_payload(),
+            CancellationToken::new(),
+            7,
+            Uuid::new_v4(),
+        )
+        .await
+        .expect("recover");
+
+        assert_eq!(receipt.target, "already-delivered");
+        assert_eq!(receipt.effect_seq, 3);
+        assert_eq!(capability.probes.load(Ordering::SeqCst), 1);
+        assert_eq!(capability.deliveries.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn started_check_before_redo_effect_resends_once_after_probe_miss() {
+        let (state, entry_id) = started_effect_entry().await;
+        let capability = Arc::new(RecordingDeliveryCapability {
+            effect_kind: swage_workflow::EffectKind::CheckBeforeRedo,
+            probe_result: None,
+            probes: AtomicUsize::new(0),
+            deliveries: AtomicUsize::new(0),
+        });
+
+        let receipt = complete_effect_entry(
+            &state,
+            Arc::clone(&capability) as Arc<dyn DeliveryCapability>,
+            entry_id,
+            recovery_payload(),
+            CancellationToken::new(),
+            7,
+            Uuid::new_v4(),
+        )
+        .await
+        .expect("recover");
+
+        assert_eq!(receipt.target, "delivered");
+        assert_eq!(receipt.effect_seq, 7);
+        assert_eq!(capability.probes.load(Ordering::SeqCst), 1);
+        assert_eq!(capability.deliveries.load(Ordering::SeqCst), 1);
+    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn inline_run_returns_detached_and_completes_from_recorded_args() {
@@ -1378,6 +1937,188 @@ mod tests {
                     .and_then(Value::as_str)
                     .is_some_and(|message| message.contains("parallel thunk 0 failed"))
         }));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn composed_run_executes_the_child_and_journals_its_output() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        storage
+            .create_workflow_script(NewWorkflowScript {
+                space_id: space.id,
+                name: "child".into(),
+                description: String::new(),
+                source: "return { doubled: args.value * 2 };".into(),
+                delivery_grant: None,
+            })
+            .await
+            .expect("child script");
+        let (parent, _) = storage
+            .create_workflow_script(NewWorkflowScript {
+                space_id: space.id,
+                name: "parent".into(),
+                description: String::new(),
+                source: "const child = await workflow(\"child\", { value: 21 }); return child;"
+                    .into(),
+                delivery_grant: None,
+            })
+            .await
+            .expect("parent script");
+        let Json(started) = start_saved_run(
+            State(state.clone()),
+            Path(parent.id),
+            Json(StartWorkflowRunRequest {
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start");
+        wait_for_terminal(&state, started.id).await;
+
+        let run = storage
+            .get_workflow_run(started.id)
+            .await
+            .expect("run")
+            .expect("present");
+        assert_eq!(run.state, "completed");
+        assert_eq!(run.final_output, Some(serde_json::json!({"doubled": 42})));
+
+        // The child is a real run carrying its parentage, and the parent's
+        // journal holds a completed workflow_call entry with the child's
+        // output — the provenance a resumed parent replays from.
+        let journal = storage
+            .list_workflow_journal(started.id)
+            .await
+            .expect("journal");
+        let call = journal
+            .iter()
+            .find(|entry| entry.kind == "workflow_call")
+            .expect("workflow_call entry");
+        assert_eq!(call.status, "completed");
+        assert_eq!(call.result, Some(serde_json::json!({"doubled": 42})));
+        let child = storage
+            .find_child_workflow_run(started.id, call.seq)
+            .await
+            .expect("query")
+            .expect("child run recorded");
+        assert_eq!(child.state, "completed");
+        assert_eq!(child.parent_run_id, Some(started.id));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_child_run_cannot_compose_further() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        storage
+            .create_workflow_script(NewWorkflowScript {
+                space_id: space.id,
+                name: "grandchild".into(),
+                description: String::new(),
+                source: "return 1;".into(),
+                delivery_grant: None,
+            })
+            .await
+            .expect("grandchild script");
+        storage
+            .create_workflow_script(NewWorkflowScript {
+                space_id: space.id,
+                name: "child".into(),
+                description: String::new(),
+                // In a child run `workflow` must be absent entirely.
+                source: "return typeof workflow;".into(),
+                delivery_grant: None,
+            })
+            .await
+            .expect("child script");
+        let (parent, _) = storage
+            .create_workflow_script(NewWorkflowScript {
+                space_id: space.id,
+                name: "parent".into(),
+                description: String::new(),
+                source: "return await workflow(\"child\");".into(),
+                delivery_grant: None,
+            })
+            .await
+            .expect("parent script");
+        let Json(started) = start_saved_run(
+            State(state.clone()),
+            Path(parent.id),
+            Json(StartWorkflowRunRequest {
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start");
+        wait_for_terminal(&state, started.id).await;
+        let run = storage
+            .get_workflow_run(started.id)
+            .await
+            .expect("run")
+            .expect("present");
+        assert_eq!(run.state, "completed");
+        assert_eq!(run.final_output, Some(serde_json::json!("undefined")));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn timer_won_wait_is_journalled_and_replays_the_same_winner() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(space.id),
+            Json(StartInlineWorkflowRunRequest {
+                source: "const wake = await wait({ timerMs: 10 }); return wake.wake;".into(),
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start");
+        wait_for_terminal(&state, started.id).await;
+        let run = storage
+            .get_workflow_run(started.id)
+            .await
+            .expect("run")
+            .expect("present");
+        assert_eq!(run.state, "completed");
+        assert_eq!(run.final_output, Some(serde_json::json!("timer")));
+        let journal = storage
+            .list_workflow_journal(started.id)
+            .await
+            .expect("journal");
+        let timer = journal
+            .iter()
+            .find(|entry| entry.kind == "timer")
+            .expect("timer entry");
+        assert_eq!(timer.status, "completed");
+        assert_eq!(timer.result, Some(serde_json::json!({"fired": true})));
+        assert_eq!(timer.request, serde_json::json!({"ms": 10}));
     }
 
     async fn wait_for_terminal(state: &AppState, id: Uuid) {

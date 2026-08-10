@@ -297,6 +297,40 @@ describe("App", () => {
     setPath("/");
   });
 
+  it("connects exactly once when popstate selects a different conversation", async () => {
+    const defaultSpace = makeSpace();
+    const first = makeConversationSummary({ id: "conv-first" });
+    const second = makeConversationSummary({ id: "conv-second" });
+
+    vi.mocked(spacesApi.listSpaces).mockResolvedValueOnce([defaultSpace]);
+    vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([
+      first,
+      second,
+    ]);
+    vi.mocked(conversationsApi.getConversation)
+      .mockResolvedValueOnce(makeConversationDetail({ id: second.id }))
+      .mockResolvedValueOnce(makeConversationDetail({ id: first.id }));
+
+    setPath(`/conversations/${first.id}`);
+    window.history.pushState(null, "", `/conversations/${second.id}`);
+    const historyLength = window.history.length;
+    component = mount(App, { target: document.body });
+    await settleUi();
+
+    expect(window.history.length).toBe(historyLength);
+    expect(websocketHarness.client.connect).toHaveBeenCalledTimes(1);
+    expect(websocketHarness.client.connect).toHaveBeenLastCalledWith(second.id);
+
+    websocketHarness.client.connect.mockClear();
+    setPath(`/conversations/${first.id}`);
+    window.dispatchEvent(new PopStateEvent("popstate"));
+    await settleUi();
+
+    expect(window.location.pathname).toBe(`/conversations/${first.id}`);
+    expect(websocketHarness.client.connect).toHaveBeenCalledTimes(1);
+    expect(websocketHarness.client.connect).toHaveBeenCalledWith(first.id);
+  });
+
   it("restores a deep-linked conversation on startup and opens its WebSocket", async () => {
     const defaultSpace = makeSpace();
     const linkedConversation = makeConversationSummary({
@@ -309,7 +343,7 @@ describe("App", () => {
       makeConversationSummary({ id: "conv-other", message_preview: "Other" }),
       linkedConversation,
     ]);
-    vi.mocked(conversationsApi.getConversation).mockResolvedValueOnce(
+    vi.mocked(conversationsApi.getConversation).mockResolvedValue(
       makeConversationDetail({
         id: "conv-linked",
         messages: [
@@ -323,15 +357,28 @@ describe("App", () => {
       }),
     );
 
-    setPath("/conversations/conv-linked");
+    window.history.pushState(null, "", "/conversations/conv-linked");
+    const historyLength = window.history.length;
     component = mount(App, { target: document.body });
     await settleUi();
 
     expect(spacesApi.listSpaces).toHaveBeenCalledTimes(1);
     expect(conversationsApi.listConversations).toHaveBeenCalledWith(defaultSpace.id);
     expect(conversationsApi.getConversation).toHaveBeenCalledWith("conv-linked");
+    expect(websocketHarness.client.connect).toHaveBeenCalledTimes(1);
     expect(websocketHarness.client.connect).toHaveBeenCalledWith("conv-linked");
     expect(window.location.pathname).toBe("/conversations/conv-linked");
+
+    const popped = new Promise<void>((resolve) => {
+      window.addEventListener("popstate", () => resolve(), { once: true });
+    });
+    window.history.back();
+    await popped;
+    await settleUi();
+
+    expect(websocketHarness.client.connect).toHaveBeenCalledTimes(1);
+    expect(window.location.pathname).toBe("/");
+    expect(window.history.length).toBe(historyLength);
 
     const activePreview = document.querySelector(".conversation-item.active .preview");
     expect(activePreview?.textContent).toContain("Deep-linked conversation");
@@ -392,6 +439,34 @@ describe("App", () => {
     expect(document.querySelector('[aria-label="Settings"]')).toBeNull();
   });
 
+  it("connects exactly once when a conversation is picked from the sidebar", async () => {
+    const defaultSpace = makeSpace();
+    const selected = makeConversationSummary({
+      id: "conv-picked",
+      message_preview: "Pick me",
+    });
+
+    vi.mocked(spacesApi.listSpaces).mockResolvedValueOnce([defaultSpace]);
+    vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([selected]);
+    vi.mocked(conversationsApi.getConversation).mockResolvedValueOnce(
+      makeConversationDetail({ id: selected.id }),
+    );
+
+    component = mount(App, { target: document.body });
+    await settleUi();
+    await openSpaceFromPicker(defaultSpace.name);
+
+    const selectButton = document.querySelector<HTMLButtonElement>(
+      ".conversation-select-btn",
+    );
+    expect(selectButton).not.toBeNull();
+    flushSync(() => selectButton!.click());
+    await settleUi();
+
+    expect(websocketHarness.client.connect).toHaveBeenCalledTimes(1);
+    expect(websocketHarness.client.connect).toHaveBeenCalledWith(selected.id);
+  });
+
   it("shows desktop shell context when the electron bridge is present", async () => {
     window.swageDesktop = {
       shell: "electron",
@@ -443,11 +518,107 @@ describe("App", () => {
     await settleUi();
 
     expect(conversationsApi.createConversation).toHaveBeenCalledWith(defaultSpace.id, undefined);
+    expect(websocketHarness.client.connect).toHaveBeenCalledTimes(1);
     expect(websocketHarness.client.connect).toHaveBeenCalledWith("conv-new");
     expect(window.location.pathname).toBe("/conversations/conv-new");
     expect(document.querySelector(".message-display")?.textContent).toContain(
       "Send a message below to start the conversation.",
     );
+  });
+
+  it("connects exactly once when the composer auto-creates a conversation", async () => {
+    const defaultSpace = makeSpace();
+    const created: ConversationResponse = {
+      id: "conv-auto",
+      space_id: defaultSpace.id,
+      created_at: "2026-04-07T12:03:00Z",
+      last_activity: "2026-04-07T12:03:00Z",
+    };
+
+    vi.mocked(spacesApi.listSpaces).mockResolvedValueOnce([defaultSpace]);
+    vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([]);
+    vi.mocked(conversationsApi.createConversation).mockResolvedValueOnce(created);
+
+    component = mount(App, { target: document.body });
+    await settleUi();
+    await openSpaceFromPicker(defaultSpace.name);
+
+    const textarea = document.querySelector<HTMLTextAreaElement>("textarea");
+    expect(textarea).not.toBeNull();
+    flushSync(() => {
+      textarea!.value = "Start from the composer";
+      textarea!.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+
+    const sendButton = document.querySelector<HTMLButtonElement>(".action.send");
+    expect(sendButton).not.toBeNull();
+    flushSync(() => sendButton!.click());
+    await settleUi();
+
+    expect(websocketHarness.client.connect).toHaveBeenCalledTimes(1);
+    expect(websocketHarness.client.connect).toHaveBeenCalledWith(created.id);
+  });
+
+  it("connects exactly once when returning to the conversation surface", async () => {
+    const defaultSpace = makeSpace();
+    const linked = makeConversationSummary({ id: "conv-surface" });
+
+    vi.mocked(spacesApi.listSpaces).mockResolvedValueOnce([defaultSpace]);
+    vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([linked]);
+    vi.mocked(conversationsApi.getConversation).mockResolvedValueOnce(
+      makeConversationDetail({ id: linked.id }),
+    );
+
+    setPath(`/conversations/${linked.id}`);
+    component = mount(App, { target: document.body });
+    await settleUi();
+    websocketHarness.client.connect.mockClear();
+
+    const surfaceButtons = Array.from(
+      document.querySelectorAll<HTMLButtonElement>('nav[aria-label="Surface"] button'),
+    );
+    const operator = surfaceButtons.find((button) =>
+      button.textContent?.includes("Operator"),
+    );
+    expect(operator).toBeDefined();
+    flushSync(() => operator!.click());
+    await settleUi();
+
+    const conversation = Array.from(
+      document.querySelectorAll<HTMLButtonElement>('nav[aria-label="Surface"] button'),
+    ).find((button) => button.textContent?.includes("Conversation"));
+    expect(conversation).toBeDefined();
+    flushSync(() => conversation!.click());
+    await settleUi();
+
+    expect(websocketHarness.client.connect).toHaveBeenCalledTimes(1);
+    expect(websocketHarness.client.connect).toHaveBeenCalledWith(linked.id);
+  });
+
+  it("connects exactly once when manual retry is requested", async () => {
+    const defaultSpace = makeSpace();
+    const linked = makeConversationSummary({ id: "conv-retry" });
+
+    vi.mocked(spacesApi.listSpaces).mockResolvedValueOnce([defaultSpace]);
+    vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([linked]);
+    vi.mocked(conversationsApi.getConversation).mockResolvedValueOnce(
+      makeConversationDetail({ id: linked.id }),
+    );
+
+    setPath(`/conversations/${linked.id}`);
+    component = mount(App, { target: document.body });
+    await settleUi();
+    websocketHarness.client.connect.mockClear();
+    websocketHarness.fireStatus("error");
+    await settleUi();
+
+    const retry = document.querySelector<HTMLButtonElement>(".retry-btn");
+    expect(retry).not.toBeNull();
+    flushSync(() => retry!.click());
+    await settleUi();
+
+    expect(websocketHarness.client.connect).toHaveBeenCalledTimes(1);
+    expect(websocketHarness.client.connect).toHaveBeenCalledWith(linked.id);
   });
 
   it("sends a message and finalises a streamed reply through the full app stack", async () => {
