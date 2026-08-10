@@ -3293,7 +3293,7 @@ async fn fresh_codex_turn_completes_without_degraded_execution_opt_in_or_audit()
             "send":[{"jsonrpc":"2.0","id":"$request_id","result":{"thread":{"id":"fake-thread"}}}]
         },
         {
-            "receive":{"method":"turn/start"},
+            "receive":{"method":"turn/start","params":{"sandboxPolicy":{"type":"readOnly","networkAccess":false}}},
             "send":[
                 {"jsonrpc":"2.0","id":"$request_id","result":{"turn":{"id":"fake-turn"}}},
                 {"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"delta":"done"}},
