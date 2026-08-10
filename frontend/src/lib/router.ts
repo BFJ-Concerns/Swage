@@ -152,7 +152,9 @@ export function createRouter(options?: RouterOptions): Router {
     },
 
     navigate(path: string): void {
-      window.history.pushState(null, "", path);
+      if (window.location.pathname !== path) {
+        window.history.pushState(null, "", path);
+      }
       // navigate() is always intentional — no async store call needed here.
       // The calling code (e.g. selectConversation in conversation list) has
       // already updated the store; we just sync the URL.
