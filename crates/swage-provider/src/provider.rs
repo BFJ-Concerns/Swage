@@ -45,22 +45,34 @@ pub(crate) fn may_forward_before_attempt_commits(chunk: &StreamChunk) -> bool {
     }
 }
 
+/// Abort a spawned forwarder instead of detaching it when its stream is gone.
+struct AbortTaskOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortTaskOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 /// Start a forwarding task when its returned stream is first polled.
 ///
-/// The Tokio sender lets forwarding tasks wait for receiver closure alongside
-/// provider output or retry timers, so abandoning a stream cancels work even
-/// when no further output arrives.
-pub(crate) fn spawn_stream_forwarder<F, Fut>(
+/// The task belongs to the returned stream: dropping the stream aborts the
+/// forwarder even when it is waiting for provider output or a retry timer.
+pub(crate) fn spawn_stream_forwarder<T, F, Fut>(
     forwarder: F,
-) -> Pin<Box<dyn Stream<Item = StreamChunk> + Send>>
+) -> Pin<Box<dyn Stream<Item = T> + Send>>
 where
-    F: FnOnce(tokio::sync::mpsc::UnboundedSender<StreamChunk>) -> Fut + Send + 'static,
+    T: Send + 'static,
+    F: FnOnce(tokio::sync::mpsc::UnboundedSender<T>) -> Fut + Send + 'static,
     Fut: Future<Output = ()> + Send + 'static,
 {
     let lazy_receiver = futures::stream::once(async move {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        tokio::spawn(forwarder(tx));
-        futures::stream::poll_fn(move |cx| rx.poll_recv(cx))
+        let task = AbortTaskOnDrop(tokio::spawn(forwarder(tx)));
+        futures::stream::poll_fn(move |cx| {
+            let _keep_task_until_stream_is_dropped = &task;
+            rx.poll_recv(cx)
+        })
     });
     Box::pin(lazy_receiver.flatten())
 }
