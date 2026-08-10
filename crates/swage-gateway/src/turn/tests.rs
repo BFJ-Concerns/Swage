@@ -173,6 +173,57 @@ impl MultiRoundMockProvider {
     }
 }
 
+/// A multi-round provider whose final configured round remains open after its chunks.
+struct PendingFinalRoundProvider {
+    rounds: std::sync::Mutex<std::collections::VecDeque<Vec<StreamChunk>>>,
+}
+
+impl PendingFinalRoundProvider {
+    fn new(rounds: Vec<Vec<StreamChunk>>) -> Self {
+        Self {
+            rounds: std::sync::Mutex::new(rounds.into_iter().collect()),
+        }
+    }
+}
+
+#[async_trait]
+impl LlmProvider for PendingFinalRoundProvider {
+    fn model_id(&self) -> &str {
+        "mock-pending-final-round"
+    }
+
+    async fn complete(
+        &self,
+        _request: CompletionRequest,
+    ) -> Result<CompletionResponse, ProviderError> {
+        unimplemented!("not used in multi-round cancellation tests")
+    }
+
+    async fn complete_with_tools(
+        &self,
+        _request: ToolCompletionRequest,
+    ) -> Result<ToolCompletionResponse, ProviderError> {
+        unimplemented!("not used in multi-round cancellation tests")
+    }
+
+    fn stream(
+        &self,
+        _request: CompletionRequest,
+    ) -> Pin<Box<dyn futures::Stream<Item = StreamChunk> + Send>> {
+        let (chunks, is_final_round) = {
+            let mut rounds = self.rounds.lock().expect("mock lock poisoned");
+            let chunks = rounds.pop_front().unwrap_or_default();
+            (chunks, rounds.is_empty())
+        };
+        let chunks = stream::iter(chunks);
+        if is_final_round {
+            Box::pin(chunks.chain(stream::pending()))
+        } else {
+            Box::pin(chunks)
+        }
+    }
+}
+
 /// A multi-round provider that records every incoming request.
 pub(crate) struct CapturingMultiRoundProvider {
     rounds: std::sync::Mutex<std::collections::VecDeque<Vec<StreamChunk>>>,
@@ -3721,6 +3772,7 @@ async fn cancelled_turn_without_partial_stores_no_assistant_response() {
 }
 
 const COMPLETED_ROUND_PARTIAL: &str = "Text shown before the tool calls.";
+const LATER_ROUND_PARTIAL: &str = " Text shown during the next response.";
 
 #[tokio::test]
 async fn cancelled_before_next_tool_persists_completed_round_text() {
@@ -3859,6 +3911,93 @@ async fn cancelled_before_next_round_persists_completed_round_text() {
         conversation.messages[1].turn_state,
         Some(swage_protocol::client::conversation::TurnState::Interrupted)
     );
+}
+
+#[tokio::test]
+async fn cancelled_during_later_stream_persists_all_accumulated_text() {
+    let provider = Arc::new(PendingFinalRoundProvider::new(vec![
+        vec![
+            StreamChunk::Delta {
+                content: COMPLETED_ROUND_PARTIAL.into(),
+            },
+            StreamChunk::ToolUse {
+                call_id: "first".into(),
+                name: "echo".into(),
+                arguments: serde_json::json!({ "text": "first" }),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ],
+        vec![StreamChunk::Delta {
+            content: LATER_ROUND_PARTIAL.into(),
+        }],
+    ]));
+    let (state, session_id) = make_state_with_tool_provider(provider).await;
+    let state = Arc::new(state);
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let state_for_turn = Arc::clone(&state);
+    let turn_task = tokio::spawn(async move {
+        process_turn(
+            &state_for_turn,
+            session_id,
+            None,
+            "Use one tool, then continue".to_string(),
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
+        )
+        .await
+    });
+
+    loop {
+        if matches!(
+            rx.recv().await.expect("later-round token should be emitted"),
+            ServerEvent::Token { content } if content == LATER_ROUND_PARTIAL
+        ) {
+            break;
+        }
+    }
+    cancel_turn(&state, session_id)
+        .await
+        .expect("cancel should succeed while the later provider stream is open");
+    turn_task
+        .await
+        .expect("turn task should not panic")
+        .expect("cancelled turn should settle cleanly");
+
+    let expected = format!("{COMPLETED_ROUND_PARTIAL}{LATER_ROUND_PARTIAL}");
+    let threads = state.storage.list_by_session(session_id).await.unwrap();
+    let turns = state
+        .storage
+        .list_turns_by_thread(threads[0].id)
+        .await
+        .unwrap();
+    assert_eq!(turns[0].state, TurnState::Interrupted);
+    assert_eq!(
+        turns[0].assistant_response.as_deref(),
+        Some(expected.as_str())
+    );
+
+    let conversation = crate::service::ConversationService::new(
+        Arc::clone(&state.storage),
+        Arc::clone(&state.space_store),
+    )
+    .get_conversation(session_id)
+    .await
+    .expect("reload-shaped conversation read should succeed");
+    assert_eq!(conversation.messages.len(), 2, "user and partial assistant");
+    assert_eq!(conversation.messages[1].role, "assistant");
+    assert_eq!(conversation.messages[1].content, expected);
+    assert_eq!(
+        conversation.messages[1].turn_state,
+        Some(swage_protocol::client::conversation::TurnState::Interrupted)
+    );
+    let thread = ThreadStore::get(&*state.storage, threads[0].id)
+        .await
+        .expect("thread lookup should succeed")
+        .expect("thread should exist");
+    assert_eq!(thread.state, ThreadState::Idle);
 }
 
 #[tokio::test]
@@ -4141,6 +4280,10 @@ impl crate::tool::Tool for BlockingMockTool {
 
 /// Build an AppState with a multi-round provider and an EchoMockTool.
 async fn make_state_with_tools(rounds: Vec<Vec<StreamChunk>>) -> (AppState, Uuid) {
+    make_state_with_tool_provider(Arc::new(MultiRoundMockProvider::new(rounds))).await
+}
+
+async fn make_state_with_tool_provider(provider: Arc<dyn LlmProvider>) -> (AppState, Uuid) {
     let storage = Arc::new(MockStorage::new());
 
     let space = storage
@@ -4169,12 +4312,10 @@ async fn make_state_with_tools(rounds: Vec<Vec<StreamChunk>>) -> (AppState, Uuid
     .await
     .expect("create default thread");
 
-    let provider = Arc::new(MultiRoundMockProvider::new(rounds));
-
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
-        provider as Arc<dyn LlmProvider>,
+        provider,
         swage_config::ResolvedConfig::default(),
         crate::tool::ToolDispatcher::allow_all(vec![
             Arc::new(EchoMockTool) as Arc<dyn crate::tool::Tool>

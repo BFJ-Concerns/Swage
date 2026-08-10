@@ -335,6 +335,7 @@ impl Agent {
                     &execution,
                     &event_tx,
                     &cancel_token,
+                    &accumulated,
                     &mut total_input_tokens,
                     &mut total_output_tokens,
                     true,
@@ -665,6 +666,7 @@ impl Agent {
                         &execution,
                         &event_tx,
                         &cancel_token,
+                        &accumulated,
                         &mut total_input_tokens,
                         &mut total_output_tokens,
                         false,
@@ -749,6 +751,7 @@ impl Agent {
         execution: &TurnExecutionContext,
         event_tx: &tokio::sync::mpsc::UnboundedSender<AgentEvent>,
         cancel_token: &tokio_util::sync::CancellationToken,
+        accumulated_prefix: &str,
         total_input_tokens: &mut u32,
         total_output_tokens: &mut u32,
         collect_tool_calls: bool,
@@ -771,10 +774,11 @@ impl Agent {
         loop {
             tokio::select! {
                 _ = cancel_token.cancelled() => {
+                    let accumulated_partial = format!("{accumulated_prefix}{text}");
                     self.persist_cancelled_partial(
                         execution.thread_id,
                         execution.turn_id,
-                        &text,
+                        &accumulated_partial,
                     ).await;
                     let _ = self.storage.update_turn_state(execution.turn_id, TurnState::Interrupted).await;
                     let _ = self.storage.update_state(execution.thread_id, ThreadState::Idle).await;
