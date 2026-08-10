@@ -1296,7 +1296,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_only_configuration_does_not_emit_no_provider_warning_or_join_completion_chain() {
+    fn codex_only_configuration_does_not_emit_no_provider_warning() {
         let storage =
             Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
         let secret_manager = crate::secret::SecretManager::new(
