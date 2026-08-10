@@ -1,11 +1,13 @@
 // @vitest-environment jsdom
 /**
- * Tests for tool call rendering in MessageDisplay.
+ * Tests for settled responses and tool call rendering in MessageDisplay.
  *
  * Verifies that ToolCallDisplay components appear for both persisted
  * message history and live streaming tool activity.
  *
  * Scenarios covered:
+ *   - Settled partial content renders once after streaming ends
+ *   - Interrupted and failed responses have distinct user-facing notices
  *   - Tool calls from committed messages render after the assistant text
  *   - Each tool call produces a .tool-call element
  *   - Multiple tool calls on one message render in order
@@ -154,10 +156,10 @@ afterEach(() => {
 });
 
 // ---------------------------------------------------------------------------
-// Historical tool calls (committed messages)
+// Settled partial responses
 // ---------------------------------------------------------------------------
 
-describe("historical tool calls from committed messages", () => {
+describe("settled partial responses", () => {
   it("renders settled partial content only once after the turn ends", () => {
     const partialContent = "The response reached this point";
     const store = makeConversationStore([]);
@@ -195,7 +197,13 @@ describe("historical tool calls from committed messages", () => {
     expect(document.body.textContent).toContain("Response failed");
     expect(document.body.textContent?.match(/Response interrupted/g)).toHaveLength(1);
   });
+});
 
+// ---------------------------------------------------------------------------
+// Historical tool calls (committed messages)
+// ---------------------------------------------------------------------------
+
+describe("historical tool calls from committed messages", () => {
   it("renders a .tool-call element for each tool call on an assistant message", () => {
     const store = makeConversationStore([
       makeAssistantMessage("Here is the file:", [makeToolCall()]),
