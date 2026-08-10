@@ -6,6 +6,7 @@ pub mod attachment;
 pub mod audit;
 pub mod channel_link;
 pub mod channel_queue;
+pub mod citation;
 pub mod config_version;
 pub mod context_snapshot;
 pub mod curation_assertion;
