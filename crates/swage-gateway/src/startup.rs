@@ -1351,7 +1351,7 @@ mod tests {
                                 tool_definitions: vec![],
                             })
                             .await
-                            .expect_err("Codex must stay outside the completion chain");
+                            .expect_err("Codex-only configuration must fail closed on completion");
                         (provider_model, completion_error)
                     })
             });
