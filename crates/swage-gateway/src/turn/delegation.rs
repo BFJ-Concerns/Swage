@@ -169,7 +169,9 @@ impl DelegationHandler for GatewayDelegationHandler {
 
         // Delegated child agents execute within the gateway runtime, but their
         // internal tool activity is not surfaced on the parent conversation's
-        // WebSocket stream.
+        // WebSocket stream. Shared assembly still emits ContextAssembled into
+        // this silent channel; the stored child-turn snapshot is the delegated
+        // assembly's audit record.
         let (silent_ws_tx, _silent_ws_rx) = mpsc::unbounded_channel();
         let target_dispatcher_build = build_gateway_dispatcher_for_unattended_execution(
             &self.state,
