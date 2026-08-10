@@ -330,6 +330,7 @@ describe("App", () => {
     expect(spacesApi.listSpaces).toHaveBeenCalledTimes(1);
     expect(conversationsApi.listConversations).toHaveBeenCalledWith(defaultSpace.id);
     expect(conversationsApi.getConversation).toHaveBeenCalledWith("conv-linked");
+    expect(websocketHarness.client.connect).toHaveBeenCalledTimes(1);
     expect(websocketHarness.client.connect).toHaveBeenCalledWith("conv-linked");
     expect(window.location.pathname).toBe("/conversations/conv-linked");
 
