@@ -833,6 +833,7 @@ pub(crate) async fn process_turn_with_existing_turn(
         Some(space_id),
         session.active_workspace_attachment_id,
         ws_tx.clone(),
+        is_codex_turn,
     )
     .await
     {
@@ -912,6 +913,7 @@ pub(crate) async fn process_turn_with_existing_turn(
                 Some(space_id),
                 session.active_workspace_attachment_id,
                 ws_tx.clone(),
+                is_codex_turn,
             )
             .await
             .map_err(|fallback_error| GatewayError::WebSocketError(fallback_error.to_string()))?

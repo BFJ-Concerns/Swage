@@ -176,9 +176,10 @@ pub(super) async fn build_turn_sandbox(
     config: &swage_config::ResolvedConfig,
     agent_config: &AgentConfig,
     workspace_policy: Option<&TrustedWorkspacePolicy>,
+    app_server_governed: bool,
 ) -> Result<TurnSandboxBuild, swage_core::SandboxError> {
     if !config.sandbox.enabled {
-        if config.default_provider_protocol() == swage_config::Protocol::Codex {
+        if app_server_governed {
             return Ok(TurnSandboxBuild {
                 sandbox: None,
                 isolation: ExecutionIsolation::AppServerPolicy,
@@ -313,6 +314,7 @@ pub(crate) async fn build_gateway_dispatcher(
     space_id: Option<Uuid>,
     active_workspace_attachment_id: Option<Uuid>,
     ws_tx: mpsc::UnboundedSender<ServerEvent>,
+    app_server_governed: bool,
 ) -> Result<GatewayDispatcherBuild, swage_core::SandboxError> {
     let workspace_policy = match space_id {
         Some(id) => Some(
@@ -339,8 +341,14 @@ pub(crate) async fn build_gateway_dispatcher(
         false,
     );
 
-    let sandbox_build =
-        build_turn_sandbox(state, config, agent_config, workspace_policy.as_ref()).await?;
+    let sandbox_build = build_turn_sandbox(
+        state,
+        config,
+        agent_config,
+        workspace_policy.as_ref(),
+        app_server_governed,
+    )
+    .await?;
     tracing::debug!(backend = ?sandbox_build.backend, "selected turn sandbox backend");
     let sandbox = sandbox_build.sandbox;
     let sandbox_guard = sandbox
@@ -434,6 +442,7 @@ pub(crate) async fn build_gateway_dispatcher_for_unattended_execution(
         space_id,
         active_workspace_attachment_id,
         ws_tx.clone(),
+        false,
     )
     .await
     .map_err(|error| swage_core::GatewayError::ConfigError(error.to_string()))?;
@@ -528,7 +537,7 @@ mod tests {
         config.sandbox.enabled = false;
         assert!(!config.sandbox.allow_degraded_execution);
 
-        let build = build_turn_sandbox(&state, &config, &agent_config, None)
+        let build = build_turn_sandbox(&state, &config, &agent_config, None, true)
             .await
             .expect("Codex App Server policy should not require degraded execution opt-in");
 
@@ -558,7 +567,7 @@ mod tests {
         config.sandbox.enabled = false;
         config.sandbox.allow_degraded_execution = true;
 
-        let build = build_turn_sandbox(&state, &config, &agent_config, None)
+        let build = build_turn_sandbox(&state, &config, &agent_config, None, false)
             .await
             .expect("explicitly opted-in non-Codex execution should remain available");
 
@@ -653,5 +662,43 @@ mod tests {
         };
 
         assert!(error.to_string().contains("injected audit write failure"));
+    }
+
+    #[tokio::test]
+    async fn gateway_runtime_codex_dispatcher_requires_degraded_execution_opt_in() {
+        let (state, session_id) = make_state_with_session(Vec::new()).await;
+        let workspace = tempfile::tempdir().unwrap();
+        let agent_config = AgentConfig::new("gateway")
+            .with_workspace(workspace.path(), vec![workspace.path().to_path_buf()]);
+        let mut config = codex_config();
+        config.sandbox.enabled = false;
+        assert!(!config.sandbox.allow_degraded_execution);
+        let (ws_tx, _ws_rx) = mpsc::unbounded_channel();
+
+        let result = build_gateway_dispatcher_for_unattended_execution(
+            &state,
+            GatewayDispatcherRequest {
+                config: &config,
+                agent_config: &agent_config,
+                session_metadata: None,
+                space_id: None,
+                active_workspace_attachment_id: None,
+                ws_tx,
+                session_id: Some(session_id),
+                turn_id: Some(Uuid::new_v4()),
+            },
+            "delegated turn",
+        )
+        .await;
+
+        let Err(error) = result else {
+            panic!("gateway-runtime Codex execution must not inherit the App Server policy bypass");
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("allow_degraded_execution = true")
+        );
+        assert!(state.storage.list_audit_events().await.unwrap().is_empty());
     }
 }
