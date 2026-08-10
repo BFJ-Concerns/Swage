@@ -53,11 +53,18 @@ describe("MessageInput", () => {
     document.body.innerHTML = "";
   });
 
-  function mountComponent(store?: StreamingStore): StreamingStore {
+  function mountComponent(
+    store?: StreamingStore,
+    props: {
+      modelOptions?: string[];
+      modelCatalogueReady?: boolean;
+      onNavigate?: (path: string) => void;
+    } = {},
+  ): StreamingStore {
     const resolvedStore = store ?? makeStreamingStore();
     component = mount(MessageInput, {
       target: document.body,
-      props: { store: resolvedStore },
+      props: { store: resolvedStore, ...props },
     });
     return resolvedStore;
   }
@@ -133,6 +140,75 @@ describe("MessageInput", () => {
     });
 
     expect(store.startTurn).not.toHaveBeenCalled();
+  });
+
+  it("guides a user with a settled empty catalogue to provider settings", () => {
+    const onNavigate = vi.fn();
+    mountComponent(undefined, {
+      modelOptions: [],
+      modelCatalogueReady: true,
+      onNavigate,
+    });
+
+    expect(document.querySelector(".model-guidance")?.textContent).toContain(
+      "No models are configured",
+    );
+
+    flushSync(() => {
+      (document.querySelector(".model-guidance button") as HTMLButtonElement).click();
+    });
+
+    expect(onNavigate).toHaveBeenCalledWith("/settings/providers");
+  });
+
+  it("prevents button and Enter submission when the settled catalogue is empty", () => {
+    const store = mountComponent(undefined, {
+      modelOptions: [],
+      modelCatalogueReady: true,
+    });
+    setTextareaValue("Cannot send this");
+
+    const sendButton = document.querySelector(".action.send") as HTMLButtonElement;
+    expect(sendButton.disabled).toBe(true);
+
+    flushSync(() => {
+      sendButton.click();
+      textarea().dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "Enter",
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+
+    expect(store.startTurn).not.toHaveBeenCalled();
+  });
+
+  it("keeps the model picker and dispatch behaviour for a populated catalogue", () => {
+    const store = mountComponent(undefined, {
+      modelOptions: ["provider/model-a", "provider/model-b"],
+      modelCatalogueReady: true,
+    });
+    setTextareaValue("Use the selected model");
+
+    const picker = document.querySelector('[aria-label="Model"]') as HTMLSelectElement;
+    expect(document.querySelector(".model-guidance")).toBeNull();
+    expect(Array.from(picker.options, (option) => option.value)).toEqual([
+      "provider/model-a",
+      "provider/model-b",
+    ]);
+
+    flushSync(() => {
+      picker.value = "provider/model-b";
+      picker.dispatchEvent(new Event("change", { bubbles: true }));
+      (document.querySelector(".action.send") as HTMLButtonElement).click();
+    });
+
+    expect(store.startTurn).toHaveBeenCalledWith(
+      "Use the selected model",
+      "provider/model-b",
+    );
   });
 
   it("clears the draft and re-focuses the textarea after send", () => {
