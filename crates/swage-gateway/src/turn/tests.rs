@@ -5726,6 +5726,33 @@ async fn delegate_tool_detaches_child_and_persists_result_after_release() {
         "child result should not exist until the gated provider is released"
     );
 
+    let child_session_id = detached_output["child_session_id"]
+        .as_str()
+        .expect("child session id should be a string")
+        .parse::<Uuid>()
+        .expect("child session id should be a uuid");
+    let child_threads = state
+        .storage
+        .list_by_session(child_session_id)
+        .await
+        .expect("list child threads before release");
+    assert_eq!(child_threads.len(), 1, "expected one child thread");
+    let child_turns = state
+        .storage
+        .list_turns_by_thread(child_threads[0].id)
+        .await
+        .expect("list child turns before release");
+    assert_eq!(child_turns.len(), 1, "expected one child turn");
+    assert!(
+        state
+            .storage
+            .get_snapshot(child_turns[0].id)
+            .await
+            .expect("read child context snapshot before release")
+            .is_some(),
+        "delegated assembly snapshot should be persisted before provider execution finishes"
+    );
+
     child_release.notify_one();
 
     let mut result_messages = Vec::new();
@@ -5749,17 +5776,6 @@ async fn delegate_tool_detaches_child_and_persists_result_after_release() {
     assert_eq!(result_message.status, MessageStatus::Delivered);
     assert_eq!(result_message.payload["response"], "Detached child answer");
 
-    let child_session_id = detached_output["child_session_id"]
-        .as_str()
-        .expect("child session id should be a string")
-        .parse::<Uuid>()
-        .expect("child session id should be a uuid");
-    let child_threads = state
-        .storage
-        .list_by_session(child_session_id)
-        .await
-        .expect("list child threads");
-    assert_eq!(child_threads.len(), 1, "expected one child thread");
     let child_turns = state
         .storage
         .list_turns_by_thread(child_threads[0].id)

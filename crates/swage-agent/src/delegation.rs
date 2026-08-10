@@ -275,6 +275,15 @@ impl DelegationExecutor {
             )
         };
 
+        if let Some(report) = assembly_report
+            && let Err(error) = self
+                .storage
+                .store_snapshot(turn_id, &report.to_string())
+                .await
+        {
+            tracing::warn!(%turn_id, %error, "failed to persist delegated context snapshot");
+        }
+
         // 4. Build agent config with schema override.
         let mut agent_config = target_config;
         agent_config.output_schema = delegation_output.schema;
@@ -304,7 +313,23 @@ impl DelegationExecutor {
 
         builder = builder.context_transfer_config(target_context_transfer_config);
 
-        let agent = builder.build()?;
+        let agent = match builder.build() {
+            Ok(agent) => agent,
+            Err(error) => {
+                if let Err(update_error) = self
+                    .storage
+                    .update_turn_state(turn_id, TurnState::Failed)
+                    .await
+                {
+                    tracing::warn!(
+                        %turn_id,
+                        %update_error,
+                        "failed to mark delegated turn failed after agent construction error"
+                    );
+                }
+                return Err(error);
+            }
+        };
         // Register the cancellation token so handle_cancel can interrupt
         // this delegation by message ID. The RAII guard ensures the entry is
         // removed even if this future is dropped mid-execution.
@@ -350,17 +375,8 @@ impl DelegationExecutor {
             cancellation_token: cancel_token.clone(),
         };
 
-        // Execute — the agent creates its own turn internally via process_turn_streaming.
+        // Execute using the child turn created before context assembly.
         let result = agent.process_turn_streaming(turn_request, event_tx).await;
-
-        if let Some(report) = assembly_report
-            && let Err(error) = self
-                .storage
-                .store_snapshot(turn_id, &report.to_string())
-                .await
-        {
-            tracing::warn!(%turn_id, %error, "failed to persist delegated context snapshot");
-        }
 
         // DelegationGuard handles deregistration on drop (including mid-
         // execution cancellation). No explicit removal needed.
@@ -574,7 +590,47 @@ impl Drop for DelegationGuard {
 
 #[cfg(test)]
 mod tests {
+    use std::pin::Pin;
+
+    use futures::{Stream, stream};
+    use swage_core::{
+        CompletionRequest, CompletionResponse, ProviderError, StreamChunk, ToolCompletionRequest,
+        ToolCompletionResponse,
+    };
+    use swage_storage::store::SpaceStore;
+    use swage_storage::{SessionStore, SqliteStorage, TurnStore};
+
     use super::*;
+
+    struct NeverCalledProvider;
+
+    #[async_trait::async_trait]
+    impl LlmProvider for NeverCalledProvider {
+        fn model_id(&self) -> &str {
+            "never-called"
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, ProviderError> {
+            unreachable!("invalid delegated config must fail before provider execution")
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _request: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, ProviderError> {
+            unreachable!("invalid delegated config must fail before provider execution")
+        }
+
+        fn stream(
+            &self,
+            _request: CompletionRequest,
+        ) -> Pin<Box<dyn Stream<Item = StreamChunk> + Send>> {
+            Box::pin(stream::empty())
+        }
+    }
 
     #[test]
     fn delegated_context_fences_instructions_background_and_task() {
@@ -620,5 +676,77 @@ mod tests {
             context[0].text_content(),
             "Delegated Task\n\nExecute delegated work"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn agent_construction_failure_marks_precreated_child_turn_failed() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("in-memory storage"));
+        let space = storage
+            .get_or_create_default()
+            .await
+            .expect("default space");
+        let storage_trait: Arc<dyn Storage> = storage.clone();
+        let router = Arc::new(MessageRouter::new(storage_trait.clone(), None));
+        let delegate_message = router
+            .send_message(NewAgentMessage {
+                sender_agent_id: "agent-a".into(),
+                recipient_agent_id: "agent-b".into(),
+                kind: MessageKind::Delegate,
+                correlation_id: None,
+                payload: serde_json::json!({
+                    "task": "Return structured output",
+                    "output_schema": { "type": 42 }
+                }),
+            })
+            .await
+            .expect("create delegate message");
+        let executor = DelegationExecutor {
+            storage: storage_trait,
+            provider: Arc::new(NeverCalledProvider),
+            hook_registry: None,
+            leak_detector: None,
+            approval_registrar: None,
+            delegation_handler: None,
+            router,
+            active_delegations: ActiveDelegations::new(),
+            context_assembler: None,
+        };
+        let config = AgentConfig::new("agent-b").with_workspace(std::env::temp_dir(), vec![]);
+
+        let error = executor
+            .execute_delegation(
+                &delegate_message,
+                None,
+                space.id,
+                config,
+                String::new(),
+                swage_config::ContextTransferConfig::default(),
+                None,
+                tokio_util::sync::CancellationToken::new(),
+                None,
+            )
+            .await
+            .expect_err("invalid output schema should reject agent construction");
+        assert!(
+            matches!(error, AgentError::InvalidConfig(_)),
+            "unexpected construction error: {error}"
+        );
+
+        let sessions = storage
+            .list_sessions_by_agent_id("agent-b")
+            .await
+            .expect("list child sessions");
+        assert_eq!(sessions.len(), 1, "expected one child session");
+        let threads = storage
+            .list_by_session(sessions[0].id)
+            .await
+            .expect("list child threads");
+        assert_eq!(threads.len(), 1, "expected one child thread");
+        let turns = storage
+            .list_turns_by_thread(threads[0].id)
+            .await
+            .expect("list child turns");
+        assert_eq!(turns.len(), 1, "expected one child turn");
+        assert_eq!(turns[0].state, TurnState::Failed);
     }
 }
