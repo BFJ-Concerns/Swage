@@ -307,6 +307,8 @@ impl Agent {
             // the stream loop is non-deterministic when both branches are
             // immediately ready.
             if cancel_token.is_cancelled() {
+                self.persist_cancelled_partial(thread_id, turn.id, &accumulated)
+                    .await;
                 let _ = self
                     .storage
                     .update_turn_state(turn.id, TurnState::Interrupted)
@@ -355,35 +357,8 @@ impl Agent {
             for call in &round_tool_calls {
                 // Re-check cancellation before each tool execution.
                 if cancel_token.is_cancelled() {
-                    if !accumulated.is_empty() {
-                        let safe_content = self.scan_output(&accumulated);
-                        if let Err(error) = self
-                            .storage
-                            .append_message(swage_storage::model::AppendMessage {
-                                thread_id,
-                                turn_id: Some(turn.id),
-                                role: Role::Assistant,
-                                content: safe_content.clone(),
-                                agent_id: self.config.agent_id.clone(),
-                            })
-                            .await
-                        {
-                            tracing::warn!(
-                                turn_id = %turn.id,
-                                %error,
-                                "failed to persist cancelled turn's partial assistant message"
-                            );
-                        }
-                        if let Err(error) =
-                            self.storage.update_response(turn.id, &safe_content).await
-                        {
-                            tracing::warn!(
-                                turn_id = %turn.id,
-                                %error,
-                                "failed to persist cancelled turn's partial response"
-                            );
-                        }
-                    }
+                    self.persist_cancelled_partial(thread_id, turn.id, &accumulated)
+                        .await;
                     let _ = self
                         .storage
                         .update_turn_state(turn.id, TurnState::Interrupted)
@@ -464,37 +439,12 @@ impl Agent {
                                     (feedback, true, "rejected".to_string())
                                 }
                                 ApprovalGateOutcome::Interrupted => {
-                                    if !accumulated.is_empty() {
-                                        let safe_content = self.scan_output(&accumulated);
-                                        if let Err(error) = self
-                                            .storage
-                                            .append_message(swage_storage::model::AppendMessage {
-                                                thread_id,
-                                                turn_id: Some(turn.id),
-                                                role: Role::Assistant,
-                                                content: safe_content.clone(),
-                                                agent_id: self.config.agent_id.clone(),
-                                            })
-                                            .await
-                                        {
-                                            tracing::warn!(
-                                                turn_id = %turn.id,
-                                                %error,
-                                                "failed to persist cancelled turn's partial assistant message"
-                                            );
-                                        }
-                                        if let Err(error) = self
-                                            .storage
-                                            .update_response(turn.id, &safe_content)
-                                            .await
-                                        {
-                                            tracing::warn!(
-                                                turn_id = %turn.id,
-                                                %error,
-                                                "failed to persist cancelled turn's partial response"
-                                            );
-                                        }
-                                    }
+                                    self.persist_cancelled_partial(
+                                        thread_id,
+                                        turn.id,
+                                        &accumulated,
+                                    )
+                                    .await;
                                     return Err(AgentError::Cancelled);
                                 }
                             }
@@ -813,29 +763,11 @@ impl Agent {
         loop {
             tokio::select! {
                 _ = cancel_token.cancelled() => {
-                    if !text.is_empty() {
-                        let safe_content = self.scan_output(&text);
-                        if let Err(error) = self.storage.append_message(swage_storage::model::AppendMessage {
-                            thread_id: execution.thread_id,
-                            turn_id: Some(execution.turn_id),
-                            role: Role::Assistant,
-                            content: safe_content.clone(),
-                            agent_id: self.config.agent_id.clone(),
-                        }).await {
-                            tracing::warn!(
-                                turn_id = %execution.turn_id,
-                                %error,
-                                "failed to persist cancelled turn's partial assistant message"
-                            );
-                        }
-                        if let Err(error) = self.storage.update_response(execution.turn_id, &safe_content).await {
-                            tracing::warn!(
-                                turn_id = %execution.turn_id,
-                                %error,
-                                "failed to persist cancelled turn's partial response"
-                            );
-                        }
-                    }
+                    self.persist_cancelled_partial(
+                        execution.thread_id,
+                        execution.turn_id,
+                        &text,
+                    ).await;
                     let _ = self.storage.update_turn_state(execution.turn_id, TurnState::Interrupted).await;
                     let _ = self.storage.update_state(execution.thread_id, ThreadState::Idle).await;
                     return Err(AgentError::Cancelled);
@@ -1963,6 +1895,38 @@ impl Agent {
     // -----------------------------------------------------------------------
     // Leak detection
     // -----------------------------------------------------------------------
+
+    async fn persist_cancelled_partial(&self, thread_id: Uuid, turn_id: Uuid, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+
+        let safe_content = self.scan_output(text);
+        if let Err(error) = self
+            .storage
+            .append_message(swage_storage::model::AppendMessage {
+                thread_id,
+                turn_id: Some(turn_id),
+                role: Role::Assistant,
+                content: safe_content.clone(),
+                agent_id: self.config.agent_id.clone(),
+            })
+            .await
+        {
+            tracing::warn!(
+                %turn_id,
+                %error,
+                "failed to persist cancelled turn's partial assistant message"
+            );
+        }
+        if let Err(error) = self.storage.update_response(turn_id, &safe_content).await {
+            tracing::warn!(
+                %turn_id,
+                %error,
+                "failed to persist cancelled turn's partial response"
+            );
+        }
+    }
 
     /// Scan text for credential leaks and return the redacted version.
     ///
