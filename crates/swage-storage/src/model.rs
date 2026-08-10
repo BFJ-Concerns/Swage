@@ -836,6 +836,30 @@ pub struct KnowledgeSearchHit {
     pub snippet_offset: usize,
 }
 
+/// An immutable citation pinned to one extraction derivation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KnowledgeCitation {
+    pub id: Uuid,
+    pub space_id: Uuid,
+    pub observation_id: Uuid,
+    pub derivation_version: u32,
+    /// Byte offset of `quoted_text` within the pinned derivation.
+    pub start_offset: usize,
+    pub end_offset: usize,
+    pub quoted_text: String,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Model-supplied citation identity. Offsets are deliberately absent: the
+/// store locates the exact quote in the pinned derivation.
+#[derive(Debug, Clone)]
+pub struct NewKnowledgeCitation {
+    pub space_id: Uuid,
+    pub observation_id: Uuid,
+    pub derivation_version: u32,
+    pub quoted_text: String,
+}
+
 /// The observation-level judgement recorded by a curation assertion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
