@@ -242,8 +242,8 @@ impl LlmProvider for RetryProvider {
                 }
 
                 let Some(message) = retryable_error else {
-                    if let Some(retry_attempt) = active_retry.take() {
-                        if tx
+                    if let Some(retry_attempt) = active_retry.take()
+                        && tx
                             .send(StreamChunk::ProviderRetrySettled {
                                 attempt: retry_attempt,
                                 max_retries: config.max_retries,
@@ -252,16 +252,15 @@ impl LlmProvider for RetryProvider {
                             })
                             .await
                             .is_err()
-                        {
-                            return;
-                        }
+                    {
+                        return;
                     }
                     return;
                 };
 
                 if attempt >= config.max_retries {
-                    if let Some(retry_attempt) = active_retry.take() {
-                        if tx
+                    if let Some(retry_attempt) = active_retry.take()
+                        && tx
                             .send(StreamChunk::ProviderRetrySettled {
                                 attempt: retry_attempt,
                                 max_retries: config.max_retries,
@@ -270,9 +269,8 @@ impl LlmProvider for RetryProvider {
                             })
                             .await
                             .is_err()
-                        {
-                            return;
-                        }
+                    {
+                        return;
                     }
                     if tx.send(StreamChunk::Error { message }).await.is_err() {
                         return;
