@@ -72,6 +72,10 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
         ("042_tool_call_provider_round", ADD_TOOL_CALL_PROVIDER_ROUND),
         ("043_knowledge_base", CREATE_KNOWLEDGE_BASE_TABLES),
         ("044_agent_definitions", CREATE_AGENT_DEFINITION_TABLE),
+        (
+            "045_knowledge_curation_assertions",
+            CREATE_KNOWLEDGE_CURATION_ASSERTIONS,
+        ),
     ]
 }
 
@@ -1088,6 +1092,40 @@ const CREATE_KNOWLEDGE_BASE_TABLES: &str = "
     BEGIN
         INSERT INTO extraction_fts (extraction_fts, rowid, extracted_text)
         VALUES ('delete', OLD.rowid, OLD.extracted_text);
+    END;
+";
+
+/// Append-only observation-level judgements. This is a sibling of the
+/// knowledge-base tables introduced by migration 043: it never reshapes or
+/// mutates the evidence ledger itself.
+const CREATE_KNOWLEDGE_CURATION_ASSERTIONS: &str = "
+    CREATE TABLE IF NOT EXISTS knowledge_curation_assertions (
+        id                    TEXT NOT NULL PRIMARY KEY,
+        space_id              TEXT NOT NULL REFERENCES spaces(id),
+        observation_id        TEXT NOT NULL REFERENCES source_observations(id),
+        kind                   TEXT NOT NULL CHECK (kind IN ('duplicate-of', 'superseded-by', 'stale')),
+        target_observation_id TEXT REFERENCES source_observations(id),
+        created_at             TEXT NOT NULL,
+        CHECK (
+            (kind = 'stale' AND target_observation_id IS NULL) OR
+            (kind IN ('duplicate-of', 'superseded-by') AND target_observation_id IS NOT NULL)
+        ),
+        CHECK (target_observation_id IS NULL OR target_observation_id <> observation_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_knowledge_curation_observation
+        ON knowledge_curation_assertions(observation_id, created_at DESC);
+
+    CREATE TRIGGER IF NOT EXISTS trg_knowledge_curation_no_update
+    BEFORE UPDATE ON knowledge_curation_assertions
+    BEGIN
+        SELECT RAISE(ABORT, 'knowledge curation assertions are append-only');
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS trg_knowledge_curation_no_delete
+    BEFORE DELETE ON knowledge_curation_assertions
+    BEGIN
+        SELECT RAISE(ABORT, 'knowledge curation assertions are append-only');
     END;
 ";
 
