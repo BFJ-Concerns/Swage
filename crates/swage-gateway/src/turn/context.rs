@@ -6,6 +6,11 @@ use swage_context::orientation::{
     AvailableSkill, ChannelOrientation, OrientationElement, SessionEnvironment,
 };
 
+#[cfg(test)]
+tokio::task_local! {
+    static SPACE_MEMORY_LOAD_COUNT: std::cell::Cell<usize>;
+}
+
 pub(super) fn delegated_target_instructions(
     target_instructions: &str,
     available_skills: &[swage_config::skill::SkillDefinition],
@@ -65,21 +70,23 @@ pub(crate) fn delegated_target_instructions_for_space(
 ///   produces content, so an empty configuration still orients the session
 /// - `PromptsElement` — from the merged instruction string
 /// - `SkillsElement`  — from the active skill set
-/// - `MemoryElement`  — from pre-loaded space memory content (may be empty)
+/// - `MemoryElement`  — only for a named assembly, from pre-loaded space
+///   memory content (may be empty)
 /// - `HistoryElement` — from the thread's message history
 ///
 /// The returned vec is suitable for passing to `swage_context::assembly::assemble()`.
 ///
 /// When instructions are empty the `PromptsElement` produces no messages;
 /// the orientation baseline is what keeps the assembled context non-empty.
-/// When `memory_content` is empty the `MemoryElement` produces no messages
-/// but is still present in the vec so custom assemblies can reference it.
+/// When `memory` is present with empty content the `MemoryElement` produces no
+/// messages but remains available for the named assembly to reference. The
+/// default assembly passes `None` so it does not construct an element it would
+/// discard.
 pub(crate) fn build_assembly_elements(
     instructions: &str,
     active_skills: Vec<ActiveSkill>,
     history: Vec<ChatMessage>,
-    memory_content: String,
-    space_name: String,
+    memory: Option<(String, String)>,
     environment: SessionEnvironment,
     available_skills: Vec<AvailableSkill>,
 ) -> Vec<Box<dyn ContextElement>> {
@@ -98,13 +105,40 @@ pub(crate) fn build_assembly_elements(
         }]
     };
 
-    vec![
+    let mut elements: Vec<Box<dyn ContextElement>> = vec![
         Box::new(OrientationElement::new(environment, available_skills)),
         Box::new(PromptsElement::new(rules)),
         Box::new(SkillsElement::new(active_skills)),
-        Box::new(MemoryElement::new(memory_content, space_name)),
-        Box::new(HistoryElement::new(history)),
-    ]
+    ];
+    if let Some((content, space_name)) = memory {
+        elements.push(Box::new(MemoryElement::new(content, space_name)));
+    }
+    elements.push(Box::new(HistoryElement::new(history)));
+    elements
+}
+
+/// Load memory only when the already-selected assembly can use it.
+///
+/// The loader argument keeps the disposition directly testable: default turns
+/// must not invoke the filesystem seam at all.
+pub(crate) async fn load_memory_for_assembly<F, Fut>(
+    assembly_name: &str,
+    loader: F,
+) -> Option<String>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = String>,
+{
+    if is_default_context_assembly(assembly_name) {
+        None
+    } else {
+        Some(loader().await)
+    }
+}
+
+pub(crate) fn is_default_context_assembly(assembly_name: &str) -> bool {
+    let assembly_name = assembly_name.trim();
+    assembly_name.is_empty() || assembly_name == "default"
 }
 
 /// Build the session-environment half of orientation from what the turn
@@ -188,6 +222,11 @@ pub(crate) fn available_skills_for_agent(
 /// between entries. Returns an empty string when the directory is absent or
 /// contains no `.md` files, so callers receive a valid `String` in all cases.
 pub(crate) async fn load_space_memory(swage_root: &Path, space_slug: &str) -> String {
+    #[cfg(test)]
+    SPACE_MEMORY_LOAD_COUNT
+        .try_with(|count| count.set(count.get() + 1))
+        .ok();
+
     let memory_dir = swage_root.join("spaces").join(space_slug).join("memory");
 
     let mut entries = match tokio::fs::read_dir(&memory_dir).await {
@@ -242,6 +281,20 @@ pub(crate) async fn load_space_memory(swage_root: &Path, space_slug: &str) -> St
     }
 
     parts.join("\n\n")
+}
+
+#[cfg(test)]
+pub(crate) async fn observe_space_memory_loads<F>(future: F) -> (F::Output, usize)
+where
+    F: std::future::Future,
+{
+    SPACE_MEMORY_LOAD_COUNT
+        .scope(std::cell::Cell::new(0), async move {
+            let output = future.await;
+            let count = SPACE_MEMORY_LOAD_COUNT.with(std::cell::Cell::get);
+            (output, count)
+        })
+        .await
 }
 
 pub(crate) fn resolve_swage_root() -> Option<PathBuf> {
