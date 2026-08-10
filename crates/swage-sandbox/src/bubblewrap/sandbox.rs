@@ -515,6 +515,7 @@ mod tests {
 
     #[tokio::test]
     async fn spawn_agent_fails_gracefully_without_bwrap() {
+        let _env_guard = crate::SANDBOX_TEST_ENV_LOCK.lock().await;
         // This test only asserts when bwrap is absent — when present, the real
         // spawn path runs. We verify the error variant on the failure path.
         use crate::bubblewrap::find_bwrap;
