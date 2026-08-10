@@ -11,9 +11,9 @@ use swage_core::{
 /// Whether a stream chunk commits the current provider attempt because response
 /// content the user could observe has escaped the reliability wrappers.
 ///
-/// Progress and accounting chunks may be forwarded without committing the
-/// attempt. Keep this match exhaustive so every new chunk kind must make that
-/// distinction deliberately.
+/// Forwarding before commitment is a separate decision: progress can escape
+/// immediately, while accounting must wait. Keep this match exhaustive so
+/// every new chunk kind must make the commitment decision deliberately.
 pub(crate) fn contains_user_visible_content(chunk: &StreamChunk) -> bool {
     match chunk {
         StreamChunk::Delta { .. } | StreamChunk::Reasoning { .. } | StreamChunk::ToolUse { .. } => {
@@ -24,6 +24,24 @@ pub(crate) fn contains_user_visible_content(chunk: &StreamChunk) -> bool {
         | StreamChunk::ProviderRetryStarted { .. }
         | StreamChunk::ProviderRetrySettled { .. }
         | StreamChunk::Error { .. } => false,
+    }
+}
+
+/// Whether a stream chunk may reach the caller before the current provider
+/// attempt commits.
+///
+/// Content and live progress are useful immediately. Usage and completion are
+/// accounting for an attempt that may still be discarded, so they must wait.
+/// Keep this match exhaustive so every new chunk kind must make the forwarding
+/// decision deliberately.
+pub(crate) fn may_forward_before_attempt_commits(chunk: &StreamChunk) -> bool {
+    match chunk {
+        StreamChunk::Delta { .. }
+        | StreamChunk::Reasoning { .. }
+        | StreamChunk::ToolUse { .. }
+        | StreamChunk::ProviderRetryStarted { .. }
+        | StreamChunk::ProviderRetrySettled { .. } => true,
+        StreamChunk::Usage(_) | StreamChunk::Done { .. } | StreamChunk::Error { .. } => false,
     }
 }
 

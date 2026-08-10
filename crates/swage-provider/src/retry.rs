@@ -15,7 +15,9 @@ use swage_core::{
     ToolCompletionResponse,
 };
 
-use crate::provider::{LlmProvider, contains_user_visible_content};
+use crate::provider::{
+    LlmProvider, contains_user_visible_content, may_forward_before_attempt_commits,
+};
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -182,8 +184,8 @@ impl LlmProvider for RetryProvider {
 
     /// Start a streaming completion, retrying errors that precede all output.
     ///
-    /// Content chunks are forwarded as they arrive. Non-content chunks are
-    /// held until the attempt commits, so accounting and completion from a
+    /// Content and live progress chunks are forwarded as they arrive. Usage
+    /// and completion are held until the attempt commits, so accounting from a
     /// discarded attempt cannot escape. After the first content chunk is
     /// forwarded, a later error is terminal and the request is not replayed.
     /// Dropping the returned stream stops forwarding and drops the active
@@ -244,6 +246,10 @@ impl LlmProvider for RetryProvider {
                                         return;
                                     }
                                 }
+                                if tx.send(chunk).await.is_err() {
+                                    return;
+                                }
+                            } else if may_forward_before_attempt_commits(&chunk) {
                                 if tx.send(chunk).await.is_err() {
                                     return;
                                 }
