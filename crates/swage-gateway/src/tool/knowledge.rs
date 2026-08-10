@@ -1,7 +1,7 @@
 //! Knowledge-base tools — the agent's hands on the space's gathered
 //! external evidence.
 //!
-//! Three tools, separately grantable so read access never implies either kind
+//! Four tools, separately grantable so read access never implies any kind
 //! of write:
 //!
 //! - **`knowledge_search`** — full-text search over the space's knowledge
@@ -11,8 +11,9 @@
 //!   permanent, citable observation.
 //! - **`knowledge_curate`** — append an observation-level judgement without
 //!   changing the gathered evidence.
+//! - **`knowledge_cite`** — record an exact quote pinned to its derivation.
 //!
-//! All three are host-only (`requires_device_execution`): they reach live gateway
+//! All four are host-only (`requires_device_execution`): they reach live gateway
 //! state and the space's body files. Knowledge content returns as tool
 //! results only — it is gathered external data, never instructions.
 
@@ -22,8 +23,10 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use swage_core::ToolError;
+use swage_protocol::client::knowledge::{KnowledgeSearchResponse, KnowledgeSearchResult};
 use swage_storage::{
-    CurationAssertionKind, NewCurationAssertion, NewSourceObservation, ObservationOrigin,
+    CurationAssertionKind, NewCurationAssertion, NewKnowledgeCitation, NewSourceObservation,
+    ObservationOrigin,
 };
 use swage_tool::context::ToolContext;
 
@@ -35,6 +38,7 @@ use crate::tool_executor::GatewayToolContext;
 const SEARCH_TOOL: &str = "knowledge_search";
 const RECORD_TOOL: &str = "knowledge_record";
 const CURATE_TOOL: &str = "knowledge_curate";
+const CITE_TOOL: &str = "knowledge_cite";
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -119,7 +123,7 @@ impl Tool for KnowledgeSearchTool {
     fn description(&self) -> &str {
         "Search this space's knowledge base — the gathered external evidence — by \
          full text. Each result is a passage with the source it came from and a \
-         stable reference (observation, version, offset) you can cite. The \
+         pinned observation and version; cite it with those values and the exact quote. The \
          knowledge base holds captured external material; it is not your memory \
          (use the memory tools for what you know about your own work)."
     }
@@ -164,36 +168,31 @@ impl Tool for KnowledgeSearchTool {
             .await
             .map_err(|error| failed(SEARCH_TOOL, error))?;
 
-        let results: Vec<Value> = hits
-            .iter()
-            .map(|hit| {
-                json!({
-                    "observation_id": hit.observation_id,
-                    "version": hit.derivation_version,
-                    "source": hit.origin.url.as_deref()
-                        .or(hit.origin.local_path.as_deref()),
-                    "retrieved_at": hit.retrieved_at.to_rfc3339(),
-                    "passage": hit.snippet,
-                    "offset": hit.snippet_offset,
-                })
+        let results: Vec<KnowledgeSearchResult> = hits
+            .into_iter()
+            .map(|hit| KnowledgeSearchResult {
+                observation_id: hit.observation_id,
+                version: hit.derivation_version,
+                source: hit.origin.url.or(hit.origin.local_path),
+                retrieved_at: hit.retrieved_at.to_rfc3339(),
+                passage: hit.snippet,
+                offset: hit.snippet_offset,
             })
             .collect();
-
-        Ok(json!({
-            "results": results,
-            "guidance": if results_empty(&results) {
+        let response = KnowledgeSearchResponse {
+            guidance: if results.is_empty() {
                 "No evidence matched. The knowledge base only holds what has \
                  been captured into it — an empty result means not gathered, \
                  not nonexistent."
             } else {
-                "Cite a passage by its observation_id, version, and offset."
-            },
-        }))
+                "Cite a passage by its observation_id, version, and exact quote. An offset is \
+                 included only when the search passage was located exactly."
+            }
+            .into(),
+            results,
+        };
+        serde_json::to_value(response).map_err(|error| failed(SEARCH_TOOL, error))
     }
-}
-
-fn results_empty(results: &[Value]) -> bool {
-    results.is_empty()
 }
 
 // ---------------------------------------------------------------------------
@@ -431,6 +430,88 @@ impl Tool for KnowledgeCurateTool {
     }
 }
 
+// ---------------------------------------------------------------------------
+// knowledge_cite
+// ---------------------------------------------------------------------------
+
+pub struct KnowledgeCiteTool;
+
+#[async_trait]
+impl Tool for KnowledgeCiteTool {
+    fn name(&self) -> &str {
+        CITE_TOOL
+    }
+
+    fn description(&self) -> &str {
+        "Record an exact quoted passage from this space's knowledge base as a \
+         durable citation. Supply the observation and version returned by \
+         search plus the exact quote. The platform locates and verifies the \
+         quote; paraphrased or absent text is refused."
+    }
+
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "observation_id": {
+                    "type": "string",
+                    "description": "The observation containing the quoted passage."
+                },
+                "version": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "The extraction derivation version returned by search."
+                },
+                "quote": {
+                    "type": "string",
+                    "description": "The exact text to cite, copied from the searched passage."
+                }
+            },
+            "required": ["observation_id", "version", "quote"]
+        })
+    }
+
+    fn requires_device_execution(&self) -> bool {
+        true
+    }
+
+    async fn execute(&self, params: Value, ctx: &dyn ToolContext) -> Result<Value, ToolError> {
+        let observation_id = required_str(CITE_TOOL, &params, "observation_id")?
+            .parse::<Uuid>()
+            .map_err(|_| invalid(CITE_TOOL, "'observation_id' must be a UUID"))?;
+        let derivation_version = params
+            .get("version")
+            .and_then(Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok())
+            .filter(|value| *value > 0)
+            .ok_or_else(|| invalid(CITE_TOOL, "'version' must be a positive integer"))?;
+        let quoted_text = required_str(CITE_TOOL, &params, "quote")?.to_owned();
+
+        let state = gateway_state(CITE_TOOL, ctx)?;
+        let (space_id, _slug) = session_space(CITE_TOOL, state, ctx).await?;
+        let citation = state
+            .storage
+            .add_citation(NewKnowledgeCitation {
+                space_id,
+                observation_id,
+                derivation_version,
+                quoted_text,
+            })
+            .await
+            .map_err(|error| failed(CITE_TOOL, error))?;
+
+        Ok(json!({
+            "citation_id": citation.id,
+            "observation_id": citation.observation_id,
+            "version": citation.derivation_version,
+            "start_offset": citation.start_offset,
+            "end_offset": citation.end_offset,
+            "quote": citation.quoted_text,
+            "recorded": true,
+        }))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -443,7 +524,8 @@ mod tests {
     use crate::turn::tests::MockProvider;
     use swage_provider::LlmProvider;
     use swage_storage::{
-        NewSession, NewSourceObservation, ObservationStore, SessionStore, SpaceStore, SqliteStorage,
+        CitationStore, NewSession, NewSourceObservation, ObservationStore, SessionStore,
+        SpaceStore, SqliteStorage,
     };
 
     // The tools' host halves (session→space resolution, storage, body files)
@@ -503,6 +585,110 @@ mod tests {
                 Err(ToolError::InvalidParameters { .. })
             ));
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cite_validates_all_model_parameters_before_host_access() {
+        let tool = KnowledgeCiteTool;
+        let ctx = swage_tool::context::MockToolContext::new("agent", "not-a-session");
+        for params in [
+            json!({"observation_id": "no", "version": 1, "quote": "exact"}),
+            json!({"observation_id": Uuid::new_v4(), "version": 0, "quote": "exact"}),
+            json!({"observation_id": Uuid::new_v4(), "version": 1, "quote": "  "}),
+        ] {
+            assert!(matches!(
+                tool.execute(params, &ctx).await,
+                Err(ToolError::InvalidParameters { .. })
+            ));
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cite_delegates_to_host_storage_and_refuses_fabricated_quotes() {
+        let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+        let space = storage.get_or_create_default().await.unwrap();
+        let session = storage
+            .create_session(NewSession {
+                space_id: space.id,
+                agent_id: "researcher".into(),
+                metadata: None,
+                active_workspace_attachment_id: None,
+            })
+            .await
+            .unwrap();
+        let observation = storage
+            .record_observation(NewSourceObservation {
+                space_id: space.id,
+                origin: ObservationOrigin {
+                    url: Some("https://example.test/evidence".into()),
+                    local_path: None,
+                },
+                retrieved_at: Utc::now(),
+                body_sha256: "tool-citation-body".into(),
+                body_bytes: 64,
+                media_type: "text/plain".into(),
+            })
+            .await
+            .unwrap();
+        let derivation = storage
+            .add_extraction(
+                observation.id,
+                "before exact searched quote after".into(),
+                "test".into(),
+            )
+            .await
+            .unwrap();
+        let provider = Arc::new(MockProvider::new(vec![]));
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn swage_storage::Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            provider as Arc<dyn LlmProvider>,
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let base = swage_tool::context::MockToolContext::new("researcher", session.id.to_string());
+        let (ws_tx, _ws_rx) = mpsc::unbounded_channel();
+        let ctx = GatewayToolContext::new(
+            &base,
+            ws_tx,
+            Arc::clone(&storage) as Arc<dyn swage_storage::Storage>,
+        )
+        .with_app_state(Some(state));
+
+        let result = KnowledgeCiteTool
+            .execute(
+                json!({
+                    "observation_id": observation.id, "version": derivation.version,
+                    "quote": "exact searched quote",
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(result["start_offset"], json!("before ".len()));
+        let citation_id = result["citation_id"].as_str().unwrap().parse().unwrap();
+        assert!(storage.get_citation(citation_id).await.unwrap().is_some());
+
+        let fabricated = KnowledgeCiteTool
+            .execute(
+                json!({
+                    "observation_id": observation.id, "version": derivation.version,
+                    "quote": "fabricated quote",
+                }),
+                &ctx,
+            )
+            .await;
+        assert!(matches!(fabricated, Err(ToolError::ExecutionFailed { .. })));
+        let count = storage
+            .with_conn(|conn| {
+                conn.query_row("SELECT COUNT(*) FROM knowledge_citations", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+            })
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -256,6 +256,10 @@ impl Default for ToolPermissionConfig {
             "knowledge-curation".to_string(),
             vec!["knowledge_curate".to_string()],
         );
+        bundles.insert(
+            "knowledge-citation".to_string(),
+            vec!["knowledge_cite".to_string()],
+        );
         Self {
             allow: vec!["*".into()],
             deny: vec![],
@@ -1312,6 +1316,12 @@ timeout_policy = "reject"
                 .get("knowledge-curation")
                 .expect("knowledge curation bundle"),
             &vec!["knowledge_curate".to_string()]
+        );
+        assert_eq!(
+            cfg.bundles
+                .get("knowledge-citation")
+                .expect("knowledge citation bundle"),
+            &vec!["knowledge_cite".to_string()]
         );
         assert_eq!(
             cfg.require_approval

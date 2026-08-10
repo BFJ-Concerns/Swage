@@ -8,16 +8,17 @@ use crate::model::{
     ApprovalRequest, ApprovalState, Attachment, AttachmentStatus, AuditEvent, BackgroundJob,
     ChannelInboundMessage, ChannelLink, ConfigurationVersion, ContextSnapshotRecord,
     CurationAssertion, DeliveryRecord, DeviceRegistration, ExtractionDerivation, InboundAudit,
-    KnowledgeSearchHit, Material, Message, NewAgentDefinition, NewAgentMemoryRecord,
-    NewAgentMessage, NewApprovalRequest, NewAttachment, NewAuditEvent, NewBackgroundJob,
-    NewChannelInboundMessage, NewChannelLink, NewConfigurationVersion, NewCurationAssertion,
-    NewDeliveryRecord, NewDeviceRegistration, NewMaterial, NewMessage, NewSchedule, NewScheduleRun,
-    NewSecretRecord, NewSession, NewSourceObservation, NewSpace, NewThread, NewToolCall, NewTurn,
-    NewWorkflowJournalIntent, NewWorkflowRun, NewWorkflowScript, NewWorkspaceAttachment,
-    PendingChannelOrigin, Schedule, ScheduleRun, ScheduleRunUpdate, SecretRecord, Session,
-    SourceObservation, Space, SpaceSlug, Thread, ThreadBranch, ThreadState, ToolCallRecord, Turn,
-    TurnState, UpdateSchedule, WorkflowJournalRecord, WorkflowRunRecord, WorkflowScriptRecord,
-    WorkflowScriptVersion, WorkspaceAttachment,
+    KnowledgeCitation, KnowledgeSearchHit, Material, Message, NewAgentDefinition,
+    NewAgentMemoryRecord, NewAgentMessage, NewApprovalRequest, NewAttachment, NewAuditEvent,
+    NewBackgroundJob, NewChannelInboundMessage, NewChannelLink, NewConfigurationVersion,
+    NewCurationAssertion, NewDeliveryRecord, NewDeviceRegistration, NewKnowledgeCitation,
+    NewMaterial, NewMessage, NewSchedule, NewScheduleRun, NewSecretRecord, NewSession,
+    NewSourceObservation, NewSpace, NewThread, NewToolCall, NewTurn, NewWorkflowJournalIntent,
+    NewWorkflowRun, NewWorkflowScript, NewWorkspaceAttachment, PendingChannelOrigin, Schedule,
+    ScheduleRun, ScheduleRunUpdate, SecretRecord, Session, SourceObservation, Space, SpaceSlug,
+    Thread, ThreadBranch, ThreadState, ToolCallRecord, Turn, TurnState, UpdateSchedule,
+    WorkflowJournalRecord, WorkflowRunRecord, WorkflowScriptRecord, WorkflowScriptVersion,
+    WorkspaceAttachment,
 };
 
 // ---------------------------------------------------------------------------
@@ -281,6 +282,18 @@ pub trait CurationAssertionStore: Send + Sync {
         &self,
         assertion: NewCurationAssertion,
     ) -> Result<CurationAssertion, StorageError>;
+}
+
+/// Append-only citations to pinned knowledge-base derivations.
+#[async_trait]
+pub trait CitationStore: Send + Sync {
+    /// Locate the supplied quote platform-side and append its citation.
+    async fn add_citation(
+        &self,
+        citation: NewKnowledgeCitation,
+    ) -> Result<KnowledgeCitation, StorageError>;
+
+    async fn get_citation(&self, id: Uuid) -> Result<Option<KnowledgeCitation>, StorageError>;
 }
 
 #[async_trait]
@@ -1002,6 +1015,7 @@ pub trait Storage:
     + ConfigurationVersionStore
     + ObservationStore
     + CurationAssertionStore
+    + CitationStore
     + SecretStore
     + ThreadStore
     + TurnStore
@@ -1035,6 +1049,7 @@ impl<T> Storage for T where
         + ConfigurationVersionStore
         + ObservationStore
         + CurationAssertionStore
+        + CitationStore
         + SecretStore
         + ThreadStore
         + TurnStore
@@ -1439,6 +1454,20 @@ mod tests {
             &self,
             _: NewCurationAssertion,
         ) -> Result<CurationAssertion, StorageError> {
+            unimplemented!()
+        }
+    }
+
+    #[async_trait]
+    impl CitationStore for StubStorage {
+        async fn add_citation(
+            &self,
+            _: NewKnowledgeCitation,
+        ) -> Result<KnowledgeCitation, StorageError> {
+            unimplemented!()
+        }
+
+        async fn get_citation(&self, _: Uuid) -> Result<Option<KnowledgeCitation>, StorageError> {
             unimplemented!()
         }
     }
