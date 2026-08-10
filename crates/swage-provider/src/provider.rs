@@ -8,6 +8,25 @@ use swage_core::{
     ToolCompletionResponse,
 };
 
+/// Whether a stream chunk commits the current provider attempt because response
+/// content the user could observe has escaped the reliability wrappers.
+///
+/// Progress and accounting chunks may be forwarded without committing the
+/// attempt. Keep this match exhaustive so every new chunk kind must make that
+/// distinction deliberately.
+pub(crate) fn contains_user_visible_content(chunk: &StreamChunk) -> bool {
+    match chunk {
+        StreamChunk::Delta { .. } | StreamChunk::Reasoning { .. } | StreamChunk::ToolUse { .. } => {
+            true
+        }
+        StreamChunk::Usage(_)
+        | StreamChunk::Done { .. }
+        | StreamChunk::ProviderRetryStarted { .. }
+        | StreamChunk::ProviderRetrySettled { .. }
+        | StreamChunk::Error { .. } => false,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // ProviderConfig
 // ---------------------------------------------------------------------------
