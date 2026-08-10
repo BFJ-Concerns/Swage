@@ -343,7 +343,7 @@ describe("App", () => {
       makeConversationSummary({ id: "conv-other", message_preview: "Other" }),
       linkedConversation,
     ]);
-    vi.mocked(conversationsApi.getConversation).mockResolvedValueOnce(
+    vi.mocked(conversationsApi.getConversation).mockResolvedValue(
       makeConversationDetail({
         id: "conv-linked",
         messages: [
@@ -357,7 +357,8 @@ describe("App", () => {
       }),
     );
 
-    setPath("/conversations/conv-linked");
+    window.history.pushState(null, "", "/conversations/conv-linked");
+    const historyLength = window.history.length;
     component = mount(App, { target: document.body });
     await settleUi();
 
@@ -367,6 +368,17 @@ describe("App", () => {
     expect(websocketHarness.client.connect).toHaveBeenCalledTimes(1);
     expect(websocketHarness.client.connect).toHaveBeenCalledWith("conv-linked");
     expect(window.location.pathname).toBe("/conversations/conv-linked");
+
+    const popped = new Promise<void>((resolve) => {
+      window.addEventListener("popstate", () => resolve(), { once: true });
+    });
+    window.history.back();
+    await popped;
+    await settleUi();
+
+    expect(websocketHarness.client.connect).toHaveBeenCalledTimes(1);
+    expect(window.location.pathname).toBe("/");
+    expect(window.history.length).toBe(historyLength);
 
     const activePreview = document.querySelector(".conversation-item.active .preview");
     expect(activePreview?.textContent).toContain("Deep-linked conversation");
