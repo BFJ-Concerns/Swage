@@ -1798,6 +1798,13 @@ pub struct WorkflowScriptVersion {
 pub struct WorkflowRunRecord {
     pub id: Uuid,
     pub space_id: Uuid,
+    /// Set on a child run started by a parent's `workflow()` call: the parent
+    /// run and the journal seq of the call that started it. The pair is what
+    /// makes composed-run recovery deterministic — a resumed parent finds its
+    /// existing child by (parent_run_id, parent_seq) instead of starting a
+    /// duplicate.
+    pub parent_run_id: Option<Uuid>,
+    pub parent_seq: Option<u64>,
     pub script_version_id: Option<Uuid>,
     pub script_id: Option<Uuid>,
     pub script_name: Option<String>,
@@ -1817,6 +1824,8 @@ pub struct WorkflowRunRecord {
 #[derive(Clone, Debug)]
 pub struct NewWorkflowRun {
     pub space_id: Uuid,
+    pub parent_run_id: Option<Uuid>,
+    pub parent_seq: Option<u64>,
     pub script_version_id: Option<Uuid>,
     pub source: Option<String>,
     pub source_hash: String,
