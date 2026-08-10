@@ -3389,7 +3389,7 @@ async fn full_turn_stores_messages_and_completes() {
     let (state, session_id) = make_state_with_session(chunks).await;
     let (tx, mut rx) = mpsc::unbounded_channel();
 
-    let (turn_result, memory_loads) = observe_space_memory_loads(process_turn(
+    let (turn_result, memory_loads) = Box::pin(observe_space_memory_loads(process_turn(
         &state,
         session_id,
         None,
@@ -3397,7 +3397,7 @@ async fn full_turn_stores_messages_and_completes() {
         tx,
         Arc::new(Mutex::new(SubscriptionState::new(true))),
         None,
-    ))
+    )))
     .await;
     turn_result.expect("turn should complete without error");
     assert_eq!(
