@@ -337,7 +337,34 @@ async fn run_ephemeral_agent_call(
     })
 }
 
-async fn run_host_commands(
+// Child workflows construct another host-command loop. Erase the loop future at
+// that recursive boundary so rustc can use the explicit `Send` contract instead
+// of recursively inspecting the async function's opaque type.
+fn run_host_commands(
+    state: AppState,
+    run_id: Uuid,
+    space_id: Uuid,
+    delivery_grant: Option<Value>,
+    budget: WorkflowBudget,
+    replay: Vec<WorkflowJournalRecord>,
+    agent_calls: Arc<AtomicU32>,
+    spent_tokens: Arc<AtomicU64>,
+    commands: mpsc::UnboundedReceiver<HostCommand>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+    Box::pin(run_host_commands_inner(
+        state,
+        run_id,
+        space_id,
+        delivery_grant,
+        budget,
+        replay,
+        agent_calls,
+        spent_tokens,
+        commands,
+    ))
+}
+
+async fn run_host_commands_inner(
     state: AppState,
     run_id: Uuid,
     space_id: Uuid,
