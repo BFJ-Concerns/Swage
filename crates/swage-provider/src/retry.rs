@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use futures::{SinkExt, Stream, StreamExt};
+use futures::{Stream, StreamExt};
 use swage_core::{
     CompletionRequest, CompletionResponse, ProviderError, StreamChunk, ToolCompletionRequest,
     ToolCompletionResponse,
@@ -17,6 +17,7 @@ use swage_core::{
 
 use crate::provider::{
     LlmProvider, contains_user_visible_content, may_forward_before_attempt_commits,
+    spawn_stream_forwarder,
 };
 
 // ---------------------------------------------------------------------------
@@ -188,8 +189,7 @@ impl LlmProvider for RetryProvider {
     /// and completion are held until the attempt commits, so accounting from a
     /// discarded attempt cannot escape. After the first content chunk is
     /// forwarded, a later error is terminal and the request is not replayed.
-    /// Dropping the returned stream stops forwarding and drops the active
-    /// inner stream at the next produced chunk.
+    /// Dropping the returned stream cancels an active attempt or retry wait.
     fn stream(
         &self,
         request: CompletionRequest,
@@ -197,33 +197,37 @@ impl LlmProvider for RetryProvider {
         let inner = Arc::clone(&self.inner);
         let config = self.config.clone();
         let provider = inner.model_id().to_string();
-        let (mut tx, rx) = futures::channel::mpsc::unbounded();
-
-        tokio::spawn(async move {
+        spawn_stream_forwarder(move |tx| async move {
             let mut attempt = 0u32;
             let mut active_retry: Option<u32> = None;
 
             loop {
+                if tx.is_closed() {
+                    return;
+                }
                 let mut stream = inner.stream(request.clone());
                 let mut output_started = false;
                 let mut pending_chunks = Vec::new();
                 let mut retryable_error = None;
 
-                while let Some(chunk) = stream.next().await {
+                while let Some(chunk) = tokio::select! {
+                    () = tx.closed() => return,
+                    chunk = stream.next() => chunk,
+                } {
                     match chunk {
                         StreamChunk::Error { message } if !output_started => {
                             retryable_error = Some(message);
                             break;
                         }
                         StreamChunk::Error { message } => {
-                            if tx.send(StreamChunk::Error { message }).await.is_err() {
+                            if tx.send(StreamChunk::Error { message }).is_err() {
                                 return;
                             }
                             return;
                         }
                         chunk => {
                             if output_started {
-                                if tx.send(chunk).await.is_err() {
+                                if tx.send(chunk).is_err() {
                                     return;
                                 }
                             } else if contains_user_visible_content(&chunk) {
@@ -236,21 +240,20 @@ impl LlmProvider for RetryProvider {
                                             provider: provider.clone(),
                                             success: true,
                                         })
-                                        .await
                                         .is_err()
                                 {
                                     return;
                                 }
                                 for pending_chunk in pending_chunks.drain(..) {
-                                    if tx.send(pending_chunk).await.is_err() {
+                                    if tx.send(pending_chunk).is_err() {
                                         return;
                                     }
                                 }
-                                if tx.send(chunk).await.is_err() {
+                                if tx.send(chunk).is_err() {
                                     return;
                                 }
                             } else if may_forward_before_attempt_commits(&chunk) {
-                                if tx.send(chunk).await.is_err() {
+                                if tx.send(chunk).is_err() {
                                     return;
                                 }
                             } else {
@@ -269,13 +272,12 @@ impl LlmProvider for RetryProvider {
                                 provider: provider.clone(),
                                 success: true,
                             })
-                            .await
                             .is_err()
                     {
                         return;
                     }
                     for pending_chunk in pending_chunks {
-                        if tx.send(pending_chunk).await.is_err() {
+                        if tx.send(pending_chunk).is_err() {
                             return;
                         }
                     }
@@ -291,12 +293,11 @@ impl LlmProvider for RetryProvider {
                                 provider: provider.clone(),
                                 success: false,
                             })
-                            .await
                             .is_err()
                     {
                         return;
                     }
-                    if tx.send(StreamChunk::Error { message }).await.is_err() {
+                    if tx.send(StreamChunk::Error { message }).is_err() {
                         return;
                     }
                     return;
@@ -312,16 +313,16 @@ impl LlmProvider for RetryProvider {
                         provider: provider.clone(),
                         wait_ms: delay.as_millis().min(u128::from(u64::MAX)) as u64,
                     })
-                    .await
                     .is_err()
                 {
                     return;
                 }
-                tokio::time::sleep(delay).await;
+                tokio::select! {
+                    () = tx.closed() => return,
+                    () = tokio::time::sleep(delay) => {}
+                }
             }
-        });
-
-        Box::pin(rx)
+        })
     }
 }
 
@@ -338,7 +339,7 @@ mod tests {
     use std::task::{Context, Poll};
 
     use async_trait::async_trait;
-    use futures::StreamExt;
+    use futures::{SinkExt, StreamExt};
     use swage_core::{FinishReason, TokenUsage};
 
     use super::*;
@@ -971,6 +972,86 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stream_does_not_retry_after_non_delta_content() {
+        let content_chunks = [
+            StreamChunk::Reasoning {
+                content: "working".into(),
+                details: None,
+            },
+            StreamChunk::ToolUse {
+                call_id: "call-1".into(),
+                name: "lookup".into(),
+                arguments: serde_json::json!({"query": "status"}),
+            },
+        ];
+
+        for content_chunk in content_chunks {
+            let call_count = Arc::new(Mutex::new(0));
+            let retry = RetryProvider::new(
+                SequencedStreamProvider {
+                    call_count: Arc::clone(&call_count),
+                    attempts: Mutex::new(vec![
+                        vec![
+                            content_chunk.clone(),
+                            StreamChunk::Error {
+                                message: "interrupted".into(),
+                            },
+                        ],
+                        vec![StreamChunk::Delta {
+                            content: "duplicate".into(),
+                        }],
+                    ]),
+                },
+                zero_backoff(),
+            );
+
+            let chunks: Vec<_> = retry.stream(completion_req()).collect().await;
+
+            assert_eq!(
+                *call_count.lock().unwrap(),
+                1,
+                "content must commit the first attempt: {content_chunk:?}"
+            );
+            assert!(chunks.contains(&content_chunk));
+            assert!(matches!(
+                chunks.last(),
+                Some(StreamChunk::Error { message }) if message == "interrupted"
+            ));
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn dropping_receiver_during_backoff_prevents_retry() {
+        let inner = FailN::new(2, ProviderError::StreamError("transient".into()));
+        let call_count = Arc::clone(&inner.call_count);
+        let retry = RetryProvider::new(
+            inner,
+            RetryConfig {
+                max_retries: 1,
+                initial_backoff: Duration::from_secs(60),
+                max_backoff: Duration::from_secs(60),
+            },
+        );
+        let mut stream = retry.stream(completion_req());
+
+        assert!(matches!(
+            stream.next().await,
+            Some(StreamChunk::ProviderRetryStarted { attempt: 1, .. })
+        ));
+        assert_eq!(*call_count.lock().unwrap(), 1);
+        drop(stream);
+
+        tokio::time::advance(Duration::from_secs(61)).await;
+        tokio::task::yield_now().await;
+
+        assert_eq!(
+            *call_count.lock().unwrap(),
+            1,
+            "abandoning the stream during backoff must cancel the retry"
+        );
+    }
+
+    #[tokio::test]
     async fn dropping_receiver_drops_active_inner_stream() {
         let (inner, mut inner_tx, dropped) = ControlledProvider::new();
         let retry = RetryProvider::new(inner, zero_backoff());
@@ -984,13 +1065,6 @@ mod tests {
             .unwrap();
         assert!(stream.next().await.is_some());
         drop(stream);
-
-        inner_tx
-            .send(StreamChunk::Delta {
-                content: "cancel checkpoint".into(),
-            })
-            .await
-            .unwrap();
 
         tokio::time::timeout(Duration::from_millis(100), async {
             while !dropped.load(Ordering::SeqCst) {
