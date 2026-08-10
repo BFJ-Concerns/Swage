@@ -133,6 +133,19 @@ describe("navigate", () => {
     expect(window.history.length).toBe(before + 1);
   });
 
+  it("does not push the current path but still updates currentRoute", () => {
+    const router = createRouter();
+    router.navigate("/conversations/previous");
+    window.history.replaceState(null, "", "/");
+    const before = window.history.length;
+
+    router.navigate("/");
+
+    expect(window.history.length).toBe(before);
+    expect(router.currentRoute.path).toBe("/");
+    expect(router.currentRoute.conversationId).toBeNull();
+  });
+
   it("updates currentRoute to root when navigating to '/'", () => {
     const router = createRouter();
     router.navigate("/conversations/some-id");

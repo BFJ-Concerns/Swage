@@ -22,7 +22,33 @@ impl Tool for WorkflowRunTool {
         "Start a saved workflow by name. Workflows enforce their own agent and delivery capabilities; use wait=true only when this turn needs the final result."
     }
     fn parameters(&self) -> Value {
-        json!({"type":"object","properties":{"name":{"type":"string"},"args":{},"budget":{"type":"object"},"wait":{"type":"boolean","default":false}},"required":["name"]})
+        json!({
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "The saved workflow's name in this space."
+                },
+                "args": {
+                    "description": "Arguments handed to the script as `args`; any JSON value the workflow expects."
+                },
+                "budget": {
+                    "type": "object",
+                    "description": "Optional run limits.",
+                    "properties": {
+                        "max_agent_calls": {"type": "integer", "description": "Most agent calls the run may make."},
+                        "max_total_tokens": {"type": "integer", "description": "Token ceiling across all the run's agent calls."},
+                        "max_concurrent_agent_calls": {"type": "integer", "description": "Most agent calls in flight at once."}
+                    }
+                },
+                "wait": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Wait for the run to finish and return its final output. Leave false to start it detached and get the run reference."
+                }
+            },
+            "required": ["name"]
+        })
     }
     fn requires_device_execution(&self) -> bool {
         true

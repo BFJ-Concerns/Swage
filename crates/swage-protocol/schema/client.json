@@ -2708,7 +2708,9 @@
         "agent_call",
         "effect",
         "log",
-        "phase"
+        "phase",
+        "workflow_call",
+        "timer"
       ]
     },
     "WorkflowJournalEntryStatus": {

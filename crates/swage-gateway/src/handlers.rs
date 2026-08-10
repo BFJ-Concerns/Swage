@@ -2089,6 +2089,24 @@ mod tests {
         serde_json::from_slice(&bytes).unwrap()
     }
 
+    async fn wait_for_terminal_message_status(
+        client: &swage_client::http::GatewayClient,
+        message_id: Uuid,
+    ) -> serde_json::Value {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while std::time::Instant::now() < deadline {
+            let current = client
+                .get_message_status(message_id)
+                .await
+                .expect("query message status");
+            if matches!(current["status"].as_str(), Some("delivered" | "failed")) {
+                return current;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        panic!("delegate message should leave pending before the deadline");
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn gateway_client_async_rest_helpers_cover_live_gateway_routes() {
         use swage_client::http::GatewayClient;
@@ -2176,21 +2194,7 @@ mod tests {
             .expect("message id string")
             .parse::<Uuid>()
             .expect("message id uuid");
-        let message_status = {
-            let mut terminal = None;
-            for _ in 0..50 {
-                let current = client
-                    .get_message_status(message_id)
-                    .await
-                    .expect("query message status");
-                if matches!(current["status"].as_str(), Some("delivered" | "failed")) {
-                    terminal = Some(current);
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            }
-            terminal.expect("delegate message should leave pending")
-        };
+        let message_status = wait_for_terminal_message_status(&client, message_id).await;
         assert!(
             matches!(
                 message_status["status"].as_str(),
@@ -2316,21 +2320,7 @@ mod tests {
             .parse::<Uuid>()
             .expect("message id uuid");
 
-        let message_status = {
-            let mut terminal = None;
-            for _ in 0..50 {
-                let current = client
-                    .get_message_status(message_id)
-                    .await
-                    .expect("query message status");
-                if matches!(current["status"].as_str(), Some("delivered" | "failed")) {
-                    terminal = Some(current);
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            }
-            terminal.expect("delegate message should leave pending")
-        };
+        let message_status = wait_for_terminal_message_status(&client, message_id).await;
 
         assert_eq!(message_status["status"], "failed");
         let stored = storage

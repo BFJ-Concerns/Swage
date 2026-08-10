@@ -938,6 +938,13 @@ pub trait WorkflowStore: Send + Sync {
         run: NewWorkflowRun,
     ) -> Result<WorkflowRunRecord, StorageError>;
     async fn get_workflow_run(&self, id: Uuid) -> Result<Option<WorkflowRunRecord>, StorageError>;
+    /// The child run a parent's journalled `workflow()` call already started,
+    /// if any — how a resumed parent finds its child instead of duplicating it.
+    async fn find_child_workflow_run(
+        &self,
+        parent_run_id: Uuid,
+        parent_seq: u64,
+    ) -> Result<Option<WorkflowRunRecord>, StorageError>;
     async fn list_workflow_runs(
         &self,
         space_id: Uuid,
@@ -2040,6 +2047,13 @@ mod tests {
         async fn get_workflow_run(
             &self,
             _: Uuid,
+        ) -> Result<Option<WorkflowRunRecord>, StorageError> {
+            unimplemented!()
+        }
+        async fn find_child_workflow_run(
+            &self,
+            _: Uuid,
+            _: u64,
         ) -> Result<Option<WorkflowRunRecord>, StorageError> {
             unimplemented!()
         }
