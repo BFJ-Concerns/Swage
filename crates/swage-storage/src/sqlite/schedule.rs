@@ -252,7 +252,7 @@ impl ScheduleStore for SqliteStorage {
     async fn create_schedule(&self, schedule: NewSchedule) -> Result<Schedule, StorageError> {
         let delivery_json = serialise_json(&schedule.delivery_routing)?;
         self.with_conn(move |conn| {
-            let id = Uuid::new_v4();
+            let id = schedule.id;
             let now = Utc::now();
             let now_str = now.to_rfc3339();
             let (policy, space_id, agent_id, session_id) =
@@ -676,6 +676,7 @@ mod tests {
 
     fn fresh_schedule(space_id: Uuid) -> NewSchedule {
         NewSchedule {
+            id: Uuid::new_v4(),
             message: "run now".into(),
             status: ScheduleStatus::Active,
             kind: ScheduleKind::Interval,
@@ -714,6 +715,7 @@ mod tests {
 
         let fresh = storage
             .create_schedule(NewSchedule {
+                id: Uuid::new_v4(),
                 gate: Some(GateConfig {
                     model: "small".into(),
                     criteria: Some("only when the queue is non-empty".into()),

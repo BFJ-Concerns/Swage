@@ -217,6 +217,16 @@ pub async fn create_schedule(
     request: wire::CreateScheduleRequest,
     creator: ScheduleCreator,
 ) -> Result<wire::Schedule, GatewayError> {
+    let intended = resolve_create_schedule(state, request, creator).await?;
+    let schedule = state.storage.create_schedule(intended).await?;
+    map_schedule(schedule)
+}
+
+pub(crate) async fn resolve_create_schedule(
+    state: &AppState,
+    request: wire::CreateScheduleRequest,
+    creator: ScheduleCreator,
+) -> Result<NewSchedule, GatewayError> {
     if request.message.trim().is_empty() {
         return Err(GatewayError::ValidationError(
             "schedule message must not be empty".into(),
@@ -235,23 +245,19 @@ pub async fn create_schedule(
     let _ = resolve_delivery_targets(None, routing.clone())?;
 
     let now = Utc::now();
-    let schedule = state
-        .storage
-        .create_schedule(NewSchedule {
-            message: request.message,
-            status: ScheduleStatus::Active,
-            kind: parsed.kind(),
-            expression: parsed.expression(),
-            session_policy: request.session,
-            creator,
-            delivery_routing: routing_to_value(&routing)?,
-            gate: request.gate,
-            next_run_at: parsed.initial_next_run_at(now),
-            last_run_at: None,
-        })
-        .await?;
-
-    map_schedule(schedule)
+    Ok(NewSchedule {
+        id: Uuid::new_v4(),
+        message: request.message,
+        status: ScheduleStatus::Active,
+        kind: parsed.kind(),
+        expression: parsed.expression(),
+        session_policy: request.session,
+        creator,
+        delivery_routing: routing_to_value(&routing)?,
+        gate: request.gate,
+        next_run_at: parsed.initial_next_run_at(now),
+        last_run_at: None,
+    })
 }
 
 pub async fn list_schedules(state: &AppState) -> Result<wire::ScheduleListResponse, GatewayError> {
@@ -269,6 +275,16 @@ pub async fn update_schedule(
     schedule_id: Uuid,
     request: wire::UpdateScheduleRequest,
 ) -> Result<wire::Schedule, GatewayError> {
+    let intended = resolve_update_schedule(state, schedule_id, request).await?;
+    let updated = apply_resolved_schedule(state, &intended).await?;
+    map_schedule(updated)
+}
+
+pub(crate) async fn resolve_update_schedule(
+    state: &AppState,
+    schedule_id: Uuid,
+    request: wire::UpdateScheduleRequest,
+) -> Result<NewSchedule, GatewayError> {
     let existing = get_schedule(state, schedule_id).await?;
 
     let now = Utc::now();
@@ -296,41 +312,44 @@ pub async fn update_schedule(
         _ => parsed.as_ref().map(|spec| spec.arm(now)),
     };
 
-    let updated = state
-        .storage
-        .update_schedule(
-            schedule_id,
-            UpdateSchedule {
-                message: request.message,
-                status: armed.map(|(status, _)| status),
-                kind: parsed.as_ref().map(ParsedSpec::kind),
-                expression: parsed.as_ref().map(ParsedSpec::expression),
-                delivery_routing: request.routing.as_ref().map(routing_to_value).transpose()?,
-                gate,
-                next_run_at: armed.map(|(_, next_run_at)| next_run_at),
-                ..Default::default()
-            },
-        )
-        .await?;
-
-    map_schedule(updated)
+    Ok(NewSchedule {
+        id: existing.id,
+        message: request.message.unwrap_or(existing.message),
+        status: armed.map_or(existing.status, |(status, _)| status),
+        kind: parsed.as_ref().map_or(existing.kind, ParsedSpec::kind),
+        expression: parsed
+            .as_ref()
+            .map_or(existing.expression, ParsedSpec::expression),
+        session_policy: existing.session_policy,
+        creator: existing.creator,
+        delivery_routing: request
+            .routing
+            .as_ref()
+            .map(routing_to_value)
+            .transpose()?
+            .unwrap_or(existing.delivery_routing),
+        gate: gate.unwrap_or(existing.gate),
+        next_run_at: armed.map_or(existing.next_run_at, |(_, next)| next),
+        last_run_at: existing.last_run_at,
+    })
 }
 
 pub async fn pause_schedule(
     state: &AppState,
     schedule_id: Uuid,
 ) -> Result<wire::Schedule, GatewayError> {
-    let updated = state
-        .storage
-        .update_schedule(
-            schedule_id,
-            UpdateSchedule {
-                status: Some(ScheduleStatus::Paused),
-                ..Default::default()
-            },
-        )
-        .await?;
+    let intended = resolve_pause_schedule(state, schedule_id).await?;
+    let updated = apply_resolved_schedule(state, &intended).await?;
     map_schedule(updated)
+}
+
+pub(crate) async fn resolve_pause_schedule(
+    state: &AppState,
+    schedule_id: Uuid,
+) -> Result<NewSchedule, GatewayError> {
+    let mut intended = new_schedule_from_existing(get_schedule(state, schedule_id).await?);
+    intended.status = ScheduleStatus::Paused;
+    Ok(intended)
 }
 
 /// Resume a paused schedule, re-arming it from its stored spec.
@@ -344,21 +363,68 @@ pub async fn resume_schedule(
     state: &AppState,
     schedule_id: Uuid,
 ) -> Result<wire::Schedule, GatewayError> {
+    let intended = resolve_resume_schedule(state, schedule_id).await?;
+    let updated = apply_resolved_schedule(state, &intended).await?;
+    map_schedule(updated)
+}
+
+pub(crate) async fn resolve_resume_schedule(
+    state: &AppState,
+    schedule_id: Uuid,
+) -> Result<NewSchedule, GatewayError> {
     let existing = get_schedule(state, schedule_id).await?;
     let parsed = ParsedSpec::parse_stored(existing.kind, &existing.expression)?;
     let (status, next_run_at) = parsed.arm(Utc::now());
-    let updated = state
+    let mut intended = new_schedule_from_existing(existing);
+    intended.status = status;
+    intended.next_run_at = next_run_at;
+    Ok(intended)
+}
+
+async fn apply_resolved_schedule(
+    state: &AppState,
+    schedule: &NewSchedule,
+) -> Result<Schedule, GatewayError> {
+    state
         .storage
         .update_schedule(
-            schedule_id,
+            schedule.id,
             UpdateSchedule {
-                status: Some(status),
-                next_run_at: Some(next_run_at),
-                ..Default::default()
+                message: Some(schedule.message.clone()),
+                status: Some(schedule.status),
+                kind: Some(schedule.kind),
+                expression: Some(schedule.expression.clone()),
+                delivery_routing: Some(schedule.delivery_routing.clone()),
+                gate: Some(schedule.gate.clone()),
+                next_run_at: Some(schedule.next_run_at),
+                last_run_at: Some(schedule.last_run_at),
             },
         )
-        .await?;
-    map_schedule(updated)
+        .await
+        .map_err(Into::into)
+}
+
+fn new_schedule_from_existing(schedule: Schedule) -> NewSchedule {
+    NewSchedule {
+        id: schedule.id,
+        message: schedule.message,
+        status: schedule.status,
+        kind: schedule.kind,
+        expression: schedule.expression,
+        session_policy: schedule.session_policy,
+        creator: schedule.creator,
+        delivery_routing: schedule.delivery_routing,
+        gate: schedule.gate,
+        next_run_at: schedule.next_run_at,
+        last_run_at: schedule.last_run_at,
+    }
+}
+
+pub(crate) async fn get_schedule_wire(
+    state: &AppState,
+    schedule_id: Uuid,
+) -> Result<wire::Schedule, GatewayError> {
+    map_schedule(get_schedule(state, schedule_id).await?)
 }
 
 pub async fn delete_schedule(state: &AppState, schedule_id: Uuid) -> Result<bool, GatewayError> {
@@ -457,6 +523,23 @@ fn resolve_gate_model(config: &swage_config::ResolvedConfig, name: &str) -> Opti
 fn routing_to_value(routing: &DeliveryRoutingRequest) -> Result<serde_json::Value, GatewayError> {
     serde_json::to_value(routing)
         .map_err(|error| GatewayError::ValidationError(format!("invalid routing payload: {error}")))
+}
+
+pub(crate) async fn validate_resolved_schedule(
+    state: &AppState,
+    schedule: &NewSchedule,
+) -> Result<(), GatewayError> {
+    ParsedSpec::parse_stored(schedule.kind, &schedule.expression)?;
+    validate_session_policy(state, &schedule.session_policy).await?;
+    if let Some(gate) = &schedule.gate {
+        validate_gate(state, gate)?;
+    }
+    let routing: DeliveryRoutingRequest = serde_json::from_value(schedule.delivery_routing.clone())
+        .map_err(|error| {
+            GatewayError::ValidationError(format!("invalid delivery routing: {error}"))
+        })?;
+    let _ = resolve_delivery_targets(None, routing)?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
