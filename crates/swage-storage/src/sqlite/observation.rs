@@ -253,6 +253,18 @@ impl ObservationStore for SqliteStorage {
                        SELECT MAX(version) FROM extraction_derivations
                        WHERE observation_id = d.observation_id
                    )
+                   -- Assertions are append-only; the most recently inserted
+                   -- assertion for an observation is its effective state.
+                   AND NOT EXISTS (
+                       SELECT 1 FROM knowledge_curation_assertions a
+                       WHERE a.observation_id = o.id
+                         AND a.rowid = (
+                             SELECT MAX(latest.rowid)
+                             FROM knowledge_curation_assertions latest
+                             WHERE latest.observation_id = o.id
+                         )
+                         AND a.kind IN ('duplicate-of', 'superseded-by', 'stale')
+                   )
                  ORDER BY bm25(extraction_fts)
                  LIMIT ?3",
             )?;
@@ -295,8 +307,8 @@ impl ObservationStore for SqliteStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::NewSpace;
-    use crate::store::SpaceStore;
+    use crate::model::{CurationAssertionKind, NewCurationAssertion, NewSpace};
+    use crate::store::{CurationAssertionStore, SpaceStore};
 
     async fn storage_with_space() -> (SqliteStorage, Uuid) {
         let storage = SqliteStorage::in_memory().unwrap();
@@ -471,6 +483,71 @@ mod tests {
         assert_eq!(
             &derivation.extracted_text[hit.snippet_offset..hit.snippet_offset + hit.snippet.len()],
             hit.snippet
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn search_keeps_observation_retired_when_latest_assertion_is_stale() {
+        let (storage, space_id) = storage_with_space().await;
+        let observation = storage
+            .record_observation(new_observation(
+                space_id,
+                "https://example.org/current",
+                "latest-state-subject",
+            ))
+            .await
+            .unwrap();
+        let preferred = storage
+            .record_observation(new_observation(
+                space_id,
+                "https://example.org/preferred",
+                "latest-state-target",
+            ))
+            .await
+            .unwrap();
+        storage
+            .add_extraction(
+                observation.id,
+                "distinctive effective state passage".into(),
+                "extractor".into(),
+            )
+            .await
+            .unwrap();
+
+        storage
+            .add_curation_assertion(NewCurationAssertion {
+                space_id,
+                observation_id: observation.id,
+                kind: CurationAssertionKind::SupersededBy,
+                target_observation_id: Some(preferred.id),
+            })
+            .await
+            .unwrap();
+        assert!(
+            storage
+                .search_extractions(space_id, "distinctive effective state", 10)
+                .await
+                .unwrap()
+                .is_empty(),
+            "the first assertion retires the observation from default retrieval"
+        );
+
+        storage
+            .add_curation_assertion(NewCurationAssertion {
+                space_id,
+                observation_id: observation.id,
+                kind: CurationAssertionKind::Stale,
+                target_observation_id: None,
+            })
+            .await
+            .unwrap();
+        assert!(
+            storage
+                .search_extractions(space_id, "distinctive effective state", 10)
+                .await
+                .unwrap()
+                .is_empty(),
+            "a stale assertion also retires the observation from default retrieval"
         );
     }
 

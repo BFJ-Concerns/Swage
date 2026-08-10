@@ -252,6 +252,10 @@ impl Default for ToolPermissionConfig {
             "knowledge-write".to_string(),
             vec!["knowledge_record".to_string()],
         );
+        bundles.insert(
+            "knowledge-curation".to_string(),
+            vec!["knowledge_curate".to_string()],
+        );
         Self {
             allow: vec!["*".into()],
             deny: vec![],
@@ -1302,6 +1306,12 @@ timeout_policy = "reject"
         assert_eq!(
             cfg.bundles.get("scheduling").expect("scheduling bundle"),
             &vec!["schedule".to_string(), "wake_me_later".to_string()]
+        );
+        assert_eq!(
+            cfg.bundles
+                .get("knowledge-curation")
+                .expect("knowledge curation bundle"),
+            &vec!["knowledge_curate".to_string()]
         );
         assert_eq!(
             cfg.require_approval
