@@ -74,9 +74,9 @@ for (let segment = 0; segment < maxSegments; segment += 1) {
       `when the brief itself is discharged. Return JSON only.`,
     { label: `Segment ${segment + 1}`, schema: segmentSchema },
   );
-  if (outcome === null) {
-    throw new Error(`segment ${segment + 1} produced no valid outcome`);
-  }
+  // A segment whose reply never validates throws from agent() after its
+  // retries, failing the run - the honest outcome, since a successor cannot
+  // be grounded from an invalid closing report.
   segments.push({
     segment: segment + 1,
     woke_from: wakeNote,

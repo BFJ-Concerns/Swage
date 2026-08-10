@@ -55,7 +55,9 @@ const plan = await agent(
     },
   },
 );
-if (!plan || plan.sources.length === 0) {
+// A schema-failed or turn-failed call throws from agent() itself, so plan is
+// a validated object here; empty is the one bad shape the schema permits.
+if (plan.sources.length === 0) {
   throw new Error("research-sweep could not scope any sources");
 }
 
@@ -182,6 +184,8 @@ const findings = await agent(
 
 // The terminal report names what failed or was omitted - the commission's
 // requirement that a sweep never pretends completeness.
+// agent() throws on failure, so reaching here means synthesis validated;
+// the terminal report still names what failed or was omitted upstream.
 return {
   topic,
   purpose,
@@ -191,6 +195,5 @@ return {
   })),
   failed_sources: failed,
   organised,
-  findings: findings ? findings.findings : [],
-  degraded: findings === null ? "synthesis failed schema validation" : null,
+  findings: findings.findings,
 };
