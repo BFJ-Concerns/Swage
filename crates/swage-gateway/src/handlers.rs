@@ -1541,6 +1541,9 @@ async fn execute_external_delegate_message(
         &delegate_msg.recipient_agent_id,
     );
 
+    // Delegated activity must not reach the parent WebSocket. Shared assembly
+    // still emits ContextAssembled into this silent channel; the stored child-
+    // turn snapshot is the delegated assembly's audit record.
     let (silent_ws_tx, silent_ws_rx) = tokio::sync::mpsc::unbounded_channel();
     drop(silent_ws_rx);
     let dispatcher_build = crate::turn::build_gateway_dispatcher_for_unattended_execution(
