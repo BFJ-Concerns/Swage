@@ -22,8 +22,8 @@ use swage_storage::{
     NewWorkflowScript, ThreadStore, WorkflowRunRecord, WorkflowScriptRecord,
 };
 use swage_workflow::{
-    AgentCallRequest, AgentCallResult, EffectPayload, EffectReceipt, EngineLimits, WorkflowEngine,
-    WorkflowHost, journal_args_hash,
+    AgentCallRequest, AgentCallResult, EffectPayload, EffectReceipt, EffectRecoveryHost,
+    EngineLimits, WorkflowEngine, WorkflowHost, journal_args_hash, recover_started_effect,
 };
 use tokio::sync::{Mutex, Notify, Semaphore, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -603,22 +603,16 @@ async fn complete_effect_entry(
     effect_seq: u64,
     key: Uuid,
 ) -> Result<EffectReceipt, String> {
-    let receipt = match capability.effect_kind() {
-        swage_workflow::EffectKind::IdempotencyKey => {
-            capability
-                .deliver(key, payload, effect_seq, cancellation)
-                .await?
-        }
-        swage_workflow::EffectKind::CheckBeforeRedo => {
-            if let Some(receipt) = capability.probe(key, &payload).await? {
-                receipt
-            } else {
-                capability
-                    .deliver(key, payload, effect_seq, cancellation)
-                    .await?
-            }
-        }
+    let request = serde_json::to_value(&payload).expect("effect payload serialises");
+    let recovery_host = GatewayEffectRecoveryHost {
+        capability: Arc::clone(&capability),
+        payload,
+        effect_seq,
+        cancellation,
     };
+    let receipt = recover_started_effect(capability.effect_kind(), key, &request, &recovery_host)
+        .await
+        .and_then(|value| serde_json::from_value(value).map_err(|error| error.to_string()))?;
     state
         .storage
         .complete_workflow_journal_entry(
@@ -628,6 +622,40 @@ async fn complete_effect_entry(
         .await
         .map_err(|error| error.to_string())?;
     Ok(receipt)
+}
+
+struct GatewayEffectRecoveryHost {
+    capability: Arc<dyn DeliveryCapability>,
+    payload: EffectPayload,
+    effect_seq: u64,
+    cancellation: CancellationToken,
+}
+
+#[async_trait::async_trait]
+impl EffectRecoveryHost for GatewayEffectRecoveryHost {
+    async fn resend(&self, key: Uuid, _request: &Value) -> Result<Value, String> {
+        self.capability
+            .deliver(
+                key,
+                self.payload.clone(),
+                self.effect_seq,
+                self.cancellation.clone(),
+            )
+            .await
+            .and_then(|receipt| serde_json::to_value(receipt).map_err(|error| error.to_string()))
+    }
+
+    async fn probe(&self, key: Uuid, _request: &Value) -> Result<Option<Value>, String> {
+        self.capability
+            .probe(key, &self.payload)
+            .await
+            .and_then(|receipt| {
+                receipt
+                    .map(serde_json::to_value)
+                    .transpose()
+                    .map_err(|error| error.to_string())
+            })
+    }
 }
 
 fn internal(error: impl std::fmt::Display) -> ApiError {
@@ -1202,6 +1230,183 @@ mod tests {
 
     use super::*;
     use swage_storage::{SpaceStore, SqliteStorage, Storage, WorkflowStore};
+
+    struct RecordingDeliveryCapability {
+        effect_kind: swage_workflow::EffectKind,
+        probe_result: Option<EffectReceipt>,
+        probes: AtomicUsize,
+        deliveries: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl DeliveryCapability for RecordingDeliveryCapability {
+        fn kind(&self) -> &'static str {
+            "recording"
+        }
+
+        fn effect_kind(&self) -> swage_workflow::EffectKind {
+            self.effect_kind
+        }
+
+        async fn deliver(
+            &self,
+            _key: Uuid,
+            _payload: EffectPayload,
+            effect_seq: u64,
+            _cancellation: CancellationToken,
+        ) -> Result<EffectReceipt, String> {
+            self.deliveries.fetch_add(1, Ordering::SeqCst);
+            Ok(EffectReceipt {
+                delivered: true,
+                target: "delivered".into(),
+                effect_seq,
+            })
+        }
+
+        async fn probe(
+            &self,
+            _key: Uuid,
+            _payload: &EffectPayload,
+        ) -> Result<Option<EffectReceipt>, String> {
+            self.probes.fetch_add(1, Ordering::SeqCst);
+            Ok(self.probe_result.clone())
+        }
+    }
+
+    async fn started_effect_entry() -> (AppState, Uuid) {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let run = storage
+            .create_workflow_run(NewWorkflowRun {
+                space_id: space.id,
+                script_version_id: None,
+                source: Some("return null".into()),
+                source_hash: source_hash("return null"),
+                args: Value::Null,
+                budget: serde_json::json!({}),
+                engine_version: "test".into(),
+            })
+            .await
+            .expect("run");
+        let entry = storage
+            .create_workflow_journal_intent(NewWorkflowJournalIntent {
+                run_id: run.id,
+                seq: 0,
+                kind: "effect".into(),
+                args_hash: journal_args_hash(&Value::Null),
+                request: Value::Null,
+                effect_kind: Some("test".into()),
+                idempotency_key: Some(Uuid::new_v4()),
+                target_kind: Some("recording".into()),
+            })
+            .await
+            .expect("started entry");
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        (state, entry.id)
+    }
+
+    fn recovery_payload() -> EffectPayload {
+        EffectPayload {
+            content: "recover me".into(),
+            metadata: None,
+            target: None,
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn started_idempotency_key_effect_resends_once_without_probing() {
+        let (state, entry_id) = started_effect_entry().await;
+        let capability = Arc::new(RecordingDeliveryCapability {
+            effect_kind: swage_workflow::EffectKind::IdempotencyKey,
+            probe_result: None,
+            probes: AtomicUsize::new(0),
+            deliveries: AtomicUsize::new(0),
+        });
+
+        let receipt = complete_effect_entry(
+            &state,
+            Arc::clone(&capability) as Arc<dyn DeliveryCapability>,
+            entry_id,
+            recovery_payload(),
+            CancellationToken::new(),
+            7,
+            Uuid::new_v4(),
+        )
+        .await
+        .expect("recover");
+
+        assert_eq!(receipt.target, "delivered");
+        assert_eq!(receipt.effect_seq, 7);
+        assert_eq!(capability.probes.load(Ordering::SeqCst), 0);
+        assert_eq!(capability.deliveries.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn started_check_before_redo_effect_uses_probe_receipt_without_resending() {
+        let (state, entry_id) = started_effect_entry().await;
+        let capability = Arc::new(RecordingDeliveryCapability {
+            effect_kind: swage_workflow::EffectKind::CheckBeforeRedo,
+            probe_result: Some(EffectReceipt {
+                delivered: true,
+                target: "already-delivered".into(),
+                effect_seq: 3,
+            }),
+            probes: AtomicUsize::new(0),
+            deliveries: AtomicUsize::new(0),
+        });
+
+        let receipt = complete_effect_entry(
+            &state,
+            Arc::clone(&capability) as Arc<dyn DeliveryCapability>,
+            entry_id,
+            recovery_payload(),
+            CancellationToken::new(),
+            7,
+            Uuid::new_v4(),
+        )
+        .await
+        .expect("recover");
+
+        assert_eq!(receipt.target, "already-delivered");
+        assert_eq!(receipt.effect_seq, 3);
+        assert_eq!(capability.probes.load(Ordering::SeqCst), 1);
+        assert_eq!(capability.deliveries.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn started_check_before_redo_effect_resends_once_after_probe_miss() {
+        let (state, entry_id) = started_effect_entry().await;
+        let capability = Arc::new(RecordingDeliveryCapability {
+            effect_kind: swage_workflow::EffectKind::CheckBeforeRedo,
+            probe_result: None,
+            probes: AtomicUsize::new(0),
+            deliveries: AtomicUsize::new(0),
+        });
+
+        let receipt = complete_effect_entry(
+            &state,
+            Arc::clone(&capability) as Arc<dyn DeliveryCapability>,
+            entry_id,
+            recovery_payload(),
+            CancellationToken::new(),
+            7,
+            Uuid::new_v4(),
+        )
+        .await
+        .expect("recover");
+
+        assert_eq!(receipt.target, "delivered");
+        assert_eq!(receipt.effect_seq, 7);
+        assert_eq!(capability.probes.load(Ordering::SeqCst), 1);
+        assert_eq!(capability.deliveries.load(Ordering::SeqCst), 1);
+    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn inline_run_returns_detached_and_completes_from_recorded_args() {
