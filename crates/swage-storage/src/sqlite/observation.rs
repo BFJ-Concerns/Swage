@@ -284,7 +284,7 @@ impl ObservationStore for SqliteStorage {
                     // it so the stored passage is text that literally occurs in
                     // the derivation, then locate its byte offset there.
                     let passage = snippet.trim_matches('…').to_string();
-                    let snippet_offset = full_text.find(&passage).unwrap_or(0);
+                    let snippet_offset = full_text.find(&passage);
                     Ok(KnowledgeSearchHit {
                         observation_id,
                         derivation_version: version,
@@ -481,7 +481,8 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(
-            &derivation.extracted_text[hit.snippet_offset..hit.snippet_offset + hit.snippet.len()],
+            &derivation.extracted_text
+                [hit.snippet_offset.unwrap()..hit.snippet_offset.unwrap() + hit.snippet.len()],
             hit.snippet
         );
     }
