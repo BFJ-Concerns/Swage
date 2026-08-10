@@ -422,8 +422,10 @@ impl LlmProvider for PendingProvider {
     }
 }
 
-/// A mock provider whose stream never emits a response or completes.
-struct EmptyPendingProvider;
+/// A mock provider whose stream reports its first poll, then remains open without emitting.
+struct EmptyPendingProvider {
+    stream_polled: Arc<Notify>,
+}
 
 #[async_trait]
 impl LlmProvider for EmptyPendingProvider {
@@ -449,7 +451,11 @@ impl LlmProvider for EmptyPendingProvider {
         &self,
         _request: CompletionRequest,
     ) -> Pin<Box<dyn futures::Stream<Item = StreamChunk> + Send>> {
-        Box::pin(futures::stream::pending())
+        let stream_polled = Arc::clone(&self.stream_polled);
+        Box::pin(futures::stream::poll_fn(move |_cx| {
+            stream_polled.notify_one();
+            std::task::Poll::Pending
+        }))
     }
 }
 
@@ -3594,10 +3600,13 @@ async fn cancelled_turn_without_partial_stores_no_assistant_response() {
     .await
     .expect("create default thread");
 
+    let stream_polled = Arc::new(Notify::new());
     let state = Arc::new(AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
-        Arc::new(EmptyPendingProvider) as Arc<dyn LlmProvider>,
+        Arc::new(EmptyPendingProvider {
+            stream_polled: Arc::clone(&stream_polled),
+        }) as Arc<dyn LlmProvider>,
         swage_config::ResolvedConfig::default(),
         crate::tool::ToolDispatcher::allow_all(vec![]),
         None,
@@ -3617,13 +3626,7 @@ async fn cancelled_turn_without_partial_stores_no_assistant_response() {
         .await
     });
 
-    for _ in 0..100 {
-        if state.active_turns.lock().await.contains_key(&session_id) {
-            break;
-        }
-        tokio::task::yield_now().await;
-    }
-    assert!(state.active_turns.lock().await.contains_key(&session_id));
+    stream_polled.notified().await;
     cancel_turn(&state, session_id)
         .await
         .expect("cancel should succeed");
