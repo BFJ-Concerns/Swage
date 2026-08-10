@@ -276,7 +276,7 @@ pub trait ObservationStore: Send + Sync {
 #[async_trait]
 pub trait CurationAssertionStore: Send + Sync {
     /// Append a curation judgement. Existing assertions and evidence are never
-    /// changed; the most recently created assertion is the effective state.
+    /// changed.
     async fn add_curation_assertion(
         &self,
         assertion: NewCurationAssertion,
