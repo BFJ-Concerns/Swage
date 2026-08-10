@@ -3,10 +3,11 @@ use super::{
     GatewayDispatcherRequest, MessageRouter, NewAgentMessage, Uuid, available_skills_for_agent,
     build_agent_config_for_space_workspace, build_approval_registrar, build_assembly_elements,
     build_gateway_dispatcher_for_unattended_execution, build_session_environment,
-    delegated_target_instructions_for_space, load_active_skills_for_agent, load_session_config,
-    load_space_memory, mpsc, resolve_swage_root, shutdown_sandbox_guard,
+    delegated_target_instructions_for_space, execute_context_assembly,
+    load_active_skills_for_agent, load_session_config, load_space_memory, mpsc, resolve_swage_root,
+    shutdown_sandbox_guard,
 };
-use swage_agent::{DelegationContextAssembler, DelegationOutcome};
+use swage_agent::{DelegatedAssembly, DelegationContextAssembler, DelegationOutcome};
 use swage_context::tokeniser::TiktokenTokeniser;
 use swage_core::DelegateCompletionMode;
 
@@ -17,6 +18,7 @@ struct GatewayDelegatedContextAssembler {
     agent_id: String,
     working_directory: String,
     swage_root: Option<std::path::PathBuf>,
+    context_event_tx: mpsc::UnboundedSender<crate::websocket::ServerEvent>,
 }
 
 pub(crate) fn delegated_context_assembler(
@@ -25,6 +27,7 @@ pub(crate) fn delegated_context_assembler(
     config: swage_config::ResolvedConfig,
     agent_id: String,
     working_directory: String,
+    context_event_tx: mpsc::UnboundedSender<crate::websocket::ServerEvent>,
 ) -> Arc<dyn DelegationContextAssembler> {
     Arc::new(GatewayDelegatedContextAssembler {
         state,
@@ -33,6 +36,7 @@ pub(crate) fn delegated_context_assembler(
         agent_id,
         working_directory,
         swage_root: resolve_swage_root(),
+        context_event_tx,
     })
 }
 
@@ -41,8 +45,9 @@ impl DelegationContextAssembler for GatewayDelegatedContextAssembler {
     async fn assemble(
         &self,
         session: &swage_storage::Session,
+        turn_id: Uuid,
         delegated_history: Vec<swage_core::ChatMessage>,
-    ) -> Result<Vec<swage_core::ChatMessage>, AgentError> {
+    ) -> Result<DelegatedAssembly, AgentError> {
         let active_skills = load_active_skills_for_agent(
             &self.state,
             session.id,
@@ -73,7 +78,32 @@ impl DelegationContextAssembler for GatewayDelegatedContextAssembler {
             available_skills,
         );
         let tokeniser = TiktokenTokeniser::new(self.config.default_model_id());
-        Ok(swage_context::assembly::assemble(&elements, &self.config.context, &tokeniser).messages)
+        let output = execute_context_assembly(
+            &self.state,
+            &self.config,
+            &elements,
+            &tokeniser,
+            self.swage_root.as_deref(),
+            &self.space.slug,
+            &self.agent_id,
+            session.id,
+            turn_id,
+        )
+        .await;
+        let report = serde_json::to_value(output.report).unwrap_or_else(|error| {
+            tracing::warn!(%error, "failed to serialise delegated assembly report");
+            serde_json::json!({ "error": "serialisation failed" })
+        });
+        let _ = self
+            .context_event_tx
+            .send(crate::websocket::ServerEvent::ContextAssembled {
+                turn_id,
+                report: report.clone(),
+            });
+        Ok(DelegatedAssembly {
+            messages: output.messages,
+            report,
+        })
     }
 }
 
@@ -149,7 +179,7 @@ impl DelegationHandler for GatewayDelegationHandler {
                 session_metadata: None,
                 space_id: Some(space_id),
                 active_workspace_attachment_id,
-                ws_tx: silent_ws_tx,
+                ws_tx: silent_ws_tx.clone(),
                 session_id: None,
                 turn_id: Some(sender_turn_id),
             },
@@ -180,6 +210,7 @@ impl DelegationHandler for GatewayDelegationHandler {
                 target_resolved.clone(),
                 target_agent_id.to_string(),
                 target_agent_config.working_directory.display().to_string(),
+                silent_ws_tx,
             )),
         };
 

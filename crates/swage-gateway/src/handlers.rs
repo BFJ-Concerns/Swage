@@ -1551,7 +1551,7 @@ async fn execute_external_delegate_message(
             session_metadata: None,
             space_id: Some(space_id),
             active_workspace_attachment_id: None,
-            ws_tx: silent_ws_tx,
+            ws_tx: silent_ws_tx.clone(),
             session_id: None,
             turn_id: sender_turn_id,
         },
@@ -1581,6 +1581,7 @@ async fn execute_external_delegate_message(
             target_resolved.clone(),
             delegate_msg.recipient_agent_id.clone(),
             target_agent_config.working_directory.display().to_string(),
+            silent_ws_tx,
         )),
     };
 

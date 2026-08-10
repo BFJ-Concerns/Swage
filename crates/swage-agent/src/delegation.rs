@@ -18,7 +18,9 @@ use swage_hook::HookRegistry;
 use swage_provider::LlmProvider;
 use swage_safety::LeakDetector;
 use swage_storage::Storage;
-use swage_storage::model::{AgentMessage, NewAgentMessage, NewSession, NewThread};
+use swage_storage::model::{
+    AgentMessage, NewAgentMessage, NewSession, NewThread, NewTurn, TurnState,
+};
 use swage_storage::store::ThreadStore;
 use swage_tool::dispatch::ToolDispatcher;
 
@@ -130,8 +132,14 @@ pub trait DelegationContextAssembler: Send + Sync {
     async fn assemble(
         &self,
         session: &swage_storage::Session,
+        turn_id: Uuid,
         delegated_history: Vec<ChatMessage>,
-    ) -> Result<Vec<ChatMessage>, AgentError>;
+    ) -> Result<DelegatedAssembly, AgentError>;
+}
+
+pub struct DelegatedAssembly {
+    pub messages: Vec<ChatMessage>,
+    pub report: serde_json::Value,
 }
 
 impl DelegationExecutor {
@@ -234,10 +242,37 @@ impl DelegationExecutor {
             .unwrap_or_default();
 
         let delegated_history = build_delegated_history(&transferred_context, task_description);
-        let assembled_context = if let Some(assembler) = &self.context_assembler {
-            assembler.assemble(&session, delegated_history).await?
+        let turn = self
+            .storage
+            .create_turn(NewTurn {
+                thread_id: thread.id,
+                agent_id: target_agent_id.clone(),
+                state: TurnState::Pending,
+                user_input: Some(task_description.to_string()),
+                parent_turn_id: sender_turn_id,
+            })
+            .await?;
+        let turn_id = turn.id;
+        let (assembled_context, assembly_report) = if let Some(assembler) = &self.context_assembler
+        {
+            let assembled = match assembler
+                .assemble(&session, turn_id, delegated_history)
+                .await
+            {
+                Ok(assembled) => assembled,
+                Err(error) => {
+                    self.storage
+                        .update_turn_state(turn_id, TurnState::Failed)
+                        .await?;
+                    return Err(error);
+                }
+            };
+            (assembled.messages, Some(assembled.report))
         } else {
-            build_delegated_context(&target_instructions, delegated_history)
+            (
+                build_delegated_context(&target_instructions, delegated_history),
+                None,
+            )
         };
 
         // 4. Build agent config with schema override.
@@ -305,18 +340,28 @@ impl DelegationExecutor {
             execution: TurnExecutionContext {
                 session_id: session.id,
                 thread_id: thread.id,
-                turn_id: Uuid::new_v4(),
+                turn_id,
                 space_id: Some(space_id),
             },
             user_message: task_description.to_string(),
             assembled_context,
             parent_turn_id: sender_turn_id,
-            existing_turn_id: None,
+            existing_turn_id: Some(turn_id),
             cancellation_token: cancel_token.clone(),
         };
 
         // Execute — the agent creates its own turn internally via process_turn_streaming.
         let result = agent.process_turn_streaming(turn_request, event_tx).await;
+
+        if let Some(report) = assembly_report {
+            if let Err(error) = self
+                .storage
+                .store_snapshot(turn_id, &report.to_string())
+                .await
+            {
+                tracing::warn!(%turn_id, %error, "failed to persist delegated context snapshot");
+            }
+        }
 
         // DelegationGuard handles deregistration on drop (including mid-
         // execution cancellation). No explicit removal needed.
