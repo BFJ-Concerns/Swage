@@ -263,7 +263,7 @@ impl ObservationStore for SqliteStorage {
                              FROM knowledge_curation_assertions latest
                              WHERE latest.observation_id = o.id
                          )
-                         AND a.kind IN ('duplicate-of', 'superseded-by')
+                         AND a.kind IN ('duplicate-of', 'superseded-by', 'stale')
                    )
                  ORDER BY bm25(extraction_fts)
                  LIMIT ?3",
@@ -487,7 +487,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn search_uses_latest_curation_assertion_as_effective_state() {
+    async fn search_keeps_observation_retired_when_latest_assertion_is_stale() {
         let (storage, space_id) = storage_with_space().await;
         let observation = storage
             .record_observation(new_observation(
@@ -541,16 +541,13 @@ mod tests {
             })
             .await
             .unwrap();
-        let hits = storage
-            .search_extractions(space_id, "distinctive effective state", 10)
-            .await
-            .unwrap();
-        assert_eq!(
-            hits.iter()
-                .map(|hit| hit.observation_id)
-                .collect::<Vec<_>>(),
-            vec![observation.id],
-            "the later assertion governs the observation's retrieval state"
+        assert!(
+            storage
+                .search_extractions(space_id, "distinctive effective state", 10)
+                .await
+                .unwrap()
+                .is_empty(),
+            "a stale assertion also retires the observation from default retrieval"
         );
     }
 
