@@ -80,8 +80,13 @@
       }
 
       connectionStore.connectTo(id);
-      // router is declared below but will be initialised before this is called.
-      router.navigate(`/conversations/${id}`);
+      // Route application has already put this path in the address bar. Only
+      // user-initiated selection needs a new history entry.
+      const path = `/conversations/${id}`;
+      if (window.location.pathname !== path) {
+        // router is declared below but will be initialised before this is called.
+        router.navigate(path);
+      }
     } catch (err) {
       console.error("Failed to select conversation:", err);
     }
