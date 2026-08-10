@@ -16,7 +16,9 @@ use swage_core::{
 };
 use tokio::time::Instant;
 
-use crate::provider::{LlmProvider, contains_user_visible_content};
+use crate::provider::{
+    LlmProvider, contains_user_visible_content, may_forward_before_attempt_commits,
+};
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -252,9 +254,9 @@ impl LlmProvider for FailoverProvider {
 
     /// Route the streaming completion through the provider chain.
     ///
-    /// Content chunks are forwarded as they arrive. Non-content chunks are
-    /// held until the attempt commits, so accounting and completion from a
-    /// discarded provider cannot escape. An error before content causes
+    /// Content and live progress chunks are forwarded as they arrive. Usage
+    /// and completion are held until the attempt commits, so accounting from
+    /// a discarded provider cannot escape. An error before content causes
     /// failover; after content starts, an error is forwarded terminally.
     /// Dropping the returned stream stops forwarding and drops the active
     /// provider stream at the next produced chunk.
@@ -350,6 +352,10 @@ impl LlmProvider for FailoverProvider {
                                 if tx.send(chunk).await.is_err() {
                                     return;
                                 }
+                            } else if may_forward_before_attempt_commits(&chunk) {
+                                if tx.send(chunk).await.is_err() {
+                                    return;
+                                }
                             } else {
                                 pending_chunks.push(chunk);
                             }
@@ -427,7 +433,7 @@ mod tests {
 
     use async_trait::async_trait;
     use futures::StreamExt;
-    use swage_core::FinishReason;
+    use swage_core::{FinishReason, TokenUsage};
     use tokio::time::advance;
 
     use super::*;
@@ -510,6 +516,40 @@ mod tests {
                     .expect("controlled stream requested more than once"),
                 dropped: Arc::clone(&self.dropped),
             })
+        }
+    }
+
+    struct SequencedStreamProvider {
+        name: &'static str,
+        call_count: Arc<StdMutex<u32>>,
+        attempts: StdMutex<Vec<Vec<StreamChunk>>>,
+    }
+
+    #[async_trait]
+    impl LlmProvider for SequencedStreamProvider {
+        fn model_id(&self) -> &str {
+            self.name
+        }
+
+        async fn complete(
+            &self,
+            _: CompletionRequest,
+        ) -> Result<CompletionResponse, ProviderError> {
+            unreachable!("sequenced stream provider is streaming-only")
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, ProviderError> {
+            unreachable!("sequenced stream provider is streaming-only")
+        }
+
+        fn stream(&self, _: CompletionRequest) -> Pin<Box<dyn Stream<Item = StreamChunk> + Send>> {
+            *self.call_count.lock().unwrap() += 1;
+            Box::pin(futures::stream::iter(
+                self.attempts.lock().unwrap().remove(0),
+            ))
         }
     }
 
@@ -1042,42 +1082,101 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stream_fails_over_after_retry_exhausts_before_content() {
+    async fn stream_reports_retry_before_failover_content_without_discarded_usage() {
         let primary_calls = Arc::new(StdMutex::new(0));
-        let primary = SequencedProvider {
+        let primary = SequencedStreamProvider {
             name: "p1",
             call_count: Arc::clone(&primary_calls),
-            results: StdMutex::new(vec![
-                Err(ProviderError::StreamError("p1 down".into())),
-                Err(ProviderError::StreamError("p1 down".into())),
+            attempts: StdMutex::new(vec![
+                vec![
+                    StreamChunk::Usage(TokenUsage {
+                        input_tokens: 100,
+                        output_tokens: 50,
+                    }),
+                    StreamChunk::Error {
+                        message: "p1 down".into(),
+                    },
+                ],
+                vec![
+                    StreamChunk::Usage(TokenUsage {
+                        input_tokens: 200,
+                        output_tokens: 75,
+                    }),
+                    StreamChunk::Error {
+                        message: "p1 still down".into(),
+                    },
+                ],
             ]),
         };
-        let secondary_calls = Arc::new(StdMutex::new(0));
-        let secondary = SequencedProvider {
-            name: "p2",
-            call_count: Arc::clone(&secondary_calls),
-            results: StdMutex::new(vec![Ok(ok_completion("hello from p2"))]),
-        };
+        let (secondary, mut secondary_tx, _) = ControlledProvider::new("p2");
         let retry_config = RetryConfig {
             max_retries: 1,
             initial_backoff: Duration::ZERO,
             max_backoff: Duration::ZERO,
         };
+        let secondary: Arc<dyn LlmProvider> = secondary;
         let failover = FailoverProvider::with_defaults(vec![
             Arc::new(RetryProvider::new(primary, retry_config.clone())),
             Arc::new(RetryProvider::new(secondary, retry_config)),
         ]);
+        let mut stream = failover.stream(completion_req());
 
-        let chunks: Vec<_> = failover.stream(completion_req()).collect().await;
+        let progress = tokio::time::timeout(Duration::from_millis(100), stream.next())
+            .await
+            .expect("retry progress must arrive while failover content is still unavailable")
+            .expect("retry progress chunk");
+        assert!(matches!(
+            progress,
+            StreamChunk::ProviderRetryStarted { ref provider, .. } if provider == "p1"
+        ));
+
+        secondary_tx
+            .send(StreamChunk::Delta {
+                content: "hello from p2".into(),
+            })
+            .await
+            .unwrap();
+        secondary_tx
+            .send(StreamChunk::Usage(TokenUsage {
+                input_tokens: 10,
+                output_tokens: 5,
+            }))
+            .await
+            .unwrap();
+        secondary_tx
+            .send(StreamChunk::Done {
+                finish_reason: None,
+            })
+            .await
+            .unwrap();
+        drop(secondary_tx);
+
+        let mut chunks = vec![progress];
+        chunks.extend(stream.collect::<Vec<_>>().await);
 
         assert_eq!(*primary_calls.lock().unwrap(), 2);
-        assert_eq!(*secondary_calls.lock().unwrap(), 1);
+        let first_content = chunks
+            .iter()
+            .position(contains_user_visible_content)
+            .expect("secondary content must reach the caller");
+        let first_progress = chunks
+            .iter()
+            .position(|chunk| matches!(chunk, StreamChunk::ProviderRetryStarted { .. }))
+            .expect("primary retry progress must reach the caller");
         assert!(
-            chunks.iter().any(
-                |chunk| matches!(chunk, StreamChunk::Delta { content } if content == "hello from p2")
-            ),
-            "secondary content must reach the caller after the primary exhausts pre-content retries: {chunks:?}"
+            first_progress < first_content,
+            "progress must precede content"
         );
+        let usage: Vec<_> = chunks
+            .iter()
+            .filter_map(|chunk| match chunk {
+                StreamChunk::Usage(usage) => Some(usage),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(usage.len(), 1, "discarded attempts must not report usage");
+        assert_eq!(usage[0].input_tokens, 10);
+        assert_eq!(usage[0].output_tokens, 5);
     }
 
     #[tokio::test]
