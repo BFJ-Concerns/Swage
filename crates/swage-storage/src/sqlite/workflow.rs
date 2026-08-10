@@ -410,6 +410,8 @@ mod tests {
         let run = storage
             .create_workflow_run(NewWorkflowRun {
                 space_id: space.id,
+                parent_run_id: None,
+                parent_seq: None,
                 script_version_id: Some(second.id),
                 source: None,
                 source_hash: "hash".into(),
