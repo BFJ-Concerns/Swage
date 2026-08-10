@@ -679,7 +679,7 @@ async fn run_host_commands_inner(
                         .max_agent_calls
                         .is_some_and(|limit| agent_calls.load(Ordering::SeqCst) >= limit)
                     {
-                        // Replay admission counting recognises this prefix in `start_run`.
+                        // Replay admission counting recognises this prefix in `launch_existing_run`.
                         let error = "BudgetExceededError: agent call limit reached";
                         seq.fetch_add(1, Ordering::SeqCst);
                         let result = record_agent_budget_refusal(
@@ -702,7 +702,7 @@ async fn run_host_commands_inner(
                             .saturating_sub(accounting.spent.saturating_add(accounting.reserved));
                         if available < reservation {
                             drop(accounting);
-                            // Replay admission counting recognises this prefix in `start_run`.
+                            // Replay admission counting recognises this prefix in `launch_existing_run`.
                             let error = "BudgetExceededError: token limit reached";
                             seq.fetch_add(1, Ordering::SeqCst);
                             let result = record_agent_budget_refusal(
