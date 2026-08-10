@@ -499,8 +499,9 @@ impl WorkflowEngine {
                             const request = buildAgentRequest(options);
                             return unwrapHostResponse(await __agent(String(prompt), JSON.stringify(request)));
                         };
-                        // Dispatch without awaiting: the returned handle is a
-                        // plain promise plus `done` bookkeeping for wait().
+                        // Dispatch without awaiting: the returned handle
+                        // carries the result promise wait() races, plus
+                        // `label`/`done` for the script's own bookkeeping.
                         globalThis.agentStart = (prompt, options = {}) => {
                             const request = buildAgentRequest(options);
                             const handle = {

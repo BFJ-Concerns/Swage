@@ -310,6 +310,7 @@ async fn run_ephemeral_agent_call(
     .await
     .map_err(|error| error.to_string())?;
     let (events, _events_rx) = mpsc::unbounded_channel::<ServerEvent>();
+    let request_schema = request.schema.clone();
     let processing = crate::turn::process_turn_with_existing_turn(
         state,
         session.id,
@@ -338,9 +339,33 @@ async fn run_ephemeral_agent_call(
         .into_iter()
         .max_by_key(|turn| turn.created_at)
         .ok_or_else(|| "agent call produced no turn".to_string())?;
-    let output = turn
-        .structured_output
-        .unwrap_or_else(|| Value::String(turn.assistant_response.unwrap_or_default()));
+    // The turn's failure must surface as this call's error — the shared turn
+    // path reports failures over its event channel, which nobody holds here.
+    // Falling through would hand the script raw text (or an empty string)
+    // where its schema promised an object, silently.
+    if turn.state != swage_storage::TurnState::Completed {
+        return Err(format!(
+            "AgentCallError: agent turn {} {}",
+            turn.id,
+            match turn.state {
+                swage_storage::TurnState::Failed => "failed".to_string(),
+                other => format!("ended {other:?}"),
+            }
+        ));
+    }
+    let output = match (&request_schema, turn.structured_output) {
+        (Some(_), Some(structured)) => structured,
+        (Some(_), None) => {
+            // Schema demanded, none produced: the validated-object contract
+            // cannot be met, and unvalidated text must not impersonate it.
+            return Err(format!(
+                "AgentCallError: agent turn {} produced no schema-valid output",
+                turn.id
+            ));
+        }
+        (None, structured) => structured
+            .unwrap_or_else(|| Value::String(turn.assistant_response.unwrap_or_default())),
+    };
     Ok(AgentCallResult {
         output,
         input_tokens: turn.input_tokens.unwrap_or(0).max(0) as u64,
@@ -433,6 +458,12 @@ async fn run_host_commands_inner(
             HostCommand::Record { kind, message } => {
                 let request = serde_json::json!({ "message": message });
                 let current_seq = seq.fetch_add(1, Ordering::SeqCst);
+                // Replay check like every other journalled command: a resumed
+                // script re-emits its logs, and the recorded row already
+                // holds them — re-inserting would collide on (run_id, seq).
+                if replay.get(current_seq as usize).is_some() {
+                    continue;
+                }
                 if let Ok(intent) = state
                     .storage
                     .create_workflow_journal_intent(NewWorkflowJournalIntent {
@@ -708,6 +739,11 @@ async fn run_host_commands_inner(
                 tokio::spawn(async move {
                     tokio::select! {
                         () = tokio::time::sleep(std::time::Duration::from_millis(ms)) => {
+                            // Reporting only — the entry is completed by
+                            // ConfirmTimer once the race declares this
+                            // firing the winner. A firing the race ignores
+                            // (its wait() already took a completion) leaves
+                            // the entry `started`.
                             let _ = reply.send(Ok(serde_json::json!({ "fired": true })));
                         }
                         () = abandon.cancelled() => {}
@@ -962,6 +998,13 @@ async fn complete_workflow_call_entry(
             _ => child,
         },
         None => {
+            let parent_budget = state
+                .storage
+                .get_workflow_run(parent_run_id)
+                .await
+                .map_err(|error| error.to_string())?
+                .map(|parent| parent.budget)
+                .unwrap_or_else(|| serde_json::json!({}));
             let record = state
                 .storage
                 .create_workflow_run(NewWorkflowRun {
@@ -972,8 +1015,12 @@ async fn complete_workflow_call_entry(
                     source: None,
                     source_hash: source_hash(&version.source),
                     args: request.args.clone(),
-                    budget: serde_json::to_value(WorkflowBudget::default())
-                        .map_err(|error| error.to_string())?,
+                    // The child inherits the parent's limits rather than
+                    // running unbounded. Coarse — each child gets the full
+                    // allowance again rather than drawing down a shared
+                    // pool — but confinement flows down, which is what the
+                    // budget contract promises.
+                    budget: parent_budget,
                     engine_version: "rquickjs-0.12.0".into(),
                 })
                 .await
