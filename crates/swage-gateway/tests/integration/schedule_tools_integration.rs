@@ -11,7 +11,13 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use serde_json::json;
+use axum::{
+    Router,
+    body::{Body, to_bytes},
+    http::{Request, StatusCode},
+};
+use serde_json::{Value, json};
+use tower::ServiceExt;
 use uuid::Uuid;
 
 use swage_core::{
@@ -21,9 +27,9 @@ use swage_core::{
 use swage_gateway::change_case::{ChangeOperation, apply_change};
 use swage_gateway::service::ConversationService;
 use swage_gateway::tool::schedule::{ScheduleTool, WakeMeLaterTool};
-use swage_gateway::tool::{ToolDispatcher, ToolRegistry};
+use swage_gateway::tool::{Tool, ToolDispatcher, ToolRegistry};
 use swage_gateway::tool_executor::GatewayToolContext;
-use swage_gateway::{schedule, state::AppState};
+use swage_gateway::{schedule, server::build_router, state::AppState};
 use swage_provider::LlmProvider;
 use swage_storage::{NewSchedule, ScheduleRunState, SqliteStorage};
 use swage_tool::context::MockToolContext;
@@ -79,6 +85,25 @@ fn test_state() -> AppState {
         ToolDispatcher::allow_all(vec![]),
         None,
     )
+}
+
+async fn post_json(router: &Router, uri: &str, body: Value) -> (StatusCode, Value) {
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    (status, body)
 }
 
 /// The scheduling bundle as the config seeds it — the grant unit the tools
@@ -363,6 +388,19 @@ async fn model_schedule_mutations_record_state_diffs_and_provenance() {
             .iter()
             .all(|v| v.source == "schedule" && v.session_id == Some(session_id))
     );
+    let space_versions = state
+        .storage
+        .list_configuration_versions(Some(space.id))
+        .await
+        .unwrap();
+    assert_eq!(
+        space_versions
+            .iter()
+            .filter(|version| version.entity_id == schedule_id)
+            .count(),
+        5,
+        "space history includes the schedule removal as well as its earlier mutations"
+    );
 
     let audit = state
         .storage
@@ -381,6 +419,7 @@ async fn model_schedule_mutations_record_state_diffs_and_provenance() {
 #[tokio::test(flavor = "multi_thread")]
 async fn rollback_surface_restores_schedule_state_and_records_the_rollback() {
     let state = test_state();
+    let router = build_router(state.clone());
     let space = state.space_store.get_or_create_default().await.unwrap();
     let dispatcher = dispatcher(permissions(&["scheduling"], &[]));
     let session_id = tool_session(&state, space.id).await;
@@ -416,18 +455,13 @@ async fn rollback_surface_restores_schedule_state_and_records_the_rollback() {
         .await
         .unwrap();
 
-    let rollback = dispatcher
-        .dispatch(
-            "schedule",
-            json!({
-                "action": "rollback", "version_id": original_version
-            }),
-            &ctx,
-            "researcher",
-        )
-        .await
-        .unwrap();
-    assert_eq!(rollback.result["schedule"]["message"], "original task");
+    let (status, rollback) = post_json(
+        &router,
+        "/api/operator/configuration/rollback",
+        json!({"version_id": original_version}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
     let restored = state
         .storage
         .get_schedule(schedule_id.parse().unwrap())
@@ -440,9 +474,7 @@ async fn rollback_surface_restores_schedule_state_and_records_the_rollback() {
     );
     assert_eq!(restored.expression, "every 1 hours");
 
-    let rollback_version = rollback.result["change_case"]["version_id"]
-        .as_str()
-        .unwrap();
+    let rollback_version = rollback["version_id"].as_str().unwrap();
     let recorded = state
         .storage
         .get_configuration_version(rollback_version.parse().unwrap())
@@ -456,11 +488,9 @@ async fn rollback_surface_restores_schedule_state_and_records_the_rollback() {
     );
     assert_eq!(recorded.diff["message"]["from"], "changed task");
     assert_eq!(recorded.diff["message"]["to"], "original task");
-    let audit = state
-        .storage
-        .list_audit_events_by_session(session_id)
-        .await
-        .unwrap();
+    assert_eq!(recorded.source, "operator_http");
+    assert_eq!(recorded.session_id, None);
+    let audit = state.storage.list_audit_events().await.unwrap();
     assert!(
         audit
             .iter()
@@ -479,25 +509,27 @@ async fn rollback_surface_restores_schedule_state_and_records_the_rollback() {
     let absence_version = removed.result["change_case"]["version_id"]
         .as_str()
         .unwrap();
-    let restored = dispatcher
-        .dispatch(
-            "schedule",
-            json!({"action": "rollback", "version_id": rollback_version}),
-            &ctx,
-            "researcher",
-        )
+    let (status, _) = post_json(
+        &router,
+        "/api/operator/configuration/rollback",
+        json!({"version_id": rollback_version}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let restored = state
+        .storage
+        .get_schedule(schedule_id.parse().unwrap())
         .await
+        .unwrap()
         .unwrap();
-    assert_eq!(restored.result["schedule"]["message"], "original task");
-    dispatcher
-        .dispatch(
-            "schedule",
-            json!({"action": "rollback", "version_id": absence_version}),
-            &ctx,
-            "researcher",
-        )
-        .await
-        .unwrap();
+    assert_eq!(restored.message, "original task");
+    let (status, _) = post_json(
+        &router,
+        "/api/operator/configuration/rollback",
+        json!({"version_id": absence_version}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
     assert!(
         state
             .storage
@@ -637,6 +669,14 @@ async fn scheduling_bundle_is_the_grant_unit() {
 
     // Granting only the scheduling bundle reaches both tools and nothing else.
     let granted = dispatcher(permissions(&["scheduling"], &[]));
+    assert!(
+        !ScheduleTool.parameters()["properties"]["action"]["enum"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| action == "rollback"),
+        "the model-facing scheduling grant does not include rollback"
+    );
     assert!(
         granted
             .dispatch("schedule", json!({"action": "list"}), &ctx, "researcher")

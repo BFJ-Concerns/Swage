@@ -14,7 +14,10 @@ use uuid::Uuid;
 
 use swage_agent::approval::ApprovalDecisionValue;
 use swage_core::GatewayError;
-use swage_protocol::client::{channel as channel_wire, schedule as schedule_wire};
+use swage_protocol::{
+    client::{channel as channel_wire, schedule as schedule_wire},
+    hosting::{ConfigurationChangeResponse, RollbackConfigurationRequest},
+};
 
 use crate::{
     attachment::{
@@ -657,6 +660,23 @@ pub async fn delete_schedule(
     } else {
         Err(ApiError::not_found("schedule", id))
     }
+}
+
+/// `POST /api/operator/configuration/rollback` — restore a recorded version.
+pub async fn rollback_configuration(
+    State(state): State<AppState>,
+    Json(req): Json<RollbackConfigurationRequest>,
+) -> Result<Json<ConfigurationChangeResponse>, ApiError> {
+    let applied =
+        crate::change_case::rollback_to_version(&state, req.version_id, "operator_http", None)
+            .await?;
+    Ok(Json(ConfigurationChangeResponse {
+        version_id: applied.version_id,
+        entity_kind: applied.entity_kind,
+        entity_id: applied.entity_id,
+        summary: applied.summary,
+        risk_band: applied.risk_band.as_str().to_owned(),
+    }))
 }
 
 /// `GET /api/presence` — inspect gateway, client, and machine presence.

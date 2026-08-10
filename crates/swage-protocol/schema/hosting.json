@@ -9,6 +9,9 @@
     "approvals": {
       "$ref": "#/$defs/ApprovalListResponse"
     },
+    "configuration_change": {
+      "$ref": "#/$defs/ConfigurationChangeResponse"
+    },
     "devices": {
       "$ref": "#/$defs/DeviceListResponse"
     },
@@ -20,6 +23,9 @@
     },
     "presence": {
       "$ref": "#/$defs/PresenceSnapshotResponse"
+    },
+    "rollback_configuration": {
+      "$ref": "#/$defs/RollbackConfigurationRequest"
     }
   },
   "required": [
@@ -27,6 +33,8 @@
     "heartbeat",
     "approvals",
     "approval_decision",
+    "rollback_configuration",
+    "configuration_change",
     "operator_overview",
     "devices"
   ],
@@ -208,6 +216,35 @@
       "required": [
         "session_id",
         "state"
+      ]
+    },
+    "ConfigurationChangeResponse": {
+      "description": "The new change-case record produced by a configuration rollback.",
+      "type": "object",
+      "properties": {
+        "entity_id": {
+          "type": "string"
+        },
+        "entity_kind": {
+          "type": "string"
+        },
+        "risk_band": {
+          "type": "string"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "version_id": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "required": [
+        "version_id",
+        "entity_kind",
+        "entity_id",
+        "summary",
+        "risk_band"
       ]
     },
     "DeliveryRoutingRequest": {
@@ -702,6 +739,19 @@
         "gateway",
         "clients",
         "machines"
+      ]
+    },
+    "RollbackConfigurationRequest": {
+      "description": "Ask the operator control plane to restore a recorded configuration version.",
+      "type": "object",
+      "properties": {
+        "version_id": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "required": [
+        "version_id"
       ]
     },
     "Schedule": {
