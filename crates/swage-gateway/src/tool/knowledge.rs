@@ -1,13 +1,16 @@
 //! Knowledge-base tools — the agent's hands on the space's gathered
 //! external evidence.
 //!
-//! Two tools, separately grantable so read access never implies write:
+//! Three tools, separately grantable so read access never implies either kind
+//! of write:
 //!
 //! - **`knowledge_search`** — full-text search over the space's knowledge
 //!   base; each hit carries the source it came from and the pinned
 //!   derivation version and offsets a citation needs.
 //! - **`knowledge_record`** — capture content into the knowledge base as a
 //!   permanent, citable observation.
+//! - **`knowledge_curate`** — append an observation-level judgement without
+//!   changing the gathered evidence.
 //!
 //! Both are host-only (`requires_device_execution`): they reach live gateway
 //! state and the space's body files. Knowledge content returns as tool
@@ -19,7 +22,9 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use swage_core::ToolError;
-use swage_storage::{NewSourceObservation, ObservationOrigin};
+use swage_storage::{
+    CurationAssertionKind, NewCurationAssertion, NewSourceObservation, ObservationOrigin,
+};
 use swage_tool::context::ToolContext;
 
 use crate::knowledge;
@@ -29,6 +34,7 @@ use crate::tool_executor::GatewayToolContext;
 
 const SEARCH_TOOL: &str = "knowledge_search";
 const RECORD_TOOL: &str = "knowledge_record";
+const CURATE_TOOL: &str = "knowledge_curate";
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -323,9 +329,123 @@ impl Tool for KnowledgeRecordTool {
     }
 }
 
+// ---------------------------------------------------------------------------
+// knowledge_curate
+// ---------------------------------------------------------------------------
+
+pub struct KnowledgeCurateTool;
+
+#[async_trait]
+impl Tool for KnowledgeCurateTool {
+    fn name(&self) -> &str {
+        CURATE_TOOL
+    }
+
+    fn description(&self) -> &str {
+        "Record a judgement about an observation in this space's knowledge base. \
+         Mark it as a duplicate of another observation, superseded by another \
+         observation, or stale. Judgements are permanent history: a later \
+         judgement becomes current without changing either observation."
+    }
+
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "observation_id": {
+                    "type": "string",
+                    "description": "The observation being judged."
+                },
+                "kind": {
+                    "type": "string",
+                    "enum": ["duplicate-of", "supersedes", "stale"],
+                    "description": "The judgement to record."
+                },
+                "target_observation_id": {
+                    "type": "string",
+                    "description": "The preferred or replacement observation. Required \
+                                    for duplicate-of and supersedes; omit for stale."
+                }
+            },
+            "required": ["observation_id", "kind"]
+        })
+    }
+
+    fn requires_device_execution(&self) -> bool {
+        true
+    }
+
+    async fn execute(&self, params: Value, ctx: &dyn ToolContext) -> Result<Value, ToolError> {
+        // Fully validate model-provided parameters before consulting host state.
+        let observation_id = required_str(CURATE_TOOL, &params, "observation_id")?
+            .parse::<Uuid>()
+            .map_err(|_| invalid(CURATE_TOOL, "'observation_id' must be a UUID"))?;
+        let kind = required_str(CURATE_TOOL, &params, "kind")?
+            .parse::<CurationAssertionKind>()
+            .map_err(|_| {
+                invalid(
+                    CURATE_TOOL,
+                    "'kind' must be duplicate-of, supersedes, or stale",
+                )
+            })?;
+        let target_observation_id = params
+            .get("target_observation_id")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| {
+                value
+                    .parse::<Uuid>()
+                    .map_err(|_| invalid(CURATE_TOOL, "'target_observation_id' must be a UUID"))
+            })
+            .transpose()?;
+        match (kind, target_observation_id) {
+            (CurationAssertionKind::Stale, Some(_)) => {
+                return Err(invalid(CURATE_TOOL, "'stale' must not have a target"));
+            }
+            (CurationAssertionKind::DuplicateOf | CurationAssertionKind::Supersedes, None) => {
+                return Err(invalid(CURATE_TOOL, "this judgement requires a target"));
+            }
+            _ => {}
+        }
+
+        let state = gateway_state(CURATE_TOOL, ctx)?;
+        let (space_id, _slug) = session_space(CURATE_TOOL, state, ctx).await?;
+        let assertion = state
+            .storage
+            .add_curation_assertion(NewCurationAssertion {
+                space_id,
+                observation_id,
+                kind,
+                target_observation_id,
+            })
+            .await
+            .map_err(|error| failed(CURATE_TOOL, error))?;
+
+        Ok(json!({
+            "assertion_id": assertion.id,
+            "observation_id": assertion.observation_id,
+            "kind": assertion.kind,
+            "target_observation_id": assertion.target_observation_id,
+            "recorded": true,
+        }))
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use tokio::sync::mpsc;
+
     use super::*;
+    use crate::state::AppState;
+    use crate::tool_executor::GatewayToolContext;
+    use crate::turn::tests::MockProvider;
+    use swage_provider::LlmProvider;
+    use swage_storage::{
+        CurationAssertionStore, NewSession, NewSourceObservation, ObservationStore, SessionStore,
+        SpaceStore, SqliteStorage,
+    };
 
     // The tools' host halves (session→space resolution, storage, body files)
     // are exercised through the storage and knowledge module tests; here the
@@ -352,6 +472,98 @@ mod tests {
 
         let result = tool.execute(json!({"query": "  "}), &ctx).await;
         assert!(matches!(result, Err(ToolError::InvalidParameters { .. })));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn curate_schema_describes_the_three_judgements() {
+        let schema = KnowledgeCurateTool.parameters();
+        assert_eq!(
+            schema["properties"]["kind"]["enum"],
+            json!(["duplicate-of", "supersedes", "stale"])
+        );
+        assert_eq!(schema["required"], json!(["observation_id", "kind"]));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn curate_validates_before_host_access() {
+        let tool = KnowledgeCurateTool;
+        let ctx = swage_tool::context::MockToolContext::new("agent", "not-a-session");
+
+        for params in [
+            json!({"observation_id": "not-a-uuid", "kind": "stale"}),
+            json!({"observation_id": Uuid::new_v4(), "kind": "unknown"}),
+            json!({"observation_id": Uuid::new_v4(), "kind": "duplicate-of"}),
+            json!({
+                "observation_id": Uuid::new_v4(),
+                "kind": "stale",
+                "target_observation_id": Uuid::new_v4()
+            }),
+        ] {
+            assert!(matches!(
+                tool.execute(params, &ctx).await,
+                Err(ToolError::InvalidParameters { .. })
+            ));
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn curate_resolves_the_session_space_and_records_an_assertion() {
+        let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+        let space = storage.get_or_create_default().await.unwrap();
+        let session = storage
+            .create_session(NewSession {
+                space_id: space.id,
+                agent_id: "curator".into(),
+                metadata: None,
+                active_workspace_attachment_id: None,
+            })
+            .await
+            .unwrap();
+        let subject = storage
+            .record_observation(NewSourceObservation {
+                space_id: space.id,
+                origin: ObservationOrigin {
+                    url: Some("https://example.test/subject".into()),
+                    local_path: None,
+                },
+                retrieved_at: Utc::now(),
+                body_sha256: "subject-hash".into(),
+                body_bytes: 10,
+                media_type: "text/plain".into(),
+            })
+            .await
+            .unwrap();
+        let provider = Arc::new(MockProvider::new(vec![]));
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn swage_storage::Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            provider as Arc<dyn LlmProvider>,
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let base = swage_tool::context::MockToolContext::new("curator", session.id.to_string());
+        let (ws_tx, _ws_rx) = mpsc::unbounded_channel();
+        let ctx = GatewayToolContext::new(
+            &base,
+            ws_tx,
+            Arc::clone(&storage) as Arc<dyn swage_storage::Storage>,
+        )
+        .with_app_state(Some(state));
+
+        let result = KnowledgeCurateTool
+            .execute(json!({"observation_id": subject.id, "kind": "stale"}), &ctx)
+            .await
+            .unwrap();
+
+        assert_eq!(result["observation_id"], json!(subject.id));
+        let assertion = storage
+            .get_effective_curation_assertion(subject.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(assertion.space_id, space.id);
+        assert_eq!(assertion.kind, CurationAssertionKind::Stale);
     }
 
     #[tokio::test(flavor = "multi_thread")]
