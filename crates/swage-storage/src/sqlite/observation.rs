@@ -253,6 +253,16 @@ impl ObservationStore for SqliteStorage {
                        SELECT MAX(version) FROM extraction_derivations
                        WHERE observation_id = d.observation_id
                    )
+                   AND NOT EXISTS (
+                       SELECT 1 FROM knowledge_curation_assertions a
+                       WHERE a.observation_id = o.id
+                         AND a.rowid = (
+                             SELECT MAX(latest.rowid)
+                             FROM knowledge_curation_assertions latest
+                             WHERE latest.observation_id = o.id
+                         )
+                         AND a.kind IN ('duplicate-of', 'supersedes')
+                   )
                  ORDER BY bm25(extraction_fts)
                  LIMIT ?3",
             )?;
