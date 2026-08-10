@@ -805,22 +805,18 @@ async fn run_host_commands_inner(
                             Err(error) => Err(error.to_string()),
                         }
                     };
-                    if call_reservation != 0 {
-                        let actual = if !completed_replay {
-                            result
-                                .as_ref()
-                                .map(|result| {
-                                    result.input_tokens.saturating_add(result.output_tokens)
-                                })
-                                .unwrap_or(0)
-                        } else {
-                            0
-                        };
-                        let mut accounting = token_budget.lock().await;
-                        accounting.spent = accounting.spent.saturating_add(actual);
-                        spent.store(accounting.spent, Ordering::SeqCst);
-                        accounting.reserved = accounting.reserved.saturating_sub(call_reservation);
-                    }
+                    let actual = if !completed_replay {
+                        result
+                            .as_ref()
+                            .map(|result| result.input_tokens.saturating_add(result.output_tokens))
+                            .unwrap_or(0)
+                    } else {
+                        0
+                    };
+                    let mut accounting = token_budget.lock().await;
+                    accounting.spent = accounting.spent.saturating_add(actual);
+                    spent.store(accounting.spent, Ordering::SeqCst);
+                    accounting.reserved = accounting.reserved.saturating_sub(call_reservation);
                     let _ = reply.send(result);
                 });
             }
@@ -2202,7 +2198,7 @@ mod tests {
             None,
             WorkflowBudget {
                 max_agent_calls: None,
-                max_total_tokens: Some(10),
+                max_total_tokens: Some(1_000_000),
                 max_concurrent_agent_calls: Some(2),
             },
             vec![],
@@ -2257,14 +2253,16 @@ mod tests {
         );
         first_cancellation.cancel();
         second_cancellation.cancel();
-        first_receive
+        let first_error = first_receive
             .await
             .expect("first reply")
-            .expect_err("cancelled");
-        second_receive
+            .expect_err("cancelled after admission");
+        let second_error = second_receive
             .await
             .expect("second reply")
-            .expect_err("cancelled");
+            .expect_err("cancelled after admission");
+        assert!(first_error.starts_with("websocket error: no active turn for session"));
+        assert!(second_error.starts_with("websocket error: no active turn for session"));
         drop(tx);
         task.await.expect("host loop");
     }
