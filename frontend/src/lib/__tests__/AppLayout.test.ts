@@ -241,4 +241,14 @@ describe("AppLayout shell navigation", () => {
 
     expect(onNavigate).toHaveBeenCalledWith("/settings/providers");
   });
+
+  it("renders global settings without a selected space", () => {
+    component = mountLayout({
+      hasCurrentSpace: false,
+      routePath: "/settings/providers",
+    });
+
+    expect(document.querySelector('[aria-label="Settings"]')).not.toBeNull();
+    expect(document.body.textContent).not.toContain("Choose where to work.");
+  });
 });
