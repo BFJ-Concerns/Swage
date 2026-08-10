@@ -422,6 +422,37 @@ impl LlmProvider for PendingProvider {
     }
 }
 
+/// A mock provider whose stream never emits a response or completes.
+struct EmptyPendingProvider;
+
+#[async_trait]
+impl LlmProvider for EmptyPendingProvider {
+    fn model_id(&self) -> &str {
+        "empty-pending-model"
+    }
+
+    async fn complete(
+        &self,
+        _request: CompletionRequest,
+    ) -> Result<CompletionResponse, ProviderError> {
+        unimplemented!("not used in cancellation tests")
+    }
+
+    async fn complete_with_tools(
+        &self,
+        _request: ToolCompletionRequest,
+    ) -> Result<ToolCompletionResponse, ProviderError> {
+        unimplemented!("not used in cancellation tests")
+    }
+
+    fn stream(
+        &self,
+        _request: CompletionRequest,
+    ) -> Pin<Box<dyn futures::Stream<Item = StreamChunk> + Send>> {
+        Box::pin(futures::stream::pending())
+    }
+}
+
 struct BlockInboundHook;
 
 #[async_trait]
@@ -3518,6 +3549,107 @@ async fn cancelled_turn_stores_partial_and_marks_interrupted() {
         turns[0].assistant_response.as_deref(),
         Some(INTERRUPTED_PARTIAL)
     );
+
+    let conversation = crate::service::ConversationService::new(
+        Arc::clone(&state.storage),
+        Arc::clone(&state.space_store),
+    )
+    .get_conversation(session_id)
+    .await
+    .expect("reload-shaped conversation read should succeed");
+    assert_eq!(conversation.messages.len(), 2, "user and partial assistant");
+    assert_eq!(conversation.messages[1].role, "assistant");
+    assert_eq!(conversation.messages[1].content, INTERRUPTED_PARTIAL);
+    assert_eq!(
+        conversation.messages[1].turn_state,
+        Some(swage_protocol::client::conversation::TurnState::Interrupted)
+    );
+}
+
+#[tokio::test]
+async fn cancelled_turn_without_partial_stores_no_assistant_response() {
+    let storage = Arc::new(MockStorage::new());
+    let space = storage
+        .get_or_create_default()
+        .await
+        .expect("create default space");
+    let session = storage
+        .create_session(NewSession {
+            space_id: space.id,
+            agent_id: "gateway".to_string(),
+            metadata: None,
+            active_workspace_attachment_id: None,
+        })
+        .await
+        .expect("create session");
+    let session_id = session.id;
+
+    ThreadStore::create(
+        &*storage,
+        NewThread {
+            session_id,
+            agent_id: "gateway".to_string(),
+        },
+    )
+    .await
+    .expect("create default thread");
+
+    let state = Arc::new(AppState::new(
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
+        Arc::new(EmptyPendingProvider) as Arc<dyn LlmProvider>,
+        swage_config::ResolvedConfig::default(),
+        crate::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+    ));
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let state_clone = Arc::clone(&state);
+    let handle = tokio::spawn(async move {
+        process_turn(
+            &state_clone,
+            session_id,
+            None,
+            "Hi".to_string(),
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
+        )
+        .await
+    });
+
+    for _ in 0..100 {
+        if state.active_turns.lock().await.contains_key(&session_id) {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(state.active_turns.lock().await.contains_key(&session_id));
+    cancel_turn(&state, session_id)
+        .await
+        .expect("cancel should succeed");
+    handle
+        .await
+        .expect("task should not panic")
+        .expect("process_turn ok");
+
+    let threads = state.storage.list_by_session(session_id).await.unwrap();
+    let turns = state
+        .storage
+        .list_turns_by_thread(threads[0].id)
+        .await
+        .unwrap();
+    assert_eq!(turns[0].state, TurnState::Interrupted);
+    assert_eq!(turns[0].assistant_response, None);
+
+    let conversation = crate::service::ConversationService::new(
+        Arc::clone(&state.storage),
+        Arc::clone(&state.space_store),
+    )
+    .get_conversation(session_id)
+    .await
+    .expect("reload-shaped conversation read should succeed");
+    assert_eq!(conversation.messages.len(), 1, "only the user message");
+    assert_eq!(conversation.messages[0].role, "user");
 }
 
 #[tokio::test]
