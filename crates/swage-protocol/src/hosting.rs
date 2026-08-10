@@ -84,13 +84,13 @@ pub struct ApprovalDecisionRequest {
     pub reason: Option<String>,
 }
 
-/// Ask the operator control plane to restore a recorded configuration version.
+/// Ask the operator control plane to undo a recorded configuration case.
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
-pub struct RollbackConfigurationRequest {
-    pub version_id: Uuid,
+pub struct UndoConfigurationCaseRequest {
+    pub case_id: Uuid,
 }
 
-/// The new change-case record produced by a configuration rollback.
+/// The new change-case record produced by undoing a configuration case.
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
 pub struct ConfigurationChangeResponse {
     pub version_id: Uuid,
@@ -159,7 +159,7 @@ pub struct HostingSurface {
     heartbeat: MachineHeartbeatRequest,
     approvals: ApprovalListResponse,
     approval_decision: ApprovalDecisionRequest,
-    rollback_configuration: RollbackConfigurationRequest,
+    undo_configuration_case: UndoConfigurationCaseRequest,
     configuration_change: ConfigurationChangeResponse,
     operator_overview: OperatorOverviewResponse,
     devices: device::DeviceListResponse,

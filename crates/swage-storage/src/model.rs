@@ -397,7 +397,7 @@ pub struct ConfigurationVersion {
     pub snapshot: serde_json::Value,
     pub diff: serde_json::Value,
     pub previous_version_id: Option<Uuid>,
-    pub rollback_to_version_id: Option<Uuid>,
+    pub undone_version_id: Option<Uuid>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -416,7 +416,7 @@ pub struct NewConfigurationVersion {
     pub snapshot: serde_json::Value,
     pub diff: serde_json::Value,
     pub previous_version_id: Option<Uuid>,
-    pub rollback_to_version_id: Option<Uuid>,
+    pub undone_version_id: Option<Uuid>,
 }
 
 /// A centrally managed secret or credential reference.

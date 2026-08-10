@@ -24,8 +24,8 @@
     "presence": {
       "$ref": "#/$defs/PresenceSnapshotResponse"
     },
-    "rollback_configuration": {
-      "$ref": "#/$defs/RollbackConfigurationRequest"
+    "undo_configuration_case": {
+      "$ref": "#/$defs/UndoConfigurationCaseRequest"
     }
   },
   "required": [
@@ -33,7 +33,7 @@
     "heartbeat",
     "approvals",
     "approval_decision",
-    "rollback_configuration",
+    "undo_configuration_case",
     "configuration_change",
     "operator_overview",
     "devices"
@@ -219,7 +219,7 @@
       ]
     },
     "ConfigurationChangeResponse": {
-      "description": "The new change-case record produced by a configuration rollback.",
+      "description": "The new change-case record produced by undoing a configuration case.",
       "type": "object",
       "properties": {
         "entity_id": {
@@ -741,19 +741,6 @@
         "machines"
       ]
     },
-    "RollbackConfigurationRequest": {
-      "description": "Ask the operator control plane to restore a recorded configuration version.",
-      "type": "object",
-      "properties": {
-        "version_id": {
-          "type": "string",
-          "format": "uuid"
-        }
-      },
-      "required": [
-        "version_id"
-      ]
-    },
     "Schedule": {
       "description": "A schedule as returned by the API.",
       "type": "object",
@@ -986,6 +973,19 @@
             "session_id"
           ]
         }
+      ]
+    },
+    "UndoConfigurationCaseRequest": {
+      "description": "Ask the operator control plane to undo a recorded configuration case.",
+      "type": "object",
+      "properties": {
+        "case_id": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "required": [
+        "case_id"
       ]
     }
   }

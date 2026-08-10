@@ -24,14 +24,14 @@ use swage_core::{
     CompletionRequest, CompletionResponse, ProviderError, StreamChunk, ToolCompletionRequest,
     ToolCompletionResponse,
 };
-use swage_gateway::change_case::{ChangeOperation, apply_change};
+use swage_gateway::change_case::{ChangeOperation, apply_change, undo_case};
 use swage_gateway::service::ConversationService;
 use swage_gateway::tool::schedule::{ScheduleTool, WakeMeLaterTool};
 use swage_gateway::tool::{Tool, ToolDispatcher, ToolRegistry};
 use swage_gateway::tool_executor::GatewayToolContext;
 use swage_gateway::{schedule, server::build_router, state::AppState};
 use swage_provider::LlmProvider;
-use swage_storage::{NewSchedule, ScheduleRunState, SqliteStorage};
+use swage_storage::{NewAgentDefinition, NewSchedule, ScheduleRunState, SqliteStorage};
 use swage_tool::context::MockToolContext;
 use swage_tool::permission::PermissionConfig;
 use swage_tool::rate_limit::{RateLimitConfig, RateLimiter};
@@ -417,7 +417,7 @@ async fn model_schedule_mutations_record_state_diffs_and_provenance() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn rollback_surface_restores_schedule_state_and_records_the_rollback() {
+async fn undo_surface_restores_schedule_state_and_records_the_undo() {
     let state = test_state();
     let router = build_router(state.clone());
     let space = state.space_store.get_or_create_default().await.unwrap();
@@ -439,10 +439,7 @@ async fn rollback_surface_restores_schedule_state_and_records_the_rollback() {
         .await
         .unwrap();
     let schedule_id = created.result["schedule"]["id"].as_str().unwrap();
-    let original_version = created.result["change_case"]["version_id"]
-        .as_str()
-        .unwrap();
-    dispatcher
+    let update = dispatcher
         .dispatch(
             "schedule",
             json!({
@@ -454,11 +451,12 @@ async fn rollback_surface_restores_schedule_state_and_records_the_rollback() {
         )
         .await
         .unwrap();
+    let updated_case = update.result["change_case"]["version_id"].as_str().unwrap();
 
-    let (status, rollback) = post_json(
+    let (status, undo) = post_json(
         &router,
-        "/api/operator/configuration/rollback",
-        json!({"version_id": original_version}),
+        "/api/operator/configuration/undo",
+        json!({"case_id": updated_case}),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -474,17 +472,21 @@ async fn rollback_surface_restores_schedule_state_and_records_the_rollback() {
     );
     assert_eq!(restored.expression, "every 1 hours");
 
-    let rollback_version = rollback["version_id"].as_str().unwrap();
+    assert_eq!(
+        undo["summary"],
+        format!("undid configuration case {updated_case}: restored schedule {schedule_id}")
+    );
+    let undo_version = undo["version_id"].as_str().unwrap();
     let recorded = state
         .storage
-        .get_configuration_version(rollback_version.parse().unwrap())
+        .get_configuration_version(undo_version.parse().unwrap())
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(recorded.operation_kind, "rollback");
+    assert_eq!(recorded.operation_kind, "undo");
     assert_eq!(
-        recorded.rollback_to_version_id.unwrap().to_string(),
-        original_version
+        recorded.undone_version_id.unwrap().to_string(),
+        updated_case
     );
     assert_eq!(recorded.diff["message"]["from"], "changed task");
     assert_eq!(recorded.diff["message"]["to"], "original task");
@@ -494,7 +496,8 @@ async fn rollback_surface_restores_schedule_state_and_records_the_rollback() {
     assert!(
         audit
             .iter()
-            .any(|event| event.metadata["version_id"] == rollback_version)
+            .any(|event| event.metadata["version_id"] == undo_version
+                && event.summary == undo["summary"])
     );
 
     let removed = dispatcher
@@ -511,8 +514,8 @@ async fn rollback_surface_restores_schedule_state_and_records_the_rollback() {
         .unwrap();
     let (status, _) = post_json(
         &router,
-        "/api/operator/configuration/rollback",
-        json!({"version_id": rollback_version}),
+        "/api/operator/configuration/undo",
+        json!({"case_id": absence_version}),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -523,10 +526,37 @@ async fn rollback_surface_restores_schedule_state_and_records_the_rollback() {
         .unwrap()
         .unwrap();
     assert_eq!(restored.message, "original task");
-    let (status, _) = post_json(
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn undoing_schedule_creation_restores_absence_and_records_the_deletion() {
+    let state = test_state();
+    let router = build_router(state.clone());
+    let space = state.space_store.get_or_create_default().await.unwrap();
+    let dispatcher = dispatcher(permissions(&["scheduling"], &[]));
+    let ctx = host_context(&state, "researcher", tool_session(&state, space.id).await);
+    let created = dispatcher
+        .dispatch(
+            "schedule",
+            json!({
+                "action": "create", "message": "temporary task", "timing": "every",
+                "every": "every 1 hours", "session": "fresh", "space_id": space.id,
+                "agent_id": "gateway"
+            }),
+            &ctx,
+            "researcher",
+        )
+        .await
+        .unwrap();
+    let schedule_id = created.result["schedule"]["id"].as_str().unwrap();
+    let created_case = created.result["change_case"]["version_id"]
+        .as_str()
+        .unwrap();
+
+    let (status, undo) = post_json(
         &router,
-        "/api/operator/configuration/rollback",
-        json!({"version_id": absence_version}),
+        "/api/operator/configuration/undo",
+        json!({"case_id": created_case}),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -536,8 +566,95 @@ async fn rollback_surface_restores_schedule_state_and_records_the_rollback() {
             .get_schedule(schedule_id.parse().unwrap())
             .await
             .unwrap()
-            .is_none(),
-        "a recorded null snapshot restores prior absence"
+            .is_none()
+    );
+    assert_eq!(
+        undo["summary"],
+        format!("undid configuration case {created_case}: removed schedule {schedule_id}")
+    );
+
+    let undo_version = undo["version_id"].as_str().unwrap();
+    let recorded = state
+        .storage
+        .get_configuration_version(undo_version.parse().unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(recorded.operation_kind, "undo");
+    assert_eq!(
+        recorded.undone_version_id.unwrap().to_string(),
+        created_case
+    );
+    assert_eq!(recorded.diff["id"]["from"], schedule_id);
+    assert!(recorded.diff["id"]["to"].is_null());
+    assert!(recorded.snapshot.is_null());
+    let audit = state.storage.list_audit_events().await.unwrap();
+    assert!(audit.iter().any(|event| {
+        event.metadata["version_id"] == undo_version && event.summary == undo["summary"]
+    }));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn agent_definition_undo_uses_the_same_prior_state_and_prior_absence_rule() {
+    let state = test_state();
+    let original = NewAgentDefinition {
+        id: "case-test-agent".into(),
+        space_id: None,
+        display_name: "Original".into(),
+        description: "first state".into(),
+        instructions: "Keep the first instructions".into(),
+        model_id: None,
+        tool_permissions: None,
+    };
+    let created = apply_change(
+        &state,
+        ChangeOperation::UpsertAgentDefinition {
+            definition: original.clone(),
+        },
+        "test",
+        None,
+    )
+    .await
+    .unwrap();
+    let mut updated = original.clone();
+    updated.display_name = "Updated".into();
+    updated.instructions = "Use the changed instructions".into();
+    let update_case = apply_change(
+        &state,
+        ChangeOperation::UpsertAgentDefinition {
+            definition: updated,
+        },
+        "test",
+        None,
+    )
+    .await
+    .unwrap();
+
+    undo_case(&state, update_case.version_id, "operator_http", None)
+        .await
+        .unwrap();
+    let restored = state
+        .storage
+        .list_agent_definitions(None)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|definition| definition.id == "case-test-agent")
+        .unwrap();
+    assert_eq!(restored.display_name, "Original");
+    assert_eq!(restored.instructions, "Keep the first instructions");
+
+    undo_case(&state, created.version_id, "operator_http", None)
+        .await
+        .unwrap();
+    assert!(
+        !state
+            .storage
+            .list_agent_definitions(None)
+            .await
+            .unwrap()
+            .into_iter()
+            .any(|definition| definition.id == "case-test-agent")
     );
 }
 
@@ -674,8 +791,8 @@ async fn scheduling_bundle_is_the_grant_unit() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|action| action == "rollback"),
-        "the model-facing scheduling grant does not include rollback"
+            .any(|action| action == "undo"),
+        "the model-facing scheduling grant does not include undo"
     );
     assert!(
         granted
