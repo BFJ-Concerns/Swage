@@ -16,7 +16,7 @@ use swage_agent::approval::ApprovalDecisionValue;
 use swage_core::GatewayError;
 use swage_protocol::{
     client::{channel as channel_wire, schedule as schedule_wire},
-    hosting::{ConfigurationChangeResponse, RollbackConfigurationRequest},
+    hosting::{ConfigurationChangeResponse, UndoConfigurationCaseRequest},
 };
 
 use crate::{
@@ -662,14 +662,12 @@ pub async fn delete_schedule(
     }
 }
 
-/// `POST /api/operator/configuration/rollback` — restore a recorded version.
-pub async fn rollback_configuration(
+/// `POST /api/operator/configuration/undo` — undo a recorded configuration case.
+pub async fn undo_configuration_case(
     State(state): State<AppState>,
-    Json(req): Json<RollbackConfigurationRequest>,
+    Json(req): Json<UndoConfigurationCaseRequest>,
 ) -> Result<Json<ConfigurationChangeResponse>, ApiError> {
-    let applied =
-        crate::change_case::rollback_to_version(&state, req.version_id, "operator_http", None)
-            .await?;
+    let applied = crate::change_case::undo_case(&state, req.case_id, "operator_http", None).await?;
     Ok(Json(ConfigurationChangeResponse {
         version_id: applied.version_id,
         entity_kind: applied.entity_kind,

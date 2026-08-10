@@ -80,8 +80,8 @@ fn typescript_bindings_are_regenerated() {
     hosting::MachineHeartbeatRequest::export_all(&cfg).expect("export hosting heartbeat");
     hosting::ApprovalListResponse::export_all(&cfg).expect("export hosting approvals");
     hosting::ApprovalDecisionRequest::export_all(&cfg).expect("export hosting approval decision");
-    hosting::RollbackConfigurationRequest::export_all(&cfg)
-        .expect("export configuration rollback request");
+    hosting::UndoConfigurationCaseRequest::export_all(&cfg)
+        .expect("export configuration undo request");
     hosting::ConfigurationChangeResponse::export_all(&cfg)
         .expect("export configuration change response");
     hosting::OperatorOverviewResponse::export_all(&cfg).expect("export operator overview");

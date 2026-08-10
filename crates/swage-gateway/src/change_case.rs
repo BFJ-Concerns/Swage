@@ -3,12 +3,12 @@
 //! A change case is a typed semantic operation on a registry resource
 //! (never a raw patch): the service validates it, applies it through the
 //! resource's own store, derives the diff from before/after snapshots, and
-//! writes the version record and audit event in the same flow. Rollback
-//! re-applies a recorded snapshot through the same typed path, recording a
-//! new version rather than rewriting history.
+//! writes the version record and audit event in the same flow. Undo re-applies
+//! the state immediately before a selected case through the same typed path,
+//! recording a new version rather than rewriting history.
 //!
 //! Under the dogfooding blind-accept posture, applies land immediately —
-//! the record, diff, and rollback are what survive. Review-at-depth
+//! the record, diff, and undo are what survive. Review-at-depth
 //! attaches to this same lifecycle when a posture wants it; it is not a
 //! separate flow.
 //!
@@ -75,7 +75,7 @@ pub enum ChangeOperation {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RiskBand {
-    /// Reversible configuration with rollback — the fast lane.
+    /// Reversible configuration with undo — the fast lane.
     Routine,
     /// Changes that alter what an agent is allowed to do.
     Sensitive,
@@ -252,7 +252,7 @@ fn validate_schedule_shape(schedule: &NewSchedule) -> Result<(), GatewayError> {
 
 /// One version-chain identity per (resource id, scope). The rendered form is
 /// readable in version listings; `agent_id_from_entity` inverts it for
-/// rollback.
+/// undo.
 fn scoped_entity_id(id: &str, space_id: Option<Uuid>) -> String {
     match space_id {
         Some(space) => format!("{id}@{space}"),
@@ -271,7 +271,7 @@ fn agent_id_from_entity(entity_id: &str) -> &str {
 /// The durable outcome of an applied change case.
 #[derive(Debug, Clone, Serialize)]
 pub struct AppliedCase {
-    /// The version record's id — the handle rollback takes.
+    /// The version record's id — the handle undo takes.
     pub version_id: Uuid,
     pub entity_kind: String,
     pub entity_id: String,
@@ -376,7 +376,7 @@ pub async fn apply_change(
             summary: &summary,
             before,
             after,
-            rollback_to_version_id: None,
+            undone_version_id: None,
         },
     )
     .await
@@ -392,52 +392,69 @@ pub async fn apply_change(
     })
 }
 
-/// Roll a resource back to a recorded version's snapshot.
+/// Undo a recorded case by restoring the resource's immediately preceding state.
 ///
-/// The snapshot re-applies through the same typed path as any change, so
-/// rollback is itself a recorded case pointing at the version it restored —
-/// history only ever grows.
-pub async fn rollback_to_version(
+/// The predecessor snapshot re-applies through the same typed path as any
+/// change. When the selected case has no predecessor, undo restores absence.
+/// Undo is itself a recorded case pointing at the case it reverses, so history
+/// only ever grows.
+pub async fn undo_case(
     state: &AppState,
-    version_id: Uuid,
+    case_id: Uuid,
     source: &str,
     session_id: Option<Uuid>,
 ) -> Result<AppliedCase, GatewayError> {
-    let version = state
+    let selected_case = state
         .storage
-        .get_configuration_version(version_id)
+        .get_configuration_version(case_id)
         .await?
         .ok_or_else(|| {
-            GatewayError::ValidationError(format!("no recorded version {version_id}"))
+            GatewayError::ValidationError(format!("no recorded configuration case {case_id}"))
         })?;
 
-    if version.entity_kind != "agent_definition" && version.entity_kind != "schedule" {
+    if selected_case.entity_kind != "agent_definition" && selected_case.entity_kind != "schedule" {
         return Err(GatewayError::ValidationError(format!(
             "no change-case handler is registered for '{}' resources",
-            version.entity_kind
+            selected_case.entity_kind
         )));
     }
 
-    let space_id = version.space_id;
-    let before =
-        snapshot_resource(state, &version.entity_kind, &version.entity_id, space_id).await?;
+    let target_snapshot =
+        match selected_case.previous_version_id {
+            Some(previous_id) => state
+                .storage
+                .get_configuration_version(previous_id)
+                .await?
+                .ok_or_else(|| {
+                    GatewayError::ValidationError(format!(
+                        "configuration case {case_id} refers to missing predecessor {previous_id}"
+                    ))
+                })?
+                .snapshot,
+            None => serde_json::Value::Null,
+        };
+    let space_id = selected_case.space_id;
+    let before = snapshot_resource(
+        state,
+        &selected_case.entity_kind,
+        &selected_case.entity_id,
+        space_id,
+    )
+    .await?;
 
-    // A null snapshot records "did not exist": rolling back to it deletes.
-    let summary = match version.entity_kind.as_str() {
+    // A null target means the resource did not exist before the selected case.
+    let summary = match selected_case.entity_kind.as_str() {
         "agent_definition" => {
-            let agent_id = agent_id_from_entity(&version.entity_id).to_owned();
-            if version.snapshot.is_null() {
+            let agent_id = agent_id_from_entity(&selected_case.entity_id).to_owned();
+            if target_snapshot.is_null() {
                 state
                     .storage
                     .delete_agent_definition(&agent_id, space_id)
                     .await?;
-                format!(
-                    "rolled agent definition '{agent_id}' back to absence (version {})",
-                    version.version_number
-                )
+                format!("undid configuration case {case_id}: removed agent definition '{agent_id}'")
             } else {
                 let definition: AgentDefinition =
-                    parse_snapshot(&version.snapshot, "agent definition")?;
+                    parse_snapshot(&target_snapshot, "agent definition")?;
                 state
                     .storage
                     .upsert_agent_definition(NewAgentDefinition {
@@ -451,48 +468,46 @@ pub async fn rollback_to_version(
                     })
                     .await?;
                 format!(
-                    "rolled agent definition '{agent_id}' back to version {}",
-                    version.version_number
+                    "undid configuration case {case_id}: restored agent definition '{agent_id}'"
                 )
             }
         }
         "schedule" => {
-            let schedule_id = Uuid::parse_str(&version.entity_id).map_err(|error| {
+            let schedule_id = Uuid::parse_str(&selected_case.entity_id).map_err(|error| {
                 GatewayError::ValidationError(format!(
                     "recorded schedule identity is invalid: {error}"
                 ))
             })?;
-            if version.snapshot.is_null() {
+            if target_snapshot.is_null() {
                 state.storage.delete_schedule(schedule_id).await?;
-                format!(
-                    "rolled schedule {schedule_id} back to absence (version {})",
-                    version.version_number
-                )
+                format!("undid configuration case {case_id}: removed schedule {schedule_id}")
             } else {
-                let schedule: Schedule = parse_snapshot(&version.snapshot, "schedule")?;
+                let schedule: Schedule = parse_snapshot(&target_snapshot, "schedule")?;
                 let intended = new_schedule_from_snapshot(schedule);
                 if state.storage.get_schedule(schedule_id).await?.is_some() {
                     apply_complete_schedule(state, &intended).await?;
                 } else {
                     state.storage.create_schedule(intended).await?;
                 }
-                format!(
-                    "rolled schedule {schedule_id} back to version {}",
-                    version.version_number
-                )
+                format!("undid configuration case {case_id}: restored schedule {schedule_id}")
             }
         }
         _ => unreachable!("entity kind checked above"),
     };
 
-    let after =
-        snapshot_resource(state, &version.entity_kind, &version.entity_id, space_id).await?;
+    let after = snapshot_resource(
+        state,
+        &selected_case.entity_kind,
+        &selected_case.entity_id,
+        space_id,
+    )
+    .await?;
     record_case(
         state,
         RecordCase {
-            entity_kind: &version.entity_kind,
-            entity_id: &version.entity_id.clone(),
-            operation_kind: "rollback",
+            entity_kind: &selected_case.entity_kind,
+            entity_id: &selected_case.entity_id,
+            operation_kind: "undo",
             risk_band: RiskBand::Routine,
             space_id,
             session_id,
@@ -500,7 +515,7 @@ pub async fn rollback_to_version(
             summary: &summary,
             before,
             after,
-            rollback_to_version_id: Some(version_id),
+            undone_version_id: Some(case_id),
         },
     )
     .await
@@ -521,7 +536,7 @@ struct RecordCase<'a> {
     summary: &'a str,
     before: Option<serde_json::Value>,
     after: Option<serde_json::Value>,
-    rollback_to_version_id: Option<Uuid>,
+    undone_version_id: Option<Uuid>,
 }
 
 async fn snapshot_agent_definition(
@@ -638,7 +653,7 @@ async fn record_case(state: &AppState, case: RecordCase<'_>) -> Result<AppliedCa
             snapshot,
             diff,
             previous_version_id: previous.map(|v| v.id),
-            rollback_to_version_id: case.rollback_to_version_id,
+            undone_version_id: case.undone_version_id,
         })
         .await?;
 
