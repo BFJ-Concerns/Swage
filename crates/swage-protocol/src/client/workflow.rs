@@ -102,6 +102,8 @@ pub enum WorkflowJournalEntryKind {
     Effect,
     Log,
     Phase,
+    WorkflowCall,
+    Timer,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]

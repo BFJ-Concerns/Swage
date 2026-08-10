@@ -589,6 +589,20 @@ impl swage_storage::WorkflowStore for MockStorage {
     ) -> Result<Option<swage_storage::WorkflowRunRecord>, StorageError> {
         unimplemented!()
     }
+    async fn find_child_workflow_run(
+        &self,
+        _: Uuid,
+        _: u64,
+    ) -> Result<Option<swage_storage::WorkflowRunRecord>, StorageError> {
+        unimplemented!()
+    }
+    async fn fail_workflow_journal_entry(
+        &self,
+        _: Uuid,
+        _: &str,
+    ) -> Result<swage_storage::WorkflowJournalRecord, StorageError> {
+        unimplemented!()
+    }
     async fn list_workflow_runs(
         &self,
         _: Uuid,
@@ -2982,6 +2996,16 @@ impl swage_storage::store::ObservationStore for MockStorage {
         _: usize,
     ) -> Result<Vec<swage_storage::KnowledgeSearchHit>, StorageError> {
         unimplemented!("turn tests do not exercise the knowledge base")
+    }
+}
+
+#[async_trait]
+impl swage_storage::store::CurationAssertionStore for MockStorage {
+    async fn add_curation_assertion(
+        &self,
+        _: swage_storage::NewCurationAssertion,
+    ) -> Result<swage_storage::CurationAssertion, StorageError> {
+        unimplemented!("turn tests do not exercise knowledge curation")
     }
 }
 

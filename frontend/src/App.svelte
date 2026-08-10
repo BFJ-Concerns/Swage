@@ -157,8 +157,13 @@
   // selectAndNavigate is passed so router.init() can activate the right
   // conversation when the page loads with a deep URL like /conversations/:id.
 
+  function handleRouteChange(route: Route): void {
+    currentRoute = route;
+  }
+
   const router = createRouter({
     conversationStore: { selectConversation: selectAndNavigate },
+    onRouteChange: handleRouteChange,
   });
 
   // ---------------------------------------------------------------------------
@@ -273,7 +278,6 @@
 
   function navigate(path: string): void {
     router.navigate(path);
-    currentRoute = router.currentRoute;
   }
 
   // ---------------------------------------------------------------------------
@@ -295,7 +299,6 @@
       conversationStore.clearActiveConversation();
       // Reset the URL so the router doesn't try to restore a stale conversation.
       router.navigate("/");
-      currentRoute = router.currentRoute;
       // Load the new space's conversations.
       await conversationStore.loadConversations(spaceId);
     } catch (err) {
@@ -324,7 +327,6 @@
       // 3. Apply the URL. If it points at a conversation, selectAndNavigate
       //    will bring its space into scope along the way.
       await router.init();
-      currentRoute = router.currentRoute;
 
       // Snapshot the not-found flag — set by the router if the URL pointed
       // at a conversation that no longer exists on the server.
