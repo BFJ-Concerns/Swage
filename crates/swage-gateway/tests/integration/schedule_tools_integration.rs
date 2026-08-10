@@ -592,6 +592,20 @@ async fn undoing_schedule_creation_restores_absence_and_records_the_deletion() {
     assert!(audit.iter().any(|event| {
         event.metadata["version_id"] == undo_version && event.summary == undo["summary"]
     }));
+
+    let (status, second_undo) = post_json(
+        &router,
+        "/api/operator/configuration/undo",
+        json!({"case_id": created_case}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        second_undo["summary"],
+        format!(
+            "undid configuration case {created_case}: schedule {schedule_id} was already absent; nothing was removed"
+        )
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -644,9 +658,16 @@ async fn agent_definition_undo_uses_the_same_prior_state_and_prior_absence_rule(
     assert_eq!(restored.display_name, "Original");
     assert_eq!(restored.instructions, "Keep the first instructions");
 
-    undo_case(&state, created.version_id, "operator_http", None)
+    let undo = undo_case(&state, created.version_id, "operator_http", None)
         .await
         .unwrap();
+    assert_eq!(
+        undo.summary,
+        format!(
+            "undid configuration case {}: removed agent definition 'case-test-agent'",
+            created.version_id
+        )
+    );
     assert!(
         !state
             .storage
@@ -655,6 +676,17 @@ async fn agent_definition_undo_uses_the_same_prior_state_and_prior_absence_rule(
             .unwrap()
             .into_iter()
             .any(|definition| definition.id == "case-test-agent")
+    );
+
+    let second_undo = undo_case(&state, created.version_id, "operator_http", None)
+        .await
+        .unwrap();
+    assert_eq!(
+        second_undo.summary,
+        format!(
+            "undid configuration case {}: agent definition 'case-test-agent' was already absent; nothing was removed",
+            created.version_id
+        )
     );
 }
 
