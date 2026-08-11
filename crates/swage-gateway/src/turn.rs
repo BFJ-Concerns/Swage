@@ -601,6 +601,38 @@ pub(crate) async fn process_turn_with_existing_turn(
         }
     };
 
+    // A worker session dispatched by a workflow run carries its dispatching
+    // context's agent in session metadata: the worker's grants are the
+    // intersection of its own and that context's, re-resolved on every turn
+    // so a suspended worker never keeps authority its dispatcher has lost.
+    // Unlike the definition overlay above, resolution failure here fails the
+    // turn: falling open would run the worker wider than its dispatcher.
+    let config = match session.metadata.as_ref().and_then(|metadata| {
+        metadata
+            .get(crate::workflow::DISPATCH_BOUND_METADATA_KEY)
+            .and_then(serde_json::Value::as_str)
+    }) {
+        Some(bound_agent_id) => {
+            let bound = load_session_config(state, &space_slug, bound_agent_id)?;
+            let bound = match state
+                .storage
+                .resolve_agent_definition(bound_agent_id, space_id)
+                .await
+            {
+                Ok(Some(definition)) => apply_agent_definition(bound, &definition),
+                Ok(None) => bound,
+                Err(error) => {
+                    return Err(GatewayError::ConfigError(format!(
+                        "failed to resolve the dispatch bound {bound_agent_id} \
+                         for worker session {session_id}: {error}"
+                    )));
+                }
+            };
+            apply_dispatch_bound(config, &bound)
+        }
+        None => config,
+    };
+
     ensure_selected_model_available(
         state,
         &config,

@@ -4,6 +4,17 @@ use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+/// An opaque continuation token naming a worker session a run already
+/// created. Scripts receive it on an `agentStart` handle after the call
+/// completes and pass it back whole via the `session` option; its fields are
+/// host business. The token's values come from journalled results, so a
+/// resumed run rebuilds identical tokens and replay stays deterministic.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentSessionRef {
+    pub session_id: Uuid,
+    pub thread_id: Uuid,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AgentCallRequest {
     pub prompt: String,
@@ -12,6 +23,12 @@ pub struct AgentCallRequest {
     pub schema: Option<Value>,
     pub max_attempts: u32,
     pub label: Option<String>,
+    /// Continue this worker session instead of creating a fresh one: the
+    /// next turn lands on the same session and thread, so the worker meets
+    /// its own history — a restated brief and the later "proceed" are one
+    /// session. `None` is the fresh-session default.
+    #[serde(default)]
+    pub session: Option<AgentSessionRef>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

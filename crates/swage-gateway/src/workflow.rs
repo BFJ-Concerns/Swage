@@ -23,9 +23,9 @@ use swage_storage::{
     NewWorkflowScript, ThreadStore, WorkflowRunRecord, WorkflowScriptRecord,
 };
 use swage_workflow::{
-    AgentCallRequest, AgentCallResult, EffectPayload, EffectReceipt, EffectRecoveryHost,
-    EngineLimits, ScriptCapabilities, WorkflowCallRequest, WorkflowEngine, WorkflowHost,
-    journal_args_hash, recover_started_effect,
+    AgentCallRequest, AgentCallResult, AgentSessionRef, EffectPayload, EffectReceipt,
+    EffectRecoveryHost, EngineLimits, ScriptCapabilities, WorkflowCallRequest, WorkflowEngine,
+    WorkflowHost, journal_args_hash, recover_started_effect,
 };
 use tokio::sync::{Mutex, Notify, Semaphore, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -286,6 +286,10 @@ impl WorkflowLauncher for GatewayWorkflowLauncher {
             args,
             budget.unwrap_or_default(),
             script.delivery_grant,
+            // The dispatching session's agent is the run's grant context:
+            // every worker the run creates is bounded by it (intersection,
+            // re-resolved at each worker turn).
+            Some(session.agent_id),
         )
         .await
         .map_err(|error| error.0.to_string())?;
@@ -462,44 +466,115 @@ impl WorkflowHost for ChannelWorkflowHost {
     }
 }
 
+/// The session-metadata key carrying a worker's dispatch bound: the agent id
+/// of the context that dispatched the run, whose grants the worker's own are
+/// intersected with on every turn (turn.rs reads it back).
+pub(crate) const DISPATCH_BOUND_METADATA_KEY: &str = "dispatch_bound_agent_id";
+
 async fn run_ephemeral_agent_call(
     state: &AppState,
+    run_id: Uuid,
     space_id: Uuid,
+    dispatching_agent_id: Option<&str>,
     request: AgentCallRequest,
     cancellation: CancellationToken,
 ) -> Result<AgentCallResult, String> {
-    let session = state
-        .storage
-        .create_session(NewSession {
-            space_id,
-            agent_id: request.agent.clone(),
-            metadata: None,
-            active_workspace_attachment_id: None,
-        })
-        .await
-        .map_err(|error| error.to_string())?;
-    if let Some(model) = request.model.as_deref() {
-        state
-            .storage
-            .set_session_selected_model(session.id, Some(model.to_string()))
+    let (session_id, thread_id) = match request.session.as_ref() {
+        // Continuation: the next turn lands on a session this run already
+        // created. The token must name one of the run's own journalled
+        // workers — an id from anywhere else (another run, an interactive
+        // session) is refused, so a script can never walk into a session
+        // its run does not own. The session's dispatch bound rides its
+        // metadata and is re-read by the turn path, so grants are
+        // re-derived at this start like any other.
+        Some(session_ref) => {
+            let created_here = state
+                .storage
+                .list_workflow_journal(run_id)
+                .await
+                .map_err(|error| error.to_string())?
+                .iter()
+                .filter(|entry| entry.kind == "agent_call" && entry.status == "completed")
+                .filter_map(|entry| entry.result.as_ref())
+                .any(|result| {
+                    result.get("session_id").and_then(Value::as_str)
+                        == Some(session_ref.session_id.to_string().as_str())
+                });
+            if !created_here {
+                return Err(format!(
+                    "AgentCallError: session {} was not created by this run; \
+                     continuation tokens come from this run's own agentStart handles",
+                    session_ref.session_id
+                ));
+            }
+            let session = state
+                .storage
+                .get_session(session_ref.session_id)
+                .await
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| {
+                    format!(
+                        "AgentCallError: continued session {} no longer exists",
+                        session_ref.session_id
+                    )
+                })?;
+            let thread = ThreadStore::get(state.storage.as_ref(), session_ref.thread_id)
+                .await
+                .map_err(|error| error.to_string())?
+                .filter(|thread| thread.session_id == session.id)
+                .ok_or_else(|| {
+                    format!(
+                        "AgentCallError: thread {} does not belong to continued session {}",
+                        session_ref.thread_id, session_ref.session_id
+                    )
+                })?;
+            if let Some(model) = request.model.as_deref() {
+                state
+                    .storage
+                    .set_session_selected_model(session.id, Some(model.to_string()))
+                    .await
+                    .map_err(|error| error.to_string())?;
+            }
+            (session.id, thread.id)
+        }
+        None => {
+            let metadata = dispatching_agent_id
+                .map(|agent| serde_json::json!({ DISPATCH_BOUND_METADATA_KEY: agent }));
+            let session = state
+                .storage
+                .create_session(NewSession {
+                    space_id,
+                    agent_id: request.agent.clone(),
+                    metadata,
+                    active_workspace_attachment_id: None,
+                })
+                .await
+                .map_err(|error| error.to_string())?;
+            if let Some(model) = request.model.as_deref() {
+                state
+                    .storage
+                    .set_session_selected_model(session.id, Some(model.to_string()))
+                    .await
+                    .map_err(|error| error.to_string())?;
+            }
+            let thread = ThreadStore::create(
+                state.storage.as_ref(),
+                NewThread {
+                    session_id: session.id,
+                    agent_id: request.agent.clone(),
+                },
+            )
             .await
             .map_err(|error| error.to_string())?;
-    }
-    let thread = ThreadStore::create(
-        state.storage.as_ref(),
-        NewThread {
-            session_id: session.id,
-            agent_id: request.agent,
-        },
-    )
-    .await
-    .map_err(|error| error.to_string())?;
+            (session.id, thread.id)
+        }
+    };
     let (events, _events_rx) = mpsc::unbounded_channel::<ServerEvent>();
     let request_schema = request.schema.clone();
     let processing = crate::turn::process_turn_with_existing_turn(
         state,
-        session.id,
-        Some(thread.id),
+        session_id,
+        Some(thread_id),
         request.prompt,
         events,
         Arc::new(Mutex::new(SubscriptionState::new(false))),
@@ -512,13 +587,13 @@ async fn run_ephemeral_agent_call(
     tokio::select! {
         result = &mut processing => result.map_err(|error| error.to_string())?,
         () = cancellation.cancelled() => {
-            crate::turn::cancel_turn(state, session.id).await.map_err(|error| error.to_string())?;
+            crate::turn::cancel_turn(state, session_id).await.map_err(|error| error.to_string())?;
             return Err("WorkflowCancelledError".into());
         }
     }
     let turn = state
         .storage
-        .list_turns_by_thread(thread.id)
+        .list_turns_by_thread(thread_id)
         .await
         .map_err(|error| error.to_string())?
         .into_iter()
@@ -556,8 +631,8 @@ async fn run_ephemeral_agent_call(
         output,
         input_tokens: turn.input_tokens.unwrap_or(0).max(0) as u64,
         output_tokens: turn.output_tokens.unwrap_or(0).max(0) as u64,
-        session_id: Some(session.id),
-        thread_id: Some(thread.id),
+        session_id: Some(session_id),
+        thread_id: Some(thread_id),
         turn_id: Some(turn.id),
     })
 }
@@ -569,6 +644,7 @@ fn run_host_commands(
     state: AppState,
     run_id: Uuid,
     space_id: Uuid,
+    dispatching_agent_id: Option<String>,
     delivery_grant: Option<Value>,
     budget: WorkflowBudget,
     replay: Vec<WorkflowJournalRecord>,
@@ -580,6 +656,7 @@ fn run_host_commands(
         state,
         run_id,
         space_id,
+        dispatching_agent_id,
         delivery_grant,
         budget,
         replay,
@@ -593,6 +670,7 @@ async fn run_host_commands_inner(
     state: AppState,
     run_id: Uuid,
     space_id: Uuid,
+    dispatching_agent_id: Option<String>,
     delivery_grant: Option<Value>,
     budget: WorkflowBudget,
     replay: Vec<WorkflowJournalRecord>,
@@ -741,6 +819,7 @@ async fn run_host_commands_inner(
                 let completed_replay =
                     existing_call.is_some_and(|entry| entry.status == "completed");
                 let state = state.clone();
+                let dispatching_agent_id = dispatching_agent_id.clone();
                 let replay = Arc::clone(&replay);
                 let spent = Arc::clone(&spent_tokens);
                 let token_budget = Arc::clone(&token_budget);
@@ -792,8 +871,16 @@ async fn run_host_commands_inner(
                             }
                             result
                         } else {
-                            complete_agent_entry(&state, space_id, entry.id, request, cancellation)
-                                .await
+                            complete_agent_entry(
+                                &state,
+                                run_id,
+                                space_id,
+                                dispatching_agent_id.as_deref(),
+                                entry.id,
+                                request,
+                                cancellation,
+                            )
+                            .await
                         }
                     } else {
                         match state
@@ -812,7 +899,9 @@ async fn run_host_commands_inner(
                             Ok(intent) => {
                                 complete_agent_entry(
                                     &state,
+                                    run_id,
                                     space_id,
+                                    dispatching_agent_id.as_deref(),
                                     intent.id,
                                     request,
                                     cancellation,
@@ -1128,12 +1217,23 @@ async fn await_replay_release(rank: u64, next: &AtomicU64, notify: &Notify) {
 
 async fn complete_agent_entry(
     state: &AppState,
+    run_id: Uuid,
     space_id: Uuid,
+    dispatching_agent_id: Option<&str>,
     entry_id: Uuid,
     request: AgentCallRequest,
     cancellation: CancellationToken,
 ) -> Result<AgentCallResult, String> {
-    match run_ephemeral_agent_call(state, space_id, request, cancellation).await {
+    match run_ephemeral_agent_call(
+        state,
+        run_id,
+        space_id,
+        dispatching_agent_id,
+        request,
+        cancellation,
+    )
+    .await
+    {
         Ok(result) => {
             state
                 .complete_workflow_journal_entry(
@@ -1233,12 +1333,14 @@ async fn complete_workflow_call_entry(
             _ => child,
         },
         None => {
-            let parent_budget = state
+            let parent = state
                 .storage
                 .get_workflow_run(parent_run_id)
                 .await
-                .map_err(|error| error.to_string())?
-                .map(|parent| parent.budget)
+                .map_err(|error| error.to_string())?;
+            let parent_budget = parent
+                .as_ref()
+                .map(|parent| parent.budget.clone())
                 .unwrap_or_else(|| serde_json::json!({}));
             let record = state
                 .storage
@@ -1257,6 +1359,10 @@ async fn complete_workflow_call_entry(
                     // budget contract promises.
                     budget: parent_budget,
                     engine_version: "rquickjs-0.12.0".into(),
+                    // Confinement flows down here too: the child's workers
+                    // stay bounded by whatever context dispatched the parent.
+                    dispatching_agent_id: parent
+                        .and_then(|parent| parent.dispatching_agent_id),
                 })
                 .await
                 .map_err(|error| error.to_string())?;
@@ -1543,6 +1649,7 @@ async fn start_run(
     args: Value,
     budget: WorkflowBudget,
     delivery_grant: Option<Value>,
+    dispatching_agent_id: Option<String>,
 ) -> Result<WorkflowRun, ApiError> {
     // Each run owns a QuickJS runtime and an OS thread. Keep the default bound
     // explicit until workflow settings join the resolved configuration model.
@@ -1563,6 +1670,7 @@ async fn start_run(
             args,
             budget: serde_json::to_value(budget).map_err(internal)?,
             engine_version: "rquickjs-0.12.0".into(),
+            dispatching_agent_id,
         })
         .await
         .map_err(internal)?;
@@ -1641,6 +1749,7 @@ async fn launch_existing_run(
         state.clone(),
         record.id,
         space_id,
+        record.dispatching_agent_id.clone(),
         delivery_grant.clone(),
         run_budget.clone(),
         replay,
@@ -1742,6 +1851,9 @@ pub async fn start_inline_run(
             request.args,
             request.budget.unwrap_or_default(),
             None,
+            // Operator-started: no dispatch bound beyond each worker's own
+            // resolved config.
+            None,
         )
         .await?,
     ))
@@ -1773,6 +1885,7 @@ pub async fn start_saved_run(
             request.args,
             request.budget.unwrap_or_default(),
             script.delivery_grant,
+            None,
         )
         .await?,
     ))
@@ -1965,6 +2078,66 @@ mod tests {
         }
     }
 
+    /// Streams scripted outputs in order and records each request's message
+    /// texts, so a test can assert what history a turn actually carried.
+    struct ScriptedRecordingProvider {
+        outputs: std::sync::Mutex<std::collections::VecDeque<&'static str>>,
+        requests: std::sync::Mutex<Vec<Vec<String>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl swage_provider::LlmProvider for ScriptedRecordingProvider {
+        fn model_id(&self) -> &str {
+            "scripted-model"
+        }
+
+        async fn complete(
+            &self,
+            _request: swage_core::CompletionRequest,
+        ) -> Result<swage_core::CompletionResponse, swage_core::ProviderError> {
+            unimplemented!("workflow calls use streaming")
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _request: swage_core::ToolCompletionRequest,
+        ) -> Result<swage_core::ToolCompletionResponse, swage_core::ProviderError> {
+            unimplemented!("workflow calls use streaming")
+        }
+
+        fn stream(
+            &self,
+            request: swage_core::CompletionRequest,
+        ) -> std::pin::Pin<Box<dyn futures::Stream<Item = swage_core::StreamChunk> + Send>>
+        {
+            self.requests.lock().expect("requests").push(
+                request
+                    .messages
+                    .iter()
+                    .map(swage_core::ChatMessage::text_content)
+                    .collect(),
+            );
+            let output = self
+                .outputs
+                .lock()
+                .expect("outputs")
+                .pop_front()
+                .expect("scripted output");
+            Box::pin(futures::stream::iter([
+                swage_core::StreamChunk::Delta {
+                    content: output.into(),
+                },
+                swage_core::StreamChunk::Usage(swage_core::TokenUsage {
+                    input_tokens: 1,
+                    output_tokens: 1,
+                }),
+                swage_core::StreamChunk::Done {
+                    finish_reason: None,
+                },
+            ]))
+        }
+    }
+
     #[async_trait::async_trait]
     impl DeliveryCapability for CancellingDeliveryCapability {
         fn kind(&self) -> &'static str {
@@ -2072,6 +2245,7 @@ mod tests {
                 args: Value::Null,
                 budget: serde_json::json!({}),
                 engine_version: "test".into(),
+                dispatching_agent_id: None,
             })
             .await
             .expect("run");
@@ -2241,6 +2415,7 @@ mod tests {
             state,
             run_id,
             space.id,
+            None,
             None,
             WorkflowBudget {
                 max_agent_calls: None,
@@ -2468,6 +2643,7 @@ mod tests {
                 args: Value::Null,
                 budget: serde_json::json!({}),
                 engine_version: "test".into(),
+                dispatching_agent_id: None,
             })
             .await
             .expect("run");
@@ -2484,6 +2660,7 @@ mod tests {
             state,
             run.id,
             space.id,
+            None,
             None,
             WorkflowBudget {
                 max_agent_calls: None,
@@ -2502,6 +2679,7 @@ mod tests {
             schema: None,
             max_attempts: 1,
             label: None,
+            session: None,
         };
         let first_cancellation = CancellationToken::new();
         let (first_reply, first_receive) = oneshot::channel();
@@ -2557,6 +2735,230 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn a_continued_call_lands_on_the_same_worker_session_with_history() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let run = storage
+            .create_workflow_run(NewWorkflowRun {
+                space_id: space.id,
+                parent_run_id: None,
+                parent_seq: None,
+                script_version_id: None,
+                source: Some("return null".into()),
+                source_hash: source_hash("return null"),
+                args: Value::Null,
+                budget: serde_json::json!({}),
+                engine_version: "test".into(),
+                dispatching_agent_id: Some("lead".into()),
+            })
+            .await
+            .expect("run");
+        let provider = Arc::new(ScriptedRecordingProvider {
+            outputs: std::sync::Mutex::new(std::collections::VecDeque::from([
+                "restated: gather the sources",
+                "the work is done",
+            ])),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let (tx, rx) = mpsc::unbounded_channel();
+        let task = tokio::spawn(run_host_commands(
+            state,
+            run.id,
+            space.id,
+            Some("lead".into()),
+            None,
+            WorkflowBudget {
+                max_agent_calls: None,
+                max_total_tokens: None,
+                max_concurrent_agent_calls: None,
+            },
+            vec![],
+            Arc::new(AtomicU32::new(0)),
+            Arc::new(AtomicU64::new(0)),
+            rx,
+        ));
+
+        let (first_reply, first_receive) = oneshot::channel();
+        tx.send(HostCommand::Agent {
+            request: AgentCallRequest {
+                prompt: "restate the brief".into(),
+                agent: "worker".into(),
+                model: None,
+                schema: None,
+                max_attempts: 1,
+                label: None,
+                session: None,
+            },
+            cancellation: CancellationToken::new(),
+            reply: first_reply,
+        })
+        .expect("first call");
+        let first = first_receive
+            .await
+            .expect("first reply")
+            .expect("first result");
+        let token = AgentSessionRef {
+            session_id: first.session_id.expect("session id"),
+            thread_id: first.thread_id.expect("thread id"),
+        };
+
+        // The worker session records its dispatching context, which the turn
+        // path reads back on every start to intersect grants.
+        let worker_session = storage
+            .get_session(token.session_id)
+            .await
+            .expect("session query")
+            .expect("worker session");
+        assert_eq!(
+            worker_session
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get(DISPATCH_BOUND_METADATA_KEY))
+                .and_then(Value::as_str),
+            Some("lead"),
+        );
+
+        let (second_reply, second_receive) = oneshot::channel();
+        tx.send(HostCommand::Agent {
+            request: AgentCallRequest {
+                prompt: "now do the work".into(),
+                agent: "worker".into(),
+                model: None,
+                schema: None,
+                max_attempts: 1,
+                label: None,
+                session: Some(token.clone()),
+            },
+            cancellation: CancellationToken::new(),
+            reply: second_reply,
+        })
+        .expect("second call");
+        let second = second_receive
+            .await
+            .expect("second reply")
+            .expect("second result");
+
+        // Same session, same thread: the restating worker IS the working one.
+        assert_eq!(second.session_id, Some(token.session_id));
+        assert_eq!(second.thread_id, Some(token.thread_id));
+        assert_eq!(second.output, Value::String("the work is done".into()));
+        let turns = storage
+            .list_turns_by_thread(token.thread_id)
+            .await
+            .expect("turns");
+        assert_eq!(turns.len(), 2, "both turns live on the one thread");
+
+        // The continued turn met its own history: the second provider request
+        // carries the first exchange, not a fresh context.
+        let requests = provider.requests.lock().expect("requests");
+        assert_eq!(requests.len(), 2);
+        let second_request = requests[1].join("\n");
+        assert!(second_request.contains("restate the brief"));
+        assert!(second_request.contains("restated: gather the sources"));
+
+        drop(tx);
+        task.await.expect("host loop");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_continuation_token_the_run_does_not_own_is_refused() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let run = storage
+            .create_workflow_run(NewWorkflowRun {
+                space_id: space.id,
+                parent_run_id: None,
+                parent_seq: None,
+                script_version_id: None,
+                source: Some("return null".into()),
+                source_hash: source_hash("return null"),
+                args: Value::Null,
+                budget: serde_json::json!({}),
+                engine_version: "test".into(),
+                dispatching_agent_id: None,
+            })
+            .await
+            .expect("run");
+        // A real session in the same space, but created outside this run —
+        // exactly what a token must not be able to reach.
+        let foreign_session = storage
+            .create_session(swage_storage::NewSession {
+                space_id: space.id,
+                agent_id: "interactive".into(),
+                metadata: None,
+                active_workspace_attachment_id: None,
+            })
+            .await
+            .expect("foreign session");
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::new(crate::turn::tests::PendingProvider),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let (tx, rx) = mpsc::unbounded_channel();
+        let task = tokio::spawn(run_host_commands(
+            state,
+            run.id,
+            space.id,
+            None,
+            None,
+            WorkflowBudget {
+                max_agent_calls: None,
+                max_total_tokens: None,
+                max_concurrent_agent_calls: None,
+            },
+            vec![],
+            Arc::new(AtomicU32::new(0)),
+            Arc::new(AtomicU64::new(0)),
+            rx,
+        ));
+        let (reply, receive) = oneshot::channel();
+        tx.send(HostCommand::Agent {
+            request: AgentCallRequest {
+                prompt: "hijack".into(),
+                agent: "worker".into(),
+                model: None,
+                schema: None,
+                max_attempts: 1,
+                label: None,
+                session: Some(AgentSessionRef {
+                    session_id: foreign_session.id,
+                    thread_id: Uuid::new_v4(),
+                }),
+            },
+            cancellation: CancellationToken::new(),
+            reply,
+        })
+        .expect("call");
+        let error = receive.await.expect("reply").expect_err("refused");
+        assert!(
+            error.contains("was not created by this run"),
+            "unexpected error: {error}"
+        );
+        // The refusal settles durably, so replay repeats it instead of
+        // re-attempting the hijack.
+        let journal = storage
+            .list_workflow_journal(run.id)
+            .await
+            .expect("journal");
+        assert_eq!(journal.len(), 1);
+        assert_eq!(journal[0].status, "failed");
+        drop(tx);
+        task.await.expect("host loop");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn token_reservation_settlement_releases_estimate_and_retains_actual_spend() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
         let space = storage.get_or_create_default().await.expect("space");
@@ -2571,6 +2973,7 @@ mod tests {
                 args: Value::Null,
                 budget: serde_json::json!({}),
                 engine_version: "test".into(),
+                dispatching_agent_id: None,
             })
             .await
             .expect("run");
@@ -2593,6 +2996,7 @@ mod tests {
             run.id,
             space.id,
             None,
+            None,
             WorkflowBudget {
                 max_agent_calls: None,
                 max_total_tokens: Some(1_000_000),
@@ -2610,6 +3014,7 @@ mod tests {
             schema: None,
             max_attempts: 1,
             label: None,
+            session: None,
         };
         let (first_reply, first_receive) = oneshot::channel();
         tx.send(HostCommand::Agent {
@@ -2669,6 +3074,7 @@ mod tests {
                 args: Value::Null,
                 budget: serde_json::json!({}),
                 engine_version: "test".into(),
+                dispatching_agent_id: None,
             })
             .await
             .expect("run");
@@ -2679,6 +3085,7 @@ mod tests {
             schema: None,
             max_attempts: 1,
             label: None,
+            session: None,
         };
         let request_json = serde_json::to_value(&request).expect("request");
         for seq in 0..2 {
@@ -2713,6 +3120,7 @@ mod tests {
             state,
             run.id,
             space.id,
+            None,
             None,
             WorkflowBudget {
                 max_agent_calls: None,
@@ -2783,6 +3191,7 @@ mod tests {
                 args: Value::Null,
                 budget: serde_json::to_value(&budget).expect("budget"),
                 engine_version: "test".into(),
+                dispatching_agent_id: None,
             })
             .await
             .expect("run");
@@ -2793,6 +3202,7 @@ mod tests {
             schema: None,
             max_attempts: 1,
             label: None,
+            session: None,
         };
         let request_json = serde_json::to_value(&request).expect("request");
         let refused = storage

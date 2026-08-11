@@ -1893,6 +1893,12 @@ pub struct WorkflowRunRecord {
     pub final_output: Option<serde_json::Value>,
     pub error_message: Option<String>,
     pub engine_version: String,
+    /// The agent whose session started this run through the workflow tool,
+    /// when one did. Worker sessions the run dispatches derive their grants
+    /// from this context by intersection — re-resolved at every worker turn,
+    /// so suspension never freezes authority. `None` means operator-started:
+    /// workers run under their own resolved config alone.
+    pub dispatching_agent_id: Option<String>,
     pub created_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
 }
@@ -1908,6 +1914,8 @@ pub struct NewWorkflowRun {
     pub args: serde_json::Value,
     pub budget: serde_json::Value,
     pub engine_version: String,
+    /// See `WorkflowRunRecord::dispatching_agent_id`.
+    pub dispatching_agent_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -201,28 +201,7 @@ pub(crate) fn apply_agent_definition(
         }
     });
     if let Some(overlay) = overlay {
-        // Intersection, never expansion: the effective allow is what both the
-        // resolved config and the overlay permit ("*" on either side defers
-        // to the other), and every deny from either side stands.
-        let config_allows_all = config.tools.permissions.allow.iter().any(|t| t == "*");
-        let overlay_allows_all = overlay.allow.iter().any(|t| t == "*");
-        config.tools.permissions.allow = match (config_allows_all, overlay_allows_all) {
-            (_, true) => config.tools.permissions.allow.clone(),
-            (true, false) => overlay.allow.clone(),
-            (false, false) => config
-                .tools
-                .permissions
-                .allow
-                .iter()
-                .filter(|tool| overlay.allow.contains(tool))
-                .cloned()
-                .collect(),
-        };
-        for denied in overlay.deny {
-            if !config.tools.permissions.deny.contains(&denied) {
-                config.tools.permissions.deny.push(denied);
-            }
-        }
+        intersect_tool_permissions(&mut config, &overlay.allow, overlay.deny);
     }
 
     config.declared_skills = definition.skills.clone();
@@ -233,6 +212,57 @@ pub(crate) fn apply_agent_definition(
         config.output.max_retries = max_retries;
     }
 
+    config
+}
+
+/// Intersection, never expansion: the effective allow is what both the
+/// resolved config and the overlay permit ("*" on either side defers to the
+/// other), and every deny from either side stands. Shared by the
+/// agent-definition overlay and the dispatch bound — the one grant-narrowing
+/// semantics, applied wherever a narrower context confines a wider one.
+fn intersect_tool_permissions(
+    config: &mut swage_config::ResolvedConfig,
+    overlay_allow: &[String],
+    overlay_deny: Vec<String>,
+) {
+    let config_allows_all = config.tools.permissions.allow.iter().any(|t| t == "*");
+    let overlay_allows_all = overlay_allow.iter().any(|t| t == "*");
+    config.tools.permissions.allow = match (config_allows_all, overlay_allows_all) {
+        (_, true) => config.tools.permissions.allow.clone(),
+        (true, false) => overlay_allow.to_vec(),
+        (false, false) => config
+            .tools
+            .permissions
+            .allow
+            .iter()
+            .filter(|tool| overlay_allow.contains(tool))
+            .cloned()
+            .collect(),
+    };
+    for denied in overlay_deny {
+        if !config.tools.permissions.deny.contains(&denied) {
+            config.tools.permissions.deny.push(denied);
+        }
+    }
+}
+
+/// Confine a worker's resolved config to its dispatching context's grants.
+///
+/// An ephemeral worker dispatched by a workflow run derives its grants from
+/// the dispatching context as a subset — intersection, never expansion (the
+/// configuration-capability Decision's rule). The bound context arrives
+/// already resolved (file config plus its own definition overlay), and only
+/// tool permissions are confined: the worker's instructions, model, and
+/// output contract are its own business.
+pub(crate) fn apply_dispatch_bound(
+    mut config: swage_config::ResolvedConfig,
+    bound: &swage_config::ResolvedConfig,
+) -> swage_config::ResolvedConfig {
+    intersect_tool_permissions(
+        &mut config,
+        &bound.tools.permissions.allow,
+        bound.tools.permissions.deny.clone(),
+    );
     config
 }
 
@@ -412,6 +442,72 @@ mod tests {
             applied.tools.permissions.allow,
             vec!["knowledge_search".to_string()],
             "an allow-all config defers to the definition's narrower grant"
+        );
+    }
+
+    #[test]
+    fn dispatch_bound_intersects_allows_and_unions_denies() {
+        let mut worker = swage_config::ResolvedConfig::default();
+        worker.tools.permissions.allow =
+            vec!["shell".into(), "knowledge_search".into(), "schedule".into()];
+        worker.tools.permissions.deny = vec!["browser_navigate".into()];
+
+        let mut bound = swage_config::ResolvedConfig::default();
+        bound.tools.permissions.allow = vec!["knowledge_search".into(), "web_fetch".into()];
+        bound.tools.permissions.deny = vec!["python_execute".into()];
+
+        let confined = apply_dispatch_bound(worker, &bound);
+
+        assert_eq!(
+            confined.tools.permissions.allow,
+            vec!["knowledge_search".to_string()],
+            "the worker keeps only what its dispatcher also holds"
+        );
+        assert!(
+            confined
+                .tools
+                .permissions
+                .deny
+                .iter()
+                .any(|tool| tool == "python_execute"),
+            "the dispatcher's denies stand on the worker"
+        );
+        assert!(
+            confined
+                .tools
+                .permissions
+                .deny
+                .iter()
+                .any(|tool| tool == "browser_navigate"),
+            "the worker's own denies survive"
+        );
+    }
+
+    #[test]
+    fn a_wildcard_dispatcher_leaves_the_workers_own_grants() {
+        let mut worker = swage_config::ResolvedConfig::default();
+        worker.tools.permissions.allow = vec!["shell".into()];
+
+        // The default config allows "*": a dispatcher with everything
+        // confines nothing, and a worker never gains from the intersection.
+        let bound = swage_config::ResolvedConfig::default();
+        let confined = apply_dispatch_bound(worker, &bound);
+        assert_eq!(confined.tools.permissions.allow, vec!["shell".to_string()]);
+    }
+
+    #[test]
+    fn a_wildcard_worker_narrows_to_the_dispatchers_grants() {
+        let worker = swage_config::ResolvedConfig::default();
+        assert!(worker.tools.permissions.allow.iter().any(|t| t == "*"));
+
+        let mut bound = swage_config::ResolvedConfig::default();
+        bound.tools.permissions.allow = vec!["knowledge_search".into()];
+
+        let confined = apply_dispatch_bound(worker, &bound);
+        assert_eq!(
+            confined.tools.permissions.allow,
+            vec!["knowledge_search".to_string()],
+            "an allow-all worker runs no wider than its dispatcher"
         );
     }
 

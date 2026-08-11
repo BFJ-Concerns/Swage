@@ -82,8 +82,21 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
             "048_knowledge_orientation_cards",
             CREATE_KNOWLEDGE_ORIENTATION_CARDS,
         ),
+        (
+            "049_workflow_run_dispatch_bound",
+            ADD_WORKFLOW_RUN_DISPATCH_BOUND,
+        ),
     ]
 }
+
+/// A run started from an agent session records that agent as its dispatching
+/// context: worker sessions the run creates derive their grants from it by
+/// intersection, re-resolved at every worker turn. NULL means
+/// operator-started — no bound beyond the worker's own resolved config.
+const ADD_WORKFLOW_RUN_DISPATCH_BOUND: &str = "
+    ALTER TABLE workflow_runs
+        ADD COLUMN dispatching_agent_id TEXT;
+";
 
 /// Composed workflow runs: a child run started by a parent's `workflow()`
 /// call records which parent and which journal seq started it, so a resumed
