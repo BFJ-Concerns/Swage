@@ -878,6 +878,11 @@ async fn wake_me_later_schedules_a_one_off_continuation_of_the_calling_session()
         .unwrap()
         .parse()
         .unwrap();
+    let version_id: Uuid = output.result["change_case"]["version_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
 
     // The wake is a one-off schedule that continues this very session.
     let schedule = state
@@ -898,6 +903,23 @@ async fn wake_me_later_schedules_a_one_off_continuation_of_the_calling_session()
         schedule.kind,
         swage_storage::ScheduleKind::OneShot
     ));
+    let version = state
+        .storage
+        .get_configuration_version(version_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(version.space_id, Some(space.id));
+    assert!(
+        state
+            .storage
+            .list_configuration_versions(Some(space.id))
+            .await
+            .unwrap()
+            .iter()
+            .any(|version| version.id == version_id),
+        "the continuation wake remains visible in its owning space's configuration history"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
