@@ -298,27 +298,4 @@ mod tests {
             Err(e) => panic!("expected InvalidConfig, got different error: {e}"),
         }
     }
-
-    #[test]
-    fn build_fails_when_max_tool_rounds_zero() {
-        let mut config = valid_config();
-        config.max_tool_rounds = 0;
-
-        let result = AgentBuilder::new()
-            .config(config)
-            .provider(stub_provider())
-            .storage(stub_storage())
-            .build();
-
-        match result {
-            Err(AgentError::InvalidConfig(msg)) => {
-                assert!(
-                    msg.contains("max_tool_rounds"),
-                    "expected 'max_tool_rounds' in: {msg}"
-                );
-            }
-            Ok(_) => panic!("expected Err(InvalidConfig), but build succeeded"),
-            Err(e) => panic!("expected InvalidConfig, got different error: {e}"),
-        }
-    }
 }

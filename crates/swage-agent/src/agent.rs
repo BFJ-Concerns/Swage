@@ -298,9 +298,6 @@ impl Agent {
         let mut tool_position: i32 = 0;
         let mut round = 0usize;
 
-        // Hard cap prevents runaway tool loops.
-        let max_tool_rounds = self.config.max_tool_rounds as usize;
-
         'outer: loop {
             // Check cancellation eagerly before starting each round. This
             // catches pre-cancelled tokens reliably — tokio::select! inside
@@ -320,13 +317,6 @@ impl Agent {
                 return Err(AgentError::Cancelled);
             }
 
-            if round >= max_tool_rounds {
-                let msg =
-                    format!("\n\n[Tool-call round limit ({max_tool_rounds}) reached — stopping.]");
-                accumulated.push_str(&msg);
-                let _ = event_tx.send(AgentEvent::Token { content: msg });
-                break 'outer;
-            }
             round += 1;
 
             let round_outcome = self
