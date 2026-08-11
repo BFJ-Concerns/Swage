@@ -4,8 +4,8 @@ use super::{
     build_agent_config_for_space_workspace, build_approval_registrar, build_assembly_elements,
     build_gateway_dispatcher_for_unattended_execution, build_session_environment,
     delegated_target_instructions_for_space, execute_context_assembly,
-    load_active_skills_for_agent, load_session_config, load_space_memory, mpsc, resolve_swage_root,
-    shutdown_sandbox_guard,
+    load_active_skills_for_agent, load_memory_for_assembly, load_session_config, load_space_memory,
+    mpsc, resolve_swage_root, select_context_assembly, shutdown_sandbox_guard,
 };
 use swage_agent::{DelegatedAssembly, DelegationContextAssembler, DelegationOutcome};
 use swage_context::tokeniser::TiktokenTokeniser;
@@ -57,10 +57,15 @@ impl DelegationContextAssembler for GatewayDelegatedContextAssembler {
             false,
         )
         .await;
-        let memory_content = match self.swage_root.as_deref() {
-            Some(root) => load_space_memory(root, &self.space.slug).await,
-            None => String::new(),
-        };
+        let assembly_name =
+            select_context_assembly(&self.state, &self.config, session.id, turn_id).await;
+        let memory_content = load_memory_for_assembly(&assembly_name, || async {
+            match self.swage_root.as_deref() {
+                Some(root) => load_space_memory(root, &self.space.slug).await,
+                None => String::new(),
+            }
+        })
+        .await;
         let environment =
             build_session_environment(&self.space, Some(self.working_directory.clone()), session);
         let available_skills = available_skills_for_agent(
@@ -72,24 +77,20 @@ impl DelegationContextAssembler for GatewayDelegatedContextAssembler {
             &self.config.instructions,
             active_skills,
             delegated_history,
-            memory_content,
-            self.space.name.clone(),
+            memory_content.map(|content| (content, self.space.name.clone())),
             environment,
             available_skills,
         );
         let tokeniser = TiktokenTokeniser::new(self.config.default_model_id());
         let output = execute_context_assembly(
-            &self.state,
+            &assembly_name,
             &self.config,
             &elements,
             &tokeniser,
             self.swage_root.as_deref(),
             &self.space.slug,
             &self.agent_id,
-            session.id,
-            turn_id,
-        )
-        .await;
+        );
         let report = serde_json::to_value(output.report).unwrap_or_else(|error| {
             tracing::warn!(%error, "failed to serialise delegated assembly report");
             serde_json::json!({ "error": "serialisation failed" })
