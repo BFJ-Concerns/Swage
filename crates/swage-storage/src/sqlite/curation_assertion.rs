@@ -122,30 +122,26 @@ impl CurationAssertionStore for SqliteStorage {
                     id: parse_uuid(row.get::<_, String>(0)?)?,
                     space_id: parse_uuid(row.get::<_, String>(1)?)?,
                     observation_id: parse_uuid(row.get::<_, String>(2)?)?,
-                    kind: row.get::<_, String>(3)?.parse().map_err(
-                        |error: String| {
-                            rusqlite::Error::FromSqlConversionFailure(
-                                3,
-                                rusqlite::types::Type::Text,
-                                error.into(),
-                            )
-                        },
-                    )?,
+                    kind: row.get::<_, String>(3)?.parse().map_err(|error: String| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            3,
+                            rusqlite::types::Type::Text,
+                            error.into(),
+                        )
+                    })?,
                     target_observation_id: row
                         .get::<_, Option<String>>(4)?
                         .map(parse_uuid)
                         .transpose()?,
-                    created_at: chrono::DateTime::parse_from_rfc3339(
-                        &row.get::<_, String>(5)?,
-                    )
-                    .map_err(|error| {
-                        rusqlite::Error::FromSqlConversionFailure(
-                            5,
-                            rusqlite::types::Type::Text,
-                            Box::new(error),
-                        )
-                    })?
-                    .with_timezone(&Utc),
+                    created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(5)?)
+                        .map_err(|error| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                5,
+                                rusqlite::types::Type::Text,
+                                Box::new(error),
+                            )
+                        })?
+                        .with_timezone(&Utc),
                 })
             })?;
             rows.collect::<rusqlite::Result<Vec<_>>>()

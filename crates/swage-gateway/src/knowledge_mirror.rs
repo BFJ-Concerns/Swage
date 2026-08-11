@@ -307,7 +307,11 @@ mod tests {
             .await
             .unwrap();
         storage
-            .add_extraction(current.id, "The 2026 guidance.".into(), "html-to-text v1".into())
+            .add_extraction(
+                current.id,
+                "The 2026 guidance.".into(),
+                "html-to-text v1".into(),
+            )
             .await
             .unwrap();
 

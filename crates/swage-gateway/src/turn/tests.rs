@@ -9784,11 +9784,13 @@ async fn delivered_delegation_results_survive_the_history_rebuild() {
     assert!(
         rebuilt
             .iter()
-            .any(|m| m.content.contains("Gathered 3 sources.")),
+            .any(|m| m.text_content().contains("Gathered 3 sources.")),
         "a delivered delegation result must reach the model as history"
     );
     assert!(
-        !rebuilt.iter().any(|m| m.content.contains("orphaned tool row")),
+        !rebuilt
+            .iter()
+            .any(|m| m.text_content().contains("orphaned tool row")),
         "a tool row answering no recorded call is dropped by the rebuild — \
          which is why deliveries must not use Role::Tool"
     );
