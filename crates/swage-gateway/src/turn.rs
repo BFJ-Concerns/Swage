@@ -440,25 +440,6 @@ pub(crate) async fn dispatch_before_inbound(
     }
 }
 
-/// Orchestrate a complete agent turn: user message → provider stream → storage.
-///
-/// # Flow
-/// 1. Look up the session's default thread (created alongside the session).
-/// 2. Guard: reject if a turn is already Processing for this thread.
-/// 3. Resolve the space for the session; load per-space config and build ToolContext.
-/// 4. Create a Turn record (state=Pending), immediately advance to Processing.
-/// 5. Store the user message with thread_id and position.
-/// 6. Build message history from the thread and send a streaming request to the provider.
-/// 7. For each chunk: forward Token events to the WebSocket, accumulate content.
-/// 8. On Done: store the assistant message, mark the turn Completed, send TurnComplete.
-/// 9. On Cancel: store any partial response, mark the turn Interrupted, send Cancelled.
-/// 10. On provider Error: mark the turn Failed, send an Error event.
-/// 11. Cleanup: remove the CancellationToken from active_turns.
-// Because process_turn is spawned as a tokio task, it won't inherit the
-// HTTP request span. The instrument macro creates a self-contained "turn"
-// span so all log entries within the turn share the same turn_id and
-// session_id. turn_id is Empty at span creation and recorded once the
-// Turn record exists.
 /// Render a completed delegation's Result message as thread content.
 ///
 /// Reads the payload the delegation path writes — `response` with optional
@@ -479,8 +460,8 @@ fn render_delegation_result(result: &swage_storage::model::AgentMessage) -> Stri
         },
     };
     if let Some(structured) = result.payload.get("structured_output") {
-        let rendered = serde_json::to_string_pretty(structured)
-            .unwrap_or_else(|_| structured.to_string());
+        let rendered =
+            serde_json::to_string_pretty(structured).unwrap_or_else(|_| structured.to_string());
         text.push_str("\n\nStructured output:\n```json\n");
         text.push_str(&rendered);
         text.push_str("\n```");
@@ -488,6 +469,25 @@ fn render_delegation_result(result: &swage_storage::model::AgentMessage) -> Stri
     text
 }
 
+/// Orchestrate a complete agent turn: user message → provider stream → storage.
+///
+/// # Flow
+/// 1. Look up the session's default thread (created alongside the session).
+/// 2. Guard: reject if a turn is already Processing for this thread.
+/// 3. Resolve the space for the session; load per-space config and build ToolContext.
+/// 4. Create a Turn record (state=Pending), immediately advance to Processing.
+/// 5. Store the user message with thread_id and position.
+/// 6. Build message history from the thread and send a streaming request to the provider.
+/// 7. For each chunk: forward Token events to the WebSocket, accumulate content.
+/// 8. On Done: store the assistant message, mark the turn Completed, send TurnComplete.
+/// 9. On Cancel: store any partial response, mark the turn Interrupted, send Cancelled.
+/// 10. On provider Error: mark the turn Failed, send an Error event.
+/// 11. Cleanup: remove the CancellationToken from active_turns.
+// Because process_turn is spawned as a tokio task, it won't inherit the
+// HTTP request span. The instrument macro creates a self-contained "turn"
+// span so all log entries within the turn share the same turn_id and
+// session_id. turn_id is Empty at span creation and recorded once the
+// Turn record exists.
 pub async fn process_turn(
     state: &AppState,
     session_id: Uuid,
@@ -1426,9 +1426,8 @@ pub(crate) async fn process_turn_with_existing_turn(
                         &e,
                     )
                     .await;
-                    record_integrity_lost.get_or_insert(format!(
-                        "structured output could not be persisted: {e}"
-                    ));
+                    record_integrity_lost
+                        .get_or_insert(format!("structured output could not be persisted: {e}"));
                 }
             }
         }
