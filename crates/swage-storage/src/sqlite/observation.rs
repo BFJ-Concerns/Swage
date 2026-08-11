@@ -263,15 +263,19 @@ impl ObservationStore for SqliteStorage {
             // extractions stay addressable (citations pin them) but drop out
             // of default retrieval. bm25 ascends, so best matches come first.
             //
-            // Quote each term independently so FTS5 implicitly requires every
-            // term without requiring them to form one contiguous phrase. This
-            // also keeps operators and punctuation in user input out of the
-            // query grammar.
-            let fts_query = query
+            // Quote each term independently so FTS5 first requires every term
+            // without requiring them to form one contiguous phrase. If that
+            // precise search finds nothing, retry with any term; both forms
+            // keep operators and punctuation in user input out of the grammar.
+            let terms = query
                 .split_whitespace()
                 .map(|term| format!("\"{}\"", term.replace('"', "\"\"")))
-                .collect::<Vec<_>>()
-                .join(" ");
+                .collect::<Vec<_>>();
+            if terms.is_empty() {
+                return Ok(Vec::new());
+            }
+            let all_terms_query = terms.join(" ");
+            let any_term_query = terms.join(" OR ");
             let mut stmt = conn.prepare(
                 "SELECT o.id, d.version, o.origin_url, o.origin_local_path, o.retrieved_at,
                         snippet(extraction_fts, 0, '', '', '…', 24) AS passage,
@@ -301,36 +305,45 @@ impl ObservationStore for SqliteStorage {
                  LIMIT ?3",
             )?;
 
-            let rows = stmt.query_map(
-                params![
-                    fts_query,
-                    space_id.to_string(),
-                    i64::try_from(limit).unwrap_or(i64::MAX)
-                ],
-                |row| {
-                    let observation_id = parse_uuid(&row.get::<_, String>(0)?)?;
-                    let version = u32::try_from(row.get::<_, i64>(1)?).unwrap_or(u32::MAX);
-                    let snippet: String = row.get(5)?;
-                    let full_text: String = row.get(6)?;
-                    // snippet() marks continuation with '…' at the ends; strip
-                    // it so the stored passage is text that literally occurs in
-                    // the derivation, then locate its byte offset there.
-                    let passage = snippet.trim_matches('…').to_string();
-                    let snippet_offset = full_text.find(&passage);
-                    Ok(KnowledgeSearchHit {
-                        observation_id,
-                        derivation_version: version,
-                        origin: ObservationOrigin {
-                            url: row.get(2)?,
-                            local_path: row.get(3)?,
-                        },
-                        retrieved_at: parse_dt(&row.get::<_, String>(4)?)?,
-                        snippet: passage,
-                        snippet_offset,
-                    })
-                },
-            )?;
-            rows.collect::<rusqlite::Result<Vec<_>>>()
+            let mut search = |fts_query: &str| {
+                let rows = stmt.query_map(
+                    params![
+                        fts_query,
+                        space_id.to_string(),
+                        i64::try_from(limit).unwrap_or(i64::MAX)
+                    ],
+                    |row| {
+                        let observation_id = parse_uuid(&row.get::<_, String>(0)?)?;
+                        let version = u32::try_from(row.get::<_, i64>(1)?).unwrap_or(u32::MAX);
+                        let snippet: String = row.get(5)?;
+                        let full_text: String = row.get(6)?;
+                        // snippet() marks continuation with '…' at the ends; strip
+                        // it so the stored passage is text that literally occurs in
+                        // the derivation, then locate its byte offset there.
+                        let passage = snippet.trim_matches('…').to_string();
+                        let snippet_offset = full_text.find(&passage);
+                        Ok(KnowledgeSearchHit {
+                            observation_id,
+                            derivation_version: version,
+                            origin: ObservationOrigin {
+                                url: row.get(2)?,
+                                local_path: row.get(3)?,
+                            },
+                            retrieved_at: parse_dt(&row.get::<_, String>(4)?)?,
+                            snippet: passage,
+                            snippet_offset,
+                        })
+                    },
+                )?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()
+            };
+
+            let hits = search(&all_terms_query)?;
+            if hits.is_empty() {
+                search(&any_term_query)
+            } else {
+                Ok(hits)
+            }
         })
         .await
     }
@@ -614,6 +627,70 @@ mod tests {
 
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].observation_id, observation.id);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn search_falls_back_to_ranked_any_term_only_after_no_all_term_match() {
+        let (storage, space_id) = storage_with_space().await;
+        let strong_match = storage
+            .record_observation(new_observation(
+                space_id,
+                "https://example.org/strong",
+                "fallback-strong",
+            ))
+            .await
+            .unwrap();
+        storage
+            .add_extraction(
+                strong_match.id,
+                "Honeybee waggle dances communicate direction.".into(),
+                "extractor".into(),
+            )
+            .await
+            .unwrap();
+        let partial_match = storage
+            .record_observation(new_observation(
+                space_id,
+                "https://example.org/partial",
+                "fallback-partial",
+            ))
+            .await
+            .unwrap();
+        storage
+            .add_extraction(
+                partial_match.id,
+                "Honeybee behaviour under noise.".into(),
+                "extractor".into(),
+            )
+            .await
+            .unwrap();
+
+        let precise_hits = storage
+            .search_extractions(space_id, "honeybee direction", 10)
+            .await
+            .unwrap();
+        assert_eq!(precise_hits.len(), 1, "partial matches stay excluded");
+        assert_eq!(precise_hits[0].observation_id, strong_match.id);
+
+        let fallback_hits = storage
+            .search_extractions(space_id, "honeybee absent", 10)
+            .await
+            .unwrap();
+        assert_eq!(fallback_hits.len(), 2, "any-term fallback returns matches");
+        assert_eq!(fallback_hits[0].observation_id, partial_match.id);
+        assert_eq!(fallback_hits[1].observation_id, strong_match.id);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn search_with_only_whitespace_returns_no_hits() {
+        let (storage, space_id) = storage_with_space().await;
+
+        let hits = storage
+            .search_extractions(space_id, " \t\n ", 10)
+            .await
+            .expect("empty term list does not reach the FTS5 parser");
+
+        assert!(hits.is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread")]
