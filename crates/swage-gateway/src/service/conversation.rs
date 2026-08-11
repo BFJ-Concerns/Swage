@@ -12,8 +12,13 @@ use swage_storage::{
 use swage_protocol::client::conversation::TurnState as WireTurnState;
 pub use swage_protocol::client::conversation::{
     ConversationBranchResponse, ConversationDetail, ConversationResponse, ConversationSummary,
-    ConversationThreadDetail, CreateConversationBranchRequest, MessageView, ToolCallView,
+    ConversationThreadDetail, CreateConversationBranchRequest, CreateConversationRequest,
+    MessageView, ToolCallView,
 };
+
+/// The built-in agent a session runs under when no definition is selected.
+/// It needs no agent-definition row, so selector validation always admits it.
+const DEFAULT_AGENT_ID: &str = "gateway";
 
 fn turn_state_to_wire(state: &TurnState) -> WireTurnState {
     match state {
@@ -49,25 +54,38 @@ impl ConversationService {
     /// Also creates a default thread for the session so that process_turn has
     /// a thread_id to attach turns and messages to.
     pub async fn create_conversation(&self) -> Result<ConversationResponse, GatewayError> {
-        self.create_conversation_with_model(None).await
+        self.create_conversation_from_request(CreateConversationRequest::default())
+            .await
     }
 
     pub async fn create_conversation_with_model(
         &self,
         selected_model_id: Option<String>,
     ) -> Result<ConversationResponse, GatewayError> {
+        self.create_conversation_from_request(CreateConversationRequest {
+            selected_model_id,
+            agent_id: None,
+        })
+        .await
+    }
+
+    pub async fn create_conversation_from_request(
+        &self,
+        request: CreateConversationRequest,
+    ) -> Result<ConversationResponse, GatewayError> {
         let space = self.space_store.get_or_create_default().await?;
+        let agent_id = self.validated_agent_id(space.id, request.agent_id).await?;
         let active_workspace_attachment_id = self.default_workspace_for_space(space.id).await?;
         let mut session = self
             .storage
             .create_session(NewSession {
                 space_id: space.id,
-                agent_id: "gateway".to_string(),
+                agent_id: agent_id.clone(),
                 metadata: None,
                 active_workspace_attachment_id,
             })
             .await?;
-        if let Some(selected_model_id) = normalise_selected_model_id(selected_model_id) {
+        if let Some(selected_model_id) = normalise_selected_model_id(request.selected_model_id) {
             session = self
                 .storage
                 .set_session_selected_model(session.id, Some(selected_model_id))
@@ -79,7 +97,7 @@ impl ConversationService {
         self.storage
             .create(NewThread {
                 session_id: session.id,
-                agent_id: "gateway".to_string(),
+                agent_id,
             })
             .await?;
 
@@ -90,6 +108,44 @@ impl ConversationService {
             created_at: session.created_at,
             last_activity: session.updated_at,
         })
+    }
+
+    /// Resolve a client-supplied agent selector to the agent id a new session
+    /// runs under.
+    ///
+    /// An absent selector means the default agent. A named selector must be
+    /// the default agent or an agent definition visible to the space
+    /// (space-scoped shadowing global) — anything else is a validation error,
+    /// never a session that silently runs under configuration the client did
+    /// not choose. Trust-carrying paths that name their agent directly
+    /// (schedule runs) use `create_session_in_space_for_agent` and are not
+    /// validated here.
+    async fn validated_agent_id(
+        &self,
+        space_id: Uuid,
+        requested: Option<String>,
+    ) -> Result<String, GatewayError> {
+        let Some(agent_id) = requested else {
+            return Ok(DEFAULT_AGENT_ID.to_string());
+        };
+        let agent_id = agent_id.trim().to_string();
+        if agent_id.is_empty() {
+            return Err(GatewayError::ValidationError(
+                "agent_id must not be empty".to_string(),
+            ));
+        }
+        if agent_id != DEFAULT_AGENT_ID
+            && self
+                .storage
+                .resolve_agent_definition(&agent_id, space_id)
+                .await?
+                .is_none()
+        {
+            return Err(GatewayError::ValidationError(format!(
+                "no agent definition named '{agent_id}' is visible to this space"
+            )));
+        }
+        Ok(agent_id)
     }
 
     /// List all conversations in the default space, ordered by most-recent activity.
@@ -254,7 +310,26 @@ impl ConversationService {
         space_id: Uuid,
         selected_model_id: Option<String>,
     ) -> Result<ConversationResponse, GatewayError> {
-        self.create_session_in_space_for_agent(space_id, "gateway", selected_model_id)
+        self.create_session_in_space_for_agent(space_id, DEFAULT_AGENT_ID, selected_model_id)
+            .await
+    }
+
+    /// Create a session in a space from a client request, resolving and
+    /// validating its agent selector.
+    ///
+    /// The space is checked first so a missing space reports 404 rather than
+    /// an unknown-agent validation error against a space that does not exist.
+    pub async fn create_session_in_space_from_request(
+        &self,
+        space_id: Uuid,
+        request: CreateConversationRequest,
+    ) -> Result<ConversationResponse, GatewayError> {
+        self.space_store
+            .get(space_id)
+            .await?
+            .ok_or(GatewayError::SpaceNotFound { id: space_id })?;
+        let agent_id = self.validated_agent_id(space_id, request.agent_id).await?;
+        self.create_session_in_space_for_agent(space_id, &agent_id, request.selected_model_id)
             .await
     }
 

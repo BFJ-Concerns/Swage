@@ -124,12 +124,19 @@ const organised = await agent(
     `covers and cite the observation ids they derive from. Where a new ` +
     `observation duplicates or supersedes existing material, assert that ` +
     `with knowledge_curate - never delete anything. Zero notes or zero ` +
-    `assertions is a valid outcome when nothing warrants them. In "note", ` +
-    `summarise in one or two sentences what you did and anything that ` +
-    `needs a human eye. Return JSON only.`,
+    `assertions is a valid outcome when nothing warrants them.\n\n` +
+    `Return JSON only, exactly this shape:\n` +
+    `{"orientation_notes": <count of orientation notes you recorded>, ` +
+    `"assertions": <count of curation assertions you made>, ` +
+    `"note": "one or two sentences on what you did and anything that ` +
+    `needs a human eye"}`,
   {
     agent: "organiser",
     label: "Organise corpus",
+    // A live organiser once answered off-schema and exhausted the default
+    // budget; the tool work above is already done by then, so extra
+    // attempts only re-shape the answer - cheap, and dedup-safe.
+    maxAttempts: 5,
     schema: {
       type: "object",
       required: ["orientation_notes", "assertions", "note"],

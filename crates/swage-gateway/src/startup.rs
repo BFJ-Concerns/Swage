@@ -696,41 +696,41 @@ pub(crate) fn build_tool_dispatcher_with_browser(
 
     let mut all_tools = non_python_tools;
 
-    match swage_python::PythonWorkerRuntime::new(config.tools.python_execute.clone()) {
-        Ok(runtime) if runtime.python_execute_available() => {
-            let runtime = Arc::new(runtime);
-            match swage_python::WorkerPool::new(Arc::clone(&runtime)) {
-                Ok(pool) => {
-                    all_tools.push(Arc::new(PythonExecuteTool::new(
-                        runtime,
-                        pool,
-                        sub_dispatcher,
-                        storage,
-                    )));
-                    info!("Python worker runtime available — python_execute tool registered");
-                }
-                Err(error) => {
-                    warn!(
-                        "Python worker pool could not be initialised unexpectedly ({error}); python_execute was not registered; report this internal startup error"
-                    );
+    if !config.tools.python_execute.enabled {
+        warn!(
+            "tools.python_execute.enabled is false; python_execute was not registered; enable it unless this was intentional"
+        );
+    } else {
+        match swage_python::PythonWorkerRuntime::new(config.tools.python_execute.clone()) {
+            Ok(runtime) if runtime.python_execute_available() => {
+                let runtime = Arc::new(runtime);
+                match swage_python::WorkerPool::new(Arc::clone(&runtime)) {
+                    Ok(pool) => {
+                        all_tools.push(Arc::new(PythonExecuteTool::new(
+                            runtime,
+                            pool,
+                            sub_dispatcher,
+                            storage,
+                        )));
+                        info!("Python worker runtime available — python_execute tool registered");
+                    }
+                    Err(error) => {
+                        warn!(
+                            "Python worker pool could not be initialised unexpectedly ({error}); python_execute was not registered; report this internal startup error"
+                        );
+                    }
                 }
             }
-        }
-        Ok(_) => {
-            if config.tools.python_execute.enabled {
+            Ok(_) => {
                 warn!(
                     "bubblewrap is unavailable; python_execute was not registered; install it or set tools.python_execute.require_sandbox = false to run Python unsandboxed"
                 );
-            } else {
+            }
+            Err(e) => {
                 warn!(
-                    "tools.python_execute.enabled is false; python_execute was not registered; enable it unless this was intentional"
+                    "Python runtime could not be resolved ({e}); python_execute was not registered; install Python 3 or correct tools.python_execute.runtime_path"
                 );
             }
-        }
-        Err(e) => {
-            warn!(
-                "Python runtime could not be resolved ({e}); python_execute was not registered; install Python 3 or correct tools.python_execute.runtime_path"
-            );
         }
     }
 
@@ -1544,6 +1544,20 @@ mod tests {
                 .is_some(),
             "delegate tool should be registered with the built-in dispatcher",
         );
+    }
+
+    #[tokio::test]
+    async fn build_tool_dispatcher_omits_disabled_python_with_missing_runtime() {
+        let storage =
+            Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
+        let mut config = swage_config::ResolvedConfig::default();
+        config.tools.python_execute.enabled = false;
+        config.tools.python_execute.runtime_path = Some("/definitely/missing/python".to_string());
+
+        let dispatcher =
+            build_tool_dispatcher(&config, storage as Arc<dyn swage_storage::store::Storage>);
+
+        assert!(dispatcher.registry().get("python_execute").is_none());
     }
 
     #[tokio::test]
