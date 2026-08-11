@@ -616,11 +616,13 @@ pub(crate) fn build_tool_dispatcher_with_browser(
     use crate::tool::{
         Tool, agent_memory::AgentMemoryTool, browser::browser_tools, file_edit::FileEditTool,
         file_list::FileListTool, file_read::FileReadTool, file_search::FileSearchTool,
-        file_write::FileWriteTool, knowledge::KnowledgeCiteTool, knowledge::KnowledgeCurateTool,
-        knowledge::KnowledgeRecordTool, knowledge::KnowledgeSearchTool, memory::MemoryTool,
-        plugin::discover_plugin_tools, python_execute::PythonExecuteTool, schedule::ScheduleTool,
-        schedule::WakeMeLaterTool, shell::ShellTool, tool_result_read::ToolResultReadTool,
-        url_fetch::UrlFetchTool, web_search::WebSearchTool,
+        file_write::FileWriteTool, knowledge::KnowledgeCiteTool,
+        knowledge::KnowledgeCurateOrientationTool, knowledge::KnowledgeCurateTool,
+        knowledge::KnowledgeOrientTool, knowledge::KnowledgeRecordTool,
+        knowledge::KnowledgeSearchTool, memory::MemoryTool, plugin::discover_plugin_tools,
+        python_execute::PythonExecuteTool, schedule::ScheduleTool, schedule::WakeMeLaterTool,
+        shell::ShellTool, tool_result_read::ToolResultReadTool, url_fetch::UrlFetchTool,
+        web_search::WebSearchTool,
     };
     use std::time::Duration;
 
@@ -664,6 +666,8 @@ pub(crate) fn build_tool_dispatcher_with_browser(
         Arc::new(KnowledgeRecordTool),
         Arc::new(KnowledgeCurateTool),
         Arc::new(KnowledgeCiteTool),
+        Arc::new(KnowledgeOrientTool),
+        Arc::new(KnowledgeCurateOrientationTool),
     ];
 
     let base_tools = if let Some(browser_host) = browser_host {
@@ -1546,6 +1550,28 @@ mod tests {
         assert!(
             dispatcher.registry().get("knowledge_cite").is_some(),
             "citation tool should be registered with the built-in dispatcher",
+        );
+    }
+
+    #[tokio::test]
+    async fn build_tool_dispatcher_registers_orientation_tool() {
+        let storage =
+            Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
+        let dispatcher = build_tool_dispatcher(
+            &swage_config::ResolvedConfig::default(),
+            storage as Arc<dyn swage_storage::store::Storage>,
+        );
+
+        assert!(
+            dispatcher.registry().get("knowledge_orient").is_some(),
+            "orientation tool should be registered with the built-in dispatcher",
+        );
+        assert!(
+            dispatcher
+                .registry()
+                .get("knowledge_curate_orientation")
+                .is_some(),
+            "orientation curation tool should be registered with the built-in dispatcher",
         );
     }
 

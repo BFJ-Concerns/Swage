@@ -11,7 +11,7 @@ use tower_http::trace::TraceLayer;
 use tracing::Instrument;
 use uuid::Uuid;
 
-use crate::{assets, handlers, state::AppState, websocket, workflow};
+use crate::{assets, handlers, knowledge_mirror, state::AppState, websocket, workflow};
 
 // ---------------------------------------------------------------------------
 // Request ID correlation middleware
@@ -100,6 +100,10 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/api/spaces/{space_id}/workspaces/{workspace_id}/trust",
             put(handlers::update_space_workspace_trust),
+        )
+        .route(
+            "/api/spaces/{id}/knowledge-mirror",
+            post(knowledge_mirror::regenerate),
         )
         .route(
             "/api/spaces/{id}/workflow-scripts",
@@ -292,6 +296,10 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/api/schedules/{id}/runs",
             get(handlers::list_schedule_runs),
+        )
+        .route(
+            "/api/operator/configuration/undo",
+            post(handlers::undo_configuration_case),
         )
         // Runtime presence and liveness.
         .route("/api/presence", get(handlers::presence_snapshot))

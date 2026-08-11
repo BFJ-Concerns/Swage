@@ -2206,6 +2206,15 @@ impl TurnStore for MockStorage {
         Ok(())
     }
 
+    async fn force_turn_failure(&self, id: Uuid) -> Result<(), StorageError> {
+        let mut db = self.db.lock().await;
+        if let Some(turn) = db.turns.get_mut(&id) {
+            turn.completed_at.get_or_insert_with(chrono::Utc::now);
+            turn.state = TurnState::Failed;
+        }
+        Ok(())
+    }
+
     async fn find_in_progress_by_agent(&self, agent_id: &str) -> Result<Vec<Turn>, StorageError> {
         Ok(self
             .db
@@ -2905,7 +2914,7 @@ impl swage_storage::store::ConfigurationVersionStore for MockStorage {
             snapshot: version.snapshot,
             diff: version.diff,
             previous_version_id: version.previous_version_id,
-            rollback_to_version_id: version.rollback_to_version_id,
+            undone_version_id: version.undone_version_id,
             created_at: chrono::Utc::now(),
         };
         self.db
@@ -3047,6 +3056,13 @@ impl swage_storage::store::ObservationStore for MockStorage {
         unimplemented!("turn tests do not exercise the knowledge base")
     }
 
+    async fn latest_extraction(
+        &self,
+        _: uuid::Uuid,
+    ) -> Result<Option<swage_storage::ExtractionDerivation>, StorageError> {
+        unimplemented!("turn tests do not exercise the knowledge base")
+    }
+
     async fn search_extractions(
         &self,
         _: uuid::Uuid,
@@ -3065,6 +3081,13 @@ impl swage_storage::store::CurationAssertionStore for MockStorage {
     ) -> Result<swage_storage::CurationAssertion, StorageError> {
         unimplemented!("turn tests do not exercise knowledge curation")
     }
+
+    async fn effective_curation_by_space(
+        &self,
+        _: uuid::Uuid,
+    ) -> Result<Vec<swage_storage::CurationAssertion>, StorageError> {
+        unimplemented!("turn tests do not exercise knowledge curation")
+    }
 }
 
 #[async_trait]
@@ -3081,6 +3104,44 @@ impl swage_storage::store::CitationStore for MockStorage {
         _: uuid::Uuid,
     ) -> Result<Option<swage_storage::KnowledgeCitation>, StorageError> {
         unimplemented!("turn tests do not exercise knowledge citations")
+    }
+}
+
+#[async_trait]
+impl swage_storage::store::OrientationCardStore for MockStorage {
+    async fn create_orientation_card(
+        &self,
+        _: swage_storage::NewOrientationCard,
+        _: Option<uuid::Uuid>,
+    ) -> Result<swage_storage::OrientationCard, StorageError> {
+        unimplemented!("turn tests do not exercise orientation cards")
+    }
+    async fn find_orientation_cards(
+        &self,
+        _: uuid::Uuid,
+        _: Option<&str>,
+        _: usize,
+    ) -> Result<Vec<swage_storage::OrientationCard>, StorageError> {
+        unimplemented!("turn tests do not exercise orientation cards")
+    }
+    async fn supersede_orientation_card(
+        &self,
+        _: uuid::Uuid,
+        _: uuid::Uuid,
+        _: uuid::Uuid,
+        _: String,
+        _: Option<uuid::Uuid>,
+    ) -> Result<swage_storage::OrientationCardLifecycle, StorageError> {
+        unimplemented!("turn tests do not exercise orientation cards")
+    }
+    async fn retire_orientation_card(
+        &self,
+        _: uuid::Uuid,
+        _: uuid::Uuid,
+        _: String,
+        _: Option<uuid::Uuid>,
+    ) -> Result<swage_storage::OrientationCardLifecycle, StorageError> {
+        unimplemented!("turn tests do not exercise orientation cards")
     }
 }
 
@@ -9738,5 +9799,104 @@ fn approval_events_routed_to_ws_tx_not_broadcast() {
     assert!(
         rx_b.try_recv().is_err(),
         "agent-b's ws_tx must not receive agent-a's approval event"
+    );
+}
+
+#[test]
+fn delegation_result_renders_response_and_structured_output() {
+    let message = swage_storage::model::AgentMessage {
+        id: Uuid::new_v4(),
+        sender_agent_id: "researcher".into(),
+        recipient_agent_id: "gateway".into(),
+        kind: swage_core::MessageKind::Result,
+        correlation_id: Some(Uuid::new_v4()),
+        payload: serde_json::json!({
+            "response": "Gathered 3 sources.",
+            "structured_output": {"sources": 3},
+            "input_tokens": 10,
+            "output_tokens": 20,
+        }),
+        status: swage_core::MessageStatus::Pending,
+        failure_reason: None,
+        created_at: chrono::Utc::now(),
+        delivered_at: None,
+    };
+
+    let rendered = render_delegation_result(&message);
+    assert!(rendered.contains("researcher"));
+    assert!(rendered.contains("Gathered 3 sources."));
+    assert!(rendered.contains("\"sources\": 3"));
+}
+
+#[test]
+fn delegation_result_renders_failure_and_unknown_shapes() {
+    let base = |payload| swage_storage::model::AgentMessage {
+        id: Uuid::new_v4(),
+        sender_agent_id: "researcher".into(),
+        recipient_agent_id: "gateway".into(),
+        kind: swage_core::MessageKind::Result,
+        correlation_id: None,
+        payload,
+        status: swage_core::MessageStatus::Pending,
+        failure_reason: None,
+        created_at: chrono::Utc::now(),
+        delivered_at: None,
+    };
+
+    let failed = render_delegation_result(&base(serde_json::json!({"error": "budget exhausted"})));
+    assert!(failed.contains("failed"));
+    assert!(failed.contains("budget exhausted"));
+
+    // An unrecognised payload is still delivered, never dropped.
+    let unknown = render_delegation_result(&base(serde_json::json!({"verdict": "unclear"})));
+    assert!(unknown.contains("verdict"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn delivered_delegation_results_survive_the_history_rebuild() {
+    let storage = MockStorage::new();
+    let thread_id = Uuid::new_v4();
+
+    // The delivery loop's role choice is load-bearing: the rebuild carries
+    // Tool-role rows only when they answer a recorded tool call, so a
+    // platform delivery on that role would be recorded yet never reach the
+    // model. Pin both halves.
+    storage
+        .append_message(AppendMessage {
+            thread_id,
+            turn_id: None,
+            role: Role::User,
+            content: "Delegated agent researcher completed:\nGathered 3 sources.".into(),
+            agent_id: "gateway".into(),
+        })
+        .await
+        .unwrap();
+    storage
+        .append_message(AppendMessage {
+            thread_id,
+            turn_id: None,
+            role: Role::Tool,
+            content: "orphaned tool row".into(),
+            agent_id: "gateway".into(),
+        })
+        .await
+        .unwrap();
+
+    let rebuilt = super::history::rebuild_thread_history_messages(&storage, thread_id)
+        .await
+        .unwrap();
+
+    assert!(
+        rebuilt
+            .iter()
+            .any(|m| m.text_content().contains("Gathered 3 sources.")),
+        "a delivered delegation result must reach the model as history"
+    );
+    assert!(
+        !rebuilt
+            .iter()
+            .any(|m| m.text_content().contains("orphaned tool row")),
+        "a tool row answering no recorded call is dropped by the rebuild — \
+         which is why deliveries must not use Role::Tool"
     );
 }

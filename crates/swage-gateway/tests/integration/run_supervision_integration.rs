@@ -310,6 +310,7 @@ async fn operator_runs_survive_restart_with_durable_history() {
 
     let schedule = storage
         .create_schedule(NewSchedule {
+            id: Uuid::new_v4(),
             message: "nightly".into(),
             status: ScheduleStatus::Active,
             kind: ScheduleKind::Cron,

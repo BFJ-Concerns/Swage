@@ -84,6 +84,22 @@ pub struct ApprovalDecisionRequest {
     pub reason: Option<String>,
 }
 
+/// Ask the operator control plane to undo a recorded configuration case.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+pub struct UndoConfigurationCaseRequest {
+    pub case_id: Uuid,
+}
+
+/// The new change-case record produced by undoing a configuration case.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+pub struct ConfigurationChangeResponse {
+    pub version_id: Uuid,
+    pub entity_kind: String,
+    pub entity_id: String,
+    pub summary: String,
+    pub risk_band: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
 pub struct OperatorGatewaySummary {
     pub status: String,
@@ -210,6 +226,15 @@ fn default_machine_stale_after_secs() -> u64 {
     30
 }
 
+/// Result of regenerating a space's knowledge-base browse mirror — a
+/// disposable markdown projection of the database-authoritative store.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+pub struct KnowledgeMirrorRegenerateResponse {
+    /// Absolute path of the regenerated mirror directory.
+    pub mirror_root: String,
+    pub files_written: u32,
+}
+
 #[derive(JsonSchema)]
 #[allow(dead_code)]
 pub struct HostingSurface {
@@ -217,10 +242,13 @@ pub struct HostingSurface {
     heartbeat: MachineHeartbeatRequest,
     approvals: ApprovalListResponse,
     approval_decision: ApprovalDecisionRequest,
+    undo_configuration_case: UndoConfigurationCaseRequest,
+    configuration_change: ConfigurationChangeResponse,
     operator_overview: OperatorOverviewResponse,
     agent_definition_list: AgentDefinitionListResponse,
     agent_definition_create: CreateAgentDefinitionRequest,
     agent_definition_update: UpdateAgentDefinitionRequest,
     agent_definition_mutation: AgentDefinitionMutationResponse,
     devices: device::DeviceListResponse,
+    knowledge_mirror: KnowledgeMirrorRegenerateResponse,
 }
