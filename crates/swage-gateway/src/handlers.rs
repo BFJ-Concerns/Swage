@@ -892,11 +892,7 @@ pub struct ConversationListResponse {
     pub conversations: Vec<ConversationSummary>,
 }
 
-#[derive(Debug, Deserialize)]
-pub struct CreateConversationRequest {
-    #[serde(default)]
-    pub selected_model_id: Option<String>,
-}
+pub use swage_protocol::client::conversation::CreateConversationRequest;
 
 // ---------------------------------------------------------------------------
 // Route handlers
@@ -910,10 +906,8 @@ pub async fn create_conversation(
     payload: Option<Json<CreateConversationRequest>>,
 ) -> Result<impl IntoResponse, ApiError> {
     let svc = ConversationService::new(state.storage, state.space_store);
-    let selected_model_id = payload.and_then(|Json(request)| request.selected_model_id);
-    let resp: ConversationResponse = svc
-        .create_conversation_with_model(selected_model_id)
-        .await?;
+    let request = payload.map(|Json(request)| request).unwrap_or_default();
+    let resp: ConversationResponse = svc.create_conversation_from_request(request).await?;
     Ok((StatusCode::CREATED, Json(resp)))
 }
 
@@ -961,9 +955,9 @@ pub async fn create_space_session(
     payload: Option<Json<CreateConversationRequest>>,
 ) -> Result<impl IntoResponse, ApiError> {
     let svc = ConversationService::new(state.storage, state.space_store);
-    let selected_model_id = payload.and_then(|Json(request)| request.selected_model_id);
+    let request = payload.map(|Json(request)| request).unwrap_or_default();
     let resp = svc
-        .create_session_in_space_with_model(space_id, selected_model_id)
+        .create_session_in_space_from_request(space_id, request)
         .await?;
     Ok((StatusCode::CREATED, Json(resp)))
 }
