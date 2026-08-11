@@ -5,6 +5,7 @@ use super::{
 use swage_context::orientation::{
     AvailableSkill, ChannelOrientation, OrientationElement, SessionEnvironment,
 };
+use swage_context::working_norms::WorkingNormsElement;
 
 #[cfg(test)]
 tokio::task_local! {
@@ -89,6 +90,7 @@ pub(crate) fn build_assembly_elements(
     memory: Option<(String, String)>,
     environment: SessionEnvironment,
     available_skills: Vec<AvailableSkill>,
+    model_id: &str,
 ) -> Vec<Box<dyn ContextElement>> {
     // Construct a single PromptRule from the resolved instructions string.
     // The config resolver has already merged hierarchy levels and assembled
@@ -107,6 +109,10 @@ pub(crate) fn build_assembly_elements(
 
     let mut elements: Vec<Box<dyn ContextElement>> = vec![
         Box::new(OrientationElement::new(environment, available_skills)),
+        // Models arrive over the proxy bare: the norms their own harness
+        // would have supplied come from the assembly, keyed by the coming
+        // turn's model family.
+        Box::new(WorkingNormsElement::for_model(model_id)),
         Box::new(PromptsElement::new(rules)),
         Box::new(SkillsElement::new(active_skills)),
     ];

@@ -8320,11 +8320,12 @@ fn named_assembly_elements_include_prompts_skills_memory_and_history() {
         Some((String::new(), "My Space".to_string())),
         test_environment(),
         vec![],
+        "claude-test-model",
     );
 
-    // Should produce five elements: orientation, prompts, skills (empty),
-    // memory, and history.
-    assert_eq!(elements.len(), 5);
+    // Should produce six elements: orientation, working norms, prompts,
+    // skills (empty), memory, and history.
+    assert_eq!(elements.len(), 6);
     let names: Vec<&str> = elements.iter().map(|e| e.name()).collect();
     assert!(
         names.contains(&"orientation"),
@@ -8350,9 +8351,10 @@ fn default_assembly_elements_exclude_memory() {
         None,
         test_environment(),
         vec![],
+        "claude-test-model",
     );
 
-    assert_eq!(elements.len(), 4);
+    assert_eq!(elements.len(), 5);
     // PromptsElement with empty rules produces no messages; the orientation
     // baseline is what keeps an unconfigured session's context non-empty.
     let orientation = elements.iter().find(|e| e.name() == "orientation").unwrap();
@@ -8399,6 +8401,7 @@ async fn named_assembly_loads_memory_and_can_compose_it() {
         memory.map(|content| (content, "My Space".to_string())),
         test_environment(),
         vec![],
+        "claude-test-model",
     );
 
     let dir = tempfile::tempdir().unwrap();
@@ -8442,6 +8445,7 @@ fn build_assembly_elements_memory_element_contains_provided_content() {
         )),
         test_environment(),
         vec![],
+        "claude-test-model",
     );
 
     let memory = elements.iter().find(|e| e.name() == "memory").unwrap();

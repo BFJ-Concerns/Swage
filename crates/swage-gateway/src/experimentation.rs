@@ -26,6 +26,11 @@ use crate::state::AppState;
 /// The context-assembly choice point: which named assembly composes a turn.
 pub const LOCATION_CONTEXT_ASSEMBLY: &str = "context.assembly";
 
+/// The working-norms choice point: which norms text a bare-proxy model's
+/// session receives for its family. The built-in text serves until
+/// alternatives register; every draw is recorded like any location's.
+pub const LOCATION_WORKING_NORMS: &str = "context.working_norms";
+
 /// Why the selected variant was selected. Recorded verbatim; the reasons are
 /// the audit trail's vocabulary, so they name situations, not code paths.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
