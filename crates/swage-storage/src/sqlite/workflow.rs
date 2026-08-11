@@ -348,6 +348,25 @@ impl WorkflowStore for SqliteStorage {
     ) -> Result<Vec<WorkflowRunRecord>, StorageError> {
         self.with_conn(move |conn| { let mut stmt = conn.prepare(&format!("SELECT {RUN_COLUMNS} FROM workflow_runs WHERE space_id = ?1 ORDER BY created_at DESC"))?; stmt.query_map([space_id.to_string()], run_row)?.collect() }).await
     }
+    async fn try_transition_workflow_run_state(
+        &self,
+        id: Uuid,
+        from: &str,
+        to: &str,
+    ) -> Result<bool, StorageError> {
+        let from = from.to_string();
+        let to = to.to_string();
+        self.with_conn(move |conn| {
+            let count = conn.execute(
+                "UPDATE workflow_runs SET state=?3, wake_at=NULL, completed_at=NULL \
+                 WHERE id=?1 AND state=?2",
+                params![id.to_string(), from, to],
+            )?;
+            Ok(count > 0)
+        })
+        .await
+    }
+
     async fn set_workflow_run_parked(
         &self,
         id: Uuid,

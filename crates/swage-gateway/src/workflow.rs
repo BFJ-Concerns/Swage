@@ -120,6 +120,7 @@ fn journal_wire(
         "timer" => WorkflowJournalEntryKind::Timer,
         "event" => WorkflowJournalEntryKind::Event,
         "gate" => WorkflowJournalEntryKind::Gate,
+        "budget" => WorkflowJournalEntryKind::Budget,
         other => return Err(format!("unknown workflow entry kind: {other}")),
     };
     let status = match entry.status.as_str() {
@@ -366,6 +367,9 @@ enum HostCommand {
         up_to_seq: u64,
         reply: oneshot::Sender<Result<Value, String>>,
     },
+    BudgetSnapshot {
+        reply: oneshot::Sender<Result<Value, String>>,
+    },
 }
 
 struct ChannelWorkflowHost {
@@ -524,6 +528,19 @@ impl WorkflowHost for ChannelWorkflowHost {
         receive
             .await
             .map_err(|_| "workflow host dropped delivery reply".to_string())?
+    }
+
+    async fn budget_snapshot(
+        &self,
+        _cancellation: CancellationToken,
+    ) -> Result<Value, String> {
+        let (reply, receive) = oneshot::channel();
+        self.tx
+            .send(HostCommand::BudgetSnapshot { reply })
+            .map_err(|_| "workflow host stopped".to_string())?;
+        receive
+            .await
+            .map_err(|_| "workflow host dropped budget reply".to_string())?
     }
 }
 
@@ -737,23 +754,6 @@ fn run_host_commands(
     ))
 }
 
-/// Whether the run has journalled work still executing — a started agent
-/// call, child workflow, or effect. Parking with live work would
-/// double-execute it at wake (replay re-runs started entries), so
-/// uncertainty reads as busy.
-async fn has_started_work(state: &AppState, run_id: Uuid) -> bool {
-    match state.storage.list_workflow_journal(run_id).await {
-        Ok(entries) => entries.iter().any(|entry| {
-            entry.status == "started"
-                && matches!(
-                    entry.kind.as_str(),
-                    "agent_call" | "workflow_call" | "effect"
-                )
-        }),
-        Err(_) => true,
-    }
-}
-
 async fn run_host_commands_inner(
     state: AppState,
     run_id: Uuid,
@@ -789,12 +789,21 @@ async fn run_host_commands_inner(
         budget.max_concurrent_agent_calls.unwrap_or(4).max(1) as usize,
     ));
     let replay = Arc::new(replay);
-    // Only agent calls can be outstanding together. Map their persisted completion
-    // order to a dense rank so replay releases parallel promises in exactly the
-    // interleaving observed by the original run, irrespective of unrelated log rows.
+    // Every spawned-reply kind — agent calls, child workflows, gate
+    // evaluations — can be outstanding together, and the script observes
+    // their completion order. Map their persisted completion order to a
+    // dense rank so replay releases those replies in exactly the
+    // interleaving the original run observed, irrespective of unrelated
+    // log rows; without this, a replayed gate answering instantly beside
+    // rank-gated agent replies would turn a wall-clock ordering into a
+    // scheduler race and fail deterministic scripts with
+    // NondeterministicReplayError.
     let mut replay_agent_orders = replay
         .iter()
-        .filter(|entry| entry.kind == "agent_call" && entry.status == "completed")
+        .filter(|entry| {
+            matches!(entry.kind.as_str(), "agent_call" | "workflow_call" | "gate")
+                && entry.status == "completed"
+        })
         .filter_map(|entry| entry.completed_order.map(|order| (entry.seq, order)))
         .collect::<Vec<_>>();
     replay_agent_orders.sort_by_key(|(_, order)| *order);
@@ -822,6 +831,15 @@ async fn run_host_commands_inner(
     // an error into a script that is still halting. The loop ends when the
     // engine's channel closes, and by then nothing awaits these.
     let mut parked_replies: Vec<oneshot::Sender<Result<Value, String>>> = Vec::new();
+    // The recorded due time once this run has parked. Later timer commands
+    // draining from the queue lower it (a run wakes at its EARLIEST due),
+    // never raise it.
+    let mut parked_due: Option<chrono::DateTime<chrono::Utc>> = None;
+    // Host work dispatched by this loop and not yet settled — agent calls,
+    // child workflows, gate evaluations. The park guard reads this counter
+    // rather than the journal: an intent row is written inside the spawned
+    // task, so the journal can lag the dispatch and miss live work.
+    let in_flight = Arc::new(AtomicU32::new(0));
     while let Some(command) = commands.recv().await {
         match command {
             HostCommand::Record { kind, message } => {
@@ -922,6 +940,8 @@ async fn run_host_commands_inner(
                 let replay_agent_ranks = Arc::clone(&replay_agent_ranks);
                 let replay_release_rank = Arc::clone(&replay_release_rank);
                 let replay_release_notify = Arc::clone(&replay_release_notify);
+                in_flight.fetch_add(1, Ordering::SeqCst);
+                let in_flight = Arc::clone(&in_flight);
                 // The channel is the deterministic boundary. Assigning sequence
                 // numbers inside spawned tasks would make scheduler timing part of
                 // the journal, which is an especially unhelpful kind of experiment.
@@ -1019,6 +1039,7 @@ async fn run_host_commands_inner(
                     spent.store(accounting.spent, Ordering::SeqCst);
                     accounting.reserved = accounting.reserved.saturating_sub(call_reservation);
                     let _ = reply.send(result);
+                    in_flight.fetch_sub(1, Ordering::SeqCst);
                 });
             }
             HostCommand::Workflow {
@@ -1032,6 +1053,11 @@ async fn run_host_commands_inner(
                 let hash = journal_args_hash(&request_json);
                 let existing = replay.get(current_seq as usize).cloned();
                 let state = state.clone();
+                in_flight.fetch_add(1, Ordering::SeqCst);
+                let in_flight = Arc::clone(&in_flight);
+                let replay_agent_ranks = Arc::clone(&replay_agent_ranks);
+                let replay_release_rank = Arc::clone(&replay_release_rank);
+                let replay_release_notify = Arc::clone(&replay_release_notify);
                 // Spawned so a slow child run does not block the host loop —
                 // log records and timer arms must keep flowing while a child
                 // works. Seq was assigned at the channel boundary above.
@@ -1040,10 +1066,21 @@ async fn run_host_commands_inner(
                         Some(entry) if entry.args_hash != hash => {
                             Err("NondeterministicReplayError".into())
                         }
-                        Some(entry) if entry.status == "completed" => entry
-                            .result
-                            .clone()
-                            .ok_or_else(|| "completed workflow entry has no result".to_string()),
+                        Some(entry) if entry.status == "completed" => {
+                            let result = entry
+                                .result
+                                .clone()
+                                .ok_or_else(|| "completed workflow entry has no result".to_string());
+                            if let Some(rank) = replay_agent_ranks.get(&current_seq).copied() {
+                                await_replay_release(
+                                    rank,
+                                    &replay_release_rank,
+                                    &replay_release_notify,
+                                )
+                                .await;
+                            }
+                            result
+                        }
                         Some(entry) => {
                             complete_workflow_call_entry(
                                 &state,
@@ -1087,6 +1124,7 @@ async fn run_host_commands_inner(
                         }
                     };
                     let _ = reply.send(result);
+                    in_flight.fetch_sub(1, Ordering::SeqCst);
                 });
             }
             HostCommand::AbandonTimer { timer_id } => {
@@ -1154,22 +1192,43 @@ async fn run_host_commands_inner(
                         }
                     };
                 timer_entries.insert(timer_id, Some(entry_id));
+                let due = chrono::Utc::now()
+                    + chrono::Duration::milliseconds(effective_ms.min(i64::MAX as u64) as i64);
+                // Once parked, every further timer draining from the queue
+                // joins the park — a run wakes at its EARLIEST due, so a
+                // later, shorter timer lowers wake_at and a longer one
+                // changes nothing.
+                if let Some(current_due) = parked_due {
+                    let earliest = current_due.min(due);
+                    if earliest < current_due {
+                        if let Err(error) =
+                            state.storage.set_workflow_run_parked(run_id, earliest).await
+                        {
+                            tracing::warn!(%run_id, %error, "could not lower a parked run's wake time");
+                        } else {
+                            parked_due = Some(earliest);
+                        }
+                    }
+                    parked_replies.push(reply);
+                    continue;
+                }
                 // A durable parked wait: a long enough sleep, with no other
-                // timer armed and no journalled work still executing, tears
-                // the engine down instead of holding an OS thread on a
-                // timer. The run records when it is due; the waker resumes
-                // it by replay, and this same arm then fires the remainder.
-                // Both guards are load-bearing: a started agent call would
-                // be double-executed by wake replay, and a sibling
-                // in-process timer would die unfired.
+                // timer armed and no host work in flight, tears the engine
+                // down instead of holding an OS thread on a timer. The run
+                // records when it is due; the waker resumes it by replay,
+                // and this same arm then fires the remainder. Both guards
+                // are load-bearing: an in-flight call would be
+                // double-executed by wake replay if it were still
+                // unsettled, and an armed sibling timer would die unfired.
+                // The in-flight counter is loop-owned truth — the journal
+                // can lag a dispatch, so it must not be the guard.
                 if effective_ms >= park_threshold_ms
                     && pending_timers.is_empty()
-                    && !has_started_work(&state, run_id).await
+                    && in_flight.load(Ordering::SeqCst) == 0
                 {
-                    let wake_at = chrono::Utc::now()
-                        + chrono::Duration::milliseconds(effective_ms.min(i64::MAX as u64) as i64);
-                    match state.storage.set_workflow_run_parked(run_id, wake_at).await {
+                    match state.storage.set_workflow_run_parked(run_id, due).await {
                         Ok(()) => {
+                            parked_due = Some(due);
                             park.cancel();
                             parked_replies.push(reply);
                             continue;
@@ -1325,6 +1384,62 @@ async fn run_host_commands_inner(
                 };
                 let _ = reply.send(result);
             }
+            HostCommand::BudgetSnapshot { reply } => {
+                let current_seq = seq.fetch_add(1, Ordering::SeqCst);
+                let request_json = serde_json::json!({ "budget": "snapshot" });
+                let hash = journal_args_hash(&request_json);
+                let result = match replay.get(current_seq as usize) {
+                    Some(entry) if entry.args_hash != hash => {
+                        Err("NondeterministicReplayError".into())
+                    }
+                    // Replay returns the RECORDED reading: the live counters
+                    // hold end-state by now, and a script that branched on
+                    // this value live must branch the same way again.
+                    Some(entry) if entry.status == "completed" => entry
+                        .result
+                        .clone()
+                        .ok_or_else(|| "completed budget entry has no result".to_string()),
+                    Some(entry) if entry.status == "failed" => Err(entry
+                        .error_message
+                        .clone()
+                        .unwrap_or_else(|| "recorded budget failure".to_string())),
+                    existing => {
+                        let spent = spent_tokens.load(Ordering::SeqCst);
+                        let reading = serde_json::json!({
+                            "spent": spent,
+                            "remaining": budget
+                                .max_total_tokens
+                                .map(|limit| limit.saturating_sub(spent)),
+                        });
+                        let entry_id = match existing {
+                            Some(entry) => Ok(entry.id),
+                            None => state
+                                .create_workflow_journal_intent(NewWorkflowJournalIntent {
+                                    run_id,
+                                    seq: current_seq,
+                                    kind: "budget".into(),
+                                    args_hash: hash,
+                                    request: request_json,
+                                    effect_kind: None,
+                                    idempotency_key: None,
+                                    target_kind: None,
+                                })
+                                .await
+                                .map(|intent| intent.id)
+                                .map_err(|error| error.to_string()),
+                        };
+                        match entry_id {
+                            Ok(entry_id) => state
+                                .complete_workflow_journal_entry(entry_id, reading.clone())
+                                .await
+                                .map(|_| reading)
+                                .map_err(|error| error.to_string()),
+                            Err(error) => Err(error),
+                        }
+                    }
+                };
+                let _ = reply.send(result);
+            }
             HostCommand::Gate {
                 request,
                 cancellation,
@@ -1335,6 +1450,11 @@ async fn run_host_commands_inner(
                 let hash = journal_args_hash(&request_json);
                 let existing = replay.get(current_seq as usize).cloned();
                 let state = state.clone();
+                in_flight.fetch_add(1, Ordering::SeqCst);
+                let in_flight = Arc::clone(&in_flight);
+                let replay_agent_ranks = Arc::clone(&replay_agent_ranks);
+                let replay_release_rank = Arc::clone(&replay_release_rank);
+                let replay_release_notify = Arc::clone(&replay_release_notify);
                 // Spawned like agent calls: a model evaluation must not block
                 // log records and timer arms.
                 tokio::spawn(async move {
@@ -1342,10 +1462,21 @@ async fn run_host_commands_inner(
                         Some(entry) if entry.args_hash != hash => {
                             Err("NondeterministicReplayError".into())
                         }
-                        Some(entry) if entry.status == "completed" => entry
-                            .result
-                            .clone()
-                            .ok_or_else(|| "completed gate entry has no result".to_string()),
+                        Some(entry) if entry.status == "completed" => {
+                            let result = entry
+                                .result
+                                .clone()
+                                .ok_or_else(|| "completed gate entry has no result".to_string());
+                            if let Some(rank) = replay_agent_ranks.get(&current_seq).copied() {
+                                await_replay_release(
+                                    rank,
+                                    &replay_release_rank,
+                                    &replay_release_notify,
+                                )
+                                .await;
+                            }
+                            result
+                        }
                         Some(entry) if entry.status == "failed" => Err(entry
                             .error_message
                             .clone()
@@ -1383,6 +1514,7 @@ async fn run_host_commands_inner(
                         }
                     };
                     let _ = reply.send(result);
+                    in_flight.fetch_sub(1, Ordering::SeqCst);
                 });
             }
             HostCommand::Deliver {
@@ -2575,11 +2707,21 @@ async fn resume_workflow_run_record(
     } else {
         None
     };
-    state
+    // The transition is a compare-and-swap on the state this caller read:
+    // losing it means someone else moved the run first — a concurrent
+    // cancellation, or another wake pass — and relaunching would resurrect
+    // a run its owner already settled.
+    let claimed = state
         .storage
-        .update_workflow_run_state(run.id, "running", None, None)
+        .try_transition_workflow_run_state(run.id, &run.state, "running")
         .await
         .map_err(internal)?;
+    if !claimed {
+        return Err(ApiError::conflict(format!(
+            "workflow run {} is no longer {}; not resuming",
+            run.id, run.state
+        )));
+    }
     let running = state
         .storage
         .get_workflow_run(run.id)

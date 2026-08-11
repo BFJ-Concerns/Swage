@@ -246,6 +246,26 @@ fn intersect_tool_permissions(
     }
 }
 
+/// Expand an allow list to concrete tool names using the same config's own
+/// bundle definitions. `None` means the list allows everything ("*").
+fn expanded_allow(
+    permissions: &swage_config::model::ToolPermissionConfig,
+) -> Option<std::collections::BTreeSet<String>> {
+    if permissions.allow.iter().any(|tool| tool == "*") {
+        return None;
+    }
+    let mut concrete = std::collections::BTreeSet::new();
+    for entry in &permissions.allow {
+        match permissions.bundles.get(entry) {
+            Some(tools) => concrete.extend(tools.iter().cloned()),
+            None => {
+                concrete.insert(entry.clone());
+            }
+        }
+    }
+    Some(concrete)
+}
+
 /// Confine a worker's resolved config to its dispatching context's grants.
 ///
 /// An ephemeral worker dispatched by a workflow run derives its grants from
@@ -254,14 +274,73 @@ fn intersect_tool_permissions(
 /// already resolved (file config plus its own definition overlay), and only
 /// tool permissions are confined: the worker's instructions, model, and
 /// output contract are its own business.
+///
+/// The intersection runs on EXPANDED allow sets, unlike the definition
+/// overlay's (which shares one bundle namespace with the config it overlays):
+/// a bundle name means whatever the config defining it says, so the same
+/// label on both sides is no licence — intersecting raw names would let a
+/// worker's wider bundle ride through under the dispatcher's narrower one.
+/// Concrete tool names are the only safe meeting point. The dispatcher's
+/// approval demands also stand on the worker: a tool the dispatching context
+/// could only use with approval must not run approval-free in a worker it
+/// dispatched.
 pub(crate) fn apply_dispatch_bound(
     mut config: swage_config::ResolvedConfig,
     bound: &swage_config::ResolvedConfig,
 ) -> swage_config::ResolvedConfig {
-    intersect_tool_permissions(
-        &mut config,
-        &bound.tools.permissions.allow,
-        bound.tools.permissions.deny.clone(),
+    let worker_allow = expanded_allow(&config.tools.permissions);
+    let bound_allow = expanded_allow(&bound.tools.permissions);
+    config.tools.permissions.allow = match (worker_allow, bound_allow) {
+        // The bound allows everything: the worker's own grants stand, in
+        // their original form (its bundles keep expanding at check time).
+        (_, None) => config.tools.permissions.allow.clone(),
+        // An allow-all worker narrows to the dispatcher's concrete set.
+        (None, Some(bound_set)) => bound_set.into_iter().collect(),
+        (Some(worker_set), Some(bound_set)) => {
+            worker_set.intersection(&bound_set).cloned().collect()
+        }
+    };
+    for denied in bound.tools.permissions.deny.clone() {
+        if !config.tools.permissions.deny.contains(&denied) {
+            config.tools.permissions.deny.push(denied);
+        }
+    }
+    let worker_approval_names: std::collections::BTreeSet<String> = config
+        .tools
+        .permissions
+        .require_approval
+        .iter()
+        .flat_map(|entry| {
+            let name = entry.tool_name().to_string();
+            match config.tools.permissions.bundles.get(&name) {
+                Some(tools) => tools.clone(),
+                None => vec![name],
+            }
+        })
+        .collect();
+    let mut carried = std::collections::BTreeSet::new();
+    for entry in &bound.tools.permissions.require_approval {
+        let name = entry.tool_name().to_string();
+        // Bound entries expand through the BOUND's own bundles, for the
+        // same aliasing reason as the allow intersection. They carry as
+        // plain demands — the worker's own approval defaults time them.
+        let names = bound
+            .tools
+            .permissions
+            .bundles
+            .get(&name)
+            .cloned()
+            .unwrap_or_else(|| vec![name]);
+        for concrete in names {
+            if !worker_approval_names.contains(&concrete) {
+                carried.insert(concrete);
+            }
+        }
+    }
+    config.tools.permissions.require_approval.extend(
+        carried
+            .into_iter()
+            .map(swage_config::model::RequireApprovalEntry::Simple),
     );
     config
 }
@@ -480,6 +559,77 @@ mod tests {
                 .iter()
                 .any(|tool| tool == "browser_navigate"),
             "the worker's own denies survive"
+        );
+    }
+
+    #[test]
+    fn a_shared_bundle_name_is_no_licence_when_definitions_differ() {
+        // The dispatcher and the worker both allow a bundle called "safe",
+        // but define it differently. Intersecting the raw name would hand
+        // the worker its own wider definition under the dispatcher's
+        // narrower one; the expanded intersection must not.
+        let mut worker = swage_config::ResolvedConfig::default();
+        worker.tools.permissions.allow = vec!["safe".into()];
+        worker.tools.permissions.bundles =
+            std::collections::HashMap::from([("safe".to_string(), vec!["shell".to_string()])]);
+
+        let mut bound = swage_config::ResolvedConfig::default();
+        bound.tools.permissions.allow = vec!["safe".into()];
+        bound.tools.permissions.bundles = std::collections::HashMap::from([(
+            "safe".to_string(),
+            vec!["file_read".to_string()],
+        )]);
+
+        let confined = apply_dispatch_bound(worker, &bound);
+        assert!(
+            confined.tools.permissions.allow.is_empty(),
+            "shell ∩ file_read is empty; the shared label must grant nothing: {:?}",
+            confined.tools.permissions.allow
+        );
+    }
+
+    #[test]
+    fn the_dispatchers_approval_demands_stand_on_the_worker() {
+        let mut worker = swage_config::ResolvedConfig::default();
+        worker.tools.permissions.allow = vec!["shell".into(), "file_read".into()];
+        worker.tools.permissions.require_approval = vec![];
+
+        let mut bound = swage_config::ResolvedConfig::default();
+        bound.tools.permissions.allow = vec!["shell".into(), "file_read".into()];
+        bound.tools.permissions.require_approval =
+            vec![swage_config::model::RequireApprovalEntry::Simple(
+                "shell".into(),
+            )];
+
+        let confined = apply_dispatch_bound(worker, &bound);
+        let demanded: Vec<&str> = confined
+            .tools
+            .permissions
+            .require_approval
+            .iter()
+            .map(|entry| entry.tool_name())
+            .collect();
+        assert!(
+            demanded.contains(&"shell"),
+            "a tool the dispatcher gates behind approval must not run approval-free in its worker"
+        );
+
+        // Already-demanded tools are not duplicated.
+        let mut worker = swage_config::ResolvedConfig::default();
+        worker.tools.permissions.require_approval =
+            vec![swage_config::model::RequireApprovalEntry::Simple(
+                "shell".into(),
+            )];
+        let confined = apply_dispatch_bound(worker, &bound);
+        assert_eq!(
+            confined
+                .tools
+                .permissions
+                .require_approval
+                .iter()
+                .filter(|entry| entry.tool_name() == "shell")
+                .count(),
+            1
         );
     }
 

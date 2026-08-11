@@ -53,7 +53,8 @@ tools and report the outcome, rather than describing what you would do or \
 stopping at a plan. Read each tool result before deciding the next step, \
 and never invent one — when a call fails, say so and adapt. Keep your \
 reply grounded in what actually happened: what you did, what you \
-verified, what remains. Be direct; skip filler, hedging, and flattery.";
+verified, what remains. Be direct; skip filler and flattery, and state \
+genuine uncertainty plainly rather than hedging around it.";
 
 const CLAUDE_NORMS: &str = "\
 Act on the operator's request without asking permission for steps the \
@@ -64,10 +65,11 @@ request or closing summaries the work doesn't need.";
 
 const GPT_NORMS: &str = "\
 Keep going until the request is fully resolved before ending your turn — \
-when a step fails, try another route rather than returning early with a \
-partial answer. Call tools with exactly the arguments their descriptions \
-declare, and let tool results settle any fact you assert afterwards. \
-Prefer several small verifiable steps over one large speculative one.";
+when a step fails, try another route within what the request authorises, \
+rather than returning early with a partial answer. Call tools with \
+exactly the arguments their descriptions declare, and let tool results \
+settle any fact you assert afterwards. Prefer several small verifiable \
+steps over one large speculative one.";
 
 /// The context element carrying the working norms for the coming turn's
 /// model. Priority 105 places it after baseline orientation (110) and
