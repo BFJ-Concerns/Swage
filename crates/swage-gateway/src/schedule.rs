@@ -498,7 +498,11 @@ pub(crate) async fn delete_schedule_change(
         state,
         crate::change_case::ChangeOperation::DeleteSchedule {
             schedule_id,
-            space_id: crate::change_case::schedule_space_id(&schedule.session_policy),
+            space_id: crate::change_case::resolve_schedule_space_id(
+                state,
+                &schedule.session_policy,
+            )
+            .await?,
         },
         source,
         session_id,

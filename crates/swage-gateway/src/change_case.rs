@@ -135,16 +135,18 @@ impl ChangeOperation {
         }
     }
 
-    fn space_id(&self) -> Option<Uuid> {
-        match self {
+    async fn resolve_space_id(&self, state: &AppState) -> Result<Option<Uuid>, GatewayError> {
+        Ok(match self {
             Self::UpsertAgentDefinition { definition } => definition.space_id,
             Self::DeleteAgentDefinition { space_id, .. } => *space_id,
             Self::CreateSchedule { schedule }
             | Self::UpdateSchedule { schedule, .. }
             | Self::PauseSchedule { schedule }
-            | Self::ResumeSchedule { schedule } => schedule_space_id(&schedule.session_policy),
+            | Self::ResumeSchedule { schedule } => {
+                resolve_schedule_space_id(state, &schedule.session_policy).await?
+            }
             Self::DeleteSchedule { space_id, .. } => *space_id,
-        }
+        })
     }
 
     /// Risk bands live with the operation kind so audit and later review can
@@ -230,10 +232,18 @@ impl ChangeOperation {
     }
 }
 
-pub(crate) fn schedule_space_id(session_policy: &swage_storage::SessionPolicy) -> Option<Uuid> {
+pub(crate) async fn resolve_schedule_space_id(
+    state: &AppState,
+    session_policy: &swage_storage::SessionPolicy,
+) -> Result<Option<Uuid>, GatewayError> {
     match session_policy {
-        swage_storage::SessionPolicy::Fresh { space_id, .. } => Some(*space_id),
-        swage_storage::SessionPolicy::Continuation { .. } => None,
+        swage_storage::SessionPolicy::Fresh { space_id, .. } => Ok(Some(*space_id)),
+        swage_storage::SessionPolicy::Continuation { session_id } => state
+            .storage
+            .get_session(*session_id)
+            .await?
+            .map(|session| Some(session.space_id))
+            .ok_or(GatewayError::ConversationNotFound { id: *session_id }),
     }
 }
 
@@ -295,7 +305,7 @@ pub async fn apply_change(
 
     let entity_kind = operation.entity_kind();
     let entity_id = operation.entity_id();
-    let space_id = operation.space_id();
+    let space_id = operation.resolve_space_id(state).await?;
 
     // Snapshot before, apply through the resource's own store, snapshot
     // after: the diff is derived, never supplied. Snapshots address the
