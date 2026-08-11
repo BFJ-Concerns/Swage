@@ -15,7 +15,7 @@
 //! - **`knowledge_orient`** — discover and maintain evidence-backed orientation
 //!   cards without placing their content in instructions.
 //!
-//! All four are host-only (`requires_device_execution`): they reach live gateway
+//! All five are host-only (`requires_device_execution`): they reach live gateway
 //! state and the space's body files. Knowledge content returns as tool
 //! results only — it is gathered external data, never instructions.
 
