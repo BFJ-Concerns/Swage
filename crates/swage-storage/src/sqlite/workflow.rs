@@ -351,6 +351,19 @@ impl WorkflowStore for SqliteStorage {
         self.with_conn(move |conn| { conn.execute("INSERT INTO workflow_journal (id, run_id, seq, kind, status, args_hash, request_json, effect_kind, idempotency_key, target_kind, started_at) VALUES (?1, ?2, ?3, ?4, 'started', ?5, ?6, ?7, ?8, ?9, ?10)", params![id.to_string(),intent.run_id.to_string(),intent.seq as i64,intent.kind,intent.args_hash,request,intent.effect_kind,intent.idempotency_key.map(|v|v.to_string()),intent.target_kind,now.to_rfc3339()])?; conn.query_row(&format!("SELECT {JOURNAL_COLUMNS} FROM workflow_journal WHERE id=?1"),[id.to_string()],journal_row) }).await
     }
 
+    async fn create_failed_workflow_journal_entry(
+        &self,
+        intent: NewWorkflowJournalIntent,
+        error_message: &str,
+    ) -> Result<WorkflowJournalRecord, StorageError> {
+        let id = Uuid::new_v4();
+        let now = Utc::now();
+        let request = serde_json::to_string(&intent.request)
+            .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
+        let error_message = error_message.to_string();
+        self.with_conn(move |conn| { let tx=conn.unchecked_transaction()?; let order:i64=tx.query_row("SELECT COALESCE(MAX(completed_order),0)+1 FROM workflow_journal WHERE run_id=?1",[intent.run_id.to_string()],|row|row.get(0))?; tx.execute("INSERT INTO workflow_journal (id, run_id, seq, completed_order, kind, status, args_hash, request_json, error_message, effect_kind, idempotency_key, target_kind, started_at, completed_at) VALUES (?1, ?2, ?3, ?4, ?5, 'failed', ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12)", params![id.to_string(),intent.run_id.to_string(),intent.seq as i64,order,intent.kind,intent.args_hash,request,error_message,intent.effect_kind,intent.idempotency_key.map(|v|v.to_string()),intent.target_kind,now.to_rfc3339()])?; tx.commit()?; conn.query_row(&format!("SELECT {JOURNAL_COLUMNS} FROM workflow_journal WHERE id=?1"),[id.to_string()],journal_row) }).await
+    }
+
     async fn complete_workflow_journal_entry(
         &self,
         id: Uuid,
@@ -484,5 +497,29 @@ mod tests {
             .expect("first completion");
         assert_eq!(second.completed_order, Some(1));
         assert_eq!(first.completed_order, Some(2));
+
+        let refusal = storage
+            .create_failed_workflow_journal_entry(
+                NewWorkflowJournalIntent {
+                    run_id: run.id,
+                    seq: 2,
+                    kind: "agent_call".into(),
+                    args_hash: "c".into(),
+                    request: serde_json::json!({}),
+                    effect_kind: None,
+                    idempotency_key: None,
+                    target_kind: None,
+                },
+                "BudgetExceededError: agent call limit reached",
+            )
+            .await
+            .expect("terminal refusal");
+        assert_eq!(refusal.status, "failed");
+        assert_eq!(refusal.completed_order, Some(3));
+        assert_eq!(
+            refusal.error_message.as_deref(),
+            Some("BudgetExceededError: agent call limit reached")
+        );
+        assert!(refusal.completed_at.is_some());
     }
 }
