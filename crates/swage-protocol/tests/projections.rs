@@ -47,6 +47,8 @@ fn typescript_bindings_are_regenerated() {
         .expect("export conversation thread");
     client::knowledge::KnowledgeSearchResponse::export_all(&cfg)
         .expect("export knowledge search response");
+    client::knowledge::OrientationFindResponse::export_all(&cfg)
+        .expect("export orientation find response");
     client::voice::VoiceCapabilitiesResponse::export_all(&cfg).expect("export voice capabilities");
     client::voice::TranscribeAudioRequest::export_all(&cfg).expect("export transcription");
     client::voice::SynthesiseSpeechRequest::export_all(&cfg).expect("export speech synthesis");
