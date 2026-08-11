@@ -14,12 +14,13 @@ use crate::model::{
     NewCurationAssertion, NewDeliveryRecord, NewDeviceRegistration, NewKnowledgeCitation,
     NewMaterial, NewMessage, NewOrientationCard, NewSchedule, NewScheduleRun, NewSecretRecord,
     NewSession, NewSourceObservation, NewSpace, NewThread, NewToolCall, NewTurn,
-    NewWorkflowJournalIntent, NewWorkflowRun, NewWorkflowScript, NewWorkspaceAttachment,
+    NewWorkflowJournalIntent, NewWorkflowRun, NewWorkflowRunEvent, NewWorkflowScript,
+    NewWorkspaceAttachment,
     OrientationCard, OrientationCardLifecycle, PendingChannelOrigin, Schedule, ScheduleRun,
     ScheduleRunUpdate, SecretRecord, Session, SourceObservation, Space, SpaceSlug, Thread,
     ThreadBranch, ThreadState, ToolCallRecord, Turn, TurnState, UpdateSchedule,
-    WorkflowJournalRecord, WorkflowRunRecord, WorkflowScriptRecord, WorkflowScriptVersion,
-    WorkspaceAttachment,
+    WorkflowJournalRecord, WorkflowRunEventRecord, WorkflowRunRecord, WorkflowScriptRecord,
+    WorkflowScriptVersion, WorkspaceAttachment,
 };
 
 // ---------------------------------------------------------------------------
@@ -1025,6 +1026,33 @@ pub trait WorkflowStore: Send + Sync {
         error_message: Option<&str>,
     ) -> Result<(), StorageError>;
     async fn interrupt_running_workflow_runs(&self) -> Result<u64, StorageError>;
+    /// Append to the run's pending-event queue. `seq` is assigned by the
+    /// store, dense per run; the insert is idempotent on
+    /// `journal_entry_id` — a replayed post returns its existing row.
+    async fn create_workflow_run_event(
+        &self,
+        event: NewWorkflowRunEvent,
+    ) -> Result<WorkflowRunEventRecord, StorageError>;
+    /// The run's undelivered events, ordered by seq ascending.
+    async fn list_pending_workflow_run_events(
+        &self,
+        run_id: Uuid,
+    ) -> Result<Vec<WorkflowRunEventRecord>, StorageError>;
+    /// All of the run's events, delivered or not, ordered by seq ascending.
+    async fn list_workflow_run_events(
+        &self,
+        run_id: Uuid,
+    ) -> Result<Vec<WorkflowRunEventRecord>, StorageError>;
+    /// Stamp pending events up to and including `up_to_seq` as delivered by
+    /// the wake at `delivered_wake_seq` (a journal seq). Already-delivered
+    /// events are untouched, so the call is idempotent. Returns the number
+    /// stamped.
+    async fn mark_workflow_run_events_delivered(
+        &self,
+        run_id: Uuid,
+        up_to_seq: u64,
+        delivered_wake_seq: u64,
+    ) -> Result<u64, StorageError>;
     async fn create_workflow_journal_intent(
         &self,
         intent: NewWorkflowJournalIntent,
@@ -2229,6 +2257,32 @@ mod tests {
             unimplemented!()
         }
         async fn interrupt_running_workflow_runs(&self) -> Result<u64, StorageError> {
+            unimplemented!()
+        }
+        async fn create_workflow_run_event(
+            &self,
+            _: NewWorkflowRunEvent,
+        ) -> Result<WorkflowRunEventRecord, StorageError> {
+            unimplemented!()
+        }
+        async fn list_pending_workflow_run_events(
+            &self,
+            _: Uuid,
+        ) -> Result<Vec<WorkflowRunEventRecord>, StorageError> {
+            unimplemented!()
+        }
+        async fn list_workflow_run_events(
+            &self,
+            _: Uuid,
+        ) -> Result<Vec<WorkflowRunEventRecord>, StorageError> {
+            unimplemented!()
+        }
+        async fn mark_workflow_run_events_delivered(
+            &self,
+            _: Uuid,
+            _: u64,
+            _: u64,
+        ) -> Result<u64, StorageError> {
             unimplemented!()
         }
         async fn create_workflow_journal_intent(

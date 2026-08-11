@@ -677,6 +677,32 @@ impl swage_storage::WorkflowStore for MockStorage {
     async fn interrupt_running_workflow_runs(&self) -> Result<u64, StorageError> {
         unimplemented!()
     }
+    async fn create_workflow_run_event(
+        &self,
+        _: swage_storage::NewWorkflowRunEvent,
+    ) -> Result<swage_storage::WorkflowRunEventRecord, StorageError> {
+        unimplemented!()
+    }
+    async fn list_pending_workflow_run_events(
+        &self,
+        _: Uuid,
+    ) -> Result<Vec<swage_storage::WorkflowRunEventRecord>, StorageError> {
+        unimplemented!()
+    }
+    async fn list_workflow_run_events(
+        &self,
+        _: Uuid,
+    ) -> Result<Vec<swage_storage::WorkflowRunEventRecord>, StorageError> {
+        unimplemented!()
+    }
+    async fn mark_workflow_run_events_delivered(
+        &self,
+        _: Uuid,
+        _: u64,
+        _: u64,
+    ) -> Result<u64, StorageError> {
+        unimplemented!()
+    }
     async fn create_workflow_journal_intent(
         &self,
         _: swage_storage::NewWorkflowJournalIntent,

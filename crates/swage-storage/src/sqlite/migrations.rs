@@ -86,8 +86,60 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
             "049_workflow_run_dispatch_bound",
             ADD_WORKFLOW_RUN_DISPATCH_BOUND,
         ),
+        ("050_workflow_run_events", CREATE_WORKFLOW_RUN_EVENTS),
     ]
 }
+
+/// A run's durable pending-event queue: completions, failures, and
+/// escalations accumulate as data between lead wakes. Events stay pending
+/// until a wake delivers them — a gate that suppresses a wake consumes
+/// nothing, so suppressed events ride the next wake for retrospective
+/// review. Each row is keyed to the journal entry that posted it, making the
+/// post exactly-once under replay. The journal's kind CHECK also widens for
+/// the two new host-call kinds (event, gate); SQLite cannot widen a CHECK in
+/// place, so the table is rebuilt, existing rows carrying over unchanged.
+const CREATE_WORKFLOW_RUN_EVENTS: &str = "
+    CREATE TABLE IF NOT EXISTS workflow_run_events (
+        id                 TEXT NOT NULL PRIMARY KEY,
+        run_id             TEXT NOT NULL REFERENCES workflow_runs(id) ON DELETE CASCADE,
+        journal_entry_id   TEXT NOT NULL UNIQUE,
+        seq                INTEGER NOT NULL,
+        kind               TEXT NOT NULL CHECK (kind IN ('completion', 'failure', 'escalation')),
+        payload_json       TEXT NOT NULL,
+        posted_at          TEXT NOT NULL,
+        delivered_wake_seq INTEGER,
+        delivered_at       TEXT,
+        UNIQUE (run_id, seq)
+    );
+    CREATE INDEX IF NOT EXISTS idx_workflow_run_events_pending
+        ON workflow_run_events(run_id, seq)
+        WHERE delivered_at IS NULL;
+
+    CREATE TABLE workflow_journal_events_new (
+        id                TEXT NOT NULL PRIMARY KEY,
+        run_id            TEXT NOT NULL REFERENCES workflow_runs(id) ON DELETE CASCADE,
+        seq               INTEGER NOT NULL,
+        completed_order   INTEGER,
+        kind              TEXT NOT NULL CHECK (kind IN ('agent_call', 'effect', 'log', 'phase', 'workflow_call', 'timer', 'event', 'gate')),
+        status            TEXT NOT NULL CHECK (status IN ('started', 'completed', 'failed')),
+        args_hash         TEXT NOT NULL,
+        request_json      TEXT NOT NULL,
+        result_json       TEXT,
+        error_message     TEXT,
+        effect_kind       TEXT,
+        idempotency_key   TEXT,
+        target_kind       TEXT,
+        started_at        TEXT NOT NULL,
+        completed_at      TEXT,
+        UNIQUE (run_id, seq),
+        UNIQUE (run_id, completed_order)
+    );
+    INSERT INTO workflow_journal_events_new SELECT * FROM workflow_journal;
+    DROP TABLE workflow_journal;
+    ALTER TABLE workflow_journal_events_new RENAME TO workflow_journal;
+    CREATE INDEX IF NOT EXISTS idx_workflow_journal_run_seq
+        ON workflow_journal(run_id, seq);
+";
 
 /// A run started from an agent session records that agent as its dispatching
 /// context: worker sessions the run creates derive their grants from it by
