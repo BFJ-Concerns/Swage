@@ -260,6 +260,10 @@ impl Default for ToolPermissionConfig {
             "knowledge-citation".to_string(),
             vec!["knowledge_cite".to_string()],
         );
+        bundles.insert(
+            "knowledge-orientation".to_string(),
+            vec!["knowledge_orient".to_string()],
+        );
         Self {
             allow: vec!["*".into()],
             deny: vec![],
@@ -1322,6 +1326,12 @@ timeout_policy = "reject"
                 .get("knowledge-citation")
                 .expect("knowledge citation bundle"),
             &vec!["knowledge_cite".to_string()]
+        );
+        assert_eq!(
+            cfg.bundles
+                .get("knowledge-orientation")
+                .expect("knowledge orientation bundle"),
+            &vec!["knowledge_orient".to_string()]
         );
         assert_eq!(
             cfg.require_approval

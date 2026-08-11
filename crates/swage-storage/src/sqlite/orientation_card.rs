@@ -196,3 +196,212 @@ impl SqliteStorage {
         }).await
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::SpaceStore;
+    use crate::{NewSourceObservation, NewSpace, ObservationOrigin};
+
+    async fn fixture() -> (SqliteStorage, Uuid, Uuid) {
+        let storage = SqliteStorage::in_memory().unwrap();
+        let space = storage
+            .create(NewSpace {
+                name: "Orientation".into(),
+                slug: "orientation".into(),
+            })
+            .await
+            .unwrap();
+        let observation = storage
+            .record_observation(NewSourceObservation {
+                space_id: space.id,
+                origin: ObservationOrigin {
+                    url: Some("https://example.test/evidence".into()),
+                    local_path: None,
+                },
+                retrieved_at: Utc::now(),
+                body_sha256: Uuid::new_v4().to_string(),
+                body_bytes: 30,
+                media_type: "text/plain".into(),
+            })
+            .await
+            .unwrap();
+        storage
+            .add_extraction(
+                observation.id,
+                "underlying evidence about quokkas".into(),
+                "test".into(),
+            )
+            .await
+            .unwrap();
+        (storage, space.id, observation.id)
+    }
+
+    async fn card(
+        storage: &SqliteStorage,
+        space_id: Uuid,
+        observation_id: Uuid,
+        title: &str,
+    ) -> OrientationCard {
+        storage
+            .create_orientation_card(
+                NewOrientationCard {
+                    space_id,
+                    title: title.into(),
+                    content: "Marsupial corpus orientation".into(),
+                    authored_by: "agent-alpha".into(),
+                    observation_ids: vec![observation_id],
+                },
+                None,
+            )
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn evidence_is_required_and_must_share_the_space() {
+        let (storage, space_id, observation_id) = fixture().await;
+        let empty = storage
+            .create_orientation_card(
+                NewOrientationCard {
+                    space_id,
+                    title: "Title".into(),
+                    content: "Content".into(),
+                    authored_by: "agent".into(),
+                    observation_ids: vec![],
+                },
+                None,
+            )
+            .await;
+        assert!(matches!(empty, Err(StorageError::ConstraintViolation(_))));
+        let other = storage
+            .create(NewSpace {
+                name: "Other".into(),
+                slug: "other".into(),
+            })
+            .await
+            .unwrap();
+        let cross_space = storage
+            .create_orientation_card(
+                NewOrientationCard {
+                    space_id: other.id,
+                    title: "Title".into(),
+                    content: "Content".into(),
+                    authored_by: "agent".into(),
+                    observation_ids: vec![observation_id],
+                },
+                None,
+            )
+            .await;
+        assert!(matches!(
+            cross_space,
+            Err(StorageError::ConstraintViolation(_))
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn schema_refuses_a_card_without_a_dedicated_evidence_link() {
+        let (storage, space_id, _) = fixture().await;
+        let result = storage.with_conn(move |conn| {
+            conn.execute("INSERT INTO orientation_cards (id,space_id,title,content,authored_by,evidence_anchor_id,created_at) VALUES (?1,?2,'title','content','actor',?3,?4)", params![Uuid::new_v4().to_string(), space_id.to_string(), Uuid::new_v4().to_string(), Utc::now().to_rfc3339()])?;
+            Ok(())
+        }).await;
+        assert!(matches!(result, Err(StorageError::ConstraintViolation(_))));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn trigger_indexes_cards_and_relation_has_no_citation_fields() {
+        let (storage, space_id, observation_id) = fixture().await;
+        let created = card(&storage, space_id, observation_id, "Quokka field guide").await;
+        storage.with_conn(move |conn| {
+            let found: String = conn.query_row("SELECT c.id FROM orientation_card_fts f JOIN orientation_cards c ON c.rowid=f.rowid WHERE orientation_card_fts MATCH 'quokka'", [], |row| row.get(0))?;
+            assert_eq!(found, created.id.to_string());
+            let columns = conn.prepare("PRAGMA table_info(orientation_card_observations)")?.query_map([], |row| row.get::<_, String>(1))?.collect::<rusqlite::Result<Vec<_>>>()?;
+            assert_eq!(columns, vec!["id", "card_id", "observation_id"]);
+            Ok(())
+        }).await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn queryless_and_fts_find_only_active_cards_while_evidence_stays_searchable() {
+        let (storage, space_id, observation_id) = fixture().await;
+        let first = card(&storage, space_id, observation_id, "Quokka field guide").await;
+        let replacement = card(&storage, space_id, observation_id, "Updated quokka guide").await;
+        storage
+            .supersede_orientation_card(first.id, replacement.id, "agent-beta".into(), None)
+            .await
+            .unwrap();
+        let active = storage
+            .find_orientation_cards(space_id, None, 20)
+            .await
+            .unwrap();
+        assert_eq!(
+            active.iter().map(|card| card.id).collect::<Vec<_>>(),
+            vec![replacement.id]
+        );
+        assert_eq!(
+            storage
+                .find_orientation_cards(space_id, Some("quokka"), 20)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            storage
+                .search_extractions(space_id, "underlying", 10)
+                .await
+                .unwrap()[0]
+                .observation_id,
+            observation_id
+        );
+        storage
+            .retire_orientation_card(replacement.id, "agent-beta".into(), None)
+            .await
+            .unwrap();
+        assert!(
+            storage
+                .find_orientation_cards(space_id, None, 20)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            storage
+                .search_extractions(space_id, "quokkas", 10)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            storage
+                .retire_orientation_card(replacement.id, "agent-beta".into(), None)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn authorship_and_lifecycle_are_present_in_the_unified_audit() {
+        use crate::store::AuditStore;
+        let (storage, space_id, observation_id) = fixture().await;
+        let created = card(&storage, space_id, observation_id, "Audit card").await;
+        storage
+            .retire_orientation_card(created.id, "agent-beta".into(), None)
+            .await
+            .unwrap();
+        let events = storage.list_audit_events().await.unwrap();
+        assert_eq!(events.len(), 2);
+        let authored = events
+            .iter()
+            .find(|event| event.event_kind == "created")
+            .unwrap();
+        let retired = events
+            .iter()
+            .find(|event| event.event_kind == "retired")
+            .unwrap();
+        assert_eq!(authored.metadata["actor"], "agent-alpha");
+        assert_eq!(retired.metadata["actor"], "agent-beta");
+    }
+}
