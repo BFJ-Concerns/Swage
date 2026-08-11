@@ -686,26 +686,20 @@ async fn run_host_commands_inner(
                 let current_seq = seq.load(Ordering::SeqCst);
                 let existing_call = replay.get(current_seq as usize);
                 let mut call_reservation = 0;
-                if existing_call.is_none() {
-                    if budget
+                if existing_call.is_none()
+                    && budget
                         .max_agent_calls
                         .is_some_and(|limit| agent_calls.load(Ordering::SeqCst) >= limit)
-                    {
-                        // Replay admission counting recognises this prefix in `launch_existing_run`.
-                        let error = "BudgetExceededError: agent call limit reached";
-                        seq.fetch_add(1, Ordering::SeqCst);
-                        let result = record_agent_budget_refusal(
-                            &state,
-                            run_id,
-                            current_seq,
-                            &request,
-                            error,
-                        )
-                        .await
-                        .map_or_else(Err, |_| Err(error.into()));
-                        let _ = reply.send(result);
-                        continue;
-                    }
+                {
+                    // Replay admission counting recognises this prefix in `launch_existing_run`.
+                    let error = "BudgetExceededError: agent call limit reached";
+                    seq.fetch_add(1, Ordering::SeqCst);
+                    let result =
+                        record_agent_budget_refusal(&state, run_id, current_seq, &request, error)
+                            .await
+                            .map_or_else(Err, |_| Err(error.into()));
+                    let _ = reply.send(result);
+                    continue;
                 }
                 if let (Some(limit), Some(reservation)) =
                     (budget.max_total_tokens, token_reservation)
