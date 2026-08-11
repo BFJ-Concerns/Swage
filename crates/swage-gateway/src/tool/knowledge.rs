@@ -126,8 +126,9 @@ impl Tool for KnowledgeSearchTool {
     }
 
     fn description(&self) -> &str {
-        "Search this space's knowledge base — the gathered external evidence — by \
-         full text. Each result is a passage with the source it came from and a \
+        "Find evidence for a question in this space's gathered external material by \
+         full text. Use knowledge_orient first when you do not yet know what the corpus \
+         contains or which vocabulary it uses. Each result here is a passage with the source it came from and a \
          pinned observation and version; cite it with those values and the exact quote. The \
          knowledge base holds captured external material; it is not your memory \
          (use the memory tools for what you know about your own work)."
@@ -784,11 +785,18 @@ mod tests {
     #[test]
     fn orientation_declaration_supports_queryless_first_contact() {
         let tool = KnowledgeOrientTool;
+        let search = KnowledgeSearchTool;
         assert!(
             tool.description()
                 .contains("before choosing corpus vocabulary")
         );
         assert!(tool.description().contains("without a query"));
+        assert!(
+            search
+                .description()
+                .contains("Find evidence for a question")
+        );
+        assert!(search.description().contains("Use knowledge_orient first"));
         assert!(
             !tool.parameters()["required"]
                 .as_array()
