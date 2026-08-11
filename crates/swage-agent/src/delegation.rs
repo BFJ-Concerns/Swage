@@ -21,7 +21,7 @@ use swage_storage::Storage;
 use swage_storage::model::{
     AgentMessage, NewAgentMessage, NewSession, NewThread, NewTurn, TurnState,
 };
-use swage_storage::store::ThreadStore;
+use swage_storage::store::{ThreadStore, TurnStore};
 use swage_tool::dispatch::ToolDispatcher;
 
 use crate::approval::ApprovalChannelRegistrar;
@@ -395,6 +395,20 @@ impl DelegationExecutor {
 
         match result {
             Ok(outbound) => {
+                if let Some(ref structured_output) = outbound.structured_output
+                    && let Err(error) = TurnStore::update_structured_output(
+                        self.storage.as_ref(),
+                        outbound.turn_id,
+                        structured_output,
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        %error,
+                        turn_id = %outbound.turn_id,
+                        "failed to persist delegated structured output"
+                    );
+                }
                 let mut result_payload = serde_json::json!({
                     "response": outbound.response,
                     "input_tokens": outbound.input_tokens,

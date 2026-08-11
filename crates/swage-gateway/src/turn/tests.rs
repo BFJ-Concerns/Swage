@@ -6071,9 +6071,15 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
             instructions: "Definition-only delegated instruction.".into(),
             model_id: None,
             tool_permissions: None,
-            skills: vec![],
-            output_schema: None,
-            output_max_retries: None,
+            skills: vec!["definition-declared".into()],
+            output_schema: Some(serde_json::json!({
+                "type": "object",
+                "required": ["result"],
+                "properties": {
+                    "result": { "type": "string" }
+                }
+            })),
+            output_max_retries: Some(1),
         })
         .await
         .expect("store delegated agent definition");
@@ -6093,7 +6099,7 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
     ];
     let child_round = vec![
         StreamChunk::Delta {
-            content: "Delegate answer".into(),
+            content: r#"{"result":"Delegate answer"}"#.into(),
         },
         StreamChunk::Done {
             finish_reason: None,
@@ -6121,6 +6127,15 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
         "---\ndescription: Foreground only\n---\nUse the parent foreground skill.\n",
     )
     .expect("write foreground skill");
+    let declared_skill_dir = swage_home
+        .path()
+        .join("spaces/default/skills/definition-declared");
+    std::fs::create_dir_all(&declared_skill_dir).expect("create declared skill directory");
+    std::fs::write(
+        declared_skill_dir.join("SKILL.md"),
+        "---\ndescription: Definition-declared behaviour\n---\nUse the definition-declared skill.\n",
+    )
+    .expect("write declared skill");
     let target_agent_dir = swage_home.path().join("spaces/default/agents/agent-b");
     std::fs::create_dir_all(target_agent_dir.join("skills/delegated-specialist"))
         .expect("create delegated agent directory");
@@ -6230,7 +6245,12 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
     assert_eq!(child_turns[0].parent_turn_id, Some(root_turn.id));
     assert_eq!(
         child_turns[0].assistant_response.as_deref(),
-        Some("Delegate answer")
+        Some(r#"{"result":"Delegate answer"}"#)
+    );
+    assert_eq!(
+        child_turns[0].structured_output,
+        Some(serde_json::json!({ "result": "Delegate answer" })),
+        "the delegated definition's output contract should validate and persist the child output"
     );
     let child_snapshot = state
         .storage
@@ -6312,12 +6332,26 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
         "delegated provider request should include target agent-level skill instructions: {child_request_text}"
     );
     assert!(
+        child_request_text.contains("Use the definition-declared skill."),
+        "delegated provider request should include definition-declared skill instructions: {child_request_text}"
+    );
+    assert!(
         child_request_text.contains("Definition-only delegated instruction."),
         "a genuinely reached child must receive its durable definition rather than file config alone: {child_request_text}"
     );
     assert!(
         !child_request_text.contains("Use the parent foreground skill."),
         "delegated provider request must not inherit user-activated parent skills: {child_request_text}"
+    );
+    assert!(
+        state
+            .storage
+            .list_active_skills(child_sessions[0].id)
+            .await
+            .expect("list child skill activations")
+            .iter()
+            .all(|activation| activation.skill_name != "definition-declared"),
+        "definition declarations must not be persisted as user activations"
     );
     assert!(
         !child_request_text.contains("Parent resumed after delegation"),
