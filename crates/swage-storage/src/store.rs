@@ -974,6 +974,14 @@ pub trait WorkflowStore: Send + Sync {
         &self,
         intent: NewWorkflowJournalIntent,
     ) -> Result<WorkflowJournalRecord, StorageError>;
+    /// Records a command that was refused before it started as a terminal
+    /// entry. Creation and settlement are one storage operation so replay can
+    /// never mistake the refusal for in-flight work.
+    async fn create_failed_workflow_journal_entry(
+        &self,
+        intent: NewWorkflowJournalIntent,
+        error_message: &str,
+    ) -> Result<WorkflowJournalRecord, StorageError>;
     async fn complete_workflow_journal_entry(
         &self,
         id: Uuid,
@@ -2114,6 +2122,13 @@ mod tests {
         async fn create_workflow_journal_intent(
             &self,
             _: NewWorkflowJournalIntent,
+        ) -> Result<WorkflowJournalRecord, StorageError> {
+            unimplemented!()
+        }
+        async fn create_failed_workflow_journal_entry(
+            &self,
+            _: NewWorkflowJournalIntent,
+            _: &str,
         ) -> Result<WorkflowJournalRecord, StorageError> {
             unimplemented!()
         }
