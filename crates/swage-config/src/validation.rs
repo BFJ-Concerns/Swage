@@ -1494,7 +1494,10 @@ poll_timeout_secs = 0
 
         let problems = validate_toml_string(toml, &path("config.toml"));
 
-        assert!(problems.is_empty(), "expected no problems, got {problems:?}");
+        assert!(
+            problems.is_empty(),
+            "expected no problems, got {problems:?}"
+        );
     }
 
     #[test]
