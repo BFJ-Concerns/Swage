@@ -1212,6 +1212,9 @@ const CREATE_KNOWLEDGE_CITATIONS: &str = "
 /// impossible at transaction commit while retaining a proper many-to-many
 /// derivation relation.
 const CREATE_KNOWLEDGE_ORIENTATION_CARDS: &str = "
+    CREATE UNIQUE INDEX idx_source_observations_id_space
+        ON source_observations(id, space_id);
+
     CREATE TABLE orientation_cards (
         id                 TEXT NOT NULL PRIMARY KEY,
         space_id           TEXT NOT NULL REFERENCES spaces(id),
@@ -1220,16 +1223,23 @@ const CREATE_KNOWLEDGE_ORIENTATION_CARDS: &str = "
         authored_by        TEXT NOT NULL CHECK (length(trim(authored_by)) > 0),
         evidence_anchor_id TEXT NOT NULL UNIQUE,
         created_at         TEXT NOT NULL,
-        FOREIGN KEY (evidence_anchor_id) REFERENCES orientation_card_observations(id)
+        UNIQUE (id, space_id),
+        FOREIGN KEY (evidence_anchor_id, id, space_id)
+            REFERENCES orientation_card_observations(id, card_id, space_id)
             DEFERRABLE INITIALLY DEFERRED
     );
 
     CREATE TABLE orientation_card_observations (
         id             TEXT NOT NULL PRIMARY KEY,
-        card_id        TEXT NOT NULL REFERENCES orientation_cards(id)
+        card_id        TEXT NOT NULL,
+        space_id       TEXT NOT NULL,
+        observation_id TEXT NOT NULL,
+        UNIQUE (id, card_id, space_id),
+        UNIQUE (card_id, observation_id),
+        FOREIGN KEY (card_id, space_id) REFERENCES orientation_cards(id, space_id)
             DEFERRABLE INITIALLY DEFERRED,
-        observation_id TEXT NOT NULL REFERENCES source_observations(id),
-        UNIQUE(card_id, observation_id)
+        FOREIGN KEY (observation_id, space_id)
+            REFERENCES source_observations(id, space_id)
     );
 
     CREATE TABLE orientation_card_lifecycle (
