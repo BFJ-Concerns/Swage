@@ -24,6 +24,22 @@ pub struct KnowledgeSearchResponse {
     pub guidance: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+pub struct OrientationCardResult {
+    pub card_id: Uuid,
+    pub title: String,
+    pub content: String,
+    pub authored_by: String,
+    pub observation_ids: Vec<Uuid>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+pub struct OrientationFindResponse {
+    pub cards: Vec<OrientationCardResult>,
+    pub guidance: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
