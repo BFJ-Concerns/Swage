@@ -397,7 +397,7 @@ pub struct ConfigurationVersion {
     pub snapshot: serde_json::Value,
     pub diff: serde_json::Value,
     pub previous_version_id: Option<Uuid>,
-    pub rollback_to_version_id: Option<Uuid>,
+    pub undone_version_id: Option<Uuid>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -416,7 +416,7 @@ pub struct NewConfigurationVersion {
     pub snapshot: serde_json::Value,
     pub diff: serde_json::Value,
     pub previous_version_id: Option<Uuid>,
-    pub rollback_to_version_id: Option<Uuid>,
+    pub undone_version_id: Option<Uuid>,
 }
 
 /// A centrally managed secret or credential reference.
@@ -1688,8 +1688,11 @@ pub struct NewTurn {
 }
 
 /// Input for creating a durable schedule.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NewSchedule {
+    /// Chosen by the caller so recorded configuration cases can establish the
+    /// version-chain identity before the resource is written.
+    pub id: Uuid,
     pub message: String,
     pub status: ScheduleStatus,
     pub kind: ScheduleKind,

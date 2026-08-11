@@ -2905,7 +2905,7 @@ impl swage_storage::store::ConfigurationVersionStore for MockStorage {
             snapshot: version.snapshot,
             diff: version.diff,
             previous_version_id: version.previous_version_id,
-            rollback_to_version_id: version.rollback_to_version_id,
+            undone_version_id: version.undone_version_id,
             created_at: chrono::Utc::now(),
         };
         self.db

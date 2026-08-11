@@ -252,7 +252,7 @@ impl ScheduleStore for SqliteStorage {
     async fn create_schedule(&self, schedule: NewSchedule) -> Result<Schedule, StorageError> {
         let delivery_json = serialise_json(&schedule.delivery_routing)?;
         self.with_conn(move |conn| {
-            let id = Uuid::new_v4();
+            let id = schedule.id;
             let now = Utc::now();
             let now_str = now.to_rfc3339();
             let (policy, space_id, agent_id, session_id) =
@@ -354,70 +354,90 @@ impl ScheduleStore for SqliteStorage {
         id: Uuid,
         update: UpdateSchedule,
     ) -> Result<Schedule, StorageError> {
-        let existing = self
-            .get_schedule(id)
+        // Apply only the fields the caller supplied. Expanding a partial
+        // update from a previously-read row would let an operator edit write
+        // stale lifecycle values over a scheduler tick that landed between
+        // the read and this statement.
+        let message_set = update.message.is_some();
+        let status_set = update.status.is_some();
+        let kind_set = update.kind.is_some();
+        let expression_set = update.expression.is_some();
+        let delivery_set = update.delivery_routing.is_some();
+        let gate_set = update.gate.is_some();
+        let next_run_set = update.next_run_at.is_some();
+        let last_run_set = update.last_run_at.is_some();
+
+        let message = update.message;
+        let status = update.status.map(|status| status.to_string());
+        let kind = update.kind.map(|kind| kind.to_string());
+        let expression = update.expression;
+        let delivery_json = update
+            .delivery_routing
+            .as_ref()
+            .map(serialise_json)
+            .transpose()?;
+        let gate = update.gate.flatten();
+        let (gate_model, gate_criteria) = match gate {
+            Some(gate) => (Some(gate.model.clone()), gate.criteria.clone()),
+            None => (None, None),
+        };
+        let next_run_at = update.next_run_at.map(serialise_optional_dt);
+        let last_run_at = update.last_run_at.map(serialise_optional_dt);
+        let updated_at = Utc::now().to_rfc3339();
+        let id_text = id.to_string();
+
+        let affected = self
+            .with_conn(move |conn| {
+                conn.execute(
+                    "UPDATE schedules
+                 SET message = CASE WHEN ?1 THEN ?2 ELSE message END,
+                     status = CASE WHEN ?3 THEN ?4 ELSE status END,
+                     kind = CASE WHEN ?5 THEN ?6 ELSE kind END,
+                     expression = CASE WHEN ?7 THEN ?8 ELSE expression END,
+                     delivery_json = CASE WHEN ?9 THEN ?10 ELSE delivery_json END,
+                     gate_model = CASE WHEN ?11 THEN ?12 ELSE gate_model END,
+                     gate_criteria = CASE WHEN ?11 THEN ?13 ELSE gate_criteria END,
+                     next_run_at = CASE WHEN ?14 THEN ?15 ELSE next_run_at END,
+                     last_run_at = CASE WHEN ?16 THEN ?17 ELSE last_run_at END,
+                     updated_at = ?18
+                 WHERE id = ?19",
+                    params![
+                        message_set,
+                        &message,
+                        status_set,
+                        &status,
+                        kind_set,
+                        &kind,
+                        expression_set,
+                        &expression,
+                        delivery_set,
+                        &delivery_json,
+                        gate_set,
+                        &gate_model,
+                        &gate_criteria,
+                        next_run_set,
+                        &next_run_at,
+                        last_run_set,
+                        &last_run_at,
+                        &updated_at,
+                        &id_text,
+                    ],
+                )
+            })
+            .await?;
+        if affected == 0 {
+            return Err(StorageError::NotFound {
+                entity: "Schedule".into(),
+                id: id.to_string(),
+            });
+        }
+
+        self.get_schedule(id)
             .await?
             .ok_or_else(|| StorageError::NotFound {
                 entity: "Schedule".into(),
                 id: id.to_string(),
-            })?;
-
-        let updated = Schedule {
-            id: existing.id,
-            message: update.message.unwrap_or(existing.message),
-            status: update.status.unwrap_or(existing.status),
-            kind: update.kind.unwrap_or(existing.kind),
-            expression: update.expression.unwrap_or(existing.expression),
-            session_policy: existing.session_policy,
-            creator: existing.creator,
-            delivery_routing: update.delivery_routing.unwrap_or(existing.delivery_routing),
-            gate: update.gate.unwrap_or(existing.gate),
-            next_run_at: update.next_run_at.unwrap_or(existing.next_run_at),
-            last_run_at: update.last_run_at.unwrap_or(existing.last_run_at),
-            created_at: existing.created_at,
-            updated_at: Utc::now(),
-        };
-
-        let delivery_json = serialise_json(&updated.delivery_routing)?;
-        let next_run_at = serialise_optional_dt(updated.next_run_at);
-        let last_run_at = serialise_optional_dt(updated.last_run_at);
-        let updated_at = updated.updated_at.to_rfc3339();
-        let (gate_model, gate_criteria) = match &updated.gate {
-            Some(gate) => (Some(gate.model.clone()), gate.criteria.clone()),
-            None => (None, None),
-        };
-
-        self.with_conn(move |conn| {
-            conn.execute(
-                "UPDATE schedules
-                 SET message = ?1,
-                     status = ?2,
-                     kind = ?3,
-                     expression = ?4,
-                     delivery_json = ?5,
-                     gate_model = ?6,
-                     gate_criteria = ?7,
-                     next_run_at = ?8,
-                     last_run_at = ?9,
-                     updated_at = ?10
-                 WHERE id = ?11",
-                params![
-                    &updated.message,
-                    updated.status.to_string(),
-                    updated.kind.to_string(),
-                    &updated.expression,
-                    &delivery_json,
-                    &gate_model,
-                    &gate_criteria,
-                    &next_run_at,
-                    &last_run_at,
-                    &updated_at,
-                    id.to_string(),
-                ],
-            )?;
-            Ok(updated)
-        })
-        .await
+            })
     }
 
     async fn delete_schedule(&self, id: Uuid) -> Result<bool, StorageError> {
@@ -676,6 +696,7 @@ mod tests {
 
     fn fresh_schedule(space_id: Uuid) -> NewSchedule {
         NewSchedule {
+            id: Uuid::new_v4(),
             message: "run now".into(),
             status: ScheduleStatus::Active,
             kind: ScheduleKind::Interval,
@@ -714,6 +735,7 @@ mod tests {
 
         let fresh = storage
             .create_schedule(NewSchedule {
+                id: Uuid::new_v4(),
                 gate: Some(GateConfig {
                     model: "small".into(),
                     criteria: Some("only when the queue is non-empty".into()),
