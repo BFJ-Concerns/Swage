@@ -143,22 +143,30 @@ impl OrientationCardStore for SqliteStorage {
 
     async fn supersede_orientation_card(
         &self,
+        expected_space_id: Uuid,
         card_id: Uuid,
         replacement_card_id: Uuid,
         actor: String,
         session_id: Option<Uuid>,
     ) -> Result<OrientationCardLifecycle, StorageError> {
-        self.append_orientation_lifecycle(card_id, Some(replacement_card_id), actor, session_id)
-            .await
+        self.append_orientation_lifecycle(
+            expected_space_id,
+            card_id,
+            Some(replacement_card_id),
+            actor,
+            session_id,
+        )
+        .await
     }
 
     async fn retire_orientation_card(
         &self,
+        expected_space_id: Uuid,
         card_id: Uuid,
         actor: String,
         session_id: Option<Uuid>,
     ) -> Result<OrientationCardLifecycle, StorageError> {
-        self.append_orientation_lifecycle(card_id, None, actor, session_id)
+        self.append_orientation_lifecycle(expected_space_id, card_id, None, actor, session_id)
             .await
     }
 }
@@ -166,6 +174,7 @@ impl OrientationCardStore for SqliteStorage {
 impl SqliteStorage {
     async fn append_orientation_lifecycle(
         &self,
+        expected_space_id: Uuid,
         card_id: Uuid,
         replacement_card_id: Option<Uuid>,
         actor: String,
@@ -177,16 +186,17 @@ impl SqliteStorage {
             ));
         }
         self.with_conn(move |conn| {
-            let card = load_card(conn, card_id)?.ok_or_else(|| rusqlite::Error::QueryReturnedNoRows)?;
-            if conn.query_row("SELECT 1 FROM orientation_card_lifecycle WHERE card_id=?1", params![card_id.to_string()], |_| Ok(())).optional()?.is_some() {
+            let transaction = conn.unchecked_transaction()?;
+            let card = load_card(&transaction, card_id)?.ok_or_else(|| rusqlite::Error::QueryReturnedNoRows)?;
+            if card.space_id != expected_space_id { return Err(rusqlite::Error::ToSqlConversionFailure("orientation card must belong to the calling space".into())); }
+            if transaction.query_row("SELECT 1 FROM orientation_card_lifecycle WHERE card_id=?1", params![card_id.to_string()], |_| Ok(())).optional()?.is_some() {
                 return Err(rusqlite::Error::ToSqlConversionFailure("orientation card already has a terminal lifecycle record".into()));
             }
             if let Some(replacement_id) = replacement_card_id {
-                let replacement = load_card(conn, replacement_id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
-                if replacement.space_id != card.space_id { return Err(rusqlite::Error::ToSqlConversionFailure("replacement card must belong to the same space".into())); }
-                if conn.query_row("SELECT 1 FROM orientation_card_lifecycle WHERE card_id=?1", params![replacement_id.to_string()], |_| Ok(())).optional()?.is_some() { return Err(rusqlite::Error::ToSqlConversionFailure("replacement card must be active".into())); }
+                let replacement = load_card(&transaction, replacement_id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+                if replacement.space_id != expected_space_id { return Err(rusqlite::Error::ToSqlConversionFailure("replacement card must belong to the calling space".into())); }
+                if transaction.query_row("SELECT 1 FROM orientation_card_lifecycle WHERE card_id=?1", params![replacement_id.to_string()], |_| Ok(())).optional()?.is_some() { return Err(rusqlite::Error::ToSqlConversionFailure("replacement card must be active".into())); }
             }
-            let transaction = conn.unchecked_transaction()?;
             let record = OrientationCardLifecycle { id: Uuid::new_v4(), card_id, kind: if replacement_card_id.is_some() { OrientationCardLifecycleKind::Superseded } else { OrientationCardLifecycleKind::Retired }, replacement_card_id, actor, created_at: Utc::now() };
             let action = match record.kind { OrientationCardLifecycleKind::Superseded => "superseded", OrientationCardLifecycleKind::Retired => "retired" };
             transaction.execute("INSERT INTO orientation_card_lifecycle (id,card_id,action,replacement_card_id,actor,created_at) VALUES (?1,?2,?3,?4,?5,?6)", params![record.id.to_string(), card_id.to_string(), action, replacement_card_id.map(|id| id.to_string()), record.actor, record.created_at.to_rfc3339()])?;
@@ -328,7 +338,13 @@ mod tests {
         let first = card(&storage, space_id, observation_id, "Quokka field guide").await;
         let replacement = card(&storage, space_id, observation_id, "Updated quokka guide").await;
         storage
-            .supersede_orientation_card(first.id, replacement.id, "agent-beta".into(), None)
+            .supersede_orientation_card(
+                space_id,
+                first.id,
+                replacement.id,
+                "agent-beta".into(),
+                None,
+            )
             .await
             .unwrap();
         let active = storage
@@ -356,7 +372,7 @@ mod tests {
             observation_id
         );
         storage
-            .retire_orientation_card(replacement.id, "agent-beta".into(), None)
+            .retire_orientation_card(space_id, replacement.id, "agent-beta".into(), None)
             .await
             .unwrap();
         assert!(
@@ -376,7 +392,7 @@ mod tests {
         );
         assert!(
             storage
-                .retire_orientation_card(replacement.id, "agent-beta".into(), None)
+                .retire_orientation_card(space_id, replacement.id, "agent-beta".into(), None)
                 .await
                 .is_err()
         );
@@ -388,7 +404,7 @@ mod tests {
         let (storage, space_id, observation_id) = fixture().await;
         let created = card(&storage, space_id, observation_id, "Audit card").await;
         storage
-            .retire_orientation_card(created.id, "agent-beta".into(), None)
+            .retire_orientation_card(space_id, created.id, "agent-beta".into(), None)
             .await
             .unwrap();
         let events = storage.list_audit_events().await.unwrap();

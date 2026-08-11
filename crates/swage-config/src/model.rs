@@ -246,7 +246,10 @@ impl Default for ToolPermissionConfig {
         // so gathering workers can hold write without every reader gaining it.
         bundles.insert(
             "knowledge-read".to_string(),
-            vec!["knowledge_search".to_string()],
+            vec![
+                "knowledge_search".to_string(),
+                "knowledge_orient".to_string(),
+            ],
         );
         bundles.insert(
             "knowledge-write".to_string(),
@@ -261,8 +264,8 @@ impl Default for ToolPermissionConfig {
             vec!["knowledge_cite".to_string()],
         );
         bundles.insert(
-            "knowledge-orientation".to_string(),
-            vec!["knowledge_orient".to_string()],
+            "knowledge-orientation-curation".to_string(),
+            vec!["knowledge_curate_orientation".to_string()],
         );
         Self {
             allow: vec!["*".into()],
@@ -1329,9 +1332,18 @@ timeout_policy = "reject"
         );
         assert_eq!(
             cfg.bundles
-                .get("knowledge-orientation")
-                .expect("knowledge orientation bundle"),
-            &vec!["knowledge_orient".to_string()]
+                .get("knowledge-read")
+                .expect("knowledge read bundle"),
+            &vec![
+                "knowledge_search".to_string(),
+                "knowledge_orient".to_string()
+            ]
+        );
+        assert_eq!(
+            cfg.bundles
+                .get("knowledge-orientation-curation")
+                .expect("knowledge orientation curation bundle"),
+            &vec!["knowledge_curate_orientation".to_string()]
         );
         assert_eq!(
             cfg.require_approval
