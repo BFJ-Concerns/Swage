@@ -313,6 +313,7 @@ pub trait OrientationCardStore: Send + Sync {
     ) -> Result<Vec<OrientationCard>, StorageError>;
     async fn supersede_orientation_card(
         &self,
+        expected_space_id: Uuid,
         card_id: Uuid,
         replacement_card_id: Uuid,
         actor: String,
@@ -320,6 +321,7 @@ pub trait OrientationCardStore: Send + Sync {
     ) -> Result<OrientationCardLifecycle, StorageError>;
     async fn retire_orientation_card(
         &self,
+        expected_space_id: Uuid,
         card_id: Uuid,
         actor: String,
         session_id: Option<Uuid>,
@@ -1533,6 +1535,7 @@ mod tests {
             &self,
             _: Uuid,
             _: Uuid,
+            _: Uuid,
             _: String,
             _: Option<Uuid>,
         ) -> Result<OrientationCardLifecycle, StorageError> {
@@ -1540,6 +1543,7 @@ mod tests {
         }
         async fn retire_orientation_card(
             &self,
+            _: Uuid,
             _: Uuid,
             _: String,
             _: Option<Uuid>,

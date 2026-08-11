@@ -3105,6 +3105,7 @@ impl swage_storage::store::OrientationCardStore for MockStorage {
         &self,
         _: uuid::Uuid,
         _: uuid::Uuid,
+        _: uuid::Uuid,
         _: String,
         _: Option<uuid::Uuid>,
     ) -> Result<swage_storage::OrientationCardLifecycle, StorageError> {
@@ -3112,6 +3113,7 @@ impl swage_storage::store::OrientationCardStore for MockStorage {
     }
     async fn retire_orientation_card(
         &self,
+        _: uuid::Uuid,
         _: uuid::Uuid,
         _: String,
         _: Option<uuid::Uuid>,
