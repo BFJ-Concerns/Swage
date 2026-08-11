@@ -14,11 +14,14 @@ use crate::store::AgentDefinitionStore;
 // ---------------------------------------------------------------------------
 
 const DEFINITION_COLUMNS: &str = "id, space_id, display_name, description, instructions,
-     model_id, tool_permissions_json, created_at, updated_at";
+     model_id, tool_permissions_json, skills_json, output_schema_json,
+     output_max_retries, created_at, updated_at";
 
 fn row_to_definition(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentDefinition> {
     let space_id: Option<String> = row.get(1)?;
     let tool_permissions: Option<String> = row.get(6)?;
+    let skills: String = row.get(7)?;
+    let output_schema: Option<String> = row.get(8)?;
     Ok(AgentDefinition {
         id: row.get(0)?,
         space_id: space_id.map(|s| parse_uuid(&s)).transpose()?,
@@ -37,8 +40,27 @@ fn row_to_definition(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentDefinitio
                 })
             })
             .transpose()?,
-        created_at: parse_dt(&row.get::<_, String>(7)?)?,
-        updated_at: parse_dt(&row.get::<_, String>(8)?)?,
+        skills: serde_json::from_str(&skills).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                7,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })?,
+        output_schema: output_schema
+            .map(|json| {
+                serde_json::from_str(&json).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        8,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })
+            })
+            .transpose()?,
+        output_max_retries: row.get(9)?,
+        created_at: parse_dt(&row.get::<_, String>(10)?)?,
+        updated_at: parse_dt(&row.get::<_, String>(11)?)?,
     })
 }
 
@@ -79,6 +101,12 @@ impl AgentDefinitionStore for SqliteStorage {
         definition: NewAgentDefinition,
     ) -> Result<AgentDefinition, StorageError> {
         let permissions_json = serialise_permissions(definition.tool_permissions.as_ref())?;
+        let skills_json = serde_json::to_string(&definition.skills).map_err(|error| {
+            StorageError::Serialisation {
+                message: error.to_string(),
+            }
+        })?;
+        let output_schema_json = serialise_permissions(definition.output_schema.as_ref())?;
         self.with_conn(move |conn| {
             let now = Utc::now().to_rfc3339();
             // SQLite treats NULLs as distinct in the composite primary key, so
@@ -98,7 +126,8 @@ impl AgentDefinitionStore for SqliteStorage {
                     conn.execute(
                         "UPDATE agent_definitions
                          SET display_name = ?3, description = ?4, instructions = ?5,
-                             model_id = ?6, tool_permissions_json = ?7, updated_at = ?8
+                             model_id = ?6, tool_permissions_json = ?7, skills_json = ?8,
+                             output_schema_json = ?9, output_max_retries = ?10, updated_at = ?11
                          WHERE id = ?1 AND space_id IS ?2",
                         params![
                             definition.id,
@@ -108,6 +137,9 @@ impl AgentDefinitionStore for SqliteStorage {
                             definition.instructions,
                             definition.model_id,
                             permissions_json,
+                            skills_json,
+                            output_schema_json,
+                            definition.output_max_retries,
                             now,
                         ],
                     )?;
@@ -117,8 +149,9 @@ impl AgentDefinitionStore for SqliteStorage {
                     conn.execute(
                         "INSERT INTO agent_definitions (
                              id, space_id, display_name, description, instructions,
-                             model_id, tool_permissions_json, created_at, updated_at
-                         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)",
+                             model_id, tool_permissions_json, skills_json, output_schema_json,
+                             output_max_retries, created_at, updated_at
+                         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11)",
                         params![
                             definition.id,
                             definition.space_id.map(|id| id.to_string()),
@@ -127,6 +160,9 @@ impl AgentDefinitionStore for SqliteStorage {
                             definition.instructions,
                             definition.model_id,
                             permissions_json,
+                            skills_json,
+                            output_schema_json,
+                            definition.output_max_retries,
                             now,
                         ],
                     )?;
@@ -219,6 +255,9 @@ mod tests {
             instructions: instructions.into(),
             model_id: None,
             tool_permissions: None,
+            skills: vec![],
+            output_schema: None,
+            output_max_retries: None,
         }
     }
 
@@ -314,6 +353,23 @@ mod tests {
         let stored = storage.upsert_agent_definition(new).await.unwrap();
         let overlay = stored.tool_permissions.expect("overlay stored");
         assert_eq!(overlay["allow"][0], "knowledge_search");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn skills_and_output_contract_round_trip() {
+        let storage = SqliteStorage::in_memory().unwrap();
+        let mut new = definition("contracted", None, "return a finding");
+        new.skills = vec!["source-checking".into(), "citation-format".into()];
+        new.output_schema = Some(serde_json::json!({
+            "type": "object",
+            "required": ["finding"]
+        }));
+        new.output_max_retries = Some(1);
+
+        let stored = storage.upsert_agent_definition(new).await.unwrap();
+        assert_eq!(stored.skills, ["source-checking", "citation-format"]);
+        assert_eq!(stored.output_schema.unwrap()["type"], "object");
+        assert_eq!(stored.output_max_retries, Some(1));
     }
 
     #[tokio::test(flavor = "multi_thread")]

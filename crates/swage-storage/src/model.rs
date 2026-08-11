@@ -861,6 +861,44 @@ pub struct NewKnowledgeCitation {
     pub quoted_text: String,
 }
 
+/// Immutable agent-authored orientation derived from whole observations.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrientationCard {
+    pub id: Uuid,
+    pub space_id: Uuid,
+    pub title: String,
+    pub content: String,
+    pub authored_by: String,
+    pub observation_ids: Vec<Uuid>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewOrientationCard {
+    pub space_id: Uuid,
+    pub title: String,
+    pub content: String,
+    pub authored_by: String,
+    pub observation_ids: Vec<Uuid>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OrientationCardLifecycleKind {
+    Superseded,
+    Retired,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrientationCardLifecycle {
+    pub id: Uuid,
+    pub card_id: Uuid,
+    pub kind: OrientationCardLifecycleKind,
+    pub replacement_card_id: Option<Uuid>,
+    pub actor: String,
+    pub created_at: DateTime<Utc>,
+}
+
 /// The observation-level judgement recorded by a curation assertion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -933,6 +971,12 @@ pub struct AgentDefinition {
     pub model_id: Option<String>,
     /// Optional tool-permission overlay (serialised `PermissionConfig`).
     pub tool_permissions: Option<serde_json::Value>,
+    /// Skills this definition activates when they are available to the agent.
+    pub skills: Vec<String>,
+    /// JSON Schema enforced for every final response from this agent.
+    pub output_schema: Option<serde_json::Value>,
+    /// Definition-specific validation retry limit.
+    pub output_max_retries: Option<u32>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -949,6 +993,10 @@ pub struct NewAgentDefinition {
     pub instructions: String,
     pub model_id: Option<String>,
     pub tool_permissions: Option<serde_json::Value>,
+    #[serde(default)]
+    pub skills: Vec<String>,
+    pub output_schema: Option<serde_json::Value>,
+    pub output_max_retries: Option<u32>,
 }
 
 /// A manually appended audit event.

@@ -126,10 +126,118 @@ async fn post_json(router: &Router, uri: &str, body: Value) -> (StatusCode, Valu
     (response.status(), json_response(response).await)
 }
 
+async fn request_json(
+    router: &Router,
+    method: &str,
+    uri: &str,
+    body: Option<Value>,
+) -> (StatusCode, Value) {
+    let mut request = Request::builder().method(method).uri(uri);
+    let body = match body {
+        Some(body) => {
+            request = request.header("content-type", "application/json");
+            Body::from(body.to_string())
+        }
+        None => Body::empty(),
+    };
+    let response = router
+        .clone()
+        .oneshot(request.body(body).unwrap())
+        .await
+        .unwrap();
+    (response.status(), json_response(response).await)
+}
+
 async fn create_conversation(router: &Router) -> Uuid {
     let (status, body) = post_json(router, "/api/conversations", json!({})).await;
     assert_eq!(status, StatusCode::CREATED);
     body["id"].as_str().unwrap().parse().unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn agent_definition_http_crud_records_every_mutation() {
+    let state = test_state();
+    let router = build_router(state.clone());
+    let create = json!({
+        "id": "researcher",
+        "space_id": null,
+        "display_name": "Researcher",
+        "description": "Finds evidence",
+        "instructions": "Gather and cite evidence.",
+        "model_id": null,
+        "tool_permissions": {"allow": ["knowledge_search"], "deny": [], "bundles": {}},
+        "skills": ["source-checking"],
+        "output_schema": {"type": "object", "required": ["finding"]},
+        "output_max_retries": 2
+    });
+
+    let (status, created) = post_json(&router, "/api/operator/agent-definitions", create).await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    assert!(created["version_id"].as_str().is_some());
+
+    let (status, listed) = get_json(&router, "/api/operator/agent-definitions").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(listed["definitions"][0]["id"], "researcher");
+    assert_eq!(listed["definitions"][0]["skills"][0], "source-checking");
+    assert_eq!(listed["definitions"][0]["output_max_retries"], 2);
+
+    let update = json!({
+        "space_id": null,
+        "display_name": "Research Lead",
+        "description": "Finds decisive evidence",
+        "instructions": "Gather, verify, and cite evidence.",
+        "model_id": null,
+        "tool_permissions": null,
+        "skills": ["source-checking"],
+        "output_schema": {"type": "object", "required": ["finding", "source"]},
+        "output_max_retries": 1
+    });
+    let (status, updated) = request_json(
+        &router,
+        "PUT",
+        "/api/operator/agent-definitions/researcher",
+        Some(update),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{updated}");
+
+    let versions = state
+        .storage
+        .list_configuration_versions_for_entity("agent_definition", "researcher@global")
+        .await
+        .unwrap();
+    assert_eq!(versions.len(), 2);
+    assert_eq!(versions[0].version_number, 2);
+    assert_eq!(versions[0].snapshot["display_name"], "Research Lead");
+    assert!(versions[0].diff.get("instructions").is_some());
+    let audits = state.storage.list_audit_events().await.unwrap();
+    assert_eq!(
+        audits
+            .iter()
+            .filter(|event| event.entity_id == "researcher@global")
+            .count(),
+        2
+    );
+
+    let (status, deleted) = request_json(
+        &router,
+        "DELETE",
+        "/api/operator/agent-definitions/researcher",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{deleted}");
+    let (status, listed) = get_json(&router, "/api/operator/agent-definitions").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(listed["definitions"], json!([]));
+
+    let versions = state
+        .storage
+        .list_configuration_versions_for_entity("agent_definition", "researcher@global")
+        .await
+        .unwrap();
+    assert_eq!(versions.len(), 3);
+    assert!(versions[0].snapshot.is_null());
 }
 
 #[tokio::test(flavor = "multi_thread")]
