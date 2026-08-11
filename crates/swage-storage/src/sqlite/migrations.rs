@@ -87,8 +87,57 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
             ADD_WORKFLOW_RUN_DISPATCH_BOUND,
         ),
         ("050_workflow_run_events", CREATE_WORKFLOW_RUN_EVENTS),
+        ("051_workflow_run_parking", ADD_WORKFLOW_RUN_PARKING),
     ]
 }
+
+/// Durable waits: a run sleeping on a long timer parks — no engine, no
+/// per-run OS thread — recording when it is due (`wake_at`); a background
+/// waker resumes it by journal replay. The state CHECK gains 'parked', which
+/// SQLite cannot widen in place, so the table is rebuilt with explicit
+/// column lists (the ALTER-added columns sit at the end of the old table).
+const ADD_WORKFLOW_RUN_PARKING: &str = "
+    CREATE TABLE workflow_runs_parking_new (
+        id                   TEXT NOT NULL PRIMARY KEY,
+        space_id             TEXT NOT NULL REFERENCES spaces(id) ON DELETE CASCADE,
+        script_version_id    TEXT REFERENCES workflow_script_versions(id),
+        source               TEXT,
+        source_hash          TEXT NOT NULL,
+        args_json            TEXT NOT NULL,
+        budget_json          TEXT NOT NULL,
+        state                TEXT NOT NULL CHECK (state IN ('running', 'completed', 'failed', 'cancelled', 'interrupted', 'parked')),
+        final_output_json    TEXT,
+        error_message        TEXT,
+        engine_version       TEXT NOT NULL,
+        created_at           TEXT NOT NULL,
+        completed_at         TEXT,
+        parent_run_id        TEXT REFERENCES workflow_runs(id),
+        parent_seq           INTEGER,
+        dispatching_agent_id TEXT,
+        wake_at              TEXT
+    );
+    INSERT INTO workflow_runs_parking_new (
+        id, space_id, script_version_id, source, source_hash, args_json,
+        budget_json, state, final_output_json, error_message, engine_version,
+        created_at, completed_at, parent_run_id, parent_seq,
+        dispatching_agent_id
+    )
+    SELECT
+        id, space_id, script_version_id, source, source_hash, args_json,
+        budget_json, state, final_output_json, error_message, engine_version,
+        created_at, completed_at, parent_run_id, parent_seq,
+        dispatching_agent_id
+    FROM workflow_runs;
+    DROP TABLE workflow_runs;
+    ALTER TABLE workflow_runs_parking_new RENAME TO workflow_runs;
+    CREATE INDEX IF NOT EXISTS idx_workflow_runs_space_created
+        ON workflow_runs(space_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_workflow_runs_state
+        ON workflow_runs(state);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_workflow_runs_parent_call
+        ON workflow_runs(parent_run_id, parent_seq)
+        WHERE parent_run_id IS NOT NULL;
+";
 
 /// A run's durable pending-event queue: completions, failures, and
 /// escalations accumulate as data between lead wakes. Events stay pending

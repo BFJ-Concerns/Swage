@@ -119,7 +119,9 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
 
     match raw_storage.interrupt_running_workflow_runs().await {
         Ok(0) => {}
-        Ok(n) => info!("Recovered {n} interrupted workflow run(s) from a previous shutdown"),
+        // Marking is half the recovery; the workflow wake loop spawned at
+        // server start relaunches these (and due parked runs) by replay.
+        Ok(n) => info!("Marked {n} workflow run(s) interrupted by a previous shutdown; resuming"),
         Err(e) => {
             eprintln!("Workflow startup recovery failed: {e}");
             std::process::exit(1);
@@ -207,6 +209,10 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
         state.clone(),
         background_shutdown.clone(),
     );
+    // Durable workflow waits: its first pass resumes the runs the previous
+    // shutdown interrupted, then it wakes parked runs as they come due.
+    let workflow_wake_handle =
+        crate::workflow::spawn_workflow_wake_loop(state.clone(), background_shutdown.clone());
     let attachment_handle = crate::attachment::spawn_ingestion_loop_until_cancelled(
         state.clone(),
         background_shutdown.clone(),
@@ -303,6 +309,7 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
         background_shutdown.cancel();
         for (name, handle) in [
             ("schedule", schedule_handle),
+            ("workflow wake", workflow_wake_handle),
             ("attachment ingestion", attachment_handle),
             ("channel queue", queue_handle),
         ] {

@@ -701,6 +701,12 @@ async fn run_ephemeral_agent_call(
 // Child workflows construct another host-command loop. Erase the loop future at
 // that recursive boundary so rustc can use the explicit `Send` contract instead
 // of recursively inspecting the async function's opaque type.
+/// The shortest timer worth tearing an engine down for. Below it, an
+/// in-process sleep is cheaper than a replay; above it, a parked run frees
+/// its thread and survives restarts. Explicit here until workflow settings
+/// join the resolved configuration model.
+const PARK_TIMER_THRESHOLD_MS: u64 = 60_000;
+
 fn run_host_commands(
     state: AppState,
     run_id: Uuid,
@@ -711,6 +717,8 @@ fn run_host_commands(
     replay: Vec<WorkflowJournalRecord>,
     agent_calls: Arc<AtomicU32>,
     spent_tokens: Arc<AtomicU64>,
+    park: CancellationToken,
+    park_threshold_ms: u64,
     commands: mpsc::UnboundedReceiver<HostCommand>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
     Box::pin(run_host_commands_inner(
@@ -723,8 +731,27 @@ fn run_host_commands(
         replay,
         agent_calls,
         spent_tokens,
+        park,
+        park_threshold_ms,
         commands,
     ))
+}
+
+/// Whether the run has journalled work still executing — a started agent
+/// call, child workflow, or effect. Parking with live work would
+/// double-execute it at wake (replay re-runs started entries), so
+/// uncertainty reads as busy.
+async fn has_started_work(state: &AppState, run_id: Uuid) -> bool {
+    match state.storage.list_workflow_journal(run_id).await {
+        Ok(entries) => entries.iter().any(|entry| {
+            entry.status == "started"
+                && matches!(
+                    entry.kind.as_str(),
+                    "agent_call" | "workflow_call" | "effect"
+                )
+        }),
+        Err(_) => true,
+    }
 }
 
 async fn run_host_commands_inner(
@@ -737,6 +764,8 @@ async fn run_host_commands_inner(
     replay: Vec<WorkflowJournalRecord>,
     agent_calls: Arc<AtomicU32>,
     spent_tokens: Arc<AtomicU64>,
+    park: CancellationToken,
+    park_threshold_ms: u64,
     mut commands: mpsc::UnboundedReceiver<HostCommand>,
 ) {
     // Reserve one equal share of the run budget per declared call, or per
@@ -788,6 +817,11 @@ async fn run_host_commands_inner(
         std::collections::HashMap::new();
     let mut timer_entries: std::collections::HashMap<u64, Option<Uuid>> =
         std::collections::HashMap::new();
+    // Reply senders for timers that parked the run. Held, never resolved:
+    // the engine is being torn down, and dropping a reply early would race
+    // an error into a script that is still halting. The loop ends when the
+    // engine's channel closes, and by then nothing awaits these.
+    let mut parked_replies: Vec<oneshot::Sender<Result<Value, String>>> = Vec::new();
     while let Some(command) = commands.recv().await {
         match command {
             HostCommand::Record { kind, message } => {
@@ -1071,11 +1105,13 @@ async fn run_host_commands_inner(
                 let hash = journal_args_hash(&request_json);
                 // A completed timer entry replays instantly, so a wait the
                 // timer won wakes the same way on resume. A started entry is
-                // re-armed whole: the original firing was never recorded, so
-                // honesty is a fresh full wait, not a guessed remainder. The
+                // re-armed with its REMAINING time from the recorded start —
+                // durable waits are wall-clock, so a four-hour sleep
+                // interrupted at hour three owes one hour, not four (a
+                // parked run's wake replays through exactly this arm). The
                 // intent is written here, in the loop, so timer_entries is
                 // populated before any ConfirmTimer can arrive.
-                let entry_id =
+                let (entry_id, effective_ms) =
                     match replay.get(current_seq as usize) {
                         Some(entry) if entry.args_hash != hash => {
                             let _ = reply.send(Err("NondeterministicReplayError".into()));
@@ -1089,7 +1125,12 @@ async fn run_host_commands_inner(
                                 }));
                             continue;
                         }
-                        Some(entry) => entry.id,
+                        Some(entry) => {
+                            let elapsed = (chrono::Utc::now() - entry.started_at)
+                                .num_milliseconds()
+                                .max(0) as u64;
+                            (entry.id, ms.saturating_sub(elapsed))
+                        }
                         None => {
                             match state
                                 .create_workflow_journal_intent(NewWorkflowJournalIntent {
@@ -1104,7 +1145,7 @@ async fn run_host_commands_inner(
                                 })
                                 .await
                             {
-                                Ok(intent) => intent.id,
+                                Ok(intent) => (intent.id, ms),
                                 Err(error) => {
                                     let _ = reply.send(Err(error.to_string()));
                                     continue;
@@ -1113,13 +1154,40 @@ async fn run_host_commands_inner(
                         }
                     };
                 timer_entries.insert(timer_id, Some(entry_id));
+                // A durable parked wait: a long enough sleep, with no other
+                // timer armed and no journalled work still executing, tears
+                // the engine down instead of holding an OS thread on a
+                // timer. The run records when it is due; the waker resumes
+                // it by replay, and this same arm then fires the remainder.
+                // Both guards are load-bearing: a started agent call would
+                // be double-executed by wake replay, and a sibling
+                // in-process timer would die unfired.
+                if effective_ms >= park_threshold_ms
+                    && pending_timers.is_empty()
+                    && !has_started_work(&state, run_id).await
+                {
+                    let wake_at = chrono::Utc::now()
+                        + chrono::Duration::milliseconds(effective_ms.min(i64::MAX as u64) as i64);
+                    match state.storage.set_workflow_run_parked(run_id, wake_at).await {
+                        Ok(()) => {
+                            park.cancel();
+                            parked_replies.push(reply);
+                            continue;
+                        }
+                        Err(error) => {
+                            // Park bookkeeping failed: fall through to an
+                            // in-process wait — slower, never wrong.
+                            tracing::warn!(%run_id, %error, "could not park workflow run; keeping its engine");
+                        }
+                    }
+                }
                 let abandon = CancellationToken::new();
                 pending_timers.insert(timer_id, abandon.clone());
                 // The firing only reports; it writes nothing. The journal
                 // settles on the race's verdict via ConfirmTimer.
                 tokio::spawn(async move {
                     tokio::select! {
-                        () = tokio::time::sleep(std::time::Duration::from_millis(ms)) => {
+                        () = tokio::time::sleep(std::time::Duration::from_millis(effective_ms)) => {
                             // Reporting only — the entry is completed by
                             // ConfirmTimer once the race declares this
                             // firing the winner. A firing the race ignores
@@ -1927,6 +1995,7 @@ fn run_state(state: &str) -> Result<WorkflowRunState, ApiError> {
         "failed" => Ok(WorkflowRunState::Failed),
         "cancelled" => Ok(WorkflowRunState::Cancelled),
         "interrupted" => Ok(WorkflowRunState::Interrupted),
+        "parked" => Ok(WorkflowRunState::Parked),
         other => Err(internal(format!("unknown workflow run state: {other}"))),
     }
 }
@@ -2121,6 +2190,26 @@ async fn launch_existing_run(
         .lock()
         .await
         .insert(record.id, cancellation.clone());
+    // Parking halts the engine without marking the run cancelled. The
+    // engine (and the per-call tokens derived from it) watch the combined
+    // halt; the park guard admits no in-flight work or armed timers, so a
+    // park fires the halt with nothing else alive to cancel, while a real
+    // run cancellation still reaches every in-flight call through the same
+    // token.
+    let park = CancellationToken::new();
+    let halt = CancellationToken::new();
+    {
+        let cancellation = cancellation.clone();
+        let park = park.clone();
+        let halt = halt.clone();
+        tokio::spawn(async move {
+            tokio::select! {
+                () = cancellation.cancelled() => {}
+                () = park.cancelled() => {}
+            }
+            halt.cancel();
+        });
+    }
     let (result_tx, result_rx) = tokio::sync::oneshot::channel();
     let (host_tx, host_rx) = mpsc::unbounded_channel();
     let run_budget = budget_wire(&record.budget);
@@ -2167,6 +2256,8 @@ async fn launch_existing_run(
         replay,
         Arc::clone(&agent_calls),
         Arc::clone(&spent_tokens),
+        park.clone(),
+        PARK_TIMER_THRESHOLD_MS,
         host_rx,
     ));
     let host: Arc<dyn WorkflowHost> = Arc::new(ChannelWorkflowHost {
@@ -2192,7 +2283,7 @@ async fn launch_existing_run(
                 runtime.block_on(WorkflowEngine::new(EngineLimits::default()).execute_hosted(
                     &source,
                     &args_json,
-                    cancellation,
+                    halt,
                     Some(host),
                     capabilities,
                 ));
@@ -2204,7 +2295,31 @@ async fn launch_existing_run(
     let run_id = record.id;
     let broadcast = state.broadcast.clone();
     tokio::spawn(async move {
-        let (run_state, output, error) = match result_rx.await {
+        let engine_result = result_rx.await;
+        // The engine drops its host sender before producing the result. Drain the
+        // command loop so fire-and-forget log/phase records are durable before the
+        // run becomes terminal and visible to trace readers.
+        let _ = host_task.await;
+        // A parked run is not terminal: the loop already recorded state
+        // `parked` and its wake time, the engine halted on the park token,
+        // and the waker will relaunch by replay. Leave the record alone —
+        // the ordinary state update would erase wake_at.
+        if park.is_cancelled() && !cancellation.is_cancelled() {
+            let _ = storage
+                .create_audit_event(NewAuditEvent {
+                    id: Uuid::new_v4().to_string(),
+                    session_id: None,
+                    entity_kind: "workflow_run".into(),
+                    entity_id: run_id.to_string(),
+                    event_kind: "parked".into(),
+                    summary: "Workflow run parked on a durable wait".into(),
+                    metadata: serde_json::json!({}),
+                })
+                .await;
+            active.lock().await.remove(&run_id);
+            return;
+        }
+        let (run_state, output, error) = match engine_result {
             Ok(Ok(json)) => match serde_json::from_str(&json) {
                 Ok(value) => ("completed", Some(value), None),
                 Err(problem) => ("failed", None, Some(problem.to_string())),
@@ -2213,10 +2328,6 @@ async fn launch_existing_run(
             Ok(Err(problem)) => ("failed", None, Some(problem.to_string())),
             Err(problem) => ("failed", None, Some(problem.to_string())),
         };
-        // The engine drops its host sender before producing the result. Drain the
-        // command loop so fire-and-forget log/phase records are durable before the
-        // run becomes terminal and visible to trace readers.
-        let _ = host_task.await;
         let _ = storage
             .update_workflow_run_state(run_id, run_state, output, error.as_deref())
             .await;
@@ -2392,6 +2503,22 @@ pub async fn cancel_run(
         .await
         .map_err(internal)?
         .ok_or_else(|| ApiError::not_found("workflow run", id))?;
+    // A parked run has no engine to signal: cancel it in the record so the
+    // waker never relaunches it.
+    if run.state == "parked" {
+        state
+            .storage
+            .update_workflow_run_state(id, "cancelled", None, None)
+            .await
+            .map_err(internal)?;
+        let cancelled = state
+            .storage
+            .get_workflow_run(id)
+            .await
+            .map_err(internal)?
+            .ok_or_else(|| ApiError::not_found("workflow run", id))?;
+        return Ok(Json(run_wire(cancelled)?));
+    }
     Ok(Json(run_wire(run)?))
 }
 
@@ -2410,6 +2537,15 @@ pub async fn resume_run(
             "only interrupted workflow runs can resume".into(),
         ));
     }
+    Ok(Json(resume_workflow_run_record(state, run).await?))
+}
+
+/// Relaunch an interrupted or due-parked run by journal replay: resolve its
+/// recorded source and grant, transition it to running, and launch.
+async fn resume_workflow_run_record(
+    state: AppState,
+    run: WorkflowRunRecord,
+) -> Result<WorkflowRun, ApiError> {
     let source = match (&run.source, run.script_version_id) {
         (Some(source), _) => source.clone(),
         (None, Some(version_id)) => {
@@ -2441,18 +2577,76 @@ pub async fn resume_run(
     };
     state
         .storage
-        .update_workflow_run_state(id, "running", None, None)
+        .update_workflow_run_state(run.id, "running", None, None)
         .await
         .map_err(internal)?;
     let running = state
         .storage
-        .get_workflow_run(id)
+        .get_workflow_run(run.id)
         .await
         .map_err(internal)?
-        .ok_or_else(|| ApiError::not_found("workflow run", id))?;
-    Ok(Json(
-        launch_existing_run(state, running, source, grant).await?,
-    ))
+        .ok_or_else(|| ApiError::not_found("workflow run", run.id))?;
+    launch_existing_run(state, running, source, grant).await
+}
+
+const WORKFLOW_WAKE_TICK: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The runs a boot or wake pass owes a relaunch right now: every
+/// interrupted run, and every parked run whose wake time has arrived.
+async fn resumable_workflow_runs(state: &AppState) -> Vec<WorkflowRunRecord> {
+    let mut due = Vec::new();
+    match state.storage.list_interrupted_workflow_runs().await {
+        Ok(runs) => due.extend(runs),
+        Err(error) => tracing::warn!(%error, "could not list interrupted workflow runs"),
+    }
+    match state
+        .storage
+        .list_due_parked_workflow_runs(chrono::Utc::now())
+        .await
+    {
+        Ok(runs) => due.extend(runs),
+        Err(error) => tracing::warn!(%error, "could not list due parked workflow runs"),
+    }
+    due
+}
+
+/// One boot/wake pass: relaunch everything `resumable_workflow_runs` owes.
+/// Returns how many runs were relaunched.
+pub(crate) async fn resume_owed_workflow_runs(state: &AppState) -> usize {
+    let mut resumed = 0;
+    for run in resumable_workflow_runs(state).await {
+        let run_id = run.id;
+        let was = run.state.clone();
+        match resume_workflow_run_record(state.clone(), run).await {
+            Ok(_) => {
+                resumed += 1;
+                tracing::info!(%run_id, from_state = %was, "resumed workflow run");
+            }
+            Err(error) => {
+                tracing::warn!(%run_id, error = %error.0, "failed to resume workflow run");
+            }
+        }
+    }
+    resumed
+}
+
+/// Durable waits need no held-open process: this loop is what wakes parked
+/// runs when they are due (and re-checks for interrupted strays). One pass
+/// runs immediately at spawn — the boot resume — then every tick until
+/// cancelled.
+pub(crate) fn spawn_workflow_wake_loop(
+    state: AppState,
+    cancel: CancellationToken,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            resume_owed_workflow_runs(&state).await;
+            tokio::select! {
+                () = cancel.cancelled() => return,
+                () = tokio::time::sleep(WORKFLOW_WAKE_TICK) => {}
+            }
+        }
+    })
 }
 
 #[cfg(test)]
@@ -2874,6 +3068,8 @@ mod tests {
             replay,
             Arc::new(AtomicU32::new(0)),
             Arc::new(AtomicU64::new(0)),
+            CancellationToken::new(),
+            PARK_TIMER_THRESHOLD_MS,
             rx,
         ));
         let (reply, receive) = oneshot::channel();
@@ -3119,6 +3315,8 @@ mod tests {
             vec![],
             Arc::new(AtomicU32::new(0)),
             Arc::new(AtomicU64::new(0)),
+            CancellationToken::new(),
+            PARK_TIMER_THRESHOLD_MS,
             rx,
         ));
         let request = AgentCallRequest {
@@ -3232,6 +3430,8 @@ mod tests {
             vec![],
             Arc::new(AtomicU32::new(0)),
             Arc::new(AtomicU64::new(0)),
+            CancellationToken::new(),
+            PARK_TIMER_THRESHOLD_MS,
             rx,
         ));
 
@@ -3370,6 +3570,8 @@ mod tests {
             vec![],
             Arc::new(AtomicU32::new(0)),
             Arc::new(AtomicU64::new(0)),
+            CancellationToken::new(),
+            PARK_TIMER_THRESHOLD_MS,
             rx,
         ));
         let (reply, receive) = oneshot::channel();
@@ -3515,6 +3717,8 @@ mod tests {
             replay,
             Arc::new(AtomicU32::new(0)),
             Arc::new(AtomicU64::new(0)),
+            CancellationToken::new(),
+            PARK_TIMER_THRESHOLD_MS,
             rx,
         ));
         (tx, task)
@@ -3671,6 +3875,203 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn a_long_timer_with_nothing_in_flight_parks_the_run() {
+        let provider = Arc::new(ScriptedGateProvider {
+            replies: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            calls: AtomicUsize::new(0),
+        });
+        let (storage, state, run) = event_gate_fixture(provider).await;
+        let park = CancellationToken::new();
+        let (tx, rx) = mpsc::unbounded_channel();
+        let task = tokio::spawn(run_host_commands(
+            state,
+            run.id,
+            run.space_id,
+            None,
+            None,
+            WorkflowBudget {
+                max_agent_calls: None,
+                max_total_tokens: None,
+                max_concurrent_agent_calls: None,
+            },
+            vec![],
+            Arc::new(AtomicU32::new(0)),
+            Arc::new(AtomicU64::new(0)),
+            park.clone(),
+            50,
+            rx,
+        ));
+        let (reply, mut receive) = oneshot::channel();
+        tx.send(HostCommand::Timer {
+            ms: 100,
+            timer_id: 0,
+            cancellation: CancellationToken::new(),
+            reply,
+        })
+        .expect("timer");
+        // The park decision is the signal: state recorded, engine told to halt.
+        park.cancelled().await;
+        let parked = storage
+            .get_workflow_run(run.id)
+            .await
+            .expect("get")
+            .expect("run");
+        assert_eq!(parked.state, "parked");
+        assert!(parked.wake_at.is_some(), "a parked run records when it is due");
+        // The timer reply is held, never resolved: the halting engine must
+        // not see a racing error it could catch.
+        assert!(matches!(
+            receive.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        drop(tx);
+        task.await.expect("host loop");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_woken_run_replays_its_timer_with_the_remaining_time() {
+        let provider = Arc::new(ScriptedGateProvider {
+            replies: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            calls: AtomicUsize::new(0),
+        });
+        let (storage, state, run) = event_gate_fixture(provider).await;
+        // A started timer entry whose recorded start is already further back
+        // than the timer's length — how a woken parked run's journal looks.
+        let request = serde_json::json!({ "ms": 80u64 });
+        storage
+            .create_workflow_journal_intent(NewWorkflowJournalIntent {
+                run_id: run.id,
+                seq: 0,
+                kind: "timer".into(),
+                args_hash: journal_args_hash(&request),
+                request,
+                effect_kind: None,
+                idempotency_key: None,
+                target_kind: None,
+            })
+            .await
+            .expect("intent");
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        let replay = storage
+            .list_workflow_journal(run.id)
+            .await
+            .expect("journal");
+        let (tx, task) = spawn_event_loop(state, run.id, run.space_id, replay);
+        let (reply, receive) = oneshot::channel();
+        tx.send(HostCommand::Timer {
+            ms: 80,
+            timer_id: 0,
+            cancellation: CancellationToken::new(),
+            reply,
+        })
+        .expect("timer");
+        // The remainder is exhausted, so the timer owes an immediate firing —
+        // not a fresh 80ms, and above all not a re-park.
+        let fired = tokio::time::timeout(std::time::Duration::from_secs(5), receive)
+            .await
+            .expect("timer fired promptly")
+            .expect("reply")
+            .expect("fired");
+        assert_eq!(fired, serde_json::json!({"fired": true}));
+        let (confirm_reply, confirm_receive) = oneshot::channel();
+        tx.send(HostCommand::ConfirmTimer {
+            timer_id: 0,
+            reply: confirm_reply,
+        })
+        .expect("confirm");
+        confirm_receive
+            .await
+            .expect("confirm reply")
+            .expect("confirmed");
+        drop(tx);
+        task.await.expect("host loop");
+        let journal = storage
+            .list_workflow_journal(run.id)
+            .await
+            .expect("journal after");
+        assert_eq!(journal[0].status, "completed");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_wake_pass_resumes_interrupted_and_due_parked_runs() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let make_run = |source: &str| NewWorkflowRun {
+            space_id: space.id,
+            parent_run_id: None,
+            parent_seq: None,
+            script_version_id: None,
+            source: Some(source.into()),
+            source_hash: source_hash(source),
+            args: Value::Null,
+            budget: serde_json::json!({}),
+            engine_version: "test".into(),
+            dispatching_agent_id: None,
+        };
+        let interrupted = storage
+            .create_workflow_run(make_run(r#"return "a-done""#))
+            .await
+            .expect("run a");
+        storage
+            .update_workflow_run_state(interrupted.id, "interrupted", None, None)
+            .await
+            .expect("interrupt");
+        let due = storage
+            .create_workflow_run(make_run(r#"return "b-woke""#))
+            .await
+            .expect("run b");
+        storage
+            .set_workflow_run_parked(due.id, chrono::Utc::now() - chrono::Duration::seconds(1))
+            .await
+            .expect("park due");
+        let sleeping = storage
+            .create_workflow_run(make_run(r#"return "c-later""#))
+            .await
+            .expect("run c");
+        storage
+            .set_workflow_run_parked(
+                sleeping.id,
+                chrono::Utc::now() + chrono::Duration::hours(1),
+            )
+            .await
+            .expect("park future");
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::new(crate::turn::tests::PendingProvider),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+
+        let resumed = resume_owed_workflow_runs(&state).await;
+        assert_eq!(resumed, 2, "the interrupted run and the due parked run");
+        wait_for_terminal(&state, interrupted.id).await;
+        wait_for_terminal(&state, due.id).await;
+        let finished = storage
+            .get_workflow_run(interrupted.id)
+            .await
+            .expect("get a")
+            .expect("run a");
+        assert_eq!(finished.state, "completed");
+        assert_eq!(finished.final_output, Some(Value::String("a-done".into())));
+        let woken = storage
+            .get_workflow_run(due.id)
+            .await
+            .expect("get b")
+            .expect("run b");
+        assert_eq!(woken.state, "completed");
+        assert_eq!(woken.final_output, Some(Value::String("b-woke".into())));
+        assert!(woken.wake_at.is_none(), "leaving parked clears the due time");
+        let still_parked = storage
+            .get_workflow_run(sleeping.id)
+            .await
+            .expect("get c")
+            .expect("run c");
+        assert_eq!(still_parked.state, "parked", "not due, not touched");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn token_reservation_settlement_releases_estimate_and_retains_actual_spend() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
         let space = storage.get_or_create_default().await.expect("space");
@@ -3717,6 +4118,8 @@ mod tests {
             vec![],
             Arc::new(AtomicU32::new(0)),
             Arc::clone(&spent),
+            CancellationToken::new(),
+            PARK_TIMER_THRESHOLD_MS,
             rx,
         ));
         let request = AgentCallRequest {
@@ -3842,6 +4245,8 @@ mod tests {
             replay,
             Arc::new(AtomicU32::new(2)),
             Arc::new(AtomicU64::new(0)),
+            CancellationToken::new(),
+            PARK_TIMER_THRESHOLD_MS,
             rx,
         ));
         let first_cancellation = CancellationToken::new();

@@ -75,6 +75,9 @@ pub enum WorkflowRunState {
     Failed,
     Cancelled,
     Interrupted,
+    /// Sleeping on a durable wait with its engine torn down; the waker
+    /// resumes it by journal replay when it is due.
+    Parked,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]

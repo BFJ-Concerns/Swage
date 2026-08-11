@@ -1899,6 +1899,9 @@ pub struct WorkflowRunRecord {
     /// so suspension never freezes authority. `None` means operator-started:
     /// workers run under their own resolved config alone.
     pub dispatching_agent_id: Option<String>,
+    /// When a parked run is due to wake. Set only while `state` is
+    /// `parked`; cleared on every other state transition.
+    pub wake_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
 }

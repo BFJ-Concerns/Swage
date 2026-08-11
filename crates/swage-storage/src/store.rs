@@ -1026,6 +1026,21 @@ pub trait WorkflowStore: Send + Sync {
         error_message: Option<&str>,
     ) -> Result<(), StorageError>;
     async fn interrupt_running_workflow_runs(&self) -> Result<u64, StorageError>;
+    /// Park a run on a durable wait: state `parked`, due at `wake_at`, its
+    /// engine torn down until the waker resumes it by replay.
+    async fn set_workflow_run_parked(
+        &self,
+        id: Uuid,
+        wake_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), StorageError>;
+    /// Parked runs whose `wake_at` has arrived, oldest due first.
+    async fn list_due_parked_workflow_runs(
+        &self,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<WorkflowRunRecord>, StorageError>;
+    /// Runs a crash or shutdown left interrupted, oldest first — the boot
+    /// resume's work list.
+    async fn list_interrupted_workflow_runs(&self) -> Result<Vec<WorkflowRunRecord>, StorageError>;
     /// Append to the run's pending-event queue. `seq` is assigned by the
     /// store, dense per run; the insert is idempotent on
     /// `journal_entry_id` — a replayed post returns its existing row.
@@ -2257,6 +2272,24 @@ mod tests {
             unimplemented!()
         }
         async fn interrupt_running_workflow_runs(&self) -> Result<u64, StorageError> {
+            unimplemented!()
+        }
+        async fn set_workflow_run_parked(
+            &self,
+            _: Uuid,
+            _: chrono::DateTime<chrono::Utc>,
+        ) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+        async fn list_due_parked_workflow_runs(
+            &self,
+            _: chrono::DateTime<chrono::Utc>,
+        ) -> Result<Vec<WorkflowRunRecord>, StorageError> {
+            unimplemented!()
+        }
+        async fn list_interrupted_workflow_runs(
+            &self,
+        ) -> Result<Vec<WorkflowRunRecord>, StorageError> {
             unimplemented!()
         }
         async fn create_workflow_run_event(
