@@ -458,6 +458,35 @@ pub(crate) async fn dispatch_before_inbound(
 // span so all log entries within the turn share the same turn_id and
 // session_id. turn_id is Empty at span creation and recorded once the
 // Turn record exists.
+/// Render a completed delegation's Result message as thread content.
+///
+/// Reads the payload the delegation path writes — `response` with optional
+/// `structured_output`, or `error` for a failed child — and falls back to
+/// the raw JSON for any other shape, so an unrecognised payload is still
+/// delivered rather than dropped.
+fn render_delegation_result(result: &swage_storage::model::AgentMessage) -> String {
+    let sender = &result.sender_agent_id;
+    let mut text = match result.payload.get("response").and_then(|v| v.as_str()) {
+        Some(response) => format!("Delegated agent {sender} completed:\n{response}"),
+        None => match result.payload.get("error").and_then(|v| v.as_str()) {
+            Some(error) => format!("Delegated agent {sender} failed: {error}"),
+            None => format!(
+                "Delegated agent {sender} finished:\n{}",
+                serde_json::to_string_pretty(&result.payload)
+                    .unwrap_or_else(|_| result.payload.to_string())
+            ),
+        },
+    };
+    if let Some(structured) = result.payload.get("structured_output") {
+        let rendered = serde_json::to_string_pretty(structured)
+            .unwrap_or_else(|_| structured.to_string());
+        text.push_str("\n\nStructured output:\n```json\n");
+        text.push_str(&rendered);
+        text.push_str("\n```");
+    }
+    text
+}
+
 pub async fn process_turn(
     state: &AppState,
     session_id: Uuid,
@@ -660,6 +689,35 @@ pub(crate) async fn process_turn_with_existing_turn(
             agent_id: session.agent_id.clone(),
         })
         .await?;
+
+    // Step 7: Deliver completed detached delegations. A detached child's
+    // Result waits in this agent's mailbox until its parent next turns;
+    // each is appended as a durable Tool message *before* history is
+    // rebuilt, so the result enters the thread record — visible in the
+    // UI, part of the audit trail, and carried to the model as ordinary
+    // history content, never as instructions. Append-before-claim: a
+    // failure between the two re-delivers next turn rather than losing
+    // the result, and a lost claim race leaves a duplicate row, not a
+    // gap.
+    let pending_results =
+        swage_agent::mailbox::pending_results(&state.storage, &session.agent_id)
+            .await
+            .map_err(|error| GatewayError::WebSocketError(error.to_string()))?;
+    for result in &pending_results {
+        state
+            .storage
+            .append_message(AppendMessage {
+                thread_id,
+                turn_id: Some(prepared_turn_id),
+                role: Role::Tool,
+                content: render_delegation_result(result),
+                agent_id: session.agent_id.clone(),
+            })
+            .await?;
+        swage_agent::mailbox::claim_result(&state.storage, result.id)
+            .await
+            .map_err(|error| GatewayError::WebSocketError(error.to_string()))?;
+    }
 
     // Steps 8–9: Assemble context via the swage-context assembly engine.
     // Loads thread history and constructs the typed elements used by the

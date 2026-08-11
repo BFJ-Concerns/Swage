@@ -110,6 +110,46 @@ pub async fn check_mailbox(
     Ok(contents)
 }
 
+/// Pending Result messages awaiting delivery into the agent's next turn.
+///
+/// Read-only: nothing is claimed here. `check_mailbox` is
+/// instantiation-shaped — it decides shutdown, collects cancellations, and
+/// claims every kind at once — and a turn loop must not run it, because
+/// claiming a Delegate or Shutdown there would swallow lifecycle messages
+/// the instantiation path owns. The turn path reads Results alone, records
+/// each durably, and only then claims it with [`claim_result`]: append
+/// before claim means a failure between the two re-delivers rather than
+/// loses, which is the right side of at-least-once for completed work.
+///
+/// When a Shutdown is pending, nothing is returned: that mailbox belongs to
+/// the instantiation path, which also decides what happens to siblings, and
+/// delivering results past it would race that decision.
+pub async fn pending_results(
+    storage: &Arc<dyn Storage>,
+    agent_id: &str,
+) -> Result<Vec<AgentMessage>, AgentError> {
+    let pending = storage.list_pending_for_agent(agent_id).await?;
+    if pending.iter().any(|m| m.kind == MessageKind::Shutdown) {
+        return Ok(Vec::new());
+    }
+    Ok(pending
+        .into_iter()
+        .filter(|m| m.kind == MessageKind::Result)
+        .collect())
+}
+
+/// Claim one Result after it has been durably recorded. First claimer wins;
+/// `false` means another consumer claimed it between read and claim, and
+/// the caller's already-recorded copy stands as at-least-once delivery.
+pub async fn claim_result(
+    storage: &Arc<dyn Storage>,
+    message_id: Uuid,
+) -> Result<bool, AgentError> {
+    Ok(storage
+        .update_agent_message_status(message_id, MessageStatus::Delivered, None)
+        .await?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -254,6 +294,97 @@ mod tests {
             Some(correlation)
         );
         assert_eq!(contents.pending_results[0].payload["response"], "done");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pending_results_reads_without_claiming_and_ignores_other_kinds() {
+        let storage: Arc<dyn Storage> = Arc::new(SqliteStorage::in_memory().unwrap());
+
+        let result = storage
+            .create_agent_message(NewAgentMessage {
+                sender_agent_id: "child".into(),
+                recipient_agent_id: "agent-a".into(),
+                kind: MessageKind::Result,
+                correlation_id: Some(Uuid::new_v4()),
+                payload: serde_json::json!({"response": "done"}),
+            })
+            .await
+            .unwrap();
+        storage
+            .create_agent_message(NewAgentMessage {
+                sender_agent_id: "sender".into(),
+                recipient_agent_id: "agent-a".into(),
+                kind: MessageKind::Delegate,
+                correlation_id: None,
+                payload: serde_json::json!({"task": "work"}),
+            })
+            .await
+            .unwrap();
+
+        let first = pending_results(&storage, "agent-a").await.unwrap();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].id, result.id);
+
+        // Reading claims nothing: the same result is still pending, and the
+        // Delegate was never touched.
+        let second = pending_results(&storage, "agent-a").await.unwrap();
+        assert_eq!(second.len(), 1);
+        let contents = check_mailbox(&storage, "agent-a").await.unwrap();
+        assert_eq!(contents.pending_delegates.len(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn claim_result_is_first_claimer_wins() {
+        let storage: Arc<dyn Storage> = Arc::new(SqliteStorage::in_memory().unwrap());
+
+        let result = storage
+            .create_agent_message(NewAgentMessage {
+                sender_agent_id: "child".into(),
+                recipient_agent_id: "agent-a".into(),
+                kind: MessageKind::Result,
+                correlation_id: None,
+                payload: serde_json::json!({"response": "done"}),
+            })
+            .await
+            .unwrap();
+
+        assert!(claim_result(&storage, result.id).await.unwrap());
+        assert!(
+            !claim_result(&storage, result.id).await.unwrap(),
+            "a second claim must lose"
+        );
+        assert!(pending_results(&storage, "agent-a").await.unwrap().is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pending_shutdown_defers_result_delivery() {
+        let storage: Arc<dyn Storage> = Arc::new(SqliteStorage::in_memory().unwrap());
+
+        storage
+            .create_agent_message(NewAgentMessage {
+                sender_agent_id: "child".into(),
+                recipient_agent_id: "agent-a".into(),
+                kind: MessageKind::Result,
+                correlation_id: None,
+                payload: serde_json::json!({"response": "done"}),
+            })
+            .await
+            .unwrap();
+        storage
+            .create_agent_message(NewAgentMessage {
+                sender_agent_id: "sender".into(),
+                recipient_agent_id: "agent-a".into(),
+                kind: MessageKind::Shutdown,
+                correlation_id: None,
+                payload: serde_json::json!({}),
+            })
+            .await
+            .unwrap();
+
+        assert!(
+            pending_results(&storage, "agent-a").await.unwrap().is_empty(),
+            "a pending Shutdown hands the whole mailbox to the instantiation path"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
