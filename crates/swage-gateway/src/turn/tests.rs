@@ -31,10 +31,10 @@ use swage_storage::{
         TurnState, UpdateSchedule, WorkspaceAttachment,
     },
     store::{
-        AgentMessageStore, ApprovalStore, AttachmentStore, BackgroundJobStore, ChannelLinkStore,
-        ContextSnapshotStore, DeviceStore, MaterialStore, MessageStore, ScheduleStore,
-        SessionStore, SkillActivationStore, SpaceStore, ThreadStore, ToolCallStore, TurnStore,
-        WorkspaceAttachmentStore,
+        AgentDefinitionStore, AgentMessageStore, ApprovalStore, AttachmentStore,
+        BackgroundJobStore, ChannelLinkStore, ContextSnapshotStore, DeviceStore, MaterialStore,
+        MessageStore, ScheduleStore, SessionStore, SkillActivationStore, SpaceStore, ThreadStore,
+        ToolCallStore, TurnStore, WorkspaceAttachmentStore,
     },
 };
 
@@ -3113,6 +3113,44 @@ impl swage_storage::store::CitationStore for MockStorage {
 }
 
 #[async_trait]
+impl swage_storage::store::OrientationCardStore for MockStorage {
+    async fn create_orientation_card(
+        &self,
+        _: swage_storage::NewOrientationCard,
+        _: Option<uuid::Uuid>,
+    ) -> Result<swage_storage::OrientationCard, StorageError> {
+        unimplemented!("turn tests do not exercise orientation cards")
+    }
+    async fn find_orientation_cards(
+        &self,
+        _: uuid::Uuid,
+        _: Option<&str>,
+        _: usize,
+    ) -> Result<Vec<swage_storage::OrientationCard>, StorageError> {
+        unimplemented!("turn tests do not exercise orientation cards")
+    }
+    async fn supersede_orientation_card(
+        &self,
+        _: uuid::Uuid,
+        _: uuid::Uuid,
+        _: uuid::Uuid,
+        _: String,
+        _: Option<uuid::Uuid>,
+    ) -> Result<swage_storage::OrientationCardLifecycle, StorageError> {
+        unimplemented!("turn tests do not exercise orientation cards")
+    }
+    async fn retire_orientation_card(
+        &self,
+        _: uuid::Uuid,
+        _: uuid::Uuid,
+        _: String,
+        _: Option<uuid::Uuid>,
+    ) -> Result<swage_storage::OrientationCardLifecycle, StorageError> {
+        unimplemented!("turn tests do not exercise orientation cards")
+    }
+}
+
+#[async_trait]
 impl swage_storage::store::SecretStore for MockStorage {
     async fn create_secret(
         &self,
@@ -6090,6 +6128,27 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
     )
     .await
     .expect("create root thread");
+    storage
+        .upsert_agent_definition(swage_storage::NewAgentDefinition {
+            id: "agent-b".into(),
+            space_id: Some(space.id),
+            display_name: "Agent B".into(),
+            description: String::new(),
+            instructions: "Definition-only delegated instruction.".into(),
+            model_id: None,
+            tool_permissions: None,
+            skills: vec!["definition-declared".into()],
+            output_schema: Some(serde_json::json!({
+                "type": "object",
+                "required": ["result"],
+                "properties": {
+                    "result": { "type": "string" }
+                }
+            })),
+            output_max_retries: Some(1),
+        })
+        .await
+        .expect("store delegated agent definition");
 
     let parent_round = vec![
         StreamChunk::ToolUse {
@@ -6105,9 +6164,10 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
         },
     ];
     let child_marker = Uuid::new_v4().to_string();
+    let child_response = format!(r#"{{"result":"{child_marker}"}}"#);
     let child_round = vec![
         StreamChunk::Delta {
-            content: child_marker.clone(),
+            content: child_response.clone(),
         },
         StreamChunk::Done {
             finish_reason: None,
@@ -6147,6 +6207,15 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
         "---\ndescription: Foreground only\n---\nUse the parent foreground skill.\n",
     )
     .expect("write foreground skill");
+    let declared_skill_dir = swage_home
+        .path()
+        .join("spaces/default/skills/definition-declared");
+    std::fs::create_dir_all(&declared_skill_dir).expect("create declared skill directory");
+    std::fs::write(
+        declared_skill_dir.join("SKILL.md"),
+        "---\ndescription: Definition-declared behaviour\n---\nUse the definition-declared skill.\n",
+    )
+    .expect("write declared skill");
     let target_agent_dir = swage_home.path().join("spaces/default/agents/agent-b");
     std::fs::create_dir_all(target_agent_dir.join("skills/delegated-specialist"))
         .expect("create delegated agent directory");
@@ -6256,7 +6325,7 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
     assert_eq!(child_turns[0].parent_turn_id, Some(root_turn.id));
     assert_eq!(
         child_turns[0].assistant_response.as_deref(),
-        Some(child_marker.as_str())
+        Some(child_response.as_str())
     );
     let child_snapshot = state
         .storage
@@ -6302,6 +6371,25 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
         captured_requests.len(),
         4,
         "expected parent, child, resumed-parent, and next-turn provider requests"
+    );
+    let delegated_result = captured_requests[2]
+        .messages
+        .iter()
+        .filter_map(ChatMessage::tool_replay)
+        .flatten()
+        .find_map(|part| match part {
+            ToolReplayPart::ToolResult {
+                call_id, content, ..
+            } if call_id == "delegate-1" => Some(content),
+            _ => None,
+        })
+        .expect("resumed parent request should contain the delegated result");
+    let delegated_result: serde_json::Value = serde_json::from_str(delegated_result)
+        .expect("delegated result payload should be valid JSON");
+    assert_eq!(
+        delegated_result["structured_output"],
+        serde_json::json!({ "result": child_marker.as_str() }),
+        "the delegated definition's output contract should produce structured output in the result payload"
     );
     let parent_request_text = captured_requests[0]
         .messages
@@ -6351,8 +6439,26 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
         "delegated provider request should include target agent-level skill instructions: {child_request_text}"
     );
     assert!(
+        child_request_text.contains("Use the definition-declared skill."),
+        "delegated provider request should include definition-declared skill instructions: {child_request_text}"
+    );
+    assert!(
+        child_request_text.contains("Definition-only delegated instruction."),
+        "a genuinely reached child must receive its durable definition rather than file config alone: {child_request_text}"
+    );
+    assert!(
         !child_request_text.contains("Use the parent foreground skill."),
         "delegated provider request must not inherit user-activated parent skills: {child_request_text}"
+    );
+    assert!(
+        state
+            .storage
+            .list_active_skills(child_sessions[0].id)
+            .await
+            .expect("list child skill activations")
+            .iter()
+            .all(|activation| activation.skill_name != "definition-declared"),
+        "definition declarations must not be persisted as user activations"
     );
     assert!(
         !child_request_text.contains("Parent resumed after delegation"),

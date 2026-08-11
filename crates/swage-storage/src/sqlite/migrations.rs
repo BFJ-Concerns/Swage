@@ -78,6 +78,10 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
         ),
         ("046_workflow_run_parentage", ADD_WORKFLOW_RUN_PARENTAGE),
         ("047_knowledge_citations", CREATE_KNOWLEDGE_CITATIONS),
+        (
+            "048_knowledge_orientation_cards",
+            CREATE_KNOWLEDGE_ORIENTATION_CARDS,
+        ),
     ]
 }
 
@@ -1203,6 +1207,84 @@ const CREATE_KNOWLEDGE_CITATIONS: &str = "
     END;
 ";
 
+/// Immutable, agent-authored orientation over observations. The deferred
+/// circular foreign keys make a card without at least one evidence relation
+/// impossible at transaction commit while retaining a proper many-to-many
+/// derivation relation.
+const CREATE_KNOWLEDGE_ORIENTATION_CARDS: &str = "
+    CREATE UNIQUE INDEX idx_source_observations_id_space
+        ON source_observations(id, space_id);
+
+    CREATE TABLE orientation_cards (
+        id                 TEXT NOT NULL PRIMARY KEY,
+        space_id           TEXT NOT NULL REFERENCES spaces(id),
+        title              TEXT NOT NULL CHECK (length(trim(title)) > 0),
+        content            TEXT NOT NULL CHECK (length(trim(content)) > 0),
+        authored_by        TEXT NOT NULL CHECK (length(trim(authored_by)) > 0),
+        evidence_anchor_id TEXT NOT NULL UNIQUE,
+        created_at         TEXT NOT NULL,
+        UNIQUE (id, space_id),
+        FOREIGN KEY (evidence_anchor_id, id, space_id)
+            REFERENCES orientation_card_observations(id, card_id, space_id)
+            DEFERRABLE INITIALLY DEFERRED
+    );
+
+    CREATE TABLE orientation_card_observations (
+        id             TEXT NOT NULL PRIMARY KEY,
+        card_id        TEXT NOT NULL,
+        space_id       TEXT NOT NULL,
+        observation_id TEXT NOT NULL,
+        UNIQUE (id, card_id, space_id),
+        UNIQUE (card_id, observation_id),
+        FOREIGN KEY (card_id, space_id) REFERENCES orientation_cards(id, space_id)
+            DEFERRABLE INITIALLY DEFERRED,
+        FOREIGN KEY (observation_id, space_id)
+            REFERENCES source_observations(id, space_id)
+    );
+
+    CREATE TABLE orientation_card_lifecycle (
+        id                  TEXT NOT NULL PRIMARY KEY,
+        card_id             TEXT NOT NULL UNIQUE REFERENCES orientation_cards(id),
+        action              TEXT NOT NULL CHECK (action IN ('superseded', 'retired')),
+        replacement_card_id TEXT REFERENCES orientation_cards(id),
+        actor               TEXT NOT NULL CHECK (length(trim(actor)) > 0),
+        created_at          TEXT NOT NULL,
+        CHECK ((action = 'superseded' AND replacement_card_id IS NOT NULL)
+            OR (action = 'retired' AND replacement_card_id IS NULL)),
+        CHECK (replacement_card_id IS NULL OR replacement_card_id <> card_id)
+    );
+
+    CREATE VIRTUAL TABLE orientation_card_fts USING fts5(
+        title, content, content='orientation_cards', content_rowid='rowid'
+    );
+    CREATE TRIGGER orientation_card_fts_insert AFTER INSERT ON orientation_cards BEGIN
+        INSERT INTO orientation_card_fts(rowid, title, content)
+        VALUES (new.rowid, new.title, new.content);
+    END;
+    CREATE TRIGGER orientation_cards_no_update BEFORE UPDATE ON orientation_cards BEGIN
+        SELECT RAISE(ABORT, 'orientation cards are immutable');
+    END;
+    CREATE TRIGGER orientation_cards_no_delete BEFORE DELETE ON orientation_cards BEGIN
+        SELECT RAISE(ABORT, 'orientation cards are append-only');
+    END;
+    CREATE TRIGGER orientation_card_observations_no_update
+    BEFORE UPDATE ON orientation_card_observations BEGIN
+        SELECT RAISE(ABORT, 'orientation card evidence is immutable');
+    END;
+    CREATE TRIGGER orientation_card_observations_no_delete
+    BEFORE DELETE ON orientation_card_observations BEGIN
+        SELECT RAISE(ABORT, 'orientation card evidence is append-only');
+    END;
+    CREATE TRIGGER orientation_card_lifecycle_no_update
+    BEFORE UPDATE ON orientation_card_lifecycle BEGIN
+        SELECT RAISE(ABORT, 'orientation card lifecycle is append-only');
+    END;
+    CREATE TRIGGER orientation_card_lifecycle_no_delete
+    BEFORE DELETE ON orientation_card_lifecycle BEGIN
+        SELECT RAISE(ABORT, 'orientation card lifecycle is append-only');
+    END;
+";
+
 /// Durable agent definitions — the bundle that gives a session its entire
 /// character, selected at session start by agent id.
 ///
@@ -1219,6 +1301,9 @@ const CREATE_AGENT_DEFINITION_TABLE: &str = "
         instructions          TEXT NOT NULL DEFAULT '',
         model_id              TEXT,
         tool_permissions_json TEXT,
+        skills_json           TEXT NOT NULL DEFAULT '[]',
+        output_schema_json    TEXT,
+        output_max_retries    INTEGER,
         created_at            TEXT NOT NULL,
         updated_at            TEXT NOT NULL,
         PRIMARY KEY (id, space_id)

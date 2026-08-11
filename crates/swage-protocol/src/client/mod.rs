@@ -41,6 +41,7 @@ pub struct ClientSurface {
     conversation_detail: conversation::ConversationDetail,
     conversation_thread: conversation::ConversationThreadDetail,
     knowledge_search: knowledge::KnowledgeSearchResponse,
+    orientation_find: knowledge::OrientationFindResponse,
     create_schedule_request: schedule::CreateScheduleRequest,
     update_schedule_request: schedule::UpdateScheduleRequest,
     schedule: schedule::Schedule,
