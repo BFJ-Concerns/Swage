@@ -224,6 +224,33 @@ impl ObservationStore for SqliteStorage {
         .await
     }
 
+    async fn latest_extraction(
+        &self,
+        observation_id: Uuid,
+    ) -> Result<Option<ExtractionDerivation>, StorageError> {
+        self.with_conn(move |conn| {
+            conn.query_row(
+                "SELECT id, observation_id, version, extracted_text, extractor, created_at
+                 FROM extraction_derivations
+                 WHERE observation_id = ?1
+                 ORDER BY version DESC LIMIT 1",
+                params![observation_id.to_string()],
+                |row| {
+                    Ok(ExtractionDerivation {
+                        id: parse_uuid(&row.get::<_, String>(0)?)?,
+                        observation_id: parse_uuid(&row.get::<_, String>(1)?)?,
+                        version: u32::try_from(row.get::<_, i64>(2)?).unwrap_or(u32::MAX),
+                        extracted_text: row.get(3)?,
+                        extractor: row.get(4)?,
+                        created_at: parse_dt(&row.get::<_, String>(5)?)?,
+                    })
+                },
+            )
+            .optional()
+        })
+        .await
+    }
+
     async fn search_extractions(
         &self,
         space_id: Uuid,
@@ -420,6 +447,41 @@ mod tests {
             .unwrap()
             .expect("version 1 should survive re-extraction");
         assert_eq!(pinned.extracted_text, "first pass");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn latest_extraction_returns_newest_version_or_none() {
+        let (storage, space_id) = storage_with_space().await;
+        let observation = storage
+            .record_observation(new_observation(space_id, "https://example.org/a", "aa11"))
+            .await
+            .unwrap();
+
+        assert!(
+            storage
+                .latest_extraction(observation.id)
+                .await
+                .unwrap()
+                .is_none(),
+            "an unextracted observation has no latest derivation"
+        );
+
+        storage
+            .add_extraction(observation.id, "first pass".into(), "extractor-a".into())
+            .await
+            .unwrap();
+        storage
+            .add_extraction(observation.id, "better pass".into(), "extractor-b".into())
+            .await
+            .unwrap();
+
+        let latest = storage
+            .latest_extraction(observation.id)
+            .await
+            .unwrap()
+            .expect("two derivations exist");
+        assert_eq!(latest.version, 2);
+        assert_eq!(latest.extracted_text, "better pass");
     }
 
     #[tokio::test(flavor = "multi_thread")]

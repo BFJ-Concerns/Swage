@@ -328,6 +328,10 @@ mod tests {
             self.inner.list_turns_by_thread(thread_id).await
         }
 
+        async fn force_turn_failure(&self, id: Uuid) -> Result<(), StorageError> {
+            self.inner.force_turn_failure(id).await
+        }
+
         async fn update_turn_state(&self, id: Uuid, state: TurnState) -> Result<(), StorageError> {
             match self.injected_failure {
                 InjectedFailure::UpdateTurnState => Err(self.injected_error()),
