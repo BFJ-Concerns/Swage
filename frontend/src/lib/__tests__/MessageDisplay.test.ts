@@ -1,11 +1,13 @@
 // @vitest-environment jsdom
 /**
- * Tests for tool call rendering in MessageDisplay.
+ * Tests for settled responses and tool call rendering in MessageDisplay.
  *
  * Verifies that ToolCallDisplay components appear for both persisted
  * message history and live streaming tool activity.
  *
  * Scenarios covered:
+ *   - Settled partial content renders once after streaming ends
+ *   - Interrupted and failed responses have distinct user-facing notices
  *   - Tool calls from committed messages render after the assistant text
  *   - Each tool call produces a .tool-call element
  *   - Multiple tool calls on one message render in order
@@ -18,7 +20,11 @@ import { describe, it, expect, afterEach } from "vitest";
 import { mount, unmount } from "svelte";
 import MessageDisplay from "../components/MessageDisplay.svelte";
 import type { ConversationStore } from "../stores/conversations";
-import type { ProviderRetryState, StreamingStore } from "../stores/streaming";
+import {
+  createStreamingStore,
+  type ProviderRetryState,
+  type StreamingStore,
+} from "../stores/streaming";
 import type { ConversationDetail, MessageView, ToolCallView } from "../types";
 
 type MountedComponent = ReturnType<typeof mount>;
@@ -49,13 +55,14 @@ function makeAssistantMessage(
   content: string,
   tool_calls?: ToolCallView[],
   model?: string | null,
+  turnState: MessageView["turn_state"] = "completed",
 ): MessageView {
   _msgSeq += 1;
   return {
     role: "assistant",
     content,
     timestamp: `2026-03-20T10:00:${String(_msgSeq).padStart(2, "0")}Z`,
-    turn_state: "completed",
+    turn_state: turnState,
     ...(tool_calls ? { tool_calls } : {}),
     ...(model !== undefined ? { model } : {}),
   };
@@ -84,7 +91,9 @@ function makeConversationStore(messages: MessageView[]): ConversationStore {
     createConversation: async () => {},
     deleteConversation: async () => {},
     appendOptimisticUserMessage: () => {},
-    appendAssistantMessage: () => {},
+    appendAssistantMessage: (message) => {
+      messages.push({ role: "assistant", ...message });
+    },
     clearActiveConversation: () => {},
     refreshActiveConversation: async () => {},
   };
@@ -144,6 +153,50 @@ afterEach(() => {
     document.body.removeChild(document.body.firstChild);
   }
   _msgSeq = 0;
+});
+
+// ---------------------------------------------------------------------------
+// Settled partial responses
+// ---------------------------------------------------------------------------
+
+describe("settled partial responses", () => {
+  it("renders settled partial content only once after the turn ends", () => {
+    const partialContent = "The response reached this point";
+    const store = makeConversationStore([]);
+    const streamingStore = createStreamingStore({ conversationStore: store });
+
+    streamingStore.startTurn("Continue until stopped");
+    streamingStore.handleServerEvent({
+      type: "token",
+      content: partialContent,
+    });
+    streamingStore.handleServerEvent({ type: "cancelled" });
+
+    component = mount(MessageDisplay, {
+      target: document.body,
+      props: { store, streamingStore },
+    });
+
+    expect(
+      document.body.textContent?.match(new RegExp(partialContent, "g")),
+    ).toHaveLength(1);
+  });
+
+  it("distinguishes interrupted and failed responses for the user", () => {
+    const store = makeConversationStore([
+      makeAssistantMessage("Stopped partial", undefined, undefined, "interrupted"),
+      makeAssistantMessage("Failed partial", undefined, undefined, "failed"),
+    ]);
+
+    component = mount(MessageDisplay, {
+      target: document.body,
+      props: { store, streamingStore: makeStreamingStore() },
+    });
+
+    expect(document.body.textContent).toContain("Response interrupted");
+    expect(document.body.textContent).toContain("Response failed");
+    expect(document.body.textContent?.match(/Response interrupted/g)).toHaveLength(1);
+  });
 });
 
 // ---------------------------------------------------------------------------

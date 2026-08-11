@@ -259,9 +259,11 @@
               <div class="plain-body">{message.content}</div>
             {/if}
 
-            {#if message.turn_state === "interrupted" || message.turn_state === "failed"}
+            {#if message.turn_state === "interrupted"}
               <!-- Subtle notice below the partial response. -->
               <p class="interrupted-notice">↩ Response interrupted</p>
+            {:else if message.turn_state === "failed"}
+              <p class="interrupted-notice">⚠ Response failed</p>
             {/if}
           </div>
         {/if}
