@@ -18,13 +18,17 @@ name: CI
 on:
   pull_request:
     types: [opened, synchronize, reopened, edited]
+  # Direct pushes to main are allowed past the PR gate, so run the same
+  # job on them as a post-merge tripwire.
+  push:
+    branches: [main]
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
   test:
-    if: forgejo.event.pull_request.draft == false && !startsWith(forgejo.event.pull_request.head.ref, 'structural/')
+    if: forgejo.event_name == 'push' || (forgejo.event.pull_request.draft == false && !startsWith(forgejo.event.pull_request.head.ref, 'structural/'))
     runs-on: docker
     container:
       image: rust:1.95
