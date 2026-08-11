@@ -51,7 +51,7 @@ pub async fn regenerate(
         .get(space_id)
         .await
         .map_err(GatewayError::from)?
-        .ok_or_else(|| GatewayError::ValidationError(format!("space {space_id} not found")))?;
+        .ok_or(GatewayError::SpaceNotFound { id: space_id })?;
     let response = regenerate_for_space(state.storage.as_ref(), space_id, &space.slug).await?;
     Ok(Json(response))
 }
@@ -266,14 +266,14 @@ mod tests {
         ObservationOrigin, ObservationStore, SpaceStore, SqliteStorage,
     };
 
+    use crate::test_support::SwageHomeGuard;
+
     // resolve_root reads the config hierarchy, so filesystem tests pin it to
-    // a temp directory through the SWAGE_HOME override the discovery honours.
-    fn pin_root() -> tempfile::TempDir {
-        let dir = tempfile::tempdir().expect("temp root");
-        // SAFETY: tests in this module run serially per process and no other
-        // thread reads the variable while it is being set.
-        unsafe { std::env::set_var("SWAGE_HOME", dir.path()) };
-        dir
+    // a temp directory. SWAGE_HOME is process-wide state and cargo runs tests
+    // on parallel threads, so the pin must be the crate's serialising guard —
+    // never a bare set_var.
+    fn pin_root() -> SwageHomeGuard {
+        SwageHomeGuard::new()
     }
 
     fn fixed_time(rfc3339: &str) -> DateTime<Utc> {

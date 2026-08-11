@@ -41,10 +41,13 @@ use swage_storage::{AuditStore, NewAuditEvent, Storage};
 ///
 /// The audit event is the degradation record the contract's class 2
 /// requires: `record` names the missing piece in the trail's own terms
-/// (`context_snapshot`, `provider_visible_snapshot`, `structured_output`,
-/// …) and the error says why. An `Err` from here means the degradation
-/// itself could not be recorded — the caller must escalate to failing the
-/// turn, not log and move on.
+/// (`context_snapshot`, `provider_visible_snapshot`, …) and the error says
+/// why. An `Err` from here means the degradation itself could not be
+/// recorded — the caller must escalate to failing the turn, not log and
+/// move on. A *constitutive* (class 1) seam may also call this so the
+/// trail names its gap, but calling it is never that seam's whole
+/// response: class 1 loss fails the turn regardless of whether this event
+/// lands (the structured-output seam in turn.rs is the worked example).
 pub(crate) async fn record_reconstruction_gap(
     storage: &dyn Storage,
     session_id: Option<Uuid>,
