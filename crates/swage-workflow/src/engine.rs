@@ -13,7 +13,7 @@ use crate::{
 };
 
 fn named_host_error(error: &str, fallback: &str) -> (String, String) {
-    const NAMES: [(&str, &str); 8] = [
+    const NAMES: [(&str, &str); 9] = [
         ("BudgetExceededError", "BudgetExceededError"),
         ("DeliveryNotGrantedError", "DeliveryNotGrantedError"),
         ("WorkflowCancelledError", "WorkflowCancelledError"),
@@ -22,6 +22,7 @@ fn named_host_error(error: &str, fallback: &str) -> (String, String) {
         ("WorkflowCompositionError", "WorkflowCompositionError"),
         ("WaitTimerError", "WaitTimerError"),
         ("RunEventError", "RunEventError"),
+        ("BudgetSnapshotError", "BudgetSnapshotError"),
     ];
     NAMES
         .iter()
@@ -551,6 +552,29 @@ impl WorkflowEngine {
                         ctx.globals().set("__deliver", deliver).map_err(|error| error.to_string())?;
                     }
 
+                    let budget_snapshot_host = Arc::clone(&host);
+                    let budget_snapshot_cancellation = host_cancellation.clone();
+                    let budget_snapshot = Function::new(
+                        ctx.clone(),
+                        Async(move || {
+                            let host = Arc::clone(&budget_snapshot_host);
+                            let cancellation = budget_snapshot_cancellation.clone();
+                            async move {
+                                match host.budget_snapshot(cancellation).await {
+                                    Ok(value) => serde_json::json!({"ok": true, "value": value}).to_string(),
+                                    Err(error) => {
+                                        let (name, message) = named_host_error(&error, "BudgetSnapshotError");
+                                        serde_json::json!({
+                                            "ok": false,
+                                            "error": {"name": name, "message": message}
+                                        }).to_string()
+                                    }
+                                }
+                            }
+                        }),
+                    ).map_err(|error| error.to_string())?;
+                    ctx.globals().set("__budgetSnapshot", budget_snapshot).map_err(|error| error.to_string())?;
+
                     let spent_host = Arc::clone(&host);
                     let spent = Function::new(ctx.clone(), move || spent_host.budget_spent())
                         .map_err(|error| error.to_string())?;
@@ -744,10 +768,18 @@ impl WorkflowEngine {
                                 return previous;
                             })
                         );
+                        // Synchronous budget reads are live diagnostics — an
+                        // unbounded budget reads as undefined, and replay sees
+                        // end-state, not what this moment saw. A script that
+                        // BRANCHES on budget state must use budgetSnapshot():
+                        // journalled, so replay repeats the recorded reading
+                        // ({spent, remaining}; remaining null when unbounded).
                         globalThis.budget = Object.freeze({
                             spent: () => __budgetSpent(),
                             remaining: () => __budgetRemaining(),
                         });
+                        globalThis.budgetSnapshot = async () =>
+                            unwrapHostResponse(await __budgetSnapshot());
                         globalThis.log = (message) => __log(String(message));
                         globalThis.phase = (title) => __phase(String(title));
                         globalThis.console = { log, warn: log, error: log };

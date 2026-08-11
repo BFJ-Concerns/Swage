@@ -677,6 +677,14 @@ impl swage_storage::WorkflowStore for MockStorage {
     async fn interrupt_running_workflow_runs(&self) -> Result<u64, StorageError> {
         unimplemented!()
     }
+    async fn try_transition_workflow_run_state(
+        &self,
+        _: Uuid,
+        _: &str,
+        _: &str,
+    ) -> Result<bool, StorageError> {
+        unimplemented!()
+    }
     async fn set_workflow_run_parked(
         &self,
         _: Uuid,

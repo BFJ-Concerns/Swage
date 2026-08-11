@@ -169,7 +169,7 @@ const CREATE_WORKFLOW_RUN_EVENTS: &str = "
         run_id            TEXT NOT NULL REFERENCES workflow_runs(id) ON DELETE CASCADE,
         seq               INTEGER NOT NULL,
         completed_order   INTEGER,
-        kind              TEXT NOT NULL CHECK (kind IN ('agent_call', 'effect', 'log', 'phase', 'workflow_call', 'timer', 'event', 'gate')),
+        kind              TEXT NOT NULL CHECK (kind IN ('agent_call', 'effect', 'log', 'phase', 'workflow_call', 'timer', 'event', 'gate', 'budget')),
         status            TEXT NOT NULL CHECK (status IN ('started', 'completed', 'failed')),
         args_hash         TEXT NOT NULL,
         request_json      TEXT NOT NULL,
@@ -1438,6 +1438,17 @@ pub fn run_migrations(conn: &Connection) -> Result<(), StorageError> {
     conn.execute_batch(CREATE_MIGRATIONS_TABLE)
         .map_err(|e| StorageError::MigrationFailed(e.to_string()))?;
 
+    // SQLite's table-rebuild recipe: run the migration pass with foreign-key
+    // enforcement OFF. With it on, dropping a rebuilt table performs an
+    // implicit DELETE whose ON DELETE actions fire — a parent-table rebuild
+    // would cascade-wipe its children (the workflow journal and event queue,
+    // for workflow_runs) while appearing to succeed. The pragma is a no-op
+    // inside a transaction, so it must live here, around the per-migration
+    // transactions; a foreign_key_check before re-enabling keeps the
+    // integrity guarantee the enforcement normally provides.
+    conn.execute_batch("PRAGMA foreign_keys=OFF;")
+        .map_err(|e| StorageError::MigrationFailed(e.to_string()))?;
+
     for (name, sql) in migrations() {
         // Check whether this migration has already been applied.
         let already_applied: bool = conn
@@ -1473,6 +1484,21 @@ pub fn run_migrations(conn: &Connection) -> Result<(), StorageError> {
         )
         .map_err(|e| StorageError::MigrationFailed(e.to_string()))?;
     }
+
+    let violations: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_foreign_key_check",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| StorageError::MigrationFailed(e.to_string()))?;
+    if violations > 0 {
+        return Err(StorageError::MigrationFailed(format!(
+            "{violations} foreign-key violation(s) after migrations; refusing to continue"
+        )));
+    }
+    conn.execute_batch("PRAGMA foreign_keys=ON;")
+        .map_err(|e| StorageError::MigrationFailed(e.to_string()))?;
 
     // Seed the default space if it does not already exist.
     seed_default_space(conn)

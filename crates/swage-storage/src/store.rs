@@ -1026,6 +1026,15 @@ pub trait WorkflowStore: Send + Sync {
         error_message: Option<&str>,
     ) -> Result<(), StorageError>;
     async fn interrupt_running_workflow_runs(&self) -> Result<u64, StorageError>;
+    /// Atomically move a run from one expected state to another. `false`
+    /// means the run was no longer in `from` — the caller lost the race
+    /// (a concurrent cancellation, another waker) and must not proceed.
+    async fn try_transition_workflow_run_state(
+        &self,
+        id: Uuid,
+        from: &str,
+        to: &str,
+    ) -> Result<bool, StorageError>;
     /// Park a run on a durable wait: state `parked`, due at `wake_at`, its
     /// engine torn down until the waker resumes it by replay.
     async fn set_workflow_run_parked(
@@ -2272,6 +2281,14 @@ mod tests {
             unimplemented!()
         }
         async fn interrupt_running_workflow_runs(&self) -> Result<u64, StorageError> {
+            unimplemented!()
+        }
+        async fn try_transition_workflow_run_state(
+            &self,
+            _: Uuid,
+            _: &str,
+            _: &str,
+        ) -> Result<bool, StorageError> {
             unimplemented!()
         }
         async fn set_workflow_run_parked(

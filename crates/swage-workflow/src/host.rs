@@ -27,7 +27,13 @@ pub struct AgentCallRequest {
     /// next turn lands on the same session and thread, so the worker meets
     /// its own history — a restated brief and the later "proceed" are one
     /// session. `None` is the fresh-session default.
-    #[serde(default)]
+    ///
+    /// `skip_serializing_if` is load-bearing beside `default`: journal args
+    /// hashes are computed over the serialised request, so an optional
+    /// field that serialises as `null` when unset would change every
+    /// existing entry's hash and fail interrupted runs on resume. Unset
+    /// must serialise to nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session: Option<AgentSessionRef>,
 }
 
@@ -180,5 +186,18 @@ pub trait WorkflowHost: Send + Sync {
         _cancellation: CancellationToken,
     ) -> Result<Value, String> {
         Err("RunEventError: this host does not support run events".into())
+    }
+
+    /// A journalled budget reading: `{spent, remaining}` (remaining null
+    /// when unbounded), recorded so replay sees what the live run saw.
+    /// The synchronous `budget.spent()`/`budget.remaining()` reads are live
+    /// diagnostics — a script that BRANCHES on budget state must branch on
+    /// this snapshot, or its replayed control flow can diverge from the
+    /// journal near the ceiling.
+    async fn budget_snapshot(
+        &self,
+        _cancellation: CancellationToken,
+    ) -> Result<Value, String> {
+        Err("BudgetSnapshotError: this host does not support budget snapshots".into())
     }
 }

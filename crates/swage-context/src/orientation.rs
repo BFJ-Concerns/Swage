@@ -66,8 +66,8 @@ Everything you do here is recorded locally on the operator's machine and is \
 reconstructable afterwards: your turns, your tool calls and their results, \
 and how this context was assembled. Values of secrets the platform manages \
 are redacted from that record by design — so use a registered secret freely \
-where a tool needs it, and keep secret values out of the text you write, \
-which is recorded as written.
+where a tool needs it, and keep those values out of any text you author \
+(replies, files, briefs for other agents), which is recorded as written.
 
 You have tools; each description states what the tool is for. Some tool \
 calls pause for approval before running — the platform is asking your \

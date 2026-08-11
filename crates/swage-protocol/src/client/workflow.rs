@@ -113,6 +113,9 @@ pub enum WorkflowJournalEntryKind {
     /// A wake-gate evaluation: a cheap model judged the pending events; its
     /// verdict and reasoning are the entry's result.
     Gate,
+    /// A journalled budget reading — what the script saw when it checked
+    /// its allowance, replayed rather than re-read.
+    Budget,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
