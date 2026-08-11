@@ -1486,6 +1486,18 @@ poll_timeout_secs = -1
     }
 
     #[test]
+    fn telegram_channel_accepts_zero_poll_timeout() {
+        let toml = r#"
+[channels.telegram]
+poll_timeout_secs = 0
+"#;
+
+        let problems = validate_toml_string(toml, &path("config.toml"));
+
+        assert!(problems.is_empty(), "expected no problems, got {problems:?}");
+    }
+
+    #[test]
     fn parse_and_validate_returns_err_on_invalid_input() {
         let toml = "[server]\nport = \"bad\"";
         let result = parse_and_validate(toml, &path("config.toml"));
