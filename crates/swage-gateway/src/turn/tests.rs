@@ -6247,11 +6247,6 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
         child_turns[0].assistant_response.as_deref(),
         Some(r#"{"result":"Delegate answer"}"#)
     );
-    assert_eq!(
-        child_turns[0].structured_output,
-        Some(serde_json::json!({ "result": "Delegate answer" })),
-        "the delegated definition's output contract should validate and persist the child output"
-    );
     let child_snapshot = state
         .storage
         .get_snapshot(child_turns[0].id)
@@ -6283,6 +6278,25 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
         captured_requests.len(),
         3,
         "expected parent, child, and resumed-parent provider requests"
+    );
+    let delegated_result = captured_requests[2]
+        .messages
+        .iter()
+        .filter_map(ChatMessage::tool_replay)
+        .flatten()
+        .find_map(|part| match part {
+            ToolReplayPart::ToolResult {
+                call_id, content, ..
+            } if call_id == "delegate-1" => Some(content),
+            _ => None,
+        })
+        .expect("resumed parent request should contain the delegated result");
+    let delegated_result: serde_json::Value = serde_json::from_str(delegated_result)
+        .expect("delegated result payload should be valid JSON");
+    assert_eq!(
+        delegated_result["structured_output"],
+        serde_json::json!({ "result": "Delegate answer" }),
+        "the delegated definition's output contract should produce structured output in the result payload"
     );
     let parent_request_text = captured_requests[0]
         .messages
