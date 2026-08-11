@@ -6,8 +6,9 @@ use uuid::Uuid;
 use swage_core::StorageError;
 
 use crate::model::{
-    NewWorkflowJournalIntent, NewWorkflowRun, NewWorkflowScript, WorkflowJournalRecord,
-    WorkflowRunRecord, WorkflowScriptRecord, WorkflowScriptVersion,
+    NewWorkflowJournalIntent, NewWorkflowRun, NewWorkflowRunEvent, NewWorkflowScript,
+    WorkflowJournalRecord, WorkflowRunEventRecord, WorkflowRunRecord, WorkflowScriptRecord,
+    WorkflowScriptVersion,
 };
 use crate::sqlite::SqliteStorage;
 use crate::store::WorkflowStore;
@@ -121,6 +122,28 @@ const RUN_COLUMNS: &str = "id, space_id, parent_run_id, parent_seq, script_versi
     (SELECT version FROM workflow_script_versions WHERE id = workflow_runs.script_version_id), \
     source, source_hash, args_json, budget_json, state, final_output_json, error_message, engine_version, created_at, completed_at, dispatching_agent_id";
 const JOURNAL_COLUMNS: &str = "id, run_id, seq, completed_order, kind, status, args_hash, request_json, result_json, error_message, effect_kind, idempotency_key, target_kind, started_at, completed_at";
+const RUN_EVENT_COLUMNS: &str = "id, run_id, journal_entry_id, seq, kind, payload_json, posted_at, delivered_wake_seq, delivered_at";
+
+fn run_event_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkflowRunEventRecord> {
+    let delivered_at: Option<String> = row.get(8)?;
+    Ok(WorkflowRunEventRecord {
+        id: uuid(row.get(0)?)?,
+        run_id: uuid(row.get(1)?)?,
+        journal_entry_id: uuid(row.get(2)?)?,
+        seq: row.get::<_, i64>(3)? as u64,
+        kind: row.get(4)?,
+        payload: serde_json::from_str(&row.get::<_, String>(5)?).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                5,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })?,
+        posted_at: time(row.get(6)?)?,
+        delivered_wake_seq: row.get::<_, Option<i64>>(7)?.map(|value| value as u64),
+        delivered_at: delivered_at.map(time).transpose()?,
+    })
+}
 
 fn journal_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkflowJournalRecord> {
     let result: Option<String> = row.get(8)?;
@@ -341,6 +364,93 @@ impl WorkflowStore for SqliteStorage {
         self.with_conn(|conn| { let count=conn.execute("UPDATE workflow_runs SET state='interrupted', completed_at=NULL WHERE state='running'", [])?; Ok(count as u64) }).await
     }
 
+    async fn create_workflow_run_event(
+        &self,
+        event: NewWorkflowRunEvent,
+    ) -> Result<WorkflowRunEventRecord, StorageError> {
+        let id = Uuid::new_v4();
+        let now = Utc::now();
+        let payload = serde_json::to_string(&event.payload)
+            .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
+        self.with_conn(move |conn| {
+            // Seq assignment and the idempotency key live in one statement:
+            // a replayed post (same journal entry) inserts nothing and reads
+            // back the row the original run created.
+            conn.execute(
+                "INSERT INTO workflow_run_events (id, run_id, journal_entry_id, seq, kind, payload_json, posted_at) \
+                 VALUES (?1, ?2, ?3, (SELECT COALESCE(MAX(seq), 0) + 1 FROM workflow_run_events WHERE run_id = ?2), ?4, ?5, ?6) \
+                 ON CONFLICT(journal_entry_id) DO NOTHING",
+                params![
+                    id.to_string(),
+                    event.run_id.to_string(),
+                    event.journal_entry_id.to_string(),
+                    event.kind,
+                    payload,
+                    now.to_rfc3339()
+                ],
+            )?;
+            conn.query_row(
+                &format!(
+                    "SELECT {RUN_EVENT_COLUMNS} FROM workflow_run_events WHERE journal_entry_id = ?1"
+                ),
+                [event.journal_entry_id.to_string()],
+                run_event_row,
+            )
+        })
+        .await
+    }
+
+    async fn list_pending_workflow_run_events(
+        &self,
+        run_id: Uuid,
+    ) -> Result<Vec<WorkflowRunEventRecord>, StorageError> {
+        self.with_conn(move |conn| {
+            let mut stmt = conn.prepare(&format!(
+                "SELECT {RUN_EVENT_COLUMNS} FROM workflow_run_events \
+                 WHERE run_id = ?1 AND delivered_at IS NULL ORDER BY seq ASC"
+            ))?;
+            stmt.query_map([run_id.to_string()], run_event_row)?.collect()
+        })
+        .await
+    }
+
+    async fn list_workflow_run_events(
+        &self,
+        run_id: Uuid,
+    ) -> Result<Vec<WorkflowRunEventRecord>, StorageError> {
+        self.with_conn(move |conn| {
+            let mut stmt = conn.prepare(&format!(
+                "SELECT {RUN_EVENT_COLUMNS} FROM workflow_run_events \
+                 WHERE run_id = ?1 ORDER BY seq ASC"
+            ))?;
+            stmt.query_map([run_id.to_string()], run_event_row)?.collect()
+        })
+        .await
+    }
+
+    async fn mark_workflow_run_events_delivered(
+        &self,
+        run_id: Uuid,
+        up_to_seq: u64,
+        delivered_wake_seq: u64,
+    ) -> Result<u64, StorageError> {
+        let now = Utc::now();
+        self.with_conn(move |conn| {
+            let count = conn.execute(
+                "UPDATE workflow_run_events SET delivered_wake_seq = ?3, delivered_at = ?4 \
+                 WHERE run_id = ?1 AND seq <= ?2 AND delivered_at IS NULL",
+                params![
+                    run_id.to_string(),
+                    up_to_seq as i64,
+                    delivered_wake_seq as i64,
+                    now.to_rfc3339()
+                ],
+            )?;
+            Ok(count as u64)
+        })
+        .await
+    }
+
     async fn create_workflow_journal_intent(
         &self,
         intent: NewWorkflowJournalIntent,
@@ -523,5 +633,95 @@ mod tests {
             Some("BudgetExceededError: agent call limit reached")
         );
         assert!(refusal.completed_at.is_some());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn run_events_assign_dense_seqs_and_deliver_idempotently() {
+        let storage = SqliteStorage::in_memory().expect("storage");
+        let space = storage
+            .create(NewSpace {
+                name: "events-test".into(),
+                slug: "events-test".parse().expect("slug"),
+            })
+            .await
+            .expect("space");
+        let run = storage
+            .create_workflow_run(NewWorkflowRun {
+                space_id: space.id,
+                parent_run_id: None,
+                parent_seq: None,
+                script_version_id: None,
+                source: Some("return null".into()),
+                source_hash: "hash".into(),
+                args: serde_json::json!({}),
+                budget: serde_json::json!({}),
+                engine_version: "rquickjs-0.12.0".into(),
+                dispatching_agent_id: None,
+            })
+            .await
+            .expect("run");
+
+        let journal_ids = [Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4()];
+        for (index, journal_entry_id) in journal_ids.iter().enumerate() {
+            let event = storage
+                .create_workflow_run_event(NewWorkflowRunEvent {
+                    run_id: run.id,
+                    journal_entry_id: *journal_entry_id,
+                    kind: "completion".into(),
+                    payload: serde_json::json!({"worker": index}),
+                })
+                .await
+                .expect("event");
+            assert_eq!(event.seq, index as u64 + 1, "seqs are dense per run");
+        }
+
+        // A replayed post (same journal entry) returns the existing row
+        // rather than a duplicate with a fresh seq.
+        let replayed = storage
+            .create_workflow_run_event(NewWorkflowRunEvent {
+                run_id: run.id,
+                journal_entry_id: journal_ids[1],
+                kind: "completion".into(),
+                payload: serde_json::json!({"worker": 1}),
+            })
+            .await
+            .expect("replayed post");
+        assert_eq!(replayed.seq, 2);
+        assert_eq!(
+            storage
+                .list_pending_workflow_run_events(run.id)
+                .await
+                .expect("pending")
+                .len(),
+            3
+        );
+
+        // Delivery stamps up to the read seq; already-delivered rows are
+        // untouched, so a re-run stamps nothing.
+        let stamped = storage
+            .mark_workflow_run_events_delivered(run.id, 2, 7)
+            .await
+            .expect("deliver");
+        assert_eq!(stamped, 2);
+        let pending = storage
+            .list_pending_workflow_run_events(run.id)
+            .await
+            .expect("pending after");
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].seq, 3);
+        assert_eq!(
+            storage
+                .mark_workflow_run_events_delivered(run.id, 2, 9)
+                .await
+                .expect("re-deliver"),
+            0
+        );
+        let all = storage
+            .list_workflow_run_events(run.id)
+            .await
+            .expect("all events");
+        assert_eq!(all.len(), 3);
+        assert_eq!(all[0].delivered_wake_seq, Some(7));
+        assert!(all[2].delivered_at.is_none());
     }
 }

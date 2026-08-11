@@ -1918,6 +1918,34 @@ pub struct NewWorkflowRun {
     pub dispatching_agent_id: Option<String>,
 }
 
+/// One entry in a run's durable pending-event queue. Events are data —
+/// completions, failures, escalations posted between lead wakes — never
+/// instructions. `seq` is assigned by the store, dense per run;
+/// `journal_entry_id` keys the row to the journal entry that posted it, so a
+/// replayed post finds its existing row instead of duplicating it. A pending
+/// event has `delivered_at` NULL; delivery stamps the journal seq of the
+/// wake that carried it.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WorkflowRunEventRecord {
+    pub id: Uuid,
+    pub run_id: Uuid,
+    pub journal_entry_id: Uuid,
+    pub seq: u64,
+    pub kind: String,
+    pub payload: serde_json::Value,
+    pub posted_at: DateTime<Utc>,
+    pub delivered_wake_seq: Option<u64>,
+    pub delivered_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Clone, Debug)]
+pub struct NewWorkflowRunEvent {
+    pub run_id: Uuid,
+    pub journal_entry_id: Uuid,
+    pub kind: String,
+    pub payload: serde_json::Value,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WorkflowJournalRecord {
     pub id: Uuid,

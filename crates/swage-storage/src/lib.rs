@@ -21,13 +21,14 @@ pub use model::{
     NewCurationAssertion, NewDeliveryRecord, NewKnowledgeCitation, NewMaterial, NewMessage,
     NewOrientationCard, NewSchedule, NewScheduleRun, NewSecretRecord, NewSession,
     NewSourceObservation, NewSpace, NewThread, NewToolCall, NewTurn, NewWorkflowJournalIntent,
-    NewWorkflowRun, NewWorkflowScript, NewWorkspaceAttachment, ObservationOrigin, OrientationCard,
+    NewWorkflowRun, NewWorkflowRunEvent, NewWorkflowScript, NewWorkspaceAttachment,
+    ObservationOrigin, OrientationCard,
     OrientationCardLifecycle, OrientationCardLifecycleKind, PendingChannelOrigin, Schedule,
     ScheduleCreator, ScheduleKind, ScheduleRun, ScheduleRunState, ScheduleRunTrigger,
     ScheduleRunUpdate, ScheduleStatus, SecretRecord, Session, SessionPolicy, SkipReason,
     SourceObservation, Space, SpaceSlug, Thread, ThreadBranch, ThreadState, ToolCallRecord, Turn,
-    TurnState, UpdateSchedule, WorkflowJournalRecord, WorkflowRunRecord, WorkflowScriptRecord,
-    WorkflowScriptVersion, WorkspaceAttachment,
+    TurnState, UpdateSchedule, WorkflowJournalRecord, WorkflowRunEventRecord, WorkflowRunRecord,
+    WorkflowScriptRecord, WorkflowScriptVersion, WorkspaceAttachment,
 };
 pub use sqlite::SqliteStorage;
 pub use store::{

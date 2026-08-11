@@ -8,10 +8,12 @@ use rquickjs::{
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
-use crate::{AgentCallRequest, EffectPayload, WorkflowCallRequest, WorkflowHost};
+use crate::{
+    AgentCallRequest, EffectPayload, GateRequest, RunEventPost, WorkflowCallRequest, WorkflowHost,
+};
 
 fn named_host_error(error: &str, fallback: &str) -> (String, String) {
-    const NAMES: [(&str, &str); 7] = [
+    const NAMES: [(&str, &str); 8] = [
         ("BudgetExceededError", "BudgetExceededError"),
         ("DeliveryNotGrantedError", "DeliveryNotGrantedError"),
         ("WorkflowCancelledError", "WorkflowCancelledError"),
@@ -19,6 +21,7 @@ fn named_host_error(error: &str, fallback: &str) -> (String, String) {
         ("EmptyAgentOutputError", "EmptyAgentOutputError"),
         ("WorkflowCompositionError", "WorkflowCompositionError"),
         ("WaitTimerError", "WaitTimerError"),
+        ("RunEventError", "RunEventError"),
     ];
     NAMES
         .iter()
@@ -427,6 +430,95 @@ impl WorkflowEngine {
                     ).map_err(|error| error.to_string())?;
                     ctx.globals().set("__confirmTimer", confirm).map_err(|error| error.to_string())?;
 
+                    let post_event_host = Arc::clone(&host);
+                    let post_event_cancellation = host_cancellation.clone();
+                    let post_event = Function::new(
+                        ctx.clone(),
+                        Async(move |kind: String, payload_json: String| {
+                            let host = Arc::clone(&post_event_host);
+                            let cancellation = post_event_cancellation.clone();
+                            async move {
+                                let payload: serde_json::Value = match serde_json::from_str(&payload_json) {
+                                    Ok(payload) => payload,
+                                    Err(error) => return serde_json::json!({
+                                        "ok": false,
+                                        "error": {"name": "RunEventError", "message": error.to_string()}
+                                    }).to_string(),
+                                };
+                                match host.post_run_event(RunEventPost { kind, payload }, cancellation).await {
+                                    Ok(value) => serde_json::json!({"ok": true, "value": value}).to_string(),
+                                    Err(error) => {
+                                        let (name, message) = named_host_error(&error, "RunEventError");
+                                        serde_json::json!({
+                                            "ok": false,
+                                            "error": {"name": name, "message": message}
+                                        }).to_string()
+                                    }
+                                }
+                            }
+                        }),
+                    ).map_err(|error| error.to_string())?;
+                    ctx.globals().set("__postEvent", post_event).map_err(|error| error.to_string())?;
+
+                    let gate_host = Arc::clone(&host);
+                    let gate_cancellation = host_cancellation.clone();
+                    let gate = Function::new(
+                        ctx.clone(),
+                        Async(move |request_json: String| {
+                            let host = Arc::clone(&gate_host);
+                            let cancellation = gate_cancellation.clone();
+                            async move {
+                                let request: GateRequest = match serde_json::from_str(&request_json) {
+                                    Ok(request) => request,
+                                    Err(error) => return serde_json::json!({
+                                        "ok": false,
+                                        "error": {"name": "RunEventError", "message": error.to_string()}
+                                    }).to_string(),
+                                };
+                                match host.evaluate_wake_gate(request, cancellation).await {
+                                    Ok(value) => serde_json::json!({"ok": true, "value": value}).to_string(),
+                                    Err(error) => {
+                                        let (name, message) = named_host_error(&error, "RunEventError");
+                                        serde_json::json!({
+                                            "ok": false,
+                                            "error": {"name": name, "message": message}
+                                        }).to_string()
+                                    }
+                                }
+                            }
+                        }),
+                    ).map_err(|error| error.to_string())?;
+                    ctx.globals().set("__gate", gate).map_err(|error| error.to_string())?;
+
+                    let deliver_events_host = Arc::clone(&host);
+                    let deliver_events_cancellation = host_cancellation.clone();
+                    let deliver_events = Function::new(
+                        ctx.clone(),
+                        Async(move |up_to_seq: f64| {
+                            let host = Arc::clone(&deliver_events_host);
+                            let cancellation = deliver_events_cancellation.clone();
+                            async move {
+                                if !up_to_seq.is_finite() || up_to_seq < 0.0 {
+                                    return serde_json::json!({
+                                        "ok": false,
+                                        "error": {"name": "RunEventError", "message": "upToSeq must be a non-negative finite number"}
+                                    }).to_string();
+                                }
+                                match host.deliver_run_events(up_to_seq as u64, cancellation).await {
+                                    Ok(value) => serde_json::json!({"ok": true, "value": value}).to_string(),
+                                    Err(error) => {
+                                        let (name, message) = named_host_error(&error, "RunEventError");
+                                        serde_json::json!({
+                                            "ok": false,
+                                            "error": {"name": name, "message": message}
+                                        }).to_string()
+                                    }
+                                }
+                            }
+                        }),
+                    ).map_err(|error| error.to_string())?;
+                    ctx.globals().set("__deliverEvents", deliver_events).map_err(|error| error.to_string())?;
+
                     if capabilities.delivery {
                         let delivery_host = Arc::clone(&host);
                         let delivery_cancellation = host_cancellation.clone();
@@ -608,6 +700,23 @@ impl WorkflowEngine {
                                 }))
                             );
                         }
+                        // The run's durable pending-event queue: completions,
+                        // failures, and escalations accumulate as data
+                        // between lead wakes. postEvent appends (journalled,
+                        // exactly-once on resume); gate() asks a cheap model
+                        // whether the pending events are worth waking the
+                        // lead for — a suppressed event stays pending and
+                        // rides the next wake; deliverEvents(upToSeq) stamps
+                        // events delivered once a wake has carried them.
+                        globalThis.postEvent = async (kind, payload = null) =>
+                            unwrapHostResponse(await __postEvent(String(kind), JSON.stringify(payload ?? null)));
+                        globalThis.gate = async (options = {}) =>
+                            unwrapHostResponse(await __gate(JSON.stringify({
+                                criteria: options.criteria ?? "",
+                                model: options.model ?? null,
+                            })));
+                        globalThis.deliverEvents = async (upToSeq) =>
+                            unwrapHostResponse(await __deliverEvents(upToSeq));
                         globalThis.parallel = async (thunks) => Promise.all(
                             thunks.map(async (thunk, index) => {
                                 try { return await thunk(); }
@@ -783,6 +892,10 @@ mod tests {
         timer_calls: Mutex<Vec<u64>>,
         timer_settles: bool,
         agent_delay_ms: u64,
+        event_posts: Mutex<Vec<RunEventPost>>,
+        gate_requests: Mutex<Vec<GateRequest>>,
+        gate_verdict: Value,
+        deliveries_up_to: Mutex<Vec<u64>>,
     }
 
     impl SurfaceHost {
@@ -795,6 +908,10 @@ mod tests {
                 timer_calls: Mutex::new(Vec::new()),
                 timer_settles: true,
                 agent_delay_ms: 0,
+                event_posts: Mutex::new(Vec::new()),
+                gate_requests: Mutex::new(Vec::new()),
+                gate_verdict: Value::Null,
+                deliveries_up_to: Mutex::new(Vec::new()),
             }
         }
     }
@@ -856,6 +973,34 @@ mod tests {
 
         async fn confirm_timer(&self, _: u64) -> Result<(), String> {
             Ok(())
+        }
+
+        async fn post_run_event(
+            &self,
+            event: RunEventPost,
+            _: CancellationToken,
+        ) -> Result<Value, String> {
+            let mut posts = self.event_posts.lock().expect("posts");
+            posts.push(event.clone());
+            Ok(json!({"seq": posts.len(), "kind": event.kind, "payload": event.payload}))
+        }
+
+        async fn evaluate_wake_gate(
+            &self,
+            request: GateRequest,
+            _: CancellationToken,
+        ) -> Result<Value, String> {
+            self.gate_requests.lock().expect("gates").push(request);
+            Ok(self.gate_verdict.clone())
+        }
+
+        async fn deliver_run_events(
+            &self,
+            up_to_seq: u64,
+            _: CancellationToken,
+        ) -> Result<Value, String> {
+            self.deliveries_up_to.lock().expect("deliveries").push(up_to_seq);
+            Ok(json!({"delivered": up_to_seq}))
         }
     }
 
@@ -973,6 +1118,50 @@ mod tests {
                 thread_id: uuid::Uuid::from_u128(0xB),
             })
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn events_post_gate_and_deliver_through_the_host() {
+        let host = Arc::new(SurfaceHost {
+            gate_verdict: json!({
+                "wake": true,
+                "reasoning": "a pipeline settled with evidence attached",
+                "events": [{"seq": 1, "kind": "completion", "payload": {"worker": "w1"}}],
+                "read_up_to_seq": 1,
+            }),
+            ..SurfaceHost::new()
+        });
+        let output = WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                r#"
+                await postEvent("completion", { worker: "w1" });
+                const verdict = await gate({ criteria: "wake when any pipeline settles" });
+                if (verdict.wake) {
+                    // The wake happens here (an agent call in a real run);
+                    // events are stamped delivered only once carried.
+                    await deliverEvents(verdict.read_up_to_seq);
+                }
+                return verdict;
+                "#,
+                "null",
+                CancellationToken::new(),
+                Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                ScriptCapabilities::default(),
+            )
+            .await
+            .expect("events run");
+        let verdict: Value = serde_json::from_str(&output).expect("verdict");
+        assert_eq!(verdict["wake"], true);
+        assert_eq!(verdict["read_up_to_seq"], 1);
+        let posts = host.event_posts.lock().unwrap();
+        assert_eq!(posts.len(), 1);
+        assert_eq!(posts[0].kind, "completion");
+        assert_eq!(posts[0].payload, json!({"worker": "w1"}));
+        assert_eq!(
+            host.gate_requests.lock().unwrap()[0].criteria,
+            "wake when any pipeline settles"
+        );
+        assert_eq!(host.deliveries_up_to.lock().unwrap().as_slice(), [1]);
     }
 
     #[tokio::test(flavor = "current_thread")]

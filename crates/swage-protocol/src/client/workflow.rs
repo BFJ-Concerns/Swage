@@ -104,6 +104,12 @@ pub enum WorkflowJournalEntryKind {
     Phase,
     WorkflowCall,
     Timer,
+    /// A pending-queue operation: an event posted, or events stamped
+    /// delivered by a wake.
+    Event,
+    /// A wake-gate evaluation: a cheap model judged the pending events; its
+    /// verdict and reasoning are the entry's result.
+    Gate,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
@@ -154,6 +160,21 @@ pub struct WorkflowJournalEntry {
 pub struct WorkflowRunDetailResponse {
     pub run: WorkflowRun,
     pub journal: Vec<WorkflowJournalEntry>,
+    /// The run's own wake economics, derived from the journal and event
+    /// queue — the falsification signal for a gated long run: a sustained
+    /// high wake rate means the design's economics are failing.
+    pub wake_metrics: WorkflowWakeMetrics,
+}
+
+/// Derived counters over a run's wake machinery. `events_pending` counts
+/// undelivered queue entries now; the rest count journalled history.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+pub struct WorkflowWakeMetrics {
+    pub gate_evaluations: u32,
+    pub gate_wakes: u32,
+    pub gate_suppressions: u32,
+    pub events_posted: u32,
+    pub events_pending: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
