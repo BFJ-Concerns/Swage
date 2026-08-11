@@ -465,6 +465,19 @@ fn validate_channels_telegram_table(
                     found: toml_type_name(value).to_string(),
                 },
             ));
+            continue;
+        }
+
+        if let ("poll_timeout_secs", Value::Integer(timeout)) = (name.as_str(), value)
+            && *timeout < 0
+        {
+            problems.push(make_problem(
+                file_path,
+                Some(nested_path),
+                ConfigProblemKind::SemanticError {
+                    message: format!("poll_timeout_secs must be non-negative, got {timeout}"),
+                },
+            ));
         }
     }
 
@@ -1455,6 +1468,21 @@ poll_timeout_secs = "seven"
                 "expected a type error for {field_path}, got {problems:?}"
             );
         }
+    }
+
+    #[test]
+    fn telegram_channel_rejects_negative_poll_timeout() {
+        let toml = r#"
+[channels.telegram]
+poll_timeout_secs = -1
+"#;
+
+        let problems = validate_toml_string(toml, &path("config.toml"));
+
+        assert!(problems.iter().any(|problem| {
+            problem.field_path.as_deref() == Some("channels.telegram.poll_timeout_secs")
+                && matches!(&problem.kind, ConfigProblemKind::SemanticError { .. })
+        }));
     }
 
     #[test]
