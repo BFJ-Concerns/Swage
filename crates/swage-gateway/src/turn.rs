@@ -45,6 +45,7 @@ use swage_tool::permission::RequireApprovalEntry as ToolRequireApprovalEntry;
 use swage_tool::rate_limit::{RateLimitConfig, RateLimiter};
 use swage_tool::tool::Tool;
 
+use crate::record_durability;
 use crate::skill::SkillManager;
 use crate::tool_executor::{GatewayExecutionStrategy, SandboxedExecutor};
 
@@ -1052,6 +1053,13 @@ pub(crate) async fn process_turn_with_existing_turn(
     // can use it for persistence and logging after the event loop finishes.
     let mut turn_id: Option<Uuid> = None;
 
+    // Set when the durability contract's escalation fires: a constitutive
+    // record was lost, or a reconstructive loss could not even be recorded
+    // as a degradation (record_durability.rs). Checked after the agent
+    // settles — the turn is then failed loudly rather than left looking
+    // auditable.
+    let mut record_integrity_lost: Option<String> = None;
+
     // Step 11: Forward AgentEvent → ServerEvent. The loop runs until the
     // agent drops event_tx (channel closes) or the agent task completes.
     while let Some(event) = event_rx.recv().await {
@@ -1071,7 +1079,22 @@ pub(crate) async fn process_turn_with_existing_turn(
                     .store_snapshot(started_id, &report_json.to_string())
                     .await
                 {
+                    // Reconstructive record (record_durability.rs): the loss
+                    // itself is recorded; only a double failure escalates.
                     tracing::warn!(error = %e, "failed to persist context snapshot");
+                    if let Err(audit_error) = record_durability::record_reconstruction_gap(
+                        state.storage.as_ref(),
+                        Some(session_id),
+                        started_id,
+                        "context_snapshot",
+                        &e,
+                    )
+                    .await
+                    {
+                        record_integrity_lost.get_or_insert(format!(
+                            "context snapshot lost and the loss could not be recorded: {audit_error}"
+                        ));
+                    }
                 }
 
                 // Deliver the ContextAssembled event (subscription-gated).
@@ -1114,10 +1137,24 @@ pub(crate) async fn process_turn_with_existing_turn(
                     .store_snapshot(snapshot_turn_id, &report_json.to_string())
                     .await
                 {
+                    // Reconstructive record (record_durability.rs).
                     tracing::warn!(
                         error = %e,
                         "failed to persist provider-visible context snapshot"
                     );
+                    if let Err(audit_error) = record_durability::record_reconstruction_gap(
+                        state.storage.as_ref(),
+                        Some(session_id),
+                        snapshot_turn_id,
+                        "provider_visible_snapshot",
+                        &e,
+                    )
+                    .await
+                    {
+                        record_integrity_lost.get_or_insert(format!(
+                            "provider-visible snapshot lost and the loss could not be recorded: {audit_error}"
+                        ));
+                    }
                 }
             }
             AgentEvent::ProviderReasoningCaptured {
@@ -1132,10 +1169,24 @@ pub(crate) async fn process_turn_with_existing_turn(
                     .store_snapshot(snapshot_turn_id, &report_json.to_string())
                     .await
                 {
+                    // Reconstructive record (record_durability.rs).
                     tracing::warn!(
                         error = %e,
                         "failed to persist provider reasoning context snapshot"
                     );
+                    if let Err(audit_error) = record_durability::record_reconstruction_gap(
+                        state.storage.as_ref(),
+                        Some(session_id),
+                        snapshot_turn_id,
+                        "provider_reasoning_snapshot",
+                        &e,
+                    )
+                    .await
+                    {
+                        record_integrity_lost.get_or_insert(format!(
+                            "provider reasoning snapshot lost and the loss could not be recorded: {audit_error}"
+                        ));
+                    }
                 }
             }
             AgentEvent::ToolStart {
@@ -1259,7 +1310,10 @@ pub(crate) async fn process_turn_with_existing_turn(
                     "turn_complete",
                 );
 
-                // Update session activity timestamp.
+                // Update session activity timestamp. Derivable record
+                // (record_durability.rs): activity is reconstructable from
+                // turn and message timestamps, so losing this write is
+                // accepted with a warning.
                 if let Err(e) = state.storage.update_activity(session_id).await {
                     tracing::warn!(error = %e, "failed to update session activity");
                 }
@@ -1334,12 +1388,28 @@ pub(crate) async fn process_turn_with_existing_turn(
                     TurnStore::update_structured_output(&*state.storage, outbound.turn_id, output)
                         .await
                 {
-                    // Non-fatal: the turn completed; only the persisted record is affected.
-                    tracing::warn!(
+                    // Constitutive record (record_durability.rs): validated
+                    // output that reached the client but not the record
+                    // makes the trail lie by omission, so the turn fails
+                    // loudly below. The degradation event is still
+                    // attempted so the trail names the gap even when the
+                    // turn row's failure stamp is all that survives.
+                    tracing::error!(
                         error = %e,
                         turn_id = %outbound.turn_id,
                         "failed to persist structured_output"
                     );
+                    let _ = record_durability::record_reconstruction_gap(
+                        state.storage.as_ref(),
+                        Some(session_id),
+                        outbound.turn_id,
+                        "structured_output",
+                        &e,
+                    )
+                    .await;
+                    record_integrity_lost.get_or_insert(format!(
+                        "structured output could not be persisted: {e}"
+                    ));
                 }
             }
         }
@@ -1368,6 +1438,25 @@ pub(crate) async fn process_turn_with_existing_turn(
                 message: "agent task panicked".to_string(),
             });
         }
+    }
+
+    // The durability contract's escalation (record_durability.rs): a turn
+    // whose record is known-incomplete must not end looking auditable. The
+    // state write may itself fail on the same broken store — then the log
+    // and the client error are the loudest surfaces left.
+    if let Some(reason) = record_integrity_lost {
+        tracing::error!(turn_id = ?turn_id, %reason, "turn record integrity lost");
+        if let Err(error) = state
+            .storage
+            .update_turn_state(turn_id.unwrap_or(prepared_turn_id), TurnState::Failed)
+            .await
+        {
+            tracing::error!(error = %error, "failed to mark record-degraded turn as failed");
+        }
+        let _ = ws_tx.send(ServerEvent::Error {
+            code: "turn_record_lost".to_string(),
+            message: format!("The turn's audit record is incomplete: {reason}"),
+        });
     }
 
     if let Some(guard) = &sandbox_guard
