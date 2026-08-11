@@ -69,6 +69,19 @@ impl AppState {
         Ok(entry)
     }
 
+    async fn create_failed_workflow_journal_entry(
+        &self,
+        intent: NewWorkflowJournalIntent,
+        error: &str,
+    ) -> Result<WorkflowJournalRecord, StorageError> {
+        let entry = self
+            .storage
+            .create_failed_workflow_journal_entry(intent, error)
+            .await?;
+        self.broadcast_terminal_workflow_entry(&entry);
+        Ok(entry)
+    }
+
     async fn fail_workflow_journal_entry(
         &self,
         id: Uuid,
@@ -191,21 +204,20 @@ async fn record_agent_budget_refusal(
     error: &str,
 ) -> Result<(), String> {
     let request = serde_json::to_value(request).expect("agent request serialises");
-    let intent = state
-        .create_workflow_journal_intent(NewWorkflowJournalIntent {
-            run_id,
-            seq,
-            kind: "agent_call".into(),
-            args_hash: journal_args_hash(&request),
-            request,
-            effect_kind: None,
-            idempotency_key: None,
-            target_kind: None,
-        })
-        .await
-        .map_err(|problem| problem.to_string())?;
     state
-        .fail_workflow_journal_entry(intent.id, error)
+        .create_failed_workflow_journal_entry(
+            NewWorkflowJournalIntent {
+                run_id,
+                seq,
+                kind: "agent_call".into(),
+                args_hash: journal_args_hash(&request),
+                request,
+                effect_kind: None,
+                idempotency_key: None,
+                target_kind: None,
+            },
+            error,
+        )
         .await
         .map_err(|problem| problem.to_string())?;
     Ok(())
@@ -1009,6 +1021,13 @@ async fn run_host_commands_inner(
                 let result = if let Some(entry) = existing {
                     if entry.args_hash != hash {
                         Err("NondeterministicReplayError".into())
+                    } else if entry.status == "failed" {
+                        // A terminal effect failure is part of the observed
+                        // run. Only a started effect enters recovery.
+                        Err(entry
+                            .error_message
+                            .clone()
+                            .unwrap_or_else(|| "recorded effect failure".to_string()))
                     } else if entry.status == "completed" {
                         entry
                             .result
@@ -2045,7 +2064,7 @@ mod tests {
         }
     }
 
-    async fn started_effect_entry() -> (AppState, Uuid, Uuid) {
+    async fn started_effect_entry() -> (AppState, Arc<SqliteStorage>, Uuid, Uuid) {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
         let space = storage.get_or_create_default().await.expect("space");
         let run = storage
@@ -2062,13 +2081,14 @@ mod tests {
             })
             .await
             .expect("run");
+        let request = serde_json::to_value(recovery_payload()).expect("effect request");
         let entry = storage
             .create_workflow_journal_intent(NewWorkflowJournalIntent {
                 run_id: run.id,
                 seq: 0,
                 kind: "effect".into(),
-                args_hash: journal_args_hash(&Value::Null),
-                request: Value::Null,
+                args_hash: journal_args_hash(&request),
+                request,
                 effect_kind: Some("test".into()),
                 idempotency_key: Some(Uuid::new_v4()),
                 target_kind: Some("recording".into()),
@@ -2083,7 +2103,7 @@ mod tests {
             crate::tool::ToolDispatcher::allow_all(vec![]),
             None,
         );
-        (state, run.id, entry.id)
+        (state, storage, run.id, entry.id)
     }
 
     fn recovery_payload() -> EffectPayload {
@@ -2096,7 +2116,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn started_idempotency_key_effect_resends_once_without_probing() {
-        let (state, _, entry_id) = started_effect_entry().await;
+        let (state, _, _, entry_id) = started_effect_entry().await;
         let capability = Arc::new(RecordingDeliveryCapability {
             effect_kind: swage_workflow::EffectKind::IdempotencyKey,
             probe_result: None,
@@ -2124,7 +2144,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn started_check_before_redo_effect_uses_probe_receipt_without_resending() {
-        let (state, _, entry_id) = started_effect_entry().await;
+        let (state, _, _, entry_id) = started_effect_entry().await;
         let capability = Arc::new(RecordingDeliveryCapability {
             effect_kind: swage_workflow::EffectKind::CheckBeforeRedo,
             probe_result: Some(EffectReceipt {
@@ -2156,7 +2176,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn started_check_before_redo_effect_resends_once_after_probe_miss() {
-        let (state, _, entry_id) = started_effect_entry().await;
+        let (state, _, _, entry_id) = started_effect_entry().await;
         let capability = Arc::new(RecordingDeliveryCapability {
             effect_kind: swage_workflow::EffectKind::CheckBeforeRedo,
             probe_result: None,
@@ -2185,7 +2205,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn failed_effect_settles_with_its_error() {
         let error = "DeliveryError: receiver refused";
-        let (state, run_id, entry_id) = started_effect_entry().await;
+        let (state, _, run_id, entry_id) = started_effect_entry().await;
         let result = complete_effect_entry(
             &state,
             Arc::new(FailingDeliveryCapability { error }),
@@ -2210,8 +2230,99 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn replayed_failed_effect_returns_recorded_error_without_recovery() {
+        let error = "DeliveryError: receiver refused";
+        let (state, storage, run_id, entry_id) = started_effect_entry().await;
+        state
+            .fail_workflow_journal_entry(entry_id, error)
+            .await
+            .expect("fail entry");
+        let replay = storage
+            .list_workflow_journal(run_id)
+            .await
+            .expect("journal");
+        let space = storage.get_or_create_default().await.expect("space");
+        let (tx, rx) = mpsc::unbounded_channel();
+        let task = tokio::spawn(run_host_commands(
+            state,
+            run_id,
+            space.id,
+            None,
+            WorkflowBudget {
+                max_agent_calls: None,
+                max_total_tokens: None,
+                max_concurrent_agent_calls: None,
+            },
+            replay,
+            Arc::new(AtomicU32::new(0)),
+            Arc::new(AtomicU64::new(0)),
+            rx,
+        ));
+        let (reply, receive) = oneshot::channel();
+        tx.send(HostCommand::Deliver {
+            payload: recovery_payload(),
+            cancellation: CancellationToken::new(),
+            reply,
+        })
+        .expect("replay effect");
+
+        assert_eq!(
+            receive.await.expect("reply").expect_err("recorded failure"),
+            error
+        );
+        drop(tx);
+        task.await.expect("host loop");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn delivered_effect_with_completion_persistence_failure_settles_as_failed() {
+        let (state, storage, run_id, entry_id) = started_effect_entry().await;
+        storage
+            .with_conn(|connection| {
+                connection.execute_batch(
+                    "CREATE TEMP TRIGGER reject_effect_completion
+                     BEFORE UPDATE OF status ON workflow_journal
+                     WHEN NEW.id = OLD.id AND NEW.status = 'completed'
+                     BEGIN SELECT RAISE(FAIL, 'injected completion persistence failure'); END;",
+                )
+            })
+            .await
+            .expect("install failure trigger");
+        let capability = Arc::new(RecordingDeliveryCapability {
+            effect_kind: swage_workflow::EffectKind::IdempotencyKey,
+            probe_result: None,
+            probes: AtomicUsize::new(0),
+            deliveries: AtomicUsize::new(0),
+        });
+
+        let error = complete_effect_entry(
+            &state,
+            Arc::clone(&capability) as Arc<dyn DeliveryCapability>,
+            entry_id,
+            recovery_payload(),
+            CancellationToken::new(),
+            0,
+            Uuid::new_v4(),
+        )
+        .await
+        .expect_err("completion persistence fails");
+
+        assert!(error.contains("injected completion persistence failure"));
+        assert_eq!(capability.deliveries.load(Ordering::SeqCst), 1);
+        let entry = storage
+            .list_workflow_journal(run_id)
+            .await
+            .expect("journal")
+            .into_iter()
+            .find(|entry| entry.id == entry_id)
+            .expect("entry");
+        assert_eq!(entry.status, "failed");
+        assert_eq!(entry.error_message.as_deref(), Some(error.as_str()));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn cancelling_an_in_flight_effect_leaves_its_entry_started() {
-        let (state, run_id, entry_id) = started_effect_entry().await;
+        let (state, _, run_id, entry_id) = started_effect_entry().await;
         let cancellation = CancellationToken::new();
         let entered = Arc::new(Notify::new());
         let completion = tokio::spawn({
