@@ -9737,3 +9737,50 @@ fn delegation_result_renders_failure_and_unknown_shapes() {
     let unknown = render_delegation_result(&base(serde_json::json!({"verdict": "unclear"})));
     assert!(unknown.contains("verdict"));
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn delivered_delegation_results_survive_the_history_rebuild() {
+    let storage = MockStorage::new();
+    let thread_id = Uuid::new_v4();
+
+    // The delivery loop's role choice is load-bearing: the rebuild carries
+    // Tool-role rows only when they answer a recorded tool call, so a
+    // platform delivery on that role would be recorded yet never reach the
+    // model. Pin both halves.
+    storage
+        .append_message(AppendMessage {
+            thread_id,
+            turn_id: None,
+            role: Role::User,
+            content: "Delegated agent researcher completed:\nGathered 3 sources.".into(),
+            agent_id: "gateway".into(),
+        })
+        .await
+        .unwrap();
+    storage
+        .append_message(AppendMessage {
+            thread_id,
+            turn_id: None,
+            role: Role::Tool,
+            content: "orphaned tool row".into(),
+            agent_id: "gateway".into(),
+        })
+        .await
+        .unwrap();
+
+    let rebuilt = super::history::rebuild_thread_history_messages(&storage, thread_id)
+        .await
+        .unwrap();
+
+    assert!(
+        rebuilt
+            .iter()
+            .any(|m| m.content.contains("Gathered 3 sources.")),
+        "a delivered delegation result must reach the model as history"
+    );
+    assert!(
+        !rebuilt.iter().any(|m| m.content.contains("orphaned tool row")),
+        "a tool row answering no recorded call is dropped by the rebuild — \
+         which is why deliveries must not use Role::Tool"
+    );
+}

@@ -99,14 +99,14 @@ pub async fn read_body(space_slug: &str, sha256: &str) -> Result<Vec<u8>, Gatewa
 mod tests {
     use super::*;
 
+    use crate::test_support::SwageHomeGuard;
+
     // resolve_root reads the config hierarchy, so these tests pin it to a
-    // temp directory through the SWAGE_HOME override the discovery honours.
-    fn pin_root() -> tempfile::TempDir {
-        let dir = tempfile::tempdir().expect("temp root");
-        // SAFETY: tests in this module run serially per process and no other
-        // thread reads the variable while it is being set.
-        unsafe { std::env::set_var("SWAGE_HOME", dir.path()) };
-        dir
+    // temp directory. SWAGE_HOME is process-wide state and cargo runs tests
+    // on parallel threads, so the pin must be the crate's serialising guard —
+    // never a bare set_var.
+    fn pin_root() -> SwageHomeGuard {
+        SwageHomeGuard::new()
     }
 
     #[tokio::test(flavor = "multi_thread")]

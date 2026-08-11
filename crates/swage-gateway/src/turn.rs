@@ -693,31 +693,50 @@ pub(crate) async fn process_turn_with_existing_turn(
 
     // Step 7: Deliver completed detached delegations. A detached child's
     // Result waits in this agent's mailbox until its parent next turns;
-    // each is appended as a durable Tool message *before* history is
+    // each is appended as a durable User-role message *before* history is
     // rebuilt, so the result enters the thread record — visible in the
     // UI, part of the audit trail, and carried to the model as ordinary
-    // history content, never as instructions. Append-before-claim: a
-    // failure between the two re-delivers next turn rather than losing
-    // the result, and a lost claim race leaves a duplicate row, not a
-    // gap.
-    let pending_results =
-        swage_agent::mailbox::pending_results(&state.storage, &session.agent_id)
-            .await
-            .map_err(|error| GatewayError::WebSocketError(error.to_string()))?;
-    for result in &pending_results {
+    // history content, never as instructions. User role, deliberately:
+    // the history rebuild carries Tool-role rows only when they answer a
+    // recorded tool call (providers reject orphaned tool results), so a
+    // platform-delivered notification rides the same role a channel or
+    // scheduled message would, with the rendering naming its real sender.
+    // Append-before-claim: a failure between the two re-delivers next
+    // turn rather than losing the result, and a lost claim race leaves a
+    // duplicate row, not a gap. A storage failure here fails the turn —
+    // with the same explicit cleanup as the surrounding error paths, so
+    // the thread is not left guarded by a stale Pending turn.
+    let delivery_result: Result<(), GatewayError> = async {
+        let pending_results =
+            swage_agent::mailbox::pending_results(&state.storage, &session.agent_id)
+                .await
+                .map_err(|error| GatewayError::WebSocketError(error.to_string()))?;
+        for result in &pending_results {
+            state
+                .storage
+                .append_message(AppendMessage {
+                    thread_id,
+                    turn_id: Some(prepared_turn_id),
+                    role: Role::User,
+                    content: render_delegation_result(result),
+                    agent_id: session.agent_id.clone(),
+                })
+                .await?;
+            swage_agent::mailbox::claim_result(&state.storage, result.id)
+                .await
+                .map_err(|error| GatewayError::WebSocketError(error.to_string()))?;
+        }
+        Ok(())
+    }
+    .await;
+    if let Err(error) = delivery_result {
         state
             .storage
-            .append_message(AppendMessage {
-                thread_id,
-                turn_id: Some(prepared_turn_id),
-                role: Role::Tool,
-                content: render_delegation_result(result),
-                agent_id: session.agent_id.clone(),
-            })
+            .update_turn_state(prepared_turn_id, TurnState::Failed)
             .await?;
-        swage_agent::mailbox::claim_result(&state.storage, result.id)
-            .await
-            .map_err(|error| GatewayError::WebSocketError(error.to_string()))?;
+        let mut turns = state.active_turns.lock().await;
+        turns.remove(&session_id);
+        return Err(error);
     }
 
     // Steps 8–9: Assemble context via the swage-context assembly engine.
