@@ -1,9 +1,9 @@
 use super::{
     AgentError, AppState, Arc, CancellationToken, DelegationExecutor, DelegationHandler,
-    GatewayDispatcherRequest, MessageRouter, NewAgentMessage, Uuid, available_skills_for_agent,
-    build_agent_config_for_space_workspace, build_approval_registrar, build_assembly_elements,
-    build_gateway_dispatcher_for_unattended_execution, build_session_environment,
-    delegated_target_instructions_for_space, execute_context_assembly,
+    GatewayDispatcherRequest, MessageRouter, NewAgentMessage, Uuid, apply_agent_definition,
+    available_skills_for_agent, build_agent_config_for_space_workspace, build_approval_registrar,
+    build_assembly_elements, build_gateway_dispatcher_for_unattended_execution,
+    build_session_environment, delegated_target_instructions_for_space, execute_context_assembly,
     load_active_skills_for_agent, load_memory_for_assembly, load_session_config, load_space_memory,
     mpsc, resolve_swage_root, select_context_assembly, shutdown_sandbox_guard,
 };
@@ -55,6 +55,7 @@ impl DelegationContextAssembler for GatewayDelegatedContextAssembler {
             &self.agent_id,
             self.swage_root.as_deref(),
             false,
+            &self.config.declared_skills,
         )
         .await;
         let assembly_name =
@@ -147,6 +148,23 @@ impl DelegationHandler for GatewayDelegationHandler {
                     space.slug
                 ))
             })?;
+        let target_resolved = match self
+            .state
+            .storage
+            .resolve_agent_definition(target_agent_id, space_id)
+            .await
+        {
+            Ok(Some(definition)) => apply_agent_definition(target_resolved, &definition),
+            Ok(None) => target_resolved,
+            Err(error) => {
+                tracing::warn!(
+                    agent_id = target_agent_id,
+                    %error,
+                    "failed to resolve delegated agent definition; using file config alone"
+                );
+                target_resolved
+            }
+        };
 
         let active_workspace_attachment_id = self
             .active_workspace_attachment_for_turn(sender_turn_id)
