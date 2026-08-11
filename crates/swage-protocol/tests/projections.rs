@@ -83,6 +83,14 @@ fn typescript_bindings_are_regenerated() {
     hosting::ApprovalListResponse::export_all(&cfg).expect("export hosting approvals");
     hosting::ApprovalDecisionRequest::export_all(&cfg).expect("export hosting approval decision");
     hosting::OperatorOverviewResponse::export_all(&cfg).expect("export operator overview");
+    hosting::AgentDefinitionScopeQuery::export_all(&cfg).expect("export agent definition query");
+    hosting::CreateAgentDefinitionRequest::export_all(&cfg)
+        .expect("export agent definition create");
+    hosting::UpdateAgentDefinitionRequest::export_all(&cfg)
+        .expect("export agent definition update");
+    hosting::AgentDefinitionListResponse::export_all(&cfg).expect("export agent definition list");
+    hosting::AgentDefinitionMutationResponse::export_all(&cfg)
+        .expect("export agent definition mutation");
     device::RegisterDeviceRequest::export_all(&cfg).expect("export device registration");
     device::DeviceListResponse::export_all(&cfg).expect("export device list");
     device::RemoteToolExecutionRequest::export_all(&cfg).expect("export device execution");

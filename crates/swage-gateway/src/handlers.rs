@@ -14,7 +14,13 @@ use uuid::Uuid;
 
 use swage_agent::approval::ApprovalDecisionValue;
 use swage_core::GatewayError;
-use swage_protocol::client::{channel as channel_wire, schedule as schedule_wire};
+use swage_protocol::{
+    client::{channel as channel_wire, schedule as schedule_wire},
+    hosting::{
+        AgentDefinitionListResponse, AgentDefinitionMutationResponse, AgentDefinitionResponse,
+        AgentDefinitionScopeQuery, CreateAgentDefinitionRequest, UpdateAgentDefinitionRequest,
+    },
+};
 
 use crate::{
     attachment::{
@@ -248,6 +254,129 @@ pub async fn operator_overview(
     State(state): State<AppState>,
 ) -> Result<Json<OperatorOverviewResponse>, ApiError> {
     Ok(Json(crate::operator::operator_overview(&state).await?))
+}
+
+fn agent_definition_response(
+    definition: swage_storage::AgentDefinition,
+) -> AgentDefinitionResponse {
+    AgentDefinitionResponse {
+        id: definition.id,
+        space_id: definition.space_id,
+        display_name: definition.display_name,
+        description: definition.description,
+        instructions: definition.instructions,
+        model_id: definition.model_id,
+        tool_permissions: definition.tool_permissions,
+        skills: definition.skills,
+        output_schema: definition.output_schema,
+        output_max_retries: definition.output_max_retries,
+        created_at: definition.created_at,
+        updated_at: definition.updated_at,
+    }
+}
+
+pub async fn list_agent_definitions(
+    State(state): State<AppState>,
+    Query(query): Query<AgentDefinitionScopeQuery>,
+) -> Result<Json<AgentDefinitionListResponse>, ApiError> {
+    let definitions = state
+        .storage
+        .list_agent_definitions(query.space_id)
+        .await
+        .map_err(GatewayError::from)?
+        .into_iter()
+        .map(agent_definition_response)
+        .collect();
+    Ok(Json(AgentDefinitionListResponse { definitions }))
+}
+
+fn new_agent_definition(
+    id: String,
+    request: UpdateAgentDefinitionRequest,
+) -> swage_storage::NewAgentDefinition {
+    swage_storage::NewAgentDefinition {
+        id,
+        space_id: request.space_id,
+        display_name: request.display_name,
+        description: request.description,
+        instructions: request.instructions,
+        model_id: request.model_id,
+        tool_permissions: request.tool_permissions,
+        skills: request.skills,
+        output_schema: request.output_schema,
+        output_max_retries: request.output_max_retries,
+    }
+}
+
+fn mutation_response(case: crate::change_case::AppliedCase) -> AgentDefinitionMutationResponse {
+    AgentDefinitionMutationResponse {
+        version_id: case.version_id,
+        entity_id: case.entity_id,
+        summary: case.summary,
+    }
+}
+
+pub async fn create_agent_definition(
+    State(state): State<AppState>,
+    Json(request): Json<CreateAgentDefinitionRequest>,
+) -> Result<Json<AgentDefinitionMutationResponse>, ApiError> {
+    let definition = new_agent_definition(
+        request.id,
+        UpdateAgentDefinitionRequest {
+            space_id: request.space_id,
+            display_name: request.display_name,
+            description: request.description,
+            instructions: request.instructions,
+            model_id: request.model_id,
+            tool_permissions: request.tool_permissions,
+            skills: request.skills,
+            output_schema: request.output_schema,
+            output_max_retries: request.output_max_retries,
+        },
+    );
+    let applied = crate::change_case::apply_change(
+        &state,
+        crate::change_case::ChangeOperation::UpsertAgentDefinition { definition },
+        "operator_http",
+        None,
+    )
+    .await?;
+    Ok(Json(mutation_response(applied)))
+}
+
+pub async fn update_agent_definition(
+    State(state): State<AppState>,
+    Path(agent_id): Path<String>,
+    Json(request): Json<UpdateAgentDefinitionRequest>,
+) -> Result<Json<AgentDefinitionMutationResponse>, ApiError> {
+    let applied = crate::change_case::apply_change(
+        &state,
+        crate::change_case::ChangeOperation::UpsertAgentDefinition {
+            definition: new_agent_definition(agent_id, request),
+        },
+        "operator_http",
+        None,
+    )
+    .await?;
+    Ok(Json(mutation_response(applied)))
+}
+
+pub async fn delete_agent_definition(
+    State(state): State<AppState>,
+    Path(agent_id): Path<String>,
+    Query(query): Query<AgentDefinitionScopeQuery>,
+) -> Result<Json<AgentDefinitionMutationResponse>, ApiError> {
+    let applied = crate::change_case::apply_change(
+        &state,
+        crate::change_case::ChangeOperation::DeleteAgentDefinition {
+            agent_id,
+            space_id: query.space_id,
+        },
+        "operator_http",
+        None,
+    )
+    .await?;
+    Ok(Json(mutation_response(applied)))
 }
 
 /// `GET /api/operator/search` — search durable operator-visible history.

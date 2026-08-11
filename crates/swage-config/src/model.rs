@@ -873,6 +873,12 @@ pub struct ResolvedConfig {
     /// Output schema validation settings — JSON Schema and retry limits.
     /// Defaults to no schema (validation disabled) with 3 retries.
     pub output: OutputConfig,
+    /// Skills declared by the resolved durable agent definition.
+    ///
+    /// This runtime-only overlay is empty for file configuration and is
+    /// populated after durable-definition resolution.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub declared_skills: Vec<String>,
     /// Inter-agent communication settings — context transfer policy.
     /// Defaults to no communication (context transfer mode = none).
     pub communication: CommunicationConfig,

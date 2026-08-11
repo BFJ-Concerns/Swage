@@ -317,6 +317,7 @@ pub(crate) async fn load_active_skills_for_agent(
     agent_id: &str,
     swage_root: Option<&Path>,
     include_user_activated: bool,
+    declared_skills: &[String],
 ) -> Vec<ActiveSkill> {
     let Some(root) = swage_root else {
         return vec![];
@@ -341,6 +342,20 @@ pub(crate) async fn load_active_skills_for_agent(
             error = ?e,
             "failed to auto-activate agent-level skills; proceeding"
         );
+    }
+
+    for skill_name in declared_skills {
+        if !available.iter().any(|skill| skill.name == *skill_name) {
+            tracing::warn!(
+                agent_id,
+                skill_name,
+                "agent definition declares an unavailable skill; ignoring it"
+            );
+            continue;
+        }
+        if let Err(error) = state.storage.activate_skill(session_id, skill_name).await {
+            tracing::warn!(agent_id, skill_name, %error, "failed to activate a skill declared by the agent definition; proceeding");
+        }
     }
 
     match SkillManager::build_active_skills(session_id, &available, state.storage.as_ref()).await {

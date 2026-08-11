@@ -132,6 +132,80 @@ pub struct OperatorOverviewResponse {
     pub devices: Vec<OperatorDeviceSummary>,
 }
 
+/// Scope filter for durable agent-definition reads and deletes.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, TS, JsonSchema)]
+pub struct AgentDefinitionScopeQuery {
+    pub space_id: Option<Uuid>,
+}
+
+/// Whole definition supplied when creating a durable agent.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+pub struct CreateAgentDefinitionRequest {
+    pub id: String,
+    pub space_id: Option<Uuid>,
+    pub display_name: String,
+    pub description: String,
+    pub instructions: String,
+    pub model_id: Option<String>,
+    #[ts(type = "unknown")]
+    pub tool_permissions: Option<serde_json::Value>,
+    #[serde(default)]
+    pub skills: Vec<String>,
+    #[ts(type = "unknown")]
+    pub output_schema: Option<serde_json::Value>,
+    #[ts(type = "number")]
+    pub output_max_retries: Option<u32>,
+}
+
+/// Whole replacement supplied when updating a durable agent definition.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+pub struct UpdateAgentDefinitionRequest {
+    pub space_id: Option<Uuid>,
+    pub display_name: String,
+    pub description: String,
+    pub instructions: String,
+    pub model_id: Option<String>,
+    #[ts(type = "unknown")]
+    pub tool_permissions: Option<serde_json::Value>,
+    #[serde(default)]
+    pub skills: Vec<String>,
+    #[ts(type = "unknown")]
+    pub output_schema: Option<serde_json::Value>,
+    #[ts(type = "number")]
+    pub output_max_retries: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+pub struct AgentDefinitionResponse {
+    pub id: String,
+    pub space_id: Option<Uuid>,
+    pub display_name: String,
+    pub description: String,
+    pub instructions: String,
+    pub model_id: Option<String>,
+    #[ts(type = "unknown")]
+    pub tool_permissions: Option<serde_json::Value>,
+    pub skills: Vec<String>,
+    #[ts(type = "unknown")]
+    pub output_schema: Option<serde_json::Value>,
+    #[ts(type = "number")]
+    pub output_max_retries: Option<u32>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+pub struct AgentDefinitionListResponse {
+    pub definitions: Vec<AgentDefinitionResponse>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+pub struct AgentDefinitionMutationResponse {
+    pub version_id: Uuid,
+    pub entity_id: String,
+    pub summary: String,
+}
+
 fn default_machine_stale_after_secs() -> u64 {
     30
 }
@@ -144,5 +218,9 @@ pub struct HostingSurface {
     approvals: ApprovalListResponse,
     approval_decision: ApprovalDecisionRequest,
     operator_overview: OperatorOverviewResponse,
+    agent_definition_list: AgentDefinitionListResponse,
+    agent_definition_create: CreateAgentDefinitionRequest,
+    agent_definition_update: UpdateAgentDefinitionRequest,
+    agent_definition_mutation: AgentDefinitionMutationResponse,
     devices: device::DeviceListResponse,
 }
