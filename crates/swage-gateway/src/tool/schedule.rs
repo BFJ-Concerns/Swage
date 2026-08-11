@@ -23,7 +23,6 @@ use swage_protocol::client::schedule as wire;
 use swage_storage::ScheduleCreator;
 use swage_tool::context::ToolContext;
 
-use crate::change_case::{ChangeOperation, apply_change, schedule_space_id};
 use crate::state::AppState;
 use crate::tool::Tool;
 use crate::tool_executor::GatewayToolContext;
@@ -307,21 +306,15 @@ impl ScheduleTool {
         let creator = ScheduleCreator::Agent {
             agent_id: agent_id.to_owned(),
         };
-        let intended = crate::schedule::resolve_create_schedule(state, request, creator)
-            .await
-            .map_err(|error| map_service_error(SCHEDULE_TOOL, error))?;
-        let schedule_id = intended.id;
-        let case = apply_change(
+        let (schedule, case) = crate::schedule::create_schedule_change(
             state,
-            ChangeOperation::CreateSchedule { schedule: intended },
+            request,
+            creator,
             SCHEDULE_TOOL,
             Some(session_id),
         )
         .await
         .map_err(|error| map_service_error(SCHEDULE_TOOL, error))?;
-        let schedule = crate::schedule::get_schedule_wire(state, schedule_id)
-            .await
-            .map_err(|error| map_service_error(SCHEDULE_TOOL, error))?;
         Ok(json!({ "schedule": schedule, "change_case": case }))
     }
 
@@ -362,20 +355,15 @@ impl ScheduleTool {
             routing: None,
             gate,
         };
-        let intended = crate::schedule::resolve_update_schedule(state, schedule_id, request)
-            .await
-            .map_err(|error| map_service_error(SCHEDULE_TOOL, error))?;
-        let case = apply_change(
+        let (schedule, case) = crate::schedule::update_schedule_change(
             state,
-            ChangeOperation::UpdateSchedule { schedule: intended },
+            schedule_id,
+            request,
             SCHEDULE_TOOL,
             Some(session_id),
         )
         .await
         .map_err(|error| map_service_error(SCHEDULE_TOOL, error))?;
-        let schedule = crate::schedule::get_schedule_wire(state, schedule_id)
-            .await
-            .map_err(|error| map_service_error(SCHEDULE_TOOL, error))?;
         Ok(json!({ "schedule": schedule, "change_case": case }))
     }
 
@@ -386,27 +374,15 @@ impl ScheduleTool {
         session_id: Uuid,
     ) -> Result<Value, ToolError> {
         let schedule_id = schedule_id(params)?;
-        let schedule = state
-            .storage
-            .get_schedule(schedule_id)
-            .await
-            .map_err(|error| ToolError::ExecutionFailed {
-                name: SCHEDULE_TOOL.into(),
-                message: error.to_string(),
-            })?
-            .ok_or_else(|| invalid(SCHEDULE_TOOL, format!("no schedule with id {schedule_id}")))?;
-        let space_id = schedule_space_id(&schedule.session_policy);
-        let case = apply_change(
+        let case = crate::schedule::delete_schedule_change(
             state,
-            ChangeOperation::DeleteSchedule {
-                schedule_id,
-                space_id,
-            },
+            schedule_id,
             SCHEDULE_TOOL,
             Some(session_id),
         )
         .await
-        .map_err(|error| map_service_error(SCHEDULE_TOOL, error))?;
+        .map_err(|error| map_service_error(SCHEDULE_TOOL, error))?
+        .ok_or_else(|| invalid(SCHEDULE_TOOL, format!("no schedule with id {schedule_id}")))?;
         Ok(json!({ "removed": true, "schedule_id": schedule_id, "change_case": case }))
     }
 
@@ -417,20 +393,14 @@ impl ScheduleTool {
         session_id: Uuid,
     ) -> Result<Value, ToolError> {
         let schedule_id = schedule_id(params)?;
-        let intended = crate::schedule::resolve_pause_schedule(state, schedule_id)
-            .await
-            .map_err(|error| map_service_error(SCHEDULE_TOOL, error))?;
-        let case = apply_change(
+        let (schedule, case) = crate::schedule::pause_schedule_change(
             state,
-            ChangeOperation::PauseSchedule { schedule: intended },
+            schedule_id,
             SCHEDULE_TOOL,
             Some(session_id),
         )
         .await
         .map_err(|error| map_service_error(SCHEDULE_TOOL, error))?;
-        let schedule = crate::schedule::get_schedule_wire(state, schedule_id)
-            .await
-            .map_err(|error| map_service_error(SCHEDULE_TOOL, error))?;
         Ok(json!({ "schedule": schedule, "change_case": case }))
     }
 
@@ -441,20 +411,14 @@ impl ScheduleTool {
         session_id: Uuid,
     ) -> Result<Value, ToolError> {
         let schedule_id = schedule_id(params)?;
-        let intended = crate::schedule::resolve_resume_schedule(state, schedule_id)
-            .await
-            .map_err(|error| map_service_error(SCHEDULE_TOOL, error))?;
-        let case = apply_change(
+        let (schedule, case) = crate::schedule::resume_schedule_change(
             state,
-            ChangeOperation::ResumeSchedule { schedule: intended },
+            schedule_id,
             SCHEDULE_TOOL,
             Some(session_id),
         )
         .await
         .map_err(|error| map_service_error(SCHEDULE_TOOL, error))?;
-        let schedule = crate::schedule::get_schedule_wire(state, schedule_id)
-            .await
-            .map_err(|error| map_service_error(SCHEDULE_TOOL, error))?;
         Ok(json!({ "schedule": schedule, "change_case": case }))
     }
 }
@@ -627,20 +591,17 @@ impl Tool for WakeMeLaterTool {
         let creator = ScheduleCreator::Agent {
             agent_id: ctx.agent_id().to_owned(),
         };
-        let intended = crate::schedule::resolve_create_schedule(state, request, creator)
-            .await
-            .map_err(|error| map_service_error(WAKE_TOOL, error))?;
-        let schedule_id = intended.id;
-        let case = apply_change(
+        let (schedule, case) = crate::schedule::create_schedule_change(
             state,
-            ChangeOperation::CreateSchedule { schedule: intended },
+            request,
+            creator,
             WAKE_TOOL,
             Some(session_id),
         )
         .await
         .map_err(|error| map_service_error(WAKE_TOOL, error))?;
         Ok(json!({
-            "schedule_id": schedule_id,
+            "schedule_id": schedule.id,
             "wake_at": wake_at.to_rfc3339(),
             "change_case": case,
         }))

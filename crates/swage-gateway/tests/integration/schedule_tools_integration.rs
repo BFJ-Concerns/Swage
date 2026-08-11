@@ -16,6 +16,7 @@ use axum::{
     body::{Body, to_bytes},
     http::{Request, StatusCode},
 };
+use chrono::Utc;
 use serde_json::{Value, json};
 use tower::ServiceExt;
 use uuid::Uuid;
@@ -30,8 +31,11 @@ use swage_gateway::tool::schedule::{ScheduleTool, WakeMeLaterTool};
 use swage_gateway::tool::{Tool, ToolDispatcher, ToolRegistry};
 use swage_gateway::tool_executor::GatewayToolContext;
 use swage_gateway::{schedule, server::build_router, state::AppState};
+use swage_protocol::client::schedule::ScheduleStatus;
 use swage_provider::LlmProvider;
-use swage_storage::{NewAgentDefinition, NewSchedule, ScheduleRunState, SqliteStorage};
+use swage_storage::{
+    NewAgentDefinition, NewSchedule, ScheduleRunState, SqliteStorage, UpdateSchedule,
+};
 use swage_tool::context::MockToolContext;
 use swage_tool::permission::PermissionConfig;
 use swage_tool::rate_limit::{RateLimitConfig, RateLimiter};
@@ -761,6 +765,92 @@ async fn change_case_validation_rejects_invalid_schedule_before_any_write() {
             .unwrap()
             .is_empty()
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ordinary_schedule_edit_preserves_a_concurrent_tick_lifecycle() {
+    let state = test_state();
+    let space = state.space_store.get_or_create_default().await.unwrap();
+    let dispatcher = dispatcher(permissions(&["scheduling"], &[]));
+    let session_id = tool_session(&state, space.id).await;
+    let ctx = host_context(&state, "researcher", session_id);
+    let created = dispatcher
+        .dispatch(
+            "schedule",
+            json!({
+                "action": "create", "message": "before tick", "timing": "once",
+                "at": Utc::now().to_rfc3339(), "session": "fresh", "space_id": space.id,
+                "agent_id": "gateway"
+            }),
+            &ctx,
+            "researcher",
+        )
+        .await
+        .unwrap();
+    let schedule_id = created.result["schedule"]["id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let stale = state
+        .storage
+        .get_schedule(schedule_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let intended = NewSchedule {
+        id: stale.id,
+        message: "after tick".into(),
+        status: stale.status,
+        kind: stale.kind,
+        expression: stale.expression,
+        session_policy: stale.session_policy,
+        creator: stale.creator,
+        delivery_routing: stale.delivery_routing,
+        gate: stale.gate,
+        next_run_at: stale.next_run_at,
+        last_run_at: stale.last_run_at,
+    };
+
+    // Model the lifecycle advance that can land after resolution but before
+    // the configuration apply. The stale intended state must not replay the
+    // old due instant or erase the tick timestamp.
+    let tick_at = Utc::now();
+    state
+        .storage
+        .update_schedule(
+            schedule_id,
+            UpdateSchedule {
+                status: Some(ScheduleStatus::Completed),
+                next_run_at: Some(None),
+                last_run_at: Some(Some(tick_at)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    apply_change(
+        &state,
+        ChangeOperation::UpdateSchedule {
+            schedule: intended,
+            rearm: false,
+        },
+        "schedule",
+        Some(session_id),
+    )
+    .await
+    .unwrap();
+
+    let stored = state
+        .storage
+        .get_schedule(schedule_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.message, "after tick");
+    assert_eq!(stored.status, ScheduleStatus::Completed);
+    assert_eq!(stored.next_run_at, None);
+    assert_eq!(stored.last_run_at, Some(tick_at));
 }
 
 #[tokio::test(flavor = "multi_thread")]

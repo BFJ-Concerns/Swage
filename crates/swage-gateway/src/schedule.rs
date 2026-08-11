@@ -217,9 +217,28 @@ pub async fn create_schedule(
     request: wire::CreateScheduleRequest,
     creator: ScheduleCreator,
 ) -> Result<wire::Schedule, GatewayError> {
+    let (schedule, _) =
+        create_schedule_change(state, request, creator, "operator_http", None).await?;
+    Ok(schedule)
+}
+
+pub(crate) async fn create_schedule_change(
+    state: &AppState,
+    request: wire::CreateScheduleRequest,
+    creator: ScheduleCreator,
+    source: &str,
+    session_id: Option<Uuid>,
+) -> Result<(wire::Schedule, crate::change_case::AppliedCase), GatewayError> {
     let intended = resolve_create_schedule(state, request, creator).await?;
-    let schedule = state.storage.create_schedule(intended).await?;
-    map_schedule(schedule)
+    let schedule_id = intended.id;
+    let applied = crate::change_case::apply_change(
+        state,
+        crate::change_case::ChangeOperation::CreateSchedule { schedule: intended },
+        source,
+        session_id,
+    )
+    .await?;
+    Ok((get_schedule_wire(state, schedule_id).await?, applied))
 }
 
 pub(crate) async fn resolve_create_schedule(
@@ -275,9 +294,31 @@ pub async fn update_schedule(
     schedule_id: Uuid,
     request: wire::UpdateScheduleRequest,
 ) -> Result<wire::Schedule, GatewayError> {
+    let (schedule, _) =
+        update_schedule_change(state, schedule_id, request, "operator_http", None).await?;
+    Ok(schedule)
+}
+
+pub(crate) async fn update_schedule_change(
+    state: &AppState,
+    schedule_id: Uuid,
+    request: wire::UpdateScheduleRequest,
+    source: &str,
+    session_id: Option<Uuid>,
+) -> Result<(wire::Schedule, crate::change_case::AppliedCase), GatewayError> {
+    let rearm = request.spec.is_some();
     let intended = resolve_update_schedule(state, schedule_id, request).await?;
-    let updated = apply_resolved_schedule(state, &intended).await?;
-    map_schedule(updated)
+    let applied = crate::change_case::apply_change(
+        state,
+        crate::change_case::ChangeOperation::UpdateSchedule {
+            schedule: intended,
+            rearm,
+        },
+        source,
+        session_id,
+    )
+    .await?;
+    Ok((get_schedule_wire(state, schedule_id).await?, applied))
 }
 
 pub(crate) async fn resolve_update_schedule(
@@ -338,9 +379,25 @@ pub async fn pause_schedule(
     state: &AppState,
     schedule_id: Uuid,
 ) -> Result<wire::Schedule, GatewayError> {
+    let (schedule, _) = pause_schedule_change(state, schedule_id, "operator_http", None).await?;
+    Ok(schedule)
+}
+
+pub(crate) async fn pause_schedule_change(
+    state: &AppState,
+    schedule_id: Uuid,
+    source: &str,
+    session_id: Option<Uuid>,
+) -> Result<(wire::Schedule, crate::change_case::AppliedCase), GatewayError> {
     let intended = resolve_pause_schedule(state, schedule_id).await?;
-    let updated = apply_resolved_schedule(state, &intended).await?;
-    map_schedule(updated)
+    let applied = crate::change_case::apply_change(
+        state,
+        crate::change_case::ChangeOperation::PauseSchedule { schedule: intended },
+        source,
+        session_id,
+    )
+    .await?;
+    Ok((get_schedule_wire(state, schedule_id).await?, applied))
 }
 
 pub(crate) async fn resolve_pause_schedule(
@@ -363,9 +420,25 @@ pub async fn resume_schedule(
     state: &AppState,
     schedule_id: Uuid,
 ) -> Result<wire::Schedule, GatewayError> {
+    let (schedule, _) = resume_schedule_change(state, schedule_id, "operator_http", None).await?;
+    Ok(schedule)
+}
+
+pub(crate) async fn resume_schedule_change(
+    state: &AppState,
+    schedule_id: Uuid,
+    source: &str,
+    session_id: Option<Uuid>,
+) -> Result<(wire::Schedule, crate::change_case::AppliedCase), GatewayError> {
     let intended = resolve_resume_schedule(state, schedule_id).await?;
-    let updated = apply_resolved_schedule(state, &intended).await?;
-    map_schedule(updated)
+    let applied = crate::change_case::apply_change(
+        state,
+        crate::change_case::ChangeOperation::ResumeSchedule { schedule: intended },
+        source,
+        session_id,
+    )
+    .await?;
+    Ok((get_schedule_wire(state, schedule_id).await?, applied))
 }
 
 pub(crate) async fn resolve_resume_schedule(
@@ -379,29 +452,6 @@ pub(crate) async fn resolve_resume_schedule(
     intended.status = status;
     intended.next_run_at = next_run_at;
     Ok(intended)
-}
-
-async fn apply_resolved_schedule(
-    state: &AppState,
-    schedule: &NewSchedule,
-) -> Result<Schedule, GatewayError> {
-    state
-        .storage
-        .update_schedule(
-            schedule.id,
-            UpdateSchedule {
-                message: Some(schedule.message.clone()),
-                status: Some(schedule.status),
-                kind: Some(schedule.kind),
-                expression: Some(schedule.expression.clone()),
-                delivery_routing: Some(schedule.delivery_routing.clone()),
-                gate: Some(schedule.gate.clone()),
-                next_run_at: Some(schedule.next_run_at),
-                last_run_at: Some(schedule.last_run_at),
-            },
-        )
-        .await
-        .map_err(Into::into)
 }
 
 fn new_schedule_from_existing(schedule: Schedule) -> NewSchedule {
@@ -428,11 +478,33 @@ pub(crate) async fn get_schedule_wire(
 }
 
 pub async fn delete_schedule(state: &AppState, schedule_id: Uuid) -> Result<bool, GatewayError> {
-    state
-        .storage
-        .delete_schedule(schedule_id)
-        .await
-        .map_err(Into::into)
+    Ok(
+        delete_schedule_change(state, schedule_id, "operator_http", None)
+            .await?
+            .is_some(),
+    )
+}
+
+pub(crate) async fn delete_schedule_change(
+    state: &AppState,
+    schedule_id: Uuid,
+    source: &str,
+    session_id: Option<Uuid>,
+) -> Result<Option<crate::change_case::AppliedCase>, GatewayError> {
+    let Some(schedule) = state.storage.get_schedule(schedule_id).await? else {
+        return Ok(None);
+    };
+    let applied = crate::change_case::apply_change(
+        state,
+        crate::change_case::ChangeOperation::DeleteSchedule {
+            schedule_id,
+            space_id: crate::change_case::schedule_space_id(&schedule.session_policy),
+        },
+        source,
+        session_id,
+    )
+    .await?;
+    Ok(Some(applied))
 }
 
 pub async fn list_schedule_runs(
