@@ -18,9 +18,6 @@ pub enum AgentError {
     #[error("hook '{hook}' blocked: {reason}")]
     HookBlocked { hook: String, reason: String },
 
-    #[error("exceeded maximum tool call rounds ({max})")]
-    ToolRoundsExceeded { max: u32 },
-
     #[error("compaction failed: {0}")]
     CompactionFailed(String),
 
@@ -65,7 +62,6 @@ impl AgentError {
             AgentError::StorageFailed(e) => e.is_retriable(),
             AgentError::ToolFailed(e) => e.is_retriable(),
             AgentError::HookBlocked { .. } => false,
-            AgentError::ToolRoundsExceeded { .. } => false,
             AgentError::CompactionFailed(_) => false,
             AgentError::SessionNotFound(_) => false,
             AgentError::SessionAccessDenied { .. } => false,
@@ -166,12 +162,6 @@ mod tests {
     }
 
     #[test]
-    fn tool_rounds_exceeded_not_retriable() {
-        let err = AgentError::ToolRoundsExceeded { max: 10 };
-        assert!(!err.is_retriable());
-    }
-
-    #[test]
     fn compaction_failed_not_retriable() {
         let err = AgentError::CompactionFailed("all tiers exhausted".into());
         assert!(!err.is_retriable());
@@ -252,12 +242,6 @@ mod tests {
             reason: "blocked by policy".into(),
         };
         assert_eq!(err.to_string(), "hook 'safety' blocked: blocked by policy");
-    }
-
-    #[test]
-    fn display_tool_rounds_exceeded() {
-        let err = AgentError::ToolRoundsExceeded { max: 5 };
-        assert_eq!(err.to_string(), "exceeded maximum tool call rounds (5)");
     }
 
     #[test]
