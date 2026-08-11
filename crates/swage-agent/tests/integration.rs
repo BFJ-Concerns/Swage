@@ -319,7 +319,7 @@ fn drain_events(mut rx: mpsc::UnboundedReceiver<AgentEvent>) -> Vec<AgentEvent> 
 
 #[tokio::test(flavor = "multi_thread")]
 async fn streaming_turn_continues_past_ten_tool_rounds() {
-    const TOOL_ROUNDS: usize = 11;
+    const TOOL_ROUNDS: usize = 25;
 
     let (storage, space, session, thread) = setup_conversation("agent-a").await;
     let mut rounds = (1..=TOOL_ROUNDS)
@@ -338,7 +338,7 @@ async fn streaming_turn_continues_past_ten_tool_rounds() {
         .collect::<Vec<_>>();
     rounds.push(vec![
         StreamChunk::Delta {
-            content: "All eleven tool calls completed successfully.".into(),
+            content: "All twenty-five tool calls completed successfully.".into(),
         },
         StreamChunk::Done {
             finish_reason: Some(FinishReason::Stop),
@@ -368,7 +368,7 @@ async fn streaming_turn_continues_past_ten_tool_rounds() {
     assert_eq!(counting_tool.call_count(), TOOL_ROUNDS);
     assert_eq!(
         outbound.response,
-        "All eleven tool calls completed successfully."
+        "All twenty-five tool calls completed successfully."
     );
 
     let tool_calls = storage
