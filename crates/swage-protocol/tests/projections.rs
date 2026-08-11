@@ -42,6 +42,8 @@ fn typescript_bindings_are_regenerated() {
     client::conversation::ConversationListResponse::export_all(&cfg).expect("export conversations");
     client::conversation::ConversationResponse::export_all(&cfg)
         .expect("export conversation response");
+    client::conversation::CreateConversationRequest::export_all(&cfg)
+        .expect("export create conversation request");
     client::conversation::ConversationDetail::export_all(&cfg).expect("export conversation detail");
     client::conversation::ConversationThreadDetail::export_all(&cfg)
         .expect("export conversation thread");

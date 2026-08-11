@@ -36,6 +36,7 @@ pub struct ClientSurface {
     create_workspace_attachment_request: space::CreateWorkspaceAttachmentRequest,
     workspace_attachment_list: space::WorkspaceAttachmentListResponse,
     channel_link_code_response: channel::ChannelLinkCodeResponse,
+    create_conversation_request: conversation::CreateConversationRequest,
     conversation: conversation::ConversationResponse,
     conversation_list: conversation::ConversationListResponse,
     conversation_detail: conversation::ConversationDetail,
