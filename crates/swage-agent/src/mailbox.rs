@@ -312,7 +312,7 @@ mod tests {
                 sender_agent_id: "sub-agent".into(),
                 recipient_agent_id: "agent-a".into(),
                 kind: MessageKind::Result,
-                correlation_id: None,
+                correlation_id: Some(Uuid::new_v4()),
                 payload: serde_json::json!({"response": "done"}),
             })
             .await
@@ -381,7 +381,7 @@ mod tests {
                 sender_agent_id: "child".into(),
                 recipient_agent_id: "agent-a".into(),
                 kind: MessageKind::Result,
-                correlation_id: None,
+                correlation_id: Some(Uuid::new_v4()),
                 payload: serde_json::json!({"response": "done"}),
             })
             .await
@@ -392,7 +392,12 @@ mod tests {
             !claim_result(&storage, result.id).await.unwrap(),
             "a second claim must lose"
         );
-        assert!(pending_results(&storage, "agent-a").await.unwrap().is_empty());
+        assert!(
+            pending_results(&storage, "agent-a")
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -404,7 +409,7 @@ mod tests {
                 sender_agent_id: "child".into(),
                 recipient_agent_id: "agent-a".into(),
                 kind: MessageKind::Result,
-                correlation_id: None,
+                correlation_id: Some(Uuid::new_v4()),
                 payload: serde_json::json!({"response": "done"}),
             })
             .await
@@ -421,7 +426,10 @@ mod tests {
             .unwrap();
 
         assert!(
-            pending_results(&storage, "agent-a").await.unwrap().is_empty(),
+            pending_results(&storage, "agent-a")
+                .await
+                .unwrap()
+                .is_empty(),
             "a pending Shutdown hands the whole mailbox to the instantiation path"
         );
     }

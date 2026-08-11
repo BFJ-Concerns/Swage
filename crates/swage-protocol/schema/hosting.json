@@ -18,6 +18,9 @@
     "heartbeat": {
       "$ref": "#/$defs/MachineHeartbeatRequest"
     },
+    "knowledge_mirror": {
+      "$ref": "#/$defs/KnowledgeMirrorRegenerateResponse"
+    },
     "operator_overview": {
       "$ref": "#/$defs/OperatorOverviewResponse"
     },
@@ -36,7 +39,8 @@
     "undo_configuration_case",
     "configuration_change",
     "operator_overview",
-    "devices"
+    "devices",
+    "knowledge_mirror"
   ],
   "$defs": {
     "ApprovalDecisionRequest": {
@@ -427,6 +431,25 @@
       },
       "required": [
         "model"
+      ]
+    },
+    "KnowledgeMirrorRegenerateResponse": {
+      "description": "Result of regenerating a space's knowledge-base browse mirror — a\ndisposable markdown projection of the database-authoritative store.",
+      "type": "object",
+      "properties": {
+        "files_written": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "mirror_root": {
+          "description": "Absolute path of the regenerated mirror directory.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "mirror_root",
+        "files_written"
       ]
     },
     "MachineHeartbeatRequest": {
