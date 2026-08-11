@@ -65,6 +65,7 @@ pub mod material;
 pub mod onboarding;
 pub mod operator;
 pub mod presence;
+pub mod record_durability;
 pub mod schedule;
 pub mod secret;
 pub mod server;
