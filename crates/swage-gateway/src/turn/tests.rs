@@ -3047,6 +3047,13 @@ impl swage_storage::store::ObservationStore for MockStorage {
         unimplemented!("turn tests do not exercise the knowledge base")
     }
 
+    async fn latest_extraction(
+        &self,
+        _: uuid::Uuid,
+    ) -> Result<Option<swage_storage::ExtractionDerivation>, StorageError> {
+        unimplemented!("turn tests do not exercise the knowledge base")
+    }
+
     async fn search_extractions(
         &self,
         _: uuid::Uuid,
@@ -3063,6 +3070,13 @@ impl swage_storage::store::CurationAssertionStore for MockStorage {
         &self,
         _: swage_storage::NewCurationAssertion,
     ) -> Result<swage_storage::CurationAssertion, StorageError> {
+        unimplemented!("turn tests do not exercise knowledge curation")
+    }
+
+    async fn effective_curation_by_space(
+        &self,
+        _: uuid::Uuid,
+    ) -> Result<Vec<swage_storage::CurationAssertion>, StorageError> {
         unimplemented!("turn tests do not exercise knowledge curation")
     }
 }
@@ -9672,4 +9686,54 @@ fn approval_events_routed_to_ws_tx_not_broadcast() {
         rx_b.try_recv().is_err(),
         "agent-b's ws_tx must not receive agent-a's approval event"
     );
+}
+
+#[test]
+fn delegation_result_renders_response_and_structured_output() {
+    let message = swage_storage::model::AgentMessage {
+        id: Uuid::new_v4(),
+        sender_agent_id: "researcher".into(),
+        recipient_agent_id: "gateway".into(),
+        kind: swage_core::MessageKind::Result,
+        correlation_id: Some(Uuid::new_v4()),
+        payload: serde_json::json!({
+            "response": "Gathered 3 sources.",
+            "structured_output": {"sources": 3},
+            "input_tokens": 10,
+            "output_tokens": 20,
+        }),
+        status: swage_core::MessageStatus::Pending,
+        failure_reason: None,
+        created_at: chrono::Utc::now(),
+        delivered_at: None,
+    };
+
+    let rendered = render_delegation_result(&message);
+    assert!(rendered.contains("researcher"));
+    assert!(rendered.contains("Gathered 3 sources."));
+    assert!(rendered.contains("\"sources\": 3"));
+}
+
+#[test]
+fn delegation_result_renders_failure_and_unknown_shapes() {
+    let base = |payload| swage_storage::model::AgentMessage {
+        id: Uuid::new_v4(),
+        sender_agent_id: "researcher".into(),
+        recipient_agent_id: "gateway".into(),
+        kind: swage_core::MessageKind::Result,
+        correlation_id: None,
+        payload,
+        status: swage_core::MessageStatus::Pending,
+        failure_reason: None,
+        created_at: chrono::Utc::now(),
+        delivered_at: None,
+    };
+
+    let failed = render_delegation_result(&base(serde_json::json!({"error": "budget exhausted"})));
+    assert!(failed.contains("failed"));
+    assert!(failed.contains("budget exhausted"));
+
+    // An unrecognised payload is still delivered, never dropped.
+    let unknown = render_delegation_result(&base(serde_json::json!({"verdict": "unclear"})));
+    assert!(unknown.contains("verdict"));
 }
