@@ -677,6 +677,24 @@ impl swage_storage::WorkflowStore for MockStorage {
     async fn interrupt_running_workflow_runs(&self) -> Result<u64, StorageError> {
         unimplemented!()
     }
+    async fn set_workflow_run_parked(
+        &self,
+        _: Uuid,
+        _: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), StorageError> {
+        unimplemented!()
+    }
+    async fn list_due_parked_workflow_runs(
+        &self,
+        _: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<swage_storage::WorkflowRunRecord>, StorageError> {
+        unimplemented!()
+    }
+    async fn list_interrupted_workflow_runs(
+        &self,
+    ) -> Result<Vec<swage_storage::WorkflowRunRecord>, StorageError> {
+        unimplemented!()
+    }
     async fn create_workflow_run_event(
         &self,
         _: swage_storage::NewWorkflowRunEvent,
