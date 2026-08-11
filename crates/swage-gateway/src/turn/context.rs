@@ -344,38 +344,53 @@ pub(crate) async fn load_active_skills_for_agent(
         );
     }
 
+    let mut active =
+        match SkillManager::build_active_skills(session_id, &available, state.storage.as_ref())
+            .await
+        {
+            Err(e) => {
+                tracing::warn!(
+                    error = ?e,
+                    "failed to load active skills; proceeding without skills"
+                );
+                vec![]
+            }
+            Ok(infos) => infos
+                .into_iter()
+                .filter(|info| include_user_activated || info.is_agent_level)
+                .map(|info| ActiveSkill {
+                    name: info.name,
+                    instructions: info.instructions,
+                    level: info.level,
+                    is_agent_level: info.is_agent_level,
+                    activation_order: info.activation_order as u32,
+                })
+                .collect(),
+        };
+
+    // Definition declarations are resolved configuration for this turn, not
+    // persistent user activations. Add their instructions directly so the
+    // current definition applies equally to foreground and delegated turns.
     for skill_name in declared_skills {
-        if !available.iter().any(|skill| skill.name == *skill_name) {
+        if active.iter().any(|skill| skill.name == *skill_name) {
+            continue;
+        }
+        let Some(skill) = available.iter().find(|skill| skill.name == *skill_name) else {
             tracing::warn!(
                 agent_id,
                 skill_name,
                 "agent definition declares an unavailable skill; ignoring it"
             );
             continue;
-        }
-        if let Err(error) = state.storage.activate_skill(session_id, skill_name).await {
-            tracing::warn!(agent_id, skill_name, %error, "failed to activate a skill declared by the agent definition; proceeding");
-        }
+        };
+        active.push(ActiveSkill {
+            name: skill.name.clone(),
+            instructions: skill.instructions.clone(),
+            level: skill.level.clone(),
+            is_agent_level: skill.level == HierarchyLevel::Agent,
+            activation_order: active.len() as u32,
+        });
     }
 
-    match SkillManager::build_active_skills(session_id, &available, state.storage.as_ref()).await {
-        Err(e) => {
-            tracing::warn!(
-                error = ?e,
-                "failed to load active skills; proceeding without skills"
-            );
-            vec![]
-        }
-        Ok(infos) => infos
-            .into_iter()
-            .filter(|info| include_user_activated || info.is_agent_level)
-            .map(|info| ActiveSkill {
-                name: info.name,
-                instructions: info.instructions,
-                level: info.level,
-                is_agent_level: info.is_agent_level,
-                activation_order: info.activation_order as u32,
-            })
-            .collect(),
-    }
+    active
 }
