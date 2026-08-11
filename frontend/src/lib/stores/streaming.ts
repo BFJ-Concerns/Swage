@@ -61,8 +61,8 @@ export interface StreamingStore {
 // to the singleton conversation and connection stores.
 
 export interface StreamingStoreOptions {
-  /** Receives messages pushed by the streaming store (user turns and completed
-   *  or interrupted assistant turns). */
+  /** Receives messages pushed by the streaming store (user turns and settled
+   *  assistant turns). */
   conversationStore?: {
     appendOptimisticUserMessage(message: {
       content: string;
@@ -71,7 +71,10 @@ export interface StreamingStoreOptions {
     appendAssistantMessage(message: {
       content: string;
       timestamp: string;
-      turn_state: Extract<MessageView["turn_state"], "completed" | "interrupted">;
+      turn_state: Extract<
+        MessageView["turn_state"],
+        "completed" | "failed" | "interrupted"
+      >;
     }): void;
   };
   /** Sends WebSocket events for outgoing user messages and cancellation. */
@@ -114,7 +117,10 @@ export function createStreamingStore(
 
   function pushAssistantMessage(
     content: string,
-    turn_state: Extract<MessageView["turn_state"], "completed" | "interrupted">,
+    turn_state: Extract<
+      MessageView["turn_state"],
+      "completed" | "failed" | "interrupted"
+    >,
   ): void {
     options?.conversationStore?.appendAssistantMessage({
       content,
@@ -125,11 +131,14 @@ export function createStreamingStore(
 
   // Commits any accumulated content to the conversation store. Called when a
   // turn ends before the server explicitly completes it (error or cancellation).
-  function preservePartialResponse(): void {
+  function settlePartialResponse(
+    turnState: Extract<MessageView["turn_state"], "failed" | "interrupted">,
+  ): void {
     const streamedContent = get(streamedContentStore);
     if (streamedContent) {
-      pushAssistantMessage(streamedContent, "interrupted");
+      pushAssistantMessage(streamedContent, turnState);
     }
+    streamedContentStore.set("");
   }
 
   // ---- Public interface -------------------------------------------------------
@@ -278,19 +287,17 @@ export function createStreamingStore(
         case "error":
           // Turn failed mid-stream. Preserve whatever the user saw so the
           // conversation history reflects the partial response.
-          preservePartialResponse();
+          settlePartialResponse("failed");
           turnErrorStore.set({ code: event.code, message: event.message });
           isStreamingStore.set(false);
           turnStartedAtStore.set(null);
-          // streamedContent is intentionally not cleared — it stays visible
-          // alongside the error until the next startTurn clears it.
           // activeToolCalls are preserved so the UI can show what was
           // in-flight when the error occurred.
           providerRetryStore.set(null);
           break;
 
         case "output_schema_failed": {
-          preservePartialResponse();
+          settlePartialResponse("failed");
           const details = event.errors
             .map((error) =>
               error.path
@@ -313,7 +320,7 @@ export function createStreamingStore(
         case "cancelled":
           // User-initiated cancel. Preserve partial content (they may want
           // to read what was generated before they stopped it).
-          preservePartialResponse();
+          settlePartialResponse("interrupted");
           isStreamingStore.set(false);
           turnStartedAtStore.set(null);
           // activeToolCalls preserved — same rationale as the error case.
@@ -324,7 +331,7 @@ export function createStreamingStore(
           // The gateway is shutting down. Preserve any partial content and
           // surface the shutdown as a turn error so the UI can notify the user.
           // The WebSocket will close shortly after this event arrives.
-          preservePartialResponse();
+          settlePartialResponse("failed");
           turnErrorStore.set({ code: "gateway_shutdown", message: event.reason });
           isStreamingStore.set(false);
           turnStartedAtStore.set(null);
