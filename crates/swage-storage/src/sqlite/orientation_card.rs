@@ -404,7 +404,7 @@ mod tests {
         let (storage, space_id, observation_id) = fixture().await;
         let created = card(&storage, space_id, observation_id, "Immutable card").await;
         let lifecycle = storage
-            .retire_orientation_card(created.id, "agent-beta".into(), None)
+            .retire_orientation_card(space_id, created.id, "agent-beta".into(), None)
             .await
             .unwrap();
 
