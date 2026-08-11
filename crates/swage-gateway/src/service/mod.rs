@@ -11,7 +11,7 @@ use serde_json::Value as JsonValue;
 #[cfg(test)]
 use swage_core::{GatewayError, Role, StorageError};
 #[cfg(test)]
-use swage_storage::model::{NewAgentDefinition, NewSession};
+use swage_storage::model::{NewAgentDefinition, NewSession, NewSpace, SpaceSlug};
 #[cfg(test)]
 use swage_storage::store::{AgentDefinitionStore, SessionStore, SpaceStore, Storage};
 #[cfg(test)]
@@ -310,7 +310,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn create_conversation_defaults_to_the_gateway_agent() {
         let (svc, storage) = make_definition_service();
 
@@ -323,7 +323,7 @@ mod tests {
         assert_eq!(session.agent_id, "gateway");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn create_conversation_for_named_agent_runs_under_that_definition() {
         let (svc, storage) = make_definition_service();
         storage
@@ -343,7 +343,7 @@ mod tests {
         assert_eq!(session.agent_id, "researcher");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn create_conversation_rejects_an_unknown_agent_selector() {
         let (svc, _storage) = make_definition_service();
 
@@ -358,8 +358,8 @@ mod tests {
         assert!(matches!(error, GatewayError::ValidationError(_)));
     }
 
-    #[tokio::test]
-    async fn create_space_session_honours_a_space_scoped_definition() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn create_space_session_accepts_a_definition_scoped_to_that_space() {
         let (svc, storage) = make_definition_service();
         let space = storage.get_or_create_default().await.unwrap();
         storage
@@ -382,7 +382,40 @@ mod tests {
         assert_eq!(session.agent_id, "triage");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn create_space_session_rejects_a_definition_scoped_to_another_space() {
+        let (svc, storage) = make_definition_service();
+        let space = storage.get_or_create_default().await.unwrap();
+        // Scoped to a space that is not the target: invisible to the
+        // selector, so validation must reject it rather than fall through
+        // to the default agent.
+        let other = storage
+            .create(NewSpace {
+                name: "Other".to_string(),
+                slug: SpaceSlug::new("other").unwrap(),
+            })
+            .await
+            .unwrap();
+        storage
+            .upsert_agent_definition(definition("triage", Some(other.id)))
+            .await
+            .unwrap();
+
+        let error = svc
+            .create_session_in_space_from_request(
+                space.id,
+                CreateConversationRequest {
+                    selected_model_id: None,
+                    agent_id: Some("triage".to_string()),
+                },
+            )
+            .await
+            .expect_err("a definition invisible to the space should be rejected");
+
+        assert!(matches!(error, GatewayError::ValidationError(_)));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn create_space_session_reports_a_missing_space_before_the_selector() {
         let (svc, _storage) = make_definition_service();
 
