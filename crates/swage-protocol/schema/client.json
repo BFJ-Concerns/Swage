@@ -25,6 +25,9 @@
     "create_channel_link_code_request": {
       "$ref": "#/$defs/CreateChannelLinkCodeRequest"
     },
+    "create_conversation_request": {
+      "$ref": "#/$defs/CreateConversationRequest"
+    },
     "create_schedule_request": {
       "$ref": "#/$defs/CreateScheduleRequest"
     },
@@ -132,6 +135,7 @@
     "create_workspace_attachment_request",
     "workspace_attachment_list",
     "channel_link_code_response",
+    "create_conversation_request",
     "conversation",
     "conversation_list",
     "conversation_detail",
@@ -575,6 +579,24 @@
       "required": [
         "integration"
       ]
+    },
+    "CreateConversationRequest": {
+      "description": "Request body for the conversation and space-session creation endpoints.\n\nEvery field is optional and the body itself may be omitted: an absent\n`agent_id` selects the default `\"gateway\"` agent, and an absent\n`selected_model_id` leaves the session's model unselected. A named\n`agent_id` must be `\"gateway\"` or an agent definition visible to the\ntarget space; the gateway rejects anything else with a validation error.",
+      "type": "object",
+      "properties": {
+        "agent_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "selected_model_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
     },
     "CreateScheduleRequest": {
       "description": "Create a schedule.",
