@@ -623,6 +623,9 @@ async fn agent_definition_undo_uses_the_same_prior_state_and_prior_absence_rule(
         instructions: "Keep the first instructions".into(),
         model_id: None,
         tool_permissions: None,
+        skills: vec![],
+        output_schema: None,
+        output_max_retries: None,
     };
     let created = apply_change(
         &state,
