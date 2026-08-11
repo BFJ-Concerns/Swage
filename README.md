@@ -102,7 +102,9 @@ XDG_RUNTIME_DIR=/tmp/swage-dev-run \
 ./target/debug/swage gateway start --port 3100
 ```
 
-Stop it with `gateway stop` under the same two variables. The dev web UI
+Stop it with `gateway stop` under the same two variables. The isolated data
+root starts empty, so give it its own `config.toml` (the provider example
+above) before expecting turns to complete. The dev web UI
 (`npm run dev`) serves <http://localhost:5173> and proxies API calls to the
 gateway; point it at a non-default port with
 `SWAGE_GATEWAY_URL=http://127.0.0.1:3100 npm run dev`.

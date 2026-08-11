@@ -123,7 +123,8 @@ impl Tool for KnowledgeSearchTool {
     fn description(&self) -> &str {
         "Search this space's knowledge base — the gathered external evidence — by \
          full text. Each result is a passage with the source it came from and a \
-         pinned observation and version; cite it with those values and the exact quote. The \
+         pinned observation and version; record a citation with the knowledge_cite \
+         tool, passing those values and the exact quote. The \
          knowledge base holds captured external material; it is not your memory \
          (for what you know about your own work, use agent_memory for your \
          private records or memory for the space's shared notes)."
