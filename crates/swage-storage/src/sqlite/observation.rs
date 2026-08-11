@@ -263,10 +263,15 @@ impl ObservationStore for SqliteStorage {
             // extractions stay addressable (citations pin them) but drop out
             // of default retrieval. bm25 ascends, so best matches come first.
             //
-            // The user's query is passed as a bound parameter, quoted as one
-            // FTS5 string so its characters are matched, not parsed as query
-            // syntax.
-            let fts_query = format!("\"{}\"", query.replace('"', "\"\""));
+            // Quote each term independently so FTS5 implicitly requires every
+            // term without requiring them to form one contiguous phrase. This
+            // also keeps operators and punctuation in user input out of the
+            // query grammar.
+            let fts_query = query
+                .split_whitespace()
+                .map(|term| format!("\"{}\"", term.replace('"', "\"\"")))
+                .collect::<Vec<_>>()
+                .join(" ");
             let mut stmt = conn.prepare(
                 "SELECT o.id, d.version, o.origin_url, o.origin_local_path, o.retrieved_at,
                         snippet(extraction_fts, 0, '', '', '…', 24) AS passage,
@@ -550,6 +555,68 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn search_matches_non_contiguous_terms_and_locates_snippet() {
+        let (storage, space_id) = storage_with_space().await;
+        let observation = storage
+            .record_observation(new_observation(
+                space_id,
+                "https://example.org/bees",
+                "multi-word-query",
+            ))
+            .await
+            .unwrap();
+        let extracted_text = "The waggle dance communicates direction, while angular measurement error is reduced by averaging.";
+        storage
+            .add_extraction(observation.id, extracted_text.into(), "extractor".into())
+            .await
+            .unwrap();
+
+        let hits = storage
+            .search_extractions(space_id, "waggle dance angular error averaging", 10)
+            .await
+            .unwrap();
+
+        assert_eq!(hits.len(), 1, "all separated query terms match");
+        let hit = &hits[0];
+        assert_eq!(hit.observation_id, observation.id);
+        assert!(extracted_text.contains(&hit.snippet));
+        let offset = hit.snippet_offset.expect("snippet has a stored offset");
+        assert_eq!(
+            &extracted_text[offset..offset + hit.snippet.len()],
+            hit.snippet
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn search_still_matches_a_single_term() {
+        let (storage, space_id) = storage_with_space().await;
+        let observation = storage
+            .record_observation(new_observation(
+                space_id,
+                "https://example.org/metals",
+                "single-term-query",
+            ))
+            .await
+            .unwrap();
+        storage
+            .add_extraction(
+                observation.id,
+                "Bronze casting preserves fine detail.".into(),
+                "extractor".into(),
+            )
+            .await
+            .unwrap();
+
+        let hits = storage
+            .search_extractions(space_id, "bronze", 10)
+            .await
+            .unwrap();
+
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].observation_id, observation.id);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn search_keeps_observation_retired_when_latest_assertion_is_stale() {
         let (storage, space_id) = storage_with_space().await;
         let observation = storage
@@ -644,22 +711,39 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn search_treats_query_as_text_not_syntax() {
         let (storage, space_id) = storage_with_space().await;
-        let observation = storage
+        let literal_match = storage
             .record_observation(new_observation(space_id, "https://example.org/a", "ee55"))
             .await
             .unwrap();
         storage
-            .add_extraction(observation.id, "plain text corpus".into(), "x".into())
+            .add_extraction(
+                literal_match.id,
+                "A corpus may contain the word OR and an unclosed quotation mark.".into(),
+                "x".into(),
+            )
+            .await
+            .unwrap();
+        let operator_broadened_match = storage
+            .record_observation(new_observation(space_id, "https://example.org/b", "ff66"))
+            .await
+            .unwrap();
+        storage
+            .add_extraction(
+                operator_broadened_match.id,
+                "A corpus alone must not satisfy every alternative.".into(),
+                "x".into(),
+            )
             .await
             .unwrap();
 
-        // FTS5 operators in a user query must not reach the parser.
-        let result = storage
-            .search_extractions(space_id, "corpus AND \"unclosed", 10)
-            .await;
-        assert!(
-            result.is_ok(),
-            "malformed query syntax is matched as text, not executed: {result:?}"
-        );
+        // Operators and malformed syntax are literal terms: OR cannot broaden
+        // the match, and the unmatched quote cannot make MATCH fail to parse.
+        let hits = storage
+            .search_extractions(space_id, "corpus OR \"unclosed", 10)
+            .await
+            .expect("malformed query syntax is matched as text, not executed");
+
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].observation_id, literal_match.id);
     }
 }
