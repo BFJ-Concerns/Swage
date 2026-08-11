@@ -40,6 +40,9 @@
     "knowledge_search": {
       "$ref": "#/$defs/KnowledgeSearchResponse"
     },
+    "orientation_find": {
+      "$ref": "#/$defs/OrientationFindResponse"
+    },
     "provider_sign_in_state": {
       "$ref": "#/$defs/ProviderSignInState"
     },
@@ -134,6 +137,7 @@
     "conversation_detail",
     "conversation_thread",
     "knowledge_search",
+    "orientation_find",
     "create_schedule_request",
     "update_schedule_request",
     "schedule",
@@ -948,6 +952,60 @@
         "content",
         "timestamp",
         "tool_calls"
+      ]
+    },
+    "OrientationCardResult": {
+      "type": "object",
+      "properties": {
+        "authored_by": {
+          "type": "string"
+        },
+        "card_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "content": {
+          "type": "string"
+        },
+        "created_at": {
+          "type": "string"
+        },
+        "observation_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "card_id",
+        "title",
+        "content",
+        "authored_by",
+        "observation_ids",
+        "created_at"
+      ]
+    },
+    "OrientationFindResponse": {
+      "type": "object",
+      "properties": {
+        "cards": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/OrientationCardResult"
+          }
+        },
+        "guidance": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "cards",
+        "guidance"
       ]
     },
     "ProviderAccount": {

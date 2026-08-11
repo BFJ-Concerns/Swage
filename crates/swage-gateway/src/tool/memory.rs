@@ -62,7 +62,7 @@ impl Tool for MemoryTool {
     }
 
     fn description(&self) -> &str {
-        "Read and write persistent per-space memory files."
+        "Read and write the space's shared memory files — named markdown notes that persist in the space and are visible to every agent working there. For private records only you will search later, use the agent_memory tool instead."
     }
 
     fn parameters(&self) -> Value {

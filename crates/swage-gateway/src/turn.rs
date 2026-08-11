@@ -45,6 +45,7 @@ use swage_tool::permission::RequireApprovalEntry as ToolRequireApprovalEntry;
 use swage_tool::rate_limit::{RateLimitConfig, RateLimiter};
 use swage_tool::tool::Tool;
 
+use crate::record_durability;
 use crate::skill::SkillManager;
 use crate::tool_executor::{GatewayExecutionStrategy, SandboxedExecutor};
 
@@ -439,6 +440,35 @@ pub(crate) async fn dispatch_before_inbound(
     }
 }
 
+/// Render a completed delegation's Result message as thread content.
+///
+/// Reads the payload the delegation path writes — `response` with optional
+/// `structured_output`, or `error` for a failed child — and falls back to
+/// the raw JSON for any other shape, so an unrecognised payload is still
+/// delivered rather than dropped.
+fn render_delegation_result(result: &swage_storage::model::AgentMessage) -> String {
+    let sender = &result.sender_agent_id;
+    let mut text = match result.payload.get("response").and_then(|v| v.as_str()) {
+        Some(response) => format!("Delegated agent {sender} completed:\n{response}"),
+        None => match result.payload.get("error").and_then(|v| v.as_str()) {
+            Some(error) => format!("Delegated agent {sender} failed: {error}"),
+            None => format!(
+                "Delegated agent {sender} finished:\n{}",
+                serde_json::to_string_pretty(&result.payload)
+                    .unwrap_or_else(|_| result.payload.to_string())
+            ),
+        },
+    };
+    if let Some(structured) = result.payload.get("structured_output") {
+        let rendered =
+            serde_json::to_string_pretty(structured).unwrap_or_else(|_| structured.to_string());
+        text.push_str("\n\nStructured output:\n```json\n");
+        text.push_str(&rendered);
+        text.push_str("\n```");
+    }
+    text
+}
+
 /// Orchestrate a complete agent turn: user message → provider stream → storage.
 ///
 /// # Flow
@@ -661,6 +691,54 @@ pub(crate) async fn process_turn_with_existing_turn(
             agent_id: session.agent_id.clone(),
         })
         .await?;
+
+    // Step 7: Deliver completed detached delegations. A detached child's
+    // Result waits in this agent's mailbox until its parent next turns;
+    // each is appended as a durable User-role message *before* history is
+    // rebuilt, so the result enters the thread record — visible in the
+    // UI, part of the audit trail, and carried to the model as ordinary
+    // history content, never as instructions. User role, deliberately:
+    // the history rebuild carries Tool-role rows only when they answer a
+    // recorded tool call (providers reject orphaned tool results), so a
+    // platform-delivered notification rides the same role a channel or
+    // scheduled message would, with the rendering naming its real sender.
+    // Append-before-claim: a failure between the two re-delivers next
+    // turn rather than losing the result, and a lost claim race leaves a
+    // duplicate row, not a gap. A storage failure here fails the turn —
+    // with the same explicit cleanup as the surrounding error paths, so
+    // the thread is not left guarded by a stale Pending turn.
+    let delivery_result: Result<(), GatewayError> = async {
+        let pending_results =
+            swage_agent::mailbox::pending_results(&state.storage, &session.agent_id)
+                .await
+                .map_err(|error| GatewayError::WebSocketError(error.to_string()))?;
+        for result in &pending_results {
+            state
+                .storage
+                .append_message(AppendMessage {
+                    thread_id,
+                    turn_id: Some(prepared_turn_id),
+                    role: Role::User,
+                    content: render_delegation_result(result),
+                    agent_id: session.agent_id.clone(),
+                })
+                .await?;
+            swage_agent::mailbox::claim_result(&state.storage, result.id)
+                .await
+                .map_err(|error| GatewayError::WebSocketError(error.to_string()))?;
+        }
+        Ok(())
+    }
+    .await;
+    if let Err(error) = delivery_result {
+        state
+            .storage
+            .update_turn_state(prepared_turn_id, TurnState::Failed)
+            .await?;
+        let mut turns = state.active_turns.lock().await;
+        turns.remove(&session_id);
+        return Err(error);
+    }
 
     // Steps 8–9: Assemble context via the swage-context assembly engine.
     // Loads thread history and constructs the typed elements used by the
@@ -995,6 +1073,13 @@ pub(crate) async fn process_turn_with_existing_turn(
     // can use it for persistence and logging after the event loop finishes.
     let mut turn_id: Option<Uuid> = None;
 
+    // Set when the durability contract's escalation fires: a constitutive
+    // record was lost, or a reconstructive loss could not even be recorded
+    // as a degradation (record_durability.rs). Checked after the agent
+    // settles — the turn is then failed loudly rather than left looking
+    // auditable.
+    let mut record_integrity_lost: Option<String> = None;
+
     // Step 11: Forward AgentEvent → ServerEvent. The loop runs until the
     // agent drops event_tx (channel closes) or the agent task completes.
     while let Some(event) = event_rx.recv().await {
@@ -1014,7 +1099,22 @@ pub(crate) async fn process_turn_with_existing_turn(
                     .store_snapshot(started_id, &report_json.to_string())
                     .await
                 {
+                    // Reconstructive record (record_durability.rs): the loss
+                    // itself is recorded; only a double failure escalates.
                     tracing::warn!(error = %e, "failed to persist context snapshot");
+                    if let Err(audit_error) = record_durability::record_reconstruction_gap(
+                        state.storage.as_ref(),
+                        Some(session_id),
+                        started_id,
+                        "context_snapshot",
+                        &e,
+                    )
+                    .await
+                    {
+                        record_integrity_lost.get_or_insert(format!(
+                            "context snapshot lost and the loss could not be recorded: {audit_error}"
+                        ));
+                    }
                 }
 
                 // Deliver the ContextAssembled event (subscription-gated).
@@ -1057,10 +1157,24 @@ pub(crate) async fn process_turn_with_existing_turn(
                     .store_snapshot(snapshot_turn_id, &report_json.to_string())
                     .await
                 {
+                    // Reconstructive record (record_durability.rs).
                     tracing::warn!(
                         error = %e,
                         "failed to persist provider-visible context snapshot"
                     );
+                    if let Err(audit_error) = record_durability::record_reconstruction_gap(
+                        state.storage.as_ref(),
+                        Some(session_id),
+                        snapshot_turn_id,
+                        "provider_visible_snapshot",
+                        &e,
+                    )
+                    .await
+                    {
+                        record_integrity_lost.get_or_insert(format!(
+                            "provider-visible snapshot lost and the loss could not be recorded: {audit_error}"
+                        ));
+                    }
                 }
             }
             AgentEvent::ProviderReasoningCaptured {
@@ -1075,10 +1189,24 @@ pub(crate) async fn process_turn_with_existing_turn(
                     .store_snapshot(snapshot_turn_id, &report_json.to_string())
                     .await
                 {
+                    // Reconstructive record (record_durability.rs).
                     tracing::warn!(
                         error = %e,
                         "failed to persist provider reasoning context snapshot"
                     );
+                    if let Err(audit_error) = record_durability::record_reconstruction_gap(
+                        state.storage.as_ref(),
+                        Some(session_id),
+                        snapshot_turn_id,
+                        "provider_reasoning_snapshot",
+                        &e,
+                    )
+                    .await
+                    {
+                        record_integrity_lost.get_or_insert(format!(
+                            "provider reasoning snapshot lost and the loss could not be recorded: {audit_error}"
+                        ));
+                    }
                 }
             }
             AgentEvent::ToolStart {
@@ -1202,7 +1330,10 @@ pub(crate) async fn process_turn_with_existing_turn(
                     "turn_complete",
                 );
 
-                // Update session activity timestamp.
+                // Update session activity timestamp. Derivable record
+                // (record_durability.rs): activity is reconstructable from
+                // turn and message timestamps, so losing this write is
+                // accepted with a warning.
                 if let Err(e) = state.storage.update_activity(session_id).await {
                     tracing::warn!(error = %e, "failed to update session activity");
                 }
@@ -1277,12 +1408,27 @@ pub(crate) async fn process_turn_with_existing_turn(
                     TurnStore::update_structured_output(&*state.storage, outbound.turn_id, output)
                         .await
                 {
-                    // Non-fatal: the turn completed; only the persisted record is affected.
-                    tracing::warn!(
+                    // Constitutive record (record_durability.rs): validated
+                    // output that reached the client but not the record
+                    // makes the trail lie by omission, so the turn fails
+                    // loudly below. The degradation event is still
+                    // attempted so the trail names the gap even when the
+                    // turn row's failure stamp is all that survives.
+                    tracing::error!(
                         error = %e,
                         turn_id = %outbound.turn_id,
                         "failed to persist structured_output"
                     );
+                    let _ = record_durability::record_reconstruction_gap(
+                        state.storage.as_ref(),
+                        Some(session_id),
+                        outbound.turn_id,
+                        "structured_output",
+                        &e,
+                    )
+                    .await;
+                    record_integrity_lost
+                        .get_or_insert(format!("structured output could not be persisted: {e}"));
                 }
             }
         }
@@ -1311,6 +1457,29 @@ pub(crate) async fn process_turn_with_existing_turn(
                 message: "agent task panicked".to_string(),
             });
         }
+    }
+
+    // The durability contract's escalation (record_durability.rs): a turn
+    // whose record is known-incomplete must not end looking auditable.
+    // force_turn_failure, not update_turn_state: the agent has usually
+    // already marked the turn Completed, and the ordinary write's
+    // first-terminal-wins guard would silently no-op — this transition is
+    // the guard's one sanctioned override. The state write may itself fail
+    // on the same broken store — then the log and the client error are the
+    // loudest surfaces left.
+    if let Some(reason) = record_integrity_lost {
+        tracing::error!(turn_id = ?turn_id, %reason, "turn record integrity lost");
+        if let Err(error) = state
+            .storage
+            .force_turn_failure(turn_id.unwrap_or(prepared_turn_id))
+            .await
+        {
+            tracing::error!(error = %error, "failed to mark record-degraded turn as failed");
+        }
+        let _ = ws_tx.send(ServerEvent::Error {
+            code: "turn_record_lost".to_string(),
+            message: format!("The turn's audit record is incomplete: {reason}"),
+        });
     }
 
     if let Some(guard) = &sandbox_guard

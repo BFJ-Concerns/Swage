@@ -183,6 +183,7 @@ async fn operator_search_queries_sessions_messages_approvals_runs_and_deliveries
         .unwrap();
     let schedule = storage
         .create_schedule(NewSchedule {
+            id: Uuid::new_v4(),
             message: "schedule needle".into(),
             status: ScheduleStatus::Active,
             kind: ScheduleKind::Interval,
@@ -369,6 +370,7 @@ async fn audit_trail_survives_restart_for_approvals_deliveries_and_runs() {
 
     let schedule = storage
         .create_schedule(NewSchedule {
+            id: Uuid::new_v4(),
             message: "nightly".into(),
             status: ScheduleStatus::Active,
             kind: ScheduleKind::Interval,
@@ -502,6 +504,7 @@ async fn operator_usage_reports_run_level_and_aggregate_costs() {
 
     let schedule = storage
         .create_schedule(NewSchedule {
+            id: Uuid::new_v4(),
             message: "usage schedule".into(),
             status: ScheduleStatus::Active,
             kind: ScheduleKind::Interval,

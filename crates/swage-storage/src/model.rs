@@ -397,7 +397,7 @@ pub struct ConfigurationVersion {
     pub snapshot: serde_json::Value,
     pub diff: serde_json::Value,
     pub previous_version_id: Option<Uuid>,
-    pub rollback_to_version_id: Option<Uuid>,
+    pub undone_version_id: Option<Uuid>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -416,7 +416,7 @@ pub struct NewConfigurationVersion {
     pub snapshot: serde_json::Value,
     pub diff: serde_json::Value,
     pub previous_version_id: Option<Uuid>,
-    pub rollback_to_version_id: Option<Uuid>,
+    pub undone_version_id: Option<Uuid>,
 }
 
 /// A centrally managed secret or credential reference.
@@ -859,6 +859,44 @@ pub struct NewKnowledgeCitation {
     pub observation_id: Uuid,
     pub derivation_version: u32,
     pub quoted_text: String,
+}
+
+/// Immutable agent-authored orientation derived from whole observations.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrientationCard {
+    pub id: Uuid,
+    pub space_id: Uuid,
+    pub title: String,
+    pub content: String,
+    pub authored_by: String,
+    pub observation_ids: Vec<Uuid>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewOrientationCard {
+    pub space_id: Uuid,
+    pub title: String,
+    pub content: String,
+    pub authored_by: String,
+    pub observation_ids: Vec<Uuid>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OrientationCardLifecycleKind {
+    Superseded,
+    Retired,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrientationCardLifecycle {
+    pub id: Uuid,
+    pub card_id: Uuid,
+    pub kind: OrientationCardLifecycleKind,
+    pub replacement_card_id: Option<Uuid>,
+    pub actor: String,
+    pub created_at: DateTime<Utc>,
 }
 
 /// The observation-level judgement recorded by a curation assertion.
@@ -1660,8 +1698,11 @@ pub struct NewTurn {
 }
 
 /// Input for creating a durable schedule.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NewSchedule {
+    /// Chosen by the caller so recorded configuration cases can establish the
+    /// version-chain identity before the resource is written.
+    pub id: Uuid,
     pub message: String,
     pub status: ScheduleStatus,
     pub kind: ScheduleKind,

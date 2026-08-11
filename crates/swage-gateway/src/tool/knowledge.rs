@@ -1,7 +1,7 @@
 //! Knowledge-base tools — the agent's hands on the space's gathered
 //! external evidence.
 //!
-//! Four tools, separately grantable so read access never implies any kind
+//! Six tools, separately grantable so read access never implies any kind
 //! of write:
 //!
 //! - **`knowledge_search`** — full-text search over the space's knowledge
@@ -12,8 +12,11 @@
 //! - **`knowledge_curate`** — append an observation-level judgement without
 //!   changing the gathered evidence.
 //! - **`knowledge_cite`** — record an exact quote pinned to its derivation.
+//! - **`knowledge_orient`** — discover evidence-backed orientation cards
+//!   without placing their content in instructions.
+//! - **`knowledge_curate_orientation`** — author and maintain those cards.
 //!
-//! All four are host-only (`requires_device_execution`): they reach live gateway
+//! All six are host-only (`requires_device_execution`): they reach live gateway
 //! state and the space's body files. Knowledge content returns as tool
 //! results only — it is gathered external data, never instructions.
 
@@ -23,10 +26,12 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use swage_core::ToolError;
-use swage_protocol::client::knowledge::{KnowledgeSearchResponse, KnowledgeSearchResult};
+use swage_protocol::client::knowledge::{
+    KnowledgeSearchResponse, KnowledgeSearchResult, OrientationCardResult, OrientationFindResponse,
+};
 use swage_storage::{
-    CurationAssertionKind, NewCurationAssertion, NewKnowledgeCitation, NewSourceObservation,
-    ObservationOrigin,
+    CurationAssertionKind, NewCurationAssertion, NewKnowledgeCitation, NewOrientationCard,
+    NewSourceObservation, ObservationOrigin,
 };
 use swage_tool::context::ToolContext;
 
@@ -39,6 +44,8 @@ const SEARCH_TOOL: &str = "knowledge_search";
 const RECORD_TOOL: &str = "knowledge_record";
 const CURATE_TOOL: &str = "knowledge_curate";
 const CITE_TOOL: &str = "knowledge_cite";
+const ORIENT_TOOL: &str = "knowledge_orient";
+const CURATE_ORIENTATION_TOOL: &str = "knowledge_curate_orientation";
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -121,11 +128,14 @@ impl Tool for KnowledgeSearchTool {
     }
 
     fn description(&self) -> &str {
-        "Search this space's knowledge base — the gathered external evidence — by \
-         full text. Each result is a passage with the source it came from and a \
-         pinned observation and version; cite it with those values and the exact quote. The \
+        "Find evidence for a question in this space's gathered external material by \
+         full text. Use knowledge_orient first when you do not yet know what the corpus \
+         contains or which vocabulary it uses. Each result here is a passage with the source it came from and a \
+         pinned observation and version; record a citation with the knowledge_cite \
+         tool, passing those values and the exact quote. The \
          knowledge base holds captured external material; it is not your memory \
-         (use the memory tools for what you know about your own work)."
+         (for what you know about your own work, use agent_memory for your \
+         private records or memory for the space's shared notes)."
     }
 
     fn parameters(&self) -> Value {
@@ -512,6 +522,225 @@ impl Tool for KnowledgeCiteTool {
     }
 }
 
+// ---------------------------------------------------------------------------
+// knowledge_orient
+// ---------------------------------------------------------------------------
+
+pub struct KnowledgeOrientTool;
+
+#[async_trait]
+impl Tool for KnowledgeOrientTool {
+    fn name(&self) -> &str {
+        ORIENT_TOOL
+    }
+
+    fn description(&self) -> &str {
+        "Discover this space's evidence-backed orientation cards before choosing corpus vocabulary. Call without a query on first contact; once useful terms are known, an optional query searches cards. Cards are derived signposts, not evidence: use knowledge_search independently to inspect and cite the underlying observations."
+    }
+
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "query": { "type": "string", "description": "Optional FTS query. Omit on first contact." },
+                "limit": { "type": "integer", "minimum": 1, "maximum": 50 }
+            },
+            "required": []
+        })
+    }
+
+    fn requires_device_execution(&self) -> bool {
+        true
+    }
+
+    async fn execute(&self, params: Value, ctx: &dyn ToolContext) -> Result<Value, ToolError> {
+        let state = gateway_state(ORIENT_TOOL, ctx)?;
+        let (space_id, _) = session_space(ORIENT_TOOL, state, ctx).await?;
+        let limit = params
+            .get("limit")
+            .and_then(Value::as_u64)
+            .map_or(20, |value| value.clamp(1, 50) as usize);
+        let query = params
+            .get("query")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty());
+        let cards = state
+            .storage
+            .find_orientation_cards(space_id, query, limit)
+            .await
+            .map_err(|error| failed(ORIENT_TOOL, error))?
+            .into_iter()
+            .map(|card| OrientationCardResult {
+                card_id: card.id,
+                title: card.title,
+                content: card.content,
+                authored_by: card.authored_by,
+                observation_ids: card.observation_ids,
+                created_at: card.created_at.to_rfc3339(),
+            })
+            .collect();
+        serde_json::to_value(OrientationFindResponse { cards, guidance: "Cards are orientation only. Search the evidence independently with knowledge_search; a card is never required to reach an observation.".into() }).map_err(|error| failed(ORIENT_TOOL, error))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// knowledge_curate_orientation
+// ---------------------------------------------------------------------------
+
+pub struct KnowledgeCurateOrientationTool;
+
+#[async_trait]
+impl Tool for KnowledgeCurateOrientationTool {
+    fn name(&self) -> &str {
+        CURATE_ORIENTATION_TOOL
+    }
+
+    fn description(&self) -> &str {
+        "Maintain this space's evidence-backed orientation cards. Author creates an immutable card grounded in source observations. Supersede and retire append terminal lifecycle records; use supersede when another active card should replace the old signpost."
+    }
+
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "operation": { "type": "string", "enum": ["author", "supersede", "retire"] },
+                "title": { "type": "string" },
+                "content": { "type": "string" },
+                "observation_ids": { "type": "array", "items": { "type": "string", "format": "uuid" }, "minItems": 1 },
+                "card_id": { "type": "string", "format": "uuid" },
+                "replacement_card_id": { "type": "string", "format": "uuid" }
+            },
+            "required": ["operation"]
+        })
+    }
+
+    fn requires_device_execution(&self) -> bool {
+        true
+    }
+
+    async fn execute(&self, params: Value, ctx: &dyn ToolContext) -> Result<Value, ToolError> {
+        let operation = required_str(CURATE_ORIENTATION_TOOL, &params, "operation")?;
+        if !matches!(operation, "author" | "supersede" | "retire") {
+            return Err(invalid(
+                CURATE_ORIENTATION_TOOL,
+                "'operation' must be author, supersede, or retire",
+            ));
+        }
+        let parsed = match operation {
+            "author" => {
+                let title = required_str(CURATE_ORIENTATION_TOOL, &params, "title")?.to_owned();
+                let content = required_str(CURATE_ORIENTATION_TOOL, &params, "content")?.to_owned();
+                let values = params
+                    .get("observation_ids")
+                    .and_then(Value::as_array)
+                    .filter(|values| !values.is_empty())
+                    .ok_or_else(|| {
+                        invalid(
+                            CURATE_ORIENTATION_TOOL,
+                            "'observation_ids' needs at least one UUID",
+                        )
+                    })?;
+                let ids = values
+                    .iter()
+                    .map(|value| {
+                        value
+                            .as_str()
+                            .and_then(|value| value.parse::<Uuid>().ok())
+                            .ok_or_else(|| {
+                                invalid(
+                                    CURATE_ORIENTATION_TOOL,
+                                    "every 'observation_ids' value must be a UUID",
+                                )
+                            })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                Some((title, content, ids))
+            }
+            _ => None,
+        };
+        let card_id = if matches!(operation, "supersede" | "retire") {
+            Some(
+                required_str(CURATE_ORIENTATION_TOOL, &params, "card_id")?
+                    .parse::<Uuid>()
+                    .map_err(|_| invalid(CURATE_ORIENTATION_TOOL, "'card_id' must be a UUID"))?,
+            )
+        } else {
+            None
+        };
+        let replacement_card_id = if operation == "supersede" {
+            Some(
+                required_str(CURATE_ORIENTATION_TOOL, &params, "replacement_card_id")?
+                    .parse::<Uuid>()
+                    .map_err(|_| {
+                        invalid(
+                            CURATE_ORIENTATION_TOOL,
+                            "'replacement_card_id' must be a UUID",
+                        )
+                    })?,
+            )
+        } else {
+            None
+        };
+
+        let state = gateway_state(CURATE_ORIENTATION_TOOL, ctx)?;
+        let (space_id, _) = session_space(CURATE_ORIENTATION_TOOL, state, ctx).await?;
+        let session_id = ctx.session_id().parse::<Uuid>().ok();
+        match operation {
+            "author" => {
+                let (title, content, observation_ids) =
+                    parsed.expect("validated author parameters");
+                let card = state
+                    .storage
+                    .create_orientation_card(
+                        NewOrientationCard {
+                            space_id,
+                            title,
+                            content,
+                            authored_by: ctx.agent_id().to_owned(),
+                            observation_ids,
+                        },
+                        session_id,
+                    )
+                    .await
+                    .map_err(|error| failed(CURATE_ORIENTATION_TOOL, error))?;
+                Ok(
+                    json!({"card_id": card.id, "authored_by": card.authored_by, "observation_ids": card.observation_ids, "recorded": true}),
+                )
+            }
+            "supersede" => {
+                let record = state
+                    .storage
+                    .supersede_orientation_card(
+                        space_id,
+                        card_id.expect("supersede parameters validated card_id"),
+                        replacement_card_id.expect("supersede parameters validated replacement"),
+                        ctx.agent_id().to_owned(),
+                        session_id,
+                    )
+                    .await
+                    .map_err(|error| failed(CURATE_ORIENTATION_TOOL, error))?;
+                Ok(
+                    json!({"card_id": record.card_id, "replacement_card_id": record.replacement_card_id, "superseded": true}),
+                )
+            }
+            "retire" => {
+                let record = state
+                    .storage
+                    .retire_orientation_card(
+                        space_id,
+                        card_id.expect("retire parameters validated card_id"),
+                        ctx.agent_id().to_owned(),
+                        session_id,
+                    )
+                    .await
+                    .map_err(|error| failed(CURATE_ORIENTATION_TOOL, error))?;
+                Ok(json!({"card_id": record.card_id, "retired": true}))
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -524,14 +753,9 @@ mod tests {
     use crate::turn::tests::MockProvider;
     use swage_provider::LlmProvider;
     use swage_storage::{
-        CitationStore, NewSession, NewSourceObservation, ObservationStore, SessionStore,
-        SpaceStore, SqliteStorage,
+        AuditStore, CitationStore, NewOrientationCard, NewSession, NewSourceObservation, NewSpace,
+        ObservationStore, OrientationCardStore, SessionStore, SpaceStore, SqliteStorage,
     };
-
-    // The tools' host halves (session→space resolution, storage, body files)
-    // are exercised through the storage and knowledge module tests; here the
-    // contract that matters is the parameter validation a model will actually
-    // hit, which runs before any host state is touched.
 
     #[tokio::test(flavor = "multi_thread")]
     async fn record_requires_an_origin() {
@@ -601,6 +825,281 @@ mod tests {
                 Err(ToolError::InvalidParameters { .. })
             ));
         }
+    }
+
+    #[test]
+    fn orientation_declaration_supports_queryless_first_contact() {
+        let tool = KnowledgeOrientTool;
+        let curate = KnowledgeCurateOrientationTool;
+        let search = KnowledgeSearchTool;
+        assert!(
+            tool.description()
+                .contains("before choosing corpus vocabulary")
+        );
+        assert!(tool.description().contains("without a query"));
+        assert!(
+            search
+                .description()
+                .contains("Find evidence for a question")
+        );
+        assert!(search.description().contains("Use knowledge_orient first"));
+        assert!(
+            !tool.parameters()["required"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|value| value == "query")
+        );
+        assert!(tool.requires_device_execution());
+        assert!(tool.parameters()["properties"].get("operation").is_none());
+        assert_eq!(
+            curate.parameters()["properties"]["operation"]["enum"],
+            json!(["author", "supersede", "retire"])
+        );
+        assert!(curate.requires_device_execution());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn orientation_validates_mutations_before_host_access() {
+        let tool = KnowledgeCurateOrientationTool;
+        let ctx = swage_tool::context::MockToolContext::new("agent", "not-a-session");
+        for params in [
+            json!({"operation": "unknown"}),
+            json!({"operation": "author", "title": "title", "content": "content", "observation_ids": []}),
+            json!({"operation": "retire", "card_id": "not-a-uuid"}),
+            json!({"operation": "supersede", "card_id": Uuid::new_v4()}),
+        ] {
+            assert!(matches!(
+                tool.execute(params, &ctx).await,
+                Err(ToolError::InvalidParameters { .. })
+            ));
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn orientation_tools_run_the_scoped_lifecycle_and_record_the_session() {
+        let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+        let space = storage.get_or_create_default().await.unwrap();
+        let other_space = storage
+            .create(NewSpace {
+                name: "Other knowledge".into(),
+                slug: "other-knowledge".into(),
+            })
+            .await
+            .unwrap();
+        let session = storage
+            .create_session(NewSession {
+                space_id: space.id,
+                agent_id: "curator".into(),
+                metadata: None,
+                active_workspace_attachment_id: None,
+            })
+            .await
+            .unwrap();
+        let observation = storage
+            .record_observation(NewSourceObservation {
+                space_id: space.id,
+                origin: ObservationOrigin {
+                    url: Some("https://example.test/local-evidence".into()),
+                    local_path: None,
+                },
+                retrieved_at: Utc::now(),
+                body_sha256: "local-orientation-body".into(),
+                body_bytes: 32,
+                media_type: "text/plain".into(),
+            })
+            .await
+            .unwrap();
+        let other_observation = storage
+            .record_observation(NewSourceObservation {
+                space_id: other_space.id,
+                origin: ObservationOrigin {
+                    url: Some("https://example.test/foreign-evidence".into()),
+                    local_path: None,
+                },
+                retrieved_at: Utc::now(),
+                body_sha256: "foreign-orientation-body".into(),
+                body_bytes: 32,
+                media_type: "text/plain".into(),
+            })
+            .await
+            .unwrap();
+        let foreign_card = storage
+            .create_orientation_card(
+                NewOrientationCard {
+                    space_id: other_space.id,
+                    title: "Foreign vocabulary".into(),
+                    content: "Must remain outside this session's authority".into(),
+                    authored_by: "other-curator".into(),
+                    observation_ids: vec![other_observation.id],
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+        let provider = Arc::new(MockProvider::new(vec![]));
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn swage_storage::Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            provider as Arc<dyn LlmProvider>,
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let base = swage_tool::context::MockToolContext::new("curator", session.id.to_string());
+        let (ws_tx, _ws_rx) = mpsc::unbounded_channel();
+        let ctx = GatewayToolContext::new(
+            &base,
+            ws_tx,
+            Arc::clone(&storage) as Arc<dyn swage_storage::Storage>,
+        )
+        .with_app_state(Some(state));
+        let curate = KnowledgeCurateOrientationTool;
+
+        let first = curate
+            .execute(
+                json!({
+                    "operation": "author",
+                    "title": "Original vocabulary",
+                    "content": "The first signpost",
+                    "observation_ids": [observation.id],
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(first["authored_by"], "curator");
+        assert_eq!(first["observation_ids"], json!([observation.id]));
+        assert_eq!(first["recorded"], true);
+        let first_id = first["card_id"].as_str().unwrap().parse::<Uuid>().unwrap();
+
+        let replacement = curate
+            .execute(
+                json!({
+                    "operation": "author",
+                    "title": "Preferred vocabulary",
+                    "content": "The current signpost",
+                    "observation_ids": [observation.id],
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        let replacement_id = replacement["card_id"]
+            .as_str()
+            .unwrap()
+            .parse::<Uuid>()
+            .unwrap();
+
+        let found = KnowledgeOrientTool.execute(json!({}), &ctx).await.unwrap();
+        assert_eq!(found["cards"].as_array().unwrap().len(), 2);
+        assert!(
+            found["guidance"]
+                .as_str()
+                .unwrap()
+                .contains("orientation only")
+        );
+        let preferred = found["cards"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|card| card["card_id"] == json!(replacement_id))
+            .unwrap();
+        assert_eq!(preferred["title"], "Preferred vocabulary");
+        assert_eq!(preferred["content"], "The current signpost");
+        assert_eq!(preferred["authored_by"], "curator");
+        assert_eq!(preferred["observation_ids"], json!([observation.id]));
+        assert!(preferred["created_at"].as_str().is_some());
+
+        let foreign_retire = curate
+            .execute(
+                json!({"operation": "retire", "card_id": foreign_card.id}),
+                &ctx,
+            )
+            .await;
+        assert!(matches!(
+            foreign_retire,
+            Err(ToolError::ExecutionFailed { .. })
+        ));
+        let foreign_replacement = curate
+            .execute(
+                json!({
+                    "operation": "supersede",
+                    "card_id": first_id,
+                    "replacement_card_id": foreign_card.id,
+                }),
+                &ctx,
+            )
+            .await;
+        assert!(matches!(
+            foreign_replacement,
+            Err(ToolError::ExecutionFailed { .. })
+        ));
+        assert_eq!(
+            storage
+                .find_orientation_cards(other_space.id, None, 20)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let superseded = curate
+            .execute(
+                json!({
+                    "operation": "supersede",
+                    "card_id": first_id,
+                    "replacement_card_id": replacement_id,
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(superseded["card_id"], json!(first_id));
+        assert_eq!(superseded["replacement_card_id"], json!(replacement_id));
+        assert_eq!(superseded["superseded"], true);
+        let active = KnowledgeOrientTool.execute(json!({}), &ctx).await.unwrap();
+        assert_eq!(active["cards"].as_array().unwrap().len(), 1);
+        assert_eq!(active["cards"][0]["card_id"], json!(replacement_id));
+
+        let retired = curate
+            .execute(
+                json!({"operation": "retire", "card_id": replacement_id}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(retired["card_id"], json!(replacement_id));
+        assert_eq!(retired["retired"], true);
+        assert!(
+            KnowledgeOrientTool.execute(json!({}), &ctx).await.unwrap()["cards"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+
+        let mut events = storage
+            .list_audit_events()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|event| event.session_id == Some(session.id))
+            .collect::<Vec<_>>();
+        events.sort_by(|left, right| left.event_kind.cmp(&right.event_kind));
+        assert_eq!(events.len(), 4);
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.event_kind.as_str())
+                .collect::<Vec<_>>(),
+            vec!["created", "created", "retired", "superseded"]
+        );
+        assert!(
+            events
+                .iter()
+                .all(|event| event.metadata["actor"] == "curator")
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

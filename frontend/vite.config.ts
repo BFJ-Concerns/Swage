@@ -34,8 +34,10 @@ export default defineConfig({
     port: 5173,
     proxy: {
       // Proxy API and WebSocket requests to the gateway during development.
+      // SWAGE_GATEWAY_URL points the dev UI at a gateway on a non-default
+      // port (isolated development instances).
       "/api": {
-        target: "http://127.0.0.1:3000",
+        target: process.env.SWAGE_GATEWAY_URL ?? "http://127.0.0.1:3000",
         changeOrigin: true,
         ws: true,
       },

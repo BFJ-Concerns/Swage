@@ -21,17 +21,26 @@
     "approvals": {
       "$ref": "#/$defs/ApprovalListResponse"
     },
+    "configuration_change": {
+      "$ref": "#/$defs/ConfigurationChangeResponse"
+    },
     "devices": {
       "$ref": "#/$defs/DeviceListResponse"
     },
     "heartbeat": {
       "$ref": "#/$defs/MachineHeartbeatRequest"
     },
+    "knowledge_mirror": {
+      "$ref": "#/$defs/KnowledgeMirrorRegenerateResponse"
+    },
     "operator_overview": {
       "$ref": "#/$defs/OperatorOverviewResponse"
     },
     "presence": {
       "$ref": "#/$defs/PresenceSnapshotResponse"
+    },
+    "undo_configuration_case": {
+      "$ref": "#/$defs/UndoConfigurationCaseRequest"
     }
   },
   "required": [
@@ -39,12 +48,15 @@
     "heartbeat",
     "approvals",
     "approval_decision",
+    "undo_configuration_case",
+    "configuration_change",
     "operator_overview",
     "agent_definition_list",
     "agent_definition_create",
     "agent_definition_update",
     "agent_definition_mutation",
-    "devices"
+    "devices",
+    "knowledge_mirror"
   ],
   "$defs": {
     "AgentDefinitionListResponse": {
@@ -323,6 +335,35 @@
         "state"
       ]
     },
+    "ConfigurationChangeResponse": {
+      "description": "The new change-case record produced by undoing a configuration case.",
+      "type": "object",
+      "properties": {
+        "entity_id": {
+          "type": "string"
+        },
+        "entity_kind": {
+          "type": "string"
+        },
+        "risk_band": {
+          "type": "string"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "version_id": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "required": [
+        "version_id",
+        "entity_kind",
+        "entity_id",
+        "summary",
+        "risk_band"
+      ]
+    },
     "CreateAgentDefinitionRequest": {
       "description": "Whole definition supplied when creating a durable agent.",
       "type": "object",
@@ -557,6 +598,25 @@
       },
       "required": [
         "model"
+      ]
+    },
+    "KnowledgeMirrorRegenerateResponse": {
+      "description": "Result of regenerating a space's knowledge-base browse mirror — a\ndisposable markdown projection of the database-authoritative store.",
+      "type": "object",
+      "properties": {
+        "files_written": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "mirror_root": {
+          "description": "Absolute path of the regenerated mirror directory.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "mirror_root",
+        "files_written"
       ]
     },
     "MachineHeartbeatRequest": {
@@ -1103,6 +1163,19 @@
             "session_id"
           ]
         }
+      ]
+    },
+    "UndoConfigurationCaseRequest": {
+      "description": "Ask the operator control plane to undo a recorded configuration case.",
+      "type": "object",
+      "properties": {
+        "case_id": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "required": [
+        "case_id"
       ]
     },
     "UpdateAgentDefinitionRequest": {

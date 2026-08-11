@@ -18,7 +18,7 @@ impl Tool for AgentMemoryTool {
     }
 
     fn description(&self) -> &str {
-        "Remember things across sessions and recall them later: save an insight, preference, procedure, or outcome now, search for it in any future session, or review how a remembered item changed over time."
+        "Your own private memory: save an insight, preference, procedure, or outcome now, search for it in any future session, or review how a remembered item changed over time. Records here are yours alone — for notes shared with everyone working in the space, use the memory tool instead."
     }
 
     fn parameters(&self) -> Value {
