@@ -1301,6 +1301,9 @@ const CREATE_AGENT_DEFINITION_TABLE: &str = "
         instructions          TEXT NOT NULL DEFAULT '',
         model_id              TEXT,
         tool_permissions_json TEXT,
+        skills_json           TEXT NOT NULL DEFAULT '[]',
+        output_schema_json    TEXT,
+        output_max_retries    INTEGER,
         created_at            TEXT NOT NULL,
         updated_at            TEXT NOT NULL,
         PRIMARY KEY (id, space_id)

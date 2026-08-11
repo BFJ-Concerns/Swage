@@ -880,6 +880,7 @@ pub fn resolve(partial: PartialConfig) -> ResolvedConfig {
                 max_retries: o.max_retries.unwrap_or(do_.max_retries),
             }
         },
+        declared_skills: Vec::new(),
         communication: {
             use crate::model::{
                 CommunicationConfig, ContextTransferConfig, ContextTransferTargetConfig,

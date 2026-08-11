@@ -225,6 +225,14 @@ pub(crate) fn apply_agent_definition(
         }
     }
 
+    config.declared_skills = definition.skills.clone();
+    if let Some(schema) = &definition.output_schema {
+        config.output.schema = Some(schema.clone());
+    }
+    if let Some(max_retries) = definition.output_max_retries {
+        config.output.max_retries = max_retries;
+    }
+
     config
 }
 
@@ -290,6 +298,9 @@ mod tests {
             instructions: instructions.into(),
             model_id: model_id.map(str::to_owned),
             tool_permissions,
+            skills: vec![],
+            output_schema: None,
+            output_max_retries: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         }
@@ -402,5 +413,19 @@ mod tests {
             vec!["knowledge_search".to_string()],
             "an allow-all config defers to the definition's narrower grant"
         );
+    }
+
+    #[test]
+    fn definition_applies_skills_and_output_contract() {
+        let mut definition = definition_with("", None, None);
+        definition.skills = vec!["source-checking".into()];
+        definition.output_schema = Some(serde_json::json!({"type": "object"}));
+        definition.output_max_retries = Some(2);
+
+        let applied = apply_agent_definition(swage_config::ResolvedConfig::default(), &definition);
+
+        assert_eq!(applied.declared_skills, ["source-checking"]);
+        assert_eq!(applied.output.schema.unwrap()["type"], "object");
+        assert_eq!(applied.output.max_retries, 2);
     }
 }

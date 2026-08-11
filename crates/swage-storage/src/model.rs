@@ -971,6 +971,12 @@ pub struct AgentDefinition {
     pub model_id: Option<String>,
     /// Optional tool-permission overlay (serialised `PermissionConfig`).
     pub tool_permissions: Option<serde_json::Value>,
+    /// Skills this definition activates when they are available to the agent.
+    pub skills: Vec<String>,
+    /// JSON Schema enforced for every final response from this agent.
+    pub output_schema: Option<serde_json::Value>,
+    /// Definition-specific validation retry limit.
+    pub output_max_retries: Option<u32>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -987,6 +993,10 @@ pub struct NewAgentDefinition {
     pub instructions: String,
     pub model_id: Option<String>,
     pub tool_permissions: Option<serde_json::Value>,
+    #[serde(default)]
+    pub skills: Vec<String>,
+    pub output_schema: Option<serde_json::Value>,
+    pub output_max_retries: Option<u32>,
 }
 
 /// A manually appended audit event.
