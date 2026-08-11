@@ -317,6 +317,7 @@ impl LlmProvider for MultiRoundMockProvider {
 struct DetachedGatedProvider {
     child_started: Arc<Notify>,
     child_release: Arc<Notify>,
+    child_answer: String,
     initial_parent_request_seen: AtomicUsize,
     captured: Arc<std::sync::Mutex<Vec<String>>>,
 }
@@ -325,12 +326,14 @@ impl DetachedGatedProvider {
     fn new(
         child_started: Arc<Notify>,
         child_release: Arc<Notify>,
+        child_answer: String,
     ) -> (Self, Arc<std::sync::Mutex<Vec<String>>>) {
         let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
         (
             Self {
                 child_started,
                 child_release,
+                child_answer,
                 initial_parent_request_seen: AtomicUsize::new(0),
                 captured: captured.clone(),
             },
@@ -374,9 +377,11 @@ impl LlmProvider for DetachedGatedProvider {
         if request_text.contains("Delegated Task\n\nSummarise independently") {
             let started = self.child_started.clone();
             let release = self.child_release.clone();
+            let child_answer = self.child_answer.clone();
             return Box::pin(stream::unfold(0_u8, move |state| {
                 let started = started.clone();
                 let release = release.clone();
+                let child_answer = child_answer.clone();
                 async move {
                     match state {
                         0 => {
@@ -384,7 +389,7 @@ impl LlmProvider for DetachedGatedProvider {
                             release.notified().await;
                             Some((
                                 StreamChunk::Delta {
-                                    content: "Detached child answer".into(),
+                                    content: child_answer,
                                 },
                                 1,
                             ))
@@ -6340,7 +6345,7 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn delegate_tool_detaches_child_and_persists_result_after_release() {
+async fn completed_detached_result_reaches_parent_next_turn() {
     let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
     let space = storage
         .get_or_create_default()
@@ -6368,8 +6373,12 @@ async fn delegate_tool_detaches_child_and_persists_result_after_release() {
 
     let child_started = Arc::new(Notify::new());
     let child_release = Arc::new(Notify::new());
-    let (provider, captured_requests) =
-        DetachedGatedProvider::new(child_started.clone(), child_release.clone());
+    let child_marker = Uuid::new_v4().to_string();
+    let (provider, captured_requests) = DetachedGatedProvider::new(
+        child_started.clone(),
+        child_release.clone(),
+        child_marker.clone(),
+    );
 
     let dispatcher =
         crate::tool::ToolDispatcher::allow_all(vec![
@@ -6495,10 +6504,7 @@ async fn delegate_tool_detaches_child_and_persists_result_after_release() {
             .list_by_correlation(delegate_message_id)
             .await
             .expect("list correlated messages after release");
-        if result_messages
-            .iter()
-            .any(|message| message.status != MessageStatus::Pending)
-        {
+        if !result_messages.is_empty() {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -6506,8 +6512,21 @@ async fn delegate_tool_detaches_child_and_persists_result_after_release() {
 
     assert_eq!(result_messages.len(), 1, "expected one result message");
     let result_message = &result_messages[0];
-    assert_eq!(result_message.status, MessageStatus::Delivered);
-    assert_eq!(result_message.payload["response"], "Detached child answer");
+    assert_eq!(result_message.payload["response"], child_marker);
+    let pre_turn_result_status = result_message.status.clone();
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    process_turn(
+        &state,
+        session_id,
+        None,
+        "Continue after the detached child completed".to_string(),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .expect("parent next turn should complete");
 
     let child_turns = state
         .storage
@@ -6520,9 +6539,22 @@ async fn delegate_tool_detaches_child_and_persists_result_after_release() {
 
     let captured = captured_requests.lock().unwrap();
     assert!(
-        captured.len() >= 3,
-        "expected initial parent, detached child, and resumed parent requests: {captured:?}"
+        captured.len() >= 4,
+        "expected initial parent, detached child, resumed parent, and next-turn requests: {captured:?}"
     );
+    let next_turn_request = captured.last().expect("next-turn provider request");
+    assert!(
+        next_turn_request.contains(&child_marker),
+        "completed detached result marker {child_marker} absent from parent next turn while result row status was {pre_turn_result_status:?}; request: {next_turn_request}"
+    );
+    let delivered_result = state
+        .storage
+        .get_agent_message(result_message.id)
+        .await
+        .expect("get result after parent next turn")
+        .expect("result should still exist");
+    assert_eq!(delivered_result.status, MessageStatus::Delivered);
+    assert!(delivered_result.delivered_at.is_some());
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -6563,8 +6595,11 @@ async fn detached_delegate_can_be_cancelled_through_active_registry() {
 
     let child_started = Arc::new(Notify::new());
     let child_release = Arc::new(Notify::new());
-    let (provider, _captured_requests) =
-        DetachedGatedProvider::new(child_started.clone(), child_release);
+    let (provider, _captured_requests) = DetachedGatedProvider::new(
+        child_started.clone(),
+        child_release,
+        "Detached child answer".to_string(),
+    );
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,

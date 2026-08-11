@@ -328,16 +328,10 @@ impl DelegationHandler for GatewayDelegationHandler {
                     .await;
 
                     match result {
-                        Ok(result_msg) => {
-                            if let Err(error) = detached_router.deliver_message(&result_msg).await {
-                                tracing::warn!(
-                                    delegate_message_id = %delegate_message_id,
-                                    result_message_id = %result_msg.id,
-                                    error = ?error,
-                                    "failed to deliver detached delegate result"
-                                );
-                            }
-                        }
+                        // execute_delegation has persisted the Result as Pending.
+                        // The parent's next turn owns its delivery: Step 7 appends
+                        // it to the parent thread before claiming it Delivered.
+                        Ok(_result_msg) => {}
                         Err(error) => {
                             let _ = detached_router
                                 .fail_message(delegate_message_id, &error.to_string())
