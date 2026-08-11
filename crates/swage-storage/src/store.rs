@@ -12,11 +12,12 @@ use crate::model::{
     NewAgentMemoryRecord, NewAgentMessage, NewApprovalRequest, NewAttachment, NewAuditEvent,
     NewBackgroundJob, NewChannelInboundMessage, NewChannelLink, NewConfigurationVersion,
     NewCurationAssertion, NewDeliveryRecord, NewDeviceRegistration, NewKnowledgeCitation,
-    NewMaterial, NewMessage, NewSchedule, NewScheduleRun, NewSecretRecord, NewSession,
-    NewSourceObservation, NewSpace, NewThread, NewToolCall, NewTurn, NewWorkflowJournalIntent,
-    NewWorkflowRun, NewWorkflowScript, NewWorkspaceAttachment, PendingChannelOrigin, Schedule,
-    ScheduleRun, ScheduleRunUpdate, SecretRecord, Session, SourceObservation, Space, SpaceSlug,
-    Thread, ThreadBranch, ThreadState, ToolCallRecord, Turn, TurnState, UpdateSchedule,
+    NewMaterial, NewMessage, NewOrientationCard, NewSchedule, NewScheduleRun, NewSecretRecord,
+    NewSession, NewSourceObservation, NewSpace, NewThread, NewToolCall, NewTurn,
+    NewWorkflowJournalIntent, NewWorkflowRun, NewWorkflowScript, NewWorkspaceAttachment,
+    OrientationCard, OrientationCardLifecycle, PendingChannelOrigin, Schedule, ScheduleRun,
+    ScheduleRunUpdate, SecretRecord, Session, SourceObservation, Space, SpaceSlug, Thread,
+    ThreadBranch, ThreadState, ToolCallRecord, Turn, TurnState, UpdateSchedule,
     WorkflowJournalRecord, WorkflowRunRecord, WorkflowScriptRecord, WorkflowScriptVersion,
     WorkspaceAttachment,
 };
@@ -294,6 +295,35 @@ pub trait CitationStore: Send + Sync {
     ) -> Result<KnowledgeCitation, StorageError>;
 
     async fn get_citation(&self, id: Uuid) -> Result<Option<KnowledgeCitation>, StorageError>;
+}
+
+/// Immutable orientation cards and their append-only lifecycle.
+#[async_trait]
+pub trait OrientationCardStore: Send + Sync {
+    async fn create_orientation_card(
+        &self,
+        card: NewOrientationCard,
+        session_id: Option<Uuid>,
+    ) -> Result<OrientationCard, StorageError>;
+    async fn find_orientation_cards(
+        &self,
+        space_id: Uuid,
+        query: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<OrientationCard>, StorageError>;
+    async fn supersede_orientation_card(
+        &self,
+        card_id: Uuid,
+        replacement_card_id: Uuid,
+        actor: String,
+        session_id: Option<Uuid>,
+    ) -> Result<OrientationCardLifecycle, StorageError>;
+    async fn retire_orientation_card(
+        &self,
+        card_id: Uuid,
+        actor: String,
+        session_id: Option<Uuid>,
+    ) -> Result<OrientationCardLifecycle, StorageError>;
 }
 
 #[async_trait]
@@ -1024,6 +1054,7 @@ pub trait Storage:
     + ObservationStore
     + CurationAssertionStore
     + CitationStore
+    + OrientationCardStore
     + SecretStore
     + ThreadStore
     + TurnStore
@@ -1058,6 +1089,7 @@ impl<T> Storage for T where
         + ObservationStore
         + CurationAssertionStore
         + CitationStore
+        + OrientationCardStore
         + SecretStore
         + ThreadStore
         + TurnStore
@@ -1476,6 +1508,42 @@ mod tests {
         }
 
         async fn get_citation(&self, _: Uuid) -> Result<Option<KnowledgeCitation>, StorageError> {
+            unimplemented!()
+        }
+    }
+
+    #[async_trait]
+    impl OrientationCardStore for StubStorage {
+        async fn create_orientation_card(
+            &self,
+            _: NewOrientationCard,
+            _: Option<Uuid>,
+        ) -> Result<OrientationCard, StorageError> {
+            unimplemented!()
+        }
+        async fn find_orientation_cards(
+            &self,
+            _: Uuid,
+            _: Option<&str>,
+            _: usize,
+        ) -> Result<Vec<OrientationCard>, StorageError> {
+            unimplemented!()
+        }
+        async fn supersede_orientation_card(
+            &self,
+            _: Uuid,
+            _: Uuid,
+            _: String,
+            _: Option<Uuid>,
+        ) -> Result<OrientationCardLifecycle, StorageError> {
+            unimplemented!()
+        }
+        async fn retire_orientation_card(
+            &self,
+            _: Uuid,
+            _: String,
+            _: Option<Uuid>,
+        ) -> Result<OrientationCardLifecycle, StorageError> {
             unimplemented!()
         }
     }
