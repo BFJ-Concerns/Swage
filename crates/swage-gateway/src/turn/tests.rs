@@ -6104,9 +6104,10 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
             finish_reason: None,
         },
     ];
+    let child_marker = Uuid::new_v4().to_string();
     let child_round = vec![
         StreamChunk::Delta {
-            content: "Delegate answer".into(),
+            content: child_marker.clone(),
         },
         StreamChunk::Done {
             finish_reason: None,
@@ -6120,9 +6121,21 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
             finish_reason: None,
         },
     ];
+    let parent_next_round = vec![
+        StreamChunk::Delta {
+            content: "Parent continued on its next turn".into(),
+        },
+        StreamChunk::Done {
+            finish_reason: None,
+        },
+    ];
 
-    let (provider, captured_requests) =
-        CapturingMultiRoundProvider::new(vec![parent_round, child_round, parent_resume_round]);
+    let (provider, captured_requests) = CapturingMultiRoundProvider::new(vec![
+        parent_round,
+        child_round,
+        parent_resume_round,
+        parent_next_round,
+    ]);
 
     let swage_home = tempfile::TempDir::new().expect("temp swage home");
     let space_skill_dir = swage_home
@@ -6243,7 +6256,7 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
     assert_eq!(child_turns[0].parent_turn_id, Some(root_turn.id));
     assert_eq!(
         child_turns[0].assistant_response.as_deref(),
-        Some("Delegate answer")
+        Some(child_marker.as_str())
     );
     let child_snapshot = state
         .storage
@@ -6271,11 +6284,24 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
         "delegated assembly selection should be recorded against the child turn"
     );
 
+    let (tx, _rx) = mpsc::unbounded_channel();
+    process_turn(
+        &state,
+        session_id,
+        None,
+        "Continue after the foreground delegation".to_string(),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .expect("parent next turn should complete");
+
     let captured_requests = captured_requests.lock().unwrap();
     assert_eq!(
         captured_requests.len(),
-        3,
-        "expected parent, child, and resumed-parent provider requests"
+        4,
+        "expected parent, child, resumed-parent, and next-turn provider requests"
     );
     let parent_request_text = captured_requests[0]
         .messages
@@ -6341,6 +6367,17 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
     assert!(
         !resumed_parent_request_text.contains("Use the delegated specialist skill."),
         "target agent skill instructions must not bleed into the resumed parent request"
+    );
+    let next_parent_request_text = captured_requests[3]
+        .messages
+        .iter()
+        .map(ChatMessage::text_content)
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    assert_eq!(
+        next_parent_request_text.matches(&child_marker).count(),
+        0,
+        "wait-mode result marker {child_marker} should not be delivered again on the parent's next turn; request: {next_parent_request_text}"
     );
 }
 
