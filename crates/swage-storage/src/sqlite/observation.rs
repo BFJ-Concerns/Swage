@@ -823,4 +823,41 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].observation_id, literal_match.id);
     }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn search_fallback_treats_query_as_text_not_syntax() {
+        let (storage, space_id) = storage_with_space().await;
+        let literal_match = storage
+            .record_observation(new_observation(space_id, "https://example.org/a", "gg77"))
+            .await
+            .unwrap();
+        storage
+            .add_extraction(
+                literal_match.id,
+                "This example contains the literal word OR.".into(),
+                "x".into(),
+            )
+            .await
+            .unwrap();
+        let operator_broadened_match = storage
+            .record_observation(new_observation(space_id, "https://example.org/b", "hh88"))
+            .await
+            .unwrap();
+        storage
+            .add_extraction(
+                operator_broadened_match.id,
+                "An unrelated alternative must remain excluded.".into(),
+                "x".into(),
+            )
+            .await
+            .unwrap();
+
+        let hits = storage
+            .search_extractions(space_id, "absent OR \"unclosed missing", 10)
+            .await
+            .expect("fallback syntax is matched as text, not executed");
+
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].observation_id, literal_match.id);
+    }
 }
