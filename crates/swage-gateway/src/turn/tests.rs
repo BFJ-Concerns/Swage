@@ -8,7 +8,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use futures::stream;
+use futures::{StreamExt, stream};
 use tokio::sync::{Mutex, Notify, mpsc};
 
 use swage_core::{
@@ -169,6 +169,57 @@ impl MultiRoundMockProvider {
     pub(crate) fn new(rounds: Vec<Vec<StreamChunk>>) -> Self {
         Self {
             rounds: std::sync::Mutex::new(rounds.into_iter().collect()),
+        }
+    }
+}
+
+/// A multi-round provider whose final configured round remains open after its chunks.
+struct PendingFinalRoundProvider {
+    rounds: std::sync::Mutex<std::collections::VecDeque<Vec<StreamChunk>>>,
+}
+
+impl PendingFinalRoundProvider {
+    fn new(rounds: Vec<Vec<StreamChunk>>) -> Self {
+        Self {
+            rounds: std::sync::Mutex::new(rounds.into_iter().collect()),
+        }
+    }
+}
+
+#[async_trait]
+impl LlmProvider for PendingFinalRoundProvider {
+    fn model_id(&self) -> &str {
+        "mock-pending-final-round"
+    }
+
+    async fn complete(
+        &self,
+        _request: CompletionRequest,
+    ) -> Result<CompletionResponse, ProviderError> {
+        unimplemented!("not used in multi-round cancellation tests")
+    }
+
+    async fn complete_with_tools(
+        &self,
+        _request: ToolCompletionRequest,
+    ) -> Result<ToolCompletionResponse, ProviderError> {
+        unimplemented!("not used in multi-round cancellation tests")
+    }
+
+    fn stream(
+        &self,
+        _request: CompletionRequest,
+    ) -> Pin<Box<dyn futures::Stream<Item = StreamChunk> + Send>> {
+        let (chunks, is_final_round) = {
+            let mut rounds = self.rounds.lock().expect("mock lock poisoned");
+            let chunks = rounds.pop_front().unwrap_or_default();
+            (chunks, rounds.is_empty())
+        };
+        let chunks = stream::iter(chunks);
+        if is_final_round {
+            Box::pin(chunks.chain(stream::pending()))
+        } else {
+            Box::pin(chunks)
         }
     }
 }
@@ -382,7 +433,9 @@ impl LlmProvider for DetachedGatedProvider {
     }
 }
 
-/// A mock provider whose stream blocks forever.
+const INTERRUPTED_PARTIAL: &str = "The response shown before cancellation.";
+
+/// A mock provider whose stream emits a known partial response, then blocks forever.
 pub(crate) struct PendingProvider;
 
 #[async_trait]
@@ -409,7 +462,51 @@ impl LlmProvider for PendingProvider {
         &self,
         _request: CompletionRequest,
     ) -> Pin<Box<dyn futures::Stream<Item = StreamChunk> + Send>> {
-        Box::pin(futures::stream::pending())
+        Box::pin(
+            futures::stream::once(async {
+                StreamChunk::Delta {
+                    content: INTERRUPTED_PARTIAL.to_string(),
+                }
+            })
+            .chain(futures::stream::pending()),
+        )
+    }
+}
+
+/// A mock provider whose stream reports its first poll, then remains open without emitting.
+struct EmptyPendingProvider {
+    stream_polled: Arc<Notify>,
+}
+
+#[async_trait]
+impl LlmProvider for EmptyPendingProvider {
+    fn model_id(&self) -> &str {
+        "empty-pending-model"
+    }
+
+    async fn complete(
+        &self,
+        _request: CompletionRequest,
+    ) -> Result<CompletionResponse, ProviderError> {
+        unimplemented!("not used in cancellation tests")
+    }
+
+    async fn complete_with_tools(
+        &self,
+        _request: ToolCompletionRequest,
+    ) -> Result<ToolCompletionResponse, ProviderError> {
+        unimplemented!("not used in cancellation tests")
+    }
+
+    fn stream(
+        &self,
+        _request: CompletionRequest,
+    ) -> Pin<Box<dyn futures::Stream<Item = StreamChunk> + Send>> {
+        let stream_polled = Arc::clone(&self.stream_polled);
+        Box::pin(futures::stream::poll_fn(move |_cx| {
+            stream_polled.notify_one();
+            std::task::Poll::Pending
+        }))
     }
 }
 
@@ -423,6 +520,47 @@ impl Hook for BlockInboundHook {
 
     async fn execute(&self, _event: &HookEvent) -> HookOutcome {
         HookOutcome::Block("blocked by test hook".to_string())
+    }
+}
+
+struct PausingPostToolHook {
+    reached: Arc<Notify>,
+    release: Arc<Notify>,
+}
+
+#[async_trait]
+impl Hook for PausingPostToolHook {
+    fn name(&self) -> &str {
+        "pause-post-tool"
+    }
+
+    async fn execute(&self, event: &HookEvent) -> HookOutcome {
+        if matches!(event, HookEvent::PostToolUse { .. }) {
+            self.reached.notify_one();
+            self.release.notified().await;
+        }
+        HookOutcome::Continue
+    }
+}
+
+struct ApprovePreToolHook;
+
+#[async_trait]
+impl Hook for ApprovePreToolHook {
+    fn name(&self) -> &str {
+        "approve-pre-tool"
+    }
+
+    async fn execute(&self, event: &HookEvent) -> HookOutcome {
+        if matches!(event, HookEvent::PreToolUse { .. }) {
+            HookOutcome::RequestApproval {
+                prompt: "Approve the test tool".to_string(),
+                context: None,
+                timeout: None,
+            }
+        } else {
+            HookOutcome::Continue
+        }
     }
 }
 
@@ -537,6 +675,13 @@ impl swage_storage::WorkflowStore for MockStorage {
     async fn create_workflow_journal_intent(
         &self,
         _: swage_storage::NewWorkflowJournalIntent,
+    ) -> Result<swage_storage::WorkflowJournalRecord, StorageError> {
+        unimplemented!()
+    }
+    async fn create_failed_workflow_journal_entry(
+        &self,
+        _: swage_storage::NewWorkflowJournalIntent,
+        _: &str,
     ) -> Result<swage_storage::WorkflowJournalRecord, StorageError> {
         unimplemented!()
     }
@@ -2923,6 +3068,23 @@ impl swage_storage::store::CurationAssertionStore for MockStorage {
 }
 
 #[async_trait]
+impl swage_storage::store::CitationStore for MockStorage {
+    async fn add_citation(
+        &self,
+        _: swage_storage::NewKnowledgeCitation,
+    ) -> Result<swage_storage::KnowledgeCitation, StorageError> {
+        unimplemented!("turn tests do not exercise knowledge citations")
+    }
+
+    async fn get_citation(
+        &self,
+        _: uuid::Uuid,
+    ) -> Result<Option<swage_storage::KnowledgeCitation>, StorageError> {
+        unimplemented!("turn tests do not exercise knowledge citations")
+    }
+}
+
+#[async_trait]
 impl swage_storage::store::SecretStore for MockStorage {
     async fn create_secret(
         &self,
@@ -3389,7 +3551,7 @@ async fn full_turn_stores_messages_and_completes() {
     let (state, session_id) = make_state_with_session(chunks).await;
     let (tx, mut rx) = mpsc::unbounded_channel();
 
-    process_turn(
+    let (turn_result, memory_loads) = Box::pin(observe_space_memory_loads(process_turn(
         &state,
         session_id,
         None,
@@ -3397,9 +3559,13 @@ async fn full_turn_stores_messages_and_completes() {
         tx,
         Arc::new(Mutex::new(SubscriptionState::new(true))),
         None,
-    )
-    .await
-    .expect("turn should complete without error");
+    )))
+    .await;
+    turn_result.expect("turn should complete without error");
+    assert_eq!(
+        memory_loads, 0,
+        "a full turn using the default assembly must not reach the space-memory loading seam"
+    );
 
     let events: Vec<ServerEvent> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
 
@@ -3497,17 +3663,15 @@ async fn cancelled_turn_stores_partial_and_marks_interrupted() {
         .await
     });
 
-    for _ in 0..50 {
-        tokio::task::yield_now().await;
-        if state.active_turns.lock().await.contains_key(&session_id) {
-            break;
+    loop {
+        match rx.recv().await.expect("partial token should be emitted") {
+            ServerEvent::Token { content } => {
+                assert_eq!(content, INTERRUPTED_PARTIAL);
+                break;
+            }
+            _ => continue,
         }
     }
-
-    assert!(
-        state.active_turns.lock().await.contains_key(&session_id),
-        "turn should be active before cancel"
-    );
 
     cancel_turn(&state, session_id)
         .await
@@ -3531,6 +3695,405 @@ async fn cancelled_turn_stores_partial_and_marks_interrupted() {
     let thread_id = threads[0].id;
     let turns = state.storage.list_turns_by_thread(thread_id).await.unwrap();
     assert_eq!(turns[0].state, TurnState::Interrupted);
+    assert_eq!(
+        turns[0].assistant_response.as_deref(),
+        Some(INTERRUPTED_PARTIAL)
+    );
+
+    let conversation = crate::service::ConversationService::new(
+        Arc::clone(&state.storage),
+        Arc::clone(&state.space_store),
+    )
+    .get_conversation(session_id)
+    .await
+    .expect("reload-shaped conversation read should succeed");
+    assert_eq!(conversation.messages.len(), 2, "user and partial assistant");
+    assert_eq!(conversation.messages[1].role, "assistant");
+    assert_eq!(conversation.messages[1].content, INTERRUPTED_PARTIAL);
+    assert_eq!(
+        conversation.messages[1].turn_state,
+        Some(swage_protocol::client::conversation::TurnState::Interrupted)
+    );
+}
+
+#[tokio::test]
+async fn cancelled_turn_without_partial_stores_no_assistant_response() {
+    let storage = Arc::new(MockStorage::new());
+    let space = storage
+        .get_or_create_default()
+        .await
+        .expect("create default space");
+    let session = storage
+        .create_session(NewSession {
+            space_id: space.id,
+            agent_id: "gateway".to_string(),
+            metadata: None,
+            active_workspace_attachment_id: None,
+        })
+        .await
+        .expect("create session");
+    let session_id = session.id;
+
+    ThreadStore::create(
+        &*storage,
+        NewThread {
+            session_id,
+            agent_id: "gateway".to_string(),
+        },
+    )
+    .await
+    .expect("create default thread");
+
+    let stream_polled = Arc::new(Notify::new());
+    let state = Arc::new(AppState::new(
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
+        Arc::new(EmptyPendingProvider {
+            stream_polled: Arc::clone(&stream_polled),
+        }) as Arc<dyn LlmProvider>,
+        swage_config::ResolvedConfig::default(),
+        crate::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+    ));
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let state_clone = Arc::clone(&state);
+    let handle = tokio::spawn(async move {
+        process_turn(
+            &state_clone,
+            session_id,
+            None,
+            "Hi".to_string(),
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
+        )
+        .await
+    });
+
+    stream_polled.notified().await;
+    cancel_turn(&state, session_id)
+        .await
+        .expect("cancel should succeed");
+    handle
+        .await
+        .expect("task should not panic")
+        .expect("process_turn ok");
+
+    let threads = state.storage.list_by_session(session_id).await.unwrap();
+    let turns = state
+        .storage
+        .list_turns_by_thread(threads[0].id)
+        .await
+        .unwrap();
+    assert_eq!(turns[0].state, TurnState::Interrupted);
+    assert_eq!(turns[0].assistant_response, None);
+
+    let conversation = crate::service::ConversationService::new(
+        Arc::clone(&state.storage),
+        Arc::clone(&state.space_store),
+    )
+    .get_conversation(session_id)
+    .await
+    .expect("reload-shaped conversation read should succeed");
+    assert_eq!(conversation.messages.len(), 1, "only the user message");
+    assert_eq!(conversation.messages[0].role, "user");
+}
+
+const COMPLETED_ROUND_PARTIAL: &str = "Text shown before the tool calls.";
+const LATER_ROUND_PARTIAL: &str = " Text shown during the next response.";
+
+#[tokio::test]
+async fn cancelled_before_next_tool_persists_completed_round_text() {
+    let rounds = vec![vec![
+        StreamChunk::Delta {
+            content: COMPLETED_ROUND_PARTIAL.into(),
+        },
+        StreamChunk::ToolUse {
+            call_id: "first".into(),
+            name: "echo".into(),
+            arguments: serde_json::json!({ "text": "first" }),
+        },
+        StreamChunk::ToolUse {
+            call_id: "second".into(),
+            name: "echo".into(),
+            arguments: serde_json::json!({ "text": "second" }),
+        },
+        StreamChunk::Done {
+            finish_reason: None,
+        },
+    ]];
+    let (mut state, session_id) = make_state_with_tools(rounds).await;
+    let hook_reached = Arc::new(Notify::new());
+    let hook_release = Arc::new(Notify::new());
+    let mut hook_registry = HookRegistry::new();
+    hook_registry.register(HookRegistration::new(Arc::new(PausingPostToolHook {
+        reached: Arc::clone(&hook_reached),
+        release: Arc::clone(&hook_release),
+    })));
+    state.hook_registry = Some(Arc::new(hook_registry));
+    let state = Arc::new(state);
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let state_for_turn = Arc::clone(&state);
+    let turn_task = tokio::spawn(async move {
+        process_turn(
+            &state_for_turn,
+            session_id,
+            None,
+            "Use both tools".to_string(),
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
+        )
+        .await
+    });
+
+    hook_reached.notified().await;
+    cancel_turn(&state, session_id)
+        .await
+        .expect("cancel should succeed while the first tool's post-hook is open");
+    hook_release.notify_one();
+    turn_task
+        .await
+        .expect("turn task should not panic")
+        .expect("cancelled turn should settle cleanly");
+
+    let conversation = crate::service::ConversationService::new(
+        Arc::clone(&state.storage),
+        Arc::clone(&state.space_store),
+    )
+    .get_conversation(session_id)
+    .await
+    .expect("reload-shaped conversation read should succeed");
+    assert_eq!(conversation.messages.len(), 2, "user and partial assistant");
+    assert_eq!(conversation.messages[1].role, "assistant");
+    assert_eq!(conversation.messages[1].content, COMPLETED_ROUND_PARTIAL);
+    assert_eq!(
+        conversation.messages[1].turn_state,
+        Some(swage_protocol::client::conversation::TurnState::Interrupted)
+    );
+}
+
+#[tokio::test]
+async fn cancelled_before_next_round_persists_completed_round_text() {
+    let rounds = vec![vec![
+        StreamChunk::Delta {
+            content: COMPLETED_ROUND_PARTIAL.into(),
+        },
+        StreamChunk::ToolUse {
+            call_id: "first".into(),
+            name: "echo".into(),
+            arguments: serde_json::json!({ "text": "first" }),
+        },
+        StreamChunk::Done {
+            finish_reason: None,
+        },
+    ]];
+    let (mut state, session_id) = make_state_with_tools(rounds).await;
+    let hook_reached = Arc::new(Notify::new());
+    let hook_release = Arc::new(Notify::new());
+    let mut hook_registry = HookRegistry::new();
+    hook_registry.register(HookRegistration::new(Arc::new(PausingPostToolHook {
+        reached: Arc::clone(&hook_reached),
+        release: Arc::clone(&hook_release),
+    })));
+    state.hook_registry = Some(Arc::new(hook_registry));
+    let state = Arc::new(state);
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let state_for_turn = Arc::clone(&state);
+    let turn_task = tokio::spawn(async move {
+        process_turn(
+            &state_for_turn,
+            session_id,
+            None,
+            "Use one tool".to_string(),
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
+        )
+        .await
+    });
+
+    hook_reached.notified().await;
+    cancel_turn(&state, session_id)
+        .await
+        .expect("cancel should succeed after the first round's tool completes");
+    hook_release.notify_one();
+    turn_task
+        .await
+        .expect("turn task should not panic")
+        .expect("cancelled turn should settle cleanly");
+
+    let conversation = crate::service::ConversationService::new(
+        Arc::clone(&state.storage),
+        Arc::clone(&state.space_store),
+    )
+    .get_conversation(session_id)
+    .await
+    .expect("reload-shaped conversation read should succeed");
+    assert_eq!(conversation.messages.len(), 2, "user and partial assistant");
+    assert_eq!(conversation.messages[1].role, "assistant");
+    assert_eq!(conversation.messages[1].content, COMPLETED_ROUND_PARTIAL);
+    assert_eq!(
+        conversation.messages[1].turn_state,
+        Some(swage_protocol::client::conversation::TurnState::Interrupted)
+    );
+}
+
+#[tokio::test]
+async fn cancelled_during_later_stream_persists_all_accumulated_text() {
+    let provider = Arc::new(PendingFinalRoundProvider::new(vec![
+        vec![
+            StreamChunk::Delta {
+                content: COMPLETED_ROUND_PARTIAL.into(),
+            },
+            StreamChunk::ToolUse {
+                call_id: "first".into(),
+                name: "echo".into(),
+                arguments: serde_json::json!({ "text": "first" }),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ],
+        vec![StreamChunk::Delta {
+            content: LATER_ROUND_PARTIAL.into(),
+        }],
+    ]));
+    let (state, session_id) = make_state_with_tool_provider(provider).await;
+    let state = Arc::new(state);
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let state_for_turn = Arc::clone(&state);
+    let turn_task = tokio::spawn(async move {
+        process_turn(
+            &state_for_turn,
+            session_id,
+            None,
+            "Use one tool, then continue".to_string(),
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
+        )
+        .await
+    });
+
+    loop {
+        if matches!(
+            rx.recv().await.expect("later-round token should be emitted"),
+            ServerEvent::Token { content } if content == LATER_ROUND_PARTIAL
+        ) {
+            break;
+        }
+    }
+    cancel_turn(&state, session_id)
+        .await
+        .expect("cancel should succeed while the later provider stream is open");
+    turn_task
+        .await
+        .expect("turn task should not panic")
+        .expect("cancelled turn should settle cleanly");
+
+    let expected = format!("{COMPLETED_ROUND_PARTIAL}{LATER_ROUND_PARTIAL}");
+    let threads = state.storage.list_by_session(session_id).await.unwrap();
+    let turns = state
+        .storage
+        .list_turns_by_thread(threads[0].id)
+        .await
+        .unwrap();
+    assert_eq!(turns[0].state, TurnState::Interrupted);
+    assert_eq!(
+        turns[0].assistant_response.as_deref(),
+        Some(expected.as_str())
+    );
+
+    let conversation = crate::service::ConversationService::new(
+        Arc::clone(&state.storage),
+        Arc::clone(&state.space_store),
+    )
+    .get_conversation(session_id)
+    .await
+    .expect("reload-shaped conversation read should succeed");
+    assert_eq!(conversation.messages.len(), 2, "user and partial assistant");
+    assert_eq!(conversation.messages[1].role, "assistant");
+    assert_eq!(conversation.messages[1].content, expected);
+    assert_eq!(
+        conversation.messages[1].turn_state,
+        Some(swage_protocol::client::conversation::TurnState::Interrupted)
+    );
+    let thread = ThreadStore::get(&*state.storage, threads[0].id)
+        .await
+        .expect("thread lookup should succeed")
+        .expect("thread should exist");
+    assert_eq!(thread.state, ThreadState::Idle);
+}
+
+#[tokio::test]
+async fn cancelled_hook_approval_persists_completed_round_text() {
+    let rounds = vec![vec![
+        StreamChunk::Delta {
+            content: COMPLETED_ROUND_PARTIAL.into(),
+        },
+        StreamChunk::ToolUse {
+            call_id: "approval".into(),
+            name: "echo".into(),
+            arguments: serde_json::json!({ "text": "gated" }),
+        },
+        StreamChunk::Done {
+            finish_reason: None,
+        },
+    ]];
+    let (mut state, session_id) = make_state_with_tools(rounds).await;
+    let mut hook_registry = HookRegistry::new();
+    hook_registry.register(HookRegistration::new(Arc::new(ApprovePreToolHook)));
+    state.hook_registry = Some(Arc::new(hook_registry));
+    let state = Arc::new(state);
+
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let state_for_turn = Arc::clone(&state);
+    let turn_task = tokio::spawn(async move {
+        process_turn(
+            &state_for_turn,
+            session_id,
+            None,
+            "Use the gated tool".to_string(),
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
+        )
+        .await
+    });
+
+    loop {
+        if matches!(
+            rx.recv().await.expect("approval event should be emitted"),
+            ServerEvent::ApprovalRequired { .. }
+        ) {
+            break;
+        }
+    }
+    cancel_turn(&state, session_id)
+        .await
+        .expect("cancel should succeed while hook approval is open");
+    turn_task
+        .await
+        .expect("turn task should not panic")
+        .expect("cancelled turn should settle cleanly");
+
+    let conversation = crate::service::ConversationService::new(
+        Arc::clone(&state.storage),
+        Arc::clone(&state.space_store),
+    )
+    .get_conversation(session_id)
+    .await
+    .expect("reload-shaped conversation read should succeed");
+    assert_eq!(conversation.messages.len(), 2, "user and partial assistant");
+    assert_eq!(conversation.messages[1].role, "assistant");
+    assert_eq!(conversation.messages[1].content, COMPLETED_ROUND_PARTIAL);
+    assert_eq!(
+        conversation.messages[1].turn_state,
+        Some(swage_protocol::client::conversation::TurnState::Interrupted)
+    );
 }
 
 #[tokio::test]
@@ -3745,6 +4308,10 @@ impl crate::tool::Tool for BlockingMockTool {
 
 /// Build an AppState with a multi-round provider and an EchoMockTool.
 async fn make_state_with_tools(rounds: Vec<Vec<StreamChunk>>) -> (AppState, Uuid) {
+    make_state_with_tool_provider(Arc::new(MultiRoundMockProvider::new(rounds))).await
+}
+
+async fn make_state_with_tool_provider(provider: Arc<dyn LlmProvider>) -> (AppState, Uuid) {
     let storage = Arc::new(MockStorage::new());
 
     let space = storage
@@ -3773,12 +4340,10 @@ async fn make_state_with_tools(rounds: Vec<Vec<StreamChunk>>) -> (AppState, Uuid
     .await
     .expect("create default thread");
 
-    let provider = Arc::new(MultiRoundMockProvider::new(rounds));
-
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
-        provider as Arc<dyn LlmProvider>,
+        provider,
         swage_config::ResolvedConfig::default(),
         crate::tool::ToolDispatcher::allow_all(vec![
             Arc::new(EchoMockTool) as Arc<dyn crate::tool::Tool>
@@ -4026,8 +4591,11 @@ async fn unknown_tool_returns_error_to_model() {
 }
 
 #[tokio::test]
-async fn cancelling_during_tool_execution_interrupts_without_waiting_for_tool_completion() {
+async fn cancelled_during_tool_dispatch_persists_partial_without_waiting() {
     let round_1 = vec![
+        StreamChunk::Delta {
+            content: COMPLETED_ROUND_PARTIAL.into(),
+        },
         StreamChunk::ToolUse {
             call_id: "call_block".into(),
             name: "block".into(),
@@ -4125,6 +4693,25 @@ async fn cancelling_during_tool_execution_interrupts_without_waiting_for_tool_co
     let thread_id = threads[0].id;
     let turns = state.storage.list_turns_by_thread(thread_id).await.unwrap();
     assert_eq!(turns[0].state, TurnState::Interrupted);
+    assert_eq!(
+        turns[0].assistant_response.as_deref(),
+        Some(COMPLETED_ROUND_PARTIAL)
+    );
+
+    let conversation = crate::service::ConversationService::new(
+        Arc::clone(&state.storage),
+        Arc::clone(&state.space_store),
+    )
+    .get_conversation(session_id)
+    .await
+    .expect("reload-shaped conversation read should succeed");
+    assert_eq!(conversation.messages.len(), 2, "user and partial assistant");
+    assert_eq!(conversation.messages[1].role, "assistant");
+    assert_eq!(conversation.messages[1].content, COMPLETED_ROUND_PARTIAL);
+    assert_eq!(
+        conversation.messages[1].turn_state,
+        Some(swage_protocol::client::conversation::TurnState::Interrupted)
+    );
 
     let thread = ThreadStore::get(&*state.storage, thread_id)
         .await
@@ -7474,7 +8061,7 @@ fn test_environment() -> swage_context::orientation::SessionEnvironment {
 /// the turn's context assembly. This function is tested directly to verify
 /// the wiring before it's used in process_turn.
 #[test]
-fn build_assembly_elements_creates_prompts_skills_memory_and_history() {
+fn named_assembly_elements_include_prompts_skills_memory_and_history() {
     let instructions = "Be helpful.";
     let history = vec![
         ChatMessage::new(Role::User, "Hi"),
@@ -7485,8 +8072,7 @@ fn build_assembly_elements_creates_prompts_skills_memory_and_history() {
         instructions,
         vec![],
         history,
-        String::new(),
-        "My Space".to_string(),
+        Some((String::new(), "My Space".to_string())),
         test_environment(),
         vec![],
     );
@@ -7508,27 +8094,93 @@ fn build_assembly_elements_creates_prompts_skills_memory_and_history() {
 }
 
 /// When instructions are empty, build_assembly_elements still includes the
-/// prompts element (which will produce no system message), the skills
-/// element, memory, and history.
+/// prompts element (which will produce no system message), the skills element,
+/// and history. A default assembly does not receive a memory element.
 #[test]
-fn build_assembly_elements_with_empty_instructions() {
+fn default_assembly_elements_exclude_memory() {
     let elements = build_assembly_elements(
         "",
         vec![],
         vec![ChatMessage::new(Role::User, "Hello")],
-        String::new(),
-        "My Space".to_string(),
+        None,
         test_environment(),
         vec![],
     );
 
-    assert_eq!(elements.len(), 5);
+    assert_eq!(elements.len(), 4);
     // PromptsElement with empty rules produces no messages; the orientation
     // baseline is what keeps an unconfigured session's context non-empty.
     let orientation = elements.iter().find(|e| e.name() == "orientation").unwrap();
     assert!(!orientation.content().is_empty());
     let prompts = elements.iter().find(|e| e.name() == "prompts").unwrap();
     assert!(prompts.content().is_empty());
+    assert!(
+        elements.iter().all(|element| element.name() != "memory"),
+        "default element construction should omit memory"
+    );
+}
+
+#[tokio::test]
+async fn default_assembly_does_not_invoke_memory_loader() {
+    let invoked = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let loader_invoked = invoked.clone();
+
+    let memory = load_memory_for_assembly("default", || async move {
+        loader_invoked.store(true, std::sync::atomic::Ordering::SeqCst);
+        "should not be loaded".to_string()
+    })
+    .await;
+
+    assert!(
+        memory.is_none(),
+        "default assembly should not receive memory"
+    );
+    assert!(
+        !invoked.load(std::sync::atomic::Ordering::SeqCst),
+        "default assembly must not invoke the memory-loading seam"
+    );
+}
+
+#[tokio::test]
+async fn named_assembly_loads_memory_and_can_compose_it() {
+    let memory = load_memory_for_assembly("memory-aware", || async {
+        "Important space context".to_string()
+    })
+    .await;
+    let elements = build_assembly_elements(
+        "Be helpful.",
+        vec![],
+        vec![],
+        memory.map(|content| (content, "My Space".to_string())),
+        test_environment(),
+        vec![],
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let assembly_path = dir.path().join("memory-aware.js");
+    std::fs::write(
+        &assembly_path,
+        r#"
+        const byName = Object.fromEntries(elements.map(element => [element.name, element]));
+        add(byName.memory);
+        "#,
+    )
+    .unwrap();
+    let output = swage_context::js_assembly::assemble_named(
+        "memory-aware",
+        Some(&assembly_path),
+        &elements,
+        &swage_config::model::ContextConfig::default(),
+        &TiktokenTokeniser::new("gpt-5"),
+    );
+
+    assert!(
+        output.messages[0]
+            .text_content()
+            .contains("Important space context"),
+        "a named assembly should be able to compose the loaded memory element"
+    );
+    assert_eq!(output.report.assembly_name, "memory-aware");
 }
 
 /// When memory_content is non-empty, the memory element produces a system
@@ -7539,8 +8191,10 @@ fn build_assembly_elements_memory_element_contains_provided_content() {
         "Be helpful.",
         vec![],
         vec![],
-        "Important space context".to_string(),
-        "My Space".to_string(),
+        Some((
+            "Important space context".to_string(),
+            "My Space".to_string(),
+        )),
         test_environment(),
         vec![],
     );

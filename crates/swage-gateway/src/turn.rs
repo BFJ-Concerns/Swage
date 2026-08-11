@@ -662,18 +662,21 @@ pub(crate) async fn process_turn_with_existing_turn(
         .await?;
 
     // Steps 8–9: Assemble context via the swage-context assembly engine.
-    // Loads thread history, space memory, and constructs typed elements.
-    // Runs fail-open assembly: custom Python configs when configured, built-in
+    // Loads thread history and constructs the typed elements used by the
+    // selected assembly.
+    // Runs fail-open assembly: custom JavaScript configs when configured, built-in
     // default otherwise. The LLM provider is passed for two-phase compaction.
     let history_messages =
         rebuild_thread_history_messages(state.storage.as_ref(), thread_id).await?;
 
-    // Load space memory from the filesystem. Returns an empty string when
-    // no memory directory or files exist — MemoryElement handles empty content.
-    let memory_content = match swage_root_opt.as_deref() {
-        Some(root) => load_space_memory(root, &space_slug).await,
-        None => String::new(),
-    };
+    let assembly_name = select_context_assembly(state, &config, session_id, prepared_turn_id).await;
+    let memory_content = load_memory_for_assembly(&assembly_name, || async {
+        match swage_root_opt.as_deref() {
+            Some(root) => load_space_memory(root, &space_slug).await,
+            None => String::new(),
+        }
+    })
+    .await;
 
     // The workspace root doubles as the session's working directory in the
     // orientation baseline, so it is resolved before elements are built.
@@ -695,8 +698,7 @@ pub(crate) async fn process_turn_with_existing_turn(
         &config.instructions,
         active_skills,
         history_messages,
-        memory_content,
-        space.name.clone(),
+        memory_content.map(|content| (content, space.name.clone())),
         environment,
         available_skills,
     );
@@ -706,25 +708,15 @@ pub(crate) async fn process_turn_with_existing_turn(
     // assembly from the config hierarchy; "default" (or empty) runs the
     // built-in implementation. JS assemblies fail open to the default with
     // the error recorded in the report.
-    //
-    // The assembly name is an experiment location: when variants are
-    // registered for it, the selection loop chooses which serves this turn
-    // (honouring the kill switch and forced pins), and every decision —
-    // including "experimentation is off" — lands in the audit trail. The
-    // report and every model-facing surface stay function-named; the audit
-    // record is the only place the variant id appears.
     let output = execute_context_assembly(
-        state,
+        &assembly_name,
         &config,
         &elements,
         &tokeniser,
         swage_root_opt.as_deref(),
         &space_slug,
         &session.agent_id,
-        session_id,
-        prepared_turn_id,
-    )
-    .await;
+    );
     let (assembled_messages, assembly_report) = (output.messages, output.report);
 
     tracing::debug!(
@@ -1335,18 +1327,18 @@ pub(crate) async fn process_turn_with_existing_turn(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn execute_context_assembly(
+async fn select_context_assembly(
     state: &AppState,
     config: &swage_config::ResolvedConfig,
-    elements: &[Box<dyn ContextElement>],
-    tokeniser: &TiktokenTokeniser,
-    swage_root: Option<&Path>,
-    space_slug: &str,
-    agent_id: &str,
     session_id: Uuid,
     turn_id: Uuid,
-) -> swage_context::report::AssemblyOutput {
+) -> String {
+    // The assembly name is an experiment location: when variants are
+    // registered for it, the selection loop chooses which serves this turn
+    // (honouring the kill switch and forced pins), and every decision —
+    // including "experimentation is off" — lands in the audit trail. The
+    // report and every model-facing surface stay function-named; the audit
+    // record is the only place the variant id appears.
     let configured_assembly = config.context.assembly.trim().to_owned();
     let assembly_variants: Vec<&str> = vec![];
     let decision = crate::experimentation::select_variant(
@@ -1379,8 +1371,20 @@ async fn execute_context_assembly(
         }
     };
 
-    let assembly_name = decision.variant.trim();
-    if assembly_name.is_empty() || assembly_name == "default" {
+    decision.variant
+}
+
+fn execute_context_assembly(
+    assembly_name: &str,
+    config: &swage_config::ResolvedConfig,
+    elements: &[Box<dyn ContextElement>],
+    tokeniser: &TiktokenTokeniser,
+    swage_root: Option<&Path>,
+    space_slug: &str,
+    agent_id: &str,
+) -> swage_context::report::AssemblyOutput {
+    let assembly_name = assembly_name.trim();
+    if is_default_context_assembly(assembly_name) {
         return swage_context::assembly::assemble(elements, &config.context, tokeniser);
     }
 
