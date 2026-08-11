@@ -663,8 +663,8 @@ impl Tool for KnowledgeOrientTool {
                 let record = state
                     .storage
                     .supersede_orientation_card(
-                        card_id.unwrap(),
-                        replacement_card_id.unwrap(),
+                        card_id.expect("supersede parameters validated card_id"),
+                        replacement_card_id.expect("supersede parameters validated replacement"),
                         ctx.agent_id().to_owned(),
                         session_id,
                     )
@@ -678,7 +678,7 @@ impl Tool for KnowledgeOrientTool {
                 let record = state
                     .storage
                     .retire_orientation_card(
-                        card_id.unwrap(),
+                        card_id.expect("retire parameters validated card_id"),
                         ctx.agent_id().to_owned(),
                         session_id,
                     )
