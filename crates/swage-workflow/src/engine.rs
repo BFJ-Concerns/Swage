@@ -305,7 +305,17 @@ impl WorkflowEngine {
                                                 "error": {"name": "EmptyAgentOutputError", "message": "agent returned empty output"}
                                             }).to_string();
                                         }
-                                        serde_json::json!({"ok": true, "value": result.output}).to_string()
+                                        // The worker's continuation token rides beside the
+                                        // output so `agentStart` handles can expose it
+                                        // without touching agent()'s bare-value contract.
+                                        let session = result
+                                            .session_id
+                                            .zip(result.thread_id)
+                                            .map(|(session_id, thread_id)| serde_json::json!({
+                                                "session_id": session_id,
+                                                "thread_id": thread_id,
+                                            }));
+                                        serde_json::json!({"ok": true, "value": result.output, "session": session}).to_string()
                                     }
                                     Err(error) => {
                                         let (name, message) = named_host_error(&error, "AgentCallError");
@@ -468,6 +478,17 @@ impl WorkflowEngine {
                             }
                             return response.value;
                         };
+                        // Agent responses carry a continuation token beside the
+                        // value; only agentStart handles surface it.
+                        const unwrapAgentResponse = (json) => {
+                            const response = JSON.parse(json);
+                            if (!response.ok) {
+                                const error = new Error(response.error.message);
+                                error.name = response.error.name;
+                                throw error;
+                            }
+                            return { value: response.value, session: response.session ?? null };
+                        };
                         // Script-level defaults fill options a call site leaves
                         // unset; only *defined* call-site values override, so a
                         // conditional spread leaving `model: undefined` still
@@ -493,25 +514,35 @@ impl WorkflowEngine {
                                 schema: merged.schema ?? null,
                                 max_attempts: merged.maxAttempts ?? 3,
                                 label: merged.label ?? null,
+                                session: merged.session ?? null,
                             };
                         };
                         globalThis.agent = async (prompt, options = {}) => {
                             const request = buildAgentRequest(options);
-                            return unwrapHostResponse(await __agent(String(prompt), JSON.stringify(request)));
+                            const response = unwrapAgentResponse(await __agent(String(prompt), JSON.stringify(request)));
+                            return response.value;
                         };
                         // Dispatch without awaiting: the returned handle
                         // carries the result promise wait() races, plus
-                        // `label`/`done` for the script's own bookkeeping.
+                        // `label`/`done` for the script's own bookkeeping and
+                        // `session` — the worker's continuation token, set
+                        // when the call completes. Pass it back whole as the
+                        // `session` option to land the worker's next turn in
+                        // the same session: worker restates, worker proceeds,
+                        // one session.
                         globalThis.agentStart = (prompt, options = {}) => {
                             const request = buildAgentRequest(options);
                             const handle = {
                                 label: request.label,
                                 done: false,
+                                session: request.session ?? null,
                             };
                             handle.result = __agent(String(prompt), JSON.stringify(request))
                                 .then((json) => {
+                                    const response = unwrapAgentResponse(json);
                                     handle.done = true;
-                                    return unwrapHostResponse(json);
+                                    handle.session = response.session ?? handle.session;
+                                    return response.value;
                                 }, (error) => {
                                     handle.done = true;
                                     throw error;
@@ -789,8 +820,8 @@ mod tests {
                 output,
                 input_tokens: 1,
                 output_tokens: 1,
-                session_id: None,
-                thread_id: None,
+                session_id: Some(uuid::Uuid::from_u128(0xA)),
+                thread_id: Some(uuid::Uuid::from_u128(0xB)),
                 turn_id: None,
             })
         }
@@ -894,6 +925,53 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<Value>(&output).expect("output"),
             json!(["one-gathered|one|0", null, "three-gathered|three|2"])
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn agent_start_surfaces_the_continuation_token_and_the_session_option_returns_it() {
+        let host = Arc::new(SurfaceHost::new());
+        host.agent_outputs
+            .lock()
+            .unwrap()
+            .extend([Ok(json!("restated")), Ok(json!("worked"))]);
+        let output = WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                r#"
+                const worker = agentStart("restate the brief", { agent: "worker" });
+                const before = worker.session;
+                await worker.result;
+                // The same worker session does the work: pass the token back.
+                const value = await agent("proceed", { agent: "worker", session: worker.session });
+                return { before, token: worker.session, value };
+                "#,
+                "null",
+                CancellationToken::new(),
+                Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                ScriptCapabilities::default(),
+            )
+            .await
+            .expect("continuity run");
+        let value: Value = serde_json::from_str(&output).expect("output");
+        // No token before completion; the host's identity after.
+        assert_eq!(value["before"], Value::Null);
+        assert_eq!(
+            value["token"],
+            json!({
+                "session_id": uuid::Uuid::from_u128(0xA),
+                "thread_id": uuid::Uuid::from_u128(0xB),
+            })
+        );
+        assert_eq!(value["value"], "worked");
+        // The continuation reached the host typed, not as loose JSON.
+        let requests = host.agent_requests.lock().unwrap();
+        assert_eq!(requests[0].session, None);
+        assert_eq!(
+            requests[1].session,
+            Some(crate::AgentSessionRef {
+                session_id: uuid::Uuid::from_u128(0xA),
+                thread_id: uuid::Uuid::from_u128(0xB),
+            })
         );
     }
 
