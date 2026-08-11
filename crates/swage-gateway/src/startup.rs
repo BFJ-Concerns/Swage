@@ -717,9 +717,15 @@ pub(crate) fn build_tool_dispatcher_with_browser(
             }
         }
         Ok(_) => {
-            warn!(
-                "Python execution is disabled in configuration or its required bubblewrap sandbox is unavailable; python_execute was not registered; enable tools.python_execute, or install bubblewrap or set tools.python_execute.require_sandbox = false"
-            );
+            if config.tools.python_execute.enabled {
+                warn!(
+                    "bubblewrap is unavailable; python_execute was not registered; install it or set tools.python_execute.require_sandbox = false to run Python unsandboxed"
+                );
+            } else {
+                warn!(
+                    "tools.python_execute.enabled is false; python_execute was not registered; enable it unless this was intentional"
+                );
+            }
         }
         Err(e) => {
             warn!(
