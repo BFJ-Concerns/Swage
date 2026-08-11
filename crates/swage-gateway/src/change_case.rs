@@ -148,6 +148,32 @@ impl ChangeOperation {
                         ))
                     })?;
                 }
+                if definition
+                    .skills
+                    .iter()
+                    .any(|skill| skill.trim().is_empty())
+                {
+                    return Err(GatewayError::ValidationError(
+                        "declared skill names must not be empty".into(),
+                    ));
+                }
+                let mut unique_skills = std::collections::HashSet::new();
+                if definition
+                    .skills
+                    .iter()
+                    .any(|skill| !unique_skills.insert(skill))
+                {
+                    return Err(GatewayError::ValidationError(
+                        "declared skill names must be unique".into(),
+                    ));
+                }
+                if let Some(schema) = &definition.output_schema {
+                    jsonschema::validator_for(schema).map_err(|error| {
+                        GatewayError::ValidationError(format!(
+                            "the output contract is not a valid JSON Schema: {error}"
+                        ))
+                    })?;
+                }
                 Ok(())
             }
             Self::DeleteAgentDefinition { agent_id, .. } => {
@@ -334,6 +360,9 @@ pub async fn rollback_to_version(
                 instructions: definition.instructions,
                 model_id: definition.model_id,
                 tool_permissions: definition.tool_permissions,
+                skills: definition.skills,
+                output_schema: definition.output_schema,
+                output_max_retries: definition.output_max_retries,
             })
             .await?;
         format!(
@@ -497,6 +526,9 @@ mod tests {
                 instructions: String::new(),
                 model_id: None,
                 tool_permissions: None,
+                skills: vec![],
+                output_schema: None,
+                output_max_retries: None,
             },
         };
         assert!(bad_id.validate().is_err());
@@ -510,6 +542,9 @@ mod tests {
                 instructions: String::new(),
                 model_id: None,
                 tool_permissions: Some(serde_json::json!("not a permission config")),
+                skills: vec![],
+                output_schema: None,
+                output_max_retries: None,
             },
         };
         assert!(bad_overlay.validate().is_err());
@@ -526,6 +561,9 @@ mod tests {
                 instructions: "be helpful".into(),
                 model_id: None,
                 tool_permissions: None,
+                skills: vec![],
+                output_schema: None,
+                output_max_retries: None,
             },
         };
         assert_eq!(routine.risk_band(), RiskBand::Routine);
@@ -539,6 +577,9 @@ mod tests {
                 instructions: String::new(),
                 model_id: None,
                 tool_permissions: Some(serde_json::json!({"allow": [], "deny": []})),
+                skills: vec![],
+                output_schema: None,
+                output_max_retries: None,
             },
         };
         assert_eq!(

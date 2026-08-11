@@ -31,10 +31,10 @@ use swage_storage::{
         TurnState, UpdateSchedule, WorkspaceAttachment,
     },
     store::{
-        AgentMessageStore, ApprovalStore, AttachmentStore, BackgroundJobStore, ChannelLinkStore,
-        ContextSnapshotStore, DeviceStore, MaterialStore, MessageStore, ScheduleStore,
-        SessionStore, SkillActivationStore, SpaceStore, ThreadStore, ToolCallStore, TurnStore,
-        WorkspaceAttachmentStore,
+        AgentDefinitionStore, AgentMessageStore, ApprovalStore, AttachmentStore,
+        BackgroundJobStore, ChannelLinkStore, ContextSnapshotStore, DeviceStore, MaterialStore,
+        MessageStore, ScheduleStore, SessionStore, SkillActivationStore, SpaceStore, ThreadStore,
+        ToolCallStore, TurnStore, WorkspaceAttachmentStore,
     },
 };
 
@@ -6062,6 +6062,21 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
     )
     .await
     .expect("create root thread");
+    storage
+        .upsert_agent_definition(swage_storage::NewAgentDefinition {
+            id: "agent-b".into(),
+            space_id: Some(space.id),
+            display_name: "Agent B".into(),
+            description: String::new(),
+            instructions: "Definition-only delegated instruction.".into(),
+            model_id: None,
+            tool_permissions: None,
+            skills: vec![],
+            output_schema: None,
+            output_max_retries: None,
+        })
+        .await
+        .expect("store delegated agent definition");
 
     let parent_round = vec![
         StreamChunk::ToolUse {
@@ -6295,6 +6310,10 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
     assert!(
         child_request_text.contains("Use the delegated specialist skill."),
         "delegated provider request should include target agent-level skill instructions: {child_request_text}"
+    );
+    assert!(
+        child_request_text.contains("Definition-only delegated instruction."),
+        "a genuinely reached child must receive its durable definition rather than file config alone: {child_request_text}"
     );
     assert!(
         !child_request_text.contains("Use the parent foreground skill."),

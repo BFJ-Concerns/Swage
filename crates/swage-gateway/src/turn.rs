@@ -592,6 +592,7 @@ pub(crate) async fn process_turn_with_existing_turn(
         &session.agent_id,
         swage_root_opt.as_deref(),
         true,
+        &config.declared_skills,
     )
     .await;
 

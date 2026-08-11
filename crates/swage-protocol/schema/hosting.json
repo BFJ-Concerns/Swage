@@ -3,6 +3,18 @@
   "title": "HostingSurface",
   "type": "object",
   "properties": {
+    "agent_definition_create": {
+      "$ref": "#/$defs/CreateAgentDefinitionRequest"
+    },
+    "agent_definition_list": {
+      "$ref": "#/$defs/AgentDefinitionListResponse"
+    },
+    "agent_definition_mutation": {
+      "$ref": "#/$defs/AgentDefinitionMutationResponse"
+    },
+    "agent_definition_update": {
+      "$ref": "#/$defs/UpdateAgentDefinitionRequest"
+    },
     "approval_decision": {
       "$ref": "#/$defs/ApprovalDecisionRequest"
     },
@@ -28,9 +40,110 @@
     "approvals",
     "approval_decision",
     "operator_overview",
+    "agent_definition_list",
+    "agent_definition_create",
+    "agent_definition_update",
+    "agent_definition_mutation",
     "devices"
   ],
   "$defs": {
+    "AgentDefinitionListResponse": {
+      "type": "object",
+      "properties": {
+        "definitions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AgentDefinitionResponse"
+          }
+        }
+      },
+      "required": [
+        "definitions"
+      ]
+    },
+    "AgentDefinitionMutationResponse": {
+      "type": "object",
+      "properties": {
+        "entity_id": {
+          "type": "string"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "version_id": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "required": [
+        "version_id",
+        "entity_id",
+        "summary"
+      ]
+    },
+    "AgentDefinitionResponse": {
+      "type": "object",
+      "properties": {
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "description": {
+          "type": "string"
+        },
+        "display_name": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "instructions": {
+          "type": "string"
+        },
+        "model_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "output_max_retries": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "output_schema": true,
+        "skills": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "space_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "tool_permissions": true,
+        "updated_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "display_name",
+        "description",
+        "instructions",
+        "skills",
+        "created_at",
+        "updated_at"
+      ]
+    },
     "ApprovalDecisionRequest": {
       "type": "object",
       "properties": {
@@ -208,6 +321,60 @@
       "required": [
         "session_id",
         "state"
+      ]
+    },
+    "CreateAgentDefinitionRequest": {
+      "description": "Whole definition supplied when creating a durable agent.",
+      "type": "object",
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "display_name": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "instructions": {
+          "type": "string"
+        },
+        "model_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "output_max_retries": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "output_schema": true,
+        "skills": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "space_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "tool_permissions": true
+      },
+      "required": [
+        "id",
+        "display_name",
+        "description",
+        "instructions"
       ]
     },
     "DeliveryRoutingRequest": {
@@ -936,6 +1103,56 @@
             "session_id"
           ]
         }
+      ]
+    },
+    "UpdateAgentDefinitionRequest": {
+      "description": "Whole replacement supplied when updating a durable agent definition.",
+      "type": "object",
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "display_name": {
+          "type": "string"
+        },
+        "instructions": {
+          "type": "string"
+        },
+        "model_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "output_max_retries": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "output_schema": true,
+        "skills": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "space_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "tool_permissions": true
+      },
+      "required": [
+        "display_name",
+        "description",
+        "instructions"
       ]
     }
   }
