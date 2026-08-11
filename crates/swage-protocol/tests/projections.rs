@@ -87,6 +87,8 @@ fn typescript_bindings_are_regenerated() {
     hosting::ConfigurationChangeResponse::export_all(&cfg)
         .expect("export configuration change response");
     hosting::OperatorOverviewResponse::export_all(&cfg).expect("export operator overview");
+    hosting::KnowledgeMirrorRegenerateResponse::export_all(&cfg)
+        .expect("export knowledge mirror regenerate");
     device::RegisterDeviceRequest::export_all(&cfg).expect("export device registration");
     device::DeviceListResponse::export_all(&cfg).expect("export device list");
     device::RemoteToolExecutionRequest::export_all(&cfg).expect("export device execution");

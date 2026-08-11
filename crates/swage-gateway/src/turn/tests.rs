@@ -2206,6 +2206,15 @@ impl TurnStore for MockStorage {
         Ok(())
     }
 
+    async fn force_turn_failure(&self, id: Uuid) -> Result<(), StorageError> {
+        let mut db = self.db.lock().await;
+        if let Some(turn) = db.turns.get_mut(&id) {
+            turn.completed_at.get_or_insert_with(chrono::Utc::now);
+            turn.state = TurnState::Failed;
+        }
+        Ok(())
+    }
+
     async fn find_in_progress_by_agent(&self, agent_id: &str) -> Result<Vec<Turn>, StorageError> {
         Ok(self
             .db

@@ -224,6 +224,30 @@ impl TurnStore for SqliteStorage {
         .await
     }
 
+    async fn force_turn_failure(&self, id: Uuid) -> Result<(), StorageError> {
+        let _current = self
+            .get_turn(id)
+            .await?
+            .ok_or_else(|| StorageError::NotFound {
+                entity: "turn".into(),
+                id: id.to_string(),
+            })?;
+
+        // Deliberately no terminal guard: the record durability escalation
+        // must be able to fail a turn the agent already marked Completed —
+        // a known-incomplete record must not stand as a completed turn.
+        self.with_conn(move |conn| {
+            let now_str = Utc::now().to_rfc3339();
+            conn.execute(
+                "UPDATE turns SET state = 'failed', completed_at = COALESCE(completed_at, ?1)
+                 WHERE id = ?2",
+                params![&now_str, id.to_string()],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
     async fn find_in_progress_by_agent(&self, agent_id: &str) -> Result<Vec<Turn>, StorageError> {
         let agent_id = agent_id.to_owned();
         self.with_conn(move |conn| {
@@ -387,6 +411,30 @@ mod tests {
             .unwrap();
 
         thread_id
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn force_turn_failure_overrides_a_completed_state() {
+        let (storage, thread_id) = make_thread().await;
+        let turn = storage.create_turn(new_turn(thread_id)).await.unwrap();
+
+        storage
+            .update_turn_state(turn.id, TurnState::Completed)
+            .await
+            .unwrap();
+        // The ordinary write's first-terminal-wins guard makes this a no-op…
+        storage
+            .update_turn_state(turn.id, TurnState::Failed)
+            .await
+            .unwrap();
+        let unchanged = storage.get_turn(turn.id).await.unwrap().unwrap();
+        assert_eq!(unchanged.state, TurnState::Completed);
+
+        // …which is exactly why the durability escalation has its own write.
+        storage.force_turn_failure(turn.id).await.unwrap();
+        let forced = storage.get_turn(turn.id).await.unwrap().unwrap();
+        assert_eq!(forced.state, TurnState::Failed);
+        assert!(forced.completed_at.is_some());
     }
 
     fn new_turn(thread_id: Uuid) -> NewTurn {
