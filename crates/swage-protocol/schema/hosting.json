@@ -9,6 +9,9 @@
     "approvals": {
       "$ref": "#/$defs/ApprovalListResponse"
     },
+    "configuration_change": {
+      "$ref": "#/$defs/ConfigurationChangeResponse"
+    },
     "devices": {
       "$ref": "#/$defs/DeviceListResponse"
     },
@@ -20,6 +23,9 @@
     },
     "presence": {
       "$ref": "#/$defs/PresenceSnapshotResponse"
+    },
+    "undo_configuration_case": {
+      "$ref": "#/$defs/UndoConfigurationCaseRequest"
     }
   },
   "required": [
@@ -27,6 +33,8 @@
     "heartbeat",
     "approvals",
     "approval_decision",
+    "undo_configuration_case",
+    "configuration_change",
     "operator_overview",
     "devices"
   ],
@@ -208,6 +216,35 @@
       "required": [
         "session_id",
         "state"
+      ]
+    },
+    "ConfigurationChangeResponse": {
+      "description": "The new change-case record produced by undoing a configuration case.",
+      "type": "object",
+      "properties": {
+        "entity_id": {
+          "type": "string"
+        },
+        "entity_kind": {
+          "type": "string"
+        },
+        "risk_band": {
+          "type": "string"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "version_id": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "required": [
+        "version_id",
+        "entity_kind",
+        "entity_id",
+        "summary",
+        "risk_band"
       ]
     },
     "DeliveryRoutingRequest": {
@@ -936,6 +973,19 @@
             "session_id"
           ]
         }
+      ]
+    },
+    "UndoConfigurationCaseRequest": {
+      "description": "Ask the operator control plane to undo a recorded configuration case.",
+      "type": "object",
+      "properties": {
+        "case_id": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "required": [
+        "case_id"
       ]
     }
   }

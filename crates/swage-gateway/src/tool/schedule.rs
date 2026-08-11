@@ -260,13 +260,17 @@ impl Tool for ScheduleTool {
     async fn execute(&self, params: Value, ctx: &dyn ToolContext) -> Result<Value, ToolError> {
         let state = gateway_state(SCHEDULE_TOOL, ctx)?;
         let action = required_str(SCHEDULE_TOOL, &params, "action")?;
+        let session_id = parse_uuid(SCHEDULE_TOOL, "session", ctx.session_id())?;
         match action {
-            "create" => self.create(state, &params, ctx.agent_id()).await,
+            "create" => {
+                self.create(state, &params, ctx.agent_id(), session_id)
+                    .await
+            }
             "list" => self.list(state).await,
-            "update" => self.update(state, &params).await,
-            "pause" => self.pause(state, &params).await,
-            "resume" => self.resume(state, &params).await,
-            "remove" => self.remove(state, &params).await,
+            "update" => self.update(state, &params, session_id).await,
+            "pause" => self.pause(state, &params, session_id).await,
+            "resume" => self.resume(state, &params, session_id).await,
+            "remove" => self.remove(state, &params, session_id).await,
             other => Err(invalid(
                 SCHEDULE_TOOL,
                 format!(
@@ -283,6 +287,7 @@ impl ScheduleTool {
         state: &AppState,
         params: &Value,
         agent_id: &str,
+        session_id: Uuid,
     ) -> Result<Value, ToolError> {
         let message = required_str(SCHEDULE_TOOL, params, "message")?.to_owned();
         let spec = build_spec(params)?;
@@ -301,10 +306,16 @@ impl ScheduleTool {
         let creator = ScheduleCreator::Agent {
             agent_id: agent_id.to_owned(),
         };
-        let schedule = crate::schedule::create_schedule(state, request, creator)
-            .await
-            .map_err(|error| map_service_error(SCHEDULE_TOOL, error))?;
-        Ok(json!({ "schedule": schedule }))
+        let (schedule, case) = crate::schedule::create_schedule_change(
+            state,
+            request,
+            creator,
+            SCHEDULE_TOOL,
+            Some(session_id),
+        )
+        .await
+        .map_err(|error| map_service_error(SCHEDULE_TOOL, error))?;
+        Ok(json!({ "schedule": schedule, "change_case": case }))
     }
 
     async fn list(&self, state: &AppState) -> Result<Value, ToolError> {
@@ -314,7 +325,12 @@ impl ScheduleTool {
         Ok(json!({ "schedules": response.schedules }))
     }
 
-    async fn update(&self, state: &AppState, params: &Value) -> Result<Value, ToolError> {
+    async fn update(
+        &self,
+        state: &AppState,
+        params: &Value,
+        session_id: Uuid,
+    ) -> Result<Value, ToolError> {
         let schedule_id = parse_uuid(
             SCHEDULE_TOOL,
             "schedule_id",
@@ -339,38 +355,71 @@ impl ScheduleTool {
             routing: None,
             gate,
         };
-        let schedule = crate::schedule::update_schedule(state, schedule_id, request)
-            .await
-            .map_err(|error| map_service_error(SCHEDULE_TOOL, error))?;
-        Ok(json!({ "schedule": schedule }))
+        let (schedule, case) = crate::schedule::update_schedule_change(
+            state,
+            schedule_id,
+            request,
+            SCHEDULE_TOOL,
+            Some(session_id),
+        )
+        .await
+        .map_err(|error| map_service_error(SCHEDULE_TOOL, error))?;
+        Ok(json!({ "schedule": schedule, "change_case": case }))
     }
 
-    async fn remove(&self, state: &AppState, params: &Value) -> Result<Value, ToolError> {
+    async fn remove(
+        &self,
+        state: &AppState,
+        params: &Value,
+        session_id: Uuid,
+    ) -> Result<Value, ToolError> {
         let schedule_id = schedule_id(params)?;
-        let removed = crate::schedule::delete_schedule(state, schedule_id)
-            .await
-            .map_err(|error| map_service_error(SCHEDULE_TOOL, error))?;
-        if !removed {
-            return Err(invalid(
-                SCHEDULE_TOOL,
-                format!("no schedule with id {schedule_id}"),
-            ));
-        }
-        Ok(json!({ "removed": true, "schedule_id": schedule_id }))
+        let case = crate::schedule::delete_schedule_change(
+            state,
+            schedule_id,
+            SCHEDULE_TOOL,
+            Some(session_id),
+        )
+        .await
+        .map_err(|error| map_service_error(SCHEDULE_TOOL, error))?
+        .ok_or_else(|| invalid(SCHEDULE_TOOL, format!("no schedule with id {schedule_id}")))?;
+        Ok(json!({ "removed": true, "schedule_id": schedule_id, "change_case": case }))
     }
 
-    async fn pause(&self, state: &AppState, params: &Value) -> Result<Value, ToolError> {
-        let schedule = crate::schedule::pause_schedule(state, schedule_id(params)?)
-            .await
-            .map_err(|error| map_service_error(SCHEDULE_TOOL, error))?;
-        Ok(json!({ "schedule": schedule }))
+    async fn pause(
+        &self,
+        state: &AppState,
+        params: &Value,
+        session_id: Uuid,
+    ) -> Result<Value, ToolError> {
+        let schedule_id = schedule_id(params)?;
+        let (schedule, case) = crate::schedule::pause_schedule_change(
+            state,
+            schedule_id,
+            SCHEDULE_TOOL,
+            Some(session_id),
+        )
+        .await
+        .map_err(|error| map_service_error(SCHEDULE_TOOL, error))?;
+        Ok(json!({ "schedule": schedule, "change_case": case }))
     }
 
-    async fn resume(&self, state: &AppState, params: &Value) -> Result<Value, ToolError> {
-        let schedule = crate::schedule::resume_schedule(state, schedule_id(params)?)
-            .await
-            .map_err(|error| map_service_error(SCHEDULE_TOOL, error))?;
-        Ok(json!({ "schedule": schedule }))
+    async fn resume(
+        &self,
+        state: &AppState,
+        params: &Value,
+        session_id: Uuid,
+    ) -> Result<Value, ToolError> {
+        let schedule_id = schedule_id(params)?;
+        let (schedule, case) = crate::schedule::resume_schedule_change(
+            state,
+            schedule_id,
+            SCHEDULE_TOOL,
+            Some(session_id),
+        )
+        .await
+        .map_err(|error| map_service_error(SCHEDULE_TOOL, error))?;
+        Ok(json!({ "schedule": schedule, "change_case": case }))
     }
 }
 
@@ -542,10 +591,20 @@ impl Tool for WakeMeLaterTool {
         let creator = ScheduleCreator::Agent {
             agent_id: ctx.agent_id().to_owned(),
         };
-        let schedule = crate::schedule::create_schedule(state, request, creator)
-            .await
-            .map_err(|error| map_service_error(WAKE_TOOL, error))?;
-        Ok(json!({ "schedule_id": schedule.id, "wake_at": wake_at.to_rfc3339() }))
+        let (schedule, case) = crate::schedule::create_schedule_change(
+            state,
+            request,
+            creator,
+            WAKE_TOOL,
+            Some(session_id),
+        )
+        .await
+        .map_err(|error| map_service_error(WAKE_TOOL, error))?;
+        Ok(json!({
+            "schedule_id": schedule.id,
+            "wake_at": wake_at.to_rfc3339(),
+            "change_case": case,
+        }))
     }
 }
 

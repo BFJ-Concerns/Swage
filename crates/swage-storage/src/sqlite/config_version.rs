@@ -37,7 +37,7 @@ fn row_to_configuration_version(row: &rusqlite::Row<'_>) -> rusqlite::Result<Con
     let snapshot_json: String = row.get(9)?;
     let diff_json: String = row.get(10)?;
     let previous_version_id: Option<String> = row.get(11)?;
-    let rollback_to_version_id: Option<String> = row.get(12)?;
+    let undone_version_id: Option<String> = row.get(12)?;
     let created_at: String = row.get(13)?;
 
     Ok(ConfigurationVersion {
@@ -65,7 +65,7 @@ fn row_to_configuration_version(row: &rusqlite::Row<'_>) -> rusqlite::Result<Con
             )
         })?,
         previous_version_id: parse_optional_uuid(previous_version_id)?,
-        rollback_to_version_id: parse_optional_uuid(rollback_to_version_id)?,
+        undone_version_id: parse_optional_uuid(undone_version_id)?,
         created_at: parse_dt(&created_at)?,
     })
 }
@@ -87,7 +87,7 @@ impl ConfigurationVersionStore for SqliteStorage {
                 "INSERT INTO configuration_versions (
                     id, space_id, session_id, entity_kind, entity_id, version_number,
                     operation_kind, source, summary, snapshot_json, diff_json,
-                    previous_version_id, rollback_to_version_id, created_at
+                    previous_version_id, undone_version_id, created_at
                  ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
                 params![
                     version.id.to_string(),
@@ -102,7 +102,7 @@ impl ConfigurationVersionStore for SqliteStorage {
                     snapshot_json,
                     diff_json,
                     version.previous_version_id.map(|id| id.to_string()),
-                    version.rollback_to_version_id.map(|id| id.to_string()),
+                    version.undone_version_id.map(|id| id.to_string()),
                     created_at_str,
                 ],
             )?;
@@ -119,7 +119,7 @@ impl ConfigurationVersionStore for SqliteStorage {
                 snapshot: version.snapshot,
                 diff: version.diff,
                 previous_version_id: version.previous_version_id,
-                rollback_to_version_id: version.rollback_to_version_id,
+                undone_version_id: version.undone_version_id,
                 created_at,
             })
         })
@@ -134,7 +134,7 @@ impl ConfigurationVersionStore for SqliteStorage {
             let mut stmt = conn.prepare(
                 "SELECT id, space_id, session_id, entity_kind, entity_id, version_number,
                         operation_kind, source, summary, snapshot_json, diff_json,
-                        previous_version_id, rollback_to_version_id, created_at
+                        previous_version_id, undone_version_id, created_at
                  FROM configuration_versions
                  WHERE id = ?1",
             )?;
@@ -152,14 +152,14 @@ impl ConfigurationVersionStore for SqliteStorage {
             let sql = if space_id.is_some() {
                 "SELECT id, space_id, session_id, entity_kind, entity_id, version_number,
                         operation_kind, source, summary, snapshot_json, diff_json,
-                        previous_version_id, rollback_to_version_id, created_at
+                        previous_version_id, undone_version_id, created_at
                  FROM configuration_versions
                  WHERE space_id = ?1
                  ORDER BY created_at DESC"
             } else {
                 "SELECT id, space_id, session_id, entity_kind, entity_id, version_number,
                         operation_kind, source, summary, snapshot_json, diff_json,
-                        previous_version_id, rollback_to_version_id, created_at
+                        previous_version_id, undone_version_id, created_at
                  FROM configuration_versions
                  ORDER BY created_at DESC"
             };
@@ -185,7 +185,7 @@ impl ConfigurationVersionStore for SqliteStorage {
             let mut stmt = conn.prepare(
                 "SELECT id, space_id, session_id, entity_kind, entity_id, version_number,
                         operation_kind, source, summary, snapshot_json, diff_json,
-                        previous_version_id, rollback_to_version_id, created_at
+                        previous_version_id, undone_version_id, created_at
                  FROM configuration_versions
                  WHERE entity_kind = ?1 AND entity_id = ?2
                  ORDER BY version_number DESC",
@@ -210,7 +210,7 @@ impl ConfigurationVersionStore for SqliteStorage {
             let mut stmt = conn.prepare(
                 "SELECT id, space_id, session_id, entity_kind, entity_id, version_number,
                         operation_kind, source, summary, snapshot_json, diff_json,
-                        previous_version_id, rollback_to_version_id, created_at
+                        previous_version_id, undone_version_id, created_at
                  FROM configuration_versions
                  WHERE entity_kind = ?1 AND entity_id = ?2
                  ORDER BY version_number DESC
@@ -259,7 +259,7 @@ mod tests {
                 snapshot: json!({"name": "team-1"}),
                 diff: json!([{"path": "/name", "before": null, "after": "team-1"}]),
                 previous_version_id: None,
-                rollback_to_version_id: None,
+                undone_version_id: None,
             })
             .await
             .unwrap();
@@ -277,7 +277,7 @@ mod tests {
                 snapshot: json!({"name": "team-1", "description": "Updated"}),
                 diff: json!([{"path": "/description", "before": null, "after": "Updated"}]),
                 previous_version_id: Some(first.id),
-                rollback_to_version_id: None,
+                undone_version_id: None,
             })
             .await
             .unwrap();

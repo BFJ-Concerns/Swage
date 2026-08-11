@@ -334,7 +334,7 @@ const CREATE_CONFIGURATION_VERSION_TABLE: &str = "
         snapshot_json          TEXT NOT NULL,
         diff_json              TEXT NOT NULL,
         previous_version_id    TEXT REFERENCES configuration_versions(id) ON DELETE SET NULL,
-        rollback_to_version_id TEXT REFERENCES configuration_versions(id) ON DELETE SET NULL,
+        undone_version_id      TEXT REFERENCES configuration_versions(id) ON DELETE SET NULL,
         created_at             TEXT NOT NULL
     );
 
