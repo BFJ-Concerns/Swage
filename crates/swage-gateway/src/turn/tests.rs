@@ -3108,6 +3108,44 @@ impl swage_storage::store::CitationStore for MockStorage {
 }
 
 #[async_trait]
+impl swage_storage::store::OrientationCardStore for MockStorage {
+    async fn create_orientation_card(
+        &self,
+        _: swage_storage::NewOrientationCard,
+        _: Option<uuid::Uuid>,
+    ) -> Result<swage_storage::OrientationCard, StorageError> {
+        unimplemented!("turn tests do not exercise orientation cards")
+    }
+    async fn find_orientation_cards(
+        &self,
+        _: uuid::Uuid,
+        _: Option<&str>,
+        _: usize,
+    ) -> Result<Vec<swage_storage::OrientationCard>, StorageError> {
+        unimplemented!("turn tests do not exercise orientation cards")
+    }
+    async fn supersede_orientation_card(
+        &self,
+        _: uuid::Uuid,
+        _: uuid::Uuid,
+        _: uuid::Uuid,
+        _: String,
+        _: Option<uuid::Uuid>,
+    ) -> Result<swage_storage::OrientationCardLifecycle, StorageError> {
+        unimplemented!("turn tests do not exercise orientation cards")
+    }
+    async fn retire_orientation_card(
+        &self,
+        _: uuid::Uuid,
+        _: uuid::Uuid,
+        _: String,
+        _: Option<uuid::Uuid>,
+    ) -> Result<swage_storage::OrientationCardLifecycle, StorageError> {
+        unimplemented!("turn tests do not exercise orientation cards")
+    }
+}
+
+#[async_trait]
 impl swage_storage::store::SecretStore for MockStorage {
     async fn create_secret(
         &self,

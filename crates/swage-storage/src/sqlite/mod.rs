@@ -16,6 +16,7 @@ pub mod material;
 pub mod message;
 pub mod migrations;
 pub mod observation;
+pub mod orientation_card;
 pub mod schedule;
 pub mod secret;
 pub mod session;
