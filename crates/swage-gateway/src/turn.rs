@@ -812,6 +812,7 @@ pub(crate) async fn process_turn_with_existing_turn(
         memory_content.map(|content| (content, space.name.clone())),
         environment,
         available_skills,
+        config.default_model_id(),
     );
     let tokeniser = TiktokenTokeniser::new(config.default_model_id());
 
@@ -1572,6 +1573,34 @@ async fn select_context_assembly(
             }
         }
     };
+
+    // The working-norms text is its own experiment location, drawn beside
+    // the assembly choice: no alternatives are registered yet, so the
+    // built-in text serves, but every turn's draw is already recorded and
+    // blinded — the seam variant texts will compete through.
+    let norms_variants: Vec<&str> = vec![];
+    let norms_decision = crate::experimentation::select_variant(
+        &config.experimentation,
+        crate::experimentation::LOCATION_WORKING_NORMS,
+        &norms_variants,
+        "built-in",
+        turn_id,
+    );
+    if let Err(error) = crate::experimentation::record_selection(
+        state,
+        crate::experimentation::LOCATION_WORKING_NORMS,
+        &norms_decision,
+        Some(session_id),
+        Some(turn_id),
+    )
+    .await
+    {
+        tracing::error!(
+            %error,
+            variant = %norms_decision.variant,
+            "working-norms selection could not be recorded; serving the built-in text"
+        );
+    }
 
     decision.variant
 }

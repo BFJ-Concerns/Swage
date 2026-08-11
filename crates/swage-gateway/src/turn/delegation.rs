@@ -81,6 +81,7 @@ impl DelegationContextAssembler for GatewayDelegatedContextAssembler {
             memory_content.map(|content| (content, self.space.name.clone())),
             environment,
             available_skills,
+            self.config.default_model_id(),
         );
         let tokeniser = TiktokenTokeniser::new(self.config.default_model_id());
         let output = execute_context_assembly(
