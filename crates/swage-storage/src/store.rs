@@ -2385,7 +2385,7 @@ mod tests {
                 snapshot: serde_json::json!({"name": "workspace-core"}),
                 diff: serde_json::json!([]),
                 previous_version_id: None,
-                rollback_to_version_id: None,
+                undone_version_id: None,
             }));
             std::mem::drop(t.get_configuration_version(id));
             std::mem::drop(t.list_configuration_versions(Some(Uuid::new_v4())));
