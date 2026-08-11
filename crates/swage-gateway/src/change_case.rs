@@ -544,6 +544,15 @@ pub async fn undo_case(
         },
     )
     .await
+    .map_err(|error| {
+        // The undo landed but its record did not. As with an ordinary apply,
+        // make the incomplete lifecycle explicit so the operator knows the
+        // resource and its audit trail may now disagree.
+        GatewayError::ConfigError(format!(
+            "'{summary}' was applied but recording its undo case failed ({error}); \
+             the configuration may be changed without a complete record — reconcile before further changes"
+        ))
+    })
 }
 
 // ---------------------------------------------------------------------------
