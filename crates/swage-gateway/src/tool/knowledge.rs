@@ -131,9 +131,11 @@ impl Tool for KnowledgeSearchTool {
         "Find evidence for a question in this space's gathered external material by \
          full text. Use knowledge_orient first when you do not yet know what the corpus \
          contains or which vocabulary it uses. Each result here is a passage with the source it came from and a \
-         pinned observation and version; cite it with those values and the exact quote. The \
+         pinned observation and version; record a citation with the knowledge_cite \
+         tool, passing those values and the exact quote. The \
          knowledge base holds captured external material; it is not your memory \
-         (use the memory tools for what you know about your own work)."
+         (for what you know about your own work, use agent_memory for your \
+         private records or memory for the space's shared notes)."
     }
 
     fn parameters(&self) -> Value {

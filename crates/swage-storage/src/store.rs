@@ -263,6 +263,14 @@ pub trait ObservationStore: Send + Sync {
         version: u32,
     ) -> Result<Option<ExtractionDerivation>, StorageError>;
 
+    /// The observation's newest extraction — the text default retrieval and
+    /// projections read. Older versions stay addressable by `get_extraction`
+    /// because citations pin them.
+    async fn latest_extraction(
+        &self,
+        observation_id: Uuid,
+    ) -> Result<Option<ExtractionDerivation>, StorageError>;
+
     /// Full-text search across the space's newest derivation per
     /// observation, best matches first. Each hit carries the derivation
     /// version and snippet offsets a citation pins to.
@@ -283,6 +291,14 @@ pub trait CurationAssertionStore: Send + Sync {
         &self,
         assertion: NewCurationAssertion,
     ) -> Result<CurationAssertion, StorageError>;
+
+    /// Each observation's newest assertion — its effective curation state,
+    /// by the same newest-assertion rule the search filter applies.
+    /// Observations with no assertion are absent from the result.
+    async fn effective_curation_by_space(
+        &self,
+        space_id: Uuid,
+    ) -> Result<Vec<CurationAssertion>, StorageError>;
 }
 
 /// Append-only citations to pinned knowledge-base derivations.
@@ -462,6 +478,13 @@ pub trait TurnStore: Send + Sync {
     /// State is consumer-driven — the storage layer records whatever state is
     /// provided. No state-machine enforcement is applied here.
     async fn update_turn_state(&self, id: Uuid, state: TurnState) -> Result<(), StorageError>;
+    /// Force a turn to `Failed`, overriding the first-terminal-wins guard.
+    ///
+    /// The one sanctioned terminal-to-terminal transition: the record
+    /// durability escalation, where a turn whose record is known-incomplete
+    /// must not stand as `Completed`. Every other caller uses
+    /// `update_turn_state`.
+    async fn force_turn_failure(&self, id: Uuid) -> Result<(), StorageError>;
     /// Find all active turns for a given agent (Pending, Processing, or AwaitingApproval).
     ///
     /// Used by startup recovery, shutdown, and cancel to identify in-flight turns.
@@ -1480,6 +1503,13 @@ mod tests {
             unimplemented!()
         }
 
+        async fn latest_extraction(
+            &self,
+            _: Uuid,
+        ) -> Result<Option<ExtractionDerivation>, StorageError> {
+            unimplemented!()
+        }
+
         async fn search_extractions(
             &self,
             _: Uuid,
@@ -1496,6 +1526,13 @@ mod tests {
             &self,
             _: NewCurationAssertion,
         ) -> Result<CurationAssertion, StorageError> {
+            unimplemented!()
+        }
+
+        async fn effective_curation_by_space(
+            &self,
+            _: Uuid,
+        ) -> Result<Vec<CurationAssertion>, StorageError> {
             unimplemented!()
         }
     }
@@ -1787,6 +1824,9 @@ mod tests {
             unimplemented!()
         }
         async fn update_turn_state(&self, _: Uuid, _: TurnState) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+        async fn force_turn_failure(&self, _: Uuid) -> Result<(), StorageError> {
             unimplemented!()
         }
         async fn find_in_progress_by_agent(

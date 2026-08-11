@@ -152,6 +152,15 @@ fn default_machine_stale_after_secs() -> u64 {
     30
 }
 
+/// Result of regenerating a space's knowledge-base browse mirror — a
+/// disposable markdown projection of the database-authoritative store.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+pub struct KnowledgeMirrorRegenerateResponse {
+    /// Absolute path of the regenerated mirror directory.
+    pub mirror_root: String,
+    pub files_written: u32,
+}
+
 #[derive(JsonSchema)]
 #[allow(dead_code)]
 pub struct HostingSurface {
@@ -163,4 +172,5 @@ pub struct HostingSurface {
     configuration_change: ConfigurationChangeResponse,
     operator_overview: OperatorOverviewResponse,
     devices: device::DeviceListResponse,
+    knowledge_mirror: KnowledgeMirrorRegenerateResponse,
 }
