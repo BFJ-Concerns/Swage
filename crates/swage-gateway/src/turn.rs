@@ -1460,14 +1460,18 @@ pub(crate) async fn process_turn_with_existing_turn(
     }
 
     // The durability contract's escalation (record_durability.rs): a turn
-    // whose record is known-incomplete must not end looking auditable. The
-    // state write may itself fail on the same broken store — then the log
-    // and the client error are the loudest surfaces left.
+    // whose record is known-incomplete must not end looking auditable.
+    // force_turn_failure, not update_turn_state: the agent has usually
+    // already marked the turn Completed, and the ordinary write's
+    // first-terminal-wins guard would silently no-op — this transition is
+    // the guard's one sanctioned override. The state write may itself fail
+    // on the same broken store — then the log and the client error are the
+    // loudest surfaces left.
     if let Some(reason) = record_integrity_lost {
         tracing::error!(turn_id = ?turn_id, %reason, "turn record integrity lost");
         if let Err(error) = state
             .storage
-            .update_turn_state(turn_id.unwrap_or(prepared_turn_id), TurnState::Failed)
+            .force_turn_failure(turn_id.unwrap_or(prepared_turn_id))
             .await
         {
             tracing::error!(error = %error, "failed to mark record-degraded turn as failed");

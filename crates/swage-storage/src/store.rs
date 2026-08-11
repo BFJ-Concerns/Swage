@@ -446,6 +446,13 @@ pub trait TurnStore: Send + Sync {
     /// State is consumer-driven — the storage layer records whatever state is
     /// provided. No state-machine enforcement is applied here.
     async fn update_turn_state(&self, id: Uuid, state: TurnState) -> Result<(), StorageError>;
+    /// Force a turn to `Failed`, overriding the first-terminal-wins guard.
+    ///
+    /// The one sanctioned terminal-to-terminal transition: the record
+    /// durability escalation, where a turn whose record is known-incomplete
+    /// must not stand as `Completed`. Every other caller uses
+    /// `update_turn_state`.
+    async fn force_turn_failure(&self, id: Uuid) -> Result<(), StorageError>;
     /// Find all active turns for a given agent (Pending, Processing, or AwaitingApproval).
     ///
     /// Used by startup recovery, shutdown, and cancel to identify in-flight turns.
@@ -1745,6 +1752,9 @@ mod tests {
             unimplemented!()
         }
         async fn update_turn_state(&self, _: Uuid, _: TurnState) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+        async fn force_turn_failure(&self, _: Uuid) -> Result<(), StorageError> {
             unimplemented!()
         }
         async fn find_in_progress_by_agent(
