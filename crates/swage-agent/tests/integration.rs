@@ -157,6 +157,50 @@ struct AppendAfterResponseHook {
 
 struct TruncatedMetadataTool;
 
+struct CountingTool {
+    calls: AtomicUsize,
+}
+
+impl CountingTool {
+    fn new() -> Self {
+        Self {
+            calls: AtomicUsize::new(0),
+        }
+    }
+
+    fn call_count(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl Tool for CountingTool {
+    fn name(&self) -> &str {
+        "counting"
+    }
+
+    fn description(&self) -> &str {
+        "Counts each invocation."
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+        })
+    }
+
+    async fn execute(
+        &self,
+        _params: serde_json::Value,
+        _ctx: &dyn swage_tool::context::ToolContext,
+    ) -> Result<serde_json::Value, ToolError> {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+        Ok(json!({ "call": call }))
+    }
+}
+
 #[async_trait]
 impl Tool for TruncatedMetadataTool {
     fn name(&self) -> &str {
@@ -271,6 +315,72 @@ fn drain_events(mut rx: mpsc::UnboundedReceiver<AgentEvent>) -> Vec<AgentEvent> 
         events.push(event);
     }
     events
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn streaming_turn_continues_past_ten_tool_rounds() {
+    const TOOL_ROUNDS: usize = 25;
+
+    let (storage, space, session, thread) = setup_conversation("agent-a").await;
+    let mut rounds = (1..=TOOL_ROUNDS)
+        .map(|round| {
+            vec![
+                StreamChunk::ToolUse {
+                    call_id: format!("call-{round}"),
+                    name: "counting".into(),
+                    arguments: json!({}),
+                },
+                StreamChunk::Done {
+                    finish_reason: Some(FinishReason::ToolUse),
+                },
+            ]
+        })
+        .collect::<Vec<_>>();
+    rounds.push(vec![
+        StreamChunk::Delta {
+            content: "All twenty-five tool calls completed successfully.".into(),
+        },
+        StreamChunk::Done {
+            finish_reason: Some(FinishReason::Stop),
+        },
+    ]);
+    let provider = Arc::new(StreamingProvider::new(rounds));
+    let counting_tool = Arc::new(CountingTool::new());
+    let dispatcher = ToolDispatcher::allow_all([counting_tool.clone() as Arc<dyn Tool>]);
+    let agent = AgentBuilder::new()
+        .config(resolved_config("agent-a"))
+        .provider(provider.clone())
+        .storage(storage.clone())
+        .tool_dispatcher(dispatcher)
+        .build()
+        .expect("agent");
+
+    let (event_tx, _event_rx) = mpsc::unbounded_channel();
+    let outbound = agent
+        .process_turn_streaming(
+            test_request(space.id, session.id, thread.id, "Keep counting", None),
+            event_tx,
+        )
+        .await
+        .expect("streaming turn should continue until the provider stops calling tools");
+
+    assert_eq!(provider.call_count(), TOOL_ROUNDS + 1);
+    assert_eq!(counting_tool.call_count(), TOOL_ROUNDS);
+    assert_eq!(
+        outbound.response,
+        "All twenty-five tool calls completed successfully."
+    );
+
+    let tool_calls = storage
+        .list_tool_calls_by_turn(outbound.turn_id)
+        .await
+        .expect("tool calls");
+    assert_eq!(tool_calls.len(), TOOL_ROUNDS);
+    let turns = storage
+        .list_turns_by_thread(thread.id)
+        .await
+        .expect("turn list");
+    assert_eq!(turns[0].state, TurnState::Completed);
 }
 
 #[tokio::test(flavor = "multi_thread")]

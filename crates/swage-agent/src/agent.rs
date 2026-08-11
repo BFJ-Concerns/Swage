@@ -298,15 +298,14 @@ impl Agent {
         let mut tool_position: i32 = 0;
         let mut round = 0usize;
 
-        // Hard cap prevents runaway tool loops.
-        let max_tool_rounds = self.config.max_tool_rounds as usize;
-
         'outer: loop {
             // Check cancellation eagerly before starting each round. This
             // catches pre-cancelled tokens reliably — tokio::select! inside
             // the stream loop is non-deterministic when both branches are
             // immediately ready.
             if cancel_token.is_cancelled() {
+                self.persist_cancelled_partial(thread_id, turn.id, &accumulated)
+                    .await;
                 let _ = self
                     .storage
                     .update_turn_state(turn.id, TurnState::Interrupted)
@@ -318,13 +317,6 @@ impl Agent {
                 return Err(AgentError::Cancelled);
             }
 
-            if round >= max_tool_rounds {
-                let msg =
-                    format!("\n\n[Tool-call round limit ({max_tool_rounds}) reached — stopping.]");
-                accumulated.push_str(&msg);
-                let _ = event_tx.send(AgentEvent::Token { content: msg });
-                break 'outer;
-            }
             round += 1;
 
             let round_outcome = self
@@ -333,6 +325,7 @@ impl Agent {
                     &execution,
                     &event_tx,
                     &cancel_token,
+                    &accumulated,
                     &mut total_input_tokens,
                     &mut total_output_tokens,
                     true,
@@ -350,41 +343,98 @@ impl Agent {
             }
 
             // --- Tool dispatch cycle ---
-            let mut tool_results = Vec::with_capacity(round_tool_calls.len());
+            let tool_dispatch_result: Result<Vec<ToolResult>, AgentError> = async {
+                let mut tool_results = Vec::with_capacity(round_tool_calls.len());
 
-            for call in &round_tool_calls {
-                // Re-check cancellation before each tool execution.
-                if cancel_token.is_cancelled() {
-                    let _ = self
-                        .storage
-                        .update_turn_state(turn.id, TurnState::Interrupted)
-                        .await;
-                    let _ = self
-                        .storage
-                        .update_state(thread_id, ThreadState::Idle)
-                        .await;
-                    return Err(AgentError::Cancelled);
-                }
-
-                let start = std::time::Instant::now();
-
-                // PreToolUse hook — may block, request approval, or proceed.
-                let (result_content, is_error, status) = match self
-                    .dispatch_pre_tool_use(&call.name, &call.arguments)
-                    .await
-                {
-                    Err(AgentError::HookBlocked { reason, .. }) => {
-                        (reason, true, "blocked".to_string())
+                for call in &round_tool_calls {
+                    // Re-check cancellation before each tool execution.
+                    if cancel_token.is_cancelled() {
+                        let _ = self
+                            .storage
+                            .update_turn_state(turn.id, TurnState::Interrupted)
+                            .await;
+                        let _ = self
+                            .storage
+                            .update_state(thread_id, ThreadState::Idle)
+                            .await;
+                        return Err(AgentError::Cancelled);
                     }
-                    Err(e) => (format!("hook error: {e}"), true, "error".to_string()),
-                    Ok(PreToolUseOutcome::RequestApproval {
-                        prompt,
-                        context,
-                        timeout,
-                    }) => {
-                        if approval_scope.should_skip_gate() {
-                            // A broader approval decision covers later gates
-                            // within this still-running turn.
+
+                    let start = std::time::Instant::now();
+
+                    // PreToolUse hook — may block, request approval, or proceed.
+                    let (result_content, is_error, status) = match self
+                        .dispatch_pre_tool_use(&call.name, &call.arguments)
+                        .await
+                    {
+                        Err(AgentError::HookBlocked { reason, .. }) => {
+                            (reason, true, "blocked".to_string())
+                        }
+                        Err(e) => (format!("hook error: {e}"), true, "error".to_string()),
+                        Ok(PreToolUseOutcome::RequestApproval {
+                            prompt,
+                            context,
+                            timeout,
+                        }) => {
+                            if approval_scope.should_skip_gate() {
+                                // A broader approval decision covers later gates
+                                // within this still-running turn.
+                                self.dispatch_tool_call(
+                                    call,
+                                    &execution,
+                                    &llm_request.messages,
+                                    &event_tx,
+                                    &cancel_token,
+                                    &mut approval_scope,
+                                )
+                                .await?
+                            } else {
+                                // Hook-driven approval gate.
+                                use crate::approval::{
+                                    ApprovalGateOutcome, DEFAULT_APPROVAL_TIMEOUT_SECS,
+                                };
+                                let gate_timeout = timeout.unwrap_or(
+                                    std::time::Duration::from_secs(DEFAULT_APPROVAL_TIMEOUT_SECS),
+                                );
+                                match self
+                                    .handle_approval_gate(
+                                        &execution,
+                                        swage_storage::model::ApprovalKind::Hook,
+                                        Some(call.name.clone()),
+                                        Some(call.arguments.clone()),
+                                        None,
+                                        prompt,
+                                        context,
+                                        gate_timeout,
+                                        swage_core::ApprovalTimeoutPolicy::default(),
+                                        &event_tx,
+                                        &cancel_token,
+                                        &mut approval_scope,
+                                    )
+                                    .await?
+                                {
+                                    ApprovalGateOutcome::Approved => {
+                                        // Approved — proceed with normal dispatch.
+                                        self.dispatch_tool_call(
+                                            call,
+                                            &execution,
+                                            &llm_request.messages,
+                                            &event_tx,
+                                            &cancel_token,
+                                            &mut approval_scope,
+                                        )
+                                        .await?
+                                    }
+                                    ApprovalGateOutcome::Rejected { feedback } => {
+                                        (feedback, true, "rejected".to_string())
+                                    }
+                                    ApprovalGateOutcome::Interrupted => {
+                                        return Err(AgentError::Cancelled);
+                                    }
+                                }
+                            }
+                        }
+                        Ok(PreToolUseOutcome::Proceed) => {
                             self.dispatch_tool_call(
                                 call,
                                 &execution,
@@ -394,121 +444,80 @@ impl Agent {
                                 &mut approval_scope,
                             )
                             .await?
-                        } else {
-                            // Hook-driven approval gate.
-                            use crate::approval::{
-                                ApprovalGateOutcome, DEFAULT_APPROVAL_TIMEOUT_SECS,
-                            };
-                            let gate_timeout = timeout.unwrap_or(std::time::Duration::from_secs(
-                                DEFAULT_APPROVAL_TIMEOUT_SECS,
-                            ));
-                            match self
-                                .handle_approval_gate(
-                                    &execution,
-                                    swage_storage::model::ApprovalKind::Hook,
-                                    Some(call.name.clone()),
-                                    Some(call.arguments.clone()),
-                                    None,
-                                    prompt,
-                                    context,
-                                    gate_timeout,
-                                    swage_core::ApprovalTimeoutPolicy::default(),
-                                    &event_tx,
-                                    &cancel_token,
-                                    &mut approval_scope,
-                                )
-                                .await?
-                            {
-                                ApprovalGateOutcome::Approved => {
-                                    // Approved — proceed with normal dispatch.
-                                    self.dispatch_tool_call(
-                                        call,
-                                        &execution,
-                                        &llm_request.messages,
-                                        &event_tx,
-                                        &cancel_token,
-                                        &mut approval_scope,
-                                    )
-                                    .await?
-                                }
-                                ApprovalGateOutcome::Rejected { feedback } => {
-                                    (feedback, true, "rejected".to_string())
-                                }
-                                ApprovalGateOutcome::Interrupted => {
-                                    return Err(AgentError::Cancelled);
-                                }
-                            }
                         }
-                    }
-                    Ok(PreToolUseOutcome::Proceed) => {
-                        self.dispatch_tool_call(
-                            call,
-                            &execution,
-                            &llm_request.messages,
-                            &event_tx,
-                            &cancel_token,
-                            &mut approval_scope,
-                        )
-                        .await?
-                    }
-                };
+                    };
 
-                let duration_ms = start.elapsed().as_millis() as u64;
+                    let duration_ms = start.elapsed().as_millis() as u64;
 
-                // Emit ToolEnd — final status and result.
-                let result_value: Value = serde_json::from_str(&result_content)
-                    .unwrap_or_else(|_| Value::String(result_content.clone()));
-                let result_metadata = extract_tool_result_metadata(&result_value);
-                let _ = event_tx.send(AgentEvent::ToolEnd {
-                    call_id: call.call_id.clone(),
-                    tool_name: call.name.clone(),
-                    result: result_value.clone(),
-                    status: status.clone(),
-                    duration_ms: Some(duration_ms),
-                });
-
-                // PostToolUse hook — informational, fire-and-forget.
-                self.dispatch_post_tool_use(&call.name, &call.arguments, &result_value)
-                    .await;
-
-                // Leak detection on tool result before feeding back to the model.
-                let safe_result = self.scan_output(&result_content);
-                let model_arguments = compact_tool_arguments_for_model(&call.arguments);
-                let model_result = compact_tool_result_for_model_with_reference(
-                    &safe_result,
-                    is_error,
-                    tool_result_reference(&turn.id.to_string(), &call.call_id),
-                );
-
-                let _ = self
-                    .storage
-                    .create_tool_call(NewToolCall {
-                        turn_id: turn.id,
-                        agent_id: self.config.agent_id.clone(),
+                    // Emit ToolEnd — final status and result.
+                    let result_value: Value = serde_json::from_str(&result_content)
+                        .unwrap_or_else(|_| Value::String(result_content.clone()));
+                    let result_metadata = extract_tool_result_metadata(&result_value);
+                    let _ = event_tx.send(AgentEvent::ToolEnd {
                         call_id: call.call_id.clone(),
-                        tool: call.name.clone(),
-                        arguments: serde_json::to_string(&call.arguments).unwrap_or_default(),
-                        model_arguments,
-                        result: Some(result_content.clone()),
-                        model_result: Some(model_result),
-                        status: Some(status),
-                        duration_ms: Some(duration_ms as i64),
-                        truncated: result_metadata.truncated,
-                        total_bytes: result_metadata.total_bytes,
-                        provider_round: round as i32,
-                        position: tool_position,
-                        parent_call_id: None,
-                    })
-                    .await;
-                tool_position += 1;
-                total_tool_calls += 1;
+                        tool_name: call.name.clone(),
+                        result: result_value.clone(),
+                        status: status.clone(),
+                        duration_ms: Some(duration_ms),
+                    });
 
-                tool_results.push(ToolResult {
-                    call_id: call.call_id.clone(),
-                    content: safe_result,
-                    is_error,
-                });
+                    // PostToolUse hook — informational, fire-and-forget.
+                    self.dispatch_post_tool_use(&call.name, &call.arguments, &result_value)
+                        .await;
+
+                    // Leak detection on tool result before feeding back to the model.
+                    let safe_result = self.scan_output(&result_content);
+                    let model_arguments = compact_tool_arguments_for_model(&call.arguments);
+                    let model_result = compact_tool_result_for_model_with_reference(
+                        &safe_result,
+                        is_error,
+                        tool_result_reference(&turn.id.to_string(), &call.call_id),
+                    );
+
+                    let _ = self
+                        .storage
+                        .create_tool_call(NewToolCall {
+                            turn_id: turn.id,
+                            agent_id: self.config.agent_id.clone(),
+                            call_id: call.call_id.clone(),
+                            tool: call.name.clone(),
+                            arguments: serde_json::to_string(&call.arguments).unwrap_or_default(),
+                            model_arguments,
+                            result: Some(result_content.clone()),
+                            model_result: Some(model_result),
+                            status: Some(status),
+                            duration_ms: Some(duration_ms as i64),
+                            truncated: result_metadata.truncated,
+                            total_bytes: result_metadata.total_bytes,
+                            provider_round: round as i32,
+                            position: tool_position,
+                            parent_call_id: None,
+                        })
+                        .await;
+                    tool_position += 1;
+                    total_tool_calls += 1;
+
+                    tool_results.push(ToolResult {
+                        call_id: call.call_id.clone(),
+                        content: safe_result,
+                        is_error,
+                    });
+                }
+
+                Ok(tool_results)
             }
+            .await;
+            let tool_results = match tool_dispatch_result {
+                Ok(tool_results) => tool_results,
+                Err(AgentError::Cancelled) => {
+                    // This function owns the accumulated partial: no cancellation
+                    // from tool dispatch may leave without persisting it here.
+                    self.persist_cancelled_partial(thread_id, turn.id, &accumulated)
+                        .await;
+                    return Err(AgentError::Cancelled);
+                }
+                Err(error) => return Err(error),
+            };
 
             // Build tool round messages and extend context for the next LLM call.
             let reasoning_replay = if self.config.replay_reasoning {
@@ -647,6 +656,7 @@ impl Agent {
                         &execution,
                         &event_tx,
                         &cancel_token,
+                        &accumulated,
                         &mut total_input_tokens,
                         &mut total_output_tokens,
                         false,
@@ -731,6 +741,7 @@ impl Agent {
         execution: &TurnExecutionContext,
         event_tx: &tokio::sync::mpsc::UnboundedSender<AgentEvent>,
         cancel_token: &tokio_util::sync::CancellationToken,
+        accumulated_prefix: &str,
         total_input_tokens: &mut u32,
         total_output_tokens: &mut u32,
         collect_tool_calls: bool,
@@ -753,6 +764,12 @@ impl Agent {
         loop {
             tokio::select! {
                 _ = cancel_token.cancelled() => {
+                    let accumulated_partial = format!("{accumulated_prefix}{text}");
+                    self.persist_cancelled_partial(
+                        execution.thread_id,
+                        execution.turn_id,
+                        &accumulated_partial,
+                    ).await;
                     let _ = self.storage.update_turn_state(execution.turn_id, TurnState::Interrupted).await;
                     let _ = self.storage.update_state(execution.thread_id, ThreadState::Idle).await;
                     return Err(AgentError::Cancelled);
@@ -1880,6 +1897,38 @@ impl Agent {
     // -----------------------------------------------------------------------
     // Leak detection
     // -----------------------------------------------------------------------
+
+    async fn persist_cancelled_partial(&self, thread_id: Uuid, turn_id: Uuid, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+
+        let safe_content = self.scan_output(text);
+        if let Err(error) = self
+            .storage
+            .append_message(swage_storage::model::AppendMessage {
+                thread_id,
+                turn_id: Some(turn_id),
+                role: Role::Assistant,
+                content: safe_content.clone(),
+                agent_id: self.config.agent_id.clone(),
+            })
+            .await
+        {
+            tracing::warn!(
+                %turn_id,
+                %error,
+                "failed to persist cancelled turn's partial assistant message"
+            );
+        }
+        if let Err(error) = self.storage.update_response(turn_id, &safe_content).await {
+            tracing::warn!(
+                %turn_id,
+                %error,
+                "failed to persist cancelled turn's partial response"
+            );
+        }
+    }
 
     /// Scan text for credential leaks and return the redacted version.
     ///

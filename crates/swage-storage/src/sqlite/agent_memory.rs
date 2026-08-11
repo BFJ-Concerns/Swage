@@ -15,10 +15,6 @@ fn parse_uuid(s: &str) -> rusqlite::Result<Uuid> {
     })
 }
 
-fn parse_optional_uuid(value: Option<String>) -> rusqlite::Result<Option<Uuid>> {
-    value.as_deref().map(parse_uuid).transpose()
-}
-
 fn parse_dt(s: &str) -> rusqlite::Result<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(s)
         .map(|value| value.with_timezone(&Utc))
@@ -32,36 +28,32 @@ fn parse_dt(s: &str) -> rusqlite::Result<DateTime<Utc>> {
 }
 
 fn row_to_agent_memory(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentMemoryRecord> {
-    let topology_run_id: Option<String> = row.get(4)?;
-    let node_execution_id: Option<String> = row.get(5)?;
-    let tags_json: String = row.get(10)?;
-    let metadata_json: String = row.get(13)?;
-    let created_at: String = row.get(14)?;
-    let updated_at: String = row.get(15)?;
+    let tags_json: String = row.get(8)?;
+    let metadata_json: String = row.get(11)?;
+    let created_at: String = row.get(12)?;
+    let updated_at: String = row.get(13)?;
 
     Ok(AgentMemoryRecord {
         id: parse_uuid(&row.get::<_, String>(0)?)?,
         space_id: parse_uuid(&row.get::<_, String>(1)?)?,
         session_id: parse_uuid(&row.get::<_, String>(2)?)?,
         turn_id: parse_uuid(&row.get::<_, String>(3)?)?,
-        topology_run_id: parse_optional_uuid(topology_run_id)?,
-        node_execution_id: parse_optional_uuid(node_execution_id)?,
-        agent_id: row.get(6)?,
-        memory_kind: row.get(7)?,
-        title: row.get(8)?,
-        content: row.get(9)?,
+        agent_id: row.get(4)?,
+        memory_kind: row.get(5)?,
+        title: row.get(6)?,
+        content: row.get(7)?,
         tags: serde_json::from_str(&tags_json).map_err(|error| {
             rusqlite::Error::FromSqlConversionFailure(
-                10,
+                8,
                 rusqlite::types::Type::Text,
                 Box::new(error),
             )
         })?,
-        outcome_status: row.get(11)?,
-        source_summary: row.get(12)?,
+        outcome_status: row.get(9)?,
+        source_summary: row.get(10)?,
         metadata: serde_json::from_str(&metadata_json).map_err(|error| {
             rusqlite::Error::FromSqlConversionFailure(
-                13,
+                11,
                 rusqlite::types::Type::Text,
                 Box::new(error),
             )
@@ -86,17 +78,15 @@ impl AgentMemoryStore for SqliteStorage {
                 .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
             conn.execute(
                 "INSERT INTO agent_memories (
-                    id, space_id, session_id, turn_id, topology_run_id, node_execution_id,
-                    agent_id, memory_kind, title, content, tags_json, outcome_status,
+                    id, space_id, session_id, turn_id, agent_id, memory_kind,
+                    title, content, tags_json, outcome_status,
                     source_summary, metadata_json, created_at, updated_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
                 params![
                     record.id.to_string(),
                     record.space_id.to_string(),
                     record.session_id.to_string(),
                     record.turn_id.to_string(),
-                    record.topology_run_id.map(|id| id.to_string()),
-                    record.node_execution_id.map(|id| id.to_string()),
                     record.agent_id,
                     record.memory_kind,
                     record.title,
@@ -114,8 +104,6 @@ impl AgentMemoryStore for SqliteStorage {
                 space_id: record.space_id,
                 session_id: record.session_id,
                 turn_id: record.turn_id,
-                topology_run_id: record.topology_run_id,
-                node_execution_id: record.node_execution_id,
                 agent_id: record.agent_id,
                 memory_kind: record.memory_kind,
                 title: record.title,
@@ -134,8 +122,8 @@ impl AgentMemoryStore for SqliteStorage {
     async fn get_agent_memory(&self, id: Uuid) -> Result<Option<AgentMemoryRecord>, StorageError> {
         self.with_conn(move |conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, space_id, session_id, turn_id, topology_run_id, node_execution_id,
-                        agent_id, memory_kind, title, content, tags_json, outcome_status,
+                "SELECT id, space_id, session_id, turn_id, agent_id, memory_kind,
+                        title, content, tags_json, outcome_status,
                         source_summary, metadata_json, created_at, updated_at
                  FROM agent_memories
                  WHERE id = ?1",
@@ -162,8 +150,8 @@ impl AgentMemoryStore for SqliteStorage {
 
         self.with_conn(move |conn| {
             let sql = "
-                SELECT id, space_id, session_id, turn_id, topology_run_id, node_execution_id,
-                       agent_id, memory_kind, title, content, tags_json, outcome_status,
+                SELECT id, space_id, session_id, turn_id, agent_id, memory_kind,
+                       title, content, tags_json, outcome_status,
                        source_summary, metadata_json, created_at, updated_at
                 FROM agent_memories
                 WHERE space_id = ?1
@@ -237,13 +225,11 @@ mod tests {
                 space_id: space.id,
                 session_id: session.id,
                 turn_id: turn.id,
-                topology_run_id: None,
-                node_execution_id: None,
                 agent_id: "agent-a".into(),
                 memory_kind: "insight".into(),
                 title: "Build quirk".into(),
-                content: "The builder needs the preview endpoint".into(),
-                tags: vec!["builder".into(), "preview".into()],
+                content: "The preview endpoint is required".into(),
+                tags: vec!["preview".into()],
                 outcome_status: Some("succeeded".into()),
                 source_summary: "turn completed".into(),
                 metadata: json!({"confidence": "high"}),
@@ -256,8 +242,6 @@ mod tests {
                 space_id: space.id,
                 session_id: session.id,
                 turn_id: turn.id,
-                topology_run_id: None,
-                node_execution_id: None,
                 agent_id: "agent-b".into(),
                 memory_kind: "outcome".into(),
                 title: "Other agent".into(),
@@ -276,7 +260,7 @@ mod tests {
             .unwrap()
             .expect("record should exist");
         assert_eq!(fetched.title, "Build quirk");
-        assert_eq!(fetched.tags, vec!["builder", "preview"]);
+        assert_eq!(fetched.tags, vec!["preview"]);
 
         let only_agent_a = storage
             .list_agent_memories(space.id, Some("agent-a"), None, Some("preview"), 10)

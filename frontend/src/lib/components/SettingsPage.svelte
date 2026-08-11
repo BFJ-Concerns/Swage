@@ -178,7 +178,7 @@
     },
     plugins: {
       title: "Plugins",
-      sub: "Managed and workspace plugin bundles. Plugins extend tools, skills, and lenses available to agents.",
+      sub: "Managed and workspace plugin bundles. Plugins extend tools and skills available to agents.",
     },
     channels: {
       title: "Channels",
@@ -198,7 +198,7 @@
     },
     display: {
       title: "Display",
-      sub: "How Swage looks. Settings here are platform-level — they apply across all spaces and lenses.",
+      sub: "How Swage looks. Settings here are platform-level — they apply across all spaces.",
     },
     account: {
       title: "Account",
@@ -289,8 +289,7 @@
         Swage has a platform plugin model.
 
         Wire the Plugins page to a real plugin/extension catalogue. Today the
-        gateway exposes per-space extensions (`/api/spaces/{id}/extensions`)
-        but no platform-level plugin registry. Surface installed plugins,
+        there is no platform-level plugin registry. Surface installed plugins,
         their tools, and an enable/disable toggle.
         Why: users cannot see or manage anything plugin-shaped from settings.
         How to apply: when the gateway gains a plugin registry endpoint,

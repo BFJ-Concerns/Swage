@@ -35,7 +35,6 @@ fn build_skeleton(
     let space_dir = root.join("spaces").join(space);
     fs::create_dir_all(space_dir.join("agents").join(agent))
         .expect("failed to create agent config dir");
-    fs::create_dir_all(space_dir.join("teams")).expect("failed to create teams config dir");
 
     if let Some(content) = space_toml {
         fs::write(space_dir.join("config.toml"), content).expect("failed to write space config");
@@ -225,29 +224,6 @@ default_model_id = "claude-sonnet-4-20250514"
     // Global values inherited all the way through
     assert_eq!(config.server.port, 5000);
     assert_eq!(config.default_model_id(), "claude-sonnet-4-20250514");
-}
-
-/// An unspecified team directory is outside the active config cascade.
-/// Even if a team config.toml has values, it does not affect an agent-only load.
-#[test]
-fn unspecified_team_configs_are_ignored() {
-    let global = r#"
-[server]
-port = 3000
-"#;
-
-    let tmp = build_skeleton(Some(global), "myspace", None, "assistant", None);
-
-    // Write a team config that tries to override port
-    let team_dir = tmp.path().join("spaces/myspace/teams/ops");
-    fs::create_dir_all(&team_dir).unwrap();
-    fs::write(team_dir.join("config.toml"), "[server]\nport = 8888\n").unwrap();
-
-    let config = load_resolved_config_from(tmp.path(), "myspace", "assistant")
-        .expect("should load successfully");
-
-    // Team values are ignored unless that team is explicitly part of the load.
-    assert_eq!(config.server.port, 3000);
 }
 
 // ---------------------------------------------------------------------------
@@ -603,16 +579,4 @@ fn space_without_config_still_discovered() {
     let spaces = discover(root);
     assert_eq!(spaces.len(), 1);
     assert_eq!(spaces[0].name, "bare");
-}
-
-/// The default lens directory is recognised when present.
-#[test]
-fn default_lens_directory_recognised() {
-    let tmp = TempDir::new().unwrap();
-    let root = tmp.path();
-    fs::create_dir_all(root.join("lenses/default")).unwrap();
-
-    // Discovery should not error on the lens structure
-    let spaces = discover(root);
-    assert!(spaces.is_empty(), "no spaces, just the lens placeholder");
 }

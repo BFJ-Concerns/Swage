@@ -1,12 +1,113 @@
 use super::{
     AgentError, AppState, Arc, CancellationToken, DelegationExecutor, DelegationHandler,
-    GatewayDispatcherRequest, MessageRouter, NewAgentMessage, Uuid,
-    build_agent_config_for_space_workspace, build_approval_registrar,
-    build_gateway_dispatcher_for_unattended_execution, delegated_target_instructions_for_space,
-    load_session_config, mpsc, shutdown_sandbox_guard,
+    GatewayDispatcherRequest, MessageRouter, NewAgentMessage, Uuid, apply_agent_definition,
+    available_skills_for_agent, build_agent_config_for_space_workspace, build_approval_registrar,
+    build_assembly_elements, build_gateway_dispatcher_for_unattended_execution,
+    build_session_environment, delegated_target_instructions_for_space, execute_context_assembly,
+    load_active_skills_for_agent, load_memory_for_assembly, load_session_config, load_space_memory,
+    mpsc, resolve_swage_root, select_context_assembly, shutdown_sandbox_guard,
 };
-use swage_agent::DelegationOutcome;
+use swage_agent::{DelegatedAssembly, DelegationContextAssembler, DelegationOutcome};
+use swage_context::tokeniser::TiktokenTokeniser;
 use swage_core::DelegateCompletionMode;
+
+struct GatewayDelegatedContextAssembler {
+    state: AppState,
+    space: swage_storage::Space,
+    config: swage_config::ResolvedConfig,
+    agent_id: String,
+    working_directory: String,
+    swage_root: Option<std::path::PathBuf>,
+    context_event_tx: mpsc::UnboundedSender<crate::websocket::ServerEvent>,
+}
+
+pub(crate) fn delegated_context_assembler(
+    state: AppState,
+    space: swage_storage::Space,
+    config: swage_config::ResolvedConfig,
+    agent_id: String,
+    working_directory: String,
+    context_event_tx: mpsc::UnboundedSender<crate::websocket::ServerEvent>,
+) -> Arc<dyn DelegationContextAssembler> {
+    Arc::new(GatewayDelegatedContextAssembler {
+        state,
+        space,
+        config,
+        agent_id,
+        working_directory,
+        swage_root: resolve_swage_root(),
+        context_event_tx,
+    })
+}
+
+#[async_trait::async_trait]
+impl DelegationContextAssembler for GatewayDelegatedContextAssembler {
+    async fn assemble(
+        &self,
+        session: &swage_storage::Session,
+        turn_id: Uuid,
+        delegated_history: Vec<swage_core::ChatMessage>,
+    ) -> Result<DelegatedAssembly, AgentError> {
+        let active_skills = load_active_skills_for_agent(
+            &self.state,
+            session.id,
+            &self.space.slug,
+            &self.agent_id,
+            self.swage_root.as_deref(),
+            false,
+            &self.config.declared_skills,
+        )
+        .await;
+        let assembly_name =
+            select_context_assembly(&self.state, &self.config, session.id, turn_id).await;
+        let memory_content = load_memory_for_assembly(&assembly_name, || async {
+            match self.swage_root.as_deref() {
+                Some(root) => load_space_memory(root, &self.space.slug).await,
+                None => String::new(),
+            }
+        })
+        .await;
+        let environment =
+            build_session_environment(&self.space, Some(self.working_directory.clone()), session);
+        let available_skills = available_skills_for_agent(
+            &self.space.slug,
+            &self.agent_id,
+            self.swage_root.as_deref(),
+        );
+        let elements = build_assembly_elements(
+            &self.config.instructions,
+            active_skills,
+            delegated_history,
+            memory_content.map(|content| (content, self.space.name.clone())),
+            environment,
+            available_skills,
+        );
+        let tokeniser = TiktokenTokeniser::new(self.config.default_model_id());
+        let output = execute_context_assembly(
+            &assembly_name,
+            &self.config,
+            &elements,
+            &tokeniser,
+            self.swage_root.as_deref(),
+            &self.space.slug,
+            &self.agent_id,
+        );
+        let report = serde_json::to_value(output.report).unwrap_or_else(|error| {
+            tracing::warn!(%error, "failed to serialise delegated assembly report");
+            serde_json::json!({ "error": "serialisation failed" })
+        });
+        let _ = self
+            .context_event_tx
+            .send(crate::websocket::ServerEvent::ContextAssembled {
+                turn_id,
+                report: report.clone(),
+            });
+        Ok(DelegatedAssembly {
+            messages: output.messages,
+            report,
+        })
+    }
+}
 
 #[derive(Clone)]
 pub(crate) struct GatewayDelegationHandler {
@@ -47,6 +148,23 @@ impl DelegationHandler for GatewayDelegationHandler {
                     space.slug
                 ))
             })?;
+        let target_resolved = match self
+            .state
+            .storage
+            .resolve_agent_definition(target_agent_id, space_id)
+            .await
+        {
+            Ok(Some(definition)) => apply_agent_definition(target_resolved, &definition),
+            Ok(None) => target_resolved,
+            Err(error) => {
+                tracing::warn!(
+                    agent_id = target_agent_id,
+                    %error,
+                    "failed to resolve delegated agent definition; using file config alone"
+                );
+                target_resolved
+            }
+        };
 
         let active_workspace_attachment_id = self
             .active_workspace_attachment_for_turn(sender_turn_id)
@@ -70,7 +188,9 @@ impl DelegationHandler for GatewayDelegationHandler {
 
         // Delegated child agents execute within the gateway runtime, but their
         // internal tool activity is not surfaced on the parent conversation's
-        // WebSocket stream.
+        // WebSocket stream. Shared assembly still emits ContextAssembled into
+        // this silent channel; the stored child-turn snapshot is the delegated
+        // assembly's audit record.
         let (silent_ws_tx, _silent_ws_rx) = mpsc::unbounded_channel();
         let target_dispatcher_build = build_gateway_dispatcher_for_unattended_execution(
             &self.state,
@@ -80,7 +200,7 @@ impl DelegationHandler for GatewayDelegationHandler {
                 session_metadata: None,
                 space_id: Some(space_id),
                 active_workspace_attachment_id,
-                ws_tx: silent_ws_tx,
+                ws_tx: silent_ws_tx.clone(),
                 session_id: None,
                 turn_id: Some(sender_turn_id),
             },
@@ -105,6 +225,14 @@ impl DelegationHandler for GatewayDelegationHandler {
             delegation_handler: Some(Arc::new(self.clone())),
             router: router.clone(),
             active_delegations: self.active_delegations.clone(),
+            context_assembler: Some(delegated_context_assembler(
+                self.state.clone(),
+                space.clone(),
+                target_resolved.clone(),
+                target_agent_id.to_string(),
+                target_agent_config.working_directory.display().to_string(),
+                silent_ws_tx,
+            )),
         };
 
         let mut payload = serde_json::json!({
@@ -218,16 +346,10 @@ impl DelegationHandler for GatewayDelegationHandler {
                     .await;
 
                     match result {
-                        Ok(result_msg) => {
-                            if let Err(error) = detached_router.deliver_message(&result_msg).await {
-                                tracing::warn!(
-                                    delegate_message_id = %delegate_message_id,
-                                    result_message_id = %result_msg.id,
-                                    error = ?error,
-                                    "failed to deliver detached delegate result"
-                                );
-                            }
-                        }
+                        // execute_delegation has persisted the Result as Pending.
+                        // The parent's next turn owns its delivery: Step 7 appends
+                        // it to the parent thread before claiming it Delivered.
+                        Ok(_result_msg) => {}
                         Err(error) => {
                             let _ = detached_router
                                 .fail_message(delegate_message_id, &error.to_string())

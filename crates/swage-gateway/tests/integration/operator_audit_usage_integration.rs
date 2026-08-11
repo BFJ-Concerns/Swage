@@ -23,14 +23,13 @@ use swage_gateway::{
 };
 use swage_provider::LlmProvider;
 use swage_storage::{
-    ApprovalKind, NewAgentMemoryRecord, NewApprovalRequest, NewNodeExecution, NewSchedule,
-    NewScheduleRun, NewSession, NewTeam, NewThread, NewTopologyRun, NewTurn, NodeExecutionState,
-    ScheduleCreator, ScheduleKind, ScheduleRunState, ScheduleRunTrigger, ScheduleRunUpdate,
-    ScheduleStatus, SessionPolicy, SqliteStorage, TopologyRunState, TurnState,
-    model::{AppendMessage, TopologyNodeRecordKind},
+    ApprovalKind, NewAgentMemoryRecord, NewApprovalRequest, NewSchedule, NewScheduleRun,
+    NewSession, NewThread, NewTurn, ScheduleCreator, ScheduleKind, ScheduleRunState,
+    ScheduleRunTrigger, ScheduleRunUpdate, ScheduleStatus, SessionPolicy, SqliteStorage, TurnState,
+    model::AppendMessage,
     store::{
         AgentMemoryStore, ApprovalStore, MessageStore, ScheduleStore, SessionStore, SpaceStore,
-        Storage, TeamStore, ThreadStore, TopologyTraceStore, TurnStore,
+        Storage, ThreadStore, TurnStore,
     },
 };
 
@@ -184,6 +183,7 @@ async fn operator_search_queries_sessions_messages_approvals_runs_and_deliveries
         .unwrap();
     let schedule = storage
         .create_schedule(NewSchedule {
+            id: Uuid::new_v4(),
             message: "schedule needle".into(),
             status: ScheduleStatus::Active,
             kind: ScheduleKind::Interval,
@@ -285,63 +285,19 @@ async fn operator_memory_surfaces_expose_provenance_and_searchability() {
         })
         .await
         .unwrap();
-    let team = storage
-        .create_team(NewTeam {
-            space_id,
-            name: "ops".into(),
-            description: "ops".into(),
-            entry_agent_id: "gateway".into(),
-            agents: vec![swage_storage::model::TeamAgentDefinition {
-                id: "gateway".into(),
-                display_name: "Gateway".into(),
-                description: String::new(),
-                instructions: String::new(),
-                model: None,
-            }],
-            tasks: vec![],
-        })
-        .await
-        .unwrap();
-    let topology_run = storage
-        .create_topology_run(NewTopologyRun {
-            team_id: team.id,
-            session_id,
-            source_turn_id: Some(turn.id),
-            state: TopologyRunState::Completed,
-            final_output: Some(json!({"result": "done"})),
-            error_message: None,
-        })
-        .await
-        .unwrap();
-    let node = storage
-        .create_node_execution(NewNodeExecution {
-            topology_run_id: topology_run.id,
-            node_id: "node-a".into(),
-            node_kind: TopologyNodeRecordKind::Llm,
-            agent_id: Some("gateway".into()),
-            task_name: Some("research".into()),
-            state: NodeExecutionState::Completed,
-            input_json: None,
-            output_json: Some(json!({"summary": "done"})),
-            error_message: None,
-        })
-        .await
-        .unwrap();
     let memory = storage
         .create_agent_memory(NewAgentMemoryRecord {
             id: Uuid::new_v4(),
             space_id,
             session_id,
             turn_id: turn.id,
-            topology_run_id: Some(topology_run.id),
-            node_execution_id: Some(node.id),
             agent_id: "gateway".into(),
             memory_kind: "outcome".into(),
             title: "Preview route requirement".into(),
-            content: "The builder runtime still depends on the preview route.".into(),
-            tags: vec!["builder".into(), "preview".into()],
+            content: "The preview route remains required.".into(),
+            tags: vec!["preview".into()],
             outcome_status: Some("succeeded".into()),
-            source_summary: "topology node research".into(),
+            source_summary: "conversation turn".into(),
             metadata: json!({"confidence": "high"}),
         })
         .await
@@ -354,14 +310,6 @@ async fn operator_memory_surfaces_expose_provenance_and_searchability() {
     .await;
     assert_eq!(list_status, StatusCode::OK);
     assert_eq!(list_body["memories"][0]["id"], memory.id.to_string());
-    assert_eq!(
-        list_body["memories"][0]["topology_run_id"],
-        topology_run.id.to_string()
-    );
-    assert_eq!(
-        list_body["memories"][0]["node_execution_id"],
-        node.id.to_string()
-    );
 
     let (detail_status, detail_body) =
         get_json(&router, &format!("/api/operator/memories/{}", memory.id)).await;
@@ -379,7 +327,7 @@ async fn operator_memory_surfaces_expose_provenance_and_searchability() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn audit_trail_survives_restart_for_approvals_deliveries_runs_and_nodes() {
+async fn audit_trail_survives_restart_for_approvals_deliveries_and_runs() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("operator-audit.db");
     let storage = Arc::new(SqliteStorage::open(&db_path).unwrap());
@@ -422,6 +370,7 @@ async fn audit_trail_survives_restart_for_approvals_deliveries_runs_and_nodes() 
 
     let schedule = storage
         .create_schedule(NewSchedule {
+            id: Uuid::new_v4(),
             message: "nightly".into(),
             status: ScheduleStatus::Active,
             kind: ScheduleKind::Interval,
@@ -462,58 +411,6 @@ async fn audit_trail_survives_restart_for_approvals_deliveries_runs_and_nodes() 
                 error_message: Some("failed later".into()),
                 ..Default::default()
             },
-        )
-        .await
-        .unwrap();
-
-    let team = storage
-        .create_team(NewTeam {
-            space_id: storage.get_or_create_default().await.unwrap().id,
-            name: "ops".into(),
-            description: "ops".into(),
-            entry_agent_id: "gateway".into(),
-            agents: vec![swage_storage::model::TeamAgentDefinition {
-                id: "gateway".into(),
-                display_name: "gateway".into(),
-                description: String::new(),
-                instructions: String::new(),
-                model: None,
-            }],
-            tasks: vec![],
-        })
-        .await
-        .unwrap();
-    let topology_run = storage
-        .create_topology_run(NewTopologyRun {
-            team_id: team.id,
-            session_id,
-            source_turn_id: Some(turn.id),
-            state: TopologyRunState::Running,
-            final_output: None,
-            error_message: None,
-        })
-        .await
-        .unwrap();
-    let node = storage
-        .create_node_execution(NewNodeExecution {
-            topology_run_id: topology_run.id,
-            node_id: "node-a".into(),
-            node_kind: TopologyNodeRecordKind::Llm,
-            agent_id: Some("gateway".into()),
-            task_name: Some("research".into()),
-            state: NodeExecutionState::Running,
-            input_json: Some(json!({"task": "research"})),
-            output_json: None,
-            error_message: None,
-        })
-        .await
-        .unwrap();
-    storage
-        .update_node_execution(
-            node.id,
-            NodeExecutionState::Failed,
-            None,
-            Some("node failed"),
         )
         .await
         .unwrap();
@@ -575,12 +472,6 @@ async fn audit_trail_survives_restart_for_approvals_deliveries_runs_and_nodes() 
     );
     assert!(
         excerpts.iter().any(|excerpt| {
-            excerpt.contains("node execution created") && excerpt.contains("\"node_id\":\"node-a\"")
-        }),
-        "expected node creation audit event, got: {body:?}"
-    );
-    assert!(
-        excerpts.iter().any(|excerpt| {
             excerpt.contains("delivery recorded") && excerpt.contains("delivered after routing")
         }),
         "expected delivery audit event, got: {body:?}"
@@ -613,6 +504,7 @@ async fn operator_usage_reports_run_level_and_aggregate_costs() {
 
     let schedule = storage
         .create_schedule(NewSchedule {
+            id: Uuid::new_v4(),
             message: "usage schedule".into(),
             status: ScheduleStatus::Active,
             kind: ScheduleKind::Interval,

@@ -25,6 +25,9 @@
     "create_channel_link_code_request": {
       "$ref": "#/$defs/CreateChannelLinkCodeRequest"
     },
+    "create_conversation_request": {
+      "$ref": "#/$defs/CreateConversationRequest"
+    },
     "create_schedule_request": {
       "$ref": "#/$defs/CreateScheduleRequest"
     },
@@ -36,6 +39,12 @@
     },
     "create_workspace_attachment_request": {
       "$ref": "#/$defs/CreateWorkspaceAttachmentRequest"
+    },
+    "knowledge_search": {
+      "$ref": "#/$defs/KnowledgeSearchResponse"
+    },
+    "orientation_find": {
+      "$ref": "#/$defs/OrientationFindResponse"
     },
     "provider_sign_in_state": {
       "$ref": "#/$defs/ProviderSignInState"
@@ -126,10 +135,13 @@
     "create_workspace_attachment_request",
     "workspace_attachment_list",
     "channel_link_code_response",
+    "create_conversation_request",
     "conversation",
     "conversation_list",
     "conversation_detail",
     "conversation_thread",
+    "knowledge_search",
+    "orientation_find",
     "create_schedule_request",
     "update_schedule_request",
     "schedule",
@@ -568,6 +580,24 @@
         "integration"
       ]
     },
+    "CreateConversationRequest": {
+      "description": "Request body for the conversation and space-session creation endpoints.\n\nEvery field is optional and the body itself may be omitted: an absent\n`agent_id` selects the default `\"gateway\"` agent, and an absent\n`selected_model_id` leaves the session's model unselected. A named\n`agent_id` must be `\"gateway\"` or an agent definition visible to the\ntarget space; the gateway rejects anything else with a validation error.",
+      "type": "object",
+      "properties": {
+        "agent_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "selected_model_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
     "CreateScheduleRequest": {
       "description": "Create a schedule.",
       "type": "object",
@@ -838,6 +868,65 @@
         "skip"
       ]
     },
+    "KnowledgeSearchResponse": {
+      "type": "object",
+      "properties": {
+        "guidance": {
+          "type": "string"
+        },
+        "results": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/KnowledgeSearchResult"
+          }
+        }
+      },
+      "required": [
+        "results",
+        "guidance"
+      ]
+    },
+    "KnowledgeSearchResult": {
+      "type": "object",
+      "properties": {
+        "observation_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "offset": {
+          "description": "Byte offset of `passage` when it can be located in the derivation.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        },
+        "passage": {
+          "type": "string"
+        },
+        "retrieved_at": {
+          "type": "string"
+        },
+        "source": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "version": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "observation_id",
+        "version",
+        "retrieved_at",
+        "passage"
+      ]
+    },
     "MessageView": {
       "type": "object",
       "properties": {
@@ -885,6 +974,60 @@
         "content",
         "timestamp",
         "tool_calls"
+      ]
+    },
+    "OrientationCardResult": {
+      "type": "object",
+      "properties": {
+        "authored_by": {
+          "type": "string"
+        },
+        "card_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "content": {
+          "type": "string"
+        },
+        "created_at": {
+          "type": "string"
+        },
+        "observation_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "card_id",
+        "title",
+        "content",
+        "authored_by",
+        "observation_ids",
+        "created_at"
+      ]
+    },
+    "OrientationFindResponse": {
+      "type": "object",
+      "properties": {
+        "cards": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/OrientationCardResult"
+          }
+        },
+        "guidance": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "cards",
+        "guidance"
       ]
     },
     "ProviderAccount": {
@@ -1704,130 +1847,6 @@
             "type",
             "parent_turn_id",
             "target_agent_id",
-            "success"
-          ]
-        },
-        {
-          "description": "A topology run has started for a session.",
-          "type": "object",
-          "properties": {
-            "session_id": {
-              "type": "string",
-              "format": "uuid"
-            },
-            "team_id": {
-              "type": "string",
-              "format": "uuid"
-            },
-            "topology_run_id": {
-              "type": "string",
-              "format": "uuid"
-            },
-            "type": {
-              "type": "string",
-              "const": "topology_run_started"
-            }
-          },
-          "required": [
-            "type",
-            "session_id",
-            "topology_run_id",
-            "team_id"
-          ]
-        },
-        {
-          "description": "A topology node has started for a session.",
-          "type": "object",
-          "properties": {
-            "node_execution_id": {
-              "type": "string",
-              "format": "uuid"
-            },
-            "node_id": {
-              "type": "string"
-            },
-            "session_id": {
-              "type": "string",
-              "format": "uuid"
-            },
-            "topology_run_id": {
-              "type": "string",
-              "format": "uuid"
-            },
-            "type": {
-              "type": "string",
-              "const": "topology_node_started"
-            }
-          },
-          "required": [
-            "type",
-            "session_id",
-            "topology_run_id",
-            "node_execution_id",
-            "node_id"
-          ]
-        },
-        {
-          "description": "A topology node has finished for a session.",
-          "type": "object",
-          "properties": {
-            "node_execution_id": {
-              "type": "string",
-              "format": "uuid"
-            },
-            "node_id": {
-              "type": "string"
-            },
-            "session_id": {
-              "type": "string",
-              "format": "uuid"
-            },
-            "success": {
-              "type": "boolean"
-            },
-            "topology_run_id": {
-              "type": "string",
-              "format": "uuid"
-            },
-            "type": {
-              "type": "string",
-              "const": "topology_node_completed"
-            }
-          },
-          "required": [
-            "type",
-            "session_id",
-            "topology_run_id",
-            "node_execution_id",
-            "node_id",
-            "success"
-          ]
-        },
-        {
-          "description": "A topology run has finished for a session.",
-          "type": "object",
-          "properties": {
-            "final_output": true,
-            "session_id": {
-              "type": "string",
-              "format": "uuid"
-            },
-            "success": {
-              "type": "boolean"
-            },
-            "topology_run_id": {
-              "type": "string",
-              "format": "uuid"
-            },
-            "type": {
-              "type": "string",
-              "const": "topology_run_completed"
-            }
-          },
-          "required": [
-            "type",
-            "session_id",
-            "topology_run_id",
             "success"
           ]
         },
@@ -2832,7 +2851,9 @@
         "agent_call",
         "effect",
         "log",
-        "phase"
+        "phase",
+        "workflow_call",
+        "timer"
       ]
     },
     "WorkflowJournalEntryStatus": {

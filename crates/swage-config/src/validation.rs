@@ -26,6 +26,7 @@ const KNOWN_SECTIONS: &[&str] = &[
     "hitl",
     "communication",
     "scheduling",
+    "channels",
 ];
 
 /// Top-level scalar keys (i.e. fields that live above any [section] header).
@@ -74,6 +75,9 @@ fn known_fields_for(section: &str) -> &'static [&'static str] {
             "expiry_interval_secs",
         ],
         "scheduling" => &["run_history_max_age_days", "run_history_max_per_schedule"],
+        // telegram has a fixed nested schema validated by
+        // `validate_channels_telegram_table`.
+        "channels" => &["telegram"],
         _ => &[],
     }
 }
@@ -180,6 +184,7 @@ fn check_field_type(
         ("scheduling", "run_history_max_per_schedule") => {
             ("integer", matches!(value, Value::Integer(_)))
         }
+        ("channels", "telegram") => ("table", matches!(value, Value::Table(_))),
         // Unknown field — already caught before this call, so no match needed.
         _ => return None,
     };
@@ -402,7 +407,78 @@ fn check_field_semantics(
                 problems.extend(validate_python_execute_table(table, file_path, field_path));
             }
         }
+        ("channels", "telegram") => {
+            if let Value::Table(table) = value {
+                problems.extend(validate_channels_telegram_table(
+                    table, file_path, field_path,
+                ));
+            }
+        }
         _ => {}
+    }
+
+    problems
+}
+
+fn validate_channels_telegram_table(
+    table: &toml::map::Map<String, Value>,
+    file_path: &Path,
+    field_path: &str,
+) -> Vec<ConfigProblem> {
+    const KNOWN_FIELDS: &[&str] = &[
+        "bot_token_secret_ref",
+        "bot_token_env",
+        "api_base_url",
+        "poll_timeout_secs",
+    ];
+
+    let mut problems = Vec::new();
+
+    for (name, value) in table {
+        let nested_path = format!("{field_path}.{name}");
+        if !KNOWN_FIELDS.contains(&name.as_str()) {
+            problems.push(make_problem(
+                file_path,
+                Some(nested_path),
+                ConfigProblemKind::UnknownField {
+                    section: field_path.to_string(),
+                    name: name.clone(),
+                },
+            ));
+            continue;
+        }
+
+        let (expected, type_ok) = match name.as_str() {
+            "bot_token_secret_ref" | "bot_token_env" | "api_base_url" => {
+                ("string", matches!(value, Value::String(_)))
+            }
+            "poll_timeout_secs" => ("integer", matches!(value, Value::Integer(_))),
+            _ => continue,
+        };
+
+        if !type_ok {
+            problems.push(make_problem(
+                file_path,
+                Some(nested_path),
+                ConfigProblemKind::TypeError {
+                    expected: expected.to_string(),
+                    found: toml_type_name(value).to_string(),
+                },
+            ));
+            continue;
+        }
+
+        if let ("poll_timeout_secs", Value::Integer(timeout)) = (name.as_str(), value)
+            && *timeout < 0
+        {
+            problems.push(make_problem(
+                file_path,
+                Some(nested_path),
+                ConfigProblemKind::SemanticError {
+                    message: format!("poll_timeout_secs must be non-negative, got {timeout}"),
+                },
+            ));
+        }
     }
 
     problems
@@ -1311,6 +1387,117 @@ default_model_id = "claude-opus"
         assert_eq!(server.port, Some(8080));
         let models = partial.models.expect("models section should be present");
         assert_eq!(models.default_model_id.as_deref(), Some("claude-opus"));
+    }
+
+    #[test]
+    fn parse_and_validate_preserves_telegram_channel_config() {
+        let toml = r#"
+[channels.telegram]
+bot_token_secret_ref = "channel-token:telegram-main"
+bot_token_env = "SWAGE_TELEGRAM_TOKEN"
+api_base_url = "http://127.0.0.1:9876"
+poll_timeout_secs = 7
+"#;
+
+        let partial =
+            parse_and_validate(toml, &path("config.toml")).expect("Telegram config should pass");
+        let telegram = partial
+            .channels
+            .expect("channels section should be present")
+            .telegram
+            .expect("Telegram section should be present");
+
+        assert_eq!(
+            telegram.bot_token_secret_ref,
+            Some(Some("channel-token:telegram-main".to_string()))
+        );
+        assert_eq!(
+            telegram.bot_token_env,
+            Some(Some("SWAGE_TELEGRAM_TOKEN".to_string()))
+        );
+        assert_eq!(
+            telegram.api_base_url.as_deref(),
+            Some("http://127.0.0.1:9876")
+        );
+        assert_eq!(telegram.poll_timeout_secs, Some(7));
+    }
+
+    #[test]
+    fn telegram_channel_rejects_unknown_nested_field() {
+        let toml = r#"
+[channels.telegram]
+bot_token_en = "SWAGE_TELEGRAM_TOKEN"
+"#;
+
+        let problems = validate_toml_string(toml, &path("config.toml"));
+
+        assert!(problems.iter().any(|problem| {
+            problem.field_path.as_deref() == Some("channels.telegram.bot_token_en")
+                && matches!(
+                    &problem.kind,
+                    ConfigProblemKind::UnknownField { section, name }
+                        if section == "channels.telegram" && name == "bot_token_en"
+                )
+        }));
+    }
+
+    #[test]
+    fn telegram_channel_rejects_wrong_nested_field_types() {
+        let toml = r#"
+[channels.telegram]
+bot_token_secret_ref = 1
+bot_token_env = false
+api_base_url = 2
+poll_timeout_secs = "seven"
+"#;
+
+        let problems = validate_toml_string(toml, &path("config.toml"));
+
+        for field in [
+            "bot_token_secret_ref",
+            "bot_token_env",
+            "api_base_url",
+            "poll_timeout_secs",
+        ] {
+            let field_path = format!("channels.telegram.{field}");
+            assert!(
+                problems.iter().any(|problem| {
+                    problem.field_path.as_deref() == Some(field_path.as_str())
+                        && matches!(&problem.kind, ConfigProblemKind::TypeError { .. })
+                }),
+                "expected a type error for {field_path}, got {problems:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn telegram_channel_rejects_negative_poll_timeout() {
+        let toml = r#"
+[channels.telegram]
+poll_timeout_secs = -1
+"#;
+
+        let problems = validate_toml_string(toml, &path("config.toml"));
+
+        assert!(problems.iter().any(|problem| {
+            problem.field_path.as_deref() == Some("channels.telegram.poll_timeout_secs")
+                && matches!(&problem.kind, ConfigProblemKind::SemanticError { .. })
+        }));
+    }
+
+    #[test]
+    fn telegram_channel_accepts_zero_poll_timeout() {
+        let toml = r#"
+[channels.telegram]
+poll_timeout_secs = 0
+"#;
+
+        let problems = validate_toml_string(toml, &path("config.toml"));
+
+        assert!(
+            problems.is_empty(),
+            "expected no problems, got {problems:?}"
+        );
     }
 
     #[test]

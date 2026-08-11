@@ -1,16 +1,10 @@
 #[path = "integration/support.rs"]
 mod support;
 
-#[path = "integration/agent_task_authoring_integration.rs"]
-mod agent_task_authoring_integration;
 #[path = "integration/attachment_ingestion_integration.rs"]
 mod attachment_ingestion_integration;
 #[path = "integration/browser_journey_integration.rs"]
 mod browser_journey_integration;
-#[path = "integration/builder_authoring_integration.rs"]
-mod builder_authoring_integration;
-#[path = "integration/builder_runtime_integration.rs"]
-mod builder_runtime_integration;
 #[path = "integration/cli_run_integration.rs"]
 mod cli_run_integration;
 #[path = "integration/credential_governance_integration.rs"]
@@ -27,8 +21,6 @@ mod gateway_observability_integration;
 mod integration;
 #[path = "integration/inter_agent_messaging_integration.rs"]
 mod inter_agent_messaging_integration;
-#[path = "integration/lens_catalog_integration.rs"]
-mod lens_catalog_integration;
 #[path = "integration/material_management_integration.rs"]
 mod material_management_integration;
 #[path = "integration/onboarding_recovery_integration.rs"]
@@ -54,8 +46,6 @@ mod schedule_integration;
 
 #[path = "integration/schedule_tools_integration.rs"]
 mod schedule_tools_integration;
-#[path = "integration/shared_reference_integration.rs"]
-mod shared_reference_integration;
 #[path = "integration/skills_endpoint_integration.rs"]
 mod skills_endpoint_integration;
 #[path = "integration/skills_integration.rs"]

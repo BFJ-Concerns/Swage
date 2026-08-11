@@ -12,7 +12,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import AppLayout from "./lib/components/AppLayout.svelte";
-  import { fetchLensRuntime, updateLensRuntime } from "./lib/api/lens";
   import { fetchSettings } from "./lib/api/settings";
   import type { ConversationStore } from "./lib/stores/conversations";
   import { createConversationStore } from "./lib/stores/conversations";
@@ -31,12 +30,7 @@
     writeDisplayPreferences,
     type DisplayPreferences,
   } from "./lib/display-preferences";
-  import type {
-    AppLens,
-    LensDescriptor,
-    LensStageModulePlacement,
-    LensSurface,
-  } from "./lib/types";
+  type Surface = "conversation" | "operator";
 
   // ---------------------------------------------------------------------------
   // Store creation
@@ -78,12 +72,11 @@
 
       // A deep-linked conversation may belong to a space other than the one
       // currently in scope (or none, on first load). Bring the space into
-      // scope so the nav, conversation list, and lens runtime reflect it.
+      // scope so the navigation and conversation list reflect it.
       const conv = conversationStore.activeConversation;
       if (conv && spaceStore.currentSpace?.id !== conv.space_id) {
         await spaceStore.selectSpace(conv.space_id);
         await conversationStore.loadConversations(conv.space_id);
-        await refreshLensRuntime("conversation");
       }
 
       connectionStore.connectTo(id);
@@ -164,8 +157,13 @@
   // selectAndNavigate is passed so router.init() can activate the right
   // conversation when the page loads with a deep URL like /conversations/:id.
 
+  function handleRouteChange(route: Route): void {
+    currentRoute = route;
+  }
+
   const router = createRouter({
     conversationStore: { selectConversation: selectAndNavigate },
+    onRouteChange: handleRouteChange,
   });
 
   // ---------------------------------------------------------------------------
@@ -176,13 +174,10 @@
   let loadError = $state<string | null>(null);
   // Set to true when the router detects that the URL contained a stale ID.
   let notFound = $state(false);
-  let activeLens = $state<AppLens>("assistant");
-  let activeSurface = $state<LensSurface>("conversation");
-  let availableLenses = $state<LensDescriptor[]>([]);
-  let stageModules = $state<LensStageModulePlacement[]>([]);
+  let activeSurface = $state<Surface>("conversation");
   let currentRoute = $state<Route>(router.currentRoute);
-  let activeModelContextWindow = $state<number | null>(null);
   let modelOptions = $state<string[]>([]);
+  let modelCatalogueReady = $state(false);
   let defaultModelId = $state<string | null>(null);
   const desktopRuntime = getDesktopRuntime();
 
@@ -263,38 +258,13 @@
     };
   });
 
-  function getLensDescriptor(lensId: AppLens): LensDescriptor | undefined {
-    return availableLenses.find((lens) => lens.id === lensId);
-  }
-
-  function fallbackSurfaceForModules(modules: LensSurface[]): LensSurface {
-    if (modules.includes("conversation")) {
-      return "conversation";
-    }
-    return modules[0] ?? "conversation";
-  }
-
-  function defaultSurfaceForLens(lensId: AppLens): LensSurface {
-    const descriptor = getLensDescriptor(lensId);
-    if (descriptor) {
-      return descriptor.default_surface;
-    }
-    return "conversation";
-  }
-
   // Passed to ConnectionIndicator so the user can trigger a manual reconnect.
   function handleRetry(): void {
     const id = conversationStore.activeConversation?.id;
     if (id) connectionStore.connectTo(id);
   }
 
-  function handleSelectSurface(next: LensSurface): void {
-    const descriptor = getLensDescriptor(activeLens);
-    if (descriptor && !descriptor.ui_modules.includes(next)) {
-      activeSurface = fallbackSurfaceForModules(descriptor.ui_modules);
-      return;
-    }
-
+  function handleSelectSurface(next: Surface): void {
     activeSurface = next;
 
     if (next !== "conversation") {
@@ -308,33 +278,6 @@
 
   function navigate(path: string): void {
     router.navigate(path);
-    currentRoute = router.currentRoute;
-  }
-
-  async function refreshLensRuntime(preferredSurface?: LensSurface): Promise<void> {
-    const spaceId = spaceStore.currentSpace?.id;
-    if (!spaceId) return;
-    const runtime = await fetchLensRuntime(spaceId);
-    availableLenses = runtime.available_lenses;
-    stageModules = runtime.stage_modules;
-    activeLens = runtime.active_lens;
-
-    const descriptor = getLensDescriptor(runtime.active_lens);
-    const nextSurface =
-      preferredSurface && descriptor?.ui_modules.includes(preferredSurface)
-        ? preferredSurface
-        : defaultSurfaceForLens(runtime.active_lens);
-    handleSelectSurface(nextSurface);
-  }
-
-  async function handleSelectLens(next: AppLens): Promise<void> {
-    const spaceId = spaceStore.currentSpace?.id;
-    if (!spaceId) return;
-    const runtime = await updateLensRuntime(spaceId, next);
-    availableLenses = runtime.available_lenses;
-    stageModules = runtime.stage_modules;
-    activeLens = runtime.active_lens;
-    handleSelectSurface(defaultSurfaceForLens(runtime.active_lens));
   }
 
   // ---------------------------------------------------------------------------
@@ -356,10 +299,8 @@
       conversationStore.clearActiveConversation();
       // Reset the URL so the router doesn't try to restore a stale conversation.
       router.navigate("/");
-      currentRoute = router.currentRoute;
       // Load the new space's conversations.
       await conversationStore.loadConversations(spaceId);
-      await refreshLensRuntime("conversation");
     } catch (err) {
       console.error("Failed to switch space:", err);
     }
@@ -372,20 +313,20 @@
       await spaceStore.loadSpaces();
 
       // 2. Fetch global model settings. Space-scoped data (conversations,
-      //    lens runtime) loads when a space is opened — either via the
+      //    scoped runtime state loads when a space is opened — either via the
       //    picker or by a deep-linked conversation that selects its space.
-      const settings = await fetchSettings().catch((error) => {
+      try {
+        const settings = await fetchSettings();
+        modelOptions = Object.keys(settings.models);
+        defaultModelId = settings.default_model;
+        modelCatalogueReady = true;
+      } catch (error) {
         console.error("Failed to load model settings:", error);
-        return null;
-      });
-      activeModelContextWindow = settings?.models[settings.default_model]?.context_window ?? null;
-      modelOptions = Object.keys(settings?.models ?? {});
-      defaultModelId = settings?.default_model ?? null;
+      }
 
       // 3. Apply the URL. If it points at a conversation, selectAndNavigate
       //    will bring its space into scope along the way.
       await router.init();
-      currentRoute = router.currentRoute;
 
       // Snapshot the not-found flag — set by the router if the URL pointed
       // at a conversation that no longer exists on the server.
@@ -439,19 +380,14 @@
     {spaceStore}
     onSpaceChange={handleSpaceChange}
     onRetry={handleRetry}
-    {activeLens}
-    {availableLenses}
-    {stageModules}
     {activeSurface}
-    onSelectLens={handleSelectLens}
-    onRefreshLenses={refreshLensRuntime}
     onSelectSurface={handleSelectSurface}
     {desktopRuntime}
     {themeMode}
     {displayPreferences}
     onSelectTheme={setThemeMode}
-    {activeModelContextWindow}
     {modelOptions}
+    {modelCatalogueReady}
     {defaultModelId}
     route={currentRoute}
     onNavigate={navigate}

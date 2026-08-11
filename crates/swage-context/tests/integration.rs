@@ -9,42 +9,7 @@
 //! rather than internal modules directly.
 
 use std::fs;
-use std::pin::Pin;
 use tempfile::TempDir;
-
-use async_trait::async_trait;
-use futures::Stream;
-use swage_core::{
-    CompletionRequest, CompletionResponse, ProviderError, StreamChunk, ToolCompletionRequest,
-    ToolCompletionResponse,
-};
-use swage_provider::LlmProvider;
-
-/// Minimal stub provider for tests that only use the default assembly path.
-/// model_id() is called by assemble(); the other methods are never invoked.
-struct StubProvider;
-
-#[async_trait]
-impl LlmProvider for StubProvider {
-    fn model_id(&self) -> &str {
-        "stub-model"
-    }
-
-    async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, ProviderError> {
-        unimplemented!("StubProvider::complete")
-    }
-
-    async fn complete_with_tools(
-        &self,
-        _req: ToolCompletionRequest,
-    ) -> Result<ToolCompletionResponse, ProviderError> {
-        unimplemented!("StubProvider::complete_with_tools")
-    }
-
-    fn stream(&self, _req: CompletionRequest) -> Pin<Box<dyn Stream<Item = StreamChunk> + Send>> {
-        unimplemented!("StubProvider::stream")
-    }
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Test 1: Default assembly preserves the legacy prompt shape
@@ -83,16 +48,19 @@ fn default_assembly_preserves_legacy_prompt_shape() {
     )
     .unwrap();
 
-    // Load prompt rules from hierarchy
-    let space_path = root.path().join("spaces/test");
-    let levels = vec![
-        (swage_config::HierarchyLevel::Global, root.path()),
-        (swage_config::HierarchyLevel::Space, space_path.as_path()),
+    let mut rules = vec![
+        swage_config::prompt_rule::parse_prompt_rule_file(
+            &global_prompts.join("base.md"),
+            swage_config::HierarchyLevel::Global,
+        )
+        .unwrap(),
+        swage_config::prompt_rule::parse_prompt_rule_file(
+            &space_prompts.join("space.md"),
+            swage_config::HierarchyLevel::Space,
+        )
+        .unwrap(),
     ];
-
-    // Load prompt rules (sorted by priority)
-    let (rules, warnings) = swage_config::prompt_rule::load_prompt_rules(&levels);
-    assert!(warnings.is_empty(), "no warnings expected for valid rules");
+    rules.sort_by_key(|rule| std::cmp::Reverse(rule.priority));
     assert_eq!(rules.len(), 2, "should find rules at both levels");
 
     // The higher-priority space rule should come first
@@ -255,18 +223,17 @@ fn budget_triggers_truncation_preserving_recent_messages() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Test 3: Fail-open catches error and falls back to default assembly
+// Test 3: The public assembly entry point produces a reported assembly
 // ─────────────────────────────────────────────────────────────────────────────
 //
-// Journey: Sustained Conversation Quality — failure recovery.
-// Cross-task: Fail-open orchestration [faup] → DefaultAssembly [3iw7] →
-//             Report types [wnyz]
+// Journey: Sustained Conversation Quality.
 //
-// Verifies that when an assembly produces invalid output (empty messages),
-// fail-open falls back to the default assembly and records the error.
+// Verifies that the library's public entry point assembles messages and
+// returns a populated report. Fail-open to the default assembly is now a
+// property of the JavaScript assembly path and is exercised there.
 
-#[tokio::test]
-async fn failopen_catches_invalid_assembly_and_falls_back() {
+#[test]
+fn public_entry_point_assembles_and_reports() {
     let config = swage_config::ContextConfig::default();
     let tokeniser = swage_context::tokeniser::TiktokenTokeniser::new("claude-sonnet-4-20250514");
 
@@ -279,12 +246,7 @@ async fn failopen_catches_invalid_assembly_and_falls_back() {
     let elements: Vec<Box<dyn swage_context::element::ContextElement>> =
         vec![Box::new(history_element)];
 
-    // Use the top-level assemble() which wraps with fail-open.
-    // Pass empty search levels and no Python runner — this test exercises the
-    // default assembly path only.
-    let output =
-        swage_context::assembly::assemble(&elements, &config, &tokeniser, &[], &StubProvider, None)
-            .await;
+    let output = swage_context::assembly::assemble(&elements, &config, &tokeniser);
 
     // Default assembly should succeed without errors
     assert!(
@@ -340,17 +302,24 @@ fn prompt_rules_merge_across_hierarchy_with_priority_ordering() {
     )
     .unwrap();
 
-    // Load rules from three levels (space has no prompts — silently skipped)
-    let space_path = root.path().join("spaces/test");
-    let agent_path = root.path().join("spaces/test/agents/default");
-    let levels = vec![
-        (swage_config::HierarchyLevel::Global, root.path()),
-        (swage_config::HierarchyLevel::Space, space_path.as_path()),
-        (swage_config::HierarchyLevel::Agent, agent_path.as_path()),
+    let mut rules = vec![
+        swage_config::prompt_rule::parse_prompt_rule_file(
+            &global_prompts.join("safety.md"),
+            swage_config::HierarchyLevel::Global,
+        )
+        .unwrap(),
+        swage_config::prompt_rule::parse_prompt_rule_file(
+            &global_prompts.join("defaults.md"),
+            swage_config::HierarchyLevel::Global,
+        )
+        .unwrap(),
+        swage_config::prompt_rule::parse_prompt_rule_file(
+            &agent_prompts.join("persona.md"),
+            swage_config::HierarchyLevel::Agent,
+        )
+        .unwrap(),
     ];
-
-    let (rules, warnings) = swage_config::prompt_rule::load_prompt_rules(&levels);
-    assert!(warnings.is_empty());
+    rules.sort_by_key(|rule| std::cmp::Reverse(rule.priority));
 
     // Expected order: safety (200) > defaults (5) > persona (0, agent-level tiebreak)
     assert_eq!(rules.len(), 3);
@@ -417,7 +386,6 @@ timeout = 10
     // Space config overrides the budget
     let space_dir = root.path().join("spaces/test");
     fs::create_dir_all(space_dir.join("agents/default")).unwrap();
-    fs::create_dir_all(root.path().join("lenses/default")).unwrap();
     fs::write(
         space_dir.join("config.toml"),
         r#"

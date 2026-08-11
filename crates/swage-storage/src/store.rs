@@ -4,21 +4,22 @@ use uuid::Uuid;
 use swage_core::StorageError;
 
 use crate::model::{
-    ActiveSkillRecord, AgentMemoryRecord, AgentMessage, AppLens, AppendMessage, ApprovalRequest,
-    ApprovalState, Attachment, AttachmentStatus, AuditEvent, BackgroundJob, ChannelInboundMessage,
-    ChannelLink, ConfigurationVersion, ContextSnapshotRecord, DeliveryRecord, DeviceRegistration,
-    EdgeEvaluation, InboundAudit, LensPreference, LensRecord, Material, Message,
+    ActiveSkillRecord, AgentDefinition, AgentMemoryRecord, AgentMessage, AppendMessage,
+    ApprovalRequest, ApprovalState, Attachment, AttachmentStatus, AuditEvent, BackgroundJob,
+    ChannelInboundMessage, ChannelLink, ConfigurationVersion, ContextSnapshotRecord,
+    CurationAssertion, DeliveryRecord, DeviceRegistration, ExtractionDerivation, InboundAudit,
+    KnowledgeCitation, KnowledgeSearchHit, Material, Message, NewAgentDefinition,
     NewAgentMemoryRecord, NewAgentMessage, NewApprovalRequest, NewAttachment, NewAuditEvent,
     NewBackgroundJob, NewChannelInboundMessage, NewChannelLink, NewConfigurationVersion,
-    NewDeliveryRecord, NewDeviceRegistration, NewEdgeEvaluation, NewLensRecord, NewMaterial,
-    NewMessage, NewNodeExecution, NewNodeRetry, NewSchedule, NewScheduleRun, NewSecretRecord,
-    NewSession, NewSharedReferenceEvent, NewSpace, NewTeam, NewThread, NewToolCall, NewTopologyRun,
-    NewTurn, NewWorkflowJournalIntent, NewWorkflowRun, NewWorkflowScript, NewWorkspaceAttachment,
-    NodeExecution, NodeExecutionState, NodeRetry, PendingChannelOrigin, Schedule, ScheduleRun,
-    ScheduleRunUpdate, SecretRecord, Session, SharedReferenceEvent, SharedReferenceKind, Space,
-    SpaceSlug, Team, Thread, ThreadBranch, ThreadState, ToolCallRecord, TopologyRun,
-    TopologyRunState, Turn, TurnState, UpdateSchedule, WorkflowJournalRecord, WorkflowRunRecord,
-    WorkflowScriptRecord, WorkflowScriptVersion, WorkspaceAttachment,
+    NewCurationAssertion, NewDeliveryRecord, NewDeviceRegistration, NewKnowledgeCitation,
+    NewMaterial, NewMessage, NewOrientationCard, NewSchedule, NewScheduleRun, NewSecretRecord,
+    NewSession, NewSourceObservation, NewSpace, NewThread, NewToolCall, NewTurn,
+    NewWorkflowJournalIntent, NewWorkflowRun, NewWorkflowScript, NewWorkspaceAttachment,
+    OrientationCard, OrientationCardLifecycle, PendingChannelOrigin, Schedule, ScheduleRun,
+    ScheduleRunUpdate, SecretRecord, Session, SourceObservation, Space, SpaceSlug, Thread,
+    ThreadBranch, ThreadState, ToolCallRecord, Turn, TurnState, UpdateSchedule,
+    WorkflowJournalRecord, WorkflowRunRecord, WorkflowScriptRecord, WorkflowScriptVersion,
+    WorkspaceAttachment,
 };
 
 // ---------------------------------------------------------------------------
@@ -124,28 +125,6 @@ pub trait SessionStore: Send + Sync {
 }
 
 #[async_trait]
-pub trait LensStore: Send + Sync {
-    async fn get_active_lens(&self, space_id: Uuid) -> Result<LensPreference, StorageError>;
-    async fn set_active_lens(
-        &self,
-        space_id: Uuid,
-        lens: AppLens,
-    ) -> Result<LensPreference, StorageError>;
-    async fn list_lenses(&self) -> Result<Vec<LensRecord>, StorageError>;
-    async fn get_lens(&self, lens: &AppLens) -> Result<Option<LensRecord>, StorageError>;
-    async fn create_lens(&self, lens: NewLensRecord) -> Result<LensRecord, StorageError>;
-    async fn update_lens(
-        &self,
-        lens_id: &AppLens,
-        title: String,
-        summary: String,
-        default_surface: String,
-        ui_modules: Vec<String>,
-        prominent_team_ids: Vec<String>,
-    ) -> Result<LensRecord, StorageError>;
-}
-
-#[async_trait]
 pub trait DeviceStore: Send + Sync {
     async fn upsert_device(
         &self,
@@ -211,6 +190,158 @@ pub trait AgentMemoryStore: Send + Sync {
         query: Option<&str>,
         limit: usize,
     ) -> Result<Vec<AgentMemoryRecord>, StorageError>;
+}
+
+/// Store for durable agent definitions.
+///
+/// Writes are whole-definition upserts because mutations arrive through the
+/// recorded configuration-change path, which validates and diffs complete
+/// definitions rather than field patches.
+#[async_trait]
+pub trait AgentDefinitionStore: Send + Sync {
+    async fn upsert_agent_definition(
+        &self,
+        definition: NewAgentDefinition,
+    ) -> Result<AgentDefinition, StorageError>;
+
+    /// Resolve the definition a session starting as `agent_id` in `space_id`
+    /// should use: the space-scoped definition when one exists, else the
+    /// global one, else none (the agent runs on resolved config alone).
+    async fn resolve_agent_definition(
+        &self,
+        agent_id: &str,
+        space_id: Uuid,
+    ) -> Result<Option<AgentDefinition>, StorageError>;
+
+    async fn list_agent_definitions(
+        &self,
+        space_id: Option<Uuid>,
+    ) -> Result<Vec<AgentDefinition>, StorageError>;
+
+    async fn delete_agent_definition(
+        &self,
+        agent_id: &str,
+        space_id: Option<Uuid>,
+    ) -> Result<bool, StorageError>;
+}
+
+/// Store for a space's knowledge base: immutable source observations and
+/// their versioned text extractions, searched by full text.
+///
+/// Immutability is this store's contract, not a caller convention: nothing
+/// here updates or deletes an observation or derivation, and extensions
+/// (curation assertions, citations, orientation cards) must keep that shape
+/// — later state is always a new row.
+#[async_trait]
+pub trait ObservationStore: Send + Sync {
+    /// Record a capture. Identical bodies within a space deduplicate: the
+    /// existing observation is returned, so evidence identity never forks.
+    async fn record_observation(
+        &self,
+        observation: NewSourceObservation,
+    ) -> Result<SourceObservation, StorageError>;
+
+    async fn get_observation(&self, id: Uuid) -> Result<Option<SourceObservation>, StorageError>;
+
+    async fn list_observations_by_space(
+        &self,
+        space_id: Uuid,
+    ) -> Result<Vec<SourceObservation>, StorageError>;
+
+    /// Add the next extraction version for an observation. The store assigns
+    /// the version; existing derivations are never touched.
+    async fn add_extraction(
+        &self,
+        observation_id: Uuid,
+        extracted_text: String,
+        extractor: String,
+    ) -> Result<ExtractionDerivation, StorageError>;
+
+    async fn get_extraction(
+        &self,
+        observation_id: Uuid,
+        version: u32,
+    ) -> Result<Option<ExtractionDerivation>, StorageError>;
+
+    /// The observation's newest extraction — the text default retrieval and
+    /// projections read. Older versions stay addressable by `get_extraction`
+    /// because citations pin them.
+    async fn latest_extraction(
+        &self,
+        observation_id: Uuid,
+    ) -> Result<Option<ExtractionDerivation>, StorageError>;
+
+    /// Full-text search across the space's newest derivation per
+    /// observation, best matches first. Each hit carries the derivation
+    /// version and snippet offsets a citation pins to.
+    async fn search_extractions(
+        &self,
+        space_id: Uuid,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<KnowledgeSearchHit>, StorageError>;
+}
+
+/// Append-only observation-level curation judgements.
+#[async_trait]
+pub trait CurationAssertionStore: Send + Sync {
+    /// Append a curation judgement. Existing assertions and evidence are never
+    /// changed.
+    async fn add_curation_assertion(
+        &self,
+        assertion: NewCurationAssertion,
+    ) -> Result<CurationAssertion, StorageError>;
+
+    /// Each observation's newest assertion — its effective curation state,
+    /// by the same newest-assertion rule the search filter applies.
+    /// Observations with no assertion are absent from the result.
+    async fn effective_curation_by_space(
+        &self,
+        space_id: Uuid,
+    ) -> Result<Vec<CurationAssertion>, StorageError>;
+}
+
+/// Append-only citations to pinned knowledge-base derivations.
+#[async_trait]
+pub trait CitationStore: Send + Sync {
+    /// Locate the supplied quote platform-side and append its citation.
+    async fn add_citation(
+        &self,
+        citation: NewKnowledgeCitation,
+    ) -> Result<KnowledgeCitation, StorageError>;
+
+    async fn get_citation(&self, id: Uuid) -> Result<Option<KnowledgeCitation>, StorageError>;
+}
+
+/// Immutable orientation cards and their append-only lifecycle.
+#[async_trait]
+pub trait OrientationCardStore: Send + Sync {
+    async fn create_orientation_card(
+        &self,
+        card: NewOrientationCard,
+        session_id: Option<Uuid>,
+    ) -> Result<OrientationCard, StorageError>;
+    async fn find_orientation_cards(
+        &self,
+        space_id: Uuid,
+        query: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<OrientationCard>, StorageError>;
+    async fn supersede_orientation_card(
+        &self,
+        expected_space_id: Uuid,
+        card_id: Uuid,
+        replacement_card_id: Uuid,
+        actor: String,
+        session_id: Option<Uuid>,
+    ) -> Result<OrientationCardLifecycle, StorageError>;
+    async fn retire_orientation_card(
+        &self,
+        expected_space_id: Uuid,
+        card_id: Uuid,
+        actor: String,
+        session_id: Option<Uuid>,
+    ) -> Result<OrientationCardLifecycle, StorageError>;
 }
 
 #[async_trait]
@@ -337,84 +468,6 @@ pub trait MaterialStore: Send + Sync {
 }
 
 #[async_trait]
-pub trait TeamStore: Send + Sync {
-    async fn create_team(&self, team: NewTeam) -> Result<Team, StorageError>;
-    async fn get_team(&self, id: Uuid) -> Result<Option<Team>, StorageError>;
-    async fn get_team_by_name(
-        &self,
-        space_id: Uuid,
-        name: &str,
-    ) -> Result<Option<Team>, StorageError>;
-    /// List teams in a space ordered by created_at ascending.
-    async fn list_teams_by_space(&self, space_id: Uuid) -> Result<Vec<Team>, StorageError>;
-    /// Partially update a team. Only `Some` fields are changed.
-    async fn update_team(
-        &self,
-        id: Uuid,
-        name: Option<String>,
-        description: Option<String>,
-        entry_agent_id: Option<String>,
-        agents: Option<Vec<crate::model::TeamAgentDefinition>>,
-        tasks: Option<Vec<crate::model::TeamTaskDefinition>>,
-    ) -> Result<Team, StorageError>;
-    /// Delete a team. Returns true if it existed and was removed.
-    async fn delete_team(&self, id: Uuid) -> Result<bool, StorageError>;
-}
-
-#[async_trait]
-pub trait TopologyTraceStore: Send + Sync {
-    async fn create_topology_run(&self, run: NewTopologyRun) -> Result<TopologyRun, StorageError>;
-    async fn get_topology_run(&self, id: Uuid) -> Result<Option<TopologyRun>, StorageError>;
-    async fn list_topology_runs_by_team(
-        &self,
-        team_id: Uuid,
-    ) -> Result<Vec<TopologyRun>, StorageError>;
-    async fn list_topology_runs_by_session(
-        &self,
-        session_id: Uuid,
-    ) -> Result<Vec<TopologyRun>, StorageError>;
-    async fn update_topology_run(
-        &self,
-        id: Uuid,
-        state: TopologyRunState,
-        final_output: Option<&serde_json::Value>,
-        error_message: Option<&str>,
-    ) -> Result<(), StorageError>;
-
-    async fn create_node_execution(
-        &self,
-        execution: NewNodeExecution,
-    ) -> Result<NodeExecution, StorageError>;
-    async fn get_node_execution(&self, id: Uuid) -> Result<Option<NodeExecution>, StorageError>;
-    async fn list_node_executions_by_run(
-        &self,
-        topology_run_id: Uuid,
-    ) -> Result<Vec<NodeExecution>, StorageError>;
-    async fn update_node_execution(
-        &self,
-        id: Uuid,
-        state: NodeExecutionState,
-        output_json: Option<&serde_json::Value>,
-        error_message: Option<&str>,
-    ) -> Result<(), StorageError>;
-
-    async fn create_edge_evaluation(
-        &self,
-        evaluation: NewEdgeEvaluation,
-    ) -> Result<EdgeEvaluation, StorageError>;
-    async fn list_edge_evaluations_by_run(
-        &self,
-        topology_run_id: Uuid,
-    ) -> Result<Vec<EdgeEvaluation>, StorageError>;
-
-    async fn create_node_retry(&self, retry: NewNodeRetry) -> Result<NodeRetry, StorageError>;
-    async fn list_node_retries(
-        &self,
-        node_execution_id: Uuid,
-    ) -> Result<Vec<NodeRetry>, StorageError>;
-}
-
-#[async_trait]
 pub trait TurnStore: Send + Sync {
     async fn create_turn(&self, turn: NewTurn) -> Result<Turn, StorageError>;
     async fn get_turn(&self, id: Uuid) -> Result<Option<Turn>, StorageError>;
@@ -425,6 +478,13 @@ pub trait TurnStore: Send + Sync {
     /// State is consumer-driven — the storage layer records whatever state is
     /// provided. No state-machine enforcement is applied here.
     async fn update_turn_state(&self, id: Uuid, state: TurnState) -> Result<(), StorageError>;
+    /// Force a turn to `Failed`, overriding the first-terminal-wins guard.
+    ///
+    /// The one sanctioned terminal-to-terminal transition: the record
+    /// durability escalation, where a turn whose record is known-incomplete
+    /// must not stand as `Completed`. Every other caller uses
+    /// `update_turn_state`.
+    async fn force_turn_failure(&self, id: Uuid) -> Result<(), StorageError>;
     /// Find all active turns for a given agent (Pending, Processing, or AwaitingApproval).
     ///
     /// Used by startup recovery, shutdown, and cancel to identify in-flight turns.
@@ -553,19 +613,6 @@ pub trait ContextSnapshotStore: Send + Sync {
         space_id: Uuid,
         limit: usize,
     ) -> Result<Vec<ContextSnapshotRecord>, StorageError>;
-}
-
-#[async_trait]
-pub trait SharedReferenceStore: Send + Sync {
-    async fn create_shared_reference_event(
-        &self,
-        event: NewSharedReferenceEvent,
-    ) -> Result<SharedReferenceEvent, StorageError>;
-    async fn list_shared_reference_events(
-        &self,
-        object_kind: SharedReferenceKind,
-        object_id: &str,
-    ) -> Result<Vec<SharedReferenceEvent>, StorageError>;
 }
 
 /// Store for thread CRUD operations.
@@ -959,6 +1006,13 @@ pub trait WorkflowStore: Send + Sync {
         run: NewWorkflowRun,
     ) -> Result<WorkflowRunRecord, StorageError>;
     async fn get_workflow_run(&self, id: Uuid) -> Result<Option<WorkflowRunRecord>, StorageError>;
+    /// The child run a parent's journalled `workflow()` call already started,
+    /// if any — how a resumed parent finds its child instead of duplicating it.
+    async fn find_child_workflow_run(
+        &self,
+        parent_run_id: Uuid,
+        parent_seq: u64,
+    ) -> Result<Option<WorkflowRunRecord>, StorageError>;
     async fn list_workflow_runs(
         &self,
         space_id: Uuid,
@@ -975,10 +1029,25 @@ pub trait WorkflowStore: Send + Sync {
         &self,
         intent: NewWorkflowJournalIntent,
     ) -> Result<WorkflowJournalRecord, StorageError>;
+    /// Records a command that was refused before it started as a terminal
+    /// entry. Creation and settlement are one storage operation so replay can
+    /// never mistake the refusal for in-flight work.
+    async fn create_failed_workflow_journal_entry(
+        &self,
+        intent: NewWorkflowJournalIntent,
+        error_message: &str,
+    ) -> Result<WorkflowJournalRecord, StorageError>;
     async fn complete_workflow_journal_entry(
         &self,
         id: Uuid,
         result: serde_json::Value,
+    ) -> Result<WorkflowJournalRecord, StorageError>;
+    /// Settles an entry as `failed`, preserving the failure's own message so
+    /// replay returns the recorded error instead of re-executing the call.
+    async fn fail_workflow_journal_entry(
+        &self,
+        id: Uuid,
+        error_message: &str,
     ) -> Result<WorkflowJournalRecord, StorageError>;
     async fn list_workflow_journal(
         &self,
@@ -995,9 +1064,7 @@ pub trait WorkflowStore: Send + Sync {
 /// `SpaceStore` is not included — it is independently available and consumers
 /// that need space operations import it separately.
 pub trait Storage:
-    TeamStore
-    + SessionStore
-    + LensStore
+    SessionStore
     + WorkspaceAttachmentStore
     + AttachmentStore
     + BackgroundJobStore
@@ -1007,20 +1074,23 @@ pub trait Storage:
     + DeliveryStore
     + AuditStore
     + AgentMemoryStore
+    + AgentDefinitionStore
     + ConfigurationVersionStore
+    + ObservationStore
+    + CurationAssertionStore
+    + CitationStore
+    + OrientationCardStore
     + SecretStore
     + ThreadStore
     + TurnStore
     + MessageStore
     + ToolCallStore
     + ContextSnapshotStore
-    + SharedReferenceStore
     + SkillActivationStore
     + ApprovalStore
     + AgentMessageStore
     + ScheduleStore
     + ChannelQueueStore
-    + TopologyTraceStore
     + WorkflowStore
     + Send
     + Sync
@@ -1029,9 +1099,7 @@ pub trait Storage:
 
 /// Blanket implementation so any type satisfying all sub-traits gets Storage for free.
 impl<T> Storage for T where
-    T: TeamStore
-        + SessionStore
-        + LensStore
+    T: SessionStore
         + WorkspaceAttachmentStore
         + AttachmentStore
         + BackgroundJobStore
@@ -1041,20 +1109,23 @@ impl<T> Storage for T where
         + DeliveryStore
         + AuditStore
         + AgentMemoryStore
+        + AgentDefinitionStore
         + ConfigurationVersionStore
+        + ObservationStore
+        + CurationAssertionStore
+        + CitationStore
+        + OrientationCardStore
         + SecretStore
         + ThreadStore
         + TurnStore
         + MessageStore
         + ToolCallStore
         + ContextSnapshotStore
-        + SharedReferenceStore
         + SkillActivationStore
         + ApprovalStore
         + AgentMessageStore
         + ScheduleStore
         + ChannelQueueStore
-        + TopologyTraceStore
         + WorkflowStore
         + Send
         + Sync
@@ -1151,45 +1222,6 @@ mod tests {
             _: &str,
             _: &str,
         ) -> Result<Option<Session>, StorageError> {
-            unimplemented!()
-        }
-    }
-
-    #[async_trait]
-    impl LensStore for StubStorage {
-        async fn get_active_lens(&self, _: Uuid) -> Result<LensPreference, StorageError> {
-            unimplemented!()
-        }
-
-        async fn set_active_lens(
-            &self,
-            _: Uuid,
-            _: AppLens,
-        ) -> Result<LensPreference, StorageError> {
-            unimplemented!()
-        }
-
-        async fn list_lenses(&self) -> Result<Vec<LensRecord>, StorageError> {
-            unimplemented!()
-        }
-
-        async fn get_lens(&self, _: &AppLens) -> Result<Option<LensRecord>, StorageError> {
-            unimplemented!()
-        }
-
-        async fn create_lens(&self, _: NewLensRecord) -> Result<LensRecord, StorageError> {
-            unimplemented!()
-        }
-
-        async fn update_lens(
-            &self,
-            _: &AppLens,
-            _: String,
-            _: String,
-            _: String,
-            _: Vec<String>,
-            _: Vec<String>,
-        ) -> Result<LensRecord, StorageError> {
             unimplemented!()
         }
     }
@@ -1394,6 +1426,165 @@ mod tests {
             _: &str,
             _: &str,
         ) -> Result<Option<ConfigurationVersion>, StorageError> {
+            unimplemented!()
+        }
+    }
+
+    #[async_trait]
+    impl AgentDefinitionStore for StubStorage {
+        async fn upsert_agent_definition(
+            &self,
+            _: NewAgentDefinition,
+        ) -> Result<AgentDefinition, StorageError> {
+            unimplemented!()
+        }
+
+        async fn resolve_agent_definition(
+            &self,
+            _: &str,
+            _: Uuid,
+        ) -> Result<Option<AgentDefinition>, StorageError> {
+            unimplemented!()
+        }
+
+        async fn list_agent_definitions(
+            &self,
+            _: Option<Uuid>,
+        ) -> Result<Vec<AgentDefinition>, StorageError> {
+            unimplemented!()
+        }
+
+        async fn delete_agent_definition(
+            &self,
+            _: &str,
+            _: Option<Uuid>,
+        ) -> Result<bool, StorageError> {
+            unimplemented!()
+        }
+    }
+
+    #[async_trait]
+    impl ObservationStore for StubStorage {
+        async fn record_observation(
+            &self,
+            _: NewSourceObservation,
+        ) -> Result<SourceObservation, StorageError> {
+            unimplemented!()
+        }
+
+        async fn get_observation(
+            &self,
+            _: Uuid,
+        ) -> Result<Option<SourceObservation>, StorageError> {
+            unimplemented!()
+        }
+
+        async fn list_observations_by_space(
+            &self,
+            _: Uuid,
+        ) -> Result<Vec<SourceObservation>, StorageError> {
+            unimplemented!()
+        }
+
+        async fn add_extraction(
+            &self,
+            _: Uuid,
+            _: String,
+            _: String,
+        ) -> Result<ExtractionDerivation, StorageError> {
+            unimplemented!()
+        }
+
+        async fn get_extraction(
+            &self,
+            _: Uuid,
+            _: u32,
+        ) -> Result<Option<ExtractionDerivation>, StorageError> {
+            unimplemented!()
+        }
+
+        async fn latest_extraction(
+            &self,
+            _: Uuid,
+        ) -> Result<Option<ExtractionDerivation>, StorageError> {
+            unimplemented!()
+        }
+
+        async fn search_extractions(
+            &self,
+            _: Uuid,
+            _: &str,
+            _: usize,
+        ) -> Result<Vec<KnowledgeSearchHit>, StorageError> {
+            unimplemented!()
+        }
+    }
+
+    #[async_trait]
+    impl CurationAssertionStore for StubStorage {
+        async fn add_curation_assertion(
+            &self,
+            _: NewCurationAssertion,
+        ) -> Result<CurationAssertion, StorageError> {
+            unimplemented!()
+        }
+
+        async fn effective_curation_by_space(
+            &self,
+            _: Uuid,
+        ) -> Result<Vec<CurationAssertion>, StorageError> {
+            unimplemented!()
+        }
+    }
+
+    #[async_trait]
+    impl CitationStore for StubStorage {
+        async fn add_citation(
+            &self,
+            _: NewKnowledgeCitation,
+        ) -> Result<KnowledgeCitation, StorageError> {
+            unimplemented!()
+        }
+
+        async fn get_citation(&self, _: Uuid) -> Result<Option<KnowledgeCitation>, StorageError> {
+            unimplemented!()
+        }
+    }
+
+    #[async_trait]
+    impl OrientationCardStore for StubStorage {
+        async fn create_orientation_card(
+            &self,
+            _: NewOrientationCard,
+            _: Option<Uuid>,
+        ) -> Result<OrientationCard, StorageError> {
+            unimplemented!()
+        }
+        async fn find_orientation_cards(
+            &self,
+            _: Uuid,
+            _: Option<&str>,
+            _: usize,
+        ) -> Result<Vec<OrientationCard>, StorageError> {
+            unimplemented!()
+        }
+        async fn supersede_orientation_card(
+            &self,
+            _: Uuid,
+            _: Uuid,
+            _: Uuid,
+            _: String,
+            _: Option<Uuid>,
+        ) -> Result<OrientationCardLifecycle, StorageError> {
+            unimplemented!()
+        }
+        async fn retire_orientation_card(
+            &self,
+            _: Uuid,
+            _: Uuid,
+            _: String,
+            _: Option<Uuid>,
+        ) -> Result<OrientationCardLifecycle, StorageError> {
             unimplemented!()
         }
     }
@@ -1622,112 +1813,6 @@ mod tests {
     }
 
     #[async_trait]
-    impl TeamStore for StubStorage {
-        async fn create_team(&self, _: NewTeam) -> Result<Team, StorageError> {
-            unimplemented!()
-        }
-        async fn get_team(&self, _: Uuid) -> Result<Option<Team>, StorageError> {
-            unimplemented!()
-        }
-        async fn get_team_by_name(&self, _: Uuid, _: &str) -> Result<Option<Team>, StorageError> {
-            unimplemented!()
-        }
-        async fn list_teams_by_space(&self, _: Uuid) -> Result<Vec<Team>, StorageError> {
-            unimplemented!()
-        }
-        async fn update_team(
-            &self,
-            _: Uuid,
-            _: Option<String>,
-            _: Option<String>,
-            _: Option<String>,
-            _: Option<Vec<crate::model::TeamAgentDefinition>>,
-            _: Option<Vec<crate::model::TeamTaskDefinition>>,
-        ) -> Result<Team, StorageError> {
-            unimplemented!()
-        }
-        async fn delete_team(&self, _: Uuid) -> Result<bool, StorageError> {
-            unimplemented!()
-        }
-    }
-
-    #[async_trait]
-    impl TopologyTraceStore for StubStorage {
-        async fn create_topology_run(
-            &self,
-            _: NewTopologyRun,
-        ) -> Result<TopologyRun, StorageError> {
-            unimplemented!()
-        }
-        async fn get_topology_run(&self, _: Uuid) -> Result<Option<TopologyRun>, StorageError> {
-            unimplemented!()
-        }
-        async fn list_topology_runs_by_team(
-            &self,
-            _: Uuid,
-        ) -> Result<Vec<TopologyRun>, StorageError> {
-            unimplemented!()
-        }
-        async fn list_topology_runs_by_session(
-            &self,
-            _: Uuid,
-        ) -> Result<Vec<TopologyRun>, StorageError> {
-            unimplemented!()
-        }
-        async fn update_topology_run(
-            &self,
-            _: Uuid,
-            _: TopologyRunState,
-            _: Option<&serde_json::Value>,
-            _: Option<&str>,
-        ) -> Result<(), StorageError> {
-            unimplemented!()
-        }
-        async fn create_node_execution(
-            &self,
-            _: NewNodeExecution,
-        ) -> Result<NodeExecution, StorageError> {
-            unimplemented!()
-        }
-        async fn get_node_execution(&self, _: Uuid) -> Result<Option<NodeExecution>, StorageError> {
-            unimplemented!()
-        }
-        async fn list_node_executions_by_run(
-            &self,
-            _: Uuid,
-        ) -> Result<Vec<NodeExecution>, StorageError> {
-            unimplemented!()
-        }
-        async fn update_node_execution(
-            &self,
-            _: Uuid,
-            _: NodeExecutionState,
-            _: Option<&serde_json::Value>,
-            _: Option<&str>,
-        ) -> Result<(), StorageError> {
-            unimplemented!()
-        }
-        async fn create_edge_evaluation(
-            &self,
-            _: NewEdgeEvaluation,
-        ) -> Result<EdgeEvaluation, StorageError> {
-            unimplemented!()
-        }
-        async fn list_edge_evaluations_by_run(
-            &self,
-            _: Uuid,
-        ) -> Result<Vec<EdgeEvaluation>, StorageError> {
-            unimplemented!()
-        }
-        async fn create_node_retry(&self, _: NewNodeRetry) -> Result<NodeRetry, StorageError> {
-            unimplemented!()
-        }
-        async fn list_node_retries(&self, _: Uuid) -> Result<Vec<NodeRetry>, StorageError> {
-            unimplemented!()
-        }
-    }
-
-    #[async_trait]
     impl TurnStore for StubStorage {
         async fn create_turn(&self, _: NewTurn) -> Result<Turn, StorageError> {
             unimplemented!()
@@ -1739,6 +1824,9 @@ mod tests {
             unimplemented!()
         }
         async fn update_turn_state(&self, _: Uuid, _: TurnState) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+        async fn force_turn_failure(&self, _: Uuid) -> Result<(), StorageError> {
             unimplemented!()
         }
         async fn find_in_progress_by_agent(
@@ -1794,24 +1882,6 @@ mod tests {
             _space_id: Uuid,
             _limit: usize,
         ) -> Result<Vec<ContextSnapshotRecord>, StorageError> {
-            unimplemented!()
-        }
-    }
-
-    #[async_trait]
-    impl SharedReferenceStore for StubStorage {
-        async fn create_shared_reference_event(
-            &self,
-            _: NewSharedReferenceEvent,
-        ) -> Result<SharedReferenceEvent, StorageError> {
-            unimplemented!()
-        }
-
-        async fn list_shared_reference_events(
-            &self,
-            _: SharedReferenceKind,
-            _: &str,
-        ) -> Result<Vec<SharedReferenceEvent>, StorageError> {
             unimplemented!()
         }
     }
@@ -2136,6 +2206,13 @@ mod tests {
         ) -> Result<Option<WorkflowRunRecord>, StorageError> {
             unimplemented!()
         }
+        async fn find_child_workflow_run(
+            &self,
+            _: Uuid,
+            _: u64,
+        ) -> Result<Option<WorkflowRunRecord>, StorageError> {
+            unimplemented!()
+        }
         async fn list_workflow_runs(
             &self,
             _: Uuid,
@@ -2160,10 +2237,24 @@ mod tests {
         ) -> Result<WorkflowJournalRecord, StorageError> {
             unimplemented!()
         }
+        async fn create_failed_workflow_journal_entry(
+            &self,
+            _: NewWorkflowJournalIntent,
+            _: &str,
+        ) -> Result<WorkflowJournalRecord, StorageError> {
+            unimplemented!()
+        }
         async fn complete_workflow_journal_entry(
             &self,
             _: Uuid,
             _: serde_json::Value,
+        ) -> Result<WorkflowJournalRecord, StorageError> {
+            unimplemented!()
+        }
+        async fn fail_workflow_journal_entry(
+            &self,
+            _: Uuid,
+            _: &str,
         ) -> Result<WorkflowJournalRecord, StorageError> {
             unimplemented!()
         }
@@ -2302,32 +2393,6 @@ mod tests {
         _assert(&stub);
     }
 
-    /// Compile-time check: TopologyTraceStore has the expected methods.
-    #[test]
-    fn topology_trace_store_compile_check() {
-        fn _assert<T: TopologyTraceStore>(t: &T) {
-            std::mem::drop(t.get_topology_run(Uuid::new_v4()));
-            std::mem::drop(t.list_topology_runs_by_team(Uuid::new_v4()));
-            std::mem::drop(t.list_topology_runs_by_session(Uuid::new_v4()));
-            std::mem::drop(t.get_node_execution(Uuid::new_v4()));
-            std::mem::drop(t.list_node_executions_by_run(Uuid::new_v4()));
-            std::mem::drop(t.list_edge_evaluations_by_run(Uuid::new_v4()));
-            std::mem::drop(t.list_node_retries(Uuid::new_v4()));
-        }
-        let stub = StubStorage;
-        _assert(&stub);
-    }
-
-    /// Compile-time check: Storage implies TopologyTraceStore.
-    #[test]
-    fn storage_supertrait_includes_topology_trace_store() {
-        fn _assert<T: Storage>(t: &T) {
-            std::mem::drop(t.list_topology_runs_by_team(Uuid::new_v4()));
-        }
-        let stub = StubStorage;
-        _assert(&stub);
-    }
-
     /// Compile-time check: ApprovalStore has the expected methods.
     #[test]
     fn approval_store_compile_check() {
@@ -2393,8 +2458,6 @@ mod tests {
                 space_id: Uuid::new_v4(),
                 session_id: Uuid::new_v4(),
                 turn_id: Uuid::new_v4(),
-                topology_run_id: None,
-                node_execution_id: None,
                 agent_id: "agent-a".into(),
                 memory_kind: "insight".into(),
                 title: "Remember this".into(),
@@ -2425,21 +2488,21 @@ mod tests {
                 id,
                 space_id: Some(Uuid::new_v4()),
                 session_id: None,
-                entity_kind: "team".into(),
-                entity_id: "team-1".into(),
+                entity_kind: "space".into(),
+                entity_id: "space-1".into(),
                 version_number: 1,
-                operation_kind: "create_team".into(),
+                operation_kind: "create_space".into(),
                 source: "test".into(),
-                summary: "created team".into(),
+                summary: "created space".into(),
                 snapshot: serde_json::json!({"name": "workspace-core"}),
                 diff: serde_json::json!([]),
                 previous_version_id: None,
-                rollback_to_version_id: None,
+                undone_version_id: None,
             }));
             std::mem::drop(t.get_configuration_version(id));
             std::mem::drop(t.list_configuration_versions(Some(Uuid::new_v4())));
-            std::mem::drop(t.list_configuration_versions_for_entity("team", "team-1"));
-            std::mem::drop(t.get_latest_configuration_version("team", "team-1"));
+            std::mem::drop(t.list_configuration_versions_for_entity("space", "space-1"));
+            std::mem::drop(t.get_latest_configuration_version("space", "space-1"));
         }
         let stub = StubStorage;
         _assert(&stub);

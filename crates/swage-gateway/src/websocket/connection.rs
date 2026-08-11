@@ -148,9 +148,8 @@ async fn handle_connection(socket: WebSocket, state: AppState, session_id: Uuid)
                     }
                 }
 
-                // Server-wide broadcast events (Shutdown plus session-scoped
-                // topology progress). Delivery filtering happens here via the
-                // session matcher rather than via per-connection subscriptions.
+                // Server-wide broadcast events are filtered here rather than
+                // through per-connection subscriptions.
                 result = bcast_rx.recv() => {
                     match result {
                         Ok(event) => {
@@ -275,25 +274,13 @@ async fn handle_connection(socket: WebSocket, state: AppState, session_id: Uuid)
     crate::presence::record_client_disconnected(&state, session_id).await;
 }
 
-pub(super) fn broadcast_event_matches_session(session_id: Uuid, event: &ServerEvent) -> bool {
-    match event {
-        ServerEvent::Shutdown { .. } => true,
-        ServerEvent::TopologyRunStarted {
-            session_id: target, ..
-        }
-        | ServerEvent::TopologyNodeStarted {
-            session_id: target, ..
-        }
-        | ServerEvent::TopologyNodeCompleted {
-            session_id: target, ..
-        }
-        | ServerEvent::TopologyRunCompleted {
-            session_id: target, ..
-        } => *target == session_id,
-        ServerEvent::WorkflowRunStarted { .. }
-        | ServerEvent::WorkflowEntryStarted { .. }
-        | ServerEvent::WorkflowEntryCompleted { .. }
-        | ServerEvent::WorkflowRunCompleted { .. } => true,
-        _ => false,
-    }
+pub(super) fn broadcast_event_matches_session(_session_id: Uuid, event: &ServerEvent) -> bool {
+    matches!(
+        event,
+        ServerEvent::Shutdown { .. }
+            | ServerEvent::WorkflowRunStarted { .. }
+            | ServerEvent::WorkflowEntryStarted { .. }
+            | ServerEvent::WorkflowEntryCompleted { .. }
+            | ServerEvent::WorkflowRunCompleted { .. }
+    )
 }

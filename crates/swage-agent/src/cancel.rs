@@ -129,7 +129,7 @@ pub async fn handle_cancel(
     }
 
     for thread_id in thread_ids {
-        storage.update_state(thread_id, ThreadState::Idle).await?;
+        reset_thread_to_idle(storage, thread_id).await?;
     }
 
     Ok(())
@@ -154,8 +154,30 @@ async fn interrupt_turns_in_thread(
                 .await?;
         }
     }
-    storage.update_state(thread_id, ThreadState::Idle).await?;
+    reset_thread_to_idle(storage, thread_id).await?;
     Ok(())
+}
+
+/// Reset a cancelled thread to Idle, accepting cleanup completed by the live
+/// agent after this handler signalled its cancellation token.
+async fn reset_thread_to_idle(
+    storage: &dyn CancellationStorage,
+    thread_id: Uuid,
+) -> Result<(), AgentError> {
+    match storage.update_state(thread_id, ThreadState::Idle).await {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            let already_idle = storage
+                .get(thread_id)
+                .await?
+                .is_some_and(|thread| thread.state == ThreadState::Idle);
+            if already_idle {
+                Ok(())
+            } else {
+                Err(error.into())
+            }
+        }
+    }
 }
 
 /// Handle a Shutdown message by interrupting all active turns for the target.
@@ -198,7 +220,7 @@ pub async fn handle_shutdown(
     // Reset threads to Idle — mirrors handle_cancel's fallback path. Without
     // this, threads stay in Processing and reject subsequent turn creation.
     for thread_id in thread_ids {
-        storage.update_state(thread_id, ThreadState::Idle).await?;
+        reset_thread_to_idle(storage, thread_id).await?;
     }
 
     Ok(())
@@ -223,6 +245,7 @@ mod tests {
     enum InjectedFailure {
         UpdateTurnState,
         UpdateThreadState,
+        ThreadIdleWonRace,
     }
 
     struct FailingCancellationStorage {
@@ -305,10 +328,16 @@ mod tests {
             self.inner.list_turns_by_thread(thread_id).await
         }
 
+        async fn force_turn_failure(&self, id: Uuid) -> Result<(), StorageError> {
+            self.inner.force_turn_failure(id).await
+        }
+
         async fn update_turn_state(&self, id: Uuid, state: TurnState) -> Result<(), StorageError> {
             match self.injected_failure {
                 InjectedFailure::UpdateTurnState => Err(self.injected_error()),
-                InjectedFailure::UpdateThreadState => self.inner.update_turn_state(id, state).await,
+                InjectedFailure::UpdateThreadState | InjectedFailure::ThreadIdleWonRace => {
+                    self.inner.update_turn_state(id, state).await
+                }
             }
         }
 
@@ -381,6 +410,10 @@ mod tests {
             match self.injected_failure {
                 InjectedFailure::UpdateThreadState => Err(self.injected_error()),
                 InjectedFailure::UpdateTurnState => self.inner.update_state(id, state).await,
+                InjectedFailure::ThreadIdleWonRace => {
+                    self.inner.update_state(id, state.clone()).await?;
+                    self.inner.update_state(id, state).await
+                }
             }
         }
 
@@ -789,6 +822,74 @@ mod tests {
         assert!(
             cancel_token.is_cancelled(),
             "cancel token should be triggered"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cancel_succeeds_when_live_agent_wins_thread_idle_race() {
+        let (inner, turn_id) = setup_with_turn("agent-b").await;
+        let turn = inner.get_turn(turn_id).await.unwrap().unwrap();
+        let thread = ThreadStore::get(inner.as_ref(), turn.thread_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let delegate = inner
+            .create_agent_message(NewAgentMessage {
+                sender_agent_id: "agent-a".into(),
+                recipient_agent_id: "agent-b".into(),
+                kind: MessageKind::Delegate,
+                correlation_id: None,
+                payload: serde_json::json!({}),
+            })
+            .await
+            .unwrap();
+
+        let registry = crate::delegation::active_delegations();
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+        registry
+            .insert(
+                delegate.id,
+                crate::delegation::ActiveDelegation {
+                    session_id: thread.session_id,
+                    thread_id: thread.id,
+                    recipient_agent_id: "agent-b".into(),
+                    cancel_token: cancel_token.clone(),
+                },
+            )
+            .await;
+        let cancel = AgentMessage {
+            id: Uuid::new_v4(),
+            sender_agent_id: "agent-a".into(),
+            recipient_agent_id: "agent-b".into(),
+            kind: MessageKind::Cancel,
+            correlation_id: Some(delegate.id),
+            payload: serde_json::json!({}),
+            status: MessageStatus::Delivered,
+            failure_reason: None,
+            created_at: chrono::Utc::now(),
+            delivered_at: Some(chrono::Utc::now()),
+        };
+        let racing_storage = FailingCancellationStorage {
+            inner: inner.clone(),
+            injected_failure: InjectedFailure::ThreadIdleWonRace,
+        };
+
+        handle_cancel(&racing_storage, &cancel, Some(&registry))
+            .await
+            .expect("already-completed live cleanup should satisfy cancellation");
+
+        assert!(cancel_token.is_cancelled());
+        assert_eq!(
+            inner.get_turn(turn_id).await.unwrap().unwrap().state,
+            TurnState::Interrupted
+        );
+        assert_eq!(
+            ThreadStore::get(inner.as_ref(), thread.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            ThreadState::Idle
         );
     }
 

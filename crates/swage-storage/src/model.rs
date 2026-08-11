@@ -5,185 +5,6 @@ use serde::{Deserialize, Serialize};
 use swage_core::{Role, StorageError};
 use uuid::Uuid;
 
-/// Canonical product lens controlling presentation defaults.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct AppLens(String);
-
-impl AppLens {
-    pub fn new(value: impl Into<String>) -> Result<Self, String> {
-        let value = value.into();
-        if !is_valid_lens_id(&value) {
-            return Err(format!("unknown app lens: {value}"));
-        }
-        Ok(Self(value))
-    }
-
-    pub fn assistant() -> Self {
-        Self("assistant".to_string())
-    }
-
-    pub fn builder() -> Self {
-        Self("builder".to_string())
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl std::fmt::Display for AppLens {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl FromStr for AppLens {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Self::new(s)
-    }
-}
-
-impl Default for AppLens {
-    fn default() -> Self {
-        Self::assistant()
-    }
-}
-
-fn is_valid_lens_id(value: &str) -> bool {
-    if value.is_empty() {
-        return false;
-    }
-
-    value
-        .bytes()
-        .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
-}
-
-/// Persisted runtime preference for the active product lens.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct LensPreference {
-    pub space_id: Uuid,
-    pub active_lens: AppLens,
-    pub updated_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LensSourceKind {
-    BuiltIn,
-    Authored,
-    Installed,
-}
-
-impl std::fmt::Display for LensSourceKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let value = match self {
-            LensSourceKind::BuiltIn => "built_in",
-            LensSourceKind::Authored => "authored",
-            LensSourceKind::Installed => "installed",
-        };
-        write!(f, "{value}")
-    }
-}
-
-impl FromStr for LensSourceKind {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "built_in" => Ok(Self::BuiltIn),
-            "authored" => Ok(Self::Authored),
-            "installed" => Ok(Self::Installed),
-            other => Err(format!("unknown lens source kind: {other}")),
-        }
-    }
-}
-
-/// Durable lens definition used to shape the UI without becoming a policy boundary.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct LensRecord {
-    pub id: AppLens,
-    pub title: String,
-    pub summary: String,
-    pub default_surface: String,
-    pub ui_modules: Vec<String>,
-    pub prominent_team_ids: Vec<String>,
-    pub source_kind: LensSourceKind,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone)]
-pub struct NewLensRecord {
-    pub id: AppLens,
-    pub title: String,
-    pub summary: String,
-    pub default_surface: String,
-    pub ui_modules: Vec<String>,
-    pub prominent_team_ids: Vec<String>,
-    pub source_kind: LensSourceKind,
-}
-
-/// Canonical kind of shared reference object exposed to users and the agent.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SharedReferenceKind {
-    TeamTopology,
-    ContextSnapshot,
-    OrchestrationFlow,
-    ContextDefinition,
-}
-
-impl std::fmt::Display for SharedReferenceKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let value = match self {
-            SharedReferenceKind::TeamTopology => "team_topology",
-            SharedReferenceKind::ContextSnapshot => "context_snapshot",
-            SharedReferenceKind::OrchestrationFlow => "orchestration_flow",
-            SharedReferenceKind::ContextDefinition => "context_definition",
-        };
-        write!(f, "{value}")
-    }
-}
-
-impl FromStr for SharedReferenceKind {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "team_topology" => Ok(Self::TeamTopology),
-            "context_snapshot" => Ok(Self::ContextSnapshot),
-            "orchestration_flow" => Ok(Self::OrchestrationFlow),
-            "context_definition" => Ok(Self::ContextDefinition),
-            other => Err(format!("unknown shared reference kind: {other}")),
-        }
-    }
-}
-
-/// Persisted interaction against a shared reference object.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SharedReferenceEvent {
-    pub id: Uuid,
-    pub object_kind: SharedReferenceKind,
-    pub object_id: String,
-    pub event_kind: String,
-    pub payload: serde_json::Value,
-    pub created_at: DateTime<Utc>,
-}
-
-/// Input for creating a shared reference event.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct NewSharedReferenceEvent {
-    pub id: Uuid,
-    pub object_kind: SharedReferenceKind,
-    pub object_id: String,
-    pub event_kind: String,
-    pub payload: serde_json::Value,
-}
-
 /// Persisted context snapshot metadata for space-scoped listing.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ContextSnapshotRecord {
@@ -532,8 +353,6 @@ pub struct AgentMemoryRecord {
     pub space_id: Uuid,
     pub session_id: Uuid,
     pub turn_id: Uuid,
-    pub topology_run_id: Option<Uuid>,
-    pub node_execution_id: Option<Uuid>,
     pub agent_id: String,
     pub memory_kind: String,
     pub title: String,
@@ -553,8 +372,6 @@ pub struct NewAgentMemoryRecord {
     pub space_id: Uuid,
     pub session_id: Uuid,
     pub turn_id: Uuid,
-    pub topology_run_id: Option<Uuid>,
-    pub node_execution_id: Option<Uuid>,
     pub agent_id: String,
     pub memory_kind: String,
     pub title: String,
@@ -565,7 +382,7 @@ pub struct NewAgentMemoryRecord {
     pub metadata: serde_json::Value,
 }
 
-/// Durable version record for builder-managed configuration.
+/// Durable configuration version record.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConfigurationVersion {
     pub id: Uuid,
@@ -580,7 +397,7 @@ pub struct ConfigurationVersion {
     pub snapshot: serde_json::Value,
     pub diff: serde_json::Value,
     pub previous_version_id: Option<Uuid>,
-    pub rollback_to_version_id: Option<Uuid>,
+    pub undone_version_id: Option<Uuid>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -599,7 +416,7 @@ pub struct NewConfigurationVersion {
     pub snapshot: serde_json::Value,
     pub diff: serde_json::Value,
     pub previous_version_id: Option<Uuid>,
-    pub rollback_to_version_id: Option<Uuid>,
+    pub undone_version_id: Option<Uuid>,
 }
 
 /// A centrally managed secret or credential reference.
@@ -940,6 +757,246 @@ pub struct NewMaterial {
     pub relative_path: String,
     pub mime_type: String,
     pub content_text: String,
+}
+
+/// Where a source observation came from: a URL, a local file, or both
+/// (a local capture of remote content records both).
+///
+/// At least one of the two is always present — the schema enforces it, and
+/// `NewSourceObservation` construction should too.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ObservationOrigin {
+    pub url: Option<String>,
+    pub local_path: Option<String>,
+}
+
+/// One immutable capture of an external source in a space's knowledge base.
+///
+/// Observations are the knowledge base's unit of storage and are never
+/// mutated or deleted: a fresh capture of the same origin is a new row, and
+/// curation reorganises through separate append-only assertions. The raw
+/// body lives as a content-addressed file under the space data root
+/// (addressed by `body_sha256`); this row holds metadata only.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SourceObservation {
+    pub id: Uuid,
+    pub space_id: Uuid,
+    pub origin: ObservationOrigin,
+    pub retrieved_at: DateTime<Utc>,
+    /// Lowercase hex SHA-256 of the raw body — the body file's address.
+    pub body_sha256: String,
+    pub body_bytes: u64,
+    pub media_type: String,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Input for recording a new source observation.
+#[derive(Debug, Clone)]
+pub struct NewSourceObservation {
+    pub space_id: Uuid,
+    pub origin: ObservationOrigin,
+    pub retrieved_at: DateTime<Utc>,
+    pub body_sha256: String,
+    pub body_bytes: u64,
+    pub media_type: String,
+}
+
+/// One versioned text extraction of an observation's raw body.
+///
+/// Versions are assigned by the store (per observation, ascending) and an
+/// existing derivation is never mutated: re-extraction inserts the next
+/// version, so a citation pinned to (observation, version, offsets) stays
+/// valid across extractor upgrades.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExtractionDerivation {
+    pub id: Uuid,
+    pub observation_id: Uuid,
+    pub version: u32,
+    pub extracted_text: String,
+    /// What produced this text (e.g. "html-to-text v1") — provenance for
+    /// judging whether a better extraction is worth deriving.
+    pub extractor: String,
+    pub created_at: DateTime<Utc>,
+}
+
+/// One full-text search hit over a space's knowledge base.
+///
+/// Carries everything a citation needs: the observation, the derivation
+/// version searched, and the matching passage. The offset is absent when a
+/// lossy search transformation prevents the passage being located exactly.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KnowledgeSearchHit {
+    pub observation_id: Uuid,
+    pub derivation_version: u32,
+    pub origin: ObservationOrigin,
+    pub retrieved_at: DateTime<Utc>,
+    /// The matching passage, exactly as it appears in the derivation text.
+    pub snippet: String,
+    /// Byte offset of `snippet` within the derivation's extracted text, when
+    /// the search-produced passage can be located exactly.
+    pub snippet_offset: Option<usize>,
+}
+
+/// An immutable citation pinned to one extraction derivation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KnowledgeCitation {
+    pub id: Uuid,
+    pub space_id: Uuid,
+    pub observation_id: Uuid,
+    pub derivation_version: u32,
+    /// Byte offset of `quoted_text` within the pinned derivation.
+    pub start_offset: usize,
+    pub end_offset: usize,
+    pub quoted_text: String,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Model-supplied citation identity. Offsets are deliberately absent: the
+/// store locates the exact quote in the pinned derivation.
+#[derive(Debug, Clone)]
+pub struct NewKnowledgeCitation {
+    pub space_id: Uuid,
+    pub observation_id: Uuid,
+    pub derivation_version: u32,
+    pub quoted_text: String,
+}
+
+/// Immutable agent-authored orientation derived from whole observations.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrientationCard {
+    pub id: Uuid,
+    pub space_id: Uuid,
+    pub title: String,
+    pub content: String,
+    pub authored_by: String,
+    pub observation_ids: Vec<Uuid>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewOrientationCard {
+    pub space_id: Uuid,
+    pub title: String,
+    pub content: String,
+    pub authored_by: String,
+    pub observation_ids: Vec<Uuid>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OrientationCardLifecycleKind {
+    Superseded,
+    Retired,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrientationCardLifecycle {
+    pub id: Uuid,
+    pub card_id: Uuid,
+    pub kind: OrientationCardLifecycleKind,
+    pub replacement_card_id: Option<Uuid>,
+    pub actor: String,
+    pub created_at: DateTime<Utc>,
+}
+
+/// The observation-level judgement recorded by a curation assertion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CurationAssertionKind {
+    DuplicateOf,
+    SupersededBy,
+    Stale,
+}
+
+impl std::fmt::Display for CurationAssertionKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::DuplicateOf => "duplicate-of",
+            Self::SupersededBy => "superseded-by",
+            Self::Stale => "stale",
+        })
+    }
+}
+
+impl std::str::FromStr for CurationAssertionKind {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "duplicate-of" => Ok(Self::DuplicateOf),
+            "superseded-by" => Ok(Self::SupersededBy),
+            "stale" => Ok(Self::Stale),
+            other => Err(format!("unknown curation assertion kind: {other}")),
+        }
+    }
+}
+
+/// An immutable observation-level curation judgement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CurationAssertion {
+    pub id: Uuid,
+    pub space_id: Uuid,
+    pub observation_id: Uuid,
+    pub kind: CurationAssertionKind,
+    /// The preferred or replacement observation for relationship assertions.
+    pub target_observation_id: Option<Uuid>,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Input for appending an observation-level curation judgement.
+#[derive(Debug, Clone)]
+pub struct NewCurationAssertion {
+    pub space_id: Uuid,
+    pub observation_id: Uuid,
+    pub kind: CurationAssertionKind,
+    pub target_observation_id: Option<Uuid>,
+}
+
+/// A durable agent definition — the bundle that gives a session its entire
+/// character, selected at session start by agent id.
+///
+/// `space_id` `None` is a global definition; a space-scoped definition with
+/// the same id shadows it within that space. The permission overlay
+/// intersects with the resolved config's grants and never expands them.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentDefinition {
+    /// The stable agent id sessions carry (`sessions.agent_id`).
+    pub id: String,
+    pub space_id: Option<Uuid>,
+    pub display_name: String,
+    pub description: String,
+    /// The agent's own instructions, appended after operator instructions.
+    pub instructions: String,
+    /// Model preference, used when the session has no explicit selection.
+    pub model_id: Option<String>,
+    /// Optional tool-permission overlay (serialised `PermissionConfig`).
+    pub tool_permissions: Option<serde_json::Value>,
+    /// Skills this definition activates when they are available to the agent.
+    pub skills: Vec<String>,
+    /// JSON Schema enforced for every final response from this agent.
+    pub output_schema: Option<serde_json::Value>,
+    /// Definition-specific validation retry limit.
+    pub output_max_retries: Option<u32>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Input for creating or replacing an agent definition. Mutations travel as
+/// recorded configuration changes, so the caller supplies whole definitions
+/// rather than field patches.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NewAgentDefinition {
+    pub id: String,
+    pub space_id: Option<Uuid>,
+    pub display_name: String,
+    pub description: String,
+    pub instructions: String,
+    pub model_id: Option<String>,
+    pub tool_permissions: Option<serde_json::Value>,
+    #[serde(default)]
+    pub skills: Vec<String>,
+    pub output_schema: Option<serde_json::Value>,
+    pub output_max_retries: Option<u32>,
 }
 
 /// A manually appended audit event.
@@ -1552,306 +1609,6 @@ impl NewAgentMessage {
     }
 }
 
-/// A team — the organisational unit for multi-agent orchestration.
-///
-/// Teams belong to a space and define durable agent and task definitions plus
-/// an entry agent (the agent that receives user messages). The legacy
-/// `members` list remains as a derived convenience surface backed by `agents`
-/// so older runtime paths can keep using stable agent IDs while the canonical
-/// authoring model moves to first-class definitions.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TeamAgentDefinition {
-    pub id: String,
-    #[serde(default)]
-    pub display_name: String,
-    #[serde(default)]
-    pub description: String,
-    #[serde(default)]
-    pub instructions: String,
-    #[serde(default)]
-    pub model: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct TeamTaskDefinition {
-    pub name: String,
-    #[serde(default)]
-    pub description: String,
-    #[serde(default)]
-    pub instructions: String,
-    #[serde(default)]
-    pub model: Option<String>,
-    #[serde(default)]
-    pub output_schema: Option<serde_json::Value>,
-    #[serde(default)]
-    pub max_output_retries: Option<u32>,
-    #[serde(default)]
-    pub tool_allow: Option<Vec<String>>,
-    #[serde(default)]
-    pub tool_deny: Option<Vec<String>>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Team {
-    pub id: Uuid,
-    pub space_id: Uuid,
-    /// Unique name within the space.
-    pub name: String,
-    pub description: String,
-    /// The agent that receives user messages for this team.
-    pub entry_agent_id: String,
-    /// Legacy member convenience derived from the canonical agent definitions.
-    pub members: Vec<String>,
-    /// Canonical durable agent definitions for this team.
-    #[serde(default)]
-    pub agents: Vec<TeamAgentDefinition>,
-    /// Canonical durable task definitions for this team.
-    #[serde(default)]
-    pub tasks: Vec<TeamTaskDefinition>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-}
-
-impl Team {
-    pub fn member_ids_from_agents(agents: &[TeamAgentDefinition]) -> Vec<String> {
-        agents.iter().map(|agent| agent.id.clone()).collect()
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Creation types — inputs for insert operations (no auto-generated fields)
-// ---------------------------------------------------------------------------
-
-/// Input for creating a new team.
-#[derive(Debug, Clone)]
-pub struct NewTeam {
-    pub space_id: Uuid,
-    pub name: String,
-    pub description: String,
-    pub entry_agent_id: String,
-    pub agents: Vec<TeamAgentDefinition>,
-    pub tasks: Vec<TeamTaskDefinition>,
-}
-
-/// Topology run lifecycle state.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TopologyRunState {
-    Pending,
-    Running,
-    Completed,
-    Failed,
-    Interrupted,
-}
-
-impl std::fmt::Display for TopologyRunState {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let s = match self {
-            TopologyRunState::Pending => "pending",
-            TopologyRunState::Running => "running",
-            TopologyRunState::Completed => "completed",
-            TopologyRunState::Failed => "failed",
-            TopologyRunState::Interrupted => "interrupted",
-        };
-        write!(f, "{s}")
-    }
-}
-
-impl FromStr for TopologyRunState {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "pending" => Ok(TopologyRunState::Pending),
-            "running" => Ok(TopologyRunState::Running),
-            "completed" => Ok(TopologyRunState::Completed),
-            "failed" => Ok(TopologyRunState::Failed),
-            "interrupted" => Ok(TopologyRunState::Interrupted),
-            other => Err(format!("unknown topology run state: {other}")),
-        }
-    }
-}
-
-/// A persisted topology run for a team conversation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TopologyRun {
-    pub id: Uuid,
-    pub team_id: Uuid,
-    pub session_id: Uuid,
-    /// The user- or delegate-triggered turn that started this topology run.
-    pub source_turn_id: Option<Uuid>,
-    pub state: TopologyRunState,
-    /// Final structured output for the topology, if one was produced.
-    pub final_output: Option<serde_json::Value>,
-    pub error_message: Option<String>,
-    pub created_at: DateTime<Utc>,
-    pub completed_at: Option<DateTime<Utc>>,
-}
-
-/// Input for creating a topology run.
-#[derive(Debug, Clone)]
-pub struct NewTopologyRun {
-    pub team_id: Uuid,
-    pub session_id: Uuid,
-    pub source_turn_id: Option<Uuid>,
-    pub state: TopologyRunState,
-    pub final_output: Option<serde_json::Value>,
-    pub error_message: Option<String>,
-}
-
-/// Node execution lifecycle state within a topology run.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum NodeExecutionState {
-    Pending,
-    Running,
-    Completed,
-    Failed,
-    Skipped,
-}
-
-impl std::fmt::Display for NodeExecutionState {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let s = match self {
-            NodeExecutionState::Pending => "pending",
-            NodeExecutionState::Running => "running",
-            NodeExecutionState::Completed => "completed",
-            NodeExecutionState::Failed => "failed",
-            NodeExecutionState::Skipped => "skipped",
-        };
-        write!(f, "{s}")
-    }
-}
-
-impl FromStr for NodeExecutionState {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "pending" => Ok(NodeExecutionState::Pending),
-            "running" => Ok(NodeExecutionState::Running),
-            "completed" => Ok(NodeExecutionState::Completed),
-            "failed" => Ok(NodeExecutionState::Failed),
-            "skipped" => Ok(NodeExecutionState::Skipped),
-            other => Err(format!("unknown node execution state: {other}")),
-        }
-    }
-}
-
-/// Stable persisted node kind for topology execution traces.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TopologyNodeRecordKind {
-    Llm,
-    Deterministic,
-    Continuation,
-}
-
-impl std::fmt::Display for TopologyNodeRecordKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let s = match self {
-            TopologyNodeRecordKind::Llm => "llm",
-            TopologyNodeRecordKind::Deterministic => "deterministic",
-            TopologyNodeRecordKind::Continuation => "continuation",
-        };
-        write!(f, "{s}")
-    }
-}
-
-impl FromStr for TopologyNodeRecordKind {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "llm" => Ok(TopologyNodeRecordKind::Llm),
-            "deterministic" => Ok(TopologyNodeRecordKind::Deterministic),
-            "continuation" => Ok(TopologyNodeRecordKind::Continuation),
-            other => Err(format!("unknown topology node kind: {other}")),
-        }
-    }
-}
-
-/// A single node execution within a topology run.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NodeExecution {
-    pub id: Uuid,
-    pub topology_run_id: Uuid,
-    /// Stable identifier from the topology definition.
-    pub node_id: String,
-    /// Semantic node kind such as `llm`, `deterministic`, or `continuation`.
-    pub node_kind: TopologyNodeRecordKind,
-    pub agent_id: Option<String>,
-    pub task_name: Option<String>,
-    pub state: NodeExecutionState,
-    pub input_json: Option<serde_json::Value>,
-    pub output_json: Option<serde_json::Value>,
-    pub error_message: Option<String>,
-    pub created_at: DateTime<Utc>,
-    pub completed_at: Option<DateTime<Utc>>,
-}
-
-/// Input for creating a node execution record.
-#[derive(Debug, Clone)]
-pub struct NewNodeExecution {
-    pub topology_run_id: Uuid,
-    pub node_id: String,
-    pub node_kind: TopologyNodeRecordKind,
-    pub agent_id: Option<String>,
-    pub task_name: Option<String>,
-    pub state: NodeExecutionState,
-    pub input_json: Option<serde_json::Value>,
-    pub output_json: Option<serde_json::Value>,
-    pub error_message: Option<String>,
-}
-
-/// Edge-condition evaluation emitted during topology traversal.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EdgeEvaluation {
-    pub id: Uuid,
-    pub topology_run_id: Uuid,
-    pub source_node_execution_id: Uuid,
-    pub edge_id: String,
-    pub target_node_id: String,
-    pub condition_expression: Option<String>,
-    pub matched: bool,
-    pub payload_json: Option<serde_json::Value>,
-    pub created_at: DateTime<Utc>,
-}
-
-/// Input for creating an edge evaluation record.
-#[derive(Debug, Clone)]
-pub struct NewEdgeEvaluation {
-    pub topology_run_id: Uuid,
-    pub source_node_execution_id: Uuid,
-    pub edge_id: String,
-    pub target_node_id: String,
-    pub condition_expression: Option<String>,
-    pub matched: bool,
-    pub payload_json: Option<serde_json::Value>,
-}
-
-/// Retry history for a node execution.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NodeRetry {
-    pub id: Uuid,
-    pub node_execution_id: Uuid,
-    pub attempt_number: i32,
-    pub failure_kind: String,
-    pub error_message: String,
-    pub recovery_guidance: Option<String>,
-    pub created_at: DateTime<Utc>,
-}
-
-/// Input for recording a node retry attempt.
-#[derive(Debug, Clone)]
-pub struct NewNodeRetry {
-    pub node_execution_id: Uuid,
-    pub attempt_number: i32,
-    pub failure_kind: String,
-    pub error_message: String,
-    pub recovery_guidance: Option<String>,
-}
-
 /// Input for creating a new space.
 #[derive(Debug, Clone)]
 pub struct NewSpace {
@@ -1941,8 +1698,11 @@ pub struct NewTurn {
 }
 
 /// Input for creating a durable schedule.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NewSchedule {
+    /// Chosen by the caller so recorded configuration cases can establish the
+    /// version-chain identity before the resource is written.
+    pub id: Uuid,
     pub message: String,
     pub status: ScheduleStatus,
     pub kind: ScheduleKind,
@@ -2114,6 +1874,13 @@ pub struct WorkflowScriptVersion {
 pub struct WorkflowRunRecord {
     pub id: Uuid,
     pub space_id: Uuid,
+    /// Set on a child run started by a parent's `workflow()` call: the parent
+    /// run and the journal seq of the call that started it. The pair is what
+    /// makes composed-run recovery deterministic — a resumed parent finds its
+    /// existing child by (parent_run_id, parent_seq) instead of starting a
+    /// duplicate.
+    pub parent_run_id: Option<Uuid>,
+    pub parent_seq: Option<u64>,
     pub script_version_id: Option<Uuid>,
     pub script_id: Option<Uuid>,
     pub script_name: Option<String>,
@@ -2133,6 +1900,8 @@ pub struct WorkflowRunRecord {
 #[derive(Clone, Debug)]
 pub struct NewWorkflowRun {
     pub space_id: Uuid,
+    pub parent_run_id: Option<Uuid>,
+    pub parent_seq: Option<u64>,
     pub script_version_id: Option<Uuid>,
     pub source: Option<String>,
     pub source_hash: String,
@@ -2380,118 +2149,6 @@ mod tests {
         assert!(SpaceSlug::new("!!! --- ___").is_err());
         assert!(SpaceSlug::new("space/escape").is_err());
         assert!(SpaceSlug::new("space-01").is_ok());
-    }
-
-    // --- Topology trace models ---
-
-    #[test]
-    fn topology_run_state_display_from_str_round_trip() {
-        let states = [
-            TopologyRunState::Pending,
-            TopologyRunState::Running,
-            TopologyRunState::Completed,
-            TopologyRunState::Failed,
-            TopologyRunState::Interrupted,
-        ];
-
-        for state in states {
-            let text = state.to_string();
-            let parsed = TopologyRunState::from_str(&text).expect("state should parse");
-            assert_eq!(parsed, state);
-        }
-    }
-
-    #[test]
-    fn node_execution_state_display_from_str_round_trip() {
-        let states = [
-            NodeExecutionState::Pending,
-            NodeExecutionState::Running,
-            NodeExecutionState::Completed,
-            NodeExecutionState::Failed,
-            NodeExecutionState::Skipped,
-        ];
-
-        for state in states {
-            let text = state.to_string();
-            let parsed = NodeExecutionState::from_str(&text).expect("state should parse");
-            assert_eq!(parsed, state);
-        }
-    }
-
-    #[test]
-    fn topology_run_serialises_final_output() {
-        let run = TopologyRun {
-            id: Uuid::new_v4(),
-            team_id: Uuid::new_v4(),
-            session_id: Uuid::new_v4(),
-            source_turn_id: Some(Uuid::new_v4()),
-            state: TopologyRunState::Completed,
-            final_output: Some(serde_json::json!({"result": "done"})),
-            error_message: None,
-            created_at: Utc::now(),
-            completed_at: Some(Utc::now()),
-        };
-
-        let json = serde_json::to_string(&run).expect("serialisation should succeed");
-        let back: TopologyRun =
-            serde_json::from_str(&json).expect("deserialisation should succeed");
-        assert_eq!(back.state, TopologyRunState::Completed);
-        assert_eq!(
-            back.final_output,
-            Some(serde_json::json!({"result": "done"}))
-        );
-    }
-
-    #[test]
-    fn node_execution_edge_evaluation_and_retry_serialise() {
-        let execution = NodeExecution {
-            id: Uuid::new_v4(),
-            topology_run_id: Uuid::new_v4(),
-            node_id: "plan".into(),
-            node_kind: TopologyNodeRecordKind::Llm,
-            agent_id: Some("planner".into()),
-            task_name: Some("draft-plan".into()),
-            state: NodeExecutionState::Completed,
-            input_json: Some(serde_json::json!({"prompt": "hello"})),
-            output_json: Some(serde_json::json!({"decision": "continue"})),
-            error_message: None,
-            created_at: Utc::now(),
-            completed_at: Some(Utc::now()),
-        };
-        let edge = EdgeEvaluation {
-            id: Uuid::new_v4(),
-            topology_run_id: execution.topology_run_id,
-            source_node_execution_id: execution.id,
-            edge_id: "plan->review".into(),
-            target_node_id: "review".into(),
-            condition_expression: Some("decision == 'continue'".into()),
-            matched: true,
-            payload_json: Some(serde_json::json!({"branch": "continue"})),
-            created_at: Utc::now(),
-        };
-        let retry = NodeRetry {
-            id: Uuid::new_v4(),
-            node_execution_id: execution.id,
-            attempt_number: 2,
-            failure_kind: "schema_validation".into(),
-            error_message: "missing field".into(),
-            recovery_guidance: Some("return valid JSON".into()),
-            created_at: Utc::now(),
-        };
-
-        let execution_json = serde_json::to_string(&execution).expect("execution serialises");
-        let edge_json = serde_json::to_string(&edge).expect("edge serialises");
-        let retry_json = serde_json::to_string(&retry).expect("retry serialises");
-
-        let execution_back: NodeExecution =
-            serde_json::from_str(&execution_json).expect("execution deserialises");
-        let edge_back: EdgeEvaluation =
-            serde_json::from_str(&edge_json).expect("edge deserialises");
-        let retry_back: NodeRetry = serde_json::from_str(&retry_json).expect("retry deserialises");
-
-        assert_eq!(execution_back.node_id, "plan");
-        assert!(edge_back.matched);
-        assert_eq!(retry_back.attempt_number, 2);
     }
 
     // --- ApprovalState round-trips ---
@@ -2848,11 +2505,11 @@ mod tests {
     fn new_session_includes_agent_id() {
         let ns = NewSession {
             space_id: Uuid::new_v4(),
-            agent_id: "builder-agent".to_string(),
+            agent_id: "config-agent".to_string(),
             metadata: None,
             active_workspace_attachment_id: None,
         };
-        assert_eq!(ns.agent_id, "builder-agent");
+        assert_eq!(ns.agent_id, "config-agent");
     }
 
     // --- Turn serialisation ---

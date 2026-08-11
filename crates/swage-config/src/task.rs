@@ -1,8 +1,8 @@
-//! Task definitions — reusable work packages for multi-agent orchestration.
+//! Task definitions — reusable work packages for agent execution.
 //!
 //! A task definition specifies: instructions, output schema, model override,
-//! and tool permissions. When bound to an agent via a topology node, the task
-//! overlays the agent's base config using the existing cascade semantics.
+//! and tool permissions. A task overlays the agent's base config using the
+//! existing cascade semantics.
 
 use std::collections::HashMap;
 
@@ -14,9 +14,8 @@ use serde::{Deserialize, Serialize};
 
 /// A reusable work package that overlays an agent's config at execution time.
 ///
-/// Declarable in TOML config or constructed programmatically in Python topology
-/// definitions. The topology engine applies the task overlay to the agent's
-/// resolved config via [`TaskDefinition::apply_to`].
+/// Declarable in TOML config and applied to the agent's resolved config via
+/// [`TaskDefinition::apply_to`].
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TaskDefinition {
     /// Unique identifier for this task definition.
