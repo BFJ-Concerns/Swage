@@ -57,11 +57,12 @@ pub enum ChangeOperation {
     },
     /// Create a schedule from its complete intended state.
     CreateSchedule { schedule: NewSchedule },
-    /// Replace every mutable field of an existing schedule.
-    UpdateSchedule { schedule: NewSchedule },
-    /// Replace a schedule with a complete paused state.
+    /// Edit an existing schedule, re-arming its lifecycle only when its
+    /// timing was explicitly replaced.
+    UpdateSchedule { schedule: NewSchedule, rearm: bool },
+    /// Pause a schedule without replaying scheduler-owned timestamps.
     PauseSchedule { schedule: NewSchedule },
-    /// Replace a schedule with a complete re-armed state.
+    /// Resume a schedule with a freshly computed next occurrence.
     ResumeSchedule { schedule: NewSchedule },
     /// Remove a schedule.
     DeleteSchedule {
@@ -114,7 +115,7 @@ impl ChangeOperation {
             }
             Self::DeleteAgentDefinition { agent_id, space_id } => (agent_id.as_str(), *space_id),
             Self::CreateSchedule { schedule }
-            | Self::UpdateSchedule { schedule }
+            | Self::UpdateSchedule { schedule, .. }
             | Self::PauseSchedule { schedule }
             | Self::ResumeSchedule { schedule } => return schedule.id.to_string(),
             Self::DeleteSchedule { schedule_id, .. } => return schedule_id.to_string(),
@@ -139,7 +140,7 @@ impl ChangeOperation {
             Self::UpsertAgentDefinition { definition } => definition.space_id,
             Self::DeleteAgentDefinition { space_id, .. } => *space_id,
             Self::CreateSchedule { schedule }
-            | Self::UpdateSchedule { schedule }
+            | Self::UpdateSchedule { schedule, .. }
             | Self::PauseSchedule { schedule }
             | Self::ResumeSchedule { schedule } => schedule_space_id(&schedule.session_policy),
             Self::DeleteSchedule { space_id, .. } => *space_id,
@@ -208,7 +209,7 @@ impl ChangeOperation {
                 Ok(())
             }
             Self::CreateSchedule { schedule }
-            | Self::UpdateSchedule { schedule }
+            | Self::UpdateSchedule { schedule, .. }
             | Self::PauseSchedule { schedule }
             | Self::ResumeSchedule { schedule } => validate_schedule_shape(schedule),
             Self::DeleteSchedule { .. } => Ok(()),
@@ -219,7 +220,7 @@ impl ChangeOperation {
         self.validate()?;
         match self {
             Self::CreateSchedule { schedule }
-            | Self::UpdateSchedule { schedule }
+            | Self::UpdateSchedule { schedule, .. }
             | Self::PauseSchedule { schedule }
             | Self::ResumeSchedule { schedule } => {
                 crate::schedule::validate_resolved_schedule(state, schedule).await
@@ -340,16 +341,16 @@ pub async fn apply_change(
             state.storage.create_schedule(schedule.clone()).await?;
             format!("created schedule '{}'", schedule.message)
         }
-        ChangeOperation::UpdateSchedule { schedule } => {
-            apply_complete_schedule(state, schedule).await?;
+        ChangeOperation::UpdateSchedule { schedule, rearm } => {
+            apply_schedule_edit(state, schedule, *rearm).await?;
             format!("updated schedule '{}'", schedule.message)
         }
         ChangeOperation::PauseSchedule { schedule } => {
-            apply_complete_schedule(state, schedule).await?;
+            apply_schedule_pause(state, schedule).await?;
             format!("paused schedule '{}'", schedule.message)
         }
         ChangeOperation::ResumeSchedule { schedule } => {
-            apply_complete_schedule(state, schedule).await?;
+            apply_schedule_resume(state, schedule).await?;
             format!("resumed schedule '{}'", schedule.message)
         }
         ChangeOperation::DeleteSchedule { schedule_id, .. } => {
@@ -635,6 +636,69 @@ async fn apply_complete_schedule(
                 gate: Some(schedule.gate.clone()),
                 next_run_at: Some(schedule.next_run_at),
                 last_run_at: Some(schedule.last_run_at),
+            },
+        )
+        .await
+        .map_err(Into::into)
+}
+
+/// Apply configuration without replaying lifecycle fields read before the
+/// scheduler's most recent tick. Timing edits deliberately re-arm
+/// status/next-run; ordinary edits leave all scheduler-owned state in place,
+/// including `last_run_at`.
+async fn apply_schedule_edit(
+    state: &AppState,
+    schedule: &NewSchedule,
+    rearm: bool,
+) -> Result<Schedule, GatewayError> {
+    state
+        .storage
+        .update_schedule(
+            schedule.id,
+            UpdateSchedule {
+                message: Some(schedule.message.clone()),
+                status: rearm.then_some(schedule.status),
+                kind: Some(schedule.kind),
+                expression: Some(schedule.expression.clone()),
+                delivery_routing: Some(schedule.delivery_routing.clone()),
+                gate: Some(schedule.gate.clone()),
+                next_run_at: rearm.then_some(schedule.next_run_at),
+                last_run_at: None,
+            },
+        )
+        .await
+        .map_err(Into::into)
+}
+
+async fn apply_schedule_pause(
+    state: &AppState,
+    schedule: &NewSchedule,
+) -> Result<Schedule, GatewayError> {
+    state
+        .storage
+        .update_schedule(
+            schedule.id,
+            UpdateSchedule {
+                status: Some(schedule.status),
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(Into::into)
+}
+
+async fn apply_schedule_resume(
+    state: &AppState,
+    schedule: &NewSchedule,
+) -> Result<Schedule, GatewayError> {
+    state
+        .storage
+        .update_schedule(
+            schedule.id,
+            UpdateSchedule {
+                status: Some(schedule.status),
+                next_run_at: Some(schedule.next_run_at),
+                ..Default::default()
             },
         )
         .await

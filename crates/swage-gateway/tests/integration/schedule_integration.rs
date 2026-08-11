@@ -359,6 +359,69 @@ async fn schedule_lifecycle_create_edit_pause_resume_trigger_delete() {
     let (status, listed) = request_json(&router, "GET", "/api/schedules", None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(listed["schedules"].as_array().unwrap().len(), 0);
+
+    // Every operator mutation travels through the same recorded change-case
+    // seam as an agent tool, with operator provenance and a usable undo
+    // target for the deletion.
+    let versions = state
+        .storage
+        .list_configuration_versions_for_entity("schedule", &schedule_id)
+        .await
+        .unwrap();
+    assert_eq!(versions.len(), 5);
+    assert!(
+        versions
+            .iter()
+            .all(|version| version.source == "operator_http")
+    );
+    assert_eq!(
+        versions
+            .iter()
+            .rev()
+            .map(|version| version.operation_kind.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "create_schedule",
+            "update_schedule",
+            "pause_schedule",
+            "resume_schedule",
+            "delete_schedule",
+        ]
+    );
+    let delete_case = versions
+        .iter()
+        .find(|version| version.operation_kind == "delete_schedule")
+        .unwrap();
+    let configuration_events = state
+        .storage
+        .list_audit_events()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|event| {
+            event.entity_kind == "schedule"
+                && event.entity_id == schedule_id
+                && event.event_kind == "configuration_change"
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(configuration_events.len(), 5);
+    assert!(configuration_events.iter().all(|event| {
+        event.metadata["source"] == "operator_http" && event.metadata["version_id"].is_string()
+    }));
+
+    let (status, undo) = request_json(
+        &router,
+        "POST",
+        "/api/operator/configuration/undo",
+        Some(json!({"case_id": delete_case.id})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(undo["entity_kind"], "schedule");
+    assert_eq!(undo["entity_id"], schedule_id);
+    let (status, listed) = request_json(&router, "GET", "/api/schedules", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(listed["schedules"].as_array().unwrap().len(), 1);
 }
 
 // ---------------------------------------------------------------------------
