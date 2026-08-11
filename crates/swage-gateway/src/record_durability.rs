@@ -35,7 +35,7 @@ use std::fmt::Display;
 use uuid::Uuid;
 
 use swage_core::GatewayError;
-use swage_storage::{AuditStore, NewAuditEvent, Storage};
+use swage_storage::{NewAuditEvent, Storage};
 
 /// Record that a reconstructive turn record could not be persisted.
 ///
@@ -53,7 +53,7 @@ pub(crate) async fn record_reconstruction_gap(
     session_id: Option<Uuid>,
     turn_id: Uuid,
     record: &'static str,
-    error: &dyn Display,
+    error: &(dyn Display + Send + Sync),
 ) -> Result<(), GatewayError> {
     storage
         .create_audit_event(NewAuditEvent {
@@ -75,22 +75,16 @@ pub(crate) async fn record_reconstruction_gap(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use swage_storage::SqliteStorage;
+    use swage_storage::{AuditStore, SqliteStorage};
 
     #[tokio::test(flavor = "multi_thread")]
     async fn reconstruction_gap_lands_in_the_audit_trail() {
         let storage = SqliteStorage::in_memory().unwrap();
         let turn_id = Uuid::new_v4();
 
-        record_reconstruction_gap(
-            &storage,
-            None,
-            turn_id,
-            "context_snapshot",
-            &"disk full",
-        )
-        .await
-        .unwrap();
+        record_reconstruction_gap(&storage, None, turn_id, "context_snapshot", &"disk full")
+            .await
+            .unwrap();
 
         let events = storage.list_audit_events().await.unwrap();
         let event = events
