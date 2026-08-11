@@ -18,7 +18,7 @@ impl Tool for AgentMemoryTool {
     }
 
     fn description(&self) -> &str {
-        "Record and recall durable agent memories with run provenance and filtered audit history."
+        "Your own private memory: save an insight, preference, procedure, or outcome now, search for it in any future session, or review how a remembered item changed over time. Records here are yours alone — for notes shared with everyone working in the space, use the memory tool instead."
     }
 
     fn parameters(&self) -> Value {
@@ -48,14 +48,6 @@ impl Tool for AgentMemoryTool {
                 "outcome_status": {
                     "type": "string",
                     "description": "Optional outcome label such as succeeded, failed, or mixed."
-                },
-                "topology_run_id": {
-                    "type": "string",
-                    "description": "Optional topology run ID to attach when the memory came from an orchestration run."
-                },
-                "node_execution_id": {
-                    "type": "string",
-                    "description": "Optional node execution ID to attach when the memory came from a specific node."
                 },
                 "metadata": {
                     "type": "object",
@@ -161,11 +153,7 @@ impl AgentMemoryTool {
                 message: format!("Session {} was not found", thread.session_id),
             })?;
 
-        let topology_run_id = parse_optional_uuid(self.name(), params, "topology_run_id")?;
-        let node_execution_id = parse_optional_uuid(self.name(), params, "node_execution_id")?;
-        let source_summary = self
-            .resolve_source_summary(gateway_ctx, session.id, topology_run_id, node_execution_id)
-            .await?;
+        let source_summary = self.resolve_source_summary(gateway_ctx).await?;
 
         let record = gateway_ctx
             .storage()
@@ -174,8 +162,6 @@ impl AgentMemoryTool {
                 space_id: session.space_id,
                 session_id: session.id,
                 turn_id,
-                topology_run_id,
-                node_execution_id,
                 agent_id: ctx.agent_id().to_string(),
                 memory_kind,
                 title,
@@ -295,59 +281,7 @@ impl AgentMemoryTool {
     async fn resolve_source_summary(
         &self,
         gateway_ctx: &GatewayToolContext,
-        session_id: Uuid,
-        topology_run_id: Option<Uuid>,
-        node_execution_id: Option<Uuid>,
     ) -> Result<String, ToolError> {
-        if let Some(topology_run_id) = topology_run_id {
-            let run = gateway_ctx
-                .storage()
-                .get_topology_run(topology_run_id)
-                .await
-                .map_err(storage_error(self.name()))?
-                .ok_or_else(|| ToolError::ExecutionFailed {
-                    name: self.name().to_owned(),
-                    message: format!("Topology run {topology_run_id} was not found"),
-                })?;
-            if run.session_id != session_id {
-                return Err(ToolError::ExecutionFailed {
-                    name: self.name().to_owned(),
-                    message: "topology_run_id does not belong to the current session".to_owned(),
-                });
-            }
-            if let Some(node_execution_id) = node_execution_id {
-                let node = gateway_ctx
-                    .storage()
-                    .get_node_execution(node_execution_id)
-                    .await
-                    .map_err(storage_error(self.name()))?
-                    .ok_or_else(|| ToolError::ExecutionFailed {
-                        name: self.name().to_owned(),
-                        message: format!("Node execution {node_execution_id} was not found"),
-                    })?;
-                if node.topology_run_id != topology_run_id {
-                    return Err(ToolError::ExecutionFailed {
-                        name: self.name().to_owned(),
-                        message:
-                            "node_execution_id does not belong to the supplied topology_run_id"
-                                .to_owned(),
-                    });
-                }
-                let task_name = node.task_name.as_deref().unwrap_or("unnamed task");
-                return Ok(format!(
-                    "topology node {task_name} in run {topology_run_id}"
-                ));
-            }
-            return Ok(format!("topology run {topology_run_id}"));
-        }
-
-        if let Some(_node_execution_id) = node_execution_id {
-            return Err(ToolError::InvalidParameters {
-                name: self.name().to_owned(),
-                message: "node_execution_id requires topology_run_id".to_owned(),
-            });
-        }
-
         let recent_calls = gateway_ctx
             .storage()
             .list_tool_calls_by_turn(parse_required_turn_id(self.name(), gateway_ctx)?)
@@ -402,21 +336,6 @@ fn optional_non_empty_string(params: &Value, key: &str) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
-fn parse_optional_uuid(name: &str, params: &Value, key: &str) -> Result<Option<Uuid>, ToolError> {
-    params
-        .get(key)
-        .and_then(Value::as_str)
-        .map(|value| {
-            value
-                .parse::<Uuid>()
-                .map_err(|error| ToolError::InvalidParameters {
-                    name: name.to_owned(),
-                    message: format!("{key} must be a UUID: {error}"),
-                })
-        })
-        .transpose()
-}
-
 fn parse_tags(name: &str, params: &Value) -> Result<Vec<String>, ToolError> {
     let Some(tags) = params.get("tags") else {
         return Ok(Vec::new());
@@ -465,8 +384,6 @@ fn memory_to_json(record: &AgentMemoryRecord) -> Value {
         "space_id": record.space_id,
         "session_id": record.session_id,
         "turn_id": record.turn_id,
-        "topology_run_id": record.topology_run_id,
-        "node_execution_id": record.node_execution_id,
         "agent_id": record.agent_id,
         "memory_kind": record.memory_kind,
         "title": record.title,
@@ -489,13 +406,9 @@ mod tests {
     use uuid::Uuid;
 
     use swage_storage::{
-        NewAgentMemoryRecord, NewAuditEvent, NewNodeExecution, NewSession, NewTeam, NewThread,
-        NewTopologyRun, NewTurn, NodeExecutionState, SqliteStorage, TopologyRunState, TurnState,
-        model::{TeamAgentDefinition, TopologyNodeRecordKind},
-        store::{
-            AgentMemoryStore, AuditStore, SessionStore, SpaceStore, TeamStore, ThreadStore,
-            TopologyTraceStore, TurnStore,
-        },
+        NewAgentMemoryRecord, NewAuditEvent, NewSession, NewThread, NewTurn, SqliteStorage,
+        TurnState,
+        store::{AgentMemoryStore, AuditStore, SessionStore, SpaceStore, ThreadStore, TurnStore},
     };
     use swage_tool::context::MockToolContext;
 
@@ -520,7 +433,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn remember_and_recall_persist_memory_with_run_provenance() {
+    async fn remember_and_recall_persist_memory() {
         let storage = Arc::new(SqliteStorage::in_memory().unwrap());
         let space = storage.get_or_create_default().await.unwrap();
         let session = storage
@@ -551,49 +464,6 @@ mod tests {
             })
             .await
             .unwrap();
-        let team = storage
-            .create_team(NewTeam {
-                space_id: space.id,
-                name: "team".into(),
-                description: "desc".into(),
-                entry_agent_id: "agent-a".into(),
-                agents: vec![TeamAgentDefinition {
-                    id: "agent-a".into(),
-                    display_name: "Agent A".into(),
-                    description: String::new(),
-                    instructions: String::new(),
-                    model: None,
-                }],
-                tasks: vec![],
-            })
-            .await
-            .unwrap();
-        let topology_run = storage
-            .create_topology_run(NewTopologyRun {
-                team_id: team.id,
-                session_id: session.id,
-                source_turn_id: Some(turn.id),
-                state: TopologyRunState::Completed,
-                final_output: Some(json!({"result": "done"})),
-                error_message: None,
-            })
-            .await
-            .unwrap();
-        let node = storage
-            .create_node_execution(NewNodeExecution {
-                topology_run_id: topology_run.id,
-                node_id: "node-a".into(),
-                node_kind: TopologyNodeRecordKind::Llm,
-                agent_id: Some("agent-a".into()),
-                task_name: Some("research".into()),
-                state: NodeExecutionState::Completed,
-                input_json: None,
-                output_json: Some(json!({"summary": "done"})),
-                error_message: None,
-            })
-            .await
-            .unwrap();
-
         let ctx = gateway_context(Arc::clone(&storage), turn.id, session.id, "agent-a").await;
         let tool = AgentMemoryTool;
         let remembered = tool
@@ -601,12 +471,10 @@ mod tests {
                 json!({
                     "operation": "remember",
                     "title": "Research outcome",
-                    "content": "The preview route must stay wired into the builder.",
+                    "content": "The preview route must stay wired.",
                     "memory_kind": "outcome",
-                    "tags": ["builder", "preview"],
+                    "tags": ["preview"],
                     "outcome_status": "succeeded",
-                    "topology_run_id": topology_run.id,
-                    "node_execution_id": node.id,
                     "metadata": {"confidence": "high"}
                 }),
                 &ctx,
@@ -614,10 +482,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(
-            remembered["memory"]["node_execution_id"],
-            node.id.to_string()
-        );
+        assert_eq!(remembered["memory"]["turn_id"], turn.id.to_string());
         let recalled = tool
             .execute(
                 json!({
@@ -632,7 +497,7 @@ mod tests {
         assert_eq!(recalled["memories"].as_array().unwrap().len(), 1);
         assert_eq!(
             recalled["memories"][0]["source_summary"],
-            format!("topology node research in run {}", topology_run.id)
+            "conversation turn"
         );
 
         let persisted = storage
@@ -681,8 +546,6 @@ mod tests {
                 space_id: space.id,
                 session_id: session.id,
                 turn_id: turn.id,
-                topology_run_id: None,
-                node_execution_id: None,
                 agent_id: "agent-a".into(),
                 memory_kind: "insight".into(),
                 title: "Allowed".into(),
@@ -700,8 +563,6 @@ mod tests {
                 space_id: space.id,
                 session_id: session.id,
                 turn_id: turn.id,
-                topology_run_id: None,
-                node_execution_id: None,
                 agent_id: "agent-b".into(),
                 memory_kind: "insight".into(),
                 title: "Blocked".into(),

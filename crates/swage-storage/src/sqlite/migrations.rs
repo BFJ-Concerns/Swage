@@ -29,8 +29,6 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
         ("006_approval_requests", CREATE_APPROVAL_REQUESTS),
         ("007_agent_messages", CREATE_AGENT_MESSAGES),
         ("008_turn_parent_turn_id", ADD_TURN_PARENT_TURN_ID),
-        ("009_teams", CREATE_TEAMS),
-        ("010_topology_trace", CREATE_TOPOLOGY_TRACE),
         ("011_approval_memory", CREATE_APPROVAL_MEMORY),
         ("012_thread_branches", CREATE_THREAD_BRANCHES),
         ("013_message_turn_id", ADD_MESSAGE_TURN_ID),
@@ -46,14 +44,7 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
             CREATE_ATTACHMENT_AND_BACKGROUND_JOB_TABLES,
         ),
         ("025_materials", CREATE_MATERIAL_TABLES),
-        ("026_lens_preferences", CREATE_LENS_PREFERENCES_TABLE),
-        (
-            "027_shared_reference_events",
-            CREATE_SHARED_REFERENCE_EVENT_TABLE,
-        ),
         ("028_deduplicate_attachment_ingestion_content", ""),
-        ("029_lens_catalog", CREATE_LENS_CATALOG_TABLES),
-        ("030_team_agent_and_task_authoring", ""),
         (
             "031_configuration_versioning",
             CREATE_CONFIGURATION_VERSION_TABLE,
@@ -75,15 +66,65 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
             "036_workspace_attachment_activation",
             ADD_WORKSPACE_ATTACHMENT_ACTIVATION,
         ),
-        (
-            "038_constrain_message_and_topology_enums",
-            CONSTRAIN_MESSAGE_AND_TOPOLOGY_ENUMS,
-        ),
+        ("038_constrain_message_enums", CONSTRAIN_MESSAGE_ENUMS),
         ("040_session_selected_model", ADD_SESSION_SELECTED_MODEL),
         ("041_tool_call_model_replay", ADD_TOOL_CALL_MODEL_REPLAY),
         ("042_tool_call_provider_round", ADD_TOOL_CALL_PROVIDER_ROUND),
+        ("043_knowledge_base", CREATE_KNOWLEDGE_BASE_TABLES),
+        ("044_agent_definitions", CREATE_AGENT_DEFINITION_TABLE),
+        (
+            "045_knowledge_curation_assertions",
+            CREATE_KNOWLEDGE_CURATION_ASSERTIONS,
+        ),
+        ("046_workflow_run_parentage", ADD_WORKFLOW_RUN_PARENTAGE),
+        ("047_knowledge_citations", CREATE_KNOWLEDGE_CITATIONS),
+        (
+            "048_knowledge_orientation_cards",
+            CREATE_KNOWLEDGE_ORIENTATION_CARDS,
+        ),
     ]
 }
+
+/// Composed workflow runs: a child run started by a parent's `workflow()`
+/// call records which parent and which journal seq started it, so a resumed
+/// parent finds its existing child instead of starting a duplicate.
+const ADD_WORKFLOW_RUN_PARENTAGE: &str = "
+    ALTER TABLE workflow_runs
+        ADD COLUMN parent_run_id TEXT REFERENCES workflow_runs(id);
+    ALTER TABLE workflow_runs
+        ADD COLUMN parent_seq INTEGER;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_workflow_runs_parent_call
+        ON workflow_runs(parent_run_id, parent_seq)
+        WHERE parent_run_id IS NOT NULL;
+
+    -- The journal gains two host-call kinds (workflow_call, timer); SQLite
+    -- cannot widen a CHECK in place, so the table is rebuilt. Existing rows
+    -- carry over unchanged.
+    CREATE TABLE workflow_journal_new (
+        id                TEXT NOT NULL PRIMARY KEY,
+        run_id            TEXT NOT NULL REFERENCES workflow_runs(id) ON DELETE CASCADE,
+        seq               INTEGER NOT NULL,
+        completed_order   INTEGER,
+        kind              TEXT NOT NULL CHECK (kind IN ('agent_call', 'effect', 'log', 'phase', 'workflow_call', 'timer')),
+        status            TEXT NOT NULL CHECK (status IN ('started', 'completed', 'failed')),
+        args_hash         TEXT NOT NULL,
+        request_json      TEXT NOT NULL,
+        result_json       TEXT,
+        error_message     TEXT,
+        effect_kind       TEXT,
+        idempotency_key   TEXT,
+        target_kind       TEXT,
+        started_at        TEXT NOT NULL,
+        completed_at      TEXT,
+        UNIQUE (run_id, seq),
+        UNIQUE (run_id, completed_order)
+    );
+    INSERT INTO workflow_journal_new SELECT * FROM workflow_journal;
+    DROP TABLE workflow_journal;
+    ALTER TABLE workflow_journal_new RENAME TO workflow_journal;
+    CREATE INDEX IF NOT EXISTS idx_workflow_journal_run_seq
+        ON workflow_journal(run_id, seq);
+";
 
 /// Per-turn context assembly report, stored as raw JSON to avoid coupling the
 /// storage layer to the AssemblyReport type definition.
@@ -92,14 +133,6 @@ const CREATE_CONTEXT_SNAPSHOTS: &str = "
         turn_id     TEXT NOT NULL PRIMARY KEY REFERENCES turns(id) ON DELETE CASCADE,
         report_json TEXT NOT NULL,
         created_at  TEXT NOT NULL
-    );
-";
-
-const CREATE_LENS_PREFERENCES_TABLE: &str = "
-    CREATE TABLE IF NOT EXISTS lens_preferences (
-        space_id    TEXT NOT NULL PRIMARY KEY REFERENCES spaces(id) ON DELETE CASCADE,
-        active_lens TEXT NOT NULL,
-        updated_at  TEXT NOT NULL
     );
 ";
 
@@ -119,69 +152,6 @@ const CREATE_WORKSPACE_ATTACHMENT_TABLE: &str = "
         ON workspace_attachments(space_id);
     CREATE UNIQUE INDEX IF NOT EXISTS idx_workspace_attachments_space_path
         ON workspace_attachments(space_id, path);
-";
-
-const CREATE_SHARED_REFERENCE_EVENT_TABLE: &str = "
-    CREATE TABLE IF NOT EXISTS shared_reference_events (
-        id           TEXT NOT NULL PRIMARY KEY,
-        object_kind  TEXT NOT NULL,
-        object_id    TEXT NOT NULL,
-        event_kind   TEXT NOT NULL,
-        payload_json TEXT NOT NULL,
-        created_at   TEXT NOT NULL
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_shared_reference_events_object
-        ON shared_reference_events(object_kind, object_id, created_at);
-";
-
-const CREATE_LENS_CATALOG_TABLES: &str = "
-    CREATE TABLE IF NOT EXISTS lenses (
-        id                 TEXT NOT NULL PRIMARY KEY,
-        title              TEXT NOT NULL,
-        summary            TEXT NOT NULL,
-        default_surface    TEXT NOT NULL,
-        ui_modules_json    TEXT NOT NULL,
-        prominent_teams_json TEXT NOT NULL,
-        source_kind        TEXT NOT NULL,
-        created_at         TEXT NOT NULL,
-        updated_at         TEXT NOT NULL
-    );
-
-    INSERT OR IGNORE INTO lenses (
-        id,
-        title,
-        summary,
-        default_surface,
-        ui_modules_json,
-        prominent_teams_json,
-        source_kind,
-        created_at,
-        updated_at
-    )
-    VALUES
-        (
-            'assistant',
-            'Assistant lens',
-            'Conversation-first view for direct work with the active agent.',
-            'conversation',
-            '[\"conversation\",\"operator\"]',
-            '[\"default\"]',
-            'built_in',
-            strftime('%Y-%m-%dT%H:%M:%fZ','now'),
-            strftime('%Y-%m-%dT%H:%M:%fZ','now')
-        ),
-        (
-            'builder',
-            'Builder lens',
-            'Workspace-first view that foregrounds system shaping and operator state.',
-            'builder',
-            '[\"builder\",\"conversation\"]',
-            '[\"workspace-core\"]',
-            'built_in',
-            strftime('%Y-%m-%dT%H:%M:%fZ','now'),
-            strftime('%Y-%m-%dT%H:%M:%fZ','now')
-        );
 ";
 
 const CREATE_DELIVERY_AND_AUDIT_TABLES: &str = "
@@ -295,77 +265,6 @@ const CREATE_DELIVERY_AND_AUDIT_TABLES: &str = "
         );
     END;
 
-    CREATE TRIGGER IF NOT EXISTS trg_topology_runs_state_audit
-    AFTER UPDATE OF state ON topology_runs
-    WHEN OLD.state <> NEW.state
-    BEGIN
-        INSERT INTO audit_events (
-            id, session_id, entity_kind, entity_id, event_kind, summary, metadata_json, created_at
-        ) VALUES (
-            lower(hex(randomblob(16))),
-            NEW.session_id,
-            'topology_run',
-            NEW.id,
-            'state_transition',
-            'topology run state ' || OLD.state || ' -> ' || NEW.state,
-            json_object(
-                'from_state', OLD.state,
-                'to_state', NEW.state,
-                'team_id', NEW.team_id,
-                'error_message', COALESCE(NEW.error_message, '')
-            ),
-            strftime('%Y-%m-%dT%H:%M:%fZ','now')
-        );
-    END;
-
-    CREATE TRIGGER IF NOT EXISTS trg_node_execution_created_audit
-    AFTER INSERT ON node_executions
-    BEGIN
-        INSERT INTO audit_events (
-            id, session_id, entity_kind, entity_id, event_kind, summary, metadata_json, created_at
-        ) VALUES (
-            lower(hex(randomblob(16))),
-            (SELECT session_id FROM topology_runs WHERE id = NEW.topology_run_id),
-            'node_execution',
-            NEW.id,
-            'node_activity',
-            'node execution created',
-            json_object(
-                'node_id', NEW.node_id,
-                'node_kind', NEW.node_kind,
-                'state', NEW.state,
-                'topology_run_id', NEW.topology_run_id
-            ),
-            strftime('%Y-%m-%dT%H:%M:%fZ','now')
-        );
-    END;
-
-    CREATE TRIGGER IF NOT EXISTS trg_node_execution_state_audit
-    AFTER UPDATE OF state ON node_executions
-    WHEN OLD.state <> NEW.state
-    BEGIN
-        INSERT INTO audit_events (
-            id, session_id, entity_kind, entity_id, event_kind, summary, metadata_json, created_at
-        ) VALUES (
-            lower(hex(randomblob(16))),
-            (
-                SELECT session_id FROM topology_runs WHERE id = NEW.topology_run_id
-            ),
-            'node_execution',
-            NEW.id,
-            'state_transition',
-            'node execution state ' || OLD.state || ' -> ' || NEW.state,
-            json_object(
-                'from_state', OLD.state,
-                'to_state', NEW.state,
-                'node_id', NEW.node_id,
-                'topology_run_id', NEW.topology_run_id,
-                'error_message', COALESCE(NEW.error_message, '')
-            ),
-            strftime('%Y-%m-%dT%H:%M:%fZ','now')
-        );
-    END;
-
     CREATE TRIGGER IF NOT EXISTS trg_delivery_record_audit
     AFTER INSERT ON delivery_records
     BEGIN
@@ -435,7 +334,7 @@ const CREATE_CONFIGURATION_VERSION_TABLE: &str = "
         snapshot_json          TEXT NOT NULL,
         diff_json              TEXT NOT NULL,
         previous_version_id    TEXT REFERENCES configuration_versions(id) ON DELETE SET NULL,
-        rollback_to_version_id TEXT REFERENCES configuration_versions(id) ON DELETE SET NULL,
+        undone_version_id      TEXT REFERENCES configuration_versions(id) ON DELETE SET NULL,
         created_at             TEXT NOT NULL
     );
 
@@ -453,8 +352,6 @@ const CREATE_AGENT_MEMORY_TABLE: &str = "
         space_id        TEXT NOT NULL REFERENCES spaces(id) ON DELETE CASCADE,
         session_id        TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
         turn_id           TEXT NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
-        topology_run_id   TEXT REFERENCES topology_runs(id) ON DELETE SET NULL,
-        node_execution_id TEXT REFERENCES node_executions(id) ON DELETE SET NULL,
         agent_id          TEXT NOT NULL,
         memory_kind       TEXT NOT NULL,
         title             TEXT NOT NULL,
@@ -473,10 +370,6 @@ const CREATE_AGENT_MEMORY_TABLE: &str = "
         ON agent_memories(session_id, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_agent_memories_turn
         ON agent_memories(turn_id, created_at DESC);
-    CREATE INDEX IF NOT EXISTS idx_agent_memories_topology_run
-        ON agent_memories(topology_run_id, created_at DESC);
-    CREATE INDEX IF NOT EXISTS idx_agent_memories_node_execution
-        ON agent_memories(node_execution_id, created_at DESC);
 
     CREATE TRIGGER IF NOT EXISTS trg_agent_memories_created_audit
     AFTER INSERT ON agent_memories
@@ -493,8 +386,6 @@ const CREATE_AGENT_MEMORY_TABLE: &str = "
             json_object(
                 'space_id', NEW.space_id,
                 'turn_id', NEW.turn_id,
-                'topology_run_id', COALESCE(NEW.topology_run_id, ''),
-                'node_execution_id', COALESCE(NEW.node_execution_id, ''),
                 'agent_id', NEW.agent_id,
                 'memory_kind', NEW.memory_kind,
                 'title', NEW.title,
@@ -1142,96 +1033,11 @@ const CREATE_ONE_IN_FLIGHT_TURN_INDEX: &str = "
         WHERE state IN ('pending', 'processing', 'awaiting_approval', 'delegating');
 ";
 
-/// Teams: the organisational unit for multi-agent orchestration.
-///
-/// A team belongs to a space and defines an entry agent (receives user
-/// messages) plus a member list. Teams link to topology definitions and
-/// are the scope boundary for budget controls.
-const CREATE_TEAMS: &str = "
-    CREATE TABLE IF NOT EXISTS teams (
-        id             TEXT NOT NULL PRIMARY KEY,
-        space_id     TEXT NOT NULL REFERENCES spaces(id) ON DELETE CASCADE,
-        name           TEXT NOT NULL,
-        description    TEXT NOT NULL DEFAULT '',
-        entry_agent_id TEXT NOT NULL,
-        members        TEXT NOT NULL DEFAULT '[]',
-        created_at     TEXT NOT NULL,
-        updated_at     TEXT NOT NULL,
-        UNIQUE(space_id, name)
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_teams_space_id ON teams(space_id);
-";
-
-/// Topology runs and execution traces for multi-agent team orchestration.
-const CREATE_TOPOLOGY_TRACE: &str = "
-    CREATE TABLE IF NOT EXISTS topology_runs (
-        id               TEXT NOT NULL PRIMARY KEY,
-        team_id          TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
-        session_id       TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-        source_turn_id   TEXT REFERENCES turns(id) ON DELETE SET NULL,
-        state            TEXT NOT NULL DEFAULT 'pending',
-        final_output_json TEXT,
-        error_message    TEXT,
-        created_at       TEXT NOT NULL,
-        completed_at     TEXT
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_topology_runs_team_id ON topology_runs(team_id);
-    CREATE INDEX IF NOT EXISTS idx_topology_runs_session_id ON topology_runs(session_id);
-    CREATE INDEX IF NOT EXISTS idx_topology_runs_source_turn_id ON topology_runs(source_turn_id);
-
-    CREATE TABLE IF NOT EXISTS node_executions (
-        id               TEXT NOT NULL PRIMARY KEY,
-        topology_run_id  TEXT NOT NULL REFERENCES topology_runs(id) ON DELETE CASCADE,
-        node_id          TEXT NOT NULL,
-        node_kind        TEXT NOT NULL CHECK (node_kind IN ('llm', 'deterministic', 'continuation')),
-        agent_id         TEXT,
-        task_name        TEXT,
-        state            TEXT NOT NULL DEFAULT 'pending',
-        input_json       TEXT,
-        output_json      TEXT,
-        error_message    TEXT,
-        created_at       TEXT NOT NULL,
-        completed_at     TEXT
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_node_executions_run_id ON node_executions(topology_run_id);
-    CREATE INDEX IF NOT EXISTS idx_node_executions_run_node_id ON node_executions(topology_run_id, node_id);
-
-    CREATE TABLE IF NOT EXISTS edge_evaluations (
-        id                       TEXT NOT NULL PRIMARY KEY,
-        topology_run_id          TEXT NOT NULL REFERENCES topology_runs(id) ON DELETE CASCADE,
-        source_node_execution_id TEXT NOT NULL REFERENCES node_executions(id) ON DELETE CASCADE,
-        edge_id                  TEXT NOT NULL,
-        target_node_id           TEXT NOT NULL,
-        condition_expression     TEXT,
-        matched                  INTEGER NOT NULL,
-        payload_json             TEXT,
-        created_at               TEXT NOT NULL
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_edge_evaluations_run_id ON edge_evaluations(topology_run_id);
-    CREATE INDEX IF NOT EXISTS idx_edge_evaluations_source_execution_id ON edge_evaluations(source_node_execution_id);
-
-    CREATE TABLE IF NOT EXISTS node_retries (
-        id                 TEXT NOT NULL PRIMARY KEY,
-        node_execution_id  TEXT NOT NULL REFERENCES node_executions(id) ON DELETE CASCADE,
-        attempt_number     INTEGER NOT NULL,
-        failure_kind       TEXT NOT NULL,
-        error_message      TEXT NOT NULL,
-        recovery_guidance  TEXT,
-        created_at         TEXT NOT NULL
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_node_retries_execution_id ON node_retries(node_execution_id);
-";
-
 /// Existing SQLite tables cannot gain `CHECK` constraints through `ALTER
 /// TABLE`, so already-migrated databases get equivalent write-boundary
 /// triggers. Fresh databases also receive the triggers; they are redundant
 /// with the table checks but keep enforcement consistent across installs.
-const CONSTRAIN_MESSAGE_AND_TOPOLOGY_ENUMS: &str = "
+const CONSTRAIN_MESSAGE_ENUMS: &str = "
     CREATE TRIGGER IF NOT EXISTS trg_messages_role_valid_insert
         BEFORE INSERT ON messages
         WHEN NEW.role NOT IN ('system', 'user', 'assistant', 'tool')
@@ -1246,19 +1052,6 @@ const CONSTRAIN_MESSAGE_AND_TOPOLOGY_ENUMS: &str = "
         SELECT RAISE(ABORT, 'messages.role must be one of system, user, assistant, tool');
     END;
 
-    CREATE TRIGGER IF NOT EXISTS trg_node_executions_kind_valid_insert
-        BEFORE INSERT ON node_executions
-        WHEN NEW.node_kind NOT IN ('llm', 'deterministic', 'continuation')
-    BEGIN
-        SELECT RAISE(ABORT, 'node_executions.node_kind must be one of llm, deterministic, continuation');
-    END;
-
-    CREATE TRIGGER IF NOT EXISTS trg_node_executions_kind_valid_update
-        BEFORE UPDATE OF node_kind ON node_executions
-        WHEN NEW.node_kind NOT IN ('llm', 'deterministic', 'continuation')
-    BEGIN
-        SELECT RAISE(ABORT, 'node_executions.node_kind must be one of llm, deterministic, continuation');
-    END;
 ";
 
 /// Session-scoped memory for approved tool requests.
@@ -1284,6 +1077,242 @@ const CREATE_THREAD_BRANCHES: &str = "
     );
 
     CREATE INDEX IF NOT EXISTS idx_thread_branches_parent_thread_id ON thread_branches(parent_thread_id);
+";
+
+/// The knowledge base: a space's cumulative store of gathered external
+/// evidence. The unit of storage is the source observation — one immutable
+/// capture of a source — with extracted text as separately versioned
+/// derivations so re-extraction never disturbs a version citations pin.
+///
+/// Unlike the rest of the schema, this family is NOT wipe-and-rebuild:
+/// observations are not regenerable (sources change and disappear), so
+/// later migrations here may reshape freely but must preserve raw bodies
+/// and origin metadata. Raw bodies live as content-addressed files under
+/// the space data root; these tables hold metadata and extractions only.
+///
+/// `extraction_fts` is an external-content FTS5 index over extraction
+/// text, kept in sync by triggers so no store method can forget it.
+const CREATE_KNOWLEDGE_BASE_TABLES: &str = "
+    CREATE TABLE IF NOT EXISTS source_observations (
+        id                TEXT NOT NULL PRIMARY KEY,
+        space_id          TEXT NOT NULL REFERENCES spaces(id) ON DELETE CASCADE,
+        origin_url        TEXT,
+        origin_local_path TEXT,
+        retrieved_at      TEXT NOT NULL,
+        body_sha256       TEXT NOT NULL,
+        body_bytes        INTEGER NOT NULL,
+        media_type        TEXT NOT NULL,
+        created_at        TEXT NOT NULL,
+        CHECK (origin_url IS NOT NULL OR origin_local_path IS NOT NULL)
+    );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_source_observations_space_body
+        ON source_observations(space_id, body_sha256);
+    CREATE INDEX IF NOT EXISTS idx_source_observations_space
+        ON source_observations(space_id, retrieved_at DESC);
+
+    CREATE TABLE IF NOT EXISTS extraction_derivations (
+        id             TEXT NOT NULL PRIMARY KEY,
+        observation_id TEXT NOT NULL REFERENCES source_observations(id) ON DELETE CASCADE,
+        version        INTEGER NOT NULL,
+        extracted_text TEXT NOT NULL,
+        extractor      TEXT NOT NULL,
+        created_at     TEXT NOT NULL,
+        UNIQUE (observation_id, version)
+    );
+
+    CREATE VIRTUAL TABLE IF NOT EXISTS extraction_fts USING fts5(
+        extracted_text,
+        content='extraction_derivations',
+        content_rowid='rowid'
+    );
+
+    CREATE TRIGGER IF NOT EXISTS trg_extraction_fts_insert
+    AFTER INSERT ON extraction_derivations
+    BEGIN
+        INSERT INTO extraction_fts (rowid, extracted_text)
+        VALUES (NEW.rowid, NEW.extracted_text);
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS trg_extraction_fts_delete
+    AFTER DELETE ON extraction_derivations
+    BEGIN
+        INSERT INTO extraction_fts (extraction_fts, rowid, extracted_text)
+        VALUES ('delete', OLD.rowid, OLD.extracted_text);
+    END;
+";
+
+/// Append-only observation-level judgements. This is a sibling of the
+/// knowledge-base tables introduced by migration 043: it never reshapes or
+/// mutates the evidence ledger itself.
+const CREATE_KNOWLEDGE_CURATION_ASSERTIONS: &str = "
+    CREATE TABLE IF NOT EXISTS knowledge_curation_assertions (
+        id                    TEXT NOT NULL PRIMARY KEY,
+        space_id              TEXT NOT NULL REFERENCES spaces(id),
+        observation_id        TEXT NOT NULL REFERENCES source_observations(id),
+        kind                   TEXT NOT NULL CHECK (kind IN ('duplicate-of', 'superseded-by', 'stale')),
+        target_observation_id TEXT REFERENCES source_observations(id),
+        created_at             TEXT NOT NULL,
+        CHECK (
+            (kind = 'stale' AND target_observation_id IS NULL) OR
+            (kind IN ('duplicate-of', 'superseded-by') AND target_observation_id IS NOT NULL)
+        ),
+        CHECK (target_observation_id IS NULL OR target_observation_id <> observation_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_knowledge_curation_observation
+        ON knowledge_curation_assertions(observation_id, created_at DESC);
+
+    CREATE TRIGGER IF NOT EXISTS trg_knowledge_curation_no_update
+    BEFORE UPDATE ON knowledge_curation_assertions
+    BEGIN
+        SELECT RAISE(ABORT, 'knowledge curation assertions are append-only');
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS trg_knowledge_curation_no_delete
+    BEFORE DELETE ON knowledge_curation_assertions
+    BEGIN
+        SELECT RAISE(ABORT, 'knowledge curation assertions are append-only');
+    END;
+";
+
+/// Append-only citations pinned to an exact extraction derivation.
+const CREATE_KNOWLEDGE_CITATIONS: &str = "
+    CREATE TABLE IF NOT EXISTS knowledge_citations (
+        id                 TEXT NOT NULL PRIMARY KEY,
+        space_id           TEXT NOT NULL REFERENCES spaces(id),
+        observation_id     TEXT NOT NULL,
+        derivation_version INTEGER NOT NULL,
+        start_offset       INTEGER NOT NULL CHECK (start_offset >= 0),
+        end_offset         INTEGER NOT NULL CHECK (end_offset > start_offset),
+        quoted_text        TEXT NOT NULL CHECK (length(quoted_text) > 0),
+        created_at         TEXT NOT NULL,
+        FOREIGN KEY (observation_id, derivation_version)
+            REFERENCES extraction_derivations(observation_id, version)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_knowledge_citations_observation
+        ON knowledge_citations(observation_id, derivation_version, created_at DESC);
+
+    CREATE TRIGGER IF NOT EXISTS trg_knowledge_citations_no_update
+    BEFORE UPDATE ON knowledge_citations
+    BEGIN
+        SELECT RAISE(ABORT, 'knowledge citations are append-only');
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS trg_knowledge_citations_no_delete
+    BEFORE DELETE ON knowledge_citations
+    BEGIN
+        SELECT RAISE(ABORT, 'knowledge citations are append-only');
+    END;
+";
+
+/// Immutable, agent-authored orientation over observations. The deferred
+/// circular foreign keys make a card without at least one evidence relation
+/// impossible at transaction commit while retaining a proper many-to-many
+/// derivation relation.
+const CREATE_KNOWLEDGE_ORIENTATION_CARDS: &str = "
+    CREATE UNIQUE INDEX idx_source_observations_id_space
+        ON source_observations(id, space_id);
+
+    CREATE TABLE orientation_cards (
+        id                 TEXT NOT NULL PRIMARY KEY,
+        space_id           TEXT NOT NULL REFERENCES spaces(id),
+        title              TEXT NOT NULL CHECK (length(trim(title)) > 0),
+        content            TEXT NOT NULL CHECK (length(trim(content)) > 0),
+        authored_by        TEXT NOT NULL CHECK (length(trim(authored_by)) > 0),
+        evidence_anchor_id TEXT NOT NULL UNIQUE,
+        created_at         TEXT NOT NULL,
+        UNIQUE (id, space_id),
+        FOREIGN KEY (evidence_anchor_id, id, space_id)
+            REFERENCES orientation_card_observations(id, card_id, space_id)
+            DEFERRABLE INITIALLY DEFERRED
+    );
+
+    CREATE TABLE orientation_card_observations (
+        id             TEXT NOT NULL PRIMARY KEY,
+        card_id        TEXT NOT NULL,
+        space_id       TEXT NOT NULL,
+        observation_id TEXT NOT NULL,
+        UNIQUE (id, card_id, space_id),
+        UNIQUE (card_id, observation_id),
+        FOREIGN KEY (card_id, space_id) REFERENCES orientation_cards(id, space_id)
+            DEFERRABLE INITIALLY DEFERRED,
+        FOREIGN KEY (observation_id, space_id)
+            REFERENCES source_observations(id, space_id)
+    );
+
+    CREATE TABLE orientation_card_lifecycle (
+        id                  TEXT NOT NULL PRIMARY KEY,
+        card_id             TEXT NOT NULL UNIQUE REFERENCES orientation_cards(id),
+        action              TEXT NOT NULL CHECK (action IN ('superseded', 'retired')),
+        replacement_card_id TEXT REFERENCES orientation_cards(id),
+        actor               TEXT NOT NULL CHECK (length(trim(actor)) > 0),
+        created_at          TEXT NOT NULL,
+        CHECK ((action = 'superseded' AND replacement_card_id IS NOT NULL)
+            OR (action = 'retired' AND replacement_card_id IS NULL)),
+        CHECK (replacement_card_id IS NULL OR replacement_card_id <> card_id)
+    );
+
+    CREATE VIRTUAL TABLE orientation_card_fts USING fts5(
+        title, content, content='orientation_cards', content_rowid='rowid'
+    );
+    CREATE TRIGGER orientation_card_fts_insert AFTER INSERT ON orientation_cards BEGIN
+        INSERT INTO orientation_card_fts(rowid, title, content)
+        VALUES (new.rowid, new.title, new.content);
+    END;
+    CREATE TRIGGER orientation_cards_no_update BEFORE UPDATE ON orientation_cards BEGIN
+        SELECT RAISE(ABORT, 'orientation cards are immutable');
+    END;
+    CREATE TRIGGER orientation_cards_no_delete BEFORE DELETE ON orientation_cards BEGIN
+        SELECT RAISE(ABORT, 'orientation cards are append-only');
+    END;
+    CREATE TRIGGER orientation_card_observations_no_update
+    BEFORE UPDATE ON orientation_card_observations BEGIN
+        SELECT RAISE(ABORT, 'orientation card evidence is immutable');
+    END;
+    CREATE TRIGGER orientation_card_observations_no_delete
+    BEFORE DELETE ON orientation_card_observations BEGIN
+        SELECT RAISE(ABORT, 'orientation card evidence is append-only');
+    END;
+    CREATE TRIGGER orientation_card_lifecycle_no_update
+    BEFORE UPDATE ON orientation_card_lifecycle BEGIN
+        SELECT RAISE(ABORT, 'orientation card lifecycle is append-only');
+    END;
+    CREATE TRIGGER orientation_card_lifecycle_no_delete
+    BEFORE DELETE ON orientation_card_lifecycle BEGIN
+        SELECT RAISE(ABORT, 'orientation card lifecycle is append-only');
+    END;
+";
+
+/// Durable agent definitions — the bundle that gives a session its entire
+/// character, selected at session start by agent id.
+///
+/// `id` is the stable agent id sessions already carry; `space_id` NULL means
+/// a global definition, and a space-scoped row with the same id shadows it.
+/// `tool_permissions_json` is a permission overlay that intersects with (and
+/// never expands) the resolved config's grants.
+const CREATE_AGENT_DEFINITION_TABLE: &str = "
+    CREATE TABLE IF NOT EXISTS agent_definitions (
+        id                    TEXT NOT NULL,
+        space_id              TEXT REFERENCES spaces(id) ON DELETE CASCADE,
+        display_name          TEXT NOT NULL,
+        description           TEXT NOT NULL DEFAULT '',
+        instructions          TEXT NOT NULL DEFAULT '',
+        model_id              TEXT,
+        tool_permissions_json TEXT,
+        skills_json           TEXT NOT NULL DEFAULT '[]',
+        output_schema_json    TEXT,
+        output_max_retries    INTEGER,
+        created_at            TEXT NOT NULL,
+        updated_at            TEXT NOT NULL,
+        PRIMARY KEY (id, space_id)
+    );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_definitions_global
+        ON agent_definitions(id) WHERE space_id IS NULL;
+    CREATE INDEX IF NOT EXISTS idx_agent_definitions_space
+        ON agent_definitions(space_id);
 ";
 
 /// Apply all pending migrations to `conn`.
@@ -1314,8 +1343,6 @@ pub fn run_migrations(conn: &Connection) -> Result<(), StorageError> {
             super::secret::migrate_managed_secret_storage(conn)?;
         } else if name == "028_deduplicate_attachment_ingestion_content" {
             super::attachment::migrate_attachment_ingested_markdown_dedup(conn)?;
-        } else if name == "030_team_agent_and_task_authoring" {
-            super::team::migrate_team_authoring_model(conn)?;
         } else if name == "041_tool_call_model_replay" {
             migrate_tool_call_model_replay(conn)?;
         } else {
@@ -1441,9 +1468,6 @@ mod tests {
             } else if name == "028_deduplicate_attachment_ingestion_content" {
                 super::super::attachment::migrate_attachment_ingested_markdown_dedup(&conn)
                     .expect("attachment dedup migration");
-            } else if name == "030_team_agent_and_task_authoring" {
-                super::super::team::migrate_team_authoring_model(&conn)
-                    .expect("team authoring migration");
             } else {
                 conn.execute_batch(&format!("BEGIN; {sql} COMMIT;"))
                     .unwrap_or_else(|error| panic!("migration {name} should apply: {error}"));
@@ -2318,154 +2342,11 @@ mod tests {
     }
 
     #[test]
-    fn topology_runs_table_created() {
-        let conn = open_migrated();
-        let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM topology_runs", [], |r| r.get(0))
-            .expect("topology_runs table should exist after migration");
-        assert_eq!(count, 0);
-    }
-
-    #[test]
-    fn node_executions_table_created() {
-        let conn = open_migrated();
-        let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM node_executions", [], |r| r.get(0))
-            .expect("node_executions table should exist after migration");
-        assert_eq!(count, 0);
-    }
-
-    #[test]
-    fn edge_evaluations_table_created() {
-        let conn = open_migrated();
-        let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM edge_evaluations", [], |r| r.get(0))
-            .expect("edge_evaluations table should exist after migration");
-        assert_eq!(count, 0);
-    }
-
-    #[test]
-    fn node_retries_table_created() {
-        let conn = open_migrated();
-        let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM node_retries", [], |r| r.get(0))
-            .expect("node_retries table should exist after migration");
-        assert_eq!(count, 0);
-    }
-
-    #[test]
-    fn node_executions_node_kind_rejects_unknown_values() {
-        let conn = open_migrated();
-        let space_id = default_space_id(&conn);
-        let now = chrono::Utc::now().to_rfc3339();
-        let session_id = insert_session(&conn, &space_id, &now);
-        let team_id = uuid::Uuid::new_v4().to_string();
-
-        conn.execute(
-            "INSERT INTO teams (id, space_id, name, description, entry_agent_id, members, created_at, updated_at)
-             VALUES (?1, ?2, 'trace-team', '', 'planner', '[\"planner\"]', ?3, ?3)",
-            rusqlite::params![team_id, space_id, now],
-        )
-        .expect("insert team");
-
-        let run_id = uuid::Uuid::new_v4().to_string();
-        conn.execute(
-            "INSERT INTO topology_runs (id, team_id, session_id, state, created_at)
-             VALUES (?1, ?2, ?3, 'running', ?4)",
-            rusqlite::params![run_id, team_id, session_id, now],
-        )
-        .expect("insert topology run");
-
-        conn.execute(
-            "INSERT INTO node_executions (id, topology_run_id, node_id, node_kind, state, created_at)
-             VALUES (?1, ?2, 'plan', 'llm', 'running', ?3)",
-            rusqlite::params![uuid::Uuid::new_v4().to_string(), run_id, now],
-        )
-        .expect("known node kind should insert");
-
-        let result = conn.execute(
-            "INSERT INTO node_executions (id, topology_run_id, node_id, node_kind, state, created_at)
-             VALUES (?1, ?2, 'review', 'map_reduce', 'running', ?3)",
-            rusqlite::params![uuid::Uuid::new_v4().to_string(), run_id, now],
-        );
-        assert!(
-            result.is_err(),
-            "unknown node_executions.node_kind should fail closed"
-        );
-    }
-
-    #[test]
     fn approval_memory_table_created() {
         let conn = open_migrated();
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM approval_memory", [], |r| r.get(0))
             .expect("approval_memory table should exist after migration");
         assert_eq!(count, 0);
-    }
-
-    #[test]
-    fn topology_run_cascade_delete_removes_trace_rows() {
-        let conn = open_migrated();
-        let space_id = default_space_id(&conn);
-        let now = chrono::Utc::now().to_rfc3339();
-        let session_id = insert_session(&conn, &space_id, &now);
-        let team_id = uuid::Uuid::new_v4().to_string();
-
-        conn.execute(
-            "INSERT INTO teams (id, space_id, name, description, entry_agent_id, members, created_at, updated_at)
-             VALUES (?1, ?2, 'trace-team', '', 'planner', '[\"planner\"]', ?3, ?3)",
-            rusqlite::params![team_id, space_id, now],
-        )
-        .expect("insert team");
-
-        let run_id = uuid::Uuid::new_v4().to_string();
-        conn.execute(
-            "INSERT INTO topology_runs (id, team_id, session_id, state, created_at)
-             VALUES (?1, ?2, ?3, 'running', ?4)",
-            rusqlite::params![run_id, team_id, session_id, now],
-        )
-        .expect("insert topology run");
-
-        let execution_id = uuid::Uuid::new_v4().to_string();
-        conn.execute(
-            "INSERT INTO node_executions (id, topology_run_id, node_id, node_kind, state, created_at)
-             VALUES (?1, ?2, 'plan', 'llm', 'running', ?3)",
-            rusqlite::params![execution_id, run_id, now],
-        )
-        .expect("insert node execution");
-
-        conn.execute(
-            "INSERT INTO edge_evaluations (id, topology_run_id, source_node_execution_id, edge_id, target_node_id, matched, created_at)
-             VALUES (?1, ?2, ?3, 'edge-1', 'review', 1, ?4)",
-            rusqlite::params![uuid::Uuid::new_v4().to_string(), run_id, execution_id, now],
-        )
-        .expect("insert edge evaluation");
-
-        conn.execute(
-            "INSERT INTO node_retries (id, node_execution_id, attempt_number, failure_kind, error_message, created_at)
-             VALUES (?1, ?2, 1, 'timeout', 'timed out', ?3)",
-            rusqlite::params![uuid::Uuid::new_v4().to_string(), execution_id, now],
-        )
-        .expect("insert node retry");
-
-        conn.execute(
-            "DELETE FROM topology_runs WHERE id = ?1",
-            rusqlite::params![run_id],
-        )
-        .expect("delete topology run");
-
-        let remaining_nodes: i64 = conn
-            .query_row("SELECT COUNT(*) FROM node_executions", [], |r| r.get(0))
-            .expect("count node executions");
-        let remaining_edges: i64 = conn
-            .query_row("SELECT COUNT(*) FROM edge_evaluations", [], |r| r.get(0))
-            .expect("count edge evaluations");
-        let remaining_retries: i64 = conn
-            .query_row("SELECT COUNT(*) FROM node_retries", [], |r| r.get(0))
-            .expect("count node retries");
-
-        assert_eq!(remaining_nodes, 0);
-        assert_eq!(remaining_edges, 0);
-        assert_eq!(remaining_retries, 0);
     }
 }

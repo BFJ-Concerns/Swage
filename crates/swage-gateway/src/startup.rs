@@ -616,7 +616,10 @@ pub(crate) fn build_tool_dispatcher_with_browser(
     use crate::tool::{
         Tool, agent_memory::AgentMemoryTool, browser::browser_tools, file_edit::FileEditTool,
         file_list::FileListTool, file_read::FileReadTool, file_search::FileSearchTool,
-        file_write::FileWriteTool, memory::MemoryTool, plugin::discover_plugin_tools,
+        file_write::FileWriteTool, knowledge::KnowledgeCiteTool,
+        knowledge::KnowledgeCurateOrientationTool, knowledge::KnowledgeCurateTool,
+        knowledge::KnowledgeOrientTool, knowledge::KnowledgeRecordTool,
+        knowledge::KnowledgeSearchTool, memory::MemoryTool, plugin::discover_plugin_tools,
         python_execute::PythonExecuteTool, schedule::ScheduleTool, schedule::WakeMeLaterTool,
         shell::ShellTool, tool_result_read::ToolResultReadTool, url_fetch::UrlFetchTool,
         web_search::WebSearchTool,
@@ -656,6 +659,15 @@ pub(crate) fn build_tool_dispatcher_with_browser(
         // tool context; both are host-only (requires_device_execution).
         Arc::new(ScheduleTool),
         Arc::new(WakeMeLaterTool),
+        // Knowledge-base tools: the space's gathered external evidence.
+        // Host-only; read, capture authoring, and curation authoring are
+        // separately grantable.
+        Arc::new(KnowledgeSearchTool),
+        Arc::new(KnowledgeRecordTool),
+        Arc::new(KnowledgeCurateTool),
+        Arc::new(KnowledgeCiteTool),
+        Arc::new(KnowledgeOrientTool),
+        Arc::new(KnowledgeCurateOrientationTool),
     ];
 
     let base_tools = if let Some(browser_host) = browser_host {
@@ -684,33 +696,41 @@ pub(crate) fn build_tool_dispatcher_with_browser(
 
     let mut all_tools = non_python_tools;
 
-    match swage_python::PythonWorkerRuntime::new(config.tools.python_execute.clone()) {
-        Ok(runtime) if runtime.python_execute_available() => {
-            let runtime = Arc::new(runtime);
-            match swage_python::WorkerPool::new(Arc::clone(&runtime)) {
-                Ok(pool) => {
-                    all_tools.push(Arc::new(PythonExecuteTool::new(
-                        runtime,
-                        pool,
-                        sub_dispatcher,
-                        storage,
-                    )));
-                    info!("Python worker runtime available — python_execute tool registered");
-                }
-                Err(error) => {
-                    warn!(
-                        "Python worker pool could not be created ({error}), python_execute tool disabled"
-                    );
+    if !config.tools.python_execute.enabled {
+        warn!(
+            "tools.python_execute.enabled is false; python_execute was not registered; enable it unless this was intentional"
+        );
+    } else {
+        match swage_python::PythonWorkerRuntime::new(config.tools.python_execute.clone()) {
+            Ok(runtime) if runtime.python_execute_available() => {
+                let runtime = Arc::new(runtime);
+                match swage_python::WorkerPool::new(Arc::clone(&runtime)) {
+                    Ok(pool) => {
+                        all_tools.push(Arc::new(PythonExecuteTool::new(
+                            runtime,
+                            pool,
+                            sub_dispatcher,
+                            storage,
+                        )));
+                        info!("Python worker runtime available — python_execute tool registered");
+                    }
+                    Err(error) => {
+                        warn!(
+                            "Python worker pool could not be initialised unexpectedly ({error}); python_execute was not registered; report this internal startup error"
+                        );
+                    }
                 }
             }
-        }
-        Ok(_) => {
-            warn!(
-                "Python worker runtime resolved but sandbox is unavailable; python_execute tool disabled"
-            );
-        }
-        Err(e) => {
-            warn!("Python runtime not available ({e}), python_execute tool disabled");
+            Ok(_) => {
+                warn!(
+                    "bubblewrap is unavailable; python_execute was not registered; install it or set tools.python_execute.require_sandbox = false to run Python unsandboxed"
+                );
+            }
+            Err(e) => {
+                warn!(
+                    "Python runtime could not be resolved ({e}); python_execute was not registered; install Python 3 or correct tools.python_execute.runtime_path"
+                );
+            }
         }
     }
 
@@ -855,6 +875,7 @@ async fn create_provider_with_retry(
     }
 
     let mut providers = Vec::new();
+    let mut has_codex_provider = false;
     for model_id in ordered_runtime_model_ids(config) {
         let Some(model_endpoint) = config.models.entries.get(&model_id) else {
             continue;
@@ -872,6 +893,7 @@ async fn create_provider_with_retry(
         // Codex is thread/turn-shaped and runs below the provider-parity
         // selection surface. It must never enter the completion failover chain.
         if provider_endpoint.protocol == swage_config::Protocol::Codex {
+            has_codex_provider = true;
             continue;
         }
 
@@ -904,6 +926,11 @@ async fn create_provider_with_retry(
     }
 
     if providers.is_empty() {
+        if has_codex_provider {
+            return Arc::new(swage_provider::UnsupportedLlmProvider::new(
+                "Codex turns run through the App Server harness",
+            ));
+        }
         tracing::warn!(
             "No usable provider/model pairs are configured. \
              Messaging will fail until configuration is fixed."
@@ -996,14 +1023,44 @@ mod tests {
     use super::*;
     use axum::{Json, Router, http::StatusCode, response::IntoResponse, routing::post};
     use serde_json::{Value, json};
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
     use swage_config::{
         LogLevel, ModelCatalogConfig, ModelEndpointConfig, Protocol, ProviderCatalogConfig,
         ProviderEndpointConfig,
     };
     use swage_storage::store::AuditStore;
     use tokio::net::TcpListener;
+    use tracing_subscriber::{Registry, layer::SubscriberExt};
+
+    #[derive(Clone, Default)]
+    struct RecordedEvents(Arc<Mutex<Vec<String>>>);
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for RecordedEvents {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            struct MessageVisitor<'a>(&'a mut String);
+
+            impl tracing::field::Visit for MessageVisitor<'_> {
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    if field.name() == "message" {
+                        *self.0 = format!("{value:?}");
+                    }
+                }
+            }
+
+            let mut message = String::new();
+            event.record(&mut MessageVisitor(&mut message));
+            self.0.lock().unwrap().push(message);
+        }
+    }
 
     #[test]
     fn swage_database_path_uses_swage_root() {
@@ -1254,6 +1311,111 @@ mod tests {
     }
 
     #[test]
+    fn codex_only_configuration_does_not_emit_no_provider_warning() {
+        let storage =
+            Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
+        let secret_manager = crate::secret::SecretManager::new(
+            Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
+        );
+        let config = swage_config::ResolvedConfig {
+            providers: ProviderCatalogConfig {
+                default: "codex".to_string(),
+                entries: [(
+                    "codex".to_string(),
+                    ProviderEndpointConfig {
+                        protocol: Protocol::Codex,
+                        api_key_secret_ref: None,
+                        api_key_env: None,
+                        base_url: None,
+                        command: None,
+                        state_dir: None,
+                    },
+                )]
+                .into_iter()
+                .collect(),
+            },
+            models: ModelCatalogConfig {
+                default: "codex".to_string(),
+                entries: [("codex".to_string(), model("codex", "gpt-5.6-codex"))]
+                    .into_iter()
+                    .collect(),
+            },
+            ..Default::default()
+        };
+        let events = RecordedEvents::default();
+        let captured = Arc::clone(&events.0);
+        let subscriber = Registry::default().with(events);
+
+        let (provider_model, completion_error) =
+            tracing::subscriber::with_default(subscriber, || {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(async {
+                        let provider = create_provider(&config, &secret_manager).await;
+                        let provider_model = provider.model_id().to_string();
+                        let completion_error = provider
+                            .complete(swage_core::CompletionRequest {
+                                messages: vec![],
+                                model: None,
+                                max_tokens: None,
+                                temperature: None,
+                                stop_sequences: None,
+                                metadata: None,
+                                tool_definitions: vec![],
+                            })
+                            .await
+                            .expect_err("Codex-only configuration must fail closed on completion");
+                        (provider_model, completion_error)
+                    })
+            });
+
+        let events = captured.lock().unwrap();
+        assert!(
+            !events
+                .iter()
+                .any(|event| event.contains("No usable provider/model pairs are configured")),
+            "Codex-only configuration emitted a false no-provider warning: {events:?}"
+        );
+        assert_eq!(provider_model, "unavailable");
+        assert!(matches!(
+            completion_error,
+            swage_core::ProviderError::InvalidConfig { message }
+                if message == "Codex turns run through the App Server harness"
+        ));
+    }
+
+    #[test]
+    fn unusable_configuration_retains_provider_configuration_warning() {
+        let storage =
+            Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
+        let secret_manager = crate::secret::SecretManager::new(
+            Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
+        );
+        let config = swage_config::ResolvedConfig::default();
+        let events = RecordedEvents::default();
+        let captured = Arc::clone(&events.0);
+        let subscriber = Registry::default().with(events);
+
+        tracing::subscriber::with_default(subscriber, || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(create_provider(&config, &secret_manager));
+        });
+
+        let events = captured.lock().unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|event| event.contains("No default provider/model pair is configured")),
+            "genuinely unusable configuration omitted the warning: {events:?}"
+        );
+    }
+
+    #[test]
     fn create_provider_candidates_preserve_default_provider_as_primary() {
         let config = swage_config::ResolvedConfig {
             providers: ProviderCatalogConfig {
@@ -1381,6 +1543,57 @@ mod tests {
                 .get(swage_tool::delegate::DELEGATE_TOOL_NAME)
                 .is_some(),
             "delegate tool should be registered with the built-in dispatcher",
+        );
+    }
+
+    #[tokio::test]
+    async fn build_tool_dispatcher_omits_disabled_python_with_missing_runtime() {
+        let storage =
+            Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
+        let mut config = swage_config::ResolvedConfig::default();
+        config.tools.python_execute.enabled = false;
+        config.tools.python_execute.runtime_path = Some("/definitely/missing/python".to_string());
+
+        let dispatcher =
+            build_tool_dispatcher(&config, storage as Arc<dyn swage_storage::store::Storage>);
+
+        assert!(dispatcher.registry().get("python_execute").is_none());
+    }
+
+    #[tokio::test]
+    async fn build_tool_dispatcher_registers_citation_tool() {
+        let storage =
+            Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
+        let dispatcher = build_tool_dispatcher(
+            &swage_config::ResolvedConfig::default(),
+            storage as Arc<dyn swage_storage::store::Storage>,
+        );
+
+        assert!(
+            dispatcher.registry().get("knowledge_cite").is_some(),
+            "citation tool should be registered with the built-in dispatcher",
+        );
+    }
+
+    #[tokio::test]
+    async fn build_tool_dispatcher_registers_orientation_tool() {
+        let storage =
+            Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
+        let dispatcher = build_tool_dispatcher(
+            &swage_config::ResolvedConfig::default(),
+            storage as Arc<dyn swage_storage::store::Storage>,
+        );
+
+        assert!(
+            dispatcher.registry().get("knowledge_orient").is_some(),
+            "orientation tool should be registered with the built-in dispatcher",
+        );
+        assert!(
+            dispatcher
+                .registry()
+                .get("knowledge_curate_orientation")
+                .is_some(),
+            "orientation curation tool should be registered with the built-in dispatcher",
         );
     }
 

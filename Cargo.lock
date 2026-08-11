@@ -3527,6 +3527,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "futures",
+ "rquickjs",
  "serde",
  "serde_json",
  "swage-config",
@@ -3594,7 +3595,6 @@ dependencies = [
  "swage-sandbox",
  "swage-storage",
  "swage-tool",
- "swage-topology",
  "swage-tui",
  "swage-workflow",
  "tempfile",
@@ -3662,10 +3662,8 @@ dependencies = [
  "serde",
  "serde_json",
  "swage-config",
- "swage-context",
  "swage-core",
  "swage-sandbox",
- "swage-topology",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -3737,15 +3735,6 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
-]
-
-[[package]]
-name = "swage-topology"
-version = "0.202607.500"
-dependencies = [
- "serde",
- "serde_json",
- "thiserror 2.0.18",
 ]
 
 [[package]]

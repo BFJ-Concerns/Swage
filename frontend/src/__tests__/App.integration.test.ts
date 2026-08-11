@@ -15,20 +15,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { flushSync, mount, unmount } from "svelte";
 
 import App from "../App.svelte";
-import * as builderApi from "../lib/api/builder";
 import * as conversationsApi from "../lib/api/conversations";
-import * as lensApi from "../lib/api/lens";
 import * as materialsApi from "../lib/api/materials";
 import * as operatorApi from "../lib/api/operator";
 import * as spacesApi from "../lib/api/spaces";
 import type {
-  AppLens,
   ClientEvent,
   ConnectionStatus,
   ConversationDetail,
   ConversationResponse,
   ConversationSummary,
-  LensRuntimeResponse,
   OperatorOverview,
   Space,
   ServerEvent,
@@ -91,22 +87,6 @@ vi.mock("../lib/api/conversations", () => ({
   createConversation: vi.fn(),
   getConversation: vi.fn(),
   deleteConversation: vi.fn(),
-}));
-
-vi.mock("../lib/api/lens", () => ({
-  fetchLensRuntime: vi.fn(),
-  updateLensRuntime: vi.fn(),
-}));
-
-vi.mock("../lib/api/builder", () => ({
-  listTeams: vi.fn(),
-  createTeam: vi.fn(),
-  updateTeam: vi.fn(),
-  listSpaceExtensions: vi.fn(),
-  createSpaceExtension: vi.fn(),
-  updateSpaceExtension: vi.fn(),
-  approveWorkspaceExtension: vi.fn(),
-  listSharedReferences: vi.fn(),
 }));
 
 vi.mock("../lib/api/materials", () => ({
@@ -240,49 +220,6 @@ function makeOperatorOverview(
   };
 }
 
-function makeLensRuntime(
-  activeLens: AppLens = "assistant",
-): LensRuntimeResponse {
-  return {
-    space_id: "proj-default",
-    active_lens: activeLens,
-    updated_at: "2026-04-07T12:00:00Z",
-    stage_modules: [],
-    available_lenses: [
-      {
-        id: "assistant",
-        title: "Assistant lens",
-        summary: "Conversation-first view",
-        default_surface: "conversation",
-        ui_modules: ["conversation", "operator"],
-        prominent_team_ids: ["default"],
-        source_kind: "built_in",
-      },
-      {
-        id: "builder",
-        title: "Builder lens",
-        summary: "Workspace-first view",
-        default_surface: "builder",
-        ui_modules: ["builder", "conversation"],
-        prominent_team_ids: ["workspace-core"],
-        source_kind: "built_in",
-      },
-      {
-        // Operator-led lens — the new shell reaches the operator surface by
-        // selecting a lens whose default_surface is "operator", rather than
-        // by switching surface tabs within a lens.
-        id: "operator",
-        title: "Operator lens",
-        summary: "Operator-first view",
-        default_surface: "operator",
-        ui_modules: ["operator", "conversation"],
-        prominent_team_ids: [],
-        source_kind: "built_in",
-      },
-    ],
-  };
-}
-
 async function settleUi(): Promise<void> {
   for (let attempt = 0; attempt < 12; attempt += 1) {
     await Promise.resolve();
@@ -337,11 +274,6 @@ describe("App", () => {
     vi.clearAllMocks();
     setPath("/");
     delete window.swageDesktop;
-    vi.mocked(lensApi.fetchLensRuntime).mockResolvedValue(makeLensRuntime());
-    vi.mocked(lensApi.updateLensRuntime).mockResolvedValue(makeLensRuntime("builder"));
-    vi.mocked(builderApi.listTeams).mockResolvedValue([]);
-    vi.mocked(builderApi.listSpaceExtensions).mockResolvedValue([]);
-    vi.mocked(builderApi.listSharedReferences).mockResolvedValue([]);
     vi.mocked(materialsApi.listSpaceMaterials).mockResolvedValue([]);
     vi.mocked(materialsApi.listSessionMaterials).mockResolvedValue([]);
     vi.mocked(operatorApi.fetchOperatorOverview).mockResolvedValue(makeOperatorOverview());
@@ -365,6 +297,40 @@ describe("App", () => {
     setPath("/");
   });
 
+  it("connects exactly once when popstate selects a different conversation", async () => {
+    const defaultSpace = makeSpace();
+    const first = makeConversationSummary({ id: "conv-first" });
+    const second = makeConversationSummary({ id: "conv-second" });
+
+    vi.mocked(spacesApi.listSpaces).mockResolvedValueOnce([defaultSpace]);
+    vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([
+      first,
+      second,
+    ]);
+    vi.mocked(conversationsApi.getConversation)
+      .mockResolvedValueOnce(makeConversationDetail({ id: second.id }))
+      .mockResolvedValueOnce(makeConversationDetail({ id: first.id }));
+
+    setPath(`/conversations/${first.id}`);
+    window.history.pushState(null, "", `/conversations/${second.id}`);
+    const historyLength = window.history.length;
+    component = mount(App, { target: document.body });
+    await settleUi();
+
+    expect(window.history.length).toBe(historyLength);
+    expect(websocketHarness.client.connect).toHaveBeenCalledTimes(1);
+    expect(websocketHarness.client.connect).toHaveBeenLastCalledWith(second.id);
+
+    websocketHarness.client.connect.mockClear();
+    setPath(`/conversations/${first.id}`);
+    window.dispatchEvent(new PopStateEvent("popstate"));
+    await settleUi();
+
+    expect(window.location.pathname).toBe(`/conversations/${first.id}`);
+    expect(websocketHarness.client.connect).toHaveBeenCalledTimes(1);
+    expect(websocketHarness.client.connect).toHaveBeenCalledWith(first.id);
+  });
+
   it("restores a deep-linked conversation on startup and opens its WebSocket", async () => {
     const defaultSpace = makeSpace();
     const linkedConversation = makeConversationSummary({
@@ -377,7 +343,7 @@ describe("App", () => {
       makeConversationSummary({ id: "conv-other", message_preview: "Other" }),
       linkedConversation,
     ]);
-    vi.mocked(conversationsApi.getConversation).mockResolvedValueOnce(
+    vi.mocked(conversationsApi.getConversation).mockResolvedValue(
       makeConversationDetail({
         id: "conv-linked",
         messages: [
@@ -391,20 +357,114 @@ describe("App", () => {
       }),
     );
 
-    setPath("/conversations/conv-linked");
+    window.history.pushState(null, "", "/conversations/conv-linked");
+    const historyLength = window.history.length;
     component = mount(App, { target: document.body });
     await settleUi();
 
     expect(spacesApi.listSpaces).toHaveBeenCalledTimes(1);
-    expect(lensApi.fetchLensRuntime).toHaveBeenCalledTimes(1);
     expect(conversationsApi.listConversations).toHaveBeenCalledWith(defaultSpace.id);
     expect(conversationsApi.getConversation).toHaveBeenCalledWith("conv-linked");
+    expect(websocketHarness.client.connect).toHaveBeenCalledTimes(1);
     expect(websocketHarness.client.connect).toHaveBeenCalledWith("conv-linked");
     expect(window.location.pathname).toBe("/conversations/conv-linked");
+
+    const popped = new Promise<void>((resolve) => {
+      window.addEventListener("popstate", () => resolve(), { once: true });
+    });
+    window.history.back();
+    await popped;
+    await settleUi();
+
+    expect(websocketHarness.client.connect).toHaveBeenCalledTimes(1);
+    expect(window.location.pathname).toBe("/");
+    expect(window.history.length).toBe(historyLength);
 
     const activePreview = document.querySelector(".conversation-item.active .preview");
     expect(activePreview?.textContent).toContain("Deep-linked conversation");
     expect(document.querySelector(".message-display")?.textContent).toContain("Restored from URL");
+  });
+
+  it("renders the conversation and removes Settings after browser Back", async () => {
+    const defaultSpace = makeSpace();
+    const linkedConversation = makeConversationSummary({
+      id: "conv-settings-back",
+      message_preview: "Settings return journey",
+    });
+
+    vi.mocked(spacesApi.listSpaces).mockResolvedValueOnce([defaultSpace]);
+    vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([
+      linkedConversation,
+    ]);
+    vi.mocked(conversationsApi.getConversation).mockResolvedValue(
+      makeConversationDetail({
+        id: linkedConversation.id,
+        messages: [
+          {
+            role: "assistant",
+            content: "Conversation restored after Back",
+            timestamp: "2026-04-07T12:01:00Z",
+            turn_state: "completed",
+          },
+        ],
+      }),
+    );
+
+    window.history.pushState(null, "", `/conversations/${linkedConversation.id}`);
+    component = mount(App, { target: document.body });
+    await settleUi();
+
+    const settingsButton = Array.from(document.querySelectorAll("button")).find(
+      (button) => button.textContent?.trim() === "Settings",
+    );
+    expect(settingsButton).toBeDefined();
+    flushSync(() => settingsButton!.click());
+    await settleUi();
+
+    expect(window.location.pathname).toBe("/settings/providers");
+    expect(document.querySelector('[aria-label="Settings"]')).not.toBeNull();
+
+    const popped = new Promise<void>((resolve) => {
+      window.addEventListener("popstate", () => resolve(), { once: true });
+    });
+    window.history.back();
+    await popped;
+    await settleUi();
+
+    expect(window.location.pathname).toBe(`/conversations/${linkedConversation.id}`);
+    expect(document.querySelector('[aria-label="Conversation"]')).not.toBeNull();
+    expect(document.querySelector(".message-display")?.textContent).toContain(
+      "Conversation restored after Back",
+    );
+    expect(document.querySelector('[aria-label="Settings"]')).toBeNull();
+  });
+
+  it("connects exactly once when a conversation is picked from the sidebar", async () => {
+    const defaultSpace = makeSpace();
+    const selected = makeConversationSummary({
+      id: "conv-picked",
+      message_preview: "Pick me",
+    });
+
+    vi.mocked(spacesApi.listSpaces).mockResolvedValueOnce([defaultSpace]);
+    vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([selected]);
+    vi.mocked(conversationsApi.getConversation).mockResolvedValueOnce(
+      makeConversationDetail({ id: selected.id }),
+    );
+
+    component = mount(App, { target: document.body });
+    await settleUi();
+    await openSpaceFromPicker(defaultSpace.name);
+
+    const selectButton = document.querySelector<HTMLButtonElement>(
+      ".conversation-select-btn",
+    );
+    expect(selectButton).not.toBeNull();
+    flushSync(() => selectButton!.click());
+    await settleUi();
+
+    expect(websocketHarness.client.connect).toHaveBeenCalledTimes(1);
+    expect(websocketHarness.client.connect).toHaveBeenCalledWith(selected.id);
   });
 
   it("shows desktop shell context when the electron bridge is present", async () => {
@@ -426,14 +486,11 @@ describe("App", () => {
     component = mount(App, { target: document.body });
     await settleUi();
     // The app lands on the space picker — open the default space so the
-    // top bar (which holds the desktop shell stamp) renders.
+    // shell navigation and its runtime context render.
     await openSpaceFromPicker("default");
 
-    // The riso shell condenses runtime context into a top-bar "stamp": the
-    // managed/remote token replaces the older verbose "Desktop shell" panel.
-    const stamp = document.querySelector(".topbar .stamp");
-    expect(stamp).not.toBeNull();
-    expect(stamp!.textContent).toContain("MANAGED");
+    const surfaceNavigation = document.querySelector('nav[aria-label="Surface"]');
+    expect(surfaceNavigation?.parentElement?.textContent).toContain("MANAGED");
   });
 
   it("creates a conversation from the real app wiring and navigates to it", async () => {
@@ -461,11 +518,107 @@ describe("App", () => {
     await settleUi();
 
     expect(conversationsApi.createConversation).toHaveBeenCalledWith(defaultSpace.id, undefined);
+    expect(websocketHarness.client.connect).toHaveBeenCalledTimes(1);
     expect(websocketHarness.client.connect).toHaveBeenCalledWith("conv-new");
     expect(window.location.pathname).toBe("/conversations/conv-new");
     expect(document.querySelector(".message-display")?.textContent).toContain(
       "Send a message below to start the conversation.",
     );
+  });
+
+  it("connects exactly once when the composer auto-creates a conversation", async () => {
+    const defaultSpace = makeSpace();
+    const created: ConversationResponse = {
+      id: "conv-auto",
+      space_id: defaultSpace.id,
+      created_at: "2026-04-07T12:03:00Z",
+      last_activity: "2026-04-07T12:03:00Z",
+    };
+
+    vi.mocked(spacesApi.listSpaces).mockResolvedValueOnce([defaultSpace]);
+    vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([]);
+    vi.mocked(conversationsApi.createConversation).mockResolvedValueOnce(created);
+
+    component = mount(App, { target: document.body });
+    await settleUi();
+    await openSpaceFromPicker(defaultSpace.name);
+
+    const textarea = document.querySelector<HTMLTextAreaElement>("textarea");
+    expect(textarea).not.toBeNull();
+    flushSync(() => {
+      textarea!.value = "Start from the composer";
+      textarea!.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+
+    const sendButton = document.querySelector<HTMLButtonElement>(".action.send");
+    expect(sendButton).not.toBeNull();
+    flushSync(() => sendButton!.click());
+    await settleUi();
+
+    expect(websocketHarness.client.connect).toHaveBeenCalledTimes(1);
+    expect(websocketHarness.client.connect).toHaveBeenCalledWith(created.id);
+  });
+
+  it("connects exactly once when returning to the conversation surface", async () => {
+    const defaultSpace = makeSpace();
+    const linked = makeConversationSummary({ id: "conv-surface" });
+
+    vi.mocked(spacesApi.listSpaces).mockResolvedValueOnce([defaultSpace]);
+    vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([linked]);
+    vi.mocked(conversationsApi.getConversation).mockResolvedValueOnce(
+      makeConversationDetail({ id: linked.id }),
+    );
+
+    setPath(`/conversations/${linked.id}`);
+    component = mount(App, { target: document.body });
+    await settleUi();
+    websocketHarness.client.connect.mockClear();
+
+    const surfaceButtons = Array.from(
+      document.querySelectorAll<HTMLButtonElement>('nav[aria-label="Surface"] button'),
+    );
+    const operator = surfaceButtons.find((button) =>
+      button.textContent?.includes("Operator"),
+    );
+    expect(operator).toBeDefined();
+    flushSync(() => operator!.click());
+    await settleUi();
+
+    const conversation = Array.from(
+      document.querySelectorAll<HTMLButtonElement>('nav[aria-label="Surface"] button'),
+    ).find((button) => button.textContent?.includes("Conversation"));
+    expect(conversation).toBeDefined();
+    flushSync(() => conversation!.click());
+    await settleUi();
+
+    expect(websocketHarness.client.connect).toHaveBeenCalledTimes(1);
+    expect(websocketHarness.client.connect).toHaveBeenCalledWith(linked.id);
+  });
+
+  it("connects exactly once when manual retry is requested", async () => {
+    const defaultSpace = makeSpace();
+    const linked = makeConversationSummary({ id: "conv-retry" });
+
+    vi.mocked(spacesApi.listSpaces).mockResolvedValueOnce([defaultSpace]);
+    vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([linked]);
+    vi.mocked(conversationsApi.getConversation).mockResolvedValueOnce(
+      makeConversationDetail({ id: linked.id }),
+    );
+
+    setPath(`/conversations/${linked.id}`);
+    component = mount(App, { target: document.body });
+    await settleUi();
+    websocketHarness.client.connect.mockClear();
+    websocketHarness.fireStatus("error");
+    await settleUi();
+
+    const retry = document.querySelector<HTMLButtonElement>(".retry-btn");
+    expect(retry).not.toBeNull();
+    flushSync(() => retry!.click());
+    await settleUi();
+
+    expect(websocketHarness.client.connect).toHaveBeenCalledTimes(1);
+    expect(websocketHarness.client.connect).toHaveBeenCalledWith(linked.id);
   });
 
   it("sends a message and finalises a streamed reply through the full app stack", async () => {
@@ -525,7 +678,7 @@ describe("App", () => {
     expect(document.querySelector(".message-display")?.textContent).toContain("Streamed reply.");
   });
 
-  it("switches to the operator deck and renders the overview", async () => {
+  it("switches to the operator surface and renders the overview", async () => {
     const defaultSpace = makeSpace();
 
     vi.mocked(spacesApi.listSpaces).mockResolvedValueOnce([defaultSpace]);
@@ -533,29 +686,20 @@ describe("App", () => {
     vi.mocked(operatorApi.fetchOperatorOverview).mockResolvedValue(
       makeOperatorOverview(),
     );
-    // Override the default beforeEach mock (which returns "builder") so
-    // selecting the Operator lens lands us in operator mode.
-    vi.mocked(lensApi.updateLensRuntime).mockResolvedValueOnce(
-      makeLensRuntime("operator"),
-    );
-
     component = mount(App, { target: document.body });
     await settleUi();
-    // Open the space so the lens tabs render in the top bar.
     await openSpaceFromPicker(defaultSpace.name);
 
-    // Lens tabs sit in the top bar with class .lens. We look for the lens
-    // whose title resolves to "Operator" (after stripping the trailing "lens"
-    // word in AppLayout).
-    const operatorLens = Array.from(
-      document.querySelectorAll(".topbar .lens"),
-    ).find((button) => button.textContent?.toLowerCase().includes("operator")) as
+    const surfaceNavigation = document.querySelector('nav[aria-label="Surface"]');
+    const operatorButton = Array.from(
+      surfaceNavigation?.querySelectorAll("button") ?? [],
+    ).find((button) => button.textContent?.trim() === "Operator") as
       | HTMLButtonElement
       | undefined;
 
-    expect(operatorLens).toBeDefined();
+    expect(operatorButton).toBeDefined();
 
-    flushSync(() => operatorLens!.click());
+    flushSync(() => operatorButton!.click());
     await waitForText("Live control surface for the running gateway");
 
     expect(operatorApi.fetchOperatorOverview).toHaveBeenCalled();
@@ -564,34 +708,6 @@ describe("App", () => {
     );
     expect(document.body.textContent).toContain("dev_dm");
     expect(document.body.textContent).toContain("Local machine");
-  });
-
-  it("loads the builder lens and renders the builder deck by default", async () => {
-    const defaultSpace = makeSpace({ name: "Space" });
-
-    vi.mocked(spacesApi.listSpaces).mockResolvedValueOnce([defaultSpace]);
-    vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([]);
-    vi.mocked(operatorApi.fetchOperatorOverview).mockResolvedValueOnce(
-      makeOperatorOverview(),
-    );
-    vi.mocked(lensApi.fetchLensRuntime).mockResolvedValueOnce(
-      makeLensRuntime("builder"),
-    );
-
-    component = mount(App, { target: document.body });
-    await settleUi();
-    // Open the space so the builder lens runtime is fetched and the deck
-    // gets placed on the stage.
-    await openSpaceFromPicker(defaultSpace.name);
-    await waitForText("Author the space, then let the agent live in it.");
-
-    expect(document.body.textContent).toContain(
-      "Author the space, then let the agent live in it.",
-    );
-    // Space name still surfaces in the space head.
-    expect(document.body.textContent).toContain("Space");
-    // Operator overview is no longer pre-fetched on mount — the rail that
-    // displayed it was dropped. The operator lens loads its own data.
   });
 
   it("shows missing space workspaces and relinks them before opening", async () => {
@@ -654,38 +770,4 @@ describe("App", () => {
     });
   });
 
-  // The right-hand SpaceRail (materials / shared references / operator
-  // pulse) was dropped per Surfaces.md ("Reference rail dropped; shared
-  // reference objects sit in the module stage"). The test that exercised the
-  // rail's contents is no longer applicable to the riso shell. When stage
-  // modules grow to expose those views, equivalent coverage should be added
-  // there.
-
-  it("persists a lens switch and changes the available primary surface", async () => {
-    const defaultSpace = makeSpace();
-
-    vi.mocked(spacesApi.listSpaces).mockResolvedValueOnce([defaultSpace]);
-    vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([]);
-
-    component = mount(App, { target: document.body });
-    await settleUi();
-    // Open the space so the lens tabs render in the top bar.
-    await openSpaceFromPicker(defaultSpace.name);
-
-    const builderLens = Array.from(
-      document.querySelectorAll(".topbar .lens"),
-    ).find((button) => button.textContent?.toLowerCase().includes("builder")) as
-      | HTMLButtonElement
-      | undefined;
-
-    expect(builderLens).toBeDefined();
-
-    flushSync(() => builderLens!.click());
-    await waitForText("Author the space, then let the agent live in it.");
-
-    expect(lensApi.updateLensRuntime).toHaveBeenCalledWith("proj-default", "builder");
-    expect(document.body.textContent).toContain(
-      "Author the space, then let the agent live in it.",
-    );
-  });
 });

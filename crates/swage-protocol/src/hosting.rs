@@ -84,6 +84,22 @@ pub struct ApprovalDecisionRequest {
     pub reason: Option<String>,
 }
 
+/// Ask the operator control plane to undo a recorded configuration case.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+pub struct UndoConfigurationCaseRequest {
+    pub case_id: Uuid,
+}
+
+/// The new change-case record produced by undoing a configuration case.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+pub struct ConfigurationChangeResponse {
+    pub version_id: Uuid,
+    pub entity_kind: String,
+    pub entity_id: String,
+    pub summary: String,
+    pub risk_band: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
 pub struct OperatorGatewaySummary {
     pub status: String,
@@ -132,8 +148,91 @@ pub struct OperatorOverviewResponse {
     pub devices: Vec<OperatorDeviceSummary>,
 }
 
+/// Scope filter for durable agent-definition reads and deletes.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, TS, JsonSchema)]
+pub struct AgentDefinitionScopeQuery {
+    pub space_id: Option<Uuid>,
+}
+
+/// Whole definition supplied when creating a durable agent.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+pub struct CreateAgentDefinitionRequest {
+    pub id: String,
+    pub space_id: Option<Uuid>,
+    pub display_name: String,
+    pub description: String,
+    pub instructions: String,
+    pub model_id: Option<String>,
+    #[ts(type = "unknown")]
+    pub tool_permissions: Option<serde_json::Value>,
+    #[serde(default)]
+    pub skills: Vec<String>,
+    #[ts(type = "unknown")]
+    pub output_schema: Option<serde_json::Value>,
+    #[ts(type = "number")]
+    pub output_max_retries: Option<u32>,
+}
+
+/// Whole replacement supplied when updating a durable agent definition.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+pub struct UpdateAgentDefinitionRequest {
+    pub space_id: Option<Uuid>,
+    pub display_name: String,
+    pub description: String,
+    pub instructions: String,
+    pub model_id: Option<String>,
+    #[ts(type = "unknown")]
+    pub tool_permissions: Option<serde_json::Value>,
+    #[serde(default)]
+    pub skills: Vec<String>,
+    #[ts(type = "unknown")]
+    pub output_schema: Option<serde_json::Value>,
+    #[ts(type = "number")]
+    pub output_max_retries: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+pub struct AgentDefinitionResponse {
+    pub id: String,
+    pub space_id: Option<Uuid>,
+    pub display_name: String,
+    pub description: String,
+    pub instructions: String,
+    pub model_id: Option<String>,
+    #[ts(type = "unknown")]
+    pub tool_permissions: Option<serde_json::Value>,
+    pub skills: Vec<String>,
+    #[ts(type = "unknown")]
+    pub output_schema: Option<serde_json::Value>,
+    #[ts(type = "number")]
+    pub output_max_retries: Option<u32>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+pub struct AgentDefinitionListResponse {
+    pub definitions: Vec<AgentDefinitionResponse>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+pub struct AgentDefinitionMutationResponse {
+    pub version_id: Uuid,
+    pub entity_id: String,
+    pub summary: String,
+}
+
 fn default_machine_stale_after_secs() -> u64 {
     30
+}
+
+/// Result of regenerating a space's knowledge-base browse mirror — a
+/// disposable markdown projection of the database-authoritative store.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+pub struct KnowledgeMirrorRegenerateResponse {
+    /// Absolute path of the regenerated mirror directory.
+    pub mirror_root: String,
+    pub files_written: u32,
 }
 
 #[derive(JsonSchema)]
@@ -143,6 +242,13 @@ pub struct HostingSurface {
     heartbeat: MachineHeartbeatRequest,
     approvals: ApprovalListResponse,
     approval_decision: ApprovalDecisionRequest,
+    undo_configuration_case: UndoConfigurationCaseRequest,
+    configuration_change: ConfigurationChangeResponse,
     operator_overview: OperatorOverviewResponse,
+    agent_definition_list: AgentDefinitionListResponse,
+    agent_definition_create: CreateAgentDefinitionRequest,
+    agent_definition_update: UpdateAgentDefinitionRequest,
+    agent_definition_mutation: AgentDefinitionMutationResponse,
     devices: device::DeviceListResponse,
+    knowledge_mirror: KnowledgeMirrorRegenerateResponse,
 }

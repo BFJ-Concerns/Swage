@@ -9,7 +9,6 @@ use std::fmt::Write as _;
 
 use crate::error::ClientError;
 use crate::runtime::RuntimeMetadata;
-use serde::Serialize;
 use uuid::Uuid;
 
 pub use swage_protocol::client::space::{
@@ -449,14 +448,9 @@ impl GatewayClient {
 
 use swage_protocol::client::conversation::ConversationListResponse as ConversationListEnvelope;
 pub use swage_protocol::client::conversation::{
-    ConversationDetail, ConversationResponse, ConversationSummary, MessageView, ToolCallView,
+    ConversationDetail, ConversationResponse, ConversationSummary, CreateConversationRequest,
+    MessageView, ToolCallView,
 };
-
-#[derive(Debug, Serialize)]
-struct CreateConversationRequest<'a> {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    selected_model_id: Option<&'a str>,
-}
 
 // ---------------------------------------------------------------------------
 // Conversation CRUD methods on GatewayClient
@@ -480,11 +474,27 @@ impl GatewayClient {
         space_id: Uuid,
         selected_model_id: Option<&str>,
     ) -> Result<ConversationResponse, ClientError> {
+        self.create_space_conversation_for_agent(space_id, None, selected_model_id)
+            .await
+    }
+
+    /// Creates a conversation in a space, naming the agent definition the new
+    /// session runs under. `None` selects the default agent; an unknown name
+    /// is rejected by the gateway with a validation error.
+    pub async fn create_space_conversation_for_agent(
+        &self,
+        space_id: Uuid,
+        agent_id: Option<&str>,
+        selected_model_id: Option<&str>,
+    ) -> Result<ConversationResponse, ClientError> {
         let url = format!("{}/api/spaces/{space_id}/sessions", self.base_url);
 
         let mut request = self.client.post(&url);
-        if selected_model_id.is_some() {
-            request = request.json(&CreateConversationRequest { selected_model_id });
+        if agent_id.is_some() || selected_model_id.is_some() {
+            request = request.json(&CreateConversationRequest {
+                selected_model_id: selected_model_id.map(str::to_owned),
+                agent_id: agent_id.map(str::to_owned),
+            });
         }
         let response = request
             .send()
@@ -505,11 +515,27 @@ impl GatewayClient {
         &self,
         selected_model_id: Option<&str>,
     ) -> Result<ConversationResponse, ClientError> {
+        self.create_conversation_for_agent(None, selected_model_id)
+            .await
+    }
+
+    /// Creates a conversation in the default space, naming the agent
+    /// definition the new session runs under. `None` selects the default
+    /// agent; an unknown name is rejected by the gateway with a validation
+    /// error.
+    pub async fn create_conversation_for_agent(
+        &self,
+        agent_id: Option<&str>,
+        selected_model_id: Option<&str>,
+    ) -> Result<ConversationResponse, ClientError> {
         let url = format!("{}/api/conversations", self.base_url);
 
         let mut request = self.client.post(&url);
-        if selected_model_id.is_some() {
-            request = request.json(&CreateConversationRequest { selected_model_id });
+        if agent_id.is_some() || selected_model_id.is_some() {
+            request = request.json(&CreateConversationRequest {
+                selected_model_id: selected_model_id.map(str::to_owned),
+                agent_id: agent_id.map(str::to_owned),
+            });
         }
         let response = request
             .send()

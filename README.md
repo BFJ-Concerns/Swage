@@ -1,0 +1,116 @@
+# Swage
+
+A context-governed agent platform for your own hardware: an always-on
+gateway running agents that work on schedules and on demand, with everything
+the system does recorded locally and reconstructable afterwards.
+
+## Build and run
+
+Requires the Rust toolchain (see `rust-toolchain.toml`) and Node for the web
+UI. The gateway listens on loopback only.
+
+```bash
+cargo build --bin swage
+./target/debug/swage gateway start --port 3000
+
+# Web UI (development)
+cd frontend && npm install && npm run dev
+```
+
+The gateway daemonises and logs to `gateway.log` in its data root —
+`~/.swage/` by default, `$SWAGE_HOME` when set. Stop it with the same binary
+you started:
+
+```bash
+./target/debug/swage gateway stop
+```
+
+The CLI finds the running gateway through a metadata file in
+`$XDG_RUNTIME_DIR/swage/` (falling back to the data root's `run/`
+directory), so run `stop` with the same environment you started with.
+
+## The first turn may ask about sandboxing
+
+Tool calls run inside a [bubblewrap](https://github.com/containers/bubblewrap)
+sandbox by default — install the `bubblewrap` package to get isolation. If
+sandbox setup fails (most commonly `bwrap` is not installed), the first turn
+pauses with an approval: *"Sandbox setup failed. Approve running this turn
+without sandbox isolation?"* Approving runs that turn unsandboxed and records
+the degradation in the audit trail; rejecting fails the turn. To decide this
+in configuration instead, set under `[sandbox]`: `enabled = false` to turn
+sandboxing off, or `allow_degraded_execution = true` to run unsandboxed
+without the per-turn prompt when setup fails.
+
+## Configure a provider first
+
+A fresh install runs, but no turn can complete until a model provider is
+configured — the composer will say so and point at Settings. Configuration
+lives in `~/.swage/config.toml`. A minimal working example:
+
+```toml
+[providers]
+default = "anthropic"
+
+[providers.entries.anthropic]
+protocol = "anthropic"                # or "openai" for OpenAI-shaped endpoints
+api_key_env = "ANTHROPIC_API_KEY"     # read from the environment at startup
+# base_url = "https://..."            # only for proxies or self-hosted routes
+
+[models]
+default = "sonnet"
+
+[models.entries.sonnet]
+provider_id = "anthropic"
+model_id = "claude-sonnet-5"
+```
+
+Set the key in the gateway's environment before starting it. Providers and
+models can also be managed from the web UI under Settings → Providers.
+
+`SWAGE_HOME` overrides the whole data root (config, database, logs) — useful
+for throwaway instances: `SWAGE_HOME=/tmp/swage-test swage gateway start`.
+
+## Where things live on disk
+
+Everything is under `~/.swage/` (or `$SWAGE_HOME`):
+
+- `config.toml` — providers, models, sandboxing, and platform settings.
+- `instructions/` — global operator instructions, as `.md` files composed in
+  filename order (`01-base.md`, `02-style.md`, …). They layer *after* the
+  built-in orientation: every session already knows what it is running on,
+  where it is, and what tools it has.
+- `skills/<name>/` — global skills, one directory per skill with frontmatter.
+- `spaces/<space>/` — each space's world: its own `instructions/`,
+  `skills/`, `agents/<agent>/` (per-agent `instructions/` and `skills/`),
+  memory, and knowledge-base bodies.
+- `swage.db` — the SQLite store: conversations, turns, the audit trail,
+  knowledge base, workflow runs. The one local record everything is
+  reconstructable from.
+
+The configuration cascade is Global → Space → Agent: the more specific
+level extends or shadows the more general one.
+
+## Isolated development instance
+
+To run a second gateway beside a real installation, give it its own data
+root, its own runtime directory (the CLI's instance discovery lives there —
+two instances sharing one collide), and its own port:
+
+```bash
+SWAGE_HOME=/tmp/swage-dev \
+XDG_RUNTIME_DIR=/tmp/swage-dev-run \
+./target/debug/swage gateway start --port 3100
+```
+
+Stop it with `gateway stop` under the same two variables. The isolated data
+root starts empty, so give it its own `config.toml` (the provider example
+above) before expecting turns to complete. The dev web UI
+(`npm run dev`) serves <http://localhost:5173> and proxies API calls to the
+gateway; point it at a non-default port with
+`SWAGE_GATEWAY_URL=http://127.0.0.1:3100 npm run dev`.
+
+## Development
+
+`just verify` runs the full gate (format, clippy, tests, frontend checks,
+projection freshness). See `CLAUDE.md` for repository conventions and
+`docs/` for architecture diagrams.

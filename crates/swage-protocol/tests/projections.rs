@@ -42,9 +42,15 @@ fn typescript_bindings_are_regenerated() {
     client::conversation::ConversationListResponse::export_all(&cfg).expect("export conversations");
     client::conversation::ConversationResponse::export_all(&cfg)
         .expect("export conversation response");
+    client::conversation::CreateConversationRequest::export_all(&cfg)
+        .expect("export create conversation request");
     client::conversation::ConversationDetail::export_all(&cfg).expect("export conversation detail");
     client::conversation::ConversationThreadDetail::export_all(&cfg)
         .expect("export conversation thread");
+    client::knowledge::KnowledgeSearchResponse::export_all(&cfg)
+        .expect("export knowledge search response");
+    client::knowledge::OrientationFindResponse::export_all(&cfg)
+        .expect("export orientation find response");
     client::voice::VoiceCapabilitiesResponse::export_all(&cfg).expect("export voice capabilities");
     client::voice::TranscribeAudioRequest::export_all(&cfg).expect("export transcription");
     client::voice::SynthesiseSpeechRequest::export_all(&cfg).expect("export speech synthesis");
@@ -80,7 +86,21 @@ fn typescript_bindings_are_regenerated() {
     hosting::MachineHeartbeatRequest::export_all(&cfg).expect("export hosting heartbeat");
     hosting::ApprovalListResponse::export_all(&cfg).expect("export hosting approvals");
     hosting::ApprovalDecisionRequest::export_all(&cfg).expect("export hosting approval decision");
+    hosting::UndoConfigurationCaseRequest::export_all(&cfg)
+        .expect("export configuration undo request");
+    hosting::ConfigurationChangeResponse::export_all(&cfg)
+        .expect("export configuration change response");
     hosting::OperatorOverviewResponse::export_all(&cfg).expect("export operator overview");
+    hosting::AgentDefinitionScopeQuery::export_all(&cfg).expect("export agent definition query");
+    hosting::CreateAgentDefinitionRequest::export_all(&cfg)
+        .expect("export agent definition create");
+    hosting::UpdateAgentDefinitionRequest::export_all(&cfg)
+        .expect("export agent definition update");
+    hosting::AgentDefinitionListResponse::export_all(&cfg).expect("export agent definition list");
+    hosting::AgentDefinitionMutationResponse::export_all(&cfg)
+        .expect("export agent definition mutation");
+    hosting::KnowledgeMirrorRegenerateResponse::export_all(&cfg)
+        .expect("export knowledge mirror regenerate");
     device::RegisterDeviceRequest::export_all(&cfg).expect("export device registration");
     device::DeviceListResponse::export_all(&cfg).expect("export device list");
     device::RemoteToolExecutionRequest::export_all(&cfg).expect("export device execution");

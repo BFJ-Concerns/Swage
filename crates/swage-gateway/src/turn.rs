@@ -45,6 +45,7 @@ use swage_tool::permission::RequireApprovalEntry as ToolRequireApprovalEntry;
 use swage_tool::rate_limit::{RateLimitConfig, RateLimiter};
 use swage_tool::tool::Tool;
 
+use crate::record_durability;
 use crate::skill::SkillManager;
 use crate::tool_executor::{GatewayExecutionStrategy, SandboxedExecutor};
 
@@ -439,6 +440,35 @@ pub(crate) async fn dispatch_before_inbound(
     }
 }
 
+/// Render a completed delegation's Result message as thread content.
+///
+/// Reads the payload the delegation path writes — `response` with optional
+/// `structured_output`, or `error` for a failed child — and falls back to
+/// the raw JSON for any other shape, so an unrecognised payload is still
+/// delivered rather than dropped.
+fn render_delegation_result(result: &swage_storage::model::AgentMessage) -> String {
+    let sender = &result.sender_agent_id;
+    let mut text = match result.payload.get("response").and_then(|v| v.as_str()) {
+        Some(response) => format!("Delegated agent {sender} completed:\n{response}"),
+        None => match result.payload.get("error").and_then(|v| v.as_str()) {
+            Some(error) => format!("Delegated agent {sender} failed: {error}"),
+            None => format!(
+                "Delegated agent {sender} finished:\n{}",
+                serde_json::to_string_pretty(&result.payload)
+                    .unwrap_or_else(|_| result.payload.to_string())
+            ),
+        },
+    };
+    if let Some(structured) = result.payload.get("structured_output") {
+        let rendered =
+            serde_json::to_string_pretty(structured).unwrap_or_else(|_| structured.to_string());
+        text.push_str("\n\nStructured output:\n```json\n");
+        text.push_str(&rendered);
+        text.push_str("\n```");
+    }
+    text
+}
+
 /// Orchestrate a complete agent turn: user message → provider stream → storage.
 ///
 /// # Flow
@@ -548,6 +578,29 @@ pub(crate) async fn process_turn_with_existing_turn(
     // startup config, but present invalid config fails the turn before any
     // user message is written.
     let config = load_session_config(state, &space_slug, &session.agent_id)?;
+
+    // A durable agent definition, when one exists for this agent, gives the
+    // session its character on top of the resolved file config: instructions
+    // append, the model preference fills an unselected default, and the
+    // permission overlay narrows grants. Resolution failure falls open to
+    // the file config — a broken definition must not brick the session.
+    let config = match state
+        .storage
+        .resolve_agent_definition(&session.agent_id, space_id)
+        .await
+    {
+        Ok(Some(definition)) => apply_agent_definition(config, &definition),
+        Ok(None) => config,
+        Err(error) => {
+            tracing::warn!(
+                agent_id = %session.agent_id,
+                %error,
+                "failed to resolve the agent definition; using file config alone"
+            );
+            config
+        }
+    };
+
     ensure_selected_model_available(
         state,
         &config,
@@ -569,6 +622,7 @@ pub(crate) async fn process_turn_with_existing_turn(
         &session.agent_id,
         swage_root_opt.as_deref(),
         true,
+        &config.declared_skills,
     )
     .await;
 
@@ -638,71 +692,110 @@ pub(crate) async fn process_turn_with_existing_turn(
         })
         .await?;
 
+    // Step 7: Deliver completed detached delegations. A detached child's
+    // Result waits in this agent's mailbox until its parent next turns;
+    // each is appended as a durable User-role message *before* history is
+    // rebuilt, so the result enters the thread record — visible in the
+    // UI, part of the audit trail, and carried to the model as ordinary
+    // history content, never as instructions. User role, deliberately:
+    // the history rebuild carries Tool-role rows only when they answer a
+    // recorded tool call (providers reject orphaned tool results), so a
+    // platform-delivered notification rides the same role a channel or
+    // scheduled message would, with the rendering naming its real sender.
+    // Append-before-claim: a failure between the two re-delivers next
+    // turn rather than losing the result, and a lost claim race leaves a
+    // duplicate row, not a gap. A storage failure here fails the turn —
+    // with the same explicit cleanup as the surrounding error paths, so
+    // the thread is not left guarded by a stale Pending turn.
+    let delivery_result: Result<(), GatewayError> = async {
+        let pending_results =
+            swage_agent::mailbox::pending_results(&state.storage, &session.agent_id)
+                .await
+                .map_err(|error| GatewayError::WebSocketError(error.to_string()))?;
+        for result in &pending_results {
+            state
+                .storage
+                .append_message(AppendMessage {
+                    thread_id,
+                    turn_id: Some(prepared_turn_id),
+                    role: Role::User,
+                    content: render_delegation_result(result),
+                    agent_id: session.agent_id.clone(),
+                })
+                .await?;
+            swage_agent::mailbox::claim_result(&state.storage, result.id)
+                .await
+                .map_err(|error| GatewayError::WebSocketError(error.to_string()))?;
+        }
+        Ok(())
+    }
+    .await;
+    if let Err(error) = delivery_result {
+        state
+            .storage
+            .update_turn_state(prepared_turn_id, TurnState::Failed)
+            .await?;
+        let mut turns = state.active_turns.lock().await;
+        turns.remove(&session_id);
+        return Err(error);
+    }
+
     // Steps 8–9: Assemble context via the swage-context assembly engine.
-    // Loads thread history, space memory, and constructs typed elements.
-    // Runs fail-open assembly: custom Python configs when configured, built-in
+    // Loads thread history and constructs the typed elements used by the
+    // selected assembly.
+    // Runs fail-open assembly: custom JavaScript configs when configured, built-in
     // default otherwise. The LLM provider is passed for two-phase compaction.
     let history_messages =
         rebuild_thread_history_messages(state.storage.as_ref(), thread_id).await?;
 
-    // Load space memory from the filesystem. Returns an empty string when
-    // no memory directory or files exist — MemoryElement handles empty content.
-    let memory_content = match swage_root_opt.as_deref() {
-        Some(root) => load_space_memory(root, &space_slug).await,
-        None => String::new(),
-    };
+    let assembly_name = select_context_assembly(state, &config, session_id, prepared_turn_id).await;
+    let memory_content = load_memory_for_assembly(&assembly_name, || async {
+        match swage_root_opt.as_deref() {
+            Some(root) => load_space_memory(root, &space_slug).await,
+            None => String::new(),
+        }
+    })
+    .await;
 
-    // Build the assembly search hierarchy for locating Python assembly files.
-    // Collected as owned PathBufs first so references can be formed safely
-    // after the Vec is complete.
-    let assembly_search_paths: Vec<(HierarchyLevel, PathBuf)> = swage_root_opt
-        .as_ref()
-        .map(|root| {
-            let space_dir = root.join("spaces").join(&space_slug);
-            let agent_dir = space_dir.join("agents").join(&session.agent_id);
-            let mut levels = vec![
-                (HierarchyLevel::Global, root.clone()),
-                (HierarchyLevel::Space, space_dir),
-            ];
-            // Only include the agent level when the directory exists;
-            // a missing agent dir means no agent-specific assemblies.
-            if agent_dir.is_dir() {
-                levels.push((HierarchyLevel::Agent, agent_dir));
-            }
-            levels
-        })
-        .unwrap_or_default();
-    let search_level_refs: Vec<(HierarchyLevel, &Path)> = assembly_search_paths
-        .iter()
-        .map(|(level, path)| (level.clone(), path.as_path()))
-        .collect();
+    // The workspace root doubles as the session's working directory in the
+    // orientation baseline, so it is resolved before elements are built.
+    let workspace_policy = load_trusted_workspace_policy(
+        &state.storage,
+        space_id,
+        session.active_workspace_attachment_id,
+    )
+    .await;
+    let (workspace_root, mut allowed_paths) =
+        agent_workspace_from_policy(&workspace_policy, space_id, session.id);
+
+    let environment =
+        build_session_environment(&space, Some(workspace_root.display().to_string()), &session);
+    let available_skills =
+        available_skills_for_agent(&space_slug, &session.agent_id, swage_root_opt.as_deref());
 
     let elements = build_assembly_elements(
         &config.instructions,
         active_skills,
         history_messages,
-        memory_content,
-        space.name.clone(),
+        memory_content.map(|content| (content, space.name.clone())),
+        environment,
+        available_skills,
     );
     let tokeniser = TiktokenTokeniser::new(config.default_model_id());
 
-    // Run the fail-open assembly orchestrator. For "default" (or empty)
-    // assembly names this delegates to default_assembly() synchronously.
-    // Named Python assemblies now execute in a child worker instead of an
-    // embedded interpreter.
-    let assembly_runner =
-        swage_python::ConfiguredAssemblyRunner::new(config.tools.python_execute.clone());
-    let provider = state.active_provider();
-    let output = swage_context::assembly::assemble_for_agent(
-        &session.agent_id,
+    // Assemble context: a configured assembly name selects an operator's JS
+    // assembly from the config hierarchy; "default" (or empty) runs the
+    // built-in implementation. JS assemblies fail open to the default with
+    // the error recorded in the report.
+    let output = execute_context_assembly(
+        &assembly_name,
+        &config,
         &elements,
-        &config.context,
         &tokeniser,
-        &search_level_refs,
-        provider.as_ref(),
-        Some(&assembly_runner),
-    )
-    .await;
+        swage_root_opt.as_deref(),
+        &space_slug,
+        &session.agent_id,
+    );
     let (assembled_messages, assembly_report) = (output.messages, output.report);
 
     tracing::debug!(
@@ -720,14 +813,6 @@ pub(crate) async fn process_turn_with_existing_turn(
         serde_json::json!({ "error": "serialisation failed" })
     });
 
-    let workspace_policy = load_trusted_workspace_policy(
-        &state.storage,
-        space_id,
-        session.active_workspace_attachment_id,
-    )
-    .await;
-    let (workspace_root, mut allowed_paths) =
-        agent_workspace_from_policy(&workspace_policy, space_id, session.id);
     let session_approval_grants = state
         .session_approval_grants
         .lock()
@@ -750,15 +835,9 @@ pub(crate) async fn process_turn_with_existing_turn(
     // enabled, this also spawns the per-turn sandbox and returns its cleanup
     // guard to this turn scope.
     let is_codex_turn = config.default_provider_protocol() == swage_config::Protocol::Codex;
-    let mut dispatcher_config = config.clone();
-    if is_codex_turn {
-        // Bridged tools remain gateway-hosted. Codex-native actions are
-        // isolated by the App Server sandbox policy instead.
-        dispatcher_config.sandbox.enabled = false;
-    }
     let dispatcher_build = match build_gateway_dispatcher(
         state,
-        &dispatcher_config,
+        &config,
         &agent_config,
         session.metadata.as_ref(),
         Some(space_id),
@@ -768,9 +847,7 @@ pub(crate) async fn process_turn_with_existing_turn(
     .await
     {
         Ok(build) => build,
-        Err(error)
-            if dispatcher_config.sandbox.enabled && attendance == TurnAttendance::Attended =>
-        {
+        Err(error) if config.sandbox.enabled && attendance == TurnAttendance::Attended => {
             let detected_degradation = ExecutionIsolation::Degraded {
                 reason: format!("sandbox_setup_failed: {error}"),
             };
@@ -996,6 +1073,13 @@ pub(crate) async fn process_turn_with_existing_turn(
     // can use it for persistence and logging after the event loop finishes.
     let mut turn_id: Option<Uuid> = None;
 
+    // Set when the durability contract's escalation fires: a constitutive
+    // record was lost, or a reconstructive loss could not even be recorded
+    // as a degradation (record_durability.rs). Checked after the agent
+    // settles — the turn is then failed loudly rather than left looking
+    // auditable.
+    let mut record_integrity_lost: Option<String> = None;
+
     // Step 11: Forward AgentEvent → ServerEvent. The loop runs until the
     // agent drops event_tx (channel closes) or the agent task completes.
     while let Some(event) = event_rx.recv().await {
@@ -1015,7 +1099,22 @@ pub(crate) async fn process_turn_with_existing_turn(
                     .store_snapshot(started_id, &report_json.to_string())
                     .await
                 {
+                    // Reconstructive record (record_durability.rs): the loss
+                    // itself is recorded; only a double failure escalates.
                     tracing::warn!(error = %e, "failed to persist context snapshot");
+                    if let Err(audit_error) = record_durability::record_reconstruction_gap(
+                        state.storage.as_ref(),
+                        Some(session_id),
+                        started_id,
+                        "context_snapshot",
+                        &e,
+                    )
+                    .await
+                    {
+                        record_integrity_lost.get_or_insert(format!(
+                            "context snapshot lost and the loss could not be recorded: {audit_error}"
+                        ));
+                    }
                 }
 
                 // Deliver the ContextAssembled event (subscription-gated).
@@ -1058,10 +1157,24 @@ pub(crate) async fn process_turn_with_existing_turn(
                     .store_snapshot(snapshot_turn_id, &report_json.to_string())
                     .await
                 {
+                    // Reconstructive record (record_durability.rs).
                     tracing::warn!(
                         error = %e,
                         "failed to persist provider-visible context snapshot"
                     );
+                    if let Err(audit_error) = record_durability::record_reconstruction_gap(
+                        state.storage.as_ref(),
+                        Some(session_id),
+                        snapshot_turn_id,
+                        "provider_visible_snapshot",
+                        &e,
+                    )
+                    .await
+                    {
+                        record_integrity_lost.get_or_insert(format!(
+                            "provider-visible snapshot lost and the loss could not be recorded: {audit_error}"
+                        ));
+                    }
                 }
             }
             AgentEvent::ProviderReasoningCaptured {
@@ -1076,10 +1189,24 @@ pub(crate) async fn process_turn_with_existing_turn(
                     .store_snapshot(snapshot_turn_id, &report_json.to_string())
                     .await
                 {
+                    // Reconstructive record (record_durability.rs).
                     tracing::warn!(
                         error = %e,
                         "failed to persist provider reasoning context snapshot"
                     );
+                    if let Err(audit_error) = record_durability::record_reconstruction_gap(
+                        state.storage.as_ref(),
+                        Some(session_id),
+                        snapshot_turn_id,
+                        "provider_reasoning_snapshot",
+                        &e,
+                    )
+                    .await
+                    {
+                        record_integrity_lost.get_or_insert(format!(
+                            "provider reasoning snapshot lost and the loss could not be recorded: {audit_error}"
+                        ));
+                    }
                 }
             }
             AgentEvent::ToolStart {
@@ -1203,7 +1330,10 @@ pub(crate) async fn process_turn_with_existing_turn(
                     "turn_complete",
                 );
 
-                // Update session activity timestamp.
+                // Update session activity timestamp. Derivable record
+                // (record_durability.rs): activity is reconstructable from
+                // turn and message timestamps, so losing this write is
+                // accepted with a warning.
                 if let Err(e) = state.storage.update_activity(session_id).await {
                     tracing::warn!(error = %e, "failed to update session activity");
                 }
@@ -1278,12 +1408,27 @@ pub(crate) async fn process_turn_with_existing_turn(
                     TurnStore::update_structured_output(&*state.storage, outbound.turn_id, output)
                         .await
                 {
-                    // Non-fatal: the turn completed; only the persisted record is affected.
-                    tracing::warn!(
+                    // Constitutive record (record_durability.rs): validated
+                    // output that reached the client but not the record
+                    // makes the trail lie by omission, so the turn fails
+                    // loudly below. The degradation event is still
+                    // attempted so the trail names the gap even when the
+                    // turn row's failure stamp is all that survives.
+                    tracing::error!(
                         error = %e,
                         turn_id = %outbound.turn_id,
                         "failed to persist structured_output"
                     );
+                    let _ = record_durability::record_reconstruction_gap(
+                        state.storage.as_ref(),
+                        Some(session_id),
+                        outbound.turn_id,
+                        "structured_output",
+                        &e,
+                    )
+                    .await;
+                    record_integrity_lost
+                        .get_or_insert(format!("structured output could not be persisted: {e}"));
                 }
             }
         }
@@ -1314,6 +1459,29 @@ pub(crate) async fn process_turn_with_existing_turn(
         }
     }
 
+    // The durability contract's escalation (record_durability.rs): a turn
+    // whose record is known-incomplete must not end looking auditable.
+    // force_turn_failure, not update_turn_state: the agent has usually
+    // already marked the turn Completed, and the ordinary write's
+    // first-terminal-wins guard would silently no-op — this transition is
+    // the guard's one sanctioned override. The state write may itself fail
+    // on the same broken store — then the log and the client error are the
+    // loudest surfaces left.
+    if let Some(reason) = record_integrity_lost {
+        tracing::error!(turn_id = ?turn_id, %reason, "turn record integrity lost");
+        if let Err(error) = state
+            .storage
+            .force_turn_failure(turn_id.unwrap_or(prepared_turn_id))
+            .await
+        {
+            tracing::error!(error = %error, "failed to mark record-degraded turn as failed");
+        }
+        let _ = ws_tx.send(ServerEvent::Error {
+            code: "turn_record_lost".to_string(),
+            message: format!("The turn's audit record is incomplete: {reason}"),
+        });
+    }
+
     if let Some(guard) = &sandbox_guard
         && let Err(error) = guard.shutdown().await
     {
@@ -1327,6 +1495,95 @@ pub(crate) async fn process_turn_with_existing_turn(
     }
 
     Ok(())
+}
+
+async fn select_context_assembly(
+    state: &AppState,
+    config: &swage_config::ResolvedConfig,
+    session_id: Uuid,
+    turn_id: Uuid,
+) -> String {
+    // The assembly name is an experiment location: when variants are
+    // registered for it, the selection loop chooses which serves this turn
+    // (honouring the kill switch and forced pins), and every decision —
+    // including "experimentation is off" — lands in the audit trail. The
+    // report and every model-facing surface stay function-named; the audit
+    // record is the only place the variant id appears.
+    let configured_assembly = config.context.assembly.trim().to_owned();
+    let assembly_variants: Vec<&str> = vec![];
+    let decision = crate::experimentation::select_variant(
+        &config.experimentation,
+        crate::experimentation::LOCATION_CONTEXT_ASSEMBLY,
+        &assembly_variants,
+        &configured_assembly,
+        turn_id,
+    );
+    let decision = match crate::experimentation::record_selection(
+        state,
+        crate::experimentation::LOCATION_CONTEXT_ASSEMBLY,
+        &decision,
+        Some(session_id),
+        Some(turn_id),
+    )
+    .await
+    {
+        Ok(()) => decision,
+        Err(error) => {
+            tracing::error!(
+                %error,
+                variant = %decision.variant,
+                "variant selection could not be recorded; serving the configured default"
+            );
+            crate::experimentation::VariantDecision {
+                variant: configured_assembly.clone(),
+                reason: crate::experimentation::SelectionReason::RecordUnavailable,
+            }
+        }
+    };
+
+    decision.variant
+}
+
+fn execute_context_assembly(
+    assembly_name: &str,
+    config: &swage_config::ResolvedConfig,
+    elements: &[Box<dyn ContextElement>],
+    tokeniser: &TiktokenTokeniser,
+    swage_root: Option<&Path>,
+    space_slug: &str,
+    agent_id: &str,
+) -> swage_context::report::AssemblyOutput {
+    let assembly_name = assembly_name.trim();
+    if is_default_context_assembly(assembly_name) {
+        return swage_context::assembly::assemble(elements, &config.context, tokeniser);
+    }
+
+    let search_levels: Vec<(swage_config::HierarchyLevel, PathBuf)> = swage_root
+        .map(|root| {
+            let space_dir = root.join("spaces").join(space_slug);
+            let agent_dir = space_dir.join("agents").join(agent_id);
+            let mut levels = vec![
+                (swage_config::HierarchyLevel::Global, root.to_path_buf()),
+                (swage_config::HierarchyLevel::Space, space_dir),
+            ];
+            if agent_dir.is_dir() {
+                levels.push((swage_config::HierarchyLevel::Agent, agent_dir));
+            }
+            levels
+        })
+        .unwrap_or_default();
+    let level_refs: Vec<(swage_config::HierarchyLevel, &Path)> = search_levels
+        .iter()
+        .map(|(level, path)| (level.clone(), path.as_path()))
+        .collect();
+    let source_path = swage_context::js_assembly::resolve_js_assembly(assembly_name, &level_refs);
+    swage_context::js_assembly::assemble_named(
+        assembly_name,
+        source_path.as_deref(),
+        elements,
+        &config.context,
+        tokeniser,
+    )
 }
 
 /// Cancel the active turn for a session.

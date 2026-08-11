@@ -561,36 +561,6 @@ pub fn handle_server_event(state: &mut ConversationState, event: ServerEvent) ->
             EventOutcome::Continue
         }
 
-        ServerEvent::TopologyRunStarted {
-            topology_run_id, ..
-        } => {
-            state.push_local_message("system", format!("Topology run started: {topology_run_id}"));
-            EventOutcome::Continue
-        }
-
-        ServerEvent::TopologyNodeStarted { node_id, .. } => {
-            state.push_local_message("system", format!("Topology node started: {node_id}"));
-            EventOutcome::Continue
-        }
-
-        ServerEvent::TopologyNodeCompleted {
-            node_id, success, ..
-        } => {
-            let status = if success { "succeeded" } else { "failed" };
-            state.push_local_message("system", format!("Topology node {node_id} {status}"));
-            EventOutcome::Continue
-        }
-
-        ServerEvent::TopologyRunCompleted {
-            topology_run_id,
-            success,
-            ..
-        } => {
-            let status = if success { "succeeded" } else { "failed" };
-            state.push_local_message("system", format!("Topology run {topology_run_id} {status}"));
-            EventOutcome::Continue
-        }
-
         ServerEvent::ApprovalRequired { prompt, .. } => {
             state.push_local_message("system", format!("Approval required: {prompt}"));
             EventOutcome::Continue

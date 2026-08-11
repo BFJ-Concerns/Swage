@@ -14,8 +14,14 @@ use uuid::Uuid;
 
 use swage_agent::approval::ApprovalDecisionValue;
 use swage_core::GatewayError;
-use swage_protocol::client::{channel as channel_wire, schedule as schedule_wire};
-use swage_storage::SharedReferenceKind;
+use swage_protocol::{
+    client::{channel as channel_wire, schedule as schedule_wire},
+    hosting::{
+        AgentDefinitionListResponse, AgentDefinitionMutationResponse, AgentDefinitionResponse,
+        AgentDefinitionScopeQuery, ConfigurationChangeResponse, CreateAgentDefinitionRequest,
+        UndoConfigurationCaseRequest, UpdateAgentDefinitionRequest,
+    },
+};
 
 use crate::{
     attachment::{
@@ -26,19 +32,6 @@ use crate::{
         AgentMemoryListQuery, AgentMemoryListResponse, OperatorSearchQuery, OperatorSearchResponse,
         OperatorUsageQuery, OperatorUsageResponse,
     },
-    authoring_definition::{
-        ContextDefinitionListResponse, ContextDefinitionRecord, CreateContextDefinitionRequest,
-        CreateTopologyFlowDefinitionRequest, PreviewContextDefinitionRequest,
-        PreviewContextDefinitionResponse, TopologyFlowDefinitionListResponse,
-        TopologyFlowDefinitionRecord, UpdateContextDefinitionRequest,
-        UpdateTopologyFlowDefinitionRequest,
-    },
-    builder_runtime::{
-        BuilderApplyRequest, BuilderApplyResponse, BuilderConfigurationService,
-        BuilderProposalRequest, BuilderProposalResponse, ConfigurationVersionListResponse,
-        ConfigurationVersionQuery, RollbackConfigurationVersionRequest,
-        RollbackConfigurationVersionResponse,
-    },
     capabilities::WorkflowCapabilitiesResponse,
     channel_gateway::{
         ChannelInboundResponse, ChannelStatusListResponse, DeliveryLogQuery, DeliveryLogResponse,
@@ -46,10 +39,6 @@ use crate::{
     },
     device::{DeviceListResponse, DeviceResponse, RegisterDeviceRequest},
     error::ApiError,
-    lens::{
-        CreateLensRequest, InstallLensRequest, LensDescriptor, LensListResponse,
-        LensRuntimeResponse, UpdateLensRequest, UpdateLensRuntimeRequest,
-    },
     material::{
         CreateMaterialRequest, MaterialListResponse, MaterialResponse, PromoteMaterialRequest,
     },
@@ -67,24 +56,11 @@ use crate::{
     service::{
         ConversationBranchResponse, ConversationDetail, ConversationResponse, ConversationService,
         ConversationSummary, ConversationThreadDetail, CreateConversationBranchRequest,
-        CreateSpaceRequest, CreateTeamRequest, CreateTopologyRunRequest,
-        CreateWorkspaceAttachmentRequest, SpaceListResponse, SpaceResponse, SpaceService,
-        TeamListResponse, TeamResponse, TeamService, TopologyRunDetailResponse,
-        TopologyRunResponse, TopologyRunService, UpdateSpaceRequest, UpdateTeamRequest,
-        UpdateWorkspaceTrustRequest, WorkspaceAttachmentListResponse, WorkspaceAttachmentResponse,
-        WorkspaceAttachmentService,
+        CreateSpaceRequest, CreateWorkspaceAttachmentRequest, SpaceListResponse, SpaceResponse,
+        SpaceService, UpdateSpaceRequest, UpdateWorkspaceTrustRequest,
+        WorkspaceAttachmentListResponse, WorkspaceAttachmentResponse, WorkspaceAttachmentService,
     },
     settings::{SaveProviderSettings, SaveSettingsRequest, SettingsResponse},
-    shared_reference::{
-        CreateSharedReferenceEventRequest, SharedReferenceDetailResponse,
-        SharedReferenceInteractionResponse, SharedReferenceListQuery, SharedReferenceListResponse,
-        UpdateContextDefinitionReferenceRequest, UpdateOrchestrationFlowReferenceRequest,
-        UpdateTeamTopologyReferenceRequest,
-    },
-    space_extension::{
-        CreateSpaceExtensionRequest, SpaceExtensionListResponse, SpaceExtensionResponse,
-        UpdateSpaceExtensionRequest,
-    },
     state::AppState,
     supervision::{RunDetailResponse, RunListQuery, RunListResponse},
     voice::{
@@ -281,6 +257,129 @@ pub async fn operator_overview(
     Ok(Json(crate::operator::operator_overview(&state).await?))
 }
 
+fn agent_definition_response(
+    definition: swage_storage::AgentDefinition,
+) -> AgentDefinitionResponse {
+    AgentDefinitionResponse {
+        id: definition.id,
+        space_id: definition.space_id,
+        display_name: definition.display_name,
+        description: definition.description,
+        instructions: definition.instructions,
+        model_id: definition.model_id,
+        tool_permissions: definition.tool_permissions,
+        skills: definition.skills,
+        output_schema: definition.output_schema,
+        output_max_retries: definition.output_max_retries,
+        created_at: definition.created_at,
+        updated_at: definition.updated_at,
+    }
+}
+
+pub async fn list_agent_definitions(
+    State(state): State<AppState>,
+    Query(query): Query<AgentDefinitionScopeQuery>,
+) -> Result<Json<AgentDefinitionListResponse>, ApiError> {
+    let definitions = state
+        .storage
+        .list_agent_definitions(query.space_id)
+        .await
+        .map_err(GatewayError::from)?
+        .into_iter()
+        .map(agent_definition_response)
+        .collect();
+    Ok(Json(AgentDefinitionListResponse { definitions }))
+}
+
+fn new_agent_definition(
+    id: String,
+    request: UpdateAgentDefinitionRequest,
+) -> swage_storage::NewAgentDefinition {
+    swage_storage::NewAgentDefinition {
+        id,
+        space_id: request.space_id,
+        display_name: request.display_name,
+        description: request.description,
+        instructions: request.instructions,
+        model_id: request.model_id,
+        tool_permissions: request.tool_permissions,
+        skills: request.skills,
+        output_schema: request.output_schema,
+        output_max_retries: request.output_max_retries,
+    }
+}
+
+fn mutation_response(case: crate::change_case::AppliedCase) -> AgentDefinitionMutationResponse {
+    AgentDefinitionMutationResponse {
+        version_id: case.version_id,
+        entity_id: case.entity_id,
+        summary: case.summary,
+    }
+}
+
+pub async fn create_agent_definition(
+    State(state): State<AppState>,
+    Json(request): Json<CreateAgentDefinitionRequest>,
+) -> Result<Json<AgentDefinitionMutationResponse>, ApiError> {
+    let definition = new_agent_definition(
+        request.id,
+        UpdateAgentDefinitionRequest {
+            space_id: request.space_id,
+            display_name: request.display_name,
+            description: request.description,
+            instructions: request.instructions,
+            model_id: request.model_id,
+            tool_permissions: request.tool_permissions,
+            skills: request.skills,
+            output_schema: request.output_schema,
+            output_max_retries: request.output_max_retries,
+        },
+    );
+    let applied = crate::change_case::apply_change(
+        &state,
+        crate::change_case::ChangeOperation::UpsertAgentDefinition { definition },
+        "operator_http",
+        None,
+    )
+    .await?;
+    Ok(Json(mutation_response(applied)))
+}
+
+pub async fn update_agent_definition(
+    State(state): State<AppState>,
+    Path(agent_id): Path<String>,
+    Json(request): Json<UpdateAgentDefinitionRequest>,
+) -> Result<Json<AgentDefinitionMutationResponse>, ApiError> {
+    let applied = crate::change_case::apply_change(
+        &state,
+        crate::change_case::ChangeOperation::UpsertAgentDefinition {
+            definition: new_agent_definition(agent_id, request),
+        },
+        "operator_http",
+        None,
+    )
+    .await?;
+    Ok(Json(mutation_response(applied)))
+}
+
+pub async fn delete_agent_definition(
+    State(state): State<AppState>,
+    Path(agent_id): Path<String>,
+    Query(query): Query<AgentDefinitionScopeQuery>,
+) -> Result<Json<AgentDefinitionMutationResponse>, ApiError> {
+    let applied = crate::change_case::apply_change(
+        &state,
+        crate::change_case::ChangeOperation::DeleteAgentDefinition {
+            agent_id,
+            space_id: query.space_id,
+        },
+        "operator_http",
+        None,
+    )
+    .await?;
+    Ok(Json(mutation_response(applied)))
+}
+
 /// `GET /api/operator/search` — search durable operator-visible history.
 pub async fn operator_search(
     State(state): State<AppState>,
@@ -316,201 +415,6 @@ pub async fn operator_usage(
     Query(query): Query<OperatorUsageQuery>,
 ) -> Result<Json<OperatorUsageResponse>, ApiError> {
     Ok(Json(crate::audit::operator_usage(&state, query).await?))
-}
-
-/// `GET /api/spaces/:id/lens-runtime` — inspect the active lens for a space.
-pub async fn get_lens_runtime(
-    State(state): State<AppState>,
-    Path(space_id): Path<Uuid>,
-) -> Result<Json<LensRuntimeResponse>, ApiError> {
-    Ok(Json(crate::lens::get_lens_runtime(&state, space_id).await?))
-}
-
-/// `GET /api/lenses` — list durable lens records.
-pub async fn list_lenses(
-    State(state): State<AppState>,
-) -> Result<Json<LensListResponse>, ApiError> {
-    Ok(Json(crate::lens::list_lenses(&state).await?))
-}
-
-/// `POST /api/lenses` — create an authored lens.
-pub async fn create_lens(
-    State(state): State<AppState>,
-    Json(request): Json<CreateLensRequest>,
-) -> Result<(StatusCode, Json<LensDescriptor>), ApiError> {
-    let service = BuilderConfigurationService::new(state.clone());
-    Ok((
-        StatusCode::CREATED,
-        Json(
-            service
-                .create_lens(request, None, None, "visual_builder")
-                .await?,
-        ),
-    ))
-}
-
-/// `PUT /api/lenses/:id` — update an authored or installed lens.
-pub async fn update_lens(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-    Json(request): Json<UpdateLensRequest>,
-) -> Result<Json<LensDescriptor>, ApiError> {
-    let service = BuilderConfigurationService::new(state.clone());
-    Ok(Json(
-        service
-            .update_lens(&id, request, None, None, "visual_builder")
-            .await?,
-    ))
-}
-
-/// `POST /api/lenses/install` — install a premade lens into durable storage.
-pub async fn install_lens(
-    State(state): State<AppState>,
-    Json(request): Json<InstallLensRequest>,
-) -> Result<(StatusCode, Json<LensDescriptor>), ApiError> {
-    let service = BuilderConfigurationService::new(state.clone());
-    Ok((
-        StatusCode::CREATED,
-        Json(
-            service
-                .install_lens_preset(request, None, None, "visual_builder")
-                .await?,
-        ),
-    ))
-}
-
-/// `PUT /api/spaces/:id/lens-runtime` — persist the active lens for a space.
-pub async fn update_lens_runtime(
-    State(state): State<AppState>,
-    Path(space_id): Path<Uuid>,
-    Json(request): Json<UpdateLensRuntimeRequest>,
-) -> Result<Json<LensRuntimeResponse>, ApiError> {
-    Ok(Json(
-        crate::lens::update_lens_runtime(&state, space_id, request).await?,
-    ))
-}
-
-/// `GET /api/shared-objects` — list shared reference objects for a space.
-pub async fn list_shared_objects(
-    State(state): State<AppState>,
-    Query(query): Query<SharedReferenceListQuery>,
-) -> Result<Json<SharedReferenceListResponse>, ApiError> {
-    Ok(Json(
-        crate::shared_reference::list_shared_objects(&state, query).await?,
-    ))
-}
-
-/// `GET /api/shared-objects/:kind/:id` — inspect one shared reference object.
-pub async fn get_shared_object(
-    State(state): State<AppState>,
-    Path((kind, id)): Path<(String, String)>,
-) -> Result<Json<SharedReferenceDetailResponse>, ApiError> {
-    Ok(Json(
-        crate::shared_reference::get_shared_object(
-            &state,
-            parse_shared_reference_kind(&kind)?,
-            &id,
-        )
-        .await?,
-    ))
-}
-
-/// `POST /api/shared-objects/:kind/:id/events` — persist a replayable interaction event.
-pub async fn create_shared_object_event(
-    State(state): State<AppState>,
-    Path((kind, id)): Path<(String, String)>,
-    Json(request): Json<CreateSharedReferenceEventRequest>,
-) -> Result<(StatusCode, Json<SharedReferenceInteractionResponse>), ApiError> {
-    Ok((
-        StatusCode::CREATED,
-        Json(
-            crate::shared_reference::create_shared_object_event(
-                &state,
-                parse_shared_reference_kind(&kind)?,
-                &id,
-                request,
-            )
-            .await?,
-        ),
-    ))
-}
-
-/// `PUT /api/shared-objects/team_topology/:id` — update the editable team-topology shared object.
-pub async fn get_team_topology_reference(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
-) -> Result<Json<SharedReferenceDetailResponse>, ApiError> {
-    Ok(Json(
-        crate::shared_reference::get_shared_object(
-            &state,
-            swage_storage::SharedReferenceKind::TeamTopology,
-            &id.to_string(),
-        )
-        .await?,
-    ))
-}
-
-/// `PUT /api/shared-objects/team_topology/:id` — update the editable team-topology shared object.
-pub async fn update_team_topology_reference(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
-    Json(request): Json<UpdateTeamTopologyReferenceRequest>,
-) -> Result<Json<SharedReferenceDetailResponse>, ApiError> {
-    Ok(Json(
-        crate::shared_reference::update_team_topology_reference(&state, id, request).await?,
-    ))
-}
-
-/// `PUT /api/shared-objects/orchestration_flow/:id` — update a durable orchestration-flow shared object.
-pub async fn update_orchestration_flow_reference(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-    Json(request): Json<UpdateOrchestrationFlowReferenceRequest>,
-) -> Result<Json<SharedReferenceDetailResponse>, ApiError> {
-    Ok(Json(
-        crate::shared_reference::update_orchestration_flow_reference(&state, &id, request).await?,
-    ))
-}
-
-/// `GET /api/shared-objects/orchestration_flow/:id` — inspect one durable orchestration-flow shared object.
-pub async fn get_orchestration_flow_reference(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> Result<Json<SharedReferenceDetailResponse>, ApiError> {
-    Ok(Json(
-        crate::shared_reference::get_shared_object(
-            &state,
-            swage_storage::SharedReferenceKind::OrchestrationFlow,
-            &id,
-        )
-        .await?,
-    ))
-}
-
-/// `PUT /api/shared-objects/context_definition/:id` — update a durable context-definition shared object.
-pub async fn update_context_definition_reference(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-    Json(request): Json<UpdateContextDefinitionReferenceRequest>,
-) -> Result<Json<SharedReferenceDetailResponse>, ApiError> {
-    Ok(Json(
-        crate::shared_reference::update_context_definition_reference(&state, &id, request).await?,
-    ))
-}
-
-/// `GET /api/shared-objects/context_definition/:id` — inspect one durable context-definition shared object.
-pub async fn get_context_definition_reference(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> Result<Json<SharedReferenceDetailResponse>, ApiError> {
-    Ok(Json(
-        crate::shared_reference::get_shared_object(
-            &state,
-            swage_storage::SharedReferenceKind::ContextDefinition,
-            &id,
-        )
-        .await?,
-    ))
 }
 
 /// `GET /api/secrets` — list governed secrets without revealing raw values.
@@ -581,11 +485,6 @@ pub async fn validate_secret(
     Path(id): Path<Uuid>,
 ) -> Result<Json<SecretValidationResponse>, ApiError> {
     Ok(Json(state.secret_manager.validate_secret(id).await?))
-}
-
-fn parse_shared_reference_kind(kind: &str) -> Result<SharedReferenceKind, ApiError> {
-    kind.parse()
-        .map_err(|error: String| ApiError::from(GatewayError::ValidationError(error)))
 }
 
 /// `GET /api/operator/runs` — inspect live and historical run supervision.
@@ -890,6 +789,21 @@ pub async fn delete_schedule(
     }
 }
 
+/// `POST /api/operator/configuration/undo` — undo a recorded configuration case.
+pub async fn undo_configuration_case(
+    State(state): State<AppState>,
+    Json(req): Json<UndoConfigurationCaseRequest>,
+) -> Result<Json<ConfigurationChangeResponse>, ApiError> {
+    let applied = crate::change_case::undo_case(&state, req.case_id, "operator_http", None).await?;
+    Ok(Json(ConfigurationChangeResponse {
+        version_id: applied.version_id,
+        entity_kind: applied.entity_kind,
+        entity_id: applied.entity_id,
+        summary: applied.summary,
+        risk_band: applied.risk_band.as_str().to_owned(),
+    }))
+}
+
 /// `GET /api/presence` — inspect gateway, client, and machine presence.
 pub async fn presence_snapshot(State(state): State<AppState>) -> Json<PresenceSnapshotResponse> {
     Json(crate::presence::snapshot_presence(&state).await)
@@ -978,11 +892,7 @@ pub struct ConversationListResponse {
     pub conversations: Vec<ConversationSummary>,
 }
 
-#[derive(Debug, Deserialize)]
-pub struct CreateConversationRequest {
-    #[serde(default)]
-    pub selected_model_id: Option<String>,
-}
+pub use swage_protocol::client::conversation::CreateConversationRequest;
 
 // ---------------------------------------------------------------------------
 // Route handlers
@@ -996,10 +906,8 @@ pub async fn create_conversation(
     payload: Option<Json<CreateConversationRequest>>,
 ) -> Result<impl IntoResponse, ApiError> {
     let svc = ConversationService::new(state.storage, state.space_store);
-    let selected_model_id = payload.and_then(|Json(request)| request.selected_model_id);
-    let resp: ConversationResponse = svc
-        .create_conversation_with_model(selected_model_id)
-        .await?;
+    let request = payload.map(|Json(request)| request).unwrap_or_default();
+    let resp: ConversationResponse = svc.create_conversation_from_request(request).await?;
     Ok((StatusCode::CREATED, Json(resp)))
 }
 
@@ -1047,9 +955,9 @@ pub async fn create_space_session(
     payload: Option<Json<CreateConversationRequest>>,
 ) -> Result<impl IntoResponse, ApiError> {
     let svc = ConversationService::new(state.storage, state.space_store);
-    let selected_model_id = payload.and_then(|Json(request)| request.selected_model_id);
+    let request = payload.map(|Json(request)| request).unwrap_or_default();
     let resp = svc
-        .create_session_in_space_with_model(space_id, selected_model_id)
+        .create_session_in_space_from_request(space_id, request)
         .await?;
     Ok((StatusCode::CREATED, Json(resp)))
 }
@@ -1173,170 +1081,6 @@ pub async fn detach_space_workspace(
     Ok(StatusCode::NO_CONTENT)
 }
 
-// ---------------------------------------------------------------------------
-// Team handlers
-// ---------------------------------------------------------------------------
-
-/// `POST /api/spaces/:space_id/teams` — create a team in a space.
-pub async fn create_team(
-    State(state): State<AppState>,
-    Path(space_id): Path<Uuid>,
-    Json(req): Json<CreateTeamRequest>,
-) -> Result<impl IntoResponse, ApiError> {
-    let svc = BuilderConfigurationService::new(state.clone());
-    let resp = svc
-        .create_team(space_id, req, None, "visual_builder")
-        .await?;
-    Ok((StatusCode::CREATED, Json(resp)))
-}
-
-/// `GET /api/spaces/:space_id/teams` — list teams in a space.
-pub async fn list_teams(
-    State(state): State<AppState>,
-    Path(space_id): Path<Uuid>,
-) -> Result<Json<TeamListResponse>, ApiError> {
-    let svc = TeamService::new(state.storage, state.space_store);
-    let resp = svc.list_teams(space_id).await?;
-    Ok(Json(resp))
-}
-
-/// `GET /api/spaces/:id/extensions` — list managed and workspace extension candidates.
-pub async fn list_space_extensions(
-    State(state): State<AppState>,
-    Path(space_id): Path<Uuid>,
-) -> Result<Json<SpaceExtensionListResponse>, ApiError> {
-    Ok(Json(
-        crate::space_extension::list_space_extensions(&state, space_id).await?,
-    ))
-}
-
-/// `POST /api/spaces/:id/extensions` — create a managed space extension.
-pub async fn create_space_extension(
-    State(state): State<AppState>,
-    Path(space_id): Path<Uuid>,
-    Json(request): Json<CreateSpaceExtensionRequest>,
-) -> Result<(StatusCode, Json<SpaceExtensionResponse>), ApiError> {
-    let service = BuilderConfigurationService::new(state.clone());
-    Ok((
-        StatusCode::CREATED,
-        Json(
-            service
-                .create_space_extension(space_id, request, None, "visual_builder")
-                .await?,
-        ),
-    ))
-}
-
-/// `PUT /api/spaces/:id/extensions/:name` — update a managed space extension.
-pub async fn update_space_extension(
-    State(state): State<AppState>,
-    Path((space_id, name)): Path<(Uuid, String)>,
-    Json(request): Json<UpdateSpaceExtensionRequest>,
-) -> Result<Json<SpaceExtensionResponse>, ApiError> {
-    let service = BuilderConfigurationService::new(state.clone());
-    Ok(Json(
-        service
-            .update_space_extension(space_id, &name, request, None, "visual_builder")
-            .await?,
-    ))
-}
-
-/// `POST /api/spaces/:id/extensions/:name/approve-workspace` — trust and import a workspace extension candidate.
-pub async fn approve_workspace_extension(
-    State(state): State<AppState>,
-    Path((space_id, name)): Path<(Uuid, String)>,
-) -> Result<Json<SpaceExtensionResponse>, ApiError> {
-    let service = BuilderConfigurationService::new(state.clone());
-    Ok(Json(
-        service
-            .approve_workspace_extension(space_id, &name, None, "visual_builder")
-            .await?,
-    ))
-}
-
-/// `GET /api/teams/:id` — fetch a team by ID.
-pub async fn get_team(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
-) -> Result<Json<TeamResponse>, ApiError> {
-    let svc = TeamService::new(state.storage, state.space_store);
-    let resp = svc.get_team(id).await?;
-    Ok(Json(resp))
-}
-
-/// `PUT /api/teams/:id` — partially update a team.
-pub async fn update_team(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
-    Json(req): Json<UpdateTeamRequest>,
-) -> Result<Json<TeamResponse>, ApiError> {
-    let svc = BuilderConfigurationService::new(state.clone());
-    let resp = svc.update_team(id, req, None, "visual_builder").await?;
-    Ok(Json(resp))
-}
-
-/// `POST /api/spaces/:id/builder/proposals` — turn a natural-language request into a reviewed config proposal.
-pub async fn create_builder_proposal(
-    State(state): State<AppState>,
-    Path(space_id): Path<Uuid>,
-    Json(request): Json<BuilderProposalRequest>,
-) -> Result<Json<BuilderProposalResponse>, ApiError> {
-    let service = BuilderConfigurationService::new(state);
-    Ok(Json(service.propose_changes(space_id, request).await?))
-}
-
-/// `POST /api/spaces/:id/builder/apply` — apply a reviewed builder proposal through the canonical config path.
-pub async fn apply_builder_proposal(
-    State(state): State<AppState>,
-    Path(space_id): Path<Uuid>,
-    Json(request): Json<BuilderApplyRequest>,
-) -> Result<(StatusCode, Json<BuilderApplyResponse>), ApiError> {
-    let service = BuilderConfigurationService::new(state);
-    let response = service.apply_operations(space_id, request).await?;
-    let status = if response.success {
-        StatusCode::OK
-    } else {
-        StatusCode::UNPROCESSABLE_ENTITY
-    };
-    Ok((status, Json(response)))
-}
-
-/// `GET /api/spaces/:id/config-versions` — inspect builder-managed configuration history.
-pub async fn list_configuration_versions(
-    State(state): State<AppState>,
-    Path(space_id): Path<Uuid>,
-    Query(query): Query<ConfigurationVersionQuery>,
-) -> Result<Json<ConfigurationVersionListResponse>, ApiError> {
-    let service = BuilderConfigurationService::new(state);
-    Ok(Json(
-        service.list_configuration_versions(space_id, query).await?,
-    ))
-}
-
-/// `POST /api/config-versions/:id/rollback` — restore a previous builder-managed configuration version.
-pub async fn rollback_configuration_version(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
-    Json(request): Json<RollbackConfigurationVersionRequest>,
-) -> Result<Json<RollbackConfigurationVersionResponse>, ApiError> {
-    let service = BuilderConfigurationService::new(state);
-    Ok(Json(
-        service
-            .rollback_configuration_version(id, request.session_id, "operator_api")
-            .await?,
-    ))
-}
-
-/// `DELETE /api/teams/:id` — delete a team.
-pub async fn delete_team(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
-) -> Result<StatusCode, ApiError> {
-    let svc = TeamService::new(state.storage, state.space_store);
-    svc.delete_team(id).await?;
-    Ok(StatusCode::NO_CONTENT)
-}
-
 /// `POST /api/conversations/:id/branches` — create a branch thread.
 pub async fn create_conversation_branch(
     State(state): State<AppState>,
@@ -1368,139 +1112,6 @@ pub async fn get_thread_detail(
     Ok(Json(resp))
 }
 
-/// `POST /api/teams/:id/runs` — validate and execute a topology run.
-pub async fn create_topology_run(
-    State(state): State<AppState>,
-    Path(team_id): Path<Uuid>,
-    Json(req): Json<CreateTopologyRunRequest>,
-) -> Result<impl IntoResponse, ApiError> {
-    let svc = TopologyRunService::new(state);
-    let resp = svc.create_run(team_id, req).await?;
-    Ok((StatusCode::CREATED, Json(resp)))
-}
-
-/// `GET /api/teams/:id/runs` — list topology runs for a team.
-pub async fn list_topology_runs(
-    State(state): State<AppState>,
-    Path(team_id): Path<Uuid>,
-) -> Result<Json<Vec<TopologyRunResponse>>, ApiError> {
-    let svc = TopologyRunService::new(state);
-    let resp = svc.list_runs(team_id).await?;
-    Ok(Json(resp))
-}
-
-/// `GET /api/topology-runs/:id` — inspect a topology run and its trace.
-pub async fn get_topology_run(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
-) -> Result<Json<TopologyRunDetailResponse>, ApiError> {
-    let svc = TopologyRunService::new(state);
-    let resp = svc.get_run(id).await?;
-    Ok(Json(resp))
-}
-
-/// `GET /api/spaces/:id/topology-flows` — list durable topology flow definitions.
-pub async fn list_topology_flows(
-    State(state): State<AppState>,
-    Path(space_id): Path<Uuid>,
-) -> Result<Json<TopologyFlowDefinitionListResponse>, ApiError> {
-    Ok(Json(
-        crate::authoring_definition::list_topology_flows(&state, space_id).await?,
-    ))
-}
-
-/// `POST /api/spaces/:id/topology-flows` — create a durable topology flow definition.
-pub async fn create_topology_flow(
-    State(state): State<AppState>,
-    Path(space_id): Path<Uuid>,
-    Json(request): Json<CreateTopologyFlowDefinitionRequest>,
-) -> Result<(StatusCode, Json<TopologyFlowDefinitionRecord>), ApiError> {
-    Ok((
-        StatusCode::CREATED,
-        Json(crate::authoring_definition::create_topology_flow(&state, space_id, request).await?),
-    ))
-}
-
-/// `GET /api/spaces/:id/topology-flows/:name` — fetch one durable topology flow definition.
-pub async fn get_topology_flow(
-    State(state): State<AppState>,
-    Path((space_id, name)): Path<(Uuid, String)>,
-) -> Result<Json<TopologyFlowDefinitionRecord>, ApiError> {
-    Ok(Json(
-        crate::authoring_definition::get_topology_flow(&state, space_id, &name).await?,
-    ))
-}
-
-/// `PUT /api/spaces/:id/topology-flows/:name` — update a durable topology flow definition.
-pub async fn update_topology_flow(
-    State(state): State<AppState>,
-    Path((space_id, name)): Path<(Uuid, String)>,
-    Json(request): Json<UpdateTopologyFlowDefinitionRequest>,
-) -> Result<Json<TopologyFlowDefinitionRecord>, ApiError> {
-    Ok(Json(
-        crate::authoring_definition::update_topology_flow(&state, space_id, &name, request).await?,
-    ))
-}
-
-/// `GET /api/spaces/:id/context-definitions` — list durable context definition records.
-pub async fn list_context_definitions(
-    State(state): State<AppState>,
-    Path(space_id): Path<Uuid>,
-) -> Result<Json<ContextDefinitionListResponse>, ApiError> {
-    Ok(Json(
-        crate::authoring_definition::list_context_definitions(&state, space_id).await?,
-    ))
-}
-
-/// `POST /api/spaces/:id/context-definitions` — create a durable context definition.
-pub async fn create_context_definition(
-    State(state): State<AppState>,
-    Path(space_id): Path<Uuid>,
-    Json(request): Json<CreateContextDefinitionRequest>,
-) -> Result<(StatusCode, Json<ContextDefinitionRecord>), ApiError> {
-    Ok((
-        StatusCode::CREATED,
-        Json(
-            crate::authoring_definition::create_context_definition(&state, space_id, request)
-                .await?,
-        ),
-    ))
-}
-
-/// `GET /api/spaces/:id/context-definitions/:name` — fetch one durable context definition.
-pub async fn get_context_definition(
-    State(state): State<AppState>,
-    Path((space_id, name)): Path<(Uuid, String)>,
-) -> Result<Json<ContextDefinitionRecord>, ApiError> {
-    Ok(Json(
-        crate::authoring_definition::get_context_definition(&state, space_id, &name).await?,
-    ))
-}
-
-/// `PUT /api/spaces/:id/context-definitions/:name` — update a durable context definition.
-pub async fn update_context_definition(
-    State(state): State<AppState>,
-    Path((space_id, name)): Path<(Uuid, String)>,
-    Json(request): Json<UpdateContextDefinitionRequest>,
-) -> Result<Json<ContextDefinitionRecord>, ApiError> {
-    Ok(Json(
-        crate::authoring_definition::update_context_definition(&state, space_id, &name, request)
-            .await?,
-    ))
-}
-
-/// `POST /api/spaces/:id/context-definitions/:name/preview` — render a stored context definition.
-pub async fn preview_context_definition(
-    State(state): State<AppState>,
-    Path((space_id, name)): Path<(Uuid, String)>,
-    Json(request): Json<PreviewContextDefinitionRequest>,
-) -> Result<Json<PreviewContextDefinitionResponse>, ApiError> {
-    Ok(Json(
-        crate::authoring_definition::preview_context_definition(&state, space_id, &name, request)
-            .await?,
-    ))
-}
-
 // ---------------------------------------------------------------------------
 // Skills listing
 // ---------------------------------------------------------------------------
@@ -1521,8 +1132,7 @@ pub struct SkillItem {
     pub name: String,
     pub display_name: Option<String>,
     pub description: String,
-    /// Hierarchy level where this skill was resolved: "agent", "space",
-    /// "team", "lens", or "global".
+    /// Hierarchy level where this skill was resolved: "agent", "space", or "global".
     pub level: String,
     /// Tool names the skill requests access to.
     pub tools: Vec<String>,
@@ -1607,7 +1217,6 @@ pub async fn list_skills(
             let always_active = s.level == HierarchyLevel::Agent;
             let level = match s.level {
                 HierarchyLevel::Agent => "agent",
-                HierarchyLevel::Team => "team",
                 HierarchyLevel::Space => "space",
                 HierarchyLevel::Global => "global",
             };
@@ -2071,6 +1680,9 @@ async fn execute_external_delegate_message(
         &delegate_msg.recipient_agent_id,
     );
 
+    // Delegated activity must not reach the parent WebSocket. Shared assembly
+    // still emits ContextAssembled into this silent channel; the stored child-
+    // turn snapshot is the delegated assembly's audit record.
     let (silent_ws_tx, silent_ws_rx) = tokio::sync::mpsc::unbounded_channel();
     drop(silent_ws_rx);
     let dispatcher_build = crate::turn::build_gateway_dispatcher_for_unattended_execution(
@@ -2081,7 +1693,7 @@ async fn execute_external_delegate_message(
             session_metadata: None,
             space_id: Some(space_id),
             active_workspace_attachment_id: None,
-            ws_tx: silent_ws_tx,
+            ws_tx: silent_ws_tx.clone(),
             session_id: None,
             turn_id: sender_turn_id,
         },
@@ -2105,6 +1717,14 @@ async fn execute_external_delegate_message(
         ))),
         router: router.clone(),
         active_delegations: swage_agent::active_delegations(),
+        context_assembler: Some(crate::turn::delegated_context_assembler(
+            state.clone(),
+            space.clone(),
+            target_resolved.clone(),
+            delegate_msg.recipient_agent_id.clone(),
+            target_agent_config.working_directory.display().to_string(),
+            silent_ws_tx,
+        )),
     };
 
     let result = executor
@@ -2547,52 +2167,20 @@ mod tests {
     use uuid::Uuid;
 
     use swage_provider::LlmProvider;
-    use swage_storage::{
-        AppLens,
-        store::{MessageStore, SessionStore, SpaceStore, Storage, TeamStore},
-    };
+    use swage_storage::store::{MessageStore, SessionStore, SpaceStore, Storage};
 
     use super::*;
     use crate::{
         server::build_router,
         state::AppState,
-        turn::tests::{
-            CapturingMultiRoundProvider, MockProvider, MockStorage, MultiRoundMockProvider,
-        },
+        test_support::SwageHomeGuard,
+        turn::tests::{CapturingMultiRoundProvider, MockProvider, MockStorage},
         websocket::ServerEvent,
     };
 
     // -----------------------------------------------------------------------
     // Test helpers
     // -----------------------------------------------------------------------
-
-    fn team_agents(ids: &[&str]) -> Vec<swage_storage::model::TeamAgentDefinition> {
-        ids.iter()
-            .map(|id| swage_storage::model::TeamAgentDefinition {
-                id: (*id).to_string(),
-                display_name: (*id).to_string(),
-                description: String::new(),
-                instructions: String::new(),
-                model: None,
-            })
-            .collect()
-    }
-
-    fn team_tasks(names: &[&str]) -> Vec<swage_storage::model::TeamTaskDefinition> {
-        names
-            .iter()
-            .map(|name| swage_storage::model::TeamTaskDefinition {
-                name: (*name).to_string(),
-                description: String::new(),
-                instructions: format!("Task {name}"),
-                model: None,
-                output_schema: None,
-                max_output_retries: None,
-                tool_allow: None,
-                tool_deny: None,
-            })
-            .collect()
-    }
 
     /// Build an axum `Router` backed by an empty `MockStorage`.
     ///
@@ -2638,6 +2226,24 @@ mod tests {
     async fn body_json(resp: axum::response::Response) -> serde_json::Value {
         let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
         serde_json::from_slice(&bytes).unwrap()
+    }
+
+    async fn wait_for_terminal_message_status(
+        client: &swage_client::http::GatewayClient,
+        message_id: Uuid,
+    ) -> serde_json::Value {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while std::time::Instant::now() < deadline {
+            let current = client
+                .get_message_status(message_id)
+                .await
+                .expect("query message status");
+            if matches!(current["status"].as_str(), Some("delivered" | "failed")) {
+                return current;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        panic!("delegate message should leave pending before the deadline");
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -2727,21 +2333,7 @@ mod tests {
             .expect("message id string")
             .parse::<Uuid>()
             .expect("message id uuid");
-        let message_status = {
-            let mut terminal = None;
-            for _ in 0..50 {
-                let current = client
-                    .get_message_status(message_id)
-                    .await
-                    .expect("query message status");
-                if matches!(current["status"].as_str(), Some("delivered" | "failed")) {
-                    terminal = Some(current);
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            }
-            terminal.expect("delegate message should leave pending")
-        };
+        let message_status = wait_for_terminal_message_status(&client, message_id).await;
         assert!(
             matches!(
                 message_status["status"].as_str(),
@@ -2867,21 +2459,7 @@ mod tests {
             .parse::<Uuid>()
             .expect("message id uuid");
 
-        let message_status = {
-            let mut terminal = None;
-            for _ in 0..50 {
-                let current = client
-                    .get_message_status(message_id)
-                    .await
-                    .expect("query message status");
-                if matches!(current["status"].as_str(), Some("delivered" | "failed")) {
-                    terminal = Some(current);
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            }
-            terminal.expect("delegate message should leave pending")
-        };
+        let message_status = wait_for_terminal_message_status(&client, message_id).await;
 
         assert_eq!(message_status["status"], "failed");
         let stored = storage
@@ -2902,10 +2480,11 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn external_delegate_message_includes_target_instructions() {
+    async fn external_delegate_message_uses_shared_context_assembly() {
         use swage_agent::MessageRouter;
         use swage_core::{FinishReason, MessageKind, StreamChunk};
         use swage_storage::model::NewAgentMessage;
+        use swage_storage::store::{AuditStore, ContextSnapshotStore, ThreadStore, TurnStore};
 
         let (provider, captured_requests) = CapturingMultiRoundProvider::new(vec![vec![
             StreamChunk::Delta {
@@ -2921,6 +2500,16 @@ mod tests {
             .get_or_create_default()
             .await
             .expect("get default space");
+        let swage_home = SwageHomeGuard::new();
+        let target_skill_dir = swage_home
+            .path()
+            .join("spaces/default/agents/agent-b/skills/external-specialist");
+        std::fs::create_dir_all(&target_skill_dir).expect("create target skill directory");
+        std::fs::write(
+            target_skill_dir.join("SKILL.md"),
+            "---\ndescription: External specialist behaviour\n---\nUse the external specialist skill.\n",
+        )
+        .expect("write target skill");
         let config = swage_config::ResolvedConfig {
             instructions: "Use the external delegated specialist instructions.".to_string(),
             ..swage_config::ResolvedConfig::default()
@@ -2949,6 +2538,45 @@ mod tests {
             .await
             .expect("external delegation should complete");
 
+        let child_sessions = storage
+            .list_sessions_by_agent_id("agent-b")
+            .await
+            .expect("list child sessions");
+        assert_eq!(child_sessions.len(), 1, "expected one child session");
+        let child_threads = storage
+            .list_by_session(child_sessions[0].id)
+            .await
+            .expect("list child threads");
+        assert_eq!(child_threads.len(), 1, "expected one child thread");
+        let child_turns = storage
+            .list_turns_by_thread(child_threads[0].id)
+            .await
+            .expect("list child turns");
+        assert_eq!(child_turns.len(), 1, "expected one child turn");
+        let child_snapshot = storage
+            .get_snapshot(child_turns[0].id)
+            .await
+            .expect("read child context snapshot")
+            .expect("external delegated assembly report should be persisted");
+        let child_snapshot: serde_json::Value = serde_json::from_str(&child_snapshot)
+            .expect("external delegated context snapshot should be JSON");
+        assert!(
+            child_snapshot["elements"].is_array(),
+            "external delegated assembly report should contain its element decisions"
+        );
+        let child_audit = storage
+            .list_audit_events_by_session(child_sessions[0].id)
+            .await
+            .expect("list child audit events");
+        assert!(
+            child_audit.iter().any(|event| {
+                event.entity_id == crate::experimentation::LOCATION_CONTEXT_ASSEMBLY
+                    && event.event_kind == "variant_selected"
+                    && event.metadata["turn_id"] == serde_json::json!(child_turns[0].id)
+            }),
+            "external delegated assembly selection should be recorded against the child turn"
+        );
+
         let captured_requests = captured_requests.lock().unwrap();
         assert_eq!(captured_requests.len(), 1);
         let request_text = captured_requests[0]
@@ -2960,6 +2588,21 @@ mod tests {
         assert!(
             request_text.contains("Use the external delegated specialist instructions."),
             "external delegated provider request should include target agent instructions: {request_text}"
+        );
+        assert!(
+            request_text.contains("You are an agent running on Swage"),
+            "external delegated provider request should include platform identity: {request_text}"
+        );
+        assert!(
+            request_text.contains("Space: the default space")
+                && request_text.contains("Working directory:")
+                && request_text.contains("Session started:"),
+            "external delegated provider request should include the child session's place: {request_text}"
+        );
+        assert!(
+            request_text.contains("## Skills available in this session")
+                && request_text.contains("external-specialist — External specialist behaviour"),
+            "external delegated provider request should include the target skill catalogue: {request_text}"
         );
     }
 
@@ -3120,116 +2763,6 @@ mod tests {
         assert!(body["space_id"].is_string());
         assert!(body["created_at"].is_string());
         assert!(body["last_activity"].is_string());
-    }
-
-    #[tokio::test]
-    async fn get_lens_runtime_defaults_to_assistant() {
-        let (router, storage) = make_router();
-        let space = storage
-            .get_or_create_default()
-            .await
-            .expect("default space");
-
-        let resp = router
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri(format!("/api/spaces/{}/lens-runtime", space.id))
-                    .body(axum::body::Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body = body_json(resp).await;
-        assert_eq!(body["active_lens"], "assistant");
-        assert_eq!(body["available_lenses"].as_array().unwrap().len(), 2);
-        let stage_modules = body["stage_modules"].as_array().unwrap();
-        assert_eq!(stage_modules.len(), 2);
-        assert_eq!(stage_modules[0]["kind"], "shared_reference");
-        assert_eq!(stage_modules[1]["kind"], "active_team_topology");
-    }
-
-    #[tokio::test]
-    async fn put_lens_runtime_persists_builder_lens() {
-        let (router, storage) = make_router();
-        let space = storage
-            .get_or_create_default()
-            .await
-            .expect("default space");
-
-        let resp = router
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri(format!("/api/spaces/{}/lens-runtime", space.id))
-                    .header("content-type", "application/json")
-                    .body(axum::body::Body::from(r#"{"lens":"builder"}"#))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body = body_json(resp).await;
-        assert_eq!(body["active_lens"], "builder");
-        assert_eq!(body["stage_modules"].as_array().unwrap().len(), 0);
-
-        let stored = swage_storage::store::LensStore::get_active_lens(&*storage, space.id)
-            .await
-            .expect("stored lens");
-        assert_eq!(stored.active_lens, AppLens::builder());
-    }
-
-    #[tokio::test]
-    async fn switching_lenses_does_not_change_workflow_capabilities() {
-        let (router, storage) = make_router();
-        let space = storage
-            .get_or_create_default()
-            .await
-            .expect("default space");
-
-        let before = router
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri("/api/capabilities")
-                    .body(axum::body::Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let before_body = body_json(before).await;
-
-        let update = router
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri(format!("/api/spaces/{}/lens-runtime", space.id))
-                    .header("content-type", "application/json")
-                    .body(axum::body::Body::from(r#"{"lens":"builder"}"#))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(update.status(), StatusCode::OK);
-
-        let after = router
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri("/api/capabilities")
-                    .body(axum::body::Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let after_body = body_json(after).await;
-
-        assert_eq!(before_body, after_body);
     }
 
     #[tokio::test]
@@ -3928,400 +3461,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Team routes
     // -----------------------------------------------------------------------
-
-    #[tokio::test]
-    async fn post_space_teams_returns_201_with_json() {
-        let (router, storage) = make_router();
-        let space = storage
-            .create(swage_storage::model::NewSpace {
-                name: "team-space".into(),
-                slug: "team-space".into(),
-            })
-            .await
-            .unwrap();
-
-        let resp = router
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(format!("/api/spaces/{}/teams", space.id))
-                    .header("content-type", "application/json")
-                    .body(axum::body::Body::from(
-                        r#"{"name":"research","description":"Research team","entry_agent_id":"planner","agents":[{"id":"planner","display_name":"planner"},{"id":"reviewer","display_name":"reviewer"}],"tasks":[]}"#,
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(resp.status(), StatusCode::CREATED);
-        let body = body_json(resp).await;
-        assert_eq!(body["name"].as_str().unwrap(), "research");
-        assert_eq!(body["entry_agent_id"].as_str().unwrap(), "planner");
-        let members = body["members"].as_array().unwrap();
-        assert_eq!(members.len(), 2);
-        assert_eq!(members[0].as_str().unwrap(), "planner");
-        assert_eq!(members[1].as_str().unwrap(), "reviewer");
-    }
-
-    #[tokio::test]
-    async fn get_space_teams_returns_200_with_array() {
-        let (router, storage) = make_router();
-        let space = storage
-            .create(swage_storage::model::NewSpace {
-                name: "team-list-space".into(),
-                slug: "team-list-space".into(),
-            })
-            .await
-            .unwrap();
-
-        storage
-            .create_team(swage_storage::model::NewTeam {
-                space_id: space.id,
-                name: "research".into(),
-                description: String::new(),
-                entry_agent_id: "planner".into(),
-                agents: team_agents(&["planner"]),
-                tasks: vec![],
-            })
-            .await
-            .unwrap();
-        storage
-            .create_team(swage_storage::model::NewTeam {
-                space_id: space.id,
-                name: "review".into(),
-                description: String::new(),
-                entry_agent_id: "reviewer".into(),
-                agents: team_agents(&["reviewer"]),
-                tasks: vec![],
-            })
-            .await
-            .unwrap();
-
-        let resp = router
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri(format!("/api/spaces/{}/teams", space.id))
-                    .body(axum::body::Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body = body_json(resp).await;
-        let teams = body["teams"].as_array().unwrap();
-        assert_eq!(teams.len(), 2);
-    }
-
-    #[tokio::test]
-    async fn put_team_returns_200_and_updates_members() {
-        let (router, storage) = make_router();
-        let space = storage
-            .create(swage_storage::model::NewSpace {
-                name: "team-update-space".into(),
-                slug: "team-update-space".into(),
-            })
-            .await
-            .unwrap();
-        let team = storage
-            .create_team(swage_storage::model::NewTeam {
-                space_id: space.id,
-                name: "research".into(),
-                description: "Initial".into(),
-                entry_agent_id: "planner".into(),
-                agents: team_agents(&["planner"]),
-                tasks: vec![],
-            })
-            .await
-            .unwrap();
-
-        let resp = router
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri(format!("/api/teams/{}", team.id))
-                    .header("content-type", "application/json")
-                    .body(axum::body::Body::from(
-                        r#"{"entry_agent_id":"reviewer","members":["critic"]}"#,
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body = body_json(resp).await;
-        assert_eq!(body["entry_agent_id"].as_str().unwrap(), "reviewer");
-        let members = body["members"].as_array().unwrap();
-        assert_eq!(members.len(), 2);
-        assert_eq!(members[0].as_str().unwrap(), "reviewer");
-        assert_eq!(members[1].as_str().unwrap(), "critic");
-    }
-
-    #[tokio::test]
-    async fn delete_team_returns_204() {
-        let (router, storage) = make_router();
-        let space = storage
-            .create(swage_storage::model::NewSpace {
-                name: "team-delete-space".into(),
-                slug: "team-delete-space".into(),
-            })
-            .await
-            .unwrap();
-        let team = storage
-            .create_team(swage_storage::model::NewTeam {
-                space_id: space.id,
-                name: "temporary".into(),
-                description: String::new(),
-                entry_agent_id: "planner".into(),
-                agents: team_agents(&["planner"]),
-                tasks: vec![],
-            })
-            .await
-            .unwrap();
-
-        let resp = router
-            .oneshot(
-                Request::builder()
-                    .method("DELETE")
-                    .uri(format!("/api/teams/{}", team.id))
-                    .body(axum::body::Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
-        assert!(storage.get_team(team.id).await.unwrap().is_none());
-    }
-
-    #[tokio::test]
-    async fn post_team_runs_returns_201_with_trace() {
-        let provider = Arc::new(MultiRoundMockProvider::new(vec![
-            vec![
-                swage_core::StreamChunk::Delta {
-                    content: "{\"decision\":\"review\",\"draft\":\"hello\"}".into(),
-                },
-                swage_core::StreamChunk::Usage(swage_core::TokenUsage {
-                    input_tokens: 10,
-                    output_tokens: 6,
-                }),
-                swage_core::StreamChunk::Done {
-                    finish_reason: Some(swage_core::FinishReason::Stop),
-                },
-            ],
-            vec![
-                swage_core::StreamChunk::Delta {
-                    content: "{\"result\":\"approved\"}".into(),
-                },
-                swage_core::StreamChunk::Usage(swage_core::TokenUsage {
-                    input_tokens: 8,
-                    output_tokens: 4,
-                }),
-                swage_core::StreamChunk::Done {
-                    finish_reason: Some(swage_core::FinishReason::Stop),
-                },
-            ],
-        ]));
-        let storage = Arc::new(MockStorage::new());
-        let (router, storage) =
-            make_router_with_provider(provider as Arc<dyn LlmProvider>, storage);
-
-        let space = storage
-            .create(swage_storage::model::NewSpace {
-                name: "team-run-space".into(),
-                slug: "team-run-space".into(),
-            })
-            .await
-            .unwrap();
-        let team = storage
-            .create_team(swage_storage::model::NewTeam {
-                space_id: space.id,
-                name: "analysis".into(),
-                description: String::new(),
-                entry_agent_id: "planner".into(),
-                agents: team_agents(&["planner", "reviewer"]),
-                tasks: team_tasks(&["draft-plan", "review-plan"]),
-            })
-            .await
-            .unwrap();
-
-        let topology_source = r#"
-import swage_topology as topo
-
-def build_topology():
-    return topo.graph(
-        "plan",
-        [
-            topo.llm_node(
-                "plan",
-                "planner",
-                "draft-plan",
-                output_schema={
-                    "type": "object",
-                    "properties": {
-                        "decision": {"type": "string"},
-                        "draft": {"type": "string"}
-                    }
-                }
-            ),
-            topo.llm_node(
-                "review",
-                "reviewer",
-                "review-plan",
-                output_schema={
-                    "type": "object",
-                    "properties": {
-                        "result": {"type": "string"}
-                    }
-                }
-            ),
-        ],
-        [
-            topo.conditional_edge(
-                "plan-to-review",
-                "plan",
-                "review",
-                "decision",
-                "review",
-            )
-        ],
-        max_fan_out=4,
-        max_concurrency=2,
-        max_total_tokens=100,
-    )
-"#;
-
-        let resp = router
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(format!("/api/teams/{}/runs", team.id))
-                    .header("content-type", "application/json")
-                    .body(axum::body::Body::from(
-                        serde_json::json!({
-                            "topology_source": topology_source,
-                            "message": "hello"
-                        })
-                        .to_string(),
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(resp.status(), StatusCode::CREATED);
-        let body = body_json(resp).await;
-        assert_eq!(body["run"]["state"].as_str().unwrap(), "completed");
-        assert_eq!(body["run"]["final_output"]["result"], "approved");
-        assert_eq!(body["nodes"].as_array().unwrap().len(), 2);
-        assert_eq!(body["edges"].as_array().unwrap().len(), 1);
-    }
-
-    #[tokio::test]
-    async fn get_topology_run_returns_200_with_trace() {
-        let provider = Arc::new(MockProvider::new(vec![
-            swage_core::StreamChunk::Delta {
-                content: "{\"result\":\"ok\"}".into(),
-            },
-            swage_core::StreamChunk::Usage(swage_core::TokenUsage {
-                input_tokens: 4,
-                output_tokens: 2,
-            }),
-            swage_core::StreamChunk::Done {
-                finish_reason: Some(swage_core::FinishReason::Stop),
-            },
-        ]));
-        let storage = Arc::new(MockStorage::new());
-        let (router, storage) =
-            make_router_with_provider(provider as Arc<dyn LlmProvider>, storage);
-
-        let space = storage
-            .create(swage_storage::model::NewSpace {
-                name: "single-run-space".into(),
-                slug: "single-run-space".into(),
-            })
-            .await
-            .unwrap();
-        let team = storage
-            .create_team(swage_storage::model::NewTeam {
-                space_id: space.id,
-                name: "single".into(),
-                description: String::new(),
-                entry_agent_id: "planner".into(),
-                agents: team_agents(&["planner"]),
-                tasks: team_tasks(&["draft-plan"]),
-            })
-            .await
-            .unwrap();
-
-        let topology_source = r#"
-import swage_topology as topo
-
-def build_topology():
-    return topo.graph(
-        "plan",
-        [
-            topo.llm_node(
-                "plan",
-                "planner",
-                "draft-plan",
-                output_schema={
-                    "type": "object",
-                    "properties": {
-                        "result": {"type": "string"}
-                    }
-                }
-            )
-        ],
-        [],
-        max_fan_out=1,
-        max_concurrency=1,
-        max_total_tokens=20,
-    )
-"#;
-
-        let create_resp = router
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(format!("/api/teams/{}/runs", team.id))
-                    .header("content-type", "application/json")
-                    .body(axum::body::Body::from(
-                        serde_json::json!({
-                            "topology_source": topology_source,
-                            "message": "hello"
-                        })
-                        .to_string(),
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let create_body = body_json(create_resp).await;
-        let run_id = create_body["run"]["id"].as_str().unwrap();
-
-        let resp = router
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri(format!("/api/topology-runs/{run_id}"))
-                    .body(axum::body::Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body = body_json(resp).await;
-        assert_eq!(body["run"]["id"].as_str().unwrap(), run_id);
-        assert_eq!(body["nodes"].as_array().unwrap().len(), 1);
-    }
 
     #[tokio::test]
     async fn post_conversation_branches_creates_independent_thread_copy() {

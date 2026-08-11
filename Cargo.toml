@@ -17,7 +17,6 @@ members = [
     "crates/swage-gateway",
     "crates/swage-protocol",
     "crates/swage-python",
-    "crates/swage-topology",
     "crates/swage-workflow",
     "crates/swage-client",
     "crates/swage-tui",

@@ -10,7 +10,7 @@
   const CONTENT: Record<InformationalTab, { title: string; body: string }> = {
     plugins: {
       title: "Installed plugins",
-      body: "No platform plugin registry yet. Space-level extensions live in the Builder lens.",
+      body: "No platform plugin registry yet.",
     },
     channels: {
       title: "Delivery channels",

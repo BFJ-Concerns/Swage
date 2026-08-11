@@ -713,6 +713,7 @@ pub async fn import_gateway_recovery_bundle(
         state
             .storage
             .create_schedule(NewSchedule {
+                id: Uuid::new_v4(),
                 message: schedule.message,
                 status: parse_recovery_value::<ScheduleStatus>(&schedule.status)?,
                 kind: parse_recovery_value::<ScheduleKind>(&schedule.kind)?,
