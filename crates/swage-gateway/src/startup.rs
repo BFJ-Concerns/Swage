@@ -711,18 +711,20 @@ pub(crate) fn build_tool_dispatcher_with_browser(
                 }
                 Err(error) => {
                     warn!(
-                        "Python worker pool could not be created ({error}), python_execute tool disabled"
+                        "Python worker pool could not be initialised unexpectedly ({error}); python_execute was not registered; report this internal startup error"
                     );
                 }
             }
         }
         Ok(_) => {
             warn!(
-                "Python worker runtime resolved but sandbox is unavailable; python_execute tool disabled"
+                "Python execution is disabled in configuration or its required bubblewrap sandbox is unavailable; python_execute was not registered; enable tools.python_execute, or install bubblewrap or set tools.python_execute.require_sandbox = false"
             );
         }
         Err(e) => {
-            warn!("Python runtime not available ({e}), python_execute tool disabled");
+            warn!(
+                "Python runtime could not be resolved ({e}); python_execute was not registered; install Python 3 or correct tools.python_execute.runtime_path"
+            );
         }
     }
 
