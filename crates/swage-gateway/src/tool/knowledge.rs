@@ -125,7 +125,8 @@ impl Tool for KnowledgeSearchTool {
          full text. Each result is a passage with the source it came from and a \
          pinned observation and version; cite it with those values and the exact quote. The \
          knowledge base holds captured external material; it is not your memory \
-         (use the memory tools for what you know about your own work)."
+         (for what you know about your own work, use agent_memory for your \
+         private records or memory for the space's shared notes)."
     }
 
     fn parameters(&self) -> Value {
