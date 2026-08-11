@@ -59,6 +59,7 @@ pub mod error;
 pub mod experimentation;
 pub mod handlers;
 pub mod knowledge;
+pub mod knowledge_mirror;
 pub mod lifecycle;
 pub mod material;
 pub mod onboarding;

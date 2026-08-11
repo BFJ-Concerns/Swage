@@ -88,6 +88,70 @@ impl CurationAssertionStore for SqliteStorage {
         })
         .await
     }
+
+    async fn effective_curation_by_space(
+        &self,
+        space_id: Uuid,
+    ) -> Result<Vec<CurationAssertion>, StorageError> {
+        self.with_conn(move |conn| {
+            // Newest assertion per observation, by the same latest-rowid rule
+            // the search filter treats as effective state.
+            let mut stmt = conn.prepare(
+                "SELECT a.id, a.space_id, a.observation_id, a.kind,
+                        a.target_observation_id, a.created_at
+                 FROM knowledge_curation_assertions a
+                 WHERE a.space_id = ?1
+                   AND a.rowid = (
+                       SELECT MAX(latest.rowid)
+                       FROM knowledge_curation_assertions latest
+                       WHERE latest.observation_id = a.observation_id
+                   )
+                 ORDER BY a.observation_id",
+            )?;
+            let rows = stmt.query_map(params![space_id.to_string()], |row| {
+                let parse_uuid = |value: String| {
+                    value.parse::<Uuid>().map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            0,
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
+                    })
+                };
+                Ok(CurationAssertion {
+                    id: parse_uuid(row.get::<_, String>(0)?)?,
+                    space_id: parse_uuid(row.get::<_, String>(1)?)?,
+                    observation_id: parse_uuid(row.get::<_, String>(2)?)?,
+                    kind: row.get::<_, String>(3)?.parse().map_err(
+                        |error: String| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                3,
+                                rusqlite::types::Type::Text,
+                                error.into(),
+                            )
+                        },
+                    )?,
+                    target_observation_id: row
+                        .get::<_, Option<String>>(4)?
+                        .map(parse_uuid)
+                        .transpose()?,
+                    created_at: chrono::DateTime::parse_from_rfc3339(
+                        &row.get::<_, String>(5)?,
+                    )
+                    .map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            5,
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
+                    })?
+                    .with_timezone(&Utc),
+                })
+            })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+        })
+        .await
+    }
 }
 
 #[cfg(test)]
@@ -127,6 +191,41 @@ mod tests {
             })
             .await
             .unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn effective_curation_is_the_newest_assertion_per_observation() {
+        let (storage, space_id) = storage_with_space().await;
+        let subject = observation(&storage, space_id, "subject").await;
+        let target = observation(&storage, space_id, "target").await;
+
+        storage
+            .add_curation_assertion(NewCurationAssertion {
+                space_id,
+                observation_id: subject.id,
+                kind: CurationAssertionKind::Stale,
+                target_observation_id: None,
+            })
+            .await
+            .unwrap();
+        storage
+            .add_curation_assertion(NewCurationAssertion {
+                space_id,
+                observation_id: subject.id,
+                kind: CurationAssertionKind::SupersededBy,
+                target_observation_id: Some(target.id),
+            })
+            .await
+            .unwrap();
+
+        let effective = storage.effective_curation_by_space(space_id).await.unwrap();
+
+        // Only the asserted observation appears, and only its newest
+        // judgement: the earlier stale assertion is history, not state.
+        assert_eq!(effective.len(), 1);
+        assert_eq!(effective[0].observation_id, subject.id);
+        assert_eq!(effective[0].kind, CurationAssertionKind::SupersededBy);
+        assert_eq!(effective[0].target_observation_id, Some(target.id));
     }
 
     #[tokio::test(flavor = "multi_thread")]
