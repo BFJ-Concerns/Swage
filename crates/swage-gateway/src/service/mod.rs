@@ -11,9 +11,9 @@ use serde_json::Value as JsonValue;
 #[cfg(test)]
 use swage_core::{GatewayError, Role, StorageError};
 #[cfg(test)]
-use swage_storage::model::NewSession;
+use swage_storage::model::{NewAgentDefinition, NewSession};
 #[cfg(test)]
-use swage_storage::store::{SpaceStore, Storage};
+use swage_storage::store::{AgentDefinitionStore, SessionStore, SpaceStore, Storage};
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -278,6 +278,126 @@ mod tests {
         assert_eq!(a.space_id, b.space_id);
         // But have distinct session IDs.
         assert_ne!(a.id, b.id);
+    }
+
+    // -----------------------------------------------------------------------
+    // agent selection at session creation
+    // -----------------------------------------------------------------------
+
+    /// Sqlite-backed service so agent-definition resolution is real rather
+    /// than a mock stub returning `None`.
+    fn make_definition_service() -> (ConversationService, Arc<SqliteStorage>) {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("sqlite should initialise"));
+        let service = ConversationService::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+        );
+        (service, storage)
+    }
+
+    fn definition(id: &str, space_id: Option<Uuid>) -> NewAgentDefinition {
+        NewAgentDefinition {
+            id: id.to_string(),
+            space_id,
+            display_name: id.to_string(),
+            description: String::new(),
+            instructions: String::new(),
+            model_id: None,
+            tool_permissions: None,
+            skills: vec![],
+            output_schema: None,
+            output_max_retries: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn create_conversation_defaults_to_the_gateway_agent() {
+        let (svc, storage) = make_definition_service();
+
+        let resp = svc
+            .create_conversation_from_request(CreateConversationRequest::default())
+            .await
+            .unwrap();
+
+        let session = storage.get_session(resp.id).await.unwrap().unwrap();
+        assert_eq!(session.agent_id, "gateway");
+    }
+
+    #[tokio::test]
+    async fn create_conversation_for_named_agent_runs_under_that_definition() {
+        let (svc, storage) = make_definition_service();
+        storage
+            .upsert_agent_definition(definition("researcher", None))
+            .await
+            .unwrap();
+
+        let resp = svc
+            .create_conversation_from_request(CreateConversationRequest {
+                selected_model_id: None,
+                agent_id: Some("researcher".to_string()),
+            })
+            .await
+            .unwrap();
+
+        let session = storage.get_session(resp.id).await.unwrap().unwrap();
+        assert_eq!(session.agent_id, "researcher");
+    }
+
+    #[tokio::test]
+    async fn create_conversation_rejects_an_unknown_agent_selector() {
+        let (svc, _storage) = make_definition_service();
+
+        let error = svc
+            .create_conversation_from_request(CreateConversationRequest {
+                selected_model_id: None,
+                agent_id: Some("nonexistent".to_string()),
+            })
+            .await
+            .expect_err("an unbacked selector should be rejected");
+
+        assert!(matches!(error, GatewayError::ValidationError(_)));
+    }
+
+    #[tokio::test]
+    async fn create_space_session_honours_a_space_scoped_definition() {
+        let (svc, storage) = make_definition_service();
+        let space = storage.get_or_create_default().await.unwrap();
+        storage
+            .upsert_agent_definition(definition("triage", Some(space.id)))
+            .await
+            .unwrap();
+
+        let resp = svc
+            .create_session_in_space_from_request(
+                space.id,
+                CreateConversationRequest {
+                    selected_model_id: None,
+                    agent_id: Some("triage".to_string()),
+                },
+            )
+            .await
+            .unwrap();
+
+        let session = storage.get_session(resp.id).await.unwrap().unwrap();
+        assert_eq!(session.agent_id, "triage");
+    }
+
+    #[tokio::test]
+    async fn create_space_session_reports_a_missing_space_before_the_selector() {
+        let (svc, _storage) = make_definition_service();
+
+        let error = svc
+            .create_session_in_space_from_request(
+                Uuid::new_v4(),
+                CreateConversationRequest {
+                    selected_model_id: None,
+                    agent_id: Some("nonexistent".to_string()),
+                },
+            )
+            .await
+            .expect_err("a missing space should be reported");
+
+        assert!(matches!(error, GatewayError::SpaceNotFound { .. }));
     }
 
     // -----------------------------------------------------------------------
