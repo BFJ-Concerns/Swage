@@ -23,9 +23,9 @@ use swage_storage::{
     NewWorkflowRunEvent, NewWorkflowScript, ThreadStore, WorkflowRunRecord, WorkflowScriptRecord,
 };
 use swage_workflow::{
-    AgentCallRequest, AgentCallResult, AgentSessionRef, EffectPayload, EffectReceipt,
-    EffectRecoveryHost, EngineLimits, GateRequest, RunEventPost, ScriptCapabilities,
-    WorkflowCallRequest, WorkflowEngine, WorkflowHost, journal_args_hash, recover_started_effect,
+    AgentCallRequest, AgentCallResult, EffectPayload, EffectReceipt, EffectRecoveryHost,
+    EngineLimits, GateRequest, RunEventPost, ScriptCapabilities, WorkflowCallRequest,
+    WorkflowEngine, WorkflowHost, journal_args_hash, recover_started_effect,
 };
 use tokio::sync::{Mutex, Notify, Semaphore, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -530,10 +530,7 @@ impl WorkflowHost for ChannelWorkflowHost {
             .map_err(|_| "workflow host dropped delivery reply".to_string())?
     }
 
-    async fn budget_snapshot(
-        &self,
-        _cancellation: CancellationToken,
-    ) -> Result<Value, String> {
+    async fn budget_snapshot(&self, _cancellation: CancellationToken) -> Result<Value, String> {
         let (reply, receive) = oneshot::channel();
         self.tx
             .send(HostCommand::BudgetSnapshot { reply })
@@ -1067,10 +1064,9 @@ async fn run_host_commands_inner(
                             Err("NondeterministicReplayError".into())
                         }
                         Some(entry) if entry.status == "completed" => {
-                            let result = entry
-                                .result
-                                .clone()
-                                .ok_or_else(|| "completed workflow entry has no result".to_string());
+                            let result = entry.result.clone().ok_or_else(|| {
+                                "completed workflow entry has no result".to_string()
+                            });
                             if let Some(rank) = replay_agent_ranks.get(&current_seq).copied() {
                                 await_replay_release(
                                     rank,
@@ -1201,8 +1197,10 @@ async fn run_host_commands_inner(
                 if let Some(current_due) = parked_due {
                     let earliest = current_due.min(due);
                     if earliest < current_due {
-                        if let Err(error) =
-                            state.storage.set_workflow_run_parked(run_id, earliest).await
+                        if let Err(error) = state
+                            .storage
+                            .set_workflow_run_parked(run_id, earliest)
+                            .await
                         {
                             tracing::warn!(%run_id, %error, "could not lower a parked run's wake time");
                         } else {
@@ -1807,7 +1805,8 @@ async fn evaluate_run_gate(
         None => config.default_model_id().to_string(),
     };
     let prompt = build_run_gate_prompt(&request.criteria, &events);
-    let completion = state.active_provider().complete(CompletionRequest {
+    let provider = state.active_provider();
+    let completion = provider.complete(CompletionRequest {
         messages: vec![ChatMessage::new(Role::User, prompt)],
         model: Some(model_id),
         max_tokens: Some(RUN_GATE_MAX_TOKENS),
@@ -1973,8 +1972,7 @@ async fn complete_workflow_call_entry(
                     engine_version: "rquickjs-0.12.0".into(),
                     // Confinement flows down here too: the child's workers
                     // stay bounded by whatever context dispatched the parent.
-                    dispatching_agent_id: parent
-                        .and_then(|parent| parent.dispatching_agent_id),
+                    dispatching_agent_id: parent.and_then(|parent| parent.dispatching_agent_id),
                 })
                 .await
                 .map_err(|error| error.to_string())?;
@@ -2796,7 +2794,10 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
-    use swage_storage::{SpaceStore, SqliteStorage, Storage, WorkflowStore};
+    use swage_storage::{
+        SessionStore, SpaceStore, SqliteStorage, Storage, TurnStore, WorkflowStore,
+    };
+    use swage_workflow::AgentSessionRef;
 
     struct RecordingDeliveryCapability {
         effect_kind: swage_workflow::EffectKind,
@@ -4059,7 +4060,10 @@ mod tests {
             .expect("get")
             .expect("run");
         assert_eq!(parked.state, "parked");
-        assert!(parked.wake_at.is_some(), "a parked run records when it is due");
+        assert!(
+            parked.wake_at.is_some(),
+            "a parked run records when it is due"
+        );
         // The timer reply is held, never resolved: the halting engine must
         // not see a racing error it could catch.
         assert!(matches!(
@@ -4171,10 +4175,7 @@ mod tests {
             .await
             .expect("run c");
         storage
-            .set_workflow_run_parked(
-                sleeping.id,
-                chrono::Utc::now() + chrono::Duration::hours(1),
-            )
+            .set_workflow_run_parked(sleeping.id, chrono::Utc::now() + chrono::Duration::hours(1))
             .await
             .expect("park future");
         let state = AppState::new(
@@ -4204,7 +4205,10 @@ mod tests {
             .expect("run b");
         assert_eq!(woken.state, "completed");
         assert_eq!(woken.final_output, Some(Value::String("b-woke".into())));
-        assert!(woken.wake_at.is_none(), "leaving parked clears the due time");
+        assert!(
+            woken.wake_at.is_none(),
+            "leaving parked clears the due time"
+        );
         let still_parked = storage
             .get_workflow_run(sleeping.id)
             .await
