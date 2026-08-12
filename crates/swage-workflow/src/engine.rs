@@ -773,7 +773,7 @@ impl WorkflowEngine {
                         // unbounded budget reads as undefined, and replay sees
                         // end-state, not what this moment saw. A script that
                         // BRANCHES on budget state must use budgetSnapshot():
-                        // journalled, so replay repeats the recorded reading
+                        // journalled, so replay repeats the recorded reading.
                         // The snapshot also names the working and reserved
                         // closing allowances and whether wind-down has begun.
                         globalThis.budget = Object.freeze({
