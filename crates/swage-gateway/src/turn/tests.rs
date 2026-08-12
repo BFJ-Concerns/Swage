@@ -4419,6 +4419,31 @@ impl crate::tool::Tool for ShellMockTool {
     }
 }
 
+struct FileReadMockTool;
+
+#[async_trait::async_trait]
+impl crate::tool::Tool for FileReadMockTool {
+    fn name(&self) -> &str {
+        "file_read"
+    }
+
+    fn description(&self) -> &str {
+        "Test file read"
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({ "type": "object" })
+    }
+
+    async fn execute(
+        &self,
+        _arguments: serde_json::Value,
+        _ctx: &dyn swage_tool::context::ToolContext,
+    ) -> Result<serde_json::Value, swage_core::ToolError> {
+        Ok(serde_json::json!({ "unexpected": "execution" }))
+    }
+}
+
 struct BlockingMockTool {
     started: Arc<Notify>,
     release: Arc<Notify>,
@@ -6478,6 +6503,11 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
         child_snapshot["elements"].is_array(),
         "delegated assembly report should contain its element decisions"
     );
+    assert_eq!(
+        child_snapshot["effective_tool_grant"],
+        serde_json::json!([]),
+        "a disjoint delegated grant must be recorded explicitly, not omitted"
+    );
     let child_audit = state
         .storage
         .list_audit_events_by_session(child_sessions[0].id)
@@ -6707,6 +6737,155 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
             .len(),
         child_count_before_failure,
         "dispatch-bound resolution failure must prevent child execution"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn delegated_child_snapshot_records_exact_non_empty_effective_tool_grant() {
+    let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
+    let space = storage
+        .get_or_create_default()
+        .await
+        .expect("default space");
+    let session = storage
+        .create_session(NewSession {
+            space_id: space.id,
+            agent_id: "gateway".into(),
+            metadata: None,
+            active_workspace_attachment_id: None,
+        })
+        .await
+        .expect("create session");
+    storage
+        .upsert_agent_definition(swage_storage::NewAgentDefinition {
+            id: "gateway".into(),
+            space_id: Some(space.id),
+            display_name: "Gateway".into(),
+            description: String::new(),
+            instructions: String::new(),
+            model_id: None,
+            tool_permissions: Some(serde_json::json!({
+                "allow": ["delegate", "file_read"], "deny": [], "bundles": {},
+                "require_approval": []
+            })),
+            skills: vec![],
+            output_schema: None,
+            output_max_retries: None,
+        })
+        .await
+        .expect("store dispatching agent definition");
+    storage
+        .upsert_agent_definition(swage_storage::NewAgentDefinition {
+            id: "agent-b".into(),
+            space_id: Some(space.id),
+            display_name: "Agent B".into(),
+            description: String::new(),
+            instructions: String::new(),
+            model_id: None,
+            tool_permissions: Some(serde_json::json!({
+                "allow": ["shell", "file_read"], "deny": [], "bundles": {},
+                "require_approval": []
+            })),
+            skills: vec![],
+            output_schema: None,
+            output_max_retries: None,
+        })
+        .await
+        .expect("store delegated agent definition");
+
+    let (provider, _captured_requests) = CapturingMultiRoundProvider::new(vec![
+        vec![
+            StreamChunk::ToolUse {
+                call_id: "delegate-1".into(),
+                name: "delegate".into(),
+                arguments: serde_json::json!({
+                    "target_agent": "agent-b",
+                    "task": "Read safely",
+                }),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ],
+        vec![
+            StreamChunk::Delta {
+                content: "child complete".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ],
+        vec![
+            StreamChunk::Delta {
+                content: "parent resumed".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ],
+    ]);
+    let dispatcher = crate::tool::ToolDispatcher::allow_all(vec![
+        Arc::new(swage_tool::delegate::DelegateTool) as Arc<dyn crate::tool::Tool>,
+        Arc::new(ShellMockTool) as Arc<dyn crate::tool::Tool>,
+        Arc::new(FileReadMockTool) as Arc<dyn crate::tool::Tool>,
+    ]);
+    let state = AppState::new(
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
+        Arc::new(provider) as Arc<dyn LlmProvider>,
+        swage_config::ResolvedConfig::default(),
+        dispatcher,
+        None,
+    );
+    let (tx, _rx) = mpsc::unbounded_channel();
+    process_turn(
+        &state,
+        session.id,
+        None,
+        "Delegate this".into(),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .expect("turn should complete");
+
+    let child_session = state
+        .storage
+        .list_sessions_by_agent_id("agent-b")
+        .await
+        .expect("list child sessions")
+        .into_iter()
+        .next()
+        .expect("delegated child session");
+    let child_thread = state
+        .storage
+        .list_by_session(child_session.id)
+        .await
+        .expect("list child threads")
+        .into_iter()
+        .next()
+        .expect("delegated child thread");
+    let child_turn = state
+        .storage
+        .list_turns_by_thread(child_thread.id)
+        .await
+        .expect("list child turns")
+        .into_iter()
+        .next()
+        .expect("delegated child turn");
+    let snapshot = state
+        .storage
+        .get_snapshot(child_turn.id)
+        .await
+        .expect("read child snapshot")
+        .expect("delegated child snapshot");
+    let snapshot: serde_json::Value =
+        serde_json::from_str(&snapshot).expect("child snapshot should be JSON");
+    assert_eq!(
+        snapshot["effective_tool_grant"],
+        serde_json::json!(["file_read"]),
+        "the audit record must carry the exact grant used to build the dispatcher"
     );
 }
 
