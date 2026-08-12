@@ -276,6 +276,17 @@ impl Agent {
         };
 
         // 4. Build initial CompletionRequest from the assembled context.
+        let output_requirements = self.config.output_schema.as_ref().map(|schema| {
+            format!(
+                "## Output Requirements\n\nReturn ONLY a JSON value that conforms to this JSON Schema. The schema is authoritative, including required properties and whether additional properties are allowed.\n\n{}",
+                serde_json::to_string_pretty(schema)
+                    .expect("a validated JSON Schema value must serialise")
+            )
+        });
+        let mut assembled_context = assembled_context;
+        if let Some(requirements) = &output_requirements {
+            assembled_context.push(ChatMessage::new(Role::System, requirements));
+        }
         let mut llm_request = CompletionRequest {
             messages: assembled_context,
             model: self.config.model_id.clone(),
@@ -631,10 +642,13 @@ impl Agent {
                     .collect::<Vec<_>>()
                     .join("\n");
 
+                let output_requirements = output_requirements
+                    .as_ref()
+                    .expect("schema validation retries require output requirements");
                 let feedback = format!(
                     "Your response did not match the required JSON schema. \
                      Please try again, producing ONLY valid JSON that conforms \
-                     to the schema.\n\nValidation errors:\n{error_description}"
+                     to the schema.\n\nValidation errors:\n{error_description}\n\n{output_requirements}"
                 );
 
                 let assistant_msg = ChatMessage::new(Role::Assistant, &accumulated);
