@@ -1746,6 +1746,10 @@ async fn execute_external_delegate_message(
             delegate_msg.recipient_agent_id.clone(),
             target_agent_config.working_directory.display().to_string(),
             silent_ws_tx,
+            effective_target_resolved.tools.permissions.allow.clone(),
+        )),
+        snapshot_recorder: Some(crate::turn::delegation_snapshot_recorder(
+            state.storage.clone(),
         )),
     };
 

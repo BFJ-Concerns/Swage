@@ -8,7 +8,9 @@ use super::{
     load_active_skills_for_agent, load_memory_for_assembly, load_session_config, load_space_memory,
     mpsc, resolve_swage_root, select_context_assembly, shutdown_sandbox_guard,
 };
-use swage_agent::{DelegatedAssembly, DelegationContextAssembler, DelegationOutcome};
+use swage_agent::{
+    DelegatedAssembly, DelegationContextAssembler, DelegationOutcome, DelegationSnapshotRecorder,
+};
 use swage_context::tokeniser::TiktokenTokeniser;
 use swage_core::DelegateCompletionMode;
 
@@ -20,6 +22,7 @@ struct GatewayDelegatedContextAssembler {
     working_directory: String,
     swage_root: Option<std::path::PathBuf>,
     context_event_tx: mpsc::UnboundedSender<crate::websocket::ServerEvent>,
+    effective_tool_grant: Vec<String>,
 }
 
 pub(crate) fn delegated_context_assembler(
@@ -29,6 +32,7 @@ pub(crate) fn delegated_context_assembler(
     agent_id: String,
     working_directory: String,
     context_event_tx: mpsc::UnboundedSender<crate::websocket::ServerEvent>,
+    effective_tool_grant: Vec<String>,
 ) -> Arc<dyn DelegationContextAssembler> {
     Arc::new(GatewayDelegatedContextAssembler {
         state,
@@ -38,6 +42,7 @@ pub(crate) fn delegated_context_assembler(
         working_directory,
         swage_root: resolve_swage_root(),
         context_event_tx,
+        effective_tool_grant,
     })
 }
 
@@ -94,10 +99,11 @@ impl DelegationContextAssembler for GatewayDelegatedContextAssembler {
             &self.space.slug,
             &self.agent_id,
         );
-        let report = serde_json::to_value(output.report).unwrap_or_else(|error| {
+        let mut report = serde_json::to_value(output.report).unwrap_or_else(|error| {
             tracing::warn!(%error, "failed to serialise delegated assembly report");
             serde_json::json!({ "error": "serialisation failed" })
         });
+        report["effective_tool_grant"] = serde_json::json!(self.effective_tool_grant);
         let _ = self
             .context_event_tx
             .send(crate::websocket::ServerEvent::ContextAssembled {
@@ -108,6 +114,53 @@ impl DelegationContextAssembler for GatewayDelegatedContextAssembler {
             messages: output.messages,
             report,
         })
+    }
+}
+
+struct GatewayDelegationSnapshotRecorder {
+    storage: Arc<dyn swage_storage::Storage>,
+}
+
+pub(crate) fn delegation_snapshot_recorder(
+    storage: Arc<dyn swage_storage::Storage>,
+) -> Arc<dyn DelegationSnapshotRecorder> {
+    Arc::new(GatewayDelegationSnapshotRecorder { storage })
+}
+
+#[async_trait::async_trait]
+impl DelegationSnapshotRecorder for GatewayDelegationSnapshotRecorder {
+    async fn record(
+        &self,
+        session_id: Uuid,
+        turn_id: Uuid,
+        report: &serde_json::Value,
+    ) -> Result<(), AgentError> {
+        if let Err(error) = self
+            .storage
+            .store_snapshot(turn_id, &report.to_string())
+            .await
+        {
+            // Reconstructive record (record_durability.rs): record the gap and
+            // escalate to a forced turn failure only if that record also fails.
+            tracing::warn!(%turn_id, %error, "failed to persist delegated context snapshot");
+            if let Err(audit_error) = crate::record_durability::record_reconstruction_gap(
+                self.storage.as_ref(),
+                Some(session_id),
+                turn_id,
+                "delegated_context_snapshot",
+                &error,
+            )
+            .await
+            {
+                if let Err(force_error) = self.storage.force_turn_failure(turn_id).await {
+                    tracing::error!(%turn_id, %force_error, "failed to mark delegated turn failed after record loss");
+                }
+                return Err(AgentError::InvalidConfig(format!(
+                    "delegated context snapshot lost and the loss could not be recorded: {audit_error}"
+                )));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -262,7 +315,9 @@ impl DelegationHandler for GatewayDelegationHandler {
                 target_agent_id.to_string(),
                 target_agent_config.working_directory.display().to_string(),
                 silent_ws_tx,
+                effective_target_resolved.tools.permissions.allow.clone(),
             )),
+            snapshot_recorder: Some(delegation_snapshot_recorder(self.state.storage.clone())),
         };
 
         let mut payload = serde_json::json!({
