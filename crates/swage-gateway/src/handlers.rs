@@ -2967,6 +2967,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn post_conversations_rejects_unknown_request_fields() {
+        let (router, _storage) = make_router();
+
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/conversations")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(r#"{"space_id":"not-a-target"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(
+            body.contains("space_id"),
+            "rejection should name the unknown field: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn post_conversations_accepts_documented_request_fields() {
+        let (router, _storage) = make_router();
+
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/conversations")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        r#"{"selected_model_id":"test-model","agent_id":"gateway"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let body = body_json(resp).await;
+        assert_eq!(body["selected_model_id"], "test-model");
+    }
+
+    #[tokio::test]
     async fn post_turns_returns_409_when_thread_has_pending_placeholder_turn() {
         use swage_storage::model::{NewTurn, TurnState};
         use swage_storage::store::{SessionStore, ThreadStore, TurnStore};
@@ -3638,6 +3688,71 @@ mod tests {
         assert!(body["id"].is_string());
         // Session should be associated with the specified space.
         assert_eq!(body["space_id"].as_str().unwrap(), space.id.to_string());
+    }
+
+    #[tokio::test]
+    async fn post_space_sessions_rejects_unknown_request_fields() {
+        let (router, storage) = make_router();
+        let space = storage
+            .create(swage_storage::model::NewSpace {
+                name: "strict-request-space".into(),
+                slug: "strict-request-space".into(),
+            })
+            .await
+            .unwrap();
+
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/spaces/{}/sessions", space.id))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(r#"{"space_id":"not-a-target"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(
+            body.contains("space_id"),
+            "rejection should name the unknown field: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn post_space_sessions_accepts_documented_request_fields() {
+        let (router, storage) = make_router();
+        let space = storage
+            .create(swage_storage::model::NewSpace {
+                name: "documented-fields-space".into(),
+                slug: "documented-fields-space".into(),
+            })
+            .await
+            .unwrap();
+
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/spaces/{}/sessions", space.id))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        r#"{"selected_model_id":"test-model","agent_id":"gateway"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let body = body_json(resp).await;
+        assert_eq!(body["space_id"], space.id.to_string());
+        assert_eq!(body["selected_model_id"], "test-model");
     }
 
     #[tokio::test]
