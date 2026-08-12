@@ -49,6 +49,10 @@ pub struct WorkflowScriptListResponse {
 pub struct WorkflowBudget {
     pub max_agent_calls: Option<u32>,
     pub max_total_tokens: Option<u64>,
+    /// Tokens held back from ordinary work for calls made after the run has
+    /// observed its wind-down boundary. This allowance is part of, not in
+    /// addition to, `max_total_tokens`.
+    pub reserved_closing_tokens: Option<u64>,
     pub max_concurrent_agent_calls: Option<u32>,
 }
 
@@ -116,6 +120,9 @@ pub enum WorkflowJournalEntryKind {
     /// A journalled budget reading — what the script saw when it checked
     /// its allowance, replayed rather than re-read.
     Budget,
+    /// The working allowance was exhausted. The triggering agent call was
+    /// not started; replay returns the same wind-down signal at this point.
+    WindDown,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
