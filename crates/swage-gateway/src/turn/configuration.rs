@@ -290,6 +290,13 @@ pub(crate) fn apply_dispatch_bound(
 ) -> swage_config::ResolvedConfig {
     let worker_allow = expanded_allow(&config.tools.permissions);
     let bound_allow = expanded_allow(&bound.tools.permissions);
+    let effective_allow = match (&worker_allow, &bound_allow) {
+        (_, None) => worker_allow.clone(),
+        (None, Some(bound_set)) => Some(bound_set.clone()),
+        (Some(worker_set), Some(bound_set)) => {
+            Some(worker_set.intersection(bound_set).cloned().collect())
+        }
+    };
     config.tools.permissions.allow = match (worker_allow, bound_allow) {
         // The bound allows everything: the worker's own grants stand, in
         // their original form (its bundles keep expanding at check time).
@@ -304,6 +311,41 @@ pub(crate) fn apply_dispatch_bound(
         if !config.tools.permissions.deny.contains(&denied) {
             config.tools.permissions.deny.push(denied);
         }
+    }
+    if let Some(ref effective_allow) = effective_allow {
+        config.tools.permissions.require_approval = config
+            .tools
+            .permissions
+            .require_approval
+            .iter()
+            .flat_map(|entry| {
+                let name = entry.tool_name();
+                config
+                    .tools
+                    .permissions
+                    .bundles
+                    .get(name)
+                    .cloned()
+                    .unwrap_or_else(|| vec![name.to_string()])
+                    .into_iter()
+                    .filter(|tool| effective_allow.contains(tool))
+                    .map(|tool| match entry {
+                        swage_config::model::RequireApprovalEntry::Simple(_) => {
+                            swage_config::model::RequireApprovalEntry::Simple(tool)
+                        }
+                        swage_config::model::RequireApprovalEntry::WithOptions {
+                            timeout,
+                            timeout_policy,
+                            ..
+                        } => swage_config::model::RequireApprovalEntry::WithOptions {
+                            tool,
+                            timeout: *timeout,
+                            timeout_policy: timeout_policy.clone(),
+                        },
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect();
     }
     let worker_approval_names: std::collections::BTreeSet<String> = config
         .tools
@@ -332,7 +374,11 @@ pub(crate) fn apply_dispatch_bound(
             .cloned()
             .unwrap_or_else(|| vec![name]);
         for concrete in names {
-            if !worker_approval_names.contains(&concrete) {
+            if effective_allow
+                .as_ref()
+                .is_none_or(|allowed| allowed.contains(&concrete))
+                && !worker_approval_names.contains(&concrete)
+            {
                 carried.insert(concrete);
             }
         }
@@ -575,10 +621,8 @@ mod tests {
 
         let mut bound = swage_config::ResolvedConfig::default();
         bound.tools.permissions.allow = vec!["safe".into()];
-        bound.tools.permissions.bundles = std::collections::HashMap::from([(
-            "safe".to_string(),
-            vec!["file_read".to_string()],
-        )]);
+        bound.tools.permissions.bundles =
+            std::collections::HashMap::from([("safe".to_string(), vec!["file_read".to_string()])]);
 
         let confined = apply_dispatch_bound(worker, &bound);
         assert!(
@@ -613,6 +657,26 @@ mod tests {
             demanded.contains(&"shell"),
             "a tool the dispatcher gates behind approval must not run approval-free in its worker"
         );
+        let permissions = swage_tool::permission::PermissionConfig {
+            allow: confined.tools.permissions.allow.clone(),
+            deny: confined.tools.permissions.deny.clone(),
+            bundles: confined.tools.permissions.bundles.clone(),
+            require_approval: confined
+                .tools
+                .permissions
+                .require_approval
+                .iter()
+                .map(|entry| swage_tool::permission::RequireApprovalEntry {
+                    tool_name: entry.tool_name().to_string(),
+                    timeout_secs: None,
+                    timeout_policy: None,
+                })
+                .collect(),
+        };
+        assert!(matches!(
+            swage_tool::permission::check_permission(&permissions, "shell"),
+            Ok(swage_tool::permission::PermissionCheckResult::RequiresApproval { .. })
+        ));
 
         // Already-demanded tools are not duplicated.
         let mut worker = swage_config::ResolvedConfig::default();
@@ -631,6 +695,48 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn dispatch_bound_removes_approval_for_a_tool_outside_the_intersection() {
+        let mut worker = swage_config::ResolvedConfig::default();
+        worker.tools.permissions.allow = vec!["shell".into()];
+        assert!(
+            worker
+                .tools
+                .permissions
+                .require_approval
+                .iter()
+                .any(|entry| entry.tool_name() == "shell")
+        );
+
+        let mut bound = swage_config::ResolvedConfig::default();
+        bound.tools.permissions.allow = vec!["knowledge_search".into()];
+        bound.tools.permissions.require_approval =
+            vec![swage_config::model::RequireApprovalEntry::Simple(
+                "shell".into(),
+            )];
+
+        let confined = apply_dispatch_bound(worker, &bound);
+        assert!(confined.tools.permissions.allow.is_empty());
+        assert!(
+            confined.tools.permissions.require_approval.is_empty(),
+            "approval requirements may only decorate effective grants"
+        );
+
+        let permissions = swage_tool::permission::PermissionConfig {
+            allow: confined.tools.permissions.allow,
+            deny: confined.tools.permissions.deny,
+            bundles: confined.tools.permissions.bundles,
+            require_approval: vec![],
+        };
+        assert!(matches!(
+            swage_tool::permission::check_permission(&permissions, "shell"),
+            Err(swage_core::ToolError::PermissionDenied {
+                reason: swage_core::PermissionDeniedReason::NotAllowed,
+                ..
+            })
+        ));
     }
 
     #[test]
