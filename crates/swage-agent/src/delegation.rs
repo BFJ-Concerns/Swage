@@ -124,6 +124,20 @@ pub struct DelegationExecutor {
     /// Caller-owned assembly path for the child session. The gateway uses this
     /// to apply the same context elements as every other session entry point.
     pub context_assembler: Option<Arc<dyn DelegationContextAssembler>>,
+    /// Optional caller-owned persistence policy for delegated context reports.
+    /// The gateway supplies this because its audit durability contract and
+    /// escalation machinery live above the agent runtime.
+    pub snapshot_recorder: Option<Arc<dyn DelegationSnapshotRecorder>>,
+}
+
+#[async_trait::async_trait]
+pub trait DelegationSnapshotRecorder: Send + Sync {
+    async fn record(
+        &self,
+        session_id: Uuid,
+        turn_id: Uuid,
+        report: &serde_json::Value,
+    ) -> Result<(), AgentError>;
 }
 
 /// Assembles model context after the delegated child session has been created.
@@ -276,13 +290,16 @@ impl DelegationExecutor {
             )
         };
 
-        if let Some(report) = assembly_report
-            && let Err(error) = self
+        if let Some(report) = assembly_report {
+            if let Some(recorder) = &self.snapshot_recorder {
+                recorder.record(session.id, turn_id, &report).await?;
+            } else if let Err(error) = self
                 .storage
                 .store_snapshot(turn_id, &report.to_string())
                 .await
-        {
-            tracing::warn!(%turn_id, %error, "failed to persist delegated context snapshot");
+            {
+                tracing::warn!(%turn_id, %error, "failed to persist delegated context snapshot");
+            }
         }
 
         // 4. Build agent config with schema override.
@@ -725,6 +742,7 @@ mod tests {
             router,
             active_delegations: ActiveDelegations::new(),
             context_assembler: None,
+            snapshot_recorder: None,
         };
         let config = AgentConfig::new("agent-b").with_workspace(std::env::temp_dir(), vec![]);
 

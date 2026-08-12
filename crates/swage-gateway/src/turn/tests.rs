@@ -578,6 +578,7 @@ pub(crate) struct MockStorage {
     pub(crate) db: Mutex<InMemoryDb>,
     fail_secret_reads: AtomicBool,
     fail_audit_writes: AtomicBool,
+    fail_snapshot_writes: AtomicBool,
 }
 
 #[async_trait]
@@ -793,6 +794,7 @@ impl MockStorage {
             db: Mutex::new(InMemoryDb::default()),
             fail_secret_reads: AtomicBool::new(false),
             fail_audit_writes: AtomicBool::new(false),
+            fail_snapshot_writes: AtomicBool::new(false),
         }
     }
 
@@ -802,6 +804,10 @@ impl MockStorage {
 
     pub(crate) fn fail_audit_writes(&self) {
         self.fail_audit_writes.store(true, Ordering::SeqCst);
+    }
+
+    fn fail_snapshot_writes(&self) {
+        self.fail_snapshot_writes.store(true, Ordering::SeqCst);
     }
 }
 
@@ -2330,6 +2336,11 @@ impl TurnStore for MockStorage {
 #[async_trait]
 impl ContextSnapshotStore for MockStorage {
     async fn store_snapshot(&self, turn_id: Uuid, report_json: &str) -> Result<(), StorageError> {
+        if self.fail_snapshot_writes.load(Ordering::SeqCst) {
+            return Err(StorageError::QueryFailed(
+                "injected snapshot write failure".into(),
+            ));
+        }
         self.db
             .lock()
             .await
@@ -6756,6 +6767,15 @@ async fn delegated_child_snapshot_records_exact_non_empty_effective_tool_grant()
         })
         .await
         .expect("create session");
+    ThreadStore::create(
+        &*storage,
+        NewThread {
+            session_id: session.id,
+            agent_id: "gateway".into(),
+        },
+    )
+    .await
+    .expect("create root thread");
     storage
         .upsert_agent_definition(swage_storage::NewAgentDefinition {
             id: "gateway".into(),
@@ -6887,6 +6907,40 @@ async fn delegated_child_snapshot_records_exact_non_empty_effective_tool_grant()
         serde_json::json!(["file_read"]),
         "the audit record must carry the exact grant used to build the dispatcher"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn delegated_snapshot_loss_records_degradation_and_double_failure_escalates() {
+    let storage = Arc::new(MockStorage::new());
+    storage.fail_snapshot_writes();
+    let recorder = delegation_snapshot_recorder(
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
+    );
+    let turn_id = Uuid::new_v4();
+
+    recorder
+        .record(Uuid::new_v4(), turn_id, &serde_json::json!({}))
+        .await
+        .expect("a recorded reconstructive gap should allow the turn to continue");
+    let db = storage.db.lock().await;
+    assert!(db.audit_events.iter().any(|event| {
+        event.entity_id == turn_id.to_string()
+            && event.event_kind == "turn_record_degraded"
+            && event.metadata["record"] == "delegated_context_snapshot"
+    }));
+    drop(db);
+
+    let broken_storage = Arc::new(MockStorage::new());
+    broken_storage.fail_snapshot_writes();
+    broken_storage.fail_audit_writes();
+    let recorder = delegation_snapshot_recorder(
+        Arc::clone(&broken_storage) as Arc<dyn swage_storage::store::Storage>
+    );
+    let error = recorder
+        .record(Uuid::new_v4(), Uuid::new_v4(), &serde_json::json!({}))
+        .await
+        .expect_err("losing both the snapshot and its degradation record must fail loudly");
+    assert!(error.to_string().contains("loss could not be recorded"));
 }
 
 #[tokio::test(flavor = "multi_thread")]
