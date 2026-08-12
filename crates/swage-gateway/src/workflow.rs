@@ -4160,7 +4160,12 @@ mod tests {
         let wake_at = parked.wake_at.expect("parked run records its wake time");
         wait_for_workflow_thread_exit(run.id).await;
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
-            while state.active_workflow_runs.lock().await.contains_key(&run.id) {
+            while state
+                .active_workflow_runs
+                .lock()
+                .await
+                .contains_key(&run.id)
+            {
                 tokio::time::sleep(std::time::Duration::from_millis(5)).await;
             }
         })
