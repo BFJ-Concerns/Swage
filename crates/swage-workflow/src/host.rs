@@ -188,16 +188,14 @@ pub trait WorkflowHost: Send + Sync {
         Err("RunEventError: this host does not support run events".into())
     }
 
-    /// A journalled budget reading: `{spent, remaining}` (remaining null
-    /// when unbounded), recorded so replay sees what the live run saw.
+    /// A journalled budget reading. Alongside total `spent` and `remaining`,
+    /// split budgets expose `working_remaining`, `closing_remaining`, and
+    /// `winding_down`, recorded so replay sees what the live run saw.
     /// The synchronous `budget.spent()`/`budget.remaining()` reads are live
     /// diagnostics — a script that BRANCHES on budget state must branch on
     /// this snapshot, or its replayed control flow can diverge from the
     /// journal near the ceiling.
-    async fn budget_snapshot(
-        &self,
-        _cancellation: CancellationToken,
-    ) -> Result<Value, String> {
+    async fn budget_snapshot(&self, _cancellation: CancellationToken) -> Result<Value, String> {
         Err("BudgetSnapshotError: this host does not support budget snapshots".into())
     }
 }

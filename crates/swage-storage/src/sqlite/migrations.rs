@@ -169,7 +169,7 @@ const CREATE_WORKFLOW_RUN_EVENTS: &str = "
         run_id            TEXT NOT NULL REFERENCES workflow_runs(id) ON DELETE CASCADE,
         seq               INTEGER NOT NULL,
         completed_order   INTEGER,
-        kind              TEXT NOT NULL CHECK (kind IN ('agent_call', 'effect', 'log', 'phase', 'workflow_call', 'timer', 'event', 'gate', 'budget')),
+        kind              TEXT NOT NULL CHECK (kind IN ('agent_call', 'effect', 'log', 'phase', 'workflow_call', 'timer', 'event', 'gate', 'budget', 'wind_down')),
         status            TEXT NOT NULL CHECK (status IN ('started', 'completed', 'failed')),
         args_hash         TEXT NOT NULL,
         request_json      TEXT NOT NULL,
@@ -1486,11 +1486,9 @@ pub fn run_migrations(conn: &Connection) -> Result<(), StorageError> {
     }
 
     let violations: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM pragma_foreign_key_check",
-            [],
-            |row| row.get(0),
-        )
+        .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+            row.get(0)
+        })
         .map_err(|e| StorageError::MigrationFailed(e.to_string()))?;
     if violations > 0 {
         return Err(StorageError::MigrationFailed(format!(
