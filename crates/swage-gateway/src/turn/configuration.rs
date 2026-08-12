@@ -3,6 +3,107 @@ use super::{
     load_trusted_workspace_policy,
 };
 
+/// Host-only session metadata carrying every agent context whose effective
+/// grants bound a worker. The lineage is ordered outermost to innermost and is
+/// re-resolved at every turn, so nested dispatch cannot shed an inherited
+/// bound and suspension cannot freeze authority.
+pub(crate) const DISPATCH_BOUND_METADATA_KEY: &str = "dispatch_bound_agent_ids";
+
+pub(crate) fn dispatch_bound_agent_ids(
+    metadata: Option<&serde_json::Value>,
+) -> Result<Vec<String>, GatewayError> {
+    let Some(value) = metadata.and_then(|metadata| metadata.get(DISPATCH_BOUND_METADATA_KEY))
+    else {
+        return Ok(Vec::new());
+    };
+    let values = value.as_array().ok_or_else(|| {
+        GatewayError::ConfigError(format!(
+            "session metadata field {DISPATCH_BOUND_METADATA_KEY:?} must be an array"
+        ))
+    })?;
+    values
+        .iter()
+        .map(|value| {
+            value.as_str().map(str::to_string).ok_or_else(|| {
+                GatewayError::ConfigError(format!(
+                    "session metadata field {DISPATCH_BOUND_METADATA_KEY:?} must contain only agent ids"
+                ))
+            })
+        })
+        .collect()
+}
+
+pub(crate) fn dispatch_bound_metadata(agent_ids: &[String]) -> Option<serde_json::Value> {
+    (!agent_ids.is_empty()).then(|| {
+        serde_json::json!({
+            DISPATCH_BOUND_METADATA_KEY: agent_ids,
+        })
+    })
+}
+
+pub(crate) async fn dispatch_bound_agent_ids_for_turn(
+    state: &AppState,
+    turn_id: Uuid,
+) -> Result<Vec<String>, GatewayError> {
+    let turn = state.storage.get_turn(turn_id).await?.ok_or_else(|| {
+        GatewayError::ConfigError(format!(
+            "cannot resolve dispatch bounds: sender turn {turn_id} was not found"
+        ))
+    })?;
+    let thread = swage_storage::store::ThreadStore::get(state.storage.as_ref(), turn.thread_id)
+        .await?
+        .ok_or_else(|| {
+            GatewayError::ConfigError(format!(
+                "cannot resolve dispatch bounds: sender thread {} was not found",
+                turn.thread_id
+            ))
+        })?;
+    let session = state
+        .storage
+        .get_session(thread.session_id)
+        .await?
+        .ok_or_else(|| {
+            GatewayError::ConfigError(format!(
+                "cannot resolve dispatch bounds: sender session {} was not found",
+                thread.session_id
+            ))
+        })?;
+    dispatch_bound_agent_ids(session.metadata.as_ref())
+}
+
+pub(crate) async fn apply_dispatch_bounds(
+    state: &AppState,
+    space_slug: &str,
+    space_id: Uuid,
+    mut config: swage_config::ResolvedConfig,
+    bound_agent_ids: &[String],
+    subject: &str,
+) -> Result<swage_config::ResolvedConfig, GatewayError> {
+    for bound_agent_id in bound_agent_ids {
+        let bound =
+            super::load_session_config(state, space_slug, bound_agent_id).map_err(|error| {
+                GatewayError::ConfigError(format!(
+                    "failed to load dispatch bound {bound_agent_id:?} for {subject}: {error}"
+                ))
+            })?;
+        let bound = match state
+            .storage
+            .resolve_agent_definition(bound_agent_id, space_id)
+            .await
+        {
+            Ok(Some(definition)) => super::apply_agent_definition(bound, &definition),
+            Ok(None) => bound,
+            Err(error) => {
+                return Err(GatewayError::ConfigError(format!(
+                    "failed to resolve dispatch bound {bound_agent_id} for {subject}: {error}"
+                )));
+            }
+        };
+        config = apply_dispatch_bound(config, &bound);
+    }
+    Ok(config)
+}
+
 pub(crate) fn build_agent_config_with_workspace(
     agent_id: String,
     config: &swage_config::ResolvedConfig,
@@ -451,6 +552,33 @@ pub(super) fn ensure_selected_model_available(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dispatch_bound_metadata_preserves_the_full_lineage() {
+        let lineage = vec!["lead".to_string(), "worker-b".to_string()];
+        let metadata = dispatch_bound_metadata(&lineage).expect("non-empty lineage");
+
+        assert_eq!(
+            dispatch_bound_agent_ids(Some(&metadata)).expect("valid metadata"),
+            lineage
+        );
+    }
+
+    #[test]
+    fn every_inherited_dispatch_bound_keeps_narrowing_the_worker() {
+        let mut worker = swage_config::ResolvedConfig::default();
+        worker.tools.permissions.allow = vec!["delegate".into(), "shell".into()];
+
+        let mut upstream = swage_config::ResolvedConfig::default();
+        upstream.tools.permissions.allow = vec!["delegate".into()];
+
+        let mut immediate_sender = swage_config::ResolvedConfig::default();
+        immediate_sender.tools.permissions.allow = vec!["delegate".into(), "shell".into()];
+
+        let confined =
+            apply_dispatch_bound(apply_dispatch_bound(worker, &upstream), &immediate_sender);
+        assert_eq!(confined.tools.permissions.allow, vec!["delegate"]);
+    }
 
     fn definition_with(
         instructions: &str,
