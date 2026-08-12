@@ -3005,6 +3005,21 @@ mod tests {
         requests: std::sync::Mutex<Vec<swage_core::CompletionRequest>>,
     }
 
+    fn scripted_text_output(content: &str) -> Vec<swage_core::StreamChunk> {
+        vec![
+            swage_core::StreamChunk::Delta {
+                content: content.into(),
+            },
+            swage_core::StreamChunk::Usage(swage_core::TokenUsage {
+                input_tokens: 1,
+                output_tokens: 1,
+            }),
+            swage_core::StreamChunk::Done {
+                finish_reason: None,
+            },
+        ]
+    }
+
     #[async_trait::async_trait]
     impl swage_provider::LlmProvider for ScriptedRecordingProvider {
         fn model_id(&self) -> &str {
@@ -4918,9 +4933,9 @@ mod tests {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
         let space = storage.get_or_create_default().await.expect("space");
         let provider = Arc::new(ScriptedRecordingProvider {
-            outputs: std::sync::Mutex::new(std::collections::VecDeque::from([
-                "one", "two", "three",
-            ])),
+            outputs: std::sync::Mutex::new(std::collections::VecDeque::from(
+                ["one", "two", "three"].map(scripted_text_output),
+            )),
             requests: std::sync::Mutex::new(Vec::new()),
         });
         let state = AppState::new(
@@ -4977,13 +4992,16 @@ mod tests {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
         let space = storage.get_or_create_default().await.expect("space");
         let provider = Arc::new(ScriptedRecordingProvider {
-            outputs: std::sync::Mutex::new(std::collections::VecDeque::from([
-                "work one",
-                "work two",
-                "closing one",
-                "closing two",
-                "closing three",
-            ])),
+            outputs: std::sync::Mutex::new(std::collections::VecDeque::from(
+                [
+                    "work one",
+                    "work two",
+                    "closing one",
+                    "closing two",
+                    "closing three",
+                ]
+                .map(scripted_text_output),
+            )),
             requests: std::sync::Mutex::new(Vec::new()),
         });
         let state = AppState::new(
@@ -5102,7 +5120,9 @@ mod tests {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
         let space = storage.get_or_create_default().await.expect("space");
         let provider = Arc::new(ScriptedRecordingProvider {
-            outputs: std::sync::Mutex::new(std::collections::VecDeque::from(["work"])),
+            outputs: std::sync::Mutex::new(std::collections::VecDeque::from(
+                ["work"].map(scripted_text_output),
+            )),
             requests: std::sync::Mutex::new(Vec::new()),
         });
         let state = AppState::new(
