@@ -82,10 +82,6 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
             "048_knowledge_orientation_cards",
             CREATE_KNOWLEDGE_ORIENTATION_CARDS,
         ),
-        (
-            "049_workflow_run_dispatch_bound",
-            ADD_WORKFLOW_RUN_DISPATCH_BOUND,
-        ),
         ("050_workflow_run_events", CREATE_WORKFLOW_RUN_EVENTS),
         ("051_workflow_run_parking", ADD_WORKFLOW_RUN_PARKING),
     ]
@@ -113,20 +109,20 @@ const ADD_WORKFLOW_RUN_PARKING: &str = "
         completed_at         TEXT,
         parent_run_id        TEXT REFERENCES workflow_runs(id),
         parent_seq           INTEGER,
-        dispatching_agent_id TEXT,
+        dispatch_bound_agent_ids_json TEXT NOT NULL,
         wake_at              TEXT
     );
     INSERT INTO workflow_runs_parking_new (
         id, space_id, script_version_id, source, source_hash, args_json,
         budget_json, state, final_output_json, error_message, engine_version,
         created_at, completed_at, parent_run_id, parent_seq,
-        dispatching_agent_id
+        dispatch_bound_agent_ids_json
     )
     SELECT
         id, space_id, script_version_id, source, source_hash, args_json,
         budget_json, state, final_output_json, error_message, engine_version,
         created_at, completed_at, parent_run_id, parent_seq,
-        dispatching_agent_id
+        dispatch_bound_agent_ids_json
     FROM workflow_runs;
     DROP TABLE workflow_runs;
     ALTER TABLE workflow_runs_parking_new RENAME TO workflow_runs;
@@ -188,15 +184,6 @@ const CREATE_WORKFLOW_RUN_EVENTS: &str = "
     ALTER TABLE workflow_journal_events_new RENAME TO workflow_journal;
     CREATE INDEX IF NOT EXISTS idx_workflow_journal_run_seq
         ON workflow_journal(run_id, seq);
-";
-
-/// A run started from an agent session records that agent as its dispatching
-/// context: worker sessions the run creates derive their grants from it by
-/// intersection, re-resolved at every worker turn. NULL means
-/// operator-started — no bound beyond the worker's own resolved config.
-const ADD_WORKFLOW_RUN_DISPATCH_BOUND: &str = "
-    ALTER TABLE workflow_runs
-        ADD COLUMN dispatching_agent_id TEXT;
 ";
 
 /// Composed workflow runs: a child run started by a parent's `workflow()`
@@ -967,7 +954,8 @@ const COMPLETE_SCHEMA: &str = "
         error_message       TEXT,
         engine_version      TEXT NOT NULL,
         created_at          TEXT NOT NULL,
-        completed_at        TEXT
+        completed_at        TEXT,
+        dispatch_bound_agent_ids_json TEXT NOT NULL DEFAULT '[]'
     );
 
     CREATE INDEX IF NOT EXISTS idx_workflow_runs_space_created

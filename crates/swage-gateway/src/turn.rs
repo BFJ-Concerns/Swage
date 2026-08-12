@@ -601,37 +601,22 @@ pub(crate) async fn process_turn_with_existing_turn(
         }
     };
 
-    // A worker session dispatched by a workflow run carries its dispatching
-    // context's agent in session metadata: the worker's grants are the
-    // intersection of its own and that context's, re-resolved on every turn
-    // so a suspended worker never keeps authority its dispatcher has lost.
+    // A worker session carries the full lineage of dispatching contexts in
+    // session metadata: the worker's grants are the intersection of its own
+    // and every inherited bound, re-resolved on every turn so nested dispatch
+    // cannot expand authority and suspension cannot freeze it.
     // Unlike the definition overlay above, resolution failure here fails the
     // turn: falling open would run the worker wider than its dispatcher.
-    let config = match session.metadata.as_ref().and_then(|metadata| {
-        metadata
-            .get(crate::workflow::DISPATCH_BOUND_METADATA_KEY)
-            .and_then(serde_json::Value::as_str)
-    }) {
-        Some(bound_agent_id) => {
-            let bound = load_session_config(state, &space_slug, bound_agent_id)?;
-            let bound = match state
-                .storage
-                .resolve_agent_definition(bound_agent_id, space_id)
-                .await
-            {
-                Ok(Some(definition)) => apply_agent_definition(bound, &definition),
-                Ok(None) => bound,
-                Err(error) => {
-                    return Err(GatewayError::ConfigError(format!(
-                        "failed to resolve the dispatch bound {bound_agent_id} \
-                         for worker session {session_id}: {error}"
-                    )));
-                }
-            };
-            apply_dispatch_bound(config, &bound)
-        }
-        None => config,
-    };
+    let bound_agent_ids = dispatch_bound_agent_ids(session.metadata.as_ref())?;
+    let config = apply_dispatch_bounds(
+        state,
+        &space_slug,
+        space_id,
+        config,
+        &bound_agent_ids,
+        &format!("worker session {session_id}"),
+    )
+    .await?;
 
     ensure_selected_model_available(
         state,

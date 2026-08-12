@@ -3,6 +3,107 @@ use super::{
     load_trusted_workspace_policy,
 };
 
+/// Host-only session metadata carrying every agent context whose effective
+/// grants bound a worker. The lineage is ordered outermost to innermost and is
+/// re-resolved at every turn, so nested dispatch cannot shed an inherited
+/// bound and suspension cannot freeze authority.
+pub(crate) const DISPATCH_BOUND_METADATA_KEY: &str = "dispatch_bound_agent_ids";
+
+pub(crate) fn dispatch_bound_agent_ids(
+    metadata: Option<&serde_json::Value>,
+) -> Result<Vec<String>, GatewayError> {
+    let Some(value) = metadata.and_then(|metadata| metadata.get(DISPATCH_BOUND_METADATA_KEY))
+    else {
+        return Ok(Vec::new());
+    };
+    let values = value.as_array().ok_or_else(|| {
+        GatewayError::ConfigError(format!(
+            "session metadata field {DISPATCH_BOUND_METADATA_KEY:?} must be an array"
+        ))
+    })?;
+    values
+        .iter()
+        .map(|value| {
+            value.as_str().map(str::to_string).ok_or_else(|| {
+                GatewayError::ConfigError(format!(
+                    "session metadata field {DISPATCH_BOUND_METADATA_KEY:?} must contain only agent ids"
+                ))
+            })
+        })
+        .collect()
+}
+
+pub(crate) fn dispatch_bound_metadata(agent_ids: &[String]) -> Option<serde_json::Value> {
+    (!agent_ids.is_empty()).then(|| {
+        serde_json::json!({
+            DISPATCH_BOUND_METADATA_KEY: agent_ids,
+        })
+    })
+}
+
+pub(crate) async fn dispatch_bound_agent_ids_for_turn(
+    state: &AppState,
+    turn_id: Uuid,
+) -> Result<Vec<String>, GatewayError> {
+    let turn = state.storage.get_turn(turn_id).await?.ok_or_else(|| {
+        GatewayError::ConfigError(format!(
+            "cannot resolve dispatch bounds: sender turn {turn_id} was not found"
+        ))
+    })?;
+    let thread = swage_storage::store::ThreadStore::get(state.storage.as_ref(), turn.thread_id)
+        .await?
+        .ok_or_else(|| {
+            GatewayError::ConfigError(format!(
+                "cannot resolve dispatch bounds: sender thread {} was not found",
+                turn.thread_id
+            ))
+        })?;
+    let session = state
+        .storage
+        .get_session(thread.session_id)
+        .await?
+        .ok_or_else(|| {
+            GatewayError::ConfigError(format!(
+                "cannot resolve dispatch bounds: sender session {} was not found",
+                thread.session_id
+            ))
+        })?;
+    dispatch_bound_agent_ids(session.metadata.as_ref())
+}
+
+pub(crate) async fn apply_dispatch_bounds(
+    state: &AppState,
+    space_slug: &str,
+    space_id: Uuid,
+    mut config: swage_config::ResolvedConfig,
+    bound_agent_ids: &[String],
+    subject: &str,
+) -> Result<swage_config::ResolvedConfig, GatewayError> {
+    for bound_agent_id in bound_agent_ids {
+        let bound =
+            super::load_session_config(state, space_slug, bound_agent_id).map_err(|error| {
+                GatewayError::ConfigError(format!(
+                    "failed to load dispatch bound {bound_agent_id:?} for {subject}: {error}"
+                ))
+            })?;
+        let bound = match state
+            .storage
+            .resolve_agent_definition(bound_agent_id, space_id)
+            .await
+        {
+            Ok(Some(definition)) => super::apply_agent_definition(bound, &definition),
+            Ok(None) => bound,
+            Err(error) => {
+                return Err(GatewayError::ConfigError(format!(
+                    "failed to resolve dispatch bound {bound_agent_id} for {subject}: {error}"
+                )));
+            }
+        };
+        config = apply_dispatch_bound(config, &bound);
+    }
+    Ok(config)
+}
+
 pub(crate) fn build_agent_config_with_workspace(
     agent_id: String,
     config: &swage_config::ResolvedConfig,
@@ -248,22 +349,67 @@ fn intersect_tool_permissions(
 
 /// Expand an allow list to concrete tool names using the same config's own
 /// bundle definitions. `None` means the list allows everything ("*").
+fn expanded_names(
+    names: impl IntoIterator<Item = String>,
+    bundles: &std::collections::HashMap<String, Vec<String>>,
+) -> std::collections::BTreeSet<String> {
+    names
+        .into_iter()
+        .flat_map(|name| bundles.get(&name).cloned().unwrap_or_else(|| vec![name]))
+        .collect()
+}
+
 fn expanded_allow(
     permissions: &swage_config::model::ToolPermissionConfig,
 ) -> Option<std::collections::BTreeSet<String>> {
     if permissions.allow.iter().any(|tool| tool == "*") {
         return None;
     }
-    let mut concrete = std::collections::BTreeSet::new();
-    for entry in &permissions.allow {
-        match permissions.bundles.get(entry) {
-            Some(tools) => concrete.extend(tools.iter().cloned()),
-            None => {
-                concrete.insert(entry.clone());
-            }
-        }
-    }
-    Some(concrete)
+    Some(expanded_names(
+        permissions.allow.clone(),
+        &permissions.bundles,
+    ))
+}
+
+fn expanded_approval_entries(
+    permissions: &swage_config::model::ToolPermissionConfig,
+) -> Vec<swage_config::model::RequireApprovalEntry> {
+    permissions
+        .require_approval
+        .iter()
+        .flat_map(|entry| {
+            expanded_names([entry.tool_name().to_string()], &permissions.bundles)
+                .into_iter()
+                .map(|tool| match entry {
+                    swage_config::model::RequireApprovalEntry::Simple(_) => {
+                        swage_config::model::RequireApprovalEntry::Simple(tool)
+                    }
+                    swage_config::model::RequireApprovalEntry::WithOptions {
+                        timeout,
+                        timeout_policy,
+                        ..
+                    } => swage_config::model::RequireApprovalEntry::WithOptions {
+                        tool,
+                        timeout: *timeout,
+                        timeout_policy: timeout_policy.clone(),
+                    },
+                })
+        })
+        .collect()
+}
+
+pub(crate) fn effective_tool_permissions_record(
+    config: &swage_config::ResolvedConfig,
+) -> serde_json::Value {
+    let permissions = &config.tools.permissions;
+    let allow = expanded_allow(permissions)
+        .map(|tools| tools.into_iter().collect::<Vec<_>>())
+        .unwrap_or_else(|| vec!["*".to_string()]);
+    serde_json::json!({
+        "allow": allow,
+        "deny": permissions.deny,
+        "require_approval": expanded_approval_entries(permissions),
+    })
 }
 
 /// Confine a worker's resolved config to its dispatching context's grants.
@@ -290,6 +436,13 @@ pub(crate) fn apply_dispatch_bound(
 ) -> swage_config::ResolvedConfig {
     let worker_allow = expanded_allow(&config.tools.permissions);
     let bound_allow = expanded_allow(&bound.tools.permissions);
+    let effective_allow = match (&worker_allow, &bound_allow) {
+        (_, None) => None,
+        (None, Some(bound_set)) => Some(bound_set.clone()),
+        (Some(worker_set), Some(bound_set)) => {
+            Some(worker_set.intersection(bound_set).cloned().collect())
+        }
+    };
     config.tools.permissions.allow = match (worker_allow, bound_allow) {
         // The bound allows everything: the worker's own grants stand, in
         // their original form (its bundles keep expanding at check time).
@@ -304,6 +457,13 @@ pub(crate) fn apply_dispatch_bound(
         if !config.tools.permissions.deny.contains(&denied) {
             config.tools.permissions.deny.push(denied);
         }
+    }
+    if let Some(ref effective_allow) = effective_allow {
+        config.tools.permissions.require_approval =
+            expanded_approval_entries(&config.tools.permissions)
+                .into_iter()
+                .filter(|entry| effective_allow.contains(entry.tool_name()))
+                .collect();
     }
     let worker_approval_names: std::collections::BTreeSet<String> = config
         .tools
@@ -320,19 +480,18 @@ pub(crate) fn apply_dispatch_bound(
         .collect();
     let mut carried = std::collections::BTreeSet::new();
     for entry in &bound.tools.permissions.require_approval {
-        let name = entry.tool_name().to_string();
         // Bound entries expand through the BOUND's own bundles, for the
         // same aliasing reason as the allow intersection. They carry as
         // plain demands — the worker's own approval defaults time them.
-        let names = bound
-            .tools
-            .permissions
-            .bundles
-            .get(&name)
-            .cloned()
-            .unwrap_or_else(|| vec![name]);
-        for concrete in names {
-            if !worker_approval_names.contains(&concrete) {
+        for concrete in expanded_names(
+            [entry.tool_name().to_string()],
+            &bound.tools.permissions.bundles,
+        ) {
+            if effective_allow
+                .as_ref()
+                .is_none_or(|allowed| allowed.contains(&concrete))
+                && !worker_approval_names.contains(&concrete)
+            {
                 carried.insert(concrete);
             }
         }
@@ -393,6 +552,33 @@ pub(super) fn ensure_selected_model_available(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dispatch_bound_metadata_preserves_the_full_lineage() {
+        let lineage = vec!["lead".to_string(), "worker-b".to_string()];
+        let metadata = dispatch_bound_metadata(&lineage).expect("non-empty lineage");
+
+        assert_eq!(
+            dispatch_bound_agent_ids(Some(&metadata)).expect("valid metadata"),
+            lineage
+        );
+    }
+
+    #[test]
+    fn every_inherited_dispatch_bound_keeps_narrowing_the_worker() {
+        let mut worker = swage_config::ResolvedConfig::default();
+        worker.tools.permissions.allow = vec!["delegate".into(), "shell".into()];
+
+        let mut upstream = swage_config::ResolvedConfig::default();
+        upstream.tools.permissions.allow = vec!["delegate".into()];
+
+        let mut immediate_sender = swage_config::ResolvedConfig::default();
+        immediate_sender.tools.permissions.allow = vec!["delegate".into(), "shell".into()];
+
+        let confined =
+            apply_dispatch_bound(apply_dispatch_bound(worker, &upstream), &immediate_sender);
+        assert_eq!(confined.tools.permissions.allow, vec!["delegate"]);
+    }
 
     fn definition_with(
         instructions: &str,
@@ -563,6 +749,66 @@ mod tests {
     }
 
     #[test]
+    fn effective_permission_record_includes_a_dispatchers_bound_deny() {
+        let mut worker = swage_config::ResolvedConfig::default();
+        worker.tools.permissions.allow = vec!["shell".into(), "file_read".into()];
+        worker.tools.permissions.deny = vec![];
+        worker.tools.permissions.require_approval = vec![];
+
+        let mut bound = swage_config::ResolvedConfig::default();
+        bound.tools.permissions.allow = vec!["delegate".into(), "file_read".into()];
+        bound.tools.permissions.deny = vec!["file_read".into()];
+        bound.tools.permissions.require_approval = vec![];
+
+        let confined = apply_dispatch_bound(worker, &bound);
+        assert_eq!(
+            effective_tool_permissions_record(&confined),
+            serde_json::json!({
+                "allow": ["file_read"],
+                "deny": ["file_read"],
+                "require_approval": [],
+            }),
+            "the record must show the deny that makes an allowed tool unreachable"
+        );
+    }
+
+    #[test]
+    fn effective_permission_record_expands_bundle_labels_to_concrete_tools() {
+        let mut confined = swage_config::ResolvedConfig::default();
+        confined.tools.permissions.allow = vec!["reading".into()];
+        confined.tools.permissions.deny = vec!["shell".into()];
+        confined.tools.permissions.bundles = std::collections::HashMap::from([
+            (
+                "reading".to_string(),
+                vec!["knowledge_search".to_string(), "file_read".to_string()],
+            ),
+            (
+                "changes".to_string(),
+                vec!["file_write".to_string(), "shell".to_string()],
+            ),
+        ]);
+        confined.tools.permissions.require_approval =
+            vec![swage_config::model::RequireApprovalEntry::WithOptions {
+                tool: "changes".into(),
+                timeout: Some(30),
+                timeout_policy: Some(swage_core::ApprovalTimeoutPolicy::Interrupt),
+            }];
+
+        assert_eq!(
+            effective_tool_permissions_record(&confined),
+            serde_json::json!({
+                "allow": ["file_read", "knowledge_search"],
+                "deny": ["shell"],
+                "require_approval": [
+                    {"tool": "file_write", "timeout": 30, "timeout_policy": "interrupt"},
+                    {"tool": "shell", "timeout": 30, "timeout_policy": "interrupt"},
+                ],
+            }),
+            "bundle labels must not be required to interpret the record"
+        );
+    }
+
+    #[test]
     fn a_shared_bundle_name_is_no_licence_when_definitions_differ() {
         // The dispatcher and the worker both allow a bundle called "safe",
         // but define it differently. Intersecting the raw name would hand
@@ -611,6 +857,26 @@ mod tests {
             demanded.contains(&"shell"),
             "a tool the dispatcher gates behind approval must not run approval-free in its worker"
         );
+        let permissions = swage_tool::permission::PermissionConfig {
+            allow: confined.tools.permissions.allow.clone(),
+            deny: confined.tools.permissions.deny.clone(),
+            bundles: confined.tools.permissions.bundles.clone(),
+            require_approval: confined
+                .tools
+                .permissions
+                .require_approval
+                .iter()
+                .map(|entry| swage_tool::permission::RequireApprovalEntry {
+                    tool_name: entry.tool_name().to_string(),
+                    timeout_secs: None,
+                    timeout_policy: None,
+                })
+                .collect(),
+        };
+        assert!(matches!(
+            swage_tool::permission::check_permission(&permissions, "shell"),
+            Ok(swage_tool::permission::PermissionCheckResult::RequiresApproval { .. })
+        ));
 
         // Already-demanded tools are not duplicated.
         let mut worker = swage_config::ResolvedConfig::default();
@@ -632,6 +898,58 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_bound_removes_approval_for_a_tool_outside_the_intersection() {
+        let mut worker = swage_config::ResolvedConfig::default();
+        worker.tools.permissions.allow = vec!["shell".into()];
+        assert!(
+            worker
+                .tools
+                .permissions
+                .require_approval
+                .iter()
+                .any(|entry| entry.tool_name() == "shell")
+        );
+
+        let mut bound = swage_config::ResolvedConfig::default();
+        bound.tools.permissions.allow = vec!["knowledge_search".into()];
+        bound.tools.permissions.require_approval =
+            vec![swage_config::model::RequireApprovalEntry::Simple(
+                "shell".into(),
+            )];
+
+        let confined = apply_dispatch_bound(worker, &bound);
+        assert!(confined.tools.permissions.allow.is_empty());
+        assert!(
+            confined.tools.permissions.require_approval.is_empty(),
+            "approval requirements may only decorate effective grants"
+        );
+
+        let permissions = swage_tool::permission::PermissionConfig {
+            allow: confined.tools.permissions.allow.clone(),
+            deny: confined.tools.permissions.deny.clone(),
+            bundles: confined.tools.permissions.bundles.clone(),
+            require_approval: confined
+                .tools
+                .permissions
+                .require_approval
+                .iter()
+                .map(|entry| swage_tool::permission::RequireApprovalEntry {
+                    tool_name: entry.tool_name().to_string(),
+                    timeout_secs: None,
+                    timeout_policy: None,
+                })
+                .collect(),
+        };
+        assert!(matches!(
+            swage_tool::permission::check_permission(&permissions, "shell"),
+            Err(swage_core::ToolError::PermissionDenied {
+                reason: swage_core::PermissionDeniedReason::NotAllowed,
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn a_wildcard_dispatcher_leaves_the_workers_own_grants() {
         let mut worker = swage_config::ResolvedConfig::default();
         worker.tools.permissions.allow = vec!["shell".into()];
@@ -641,6 +959,21 @@ mod tests {
         let bound = swage_config::ResolvedConfig::default();
         let confined = apply_dispatch_bound(worker, &bound);
         assert_eq!(confined.tools.permissions.allow, vec!["shell".to_string()]);
+    }
+
+    #[test]
+    fn a_wildcard_dispatcher_leaves_the_workers_own_approval_demands() {
+        let mut worker = swage_config::ResolvedConfig::default();
+        worker.tools.permissions.allow = vec!["shell".into()];
+        let worker_approvals = worker.tools.permissions.require_approval.clone();
+
+        let bound = swage_config::ResolvedConfig::default();
+        let confined = apply_dispatch_bound(worker, &bound);
+
+        assert_eq!(
+            confined.tools.permissions.require_approval,
+            worker_approvals
+        );
     }
 
     #[test]

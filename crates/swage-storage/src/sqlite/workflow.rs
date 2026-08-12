@@ -107,7 +107,15 @@ fn run_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkflowRunRecord> {
             })?,
         error_message: row.get(14)?,
         engine_version: row.get(15)?,
-        dispatching_agent_id: row.get(18)?,
+        dispatch_bound_agent_ids: serde_json::from_str(&row.get::<_, String>(18)?).map_err(
+            |error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    18,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            },
+        )?,
         wake_at: row.get::<_, Option<String>>(19)?.map(time).transpose()?,
         created_at: time(row.get(16)?)?,
         completed_at: completed_at.map(time).transpose()?,
@@ -121,7 +129,7 @@ const RUN_COLUMNS: &str = "id, space_id, parent_run_id, parent_seq, script_versi
     (SELECT script_id FROM workflow_script_versions WHERE id = workflow_runs.script_version_id), \
     (SELECT name FROM workflow_scripts WHERE id = (SELECT script_id FROM workflow_script_versions WHERE id = workflow_runs.script_version_id)), \
     (SELECT version FROM workflow_script_versions WHERE id = workflow_runs.script_version_id), \
-    source, source_hash, args_json, budget_json, state, final_output_json, error_message, engine_version, created_at, completed_at, dispatching_agent_id, wake_at";
+    source, source_hash, args_json, budget_json, state, final_output_json, error_message, engine_version, created_at, completed_at, dispatch_bound_agent_ids_json, wake_at";
 const JOURNAL_COLUMNS: &str = "id, run_id, seq, completed_order, kind, status, args_hash, request_json, result_json, error_message, effect_kind, idempotency_key, target_kind, started_at, completed_at";
 const RUN_EVENT_COLUMNS: &str = "id, run_id, journal_entry_id, seq, kind, payload_json, posted_at, delivered_wake_seq, delivered_at";
 
@@ -307,7 +315,9 @@ impl WorkflowStore for SqliteStorage {
             .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
         let budget = serde_json::to_string(&run.budget)
             .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
-        self.with_conn(move |conn| { conn.execute("INSERT INTO workflow_runs (id, space_id, parent_run_id, parent_seq, script_version_id, source, source_hash, args_json, budget_json, state, engine_version, dispatching_agent_id, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'running', ?10, ?11, ?12)", params![id.to_string(), run.space_id.to_string(), run.parent_run_id.map(|v| v.to_string()), run.parent_seq.map(|v| v as i64), run.script_version_id.map(|v| v.to_string()), run.source, run.source_hash, args, budget, run.engine_version, run.dispatching_agent_id, now.to_rfc3339()])?; conn.query_row(&format!("SELECT {RUN_COLUMNS} FROM workflow_runs WHERE id = ?1"), [id.to_string()], run_row) }).await
+        let dispatch_bound_agent_ids = serde_json::to_string(&run.dispatch_bound_agent_ids)
+            .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
+        self.with_conn(move |conn| { conn.execute("INSERT INTO workflow_runs (id, space_id, parent_run_id, parent_seq, script_version_id, source, source_hash, args_json, budget_json, state, engine_version, dispatch_bound_agent_ids_json, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'running', ?10, ?11, ?12)", params![id.to_string(), run.space_id.to_string(), run.parent_run_id.map(|v| v.to_string()), run.parent_seq.map(|v| v as i64), run.script_version_id.map(|v| v.to_string()), run.source, run.source_hash, args, budget, run.engine_version, dispatch_bound_agent_ids, now.to_rfc3339()])?; conn.query_row(&format!("SELECT {RUN_COLUMNS} FROM workflow_runs WHERE id = ?1"), [id.to_string()], run_row) }).await
     }
 
     async fn get_workflow_run(&self, id: Uuid) -> Result<Option<WorkflowRunRecord>, StorageError> {
@@ -614,7 +624,7 @@ mod tests {
                 args: serde_json::json!({}),
                 budget: serde_json::json!({}),
                 engine_version: "rquickjs-0.12.0".into(),
-                dispatching_agent_id: None,
+                dispatch_bound_agent_ids: vec![],
             })
             .await
             .expect("run");
@@ -718,7 +728,7 @@ mod tests {
                 args: serde_json::json!({}),
                 budget: serde_json::json!({}),
                 engine_version: "rquickjs-0.12.0".into(),
-                dispatching_agent_id: None,
+                dispatch_bound_agent_ids: vec![],
             })
             .await
             .expect("run");
