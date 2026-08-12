@@ -6240,7 +6240,7 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
         .create_session(NewSession {
             space_id: space.id,
             agent_id: "gateway".to_string(),
-            metadata: None,
+            metadata: dispatch_bound_metadata(&["upstream".to_string()]),
             active_workspace_attachment_id: None,
         })
         .await
@@ -6264,7 +6264,7 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
             instructions: String::new(),
             model_id: None,
             tool_permissions: Some(serde_json::json!({
-                "allow": ["delegate"], "deny": [], "bundles": {}, "require_approval": []
+                "allow": ["delegate", "shell"], "deny": [], "bundles": {}, "require_approval": []
             })),
             skills: vec![],
             output_schema: None,
@@ -6272,6 +6272,23 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
         })
         .await
         .expect("store dispatching agent definition");
+    storage
+        .upsert_agent_definition(swage_storage::NewAgentDefinition {
+            id: "upstream".into(),
+            space_id: Some(space.id),
+            display_name: "Upstream".into(),
+            description: String::new(),
+            instructions: String::new(),
+            model_id: None,
+            tool_permissions: Some(serde_json::json!({
+                "allow": ["delegate"], "deny": [], "bundles": {}, "require_approval": []
+            })),
+            skills: vec![],
+            output_schema: None,
+            output_max_retries: None,
+        })
+        .await
+        .expect("store inherited dispatch-bound definition");
     storage
         .upsert_agent_definition(swage_storage::NewAgentDefinition {
             id: "agent-b".into(),
@@ -6477,10 +6494,13 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
         child_sessions[0]
             .metadata
             .as_ref()
-            .and_then(|metadata| metadata.get(crate::workflow::DISPATCH_BOUND_METADATA_KEY))
-            .and_then(serde_json::Value::as_str),
-        Some("gateway"),
-        "delegated child should persist its dispatching agent bound"
+            .and_then(|metadata| metadata.get(crate::turn::DISPATCH_BOUND_METADATA_KEY))
+            .and_then(serde_json::Value::as_array),
+        Some(&vec![
+            serde_json::Value::String("upstream".into()),
+            serde_json::Value::String("gateway".into()),
+        ]),
+        "delegated child should persist its complete dispatch-bound lineage"
     );
 
     let child_threads = state
@@ -6521,7 +6541,7 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
             "deny": [],
             "require_approval": [],
         }),
-        "a disjoint delegated grant must be recorded explicitly, not omitted"
+        "the upstream bound must keep shell out even though both immediate sender and child grant it"
     );
     let child_audit = state
         .storage
@@ -6549,7 +6569,7 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
             .result
             .as_deref()
             .is_some_and(|result| result.contains("not permitted")),
-        "the target-only tool call should leave a denied audit record: {child_tool_calls:?}"
+        "the inherited-bound tool call should leave a denied audit record: {child_tool_calls:?}"
     );
 
     let (tx, _rx) = mpsc::unbounded_channel();

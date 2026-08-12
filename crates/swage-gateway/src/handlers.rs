@@ -1661,28 +1661,25 @@ async fn execute_external_delegate_message(
     let target_resolved =
         crate::turn::load_session_config(&state, &space.slug, &delegate_msg.recipient_agent_id)
             .map_err(|error| ApiError::internal(error.to_string()))?;
-    let dispatch_bound =
-        crate::turn::load_session_config(&state, &space.slug, &delegate_msg.sender_agent_id)
-            .map_err(|error| ApiError::internal(error.to_string()))?;
-    let dispatch_bound = match state
-        .storage
-        .resolve_agent_definition(&delegate_msg.sender_agent_id, space_id)
-        .await
-    {
-        Ok(Some(definition)) => crate::turn::apply_agent_definition(dispatch_bound, &definition),
-        Ok(None) => dispatch_bound,
-        Err(error) => {
-            return Err(ApiError::internal(format!(
-                "failed to resolve dispatch bound '{}' for delegated agent '{}': {error}",
-                delegate_msg.sender_agent_id, delegate_msg.recipient_agent_id
-            )));
-        }
+    let mut bound_agent_ids = match sender_turn_id {
+        Some(turn_id) => crate::turn::dispatch_bound_agent_ids_for_turn(&state, turn_id)
+            .await
+            .map_err(|error| ApiError::internal(error.to_string()))?,
+        None => Vec::new(),
     };
-    let effective_target_resolved =
-        crate::turn::apply_dispatch_bound(target_resolved.clone(), &dispatch_bound);
-    let session_metadata = serde_json::json!({
-        crate::workflow::DISPATCH_BOUND_METADATA_KEY: delegate_msg.sender_agent_id,
-    });
+    bound_agent_ids.push(delegate_msg.sender_agent_id.clone());
+    let effective_target_resolved = crate::turn::apply_dispatch_bounds(
+        &state,
+        &space.slug,
+        space_id,
+        target_resolved.clone(),
+        &bound_agent_ids,
+        &format!("delegated agent {:?}", delegate_msg.recipient_agent_id),
+    )
+    .await
+    .map_err(|error| ApiError::internal(error.to_string()))?;
+    let session_metadata = crate::turn::dispatch_bound_metadata(&bound_agent_ids)
+        .expect("a delegated session always has at least its sender bound");
     let active_workspace_attachment_id =
         active_workspace_attachment_for_sender_turn(&state, sender_turn_id).await?;
     let target_agent_config = crate::turn::build_agent_config_for_space_workspace(
@@ -2758,9 +2755,9 @@ mod tests {
             child_sessions[0]
                 .metadata
                 .as_ref()
-                .and_then(|metadata| metadata.get(crate::workflow::DISPATCH_BOUND_METADATA_KEY))
-                .and_then(serde_json::Value::as_str),
-            Some("agent-a"),
+                .and_then(|metadata| metadata.get(crate::turn::DISPATCH_BOUND_METADATA_KEY))
+                .and_then(serde_json::Value::as_array),
+            Some(&vec![serde_json::Value::String("agent-a".into())]),
             "external delegated child should persist its dispatching agent bound"
         );
 

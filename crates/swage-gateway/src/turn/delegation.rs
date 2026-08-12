@@ -1,13 +1,13 @@
 use super::{
     AgentError, AppState, Arc, CancellationToken, DelegationExecutor, DelegationHandler,
     GatewayDispatcherRequest, MessageRouter, NewAgentMessage, Uuid, apply_agent_definition,
-    apply_dispatch_bound, available_skills_for_agent, build_agent_config_for_space_workspace,
+    apply_dispatch_bounds, available_skills_for_agent, build_agent_config_for_space_workspace,
     build_approval_registrar, build_assembly_elements,
     build_gateway_dispatcher_for_unattended_execution, build_session_environment,
-    delegated_target_instructions_for_space, effective_tool_permissions_record,
-    execute_context_assembly, load_active_skills_for_agent, load_memory_for_assembly,
-    load_session_config, load_space_memory, mpsc, resolve_swage_root, select_context_assembly,
-    shutdown_sandbox_guard,
+    delegated_target_instructions_for_space, dispatch_bound_agent_ids_for_turn,
+    dispatch_bound_metadata, effective_tool_permissions_record, execute_context_assembly,
+    load_active_skills_for_agent, load_memory_for_assembly, load_session_config, load_space_memory,
+    mpsc, resolve_swage_root, select_context_assembly, shutdown_sandbox_guard,
 };
 use swage_agent::{
     DelegatedAssembly, DelegationContextAssembler, DelegationOutcome, DelegationSnapshotRecorder,
@@ -222,33 +222,22 @@ impl DelegationHandler for GatewayDelegationHandler {
             }
         };
 
-        let dispatch_bound = load_session_config(&self.state, &space.slug, sender_agent_id)
-            .map_err(|error| {
-                AgentError::InvalidConfig(format!(
-                    "failed to load dispatch bound '{sender_agent_id}' in space '{}': {error}",
-                    space.slug
-                ))
-            })?;
-        let dispatch_bound = match self
-            .state
-            .storage
-            .resolve_agent_definition(sender_agent_id, space_id)
+        let mut bound_agent_ids = dispatch_bound_agent_ids_for_turn(&self.state, sender_turn_id)
             .await
-        {
-            Ok(Some(definition)) => apply_agent_definition(dispatch_bound, &definition),
-            Ok(None) => dispatch_bound,
-            Err(error) => {
-                return Err(AgentError::InvalidConfig(format!(
-                    "failed to resolve dispatch bound '{sender_agent_id}' for delegated agent \
-                     '{target_agent_id}': {error}"
-                )));
-            }
-        };
-        let effective_target_resolved =
-            apply_dispatch_bound(target_resolved.clone(), &dispatch_bound);
-        let session_metadata = serde_json::json!({
-            crate::workflow::DISPATCH_BOUND_METADATA_KEY: sender_agent_id,
-        });
+            .map_err(|error| AgentError::InvalidConfig(error.to_string()))?;
+        bound_agent_ids.push(sender_agent_id.to_string());
+        let effective_target_resolved = apply_dispatch_bounds(
+            &self.state,
+            &space.slug,
+            space_id,
+            target_resolved.clone(),
+            &bound_agent_ids,
+            &format!("delegated agent {target_agent_id:?}"),
+        )
+        .await
+        .map_err(|error| AgentError::InvalidConfig(error.to_string()))?;
+        let session_metadata = dispatch_bound_metadata(&bound_agent_ids)
+            .expect("a delegated session always has at least its sender bound");
 
         let active_workspace_attachment_id = self
             .active_workspace_attachment_for_turn(sender_turn_id)

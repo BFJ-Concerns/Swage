@@ -296,6 +296,10 @@ impl WorkflowLauncher for GatewayWorkflowLauncher {
             .await
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "workflow script has no version".to_string())?;
+        let mut dispatch_bound_agent_ids =
+            crate::turn::dispatch_bound_agent_ids(session.metadata.as_ref())
+                .map_err(|error| error.to_string())?;
+        dispatch_bound_agent_ids.push(session.agent_id);
         let run = start_run(
             self.state.clone(),
             session.space_id,
@@ -304,10 +308,10 @@ impl WorkflowLauncher for GatewayWorkflowLauncher {
             args,
             budget.unwrap_or_default(),
             script.delivery_grant,
-            // The dispatching session's agent is the run's grant context:
-            // every worker the run creates is bounded by it (intersection,
-            // re-resolved at each worker turn).
-            Some(session.agent_id),
+            // The run inherits every bound on the dispatching session, then
+            // adds that session's own agent. Each worker turn re-resolves the
+            // entire lineage before intersecting grants.
+            dispatch_bound_agent_ids,
         )
         .await
         .map_err(|error| error.0.to_string())?;
@@ -556,16 +560,11 @@ impl WorkflowHost for ChannelWorkflowHost {
     }
 }
 
-/// The session-metadata key carrying a worker's dispatch bound: the agent id
-/// of the context that dispatched the run, whose grants the worker's own are
-/// intersected with on every turn (turn.rs reads it back).
-pub(crate) const DISPATCH_BOUND_METADATA_KEY: &str = "dispatch_bound_agent_id";
-
 async fn run_ephemeral_agent_call(
     state: &AppState,
     run_id: Uuid,
     space_id: Uuid,
-    dispatching_agent_id: Option<&str>,
+    dispatch_bound_agent_ids: &[String],
     request: AgentCallRequest,
     cancellation: CancellationToken,
 ) -> Result<AgentCallResult, String> {
@@ -628,8 +627,7 @@ async fn run_ephemeral_agent_call(
             (session.id, thread.id)
         }
         None => {
-            let metadata = dispatching_agent_id
-                .map(|agent| serde_json::json!({ DISPATCH_BOUND_METADATA_KEY: agent }));
+            let metadata = crate::turn::dispatch_bound_metadata(dispatch_bound_agent_ids);
             let session = state
                 .storage
                 .create_session(NewSession {
@@ -740,7 +738,7 @@ fn run_host_commands(
     state: AppState,
     run_id: Uuid,
     space_id: Uuid,
-    dispatching_agent_id: Option<String>,
+    dispatch_bound_agent_ids: Vec<String>,
     delivery_grant: Option<Value>,
     budget: WorkflowBudget,
     replay: Vec<WorkflowJournalRecord>,
@@ -754,7 +752,7 @@ fn run_host_commands(
         state,
         run_id,
         space_id,
-        dispatching_agent_id,
+        dispatch_bound_agent_ids,
         delivery_grant,
         budget,
         replay,
@@ -770,7 +768,7 @@ async fn run_host_commands_inner(
     state: AppState,
     run_id: Uuid,
     space_id: Uuid,
-    dispatching_agent_id: Option<String>,
+    dispatch_bound_agent_ids: Vec<String>,
     delivery_grant: Option<Value>,
     budget: WorkflowBudget,
     replay: Vec<WorkflowJournalRecord>,
@@ -1010,7 +1008,7 @@ async fn run_host_commands_inner(
                 let completed_replay =
                     existing_call.is_some_and(|entry| entry.status == "completed");
                 let state = state.clone();
-                let dispatching_agent_id = dispatching_agent_id.clone();
+                let dispatch_bound_agent_ids = dispatch_bound_agent_ids.clone();
                 let replay = Arc::clone(&replay);
                 let spent = Arc::clone(&spent_tokens);
                 let token_budget = Arc::clone(&token_budget);
@@ -1066,7 +1064,7 @@ async fn run_host_commands_inner(
                                 &state,
                                 run_id,
                                 space_id,
-                                dispatching_agent_id.as_deref(),
+                                &dispatch_bound_agent_ids,
                                 entry.id,
                                 request,
                                 cancellation,
@@ -1092,7 +1090,7 @@ async fn run_host_commands_inner(
                                     &state,
                                     run_id,
                                     space_id,
-                                    dispatching_agent_id.as_deref(),
+                                    &dispatch_bound_agent_ids,
                                     intent.id,
                                     request,
                                     cancellation,
@@ -1742,7 +1740,7 @@ async fn complete_agent_entry(
     state: &AppState,
     run_id: Uuid,
     space_id: Uuid,
-    dispatching_agent_id: Option<&str>,
+    dispatch_bound_agent_ids: &[String],
     entry_id: Uuid,
     request: AgentCallRequest,
     cancellation: CancellationToken,
@@ -1751,7 +1749,7 @@ async fn complete_agent_entry(
         state,
         run_id,
         space_id,
-        dispatching_agent_id,
+        dispatch_bound_agent_ids,
         request,
         cancellation,
     )
@@ -2070,7 +2068,9 @@ async fn complete_workflow_call_entry(
                     engine_version: "rquickjs-0.12.0".into(),
                     // Confinement flows down here too: the child's workers
                     // stay bounded by whatever context dispatched the parent.
-                    dispatching_agent_id: parent.and_then(|parent| parent.dispatching_agent_id),
+                    dispatch_bound_agent_ids: parent
+                        .map(|parent| parent.dispatch_bound_agent_ids)
+                        .unwrap_or_default(),
                 })
                 .await
                 .map_err(|error| error.to_string())?;
@@ -2358,7 +2358,7 @@ async fn start_run(
     args: Value,
     budget: WorkflowBudget,
     delivery_grant: Option<Value>,
-    dispatching_agent_id: Option<String>,
+    dispatch_bound_agent_ids: Vec<String>,
 ) -> Result<WorkflowRun, ApiError> {
     validate_budget(&budget)?;
     // Each run owns a QuickJS runtime and an OS thread. Keep the default bound
@@ -2380,7 +2380,7 @@ async fn start_run(
             args,
             budget: serde_json::to_value(budget).map_err(internal)?,
             engine_version: "rquickjs-0.12.0".into(),
-            dispatching_agent_id,
+            dispatch_bound_agent_ids,
         })
         .await
         .map_err(internal)?;
@@ -2479,7 +2479,7 @@ async fn launch_existing_run(
         state.clone(),
         record.id,
         space_id,
-        record.dispatching_agent_id.clone(),
+        record.dispatch_bound_agent_ids.clone(),
         delivery_grant.clone(),
         run_budget.clone(),
         replay,
@@ -2605,7 +2605,7 @@ pub async fn start_inline_run(
             None,
             // Operator-started: no dispatch bound beyond each worker's own
             // resolved config.
-            None,
+            vec![],
         )
         .await?,
     ))
@@ -2637,7 +2637,7 @@ pub async fn start_saved_run(
             request.args,
             request.budget.unwrap_or_default(),
             script.delivery_grant,
-            None,
+            vec![],
         )
         .await?,
     ))
@@ -2895,7 +2895,7 @@ mod tests {
     use super::*;
     use swage_protocol::client::workflow::{WorkflowJournalEntryKind, WorkflowJournalEntryStatus};
     use swage_storage::{
-        SessionStore, SpaceStore, SqliteStorage, Storage, ToolCallStore, TurnStore, WorkflowStore,
+        SessionStore, SpaceStore, SqliteStorage, Storage, TurnStore, WorkflowStore,
     };
     use swage_workflow::AgentSessionRef;
 
@@ -3188,7 +3188,7 @@ mod tests {
                 args: Value::Null,
                 budget: serde_json::json!({}),
                 engine_version: "test".into(),
-                dispatching_agent_id: None,
+                dispatch_bound_agent_ids: vec![],
             })
             .await
             .expect("run");
@@ -3358,7 +3358,7 @@ mod tests {
             state,
             run_id,
             space.id,
-            None,
+            vec![],
             None,
             WorkflowBudget {
                 max_agent_calls: None,
@@ -3589,7 +3589,7 @@ mod tests {
                 args: Value::Null,
                 budget: serde_json::json!({}),
                 engine_version: "test".into(),
-                dispatching_agent_id: None,
+                dispatch_bound_agent_ids: vec![],
             })
             .await
             .expect("run");
@@ -3606,7 +3606,7 @@ mod tests {
             state,
             run.id,
             space.id,
-            None,
+            vec![],
             None,
             WorkflowBudget {
                 max_agent_calls: None,
@@ -3688,7 +3688,7 @@ mod tests {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
         let space = storage.get_or_create_default().await.expect("space");
         let swage_home = crate::test_support::SwageHomeGuard::new();
-        for (agent, allow) in [("lead", "knowledge_search"), ("worker", "shell")] {
+        for (agent, allow) in [("lead", "shell"), ("worker", "shell")] {
             let agent_dir = swage_home.path().join("spaces/default/agents").join(agent);
             std::fs::create_dir_all(&agent_dir).expect("create agent config directory");
             std::fs::write(
@@ -3708,22 +3708,12 @@ mod tests {
                 args: Value::Null,
                 budget: serde_json::json!({}),
                 engine_version: "test".into(),
-                dispatching_agent_id: Some("lead".into()),
+                dispatch_bound_agent_ids: vec!["lead".into()],
             })
             .await
             .expect("run");
         let provider = Arc::new(ScriptedRecordingProvider {
             outputs: std::sync::Mutex::new(std::collections::VecDeque::from([
-                vec![
-                    swage_core::StreamChunk::ToolUse {
-                        call_id: "disjoint-shell".into(),
-                        name: "shell".into(),
-                        arguments: serde_json::json!({}),
-                    },
-                    swage_core::StreamChunk::Done {
-                        finish_reason: None,
-                    },
-                ],
                 vec![
                     swage_core::StreamChunk::Delta {
                         content: "restated: gather the sources".into(),
@@ -3758,7 +3748,7 @@ mod tests {
             state,
             run.id,
             space.id,
-            Some("lead".into()),
+            vec!["lead".into()],
             None,
             WorkflowBudget {
                 max_agent_calls: None,
@@ -3798,8 +3788,8 @@ mod tests {
             thread_id: first.thread_id.expect("thread id"),
         };
 
-        // The worker session records its dispatching context, which the turn
-        // path reads back on every start to intersect grants.
+        // The worker session records its dispatching-context lineage, which
+        // the turn path reads back on every start to intersect grants.
         let worker_session = storage
             .get_session(token.session_id)
             .await
@@ -3809,10 +3799,22 @@ mod tests {
             worker_session
                 .metadata
                 .as_ref()
-                .and_then(|metadata| metadata.get(DISPATCH_BOUND_METADATA_KEY))
-                .and_then(Value::as_str),
-            Some("lead"),
+                .and_then(|metadata| metadata.get(crate::turn::DISPATCH_BOUND_METADATA_KEY))
+                .and_then(Value::as_array),
+            Some(&vec![Value::String("lead".into())]),
         );
+
+        // Revoke shell after the first worker turn. The continuation must
+        // re-resolve this changed bound rather than retaining the authority
+        // it had when the worker session was created.
+        let lead_config = swage_home
+            .path()
+            .join("spaces/default/agents/lead/config.toml");
+        std::fs::write(
+            lead_config,
+            "[tools]\nallow = [\"knowledge_search\"]\ndeny = []\nbundles = {}\n",
+        )
+        .expect("revoke lead shell grant");
 
         let (second_reply, second_receive) = oneshot::channel();
         tx.send(HostCommand::Agent {
@@ -3843,31 +3845,26 @@ mod tests {
             .await
             .expect("turns");
         assert_eq!(turns.len(), 2, "both turns live on the one thread");
-        let first_tool_calls = storage
-            .list_tool_calls_by_turn(turns[0].id)
-            .await
-            .expect("first worker tool calls");
-        assert_eq!(first_tool_calls.len(), 1);
-        assert_eq!(first_tool_calls[0].tool, "shell");
-        assert_eq!(first_tool_calls[0].status.as_deref(), Some("error"));
-        assert!(
-            first_tool_calls[0]
-                .result
-                .as_deref()
-                .is_some_and(|result| result.contains("not permitted"))
-        );
 
         // The continued turn met its own history: the second provider request
         // carries the first exchange, not a fresh context.
         let requests = provider.requests.lock().expect("requests");
-        assert_eq!(requests.len(), 3);
-        assert!(requests.iter().all(|request| {
-            request
+        assert_eq!(requests.len(), 2);
+        assert!(
+            requests[0]
                 .tool_definitions
                 .iter()
-                .all(|definition| definition["name"] != "shell")
-        }));
-        let second_request = requests[2]
+                .any(|definition| definition["name"] == "shell"),
+            "shell is available while the lead still grants it"
+        );
+        assert!(
+            requests[1]
+                .tool_definitions
+                .iter()
+                .all(|definition| definition["name"] != "shell"),
+            "the continued turn must observe the lead's revoked shell grant"
+        );
+        let second_request = requests[1]
             .messages
             .iter()
             .map(swage_core::ChatMessage::text_content)
@@ -3895,7 +3892,7 @@ mod tests {
                 args: Value::Null,
                 budget: serde_json::json!({}),
                 engine_version: "test".into(),
-                dispatching_agent_id: None,
+                dispatch_bound_agent_ids: vec![],
             })
             .await
             .expect("run");
@@ -3923,7 +3920,7 @@ mod tests {
             state,
             run.id,
             space.id,
-            None,
+            vec![],
             None,
             WorkflowBudget {
                 max_agent_calls: None,
@@ -4042,7 +4039,7 @@ mod tests {
                 args: Value::Null,
                 budget: serde_json::json!({}),
                 engine_version: "test".into(),
-                dispatching_agent_id: None,
+                dispatch_bound_agent_ids: vec![],
             })
             .await
             .expect("run");
@@ -4114,7 +4111,7 @@ mod tests {
             state,
             run_id,
             space_id,
-            None,
+            vec![],
             None,
             WorkflowBudget {
                 max_agent_calls: None,
@@ -4295,7 +4292,7 @@ mod tests {
             state,
             run.id,
             run.space_id,
-            None,
+            vec![],
             None,
             WorkflowBudget {
                 max_agent_calls: None,
@@ -4498,7 +4495,7 @@ mod tests {
             args: Value::Null,
             budget: serde_json::json!({}),
             engine_version: "test".into(),
-            dispatching_agent_id: None,
+            dispatch_bound_agent_ids: vec![],
         };
         let interrupted = storage
             .create_workflow_run(make_run(r#"return "a-done""#))
@@ -4578,7 +4575,7 @@ mod tests {
                 args: Value::Null,
                 budget: serde_json::json!({}),
                 engine_version: "test".into(),
-                dispatching_agent_id: None,
+                dispatch_bound_agent_ids: vec![],
             })
             .await
             .expect("run");
@@ -4600,7 +4597,7 @@ mod tests {
             state,
             run.id,
             space.id,
-            None,
+            vec![],
             None,
             WorkflowBudget {
                 max_agent_calls: None,
@@ -4682,7 +4679,7 @@ mod tests {
                 args: Value::Null,
                 budget: serde_json::json!({}),
                 engine_version: "test".into(),
-                dispatching_agent_id: None,
+                dispatch_bound_agent_ids: vec![],
             })
             .await
             .expect("run");
@@ -4728,7 +4725,7 @@ mod tests {
             state,
             run.id,
             space.id,
-            None,
+            vec![],
             None,
             WorkflowBudget {
                 max_agent_calls: None,
@@ -4803,7 +4800,7 @@ mod tests {
                 args: Value::Null,
                 budget: serde_json::to_value(&budget).expect("budget"),
                 engine_version: "test".into(),
-                dispatching_agent_id: None,
+                dispatch_bound_agent_ids: vec![],
             })
             .await
             .expect("run");
