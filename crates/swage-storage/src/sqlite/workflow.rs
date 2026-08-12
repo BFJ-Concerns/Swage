@@ -108,10 +108,7 @@ fn run_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkflowRunRecord> {
         error_message: row.get(14)?,
         engine_version: row.get(15)?,
         dispatching_agent_id: row.get(18)?,
-        wake_at: row
-            .get::<_, Option<String>>(19)?
-            .map(time)
-            .transpose()?,
+        wake_at: row.get::<_, Option<String>>(19)?.map(time).transpose()?,
         created_at: time(row.get(16)?)?,
         completed_at: completed_at.map(time).transpose()?,
     })
@@ -472,7 +469,8 @@ impl WorkflowStore for SqliteStorage {
                 "SELECT {RUN_EVENT_COLUMNS} FROM workflow_run_events \
                  WHERE run_id = ?1 AND delivered_at IS NULL ORDER BY seq ASC"
             ))?;
-            stmt.query_map([run_id.to_string()], run_event_row)?.collect()
+            stmt.query_map([run_id.to_string()], run_event_row)?
+                .collect()
         })
         .await
     }
@@ -486,7 +484,8 @@ impl WorkflowStore for SqliteStorage {
                 "SELECT {RUN_EVENT_COLUMNS} FROM workflow_run_events \
                  WHERE run_id = ?1 ORDER BY seq ASC"
             ))?;
-            stmt.query_map([run_id.to_string()], run_event_row)?.collect()
+            stmt.query_map([run_id.to_string()], run_event_row)?
+                .collect()
         })
         .await
     }
