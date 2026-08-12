@@ -77,10 +77,9 @@ pub struct PermissionConfig {
     /// constituent tools at resolution time.
     pub bundles: HashMap<String, Vec<String>>,
 
-    /// Tools that require human approval before execution. Resolution order
-    /// places this between deny (higher priority) and allow (lower priority):
-    /// a denied tool is never approved; a required-approval tool is implicitly
-    /// permitted but gated. Bundle names here expand just like in `allow`.
+    /// Granted tools that require human approval before execution. An entry
+    /// gates a tool only after `allow` grants it; it never grants access by
+    /// itself. Bundle names here expand just like in `allow`.
     #[serde(default)]
     pub require_approval: Vec<RequireApprovalEntry>,
 }
@@ -98,14 +97,11 @@ pub struct PermissionConfig {
 /// Resolution rules (applied in strict order):
 ///
 /// 1. **Deny wins**: if `tool_name` appears in `config.deny`, return `ExplicitlyDenied`.
-/// 2. **Require-approval**: if `tool_name` matches any `require_approval` entry
-///    (directly or via bundle expansion), return `RequiresApproval`.
-/// 3. **Wildcard**: if `config.allow` contains `"*"`, return `Allowed`.
-/// 4. **Direct allow match**: if `config.allow` contains `tool_name` directly,
-///    return `Allowed`.
-/// 5. **Bundle allow expansion**: for each bundle name in `config.allow`, if
-///    `tool_name` is in that bundle, return `Allowed`.
-/// 6. **Default-deny**: return `NotAllowed`.
+/// 2. **Establish grant**: wildcard, direct, and bundle-expanded `allow`
+///    entries grant the tool. If none match, return `NotAllowed`.
+/// 3. **Require-approval**: if the granted tool matches any `require_approval`
+///    entry (directly or via bundle expansion), return `RequiresApproval`.
+/// 4. **Allow**: return `Allowed`.
 pub fn check_permission(
     config: &PermissionConfig,
     tool_name: &str,
@@ -118,7 +114,24 @@ pub fn check_permission(
         });
     }
 
-    // Rule 2: require_approval — check direct match and bundle expansion.
+    // Rule 2: approval is subordinate to a grant, so establish the effective
+    // allow before consulting require_approval.
+    let granted = config.allow.iter().any(|entry| {
+        entry == "*"
+            || entry == tool_name
+            || config
+                .bundles
+                .get(entry)
+                .is_some_and(|bundle_tools| bundle_tools.iter().any(|tool| tool == tool_name))
+    });
+    if !granted {
+        return Err(ToolError::PermissionDenied {
+            name: tool_name.to_string(),
+            reason: PermissionDeniedReason::NotAllowed,
+        });
+    }
+
+    // Rule 3: require_approval — check direct match and bundle expansion.
     for entry in &config.require_approval {
         // Direct tool name match.
         if entry.tool_name == tool_name {
@@ -138,29 +151,8 @@ pub fn check_permission(
         }
     }
 
-    // Rules 3–5: scan allow entries for a match.
-    for entry in &config.allow {
-        // Wildcard: allows everything not explicitly denied (checked above).
-        if entry == "*" {
-            return Ok(PermissionCheckResult::Allowed);
-        }
-        // Direct name match.
-        if entry == tool_name {
-            return Ok(PermissionCheckResult::Allowed);
-        }
-        // Bundle expansion: treat `entry` as a bundle label and search its tools.
-        if let Some(bundle_tools) = config.bundles.get(entry)
-            && bundle_tools.iter().any(|t| t == tool_name)
-        {
-            return Ok(PermissionCheckResult::Allowed);
-        }
-    }
-
-    // Rule 6: default-deny — not found in any allow or require_approval entry.
-    Err(ToolError::PermissionDenied {
-        name: tool_name.to_string(),
-        reason: PermissionDeniedReason::NotAllowed,
-    })
+    // Rule 4: granted and not gated.
+    Ok(PermissionCheckResult::Allowed)
 }
 
 #[cfg(test)]
@@ -321,7 +313,7 @@ mod tests {
     // -- RequireApproval entries -------------------------------------------
 
     #[test]
-    fn require_approval_tool_returns_requires_approval() {
+    fn require_approval_without_allow_does_not_grant_tool() {
         let cfg = PermissionConfig {
             allow: vec![],
             deny: vec![],
@@ -332,17 +324,19 @@ mod tests {
                 timeout_policy: None,
             }],
         };
-        let result = check_permission(&cfg, "shell").unwrap();
-        assert!(
-            matches!(result, PermissionCheckResult::RequiresApproval { .. }),
-            "expected RequiresApproval, got: {result:?}"
-        );
+        assert!(matches!(
+            check_permission(&cfg, "shell"),
+            Err(ToolError::PermissionDenied {
+                reason: PermissionDeniedReason::NotAllowed,
+                ..
+            })
+        ));
     }
 
     #[test]
     fn require_approval_carries_timeout_secs() {
         let cfg = PermissionConfig {
-            allow: vec![],
+            allow: vec!["shell".into()],
             deny: vec![],
             bundles: HashMap::new(),
             require_approval: vec![RequireApprovalEntry {
@@ -366,7 +360,7 @@ mod tests {
     fn require_approval_carries_timeout_policy() {
         use swage_core::ApprovalTimeoutPolicy;
         let cfg = PermissionConfig {
-            allow: vec![],
+            allow: vec!["shell".into()],
             deny: vec![],
             bundles: HashMap::new(),
             require_approval: vec![RequireApprovalEntry {
@@ -390,7 +384,7 @@ mod tests {
     fn deny_overrides_require_approval() {
         // A tool listed in both deny and require_approval is denied — deny wins.
         let cfg = PermissionConfig {
-            allow: vec![],
+            allow: vec!["shell".into()],
             deny: vec!["shell".into()],
             bundles: HashMap::new(),
             require_approval: vec![RequireApprovalEntry {
@@ -417,7 +411,7 @@ mod tests {
             vec!["file_read".into(), "file_write".into()],
         );
         let cfg = PermissionConfig {
-            allow: vec![],
+            allow: vec!["filesystem".into()],
             deny: vec![],
             bundles,
             require_approval: vec![RequireApprovalEntry {
@@ -428,8 +422,20 @@ mod tests {
         };
         let r1 = check_permission(&cfg, "file_read").unwrap();
         let r2 = check_permission(&cfg, "file_write").unwrap();
-        assert!(matches!(r1, PermissionCheckResult::RequiresApproval { .. }));
-        assert!(matches!(r2, PermissionCheckResult::RequiresApproval { .. }));
+        assert!(matches!(
+            r1,
+            PermissionCheckResult::RequiresApproval {
+                timeout_secs: Some(60),
+                ..
+            }
+        ));
+        assert!(matches!(
+            r2,
+            PermissionCheckResult::RequiresApproval {
+                timeout_secs: Some(60),
+                ..
+            }
+        ));
         // Tools outside the bundle are still denied.
         assert!(check_permission(&cfg, "shell").is_err());
     }
