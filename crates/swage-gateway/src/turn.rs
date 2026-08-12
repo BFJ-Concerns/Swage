@@ -765,25 +765,19 @@ pub(crate) async fn process_turn_with_existing_turn(
     let history_messages =
         rebuild_thread_history_messages(state.storage.as_ref(), thread_id).await?;
 
-    let assembly_name = match select_context_assembly(
-        state,
-        &config,
-        session_id,
-        prepared_turn_id,
-    )
-    .await
-    {
-        Ok(assembly_name) => assembly_name,
-        Err(error) => {
-            state
-                .storage
-                .update_turn_state(prepared_turn_id, TurnState::Failed)
-                .await?;
-            let mut turns = state.active_turns.lock().await;
-            turns.remove(&session_id);
-            return Err(error);
-        }
-    };
+    let assembly_name =
+        match select_context_assembly(state, &config, session_id, prepared_turn_id).await {
+            Ok(assembly_name) => assembly_name,
+            Err(error) => {
+                state
+                    .storage
+                    .update_turn_state(prepared_turn_id, TurnState::Failed)
+                    .await?;
+                let mut turns = state.active_turns.lock().await;
+                turns.remove(&session_id);
+                return Err(error);
+            }
+        };
     let memory_content = load_memory_for_assembly(&assembly_name, || async {
         match swage_root_opt.as_deref() {
             Some(root) => load_space_memory(root, &space_slug).await,
