@@ -936,7 +936,6 @@ async fn run_host_commands_inner(
                             let committed = accounting.spent.saturating_add(accounting.reserved);
                             let working_available = working_limit.saturating_sub(committed);
                             if working_available < reservation {
-                                winding_down = true;
                                 drop(accounting);
                                 seq.fetch_add(1, Ordering::SeqCst);
                                 let spent = spent_tokens.load(Ordering::SeqCst);
@@ -967,6 +966,9 @@ async fn run_host_commands_inner(
                                         .map_err(|error| error.to_string()),
                                     Err(error) => Err(error.to_string()),
                                 };
+                                if recorded.is_ok() {
+                                    winding_down = true;
+                                }
                                 let result = recorded.and(Err(
                                     "BudgetWindDownError: working token allowance exhausted".into(),
                                 ));
@@ -2896,6 +2898,40 @@ mod tests {
         SessionStore, SpaceStore, SqliteStorage, Storage, TurnStore, WorkflowStore,
     };
     use swage_workflow::AgentSessionRef;
+
+    #[test]
+    fn budget_reserve_requires_a_total_token_ceiling() {
+        let error = validate_budget(&WorkflowBudget {
+            max_agent_calls: None,
+            max_total_tokens: None,
+            reserved_closing_tokens: Some(1),
+            max_concurrent_agent_calls: None,
+        })
+        .expect_err("reserve without ceiling must be rejected");
+
+        assert!(matches!(
+            error.0,
+            swage_core::GatewayError::ValidationError(message)
+                if message == "reserved_closing_tokens requires max_total_tokens"
+        ));
+    }
+
+    #[test]
+    fn budget_reserve_cannot_exceed_total_token_ceiling() {
+        let error = validate_budget(&WorkflowBudget {
+            max_agent_calls: None,
+            max_total_tokens: Some(10),
+            reserved_closing_tokens: Some(11),
+            max_concurrent_agent_calls: None,
+        })
+        .expect_err("reserve above ceiling must be rejected");
+
+        assert!(matches!(
+            error.0,
+            swage_core::GatewayError::ValidationError(message)
+                if message == "reserved_closing_tokens cannot exceed max_total_tokens"
+        ));
+    }
 
     struct RecordingDeliveryCapability {
         effect_kind: swage_workflow::EffectKind,
@@ -4868,6 +4904,87 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn failed_wind_down_journal_write_does_not_latch_wind_down() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let provider = Arc::new(ScriptedRecordingProvider {
+            outputs: std::sync::Mutex::new(std::collections::VecDeque::from(["work"])),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let source = r#"
+            await agent("work", {agent: "default"});
+            let refusal = null;
+            try { await agent("cross working boundary", {agent: "default"}); }
+            catch (error) { refusal = error.message; }
+            return {refusal, snapshot: await budgetSnapshot()};
+        "#;
+        let (script, _) = storage
+            .create_workflow_script(NewWorkflowScript {
+                space_id: space.id,
+                name: "failed wind-down journal".into(),
+                description: String::new(),
+                source: source.into(),
+                delivery_grant: None,
+            })
+            .await
+            .expect("script");
+        storage
+            .with_conn(|connection| {
+                connection.execute_batch(
+                    "CREATE TEMP TRIGGER reject_wind_down_insert
+                     BEFORE INSERT ON workflow_journal
+                     WHEN NEW.kind = 'wind_down'
+                     BEGIN SELECT RAISE(FAIL, 'injected wind-down persistence failure'); END;",
+                )
+            })
+            .await
+            .expect("install failure trigger");
+
+        let Json(started) = start_saved_run(
+            State(state.clone()),
+            Path(script.id),
+            Json(StartWorkflowRunRequest {
+                args: Value::Null,
+                budget: Some(WorkflowBudget {
+                    max_agent_calls: Some(2),
+                    max_total_tokens: Some(4),
+                    reserved_closing_tokens: Some(2),
+                    max_concurrent_agent_calls: Some(1),
+                }),
+            }),
+        )
+        .await
+        .expect("start saved run");
+        wait_for_terminal(&state, started.id).await;
+
+        let Json(detail) = get_run(State(state), Path(started.id))
+            .await
+            .expect("run detail");
+        let output = detail.run.final_output.expect("output");
+        assert!(
+            output["refusal"]
+                .as_str()
+                .is_some_and(|message| message.contains("injected wind-down persistence failure"))
+        );
+        assert_eq!(output["snapshot"]["winding_down"], false);
+        assert!(
+            detail
+                .journal
+                .iter()
+                .all(|entry| entry.kind != WorkflowJournalEntryKind::WindDown)
+        );
+        assert_eq!(provider.requests.lock().unwrap().len(), 1);
     }
 
     #[tokio::test(flavor = "multi_thread")]
