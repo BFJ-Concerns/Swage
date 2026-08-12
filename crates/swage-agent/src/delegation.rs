@@ -162,6 +162,7 @@ impl DelegationExecutor {
         target_instructions: String,
         target_context_transfer_config: swage_config::ContextTransferConfig,
         target_tool_dispatcher: Option<ToolDispatcher>,
+        session_metadata: serde_json::Value,
         cancel_token: tokio_util::sync::CancellationToken,
         started_tx: Option<tokio::sync::oneshot::Sender<DetachedDelegation>>,
     ) -> Result<AgentMessage, AgentError> {
@@ -180,7 +181,7 @@ impl DelegationExecutor {
             .create_session(NewSession {
                 space_id,
                 agent_id: target_agent_id.clone(),
-                metadata: None,
+                metadata: Some(session_metadata),
                 active_workspace_attachment_id: None,
             })
             .await?;
@@ -736,6 +737,7 @@ mod tests {
                 String::new(),
                 swage_config::ContextTransferConfig::default(),
                 None,
+                serde_json::json!({"dispatch_bound_agent_id": "agent-a"}),
                 tokio_util::sync::CancellationToken::new(),
                 None,
             )
@@ -751,6 +753,14 @@ mod tests {
             .await
             .expect("list child sessions");
         assert_eq!(sessions.len(), 1, "expected one child session");
+        assert_eq!(
+            sessions[0]
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("dispatch_bound_agent_id"))
+                .and_then(serde_json::Value::as_str),
+            Some("agent-a")
+        );
         let threads = storage
             .list_by_session(sessions[0].id)
             .await

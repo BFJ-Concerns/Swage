@@ -1,9 +1,10 @@
 use super::{
     AgentError, AppState, Arc, CancellationToken, DelegationExecutor, DelegationHandler,
     GatewayDispatcherRequest, MessageRouter, NewAgentMessage, Uuid, apply_agent_definition,
-    available_skills_for_agent, build_agent_config_for_space_workspace, build_approval_registrar,
-    build_assembly_elements, build_gateway_dispatcher_for_unattended_execution,
-    build_session_environment, delegated_target_instructions_for_space, execute_context_assembly,
+    apply_dispatch_bound, available_skills_for_agent, build_agent_config_for_space_workspace,
+    build_approval_registrar, build_assembly_elements,
+    build_gateway_dispatcher_for_unattended_execution, build_session_environment,
+    delegated_target_instructions_for_space, execute_context_assembly,
     load_active_skills_for_agent, load_memory_for_assembly, load_session_config, load_space_memory,
     mpsc, resolve_swage_root, select_context_assembly, shutdown_sandbox_guard,
 };
@@ -167,6 +168,34 @@ impl DelegationHandler for GatewayDelegationHandler {
             }
         };
 
+        let dispatch_bound = load_session_config(&self.state, &space.slug, sender_agent_id)
+            .map_err(|error| {
+                AgentError::InvalidConfig(format!(
+                    "failed to load dispatch bound '{sender_agent_id}' in space '{}': {error}",
+                    space.slug
+                ))
+            })?;
+        let dispatch_bound = match self
+            .state
+            .storage
+            .resolve_agent_definition(sender_agent_id, space_id)
+            .await
+        {
+            Ok(Some(definition)) => apply_agent_definition(dispatch_bound, &definition),
+            Ok(None) => dispatch_bound,
+            Err(error) => {
+                return Err(AgentError::InvalidConfig(format!(
+                    "failed to resolve dispatch bound '{sender_agent_id}' for delegated agent \
+                     '{target_agent_id}': {error}"
+                )));
+            }
+        };
+        let effective_target_resolved =
+            apply_dispatch_bound(target_resolved.clone(), &dispatch_bound);
+        let session_metadata = serde_json::json!({
+            crate::workflow::DISPATCH_BOUND_METADATA_KEY: sender_agent_id,
+        });
+
         let active_workspace_attachment_id = self
             .active_workspace_attachment_for_turn(sender_turn_id)
             .await?;
@@ -196,7 +225,7 @@ impl DelegationHandler for GatewayDelegationHandler {
         let target_dispatcher_build = build_gateway_dispatcher_for_unattended_execution(
             &self.state,
             GatewayDispatcherRequest {
-                config: &target_resolved,
+                config: &effective_target_resolved,
                 agent_config: &target_agent_config,
                 session_metadata: None,
                 space_id: Some(space_id),
@@ -285,6 +314,7 @@ impl DelegationHandler for GatewayDelegationHandler {
                         target_instructions,
                         target_context_transfer_config,
                         Some(target_dispatcher),
+                        session_metadata,
                         child_cancel_token,
                         None,
                     )
@@ -335,6 +365,7 @@ impl DelegationHandler for GatewayDelegationHandler {
                             target_instructions,
                             target_context_transfer_config,
                             Some(target_dispatcher),
+                            session_metadata,
                             child_cancel_token,
                             Some(started_tx),
                         )
