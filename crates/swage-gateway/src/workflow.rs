@@ -2795,7 +2795,7 @@ mod tests {
 
     use super::*;
     use swage_storage::{
-        SessionStore, SpaceStore, SqliteStorage, Storage, TurnStore, WorkflowStore,
+        SessionStore, SpaceStore, SqliteStorage, Storage, ToolCallStore, TurnStore, WorkflowStore,
     };
     use swage_workflow::AgentSessionRef;
 
@@ -2867,8 +2867,8 @@ mod tests {
     /// Streams scripted outputs in order and records each request's message
     /// texts, so a test can assert what history a turn actually carried.
     struct ScriptedRecordingProvider {
-        outputs: std::sync::Mutex<std::collections::VecDeque<&'static str>>,
-        requests: std::sync::Mutex<Vec<Vec<String>>>,
+        outputs: std::sync::Mutex<std::collections::VecDeque<Vec<swage_core::StreamChunk>>>,
+        requests: std::sync::Mutex<Vec<swage_core::CompletionRequest>>,
     }
 
     #[async_trait::async_trait]
@@ -2896,31 +2896,39 @@ mod tests {
             request: swage_core::CompletionRequest,
         ) -> std::pin::Pin<Box<dyn futures::Stream<Item = swage_core::StreamChunk> + Send>>
         {
-            self.requests.lock().expect("requests").push(
-                request
-                    .messages
-                    .iter()
-                    .map(swage_core::ChatMessage::text_content)
-                    .collect(),
-            );
+            self.requests.lock().expect("requests").push(request);
             let output = self
                 .outputs
                 .lock()
                 .expect("outputs")
                 .pop_front()
                 .expect("scripted output");
-            Box::pin(futures::stream::iter([
-                swage_core::StreamChunk::Delta {
-                    content: output.into(),
-                },
-                swage_core::StreamChunk::Usage(swage_core::TokenUsage {
-                    input_tokens: 1,
-                    output_tokens: 1,
-                }),
-                swage_core::StreamChunk::Done {
-                    finish_reason: None,
-                },
-            ]))
+            Box::pin(futures::stream::iter(output))
+        }
+    }
+
+    struct WorkflowShellTool;
+
+    #[async_trait::async_trait]
+    impl crate::tool::Tool for WorkflowShellTool {
+        fn name(&self) -> &str {
+            "shell"
+        }
+
+        fn description(&self) -> &str {
+            "Test shell"
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({ "type": "object" })
+        }
+
+        async fn execute(
+            &self,
+            _arguments: serde_json::Value,
+            _ctx: &dyn swage_tool::context::ToolContext,
+        ) -> Result<serde_json::Value, swage_core::ToolError> {
+            Ok(serde_json::json!({ "unexpected": "execution" }))
         }
     }
 
@@ -3528,6 +3536,16 @@ mod tests {
     async fn a_continued_call_lands_on_the_same_worker_session_with_history() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
         let space = storage.get_or_create_default().await.expect("space");
+        let swage_home = crate::test_support::SwageHomeGuard::new();
+        for (agent, allow) in [("lead", "knowledge_search"), ("worker", "shell")] {
+            let agent_dir = swage_home.path().join("spaces/default/agents").join(agent);
+            std::fs::create_dir_all(&agent_dir).expect("create agent config directory");
+            std::fs::write(
+                agent_dir.join("config.toml"),
+                format!("[tools]\nallow = [\"{allow}\"]\ndeny = []\nbundles = {{}}\n"),
+            )
+            .expect("write agent config");
+        }
         let run = storage
             .create_workflow_run(NewWorkflowRun {
                 space_id: space.id,
@@ -3545,8 +3563,32 @@ mod tests {
             .expect("run");
         let provider = Arc::new(ScriptedRecordingProvider {
             outputs: std::sync::Mutex::new(std::collections::VecDeque::from([
-                "restated: gather the sources",
-                "the work is done",
+                vec![
+                    swage_core::StreamChunk::ToolUse {
+                        call_id: "disjoint-shell".into(),
+                        name: "shell".into(),
+                        arguments: serde_json::json!({}),
+                    },
+                    swage_core::StreamChunk::Done {
+                        finish_reason: None,
+                    },
+                ],
+                vec![
+                    swage_core::StreamChunk::Delta {
+                        content: "restated: gather the sources".into(),
+                    },
+                    swage_core::StreamChunk::Done {
+                        finish_reason: None,
+                    },
+                ],
+                vec![
+                    swage_core::StreamChunk::Delta {
+                        content: "the work is done".into(),
+                    },
+                    swage_core::StreamChunk::Done {
+                        finish_reason: None,
+                    },
+                ],
             ])),
             requests: std::sync::Mutex::new(Vec::new()),
         });
@@ -3555,7 +3597,9 @@ mod tests {
             Arc::clone(&storage) as Arc<dyn SpaceStore>,
             Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
             swage_config::ResolvedConfig::default(),
-            crate::tool::ToolDispatcher::allow_all(vec![]),
+            crate::tool::ToolDispatcher::allow_all(vec![
+                Arc::new(WorkflowShellTool) as Arc<dyn crate::tool::Tool>
+            ]),
             None,
         );
         let (tx, rx) = mpsc::unbounded_channel();
@@ -3647,12 +3691,36 @@ mod tests {
             .await
             .expect("turns");
         assert_eq!(turns.len(), 2, "both turns live on the one thread");
+        let first_tool_calls = storage
+            .list_tool_calls_by_turn(turns[0].id)
+            .await
+            .expect("first worker tool calls");
+        assert_eq!(first_tool_calls.len(), 1);
+        assert_eq!(first_tool_calls[0].tool, "shell");
+        assert_eq!(first_tool_calls[0].status.as_deref(), Some("error"));
+        assert!(
+            first_tool_calls[0]
+                .result
+                .as_deref()
+                .is_some_and(|result| result.contains("not permitted"))
+        );
 
         // The continued turn met its own history: the second provider request
         // carries the first exchange, not a fresh context.
         let requests = provider.requests.lock().expect("requests");
-        assert_eq!(requests.len(), 2);
-        let second_request = requests[1].join("\n");
+        assert_eq!(requests.len(), 3);
+        assert!(requests.iter().all(|request| {
+            request
+                .tool_definitions
+                .iter()
+                .all(|definition| definition["name"] != "shell")
+        }));
+        let second_request = requests[2]
+            .messages
+            .iter()
+            .map(swage_core::ChatMessage::text_content)
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(second_request.contains("restate the brief"));
         assert!(second_request.contains("restated: gather the sources"));
 

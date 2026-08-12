@@ -4394,6 +4394,31 @@ impl crate::tool::Tool for EchoMockTool {
     }
 }
 
+struct ShellMockTool;
+
+#[async_trait::async_trait]
+impl crate::tool::Tool for ShellMockTool {
+    fn name(&self) -> &str {
+        "shell"
+    }
+
+    fn description(&self) -> &str {
+        "Test shell"
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({ "type": "object" })
+    }
+
+    async fn execute(
+        &self,
+        _arguments: serde_json::Value,
+        _ctx: &dyn swage_tool::context::ToolContext,
+    ) -> Result<serde_json::Value, swage_core::ToolError> {
+        Ok(serde_json::json!({ "unexpected": "execution" }))
+    }
+}
+
 struct BlockingMockTool {
     started: Arc<Notify>,
     release: Arc<Notify>,
@@ -6220,7 +6245,7 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
             instructions: "Definition-only delegated instruction.".into(),
             model_id: None,
             tool_permissions: Some(serde_json::json!({
-                "allow": ["echo"], "deny": [], "bundles": {}, "require_approval": []
+                "allow": ["shell"], "deny": [], "bundles": {}
             })),
             skills: vec!["definition-declared".into()],
             output_schema: Some(serde_json::json!({
@@ -6252,9 +6277,9 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
     let child_response = format!(r#"{{"result":"{child_marker}"}}"#);
     let child_round = vec![
         StreamChunk::ToolUse {
-            call_id: "excluded-echo".into(),
-            name: "echo".into(),
-            arguments: serde_json::json!({ "text": "must be denied" }),
+            call_id: "excluded-shell".into(),
+            name: "shell".into(),
+            arguments: serde_json::json!({}),
         },
         StreamChunk::Done {
             finish_reason: None,
@@ -6337,7 +6362,7 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
 
     let dispatcher = crate::tool::ToolDispatcher::allow_all(vec![
         Arc::new(swage_tool::delegate::DelegateTool) as Arc<dyn crate::tool::Tool>,
-        Arc::new(EchoMockTool) as Arc<dyn crate::tool::Tool>,
+        Arc::new(ShellMockTool) as Arc<dyn crate::tool::Tool>,
     ]);
 
     let state = AppState::new(
@@ -6472,7 +6497,7 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
         .await
         .expect("list delegated tool calls");
     assert_eq!(child_tool_calls.len(), 1);
-    assert_eq!(child_tool_calls[0].tool, "echo");
+    assert_eq!(child_tool_calls[0].tool, "shell");
     assert_eq!(child_tool_calls[0].status.as_deref(), Some("error"));
     assert!(
         child_tool_calls[0]
@@ -6553,7 +6578,7 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
         captured_requests[1]
             .tool_definitions
             .iter()
-            .all(|definition| definition["name"] != "echo"),
+            .all(|definition| definition["name"] != "shell"),
         "the initial delegated request must not advertise a target-only tool"
     );
     assert!(
@@ -6638,7 +6663,7 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
         captured_requests[5]
             .tool_definitions
             .iter()
-            .all(|definition| definition["name"] != "echo"),
+            .all(|definition| definition["name"] != "shell"),
         "a subsequent child turn must re-read its metadata and remain bounded"
     );
     drop(captured_requests);
