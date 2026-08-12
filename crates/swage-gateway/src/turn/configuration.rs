@@ -291,7 +291,7 @@ pub(crate) fn apply_dispatch_bound(
     let worker_allow = expanded_allow(&config.tools.permissions);
     let bound_allow = expanded_allow(&bound.tools.permissions);
     let effective_allow = match (&worker_allow, &bound_allow) {
-        (_, None) => worker_allow.clone(),
+        (_, None) => None,
         (None, Some(bound_set)) => Some(bound_set.clone()),
         (Some(worker_set), Some(bound_set)) => {
             Some(worker_set.intersection(bound_set).cloned().collect())
@@ -725,10 +725,20 @@ mod tests {
         );
 
         let permissions = swage_tool::permission::PermissionConfig {
-            allow: confined.tools.permissions.allow,
-            deny: confined.tools.permissions.deny,
-            bundles: confined.tools.permissions.bundles,
-            require_approval: vec![],
+            allow: confined.tools.permissions.allow.clone(),
+            deny: confined.tools.permissions.deny.clone(),
+            bundles: confined.tools.permissions.bundles.clone(),
+            require_approval: confined
+                .tools
+                .permissions
+                .require_approval
+                .iter()
+                .map(|entry| swage_tool::permission::RequireApprovalEntry {
+                    tool_name: entry.tool_name().to_string(),
+                    timeout_secs: None,
+                    timeout_policy: None,
+                })
+                .collect(),
         };
         assert!(matches!(
             swage_tool::permission::check_permission(&permissions, "shell"),
@@ -749,6 +759,21 @@ mod tests {
         let bound = swage_config::ResolvedConfig::default();
         let confined = apply_dispatch_bound(worker, &bound);
         assert_eq!(confined.tools.permissions.allow, vec!["shell".to_string()]);
+    }
+
+    #[test]
+    fn a_wildcard_dispatcher_leaves_the_workers_own_approval_demands() {
+        let mut worker = swage_config::ResolvedConfig::default();
+        worker.tools.permissions.allow = vec!["shell".into()];
+        let worker_approvals = worker.tools.permissions.require_approval.clone();
+
+        let bound = swage_config::ResolvedConfig::default();
+        let confined = apply_dispatch_bound(worker, &bound);
+
+        assert_eq!(
+            confined.tools.permissions.require_approval,
+            worker_approvals
+        );
     }
 
     #[test]
