@@ -247,8 +247,7 @@ impl WorkflowEngine {
         let args_json = args_json.to_string();
         let host_cancellation = (*cancellation).clone();
 
-        let result = context
-            .async_with(async move |ctx| {
+        let execution = context.async_with(async move |ctx| {
                 // QuickJS installs Math as a base object and seeds random from ambient time.
                 // Replacing the function makes the nondeterministic surface fail explicitly.
                 ctx.eval::<(), _>(
@@ -795,8 +794,12 @@ impl WorkflowEngine {
                     .await
                     .catch(&ctx)
                     .map_err(|error| error.to_string())
-            })
-            .await;
+            });
+        tokio::pin!(execution);
+        let result = tokio::select! {
+            result = &mut execution => result,
+            () = cancellation.cancelled() => return Err(WorkflowEngineError::Cancelled),
+        };
 
         if cancellation.is_cancelled() {
             return Err(WorkflowEngineError::Cancelled);
@@ -1372,6 +1375,33 @@ mod tests {
         cancellation.cancel();
 
         let result = engine.execute("while (true) {}", cancellation).await;
+        assert!(matches!(result, Err(WorkflowEngineError::Cancelled)));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancellation_interrupts_a_suspended_host_call() {
+        let mut host = SurfaceHost::new();
+        host.timer_settles = false;
+        let cancellation = CancellationToken::new();
+        let engine = WorkflowEngine::new(EngineLimits::default());
+        let execution = engine.execute_hosted(
+            "return await wait({ timerMs: 120_000 });",
+            "null",
+            cancellation.clone(),
+            Some(Arc::new(host)),
+            ScriptCapabilities::default(),
+        );
+
+        tokio::pin!(execution);
+        tokio::select! {
+            result = &mut execution => panic!("host call settled before cancellation: {result:?}"),
+            () = tokio::time::sleep(std::time::Duration::from_millis(20)) => {}
+        }
+        cancellation.cancel();
+
+        let result = tokio::time::timeout(std::time::Duration::from_millis(100), execution)
+            .await
+            .expect("cancellation releases a suspended host call");
         assert!(matches!(result, Err(WorkflowEngineError::Cancelled)));
     }
 
