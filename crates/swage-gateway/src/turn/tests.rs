@@ -6962,14 +6962,34 @@ async fn delegated_snapshot_loss_records_degradation_and_double_failure_escalate
     let broken_storage = Arc::new(MockStorage::new());
     broken_storage.fail_snapshot_writes();
     broken_storage.fail_audit_writes();
+    let child_turn = broken_storage
+        .create_turn(NewTurn {
+            thread_id: Uuid::new_v4(),
+            agent_id: "agent-b".to_string(),
+            state: TurnState::Pending,
+            user_input: Some("delegated work".to_string()),
+            parent_turn_id: Some(Uuid::new_v4()),
+        })
+        .await
+        .expect("create delegated child turn");
     let recorder = delegation_snapshot_recorder(
         Arc::clone(&broken_storage) as Arc<dyn swage_storage::store::Storage>
     );
     let error = recorder
-        .record(Uuid::new_v4(), Uuid::new_v4(), &serde_json::json!({}))
+        .record(Uuid::new_v4(), child_turn.id, &serde_json::json!({}))
         .await
         .expect_err("losing both the snapshot and its degradation record must fail loudly");
     assert!(error.to_string().contains("loss could not be recorded"));
+    assert_eq!(
+        broken_storage
+            .get_turn(child_turn.id)
+            .await
+            .expect("read delegated child turn")
+            .expect("delegated child turn should remain stored")
+            .state,
+        TurnState::Failed,
+        "an unrecorded reconstructive gap must force the delegated child turn to fail"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
