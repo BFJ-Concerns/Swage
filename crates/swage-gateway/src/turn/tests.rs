@@ -7711,6 +7711,125 @@ async fn process_turn_uses_hot_swapped_runtime_config_for_next_turn() {
 }
 
 #[tokio::test]
+async fn unknown_forced_context_assembly_fails_before_provider_and_audit() {
+    let _guard = SwageHomeGuard::isolate();
+    let (provider, captured_request) = CapturingProvider::new(vec![]);
+    let (storage, session_id) = make_storage_with_session().await;
+    let mut config = swage_config::ResolvedConfig::default();
+    config.experimentation.locations.insert(
+        crate::experimentation::LOCATION_CONTEXT_ASSEMBLY.to_owned(),
+        swage_config::model::ExperimentLocationConfig {
+            enabled: true,
+            forced_variant: Some("missing".to_owned()),
+        },
+    );
+    let state = AppState::new(
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
+        Arc::new(provider) as Arc<dyn LlmProvider>,
+        config,
+        crate::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+    );
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let error = process_turn(
+        &state,
+        session_id,
+        None,
+        "hi".into(),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .expect_err("unknown forced assembly must fail the turn");
+
+    assert_eq!(
+        error.to_string(),
+        "config error: experimentation location 'context.assembly' forced unknown variant 'missing'; available variants: [\"default\"]"
+    );
+    assert!(
+        captured_request.lock().unwrap().is_none(),
+        "the provider must not run for a rejected force"
+    );
+    let audit = state
+        .storage
+        .list_audit_events_by_session(session_id)
+        .await
+        .expect("list audit events");
+    assert!(
+        !audit.iter().any(|event| {
+            event.entity_id == crate::experimentation::LOCATION_CONTEXT_ASSEMBLY
+                && event.event_kind == "variant_selected"
+        }),
+        "a rejected force must not create a phantom selection"
+    );
+    let threads = state.storage.list_by_session(session_id).await.unwrap();
+    let turns = state
+        .storage
+        .list_turns_by_thread(threads[0].id)
+        .await
+        .unwrap();
+    assert_eq!(turns[0].state, TurnState::Failed);
+}
+
+#[tokio::test]
+async fn forced_default_context_assembly_runs_and_records_forced_reason() {
+    let _guard = SwageHomeGuard::isolate();
+    let chunks = vec![StreamChunk::Done {
+        finish_reason: None,
+    }];
+    let (provider, captured_request) = CapturingProvider::new(chunks);
+    let (storage, session_id) = make_storage_with_session().await;
+    let mut config = swage_config::ResolvedConfig::default();
+    config.experimentation.locations.insert(
+        crate::experimentation::LOCATION_CONTEXT_ASSEMBLY.to_owned(),
+        swage_config::model::ExperimentLocationConfig {
+            enabled: true,
+            forced_variant: Some("default".to_owned()),
+        },
+    );
+    let state = AppState::new(
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
+        Arc::new(provider) as Arc<dyn LlmProvider>,
+        config,
+        crate::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+    );
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    process_turn(
+        &state,
+        session_id,
+        None,
+        "hi".into(),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .expect("forcing the registered default should succeed");
+
+    assert!(
+        captured_request.lock().unwrap().is_some(),
+        "the provider should run for a valid force"
+    );
+    let audit = state
+        .storage
+        .list_audit_events_by_session(session_id)
+        .await
+        .expect("list audit events");
+    assert!(audit.iter().any(|event| {
+        event.entity_id == crate::experimentation::LOCATION_CONTEXT_ASSEMBLY
+            && event.event_kind == "variant_selected"
+            && event.metadata["variant"] == serde_json::json!("default")
+            && event.metadata["reason"] == serde_json::json!("forced")
+    }));
+}
+
+#[tokio::test]
 async fn process_turn_uses_hot_swapped_runtime_tool_policy_for_next_turn() {
     let _guard = SwageHomeGuard::isolate();
     let chunks = vec![
