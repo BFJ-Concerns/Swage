@@ -4,9 +4,10 @@ use super::{
     apply_dispatch_bound, available_skills_for_agent, build_agent_config_for_space_workspace,
     build_approval_registrar, build_assembly_elements,
     build_gateway_dispatcher_for_unattended_execution, build_session_environment,
-    delegated_target_instructions_for_space, execute_context_assembly,
-    load_active_skills_for_agent, load_memory_for_assembly, load_session_config, load_space_memory,
-    mpsc, resolve_swage_root, select_context_assembly, shutdown_sandbox_guard,
+    delegated_target_instructions_for_space, effective_tool_permissions_record,
+    execute_context_assembly, load_active_skills_for_agent, load_memory_for_assembly,
+    load_session_config, load_space_memory, mpsc, resolve_swage_root, select_context_assembly,
+    shutdown_sandbox_guard,
 };
 use swage_agent::{
     DelegatedAssembly, DelegationContextAssembler, DelegationOutcome, DelegationSnapshotRecorder,
@@ -22,7 +23,7 @@ struct GatewayDelegatedContextAssembler {
     working_directory: String,
     swage_root: Option<std::path::PathBuf>,
     context_event_tx: mpsc::UnboundedSender<crate::websocket::ServerEvent>,
-    effective_tool_grant: Vec<String>,
+    effective_tool_permissions: serde_json::Value,
 }
 
 pub(crate) fn delegated_context_assembler(
@@ -32,7 +33,7 @@ pub(crate) fn delegated_context_assembler(
     agent_id: String,
     working_directory: String,
     context_event_tx: mpsc::UnboundedSender<crate::websocket::ServerEvent>,
-    effective_tool_grant: Vec<String>,
+    effective_tool_permissions: serde_json::Value,
 ) -> Arc<dyn DelegationContextAssembler> {
     Arc::new(GatewayDelegatedContextAssembler {
         state,
@@ -42,7 +43,7 @@ pub(crate) fn delegated_context_assembler(
         working_directory,
         swage_root: resolve_swage_root(),
         context_event_tx,
-        effective_tool_grant,
+        effective_tool_permissions,
     })
 }
 
@@ -103,7 +104,7 @@ impl DelegationContextAssembler for GatewayDelegatedContextAssembler {
             tracing::warn!(%error, "failed to serialise delegated assembly report");
             serde_json::json!({ "error": "serialisation failed" })
         });
-        report["effective_tool_grant"] = serde_json::json!(self.effective_tool_grant);
+        report["effective_tool_permissions"] = self.effective_tool_permissions.clone();
         let _ = self
             .context_event_tx
             .send(crate::websocket::ServerEvent::ContextAssembled {
@@ -315,7 +316,7 @@ impl DelegationHandler for GatewayDelegationHandler {
                 target_agent_id.to_string(),
                 target_agent_config.working_directory.display().to_string(),
                 silent_ws_tx,
-                effective_target_resolved.tools.permissions.allow.clone(),
+                effective_tool_permissions_record(&effective_target_resolved),
             )),
             snapshot_recorder: Some(delegation_snapshot_recorder(self.state.storage.clone())),
         };

@@ -6515,8 +6515,12 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
         "delegated assembly report should contain its element decisions"
     );
     assert_eq!(
-        child_snapshot["effective_tool_grant"],
-        serde_json::json!([]),
+        child_snapshot["effective_tool_permissions"],
+        serde_json::json!({
+            "allow": [],
+            "deny": [],
+            "require_approval": [],
+        }),
         "a disjoint delegated grant must be recorded explicitly, not omitted"
     );
     let child_audit = state
@@ -6904,9 +6908,13 @@ async fn delegated_child_snapshot_records_exact_non_empty_effective_tool_grant()
     let snapshot: serde_json::Value =
         serde_json::from_str(&snapshot).expect("child snapshot should be JSON");
     assert_eq!(
-        snapshot["effective_tool_grant"],
-        serde_json::json!(["file_read"]),
-        "the audit record must carry the exact grant used to build the dispatcher"
+        snapshot["effective_tool_permissions"],
+        serde_json::json!({
+            "allow": ["file_read"],
+            "deny": [],
+            "require_approval": [],
+        }),
+        "the audit record must carry the exact permissions used to build the dispatcher"
     );
 }
 
