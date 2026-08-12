@@ -765,7 +765,25 @@ pub(crate) async fn process_turn_with_existing_turn(
     let history_messages =
         rebuild_thread_history_messages(state.storage.as_ref(), thread_id).await?;
 
-    let assembly_name = select_context_assembly(state, &config, session_id, prepared_turn_id).await;
+    let assembly_name = match select_context_assembly(
+        state,
+        &config,
+        session_id,
+        prepared_turn_id,
+    )
+    .await
+    {
+        Ok(assembly_name) => assembly_name,
+        Err(error) => {
+            state
+                .storage
+                .update_turn_state(prepared_turn_id, TurnState::Failed)
+                .await?;
+            let mut turns = state.active_turns.lock().await;
+            turns.remove(&session_id);
+            return Err(error);
+        }
+    };
     let memory_content = load_memory_for_assembly(&assembly_name, || async {
         match swage_root_opt.as_deref() {
             Some(root) => load_space_memory(root, &space_slug).await,
@@ -1520,7 +1538,7 @@ async fn select_context_assembly(
     config: &swage_config::ResolvedConfig,
     session_id: Uuid,
     turn_id: Uuid,
-) -> String {
+) -> Result<String, GatewayError> {
     // The assembly name is an experiment location: when variants are
     // registered for it, the selection loop chooses which serves this turn
     // (honouring the kill switch and forced pins), and every decision —
@@ -1535,7 +1553,8 @@ async fn select_context_assembly(
         &assembly_variants,
         &configured_assembly,
         turn_id,
-    );
+    )
+    .map_err(|error| GatewayError::ConfigError(error.to_string()))?;
     let decision = match crate::experimentation::record_selection(
         state,
         crate::experimentation::LOCATION_CONTEXT_ASSEMBLY,
@@ -1570,7 +1589,8 @@ async fn select_context_assembly(
         &norms_variants,
         "built-in",
         turn_id,
-    );
+    )
+    .map_err(|error| GatewayError::ConfigError(error.to_string()))?;
     if let Err(error) = crate::experimentation::record_selection(
         state,
         crate::experimentation::LOCATION_WORKING_NORMS,
@@ -1587,7 +1607,7 @@ async fn select_context_assembly(
         );
     }
 
-    decision.variant
+    Ok(decision.variant)
 }
 
 fn execute_context_assembly(
