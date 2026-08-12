@@ -1610,12 +1610,12 @@ pub async fn send_agent_message(
         let msg_for_task = msg.clone();
         tokio::spawn(async move {
             let message_id = msg_for_task.id;
-            if let Err(error) = execute_external_delegate_message(
+            if let Err(error) = Box::pin(execute_external_delegate_message(
                 state_for_task.clone(),
                 msg_for_task,
                 execution_space_id,
                 sender_turn_id,
-            )
+            ))
             .await
             {
                 tracing::warn!(error = ?error, "external delegate execution failed");
@@ -2561,9 +2561,14 @@ mod tests {
             .await
             .expect("create external delegate message");
 
-        execute_external_delegate_message(state, delegate_msg, space.id, None)
-            .await
-            .expect("external delegation should complete");
+        Box::pin(execute_external_delegate_message(
+            state,
+            delegate_msg,
+            space.id,
+            None,
+        ))
+        .await
+        .expect("external delegation should complete");
 
         let child_sessions = storage
             .list_sessions_by_agent_id("agent-b")
@@ -2735,9 +2740,14 @@ mod tests {
             .await
             .expect("create external delegate message");
 
-        execute_external_delegate_message(state, delegate_msg, space.id, None)
-            .await
-            .expect("external delegation should complete");
+        Box::pin(execute_external_delegate_message(
+            state,
+            delegate_msg,
+            space.id,
+            None,
+        ))
+        .await
+        .expect("external delegation should complete");
 
         let child_sessions = storage
             .list_sessions_by_agent_id("agent-b")
