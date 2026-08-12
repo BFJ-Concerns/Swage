@@ -190,9 +190,9 @@ impl ToolDispatcher {
     /// Returns tool schemas suitable for `ToolCompletionRequest.tool_definitions`.
     ///
     /// Only tools that the dispatcher would permit the agent to invoke are
-    /// advertised to the model. Tools behind `require_approval` stay visible:
-    /// the model may request them, but execution will pause for human approval
-    /// before the tool runs.
+    /// advertised to the model. An approval requirement keeps a tool visible
+    /// only when a direct, wildcard, or bundle-expanded allow entry grants it;
+    /// execution then pauses for human approval before the tool runs.
     pub fn tool_definitions(&self) -> Vec<serde_json::Value> {
         self.registry
             .list()
@@ -566,6 +566,72 @@ mod tests {
             definitions.is_empty(),
             "approval requirements must not advertise ungranted tools"
         );
+    }
+
+    #[test]
+    fn tool_definitions_advertise_wildcard_grant_with_direct_approval() {
+        let mut registry = ToolRegistry::new();
+        registry
+            .register(Arc::new(EchoTool))
+            .expect("registration should succeed");
+
+        let permissions = PermissionConfig {
+            allow: vec!["*".into()],
+            deny: vec![],
+            bundles: HashMap::new(),
+            require_approval: vec![RequireApprovalEntry {
+                tool_name: "echo".into(),
+                timeout_secs: None,
+                timeout_policy: None,
+            }],
+        };
+
+        let dispatcher = ToolDispatcher::new(
+            Arc::new(registry),
+            permissions,
+            Arc::new(RateLimiter::new()),
+            RateLimitConfig::default(),
+            Arc::new(LeakDetector::default()),
+            false,
+        );
+
+        let definitions = dispatcher.tool_definitions();
+
+        assert_eq!(definitions.len(), 1);
+        assert_eq!(definitions[0]["name"], "echo");
+    }
+
+    #[test]
+    fn tool_definitions_advertise_wildcard_grant_with_bundle_approval() {
+        let mut registry = ToolRegistry::new();
+        registry
+            .register(Arc::new(EchoTool))
+            .expect("registration should succeed");
+
+        let permissions = PermissionConfig {
+            allow: vec!["*".into()],
+            deny: vec![],
+            bundles: HashMap::from([("standard".into(), vec!["echo".into()])]),
+            require_approval: vec![RequireApprovalEntry {
+                tool_name: "standard".into(),
+                timeout_secs: None,
+                timeout_policy: None,
+            }],
+        };
+
+        let dispatcher = ToolDispatcher::new(
+            Arc::new(registry),
+            permissions,
+            Arc::new(RateLimiter::new()),
+            RateLimitConfig::default(),
+            Arc::new(LeakDetector::default()),
+            false,
+        );
+
+        let definitions = dispatcher.tool_definitions();
+
+        assert_eq!(definitions.len(), 1);
+        assert_eq!(definitions[0]["name"], "echo");
     }
 
     #[test]
