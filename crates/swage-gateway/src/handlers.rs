@@ -1661,6 +1661,28 @@ async fn execute_external_delegate_message(
     let target_resolved =
         crate::turn::load_session_config(&state, &space.slug, &delegate_msg.recipient_agent_id)
             .map_err(|error| ApiError::internal(error.to_string()))?;
+    let dispatch_bound =
+        crate::turn::load_session_config(&state, &space.slug, &delegate_msg.sender_agent_id)
+            .map_err(|error| ApiError::internal(error.to_string()))?;
+    let dispatch_bound = match state
+        .storage
+        .resolve_agent_definition(&delegate_msg.sender_agent_id, space_id)
+        .await
+    {
+        Ok(Some(definition)) => crate::turn::apply_agent_definition(dispatch_bound, &definition),
+        Ok(None) => dispatch_bound,
+        Err(error) => {
+            return Err(ApiError::internal(format!(
+                "failed to resolve dispatch bound '{}' for delegated agent '{}': {error}",
+                delegate_msg.sender_agent_id, delegate_msg.recipient_agent_id
+            )));
+        }
+    };
+    let effective_target_resolved =
+        crate::turn::apply_dispatch_bound(target_resolved.clone(), &dispatch_bound);
+    let session_metadata = serde_json::json!({
+        crate::workflow::DISPATCH_BOUND_METADATA_KEY: delegate_msg.sender_agent_id,
+    });
     let active_workspace_attachment_id =
         active_workspace_attachment_for_sender_turn(&state, sender_turn_id).await?;
     let target_agent_config = crate::turn::build_agent_config_for_space_workspace(
@@ -1688,7 +1710,7 @@ async fn execute_external_delegate_message(
     let dispatcher_build = crate::turn::build_gateway_dispatcher_for_unattended_execution(
         &state,
         crate::turn::GatewayDispatcherRequest {
-            config: &target_resolved,
+            config: &effective_target_resolved,
             agent_config: &target_agent_config,
             session_metadata: None,
             space_id: Some(space_id),
@@ -1736,6 +1758,7 @@ async fn execute_external_delegate_message(
             target_instructions,
             target_context_transfer_config,
             Some(dispatcher_build.dispatcher),
+            session_metadata,
             tokio_util::sync::CancellationToken::new(),
             None,
         )

@@ -6196,13 +6196,32 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
     .expect("create root thread");
     storage
         .upsert_agent_definition(swage_storage::NewAgentDefinition {
+            id: "gateway".into(),
+            space_id: Some(space.id),
+            display_name: "Gateway".into(),
+            description: String::new(),
+            instructions: String::new(),
+            model_id: None,
+            tool_permissions: Some(serde_json::json!({
+                "allow": ["delegate"], "deny": [], "bundles": {}, "require_approval": []
+            })),
+            skills: vec![],
+            output_schema: None,
+            output_max_retries: None,
+        })
+        .await
+        .expect("store dispatching agent definition");
+    storage
+        .upsert_agent_definition(swage_storage::NewAgentDefinition {
             id: "agent-b".into(),
             space_id: Some(space.id),
             display_name: "Agent B".into(),
             description: String::new(),
             instructions: "Definition-only delegated instruction.".into(),
             model_id: None,
-            tool_permissions: None,
+            tool_permissions: Some(serde_json::json!({
+                "allow": ["echo"], "deny": [], "bundles": {}, "require_approval": []
+            })),
             skills: vec!["definition-declared".into()],
             output_schema: Some(serde_json::json!({
                 "type": "object",
@@ -6232,6 +6251,16 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
     let child_marker = Uuid::new_v4().to_string();
     let child_response = format!(r#"{{"result":"{child_marker}"}}"#);
     let child_round = vec![
+        StreamChunk::ToolUse {
+            call_id: "excluded-echo".into(),
+            name: "echo".into(),
+            arguments: serde_json::json!({ "text": "must be denied" }),
+        },
+        StreamChunk::Done {
+            finish_reason: None,
+        },
+    ];
+    let child_denied_round = vec![
         StreamChunk::Delta {
             content: child_response.clone(),
         },
@@ -6255,12 +6284,22 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
             finish_reason: None,
         },
     ];
+    let child_next_round = vec![
+        StreamChunk::Delta {
+            content: r#"{"result":"Child continued within its bound"}"#.into(),
+        },
+        StreamChunk::Done {
+            finish_reason: None,
+        },
+    ];
 
     let (provider, captured_requests) = CapturingMultiRoundProvider::new(vec![
         parent_round,
         child_round,
+        child_denied_round,
         parent_resume_round,
         parent_next_round,
+        child_next_round,
     ]);
 
     let swage_home = tempfile::TempDir::new().expect("temp swage home");
@@ -6296,10 +6335,10 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
         .await
         .expect("activate foreground skill");
 
-    let dispatcher =
-        crate::tool::ToolDispatcher::allow_all(vec![
-            Arc::new(swage_tool::delegate::DelegateTool) as Arc<dyn crate::tool::Tool>
-        ]);
+    let dispatcher = crate::tool::ToolDispatcher::allow_all(vec![
+        Arc::new(swage_tool::delegate::DelegateTool) as Arc<dyn crate::tool::Tool>,
+        Arc::new(EchoMockTool) as Arc<dyn crate::tool::Tool>,
+    ]);
 
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
@@ -6373,6 +6412,15 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
         .await
         .expect("list child sessions");
     assert_eq!(child_sessions.len(), 1, "expected one child session");
+    assert_eq!(
+        child_sessions[0]
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get(crate::workflow::DISPATCH_BOUND_METADATA_KEY))
+            .and_then(serde_json::Value::as_str),
+        Some("gateway"),
+        "delegated child should persist its dispatching agent bound"
+    );
 
     let child_threads = state
         .storage
@@ -6418,6 +6466,21 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
         }),
         "delegated assembly selection should be recorded against the child turn"
     );
+    let child_tool_calls = state
+        .storage
+        .list_tool_calls_by_turn(child_turns[0].id)
+        .await
+        .expect("list delegated tool calls");
+    assert_eq!(child_tool_calls.len(), 1);
+    assert_eq!(child_tool_calls[0].tool, "echo");
+    assert_eq!(child_tool_calls[0].status.as_deref(), Some("error"));
+    assert!(
+        child_tool_calls[0]
+            .result
+            .as_deref()
+            .is_some_and(|result| result.contains("not permitted")),
+        "the target-only tool call should leave a denied audit record: {child_tool_calls:?}"
+    );
 
     let (tx, _rx) = mpsc::unbounded_channel();
     process_turn(
@@ -6432,13 +6495,26 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
     .await
     .expect("parent next turn should complete");
 
+    let (tx, _rx) = mpsc::unbounded_channel();
+    process_turn(
+        &state,
+        child_sessions[0].id,
+        None,
+        "Continue the delegated work".to_string(),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .expect("child next turn should remain dispatch-bound");
+
     let captured_requests = captured_requests.lock().unwrap();
     assert_eq!(
         captured_requests.len(),
-        4,
-        "expected parent, child, resumed-parent, and next-turn provider requests"
+        6,
+        "expected parent, two child rounds, resumed-parent, parent continuation, and child continuation requests"
     );
-    let delegated_result = captured_requests[2]
+    let delegated_result = captured_requests[3]
         .messages
         .iter()
         .filter_map(ChatMessage::tool_replay)
@@ -6473,6 +6549,13 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
         .map(ChatMessage::text_content)
         .collect::<Vec<_>>()
         .join("\n\n");
+    assert!(
+        captured_requests[1]
+            .tool_definitions
+            .iter()
+            .all(|definition| definition["name"] != "echo"),
+        "the initial delegated request must not advertise a target-only tool"
+    );
     assert!(
         child_request_text.contains("You are an agent running on Swage"),
         "delegated provider request should include platform identity: {child_request_text}"
@@ -6530,7 +6613,7 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
         !child_request_text.contains("Parent resumed after delegation"),
         "child provider request must not inherit future parent continuation"
     );
-    let resumed_parent_request_text = captured_requests[2]
+    let resumed_parent_request_text = captured_requests[3]
         .messages
         .iter()
         .map(ChatMessage::text_content)
@@ -6540,7 +6623,7 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
         !resumed_parent_request_text.contains("Use the delegated specialist skill."),
         "target agent skill instructions must not bleed into the resumed parent request"
     );
-    let next_parent_request_text = captured_requests[3]
+    let next_parent_request_text = captured_requests[4]
         .messages
         .iter()
         .map(ChatMessage::text_content)
@@ -6550,6 +6633,55 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
         next_parent_request_text.matches(&child_marker).count(),
         0,
         "wait-mode result marker {child_marker} should not be delivered again on the parent's next turn; request: {next_parent_request_text}"
+    );
+    assert!(
+        captured_requests[5]
+            .tool_definitions
+            .iter()
+            .all(|definition| definition["name"] != "echo"),
+        "a subsequent child turn must re-read its metadata and remain bounded"
+    );
+    drop(captured_requests);
+
+    let sender_config_dir = swage_home.path().join("spaces/default/agents/gateway");
+    std::fs::create_dir_all(&sender_config_dir).expect("create sender config directory");
+    std::fs::write(sender_config_dir.join("config.toml"), "not valid toml =")
+        .expect("write broken dispatch-bound config");
+    let child_count_before_failure = state
+        .storage
+        .list_sessions_by_agent_id("agent-b")
+        .await
+        .expect("list child sessions before closed failure")
+        .len();
+    let error = match GatewayDelegationHandler::new(state.clone())
+        .handle_delegation(
+            "agent-b",
+            "This must not start",
+            None,
+            "gateway",
+            root_turn.id,
+            space.id,
+            CancellationToken::new(),
+            DelegateCompletionMode::Wait,
+        )
+        .await
+    {
+        Ok(_) => panic!("an unresolved dispatch bound must fail delegation closed"),
+        Err(error) => error,
+    };
+    assert!(
+        error.to_string().contains("failed to load dispatch bound"),
+        "unexpected dispatch-bound failure: {error}"
+    );
+    assert_eq!(
+        state
+            .storage
+            .list_sessions_by_agent_id("agent-b")
+            .await
+            .expect("list child sessions after closed failure")
+            .len(),
+        child_count_before_failure,
+        "dispatch-bound resolution failure must prevent child execution"
     );
 }
 
