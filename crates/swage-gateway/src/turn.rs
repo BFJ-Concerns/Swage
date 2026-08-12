@@ -980,14 +980,19 @@ pub(crate) async fn process_turn_with_existing_turn(
                     )));
                 }
                 SandboxDegradationApproval::Interrupted => {
-                    record_terminal_state_and_release(
+                    release_active_turn_on_error(
                         state,
                         session_id,
-                        prepared_turn_id,
-                        TurnState::Interrupted,
+                        state
+                            .storage
+                            .update_turn_state(prepared_turn_id, TurnState::Interrupted)
+                            .await,
                     )
                     .await?;
                     let _ = ws_tx.send(ServerEvent::Cancelled {});
+                    // Preserve the client-visible interrupt ordering: the old turn
+                    // remains active until its cancellation event has been sent.
+                    release_active_turn(state, session_id).await;
                     return Ok(());
                 }
             }
