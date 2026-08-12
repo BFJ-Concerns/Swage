@@ -597,6 +597,8 @@ impl Hook for ApprovePreToolHook {
 pub(crate) struct MockStorage {
     pub(crate) db: Mutex<InMemoryDb>,
     fail_turn_state_writes: AtomicBool,
+    fail_turn_state_write_at: AtomicUsize,
+    turn_state_write_calls: AtomicUsize,
     fail_inbound_audit_writes: AtomicBool,
     fail_append_message_at: AtomicUsize,
     append_message_calls: AtomicUsize,
@@ -818,6 +820,8 @@ impl MockStorage {
         Self {
             db: Mutex::new(InMemoryDb::default()),
             fail_turn_state_writes: AtomicBool::new(false),
+            fail_turn_state_write_at: AtomicUsize::new(0),
+            turn_state_write_calls: AtomicUsize::new(0),
             fail_inbound_audit_writes: AtomicBool::new(false),
             fail_append_message_at: AtomicUsize::new(0),
             append_message_calls: AtomicUsize::new(0),
@@ -830,6 +834,10 @@ impl MockStorage {
 
     fn fail_turn_state_writes(&self) {
         self.fail_turn_state_writes.store(true, Ordering::SeqCst);
+    }
+
+    fn fail_turn_state_write_at(&self, call: usize) {
+        self.fail_turn_state_write_at.store(call, Ordering::SeqCst);
     }
 
     fn fail_inbound_audit_writes(&self) {
@@ -2302,7 +2310,10 @@ impl TurnStore for MockStorage {
     }
 
     async fn update_turn_state(&self, id: Uuid, state: TurnState) -> Result<(), StorageError> {
-        if self.fail_turn_state_writes.load(Ordering::SeqCst) {
+        let call = self.turn_state_write_calls.fetch_add(1, Ordering::SeqCst) + 1;
+        if self.fail_turn_state_writes.load(Ordering::SeqCst)
+            || self.fail_turn_state_write_at.load(Ordering::SeqCst) == call
+        {
             return Err(StorageError::QueryFailed(
                 "injected turn state write failure".into(),
             ));
@@ -3586,7 +3597,14 @@ pub(crate) async fn make_state_with_config(
     config: swage_config::ResolvedConfig,
 ) -> (AppState, Uuid) {
     let storage = Arc::new(MockStorage::new());
+    make_state_with_config_and_storage(provider_chunks, config, storage).await
+}
 
+async fn make_state_with_config_and_storage(
+    provider_chunks: Vec<StreamChunk>,
+    config: swage_config::ResolvedConfig,
+    storage: Arc<MockStorage>,
+) -> (AppState, Uuid) {
     let space = storage
         .get_or_create_default()
         .await
@@ -4549,6 +4567,41 @@ async fn history_rebuild_failure_clears_active_turn() {
     assert!(
         !state.active_turns.lock().await.contains_key(&session_id),
         "history rebuild failure must release the turn guard"
+    );
+}
+
+#[tokio::test]
+async fn degradation_audit_and_terminal_state_failure_clears_active_turn() {
+    let storage = Arc::new(MockStorage::new());
+    storage.fail_audit_writes();
+    storage.fail_turn_state_write_at(1);
+    let mut config = swage_config::ResolvedConfig::default();
+    config.sandbox.enabled = false;
+    config.sandbox.allow_degraded_execution = true;
+    let (state, session_id) =
+        make_state_with_config_and_storage(vec![], config, Arc::clone(&storage)).await;
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let error = process_turn(
+        &state,
+        session_id,
+        None,
+        "message".to_string(),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .expect_err("the injected degradation terminal-state write must fail");
+    assert!(
+        error
+            .to_string()
+            .contains("injected turn state write failure"),
+        "unexpected error: {error}"
+    );
+    assert!(
+        !state.active_turns.lock().await.contains_key(&session_id),
+        "degradation audit failure must release the turn guard"
     );
 }
 
