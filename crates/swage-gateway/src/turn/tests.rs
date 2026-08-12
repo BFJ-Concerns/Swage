@@ -6753,6 +6753,7 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn delegated_child_snapshot_records_exact_non_empty_effective_tool_grant() {
+    let _swage_home = SwageHomeGuard::isolate();
     let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
     let space = storage
         .get_or_create_default()
