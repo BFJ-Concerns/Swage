@@ -27,6 +27,7 @@ pub enum TurnState {
 /// `agent_id` must be `"gateway"` or an agent definition visible to the
 /// target space; the gateway rejects anything else with a validation error.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, TS, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CreateConversationRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]

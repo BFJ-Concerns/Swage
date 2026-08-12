@@ -596,7 +596,8 @@
             "null"
           ]
         }
-      }
+      },
+      "additionalProperties": false
     },
     "CreateScheduleRequest": {
       "description": "Create a schedule.",
