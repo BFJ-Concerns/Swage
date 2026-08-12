@@ -575,10 +575,8 @@ mod tests {
 
         let mut bound = swage_config::ResolvedConfig::default();
         bound.tools.permissions.allow = vec!["safe".into()];
-        bound.tools.permissions.bundles = std::collections::HashMap::from([(
-            "safe".to_string(),
-            vec!["file_read".to_string()],
-        )]);
+        bound.tools.permissions.bundles =
+            std::collections::HashMap::from([("safe".to_string(), vec!["file_read".to_string()])]);
 
         let confined = apply_dispatch_bound(worker, &bound);
         assert!(
