@@ -4140,6 +4140,43 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn a_parked_run_survives_its_terminal_completion_task() {
+        let provider = Arc::new(ScriptedGateProvider {
+            replies: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            calls: AtomicUsize::new(0),
+        });
+        let (storage, state, run) = event_gate_fixture(provider).await;
+
+        launch_existing_run(
+            state.clone(),
+            run.clone(),
+            "return await wait({ timerMs: 120_000 });".into(),
+            None,
+        )
+        .await
+        .expect("launch parked run");
+
+        let parked = wait_for_run_state(&storage, run.id, "parked").await;
+        let wake_at = parked.wake_at.expect("parked run records its wake time");
+        wait_for_workflow_thread_exit(run.id).await;
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while state.active_workflow_runs.lock().await.contains_key(&run.id) {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("parked run terminal task completes");
+
+        let after_terminal_task = storage
+            .get_workflow_run(run.id)
+            .await
+            .expect("get parked run after terminal task")
+            .expect("parked run after terminal task");
+        assert_eq!(after_terminal_task.state, "parked");
+        assert_eq!(after_terminal_task.wake_at, Some(wake_at));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn a_completed_run_releases_its_workflow_thread() {
         let provider = Arc::new(ScriptedGateProvider {
             replies: std::sync::Mutex::new(std::collections::VecDeque::new()),
