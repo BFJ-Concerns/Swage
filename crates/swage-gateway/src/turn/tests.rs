@@ -4962,11 +4962,12 @@ async fn second_tool_round_request_keeps_structured_tool_messages() {
     assert_eq!(requests.len(), 2, "expected two provider requests");
 
     let second = &requests[1];
-    assert_eq!(second.messages.len(), 4);
+    assert_eq!(second.messages.len(), 5);
     assert_eq!(second.messages[0].role(), Role::System);
-    assert_eq!(second.messages[1].role(), Role::User);
-    assert_eq!(second.messages[2].role(), Role::Assistant);
-    assert_eq!(second.messages[3].role(), Role::User);
+    assert_eq!(second.messages[1].role(), Role::System);
+    assert_eq!(second.messages[2].role(), Role::User);
+    assert_eq!(second.messages[3].role(), Role::Assistant);
+    assert_eq!(second.messages[4].role(), Role::User);
     assert!(
         second.messages.iter().any(|message| {
             message.role() == Role::System
@@ -4975,6 +4976,12 @@ async fn second_tool_round_request_keeps_structured_tool_messages() {
                     .contains("You are an agent running on Swage")
         }),
         "second request should retain orientation"
+    );
+    assert!(
+        second.messages.iter().any(|message| {
+            message.role() == Role::System && message.text_content().contains("## Working norms")
+        }),
+        "second request should retain the working norms"
     );
     let assistant_replay = second
         .messages
@@ -6097,11 +6104,12 @@ async fn approval_resumption_keeps_structured_tool_messages() {
     assert_eq!(requests.len(), 2, "expected two provider requests");
 
     let second = &requests[1];
-    assert_eq!(second.messages.len(), 4);
+    assert_eq!(second.messages.len(), 5);
     assert_eq!(second.messages[0].role(), Role::System);
-    assert_eq!(second.messages[1].role(), Role::User);
-    assert_eq!(second.messages[2].role(), Role::Assistant);
-    assert_eq!(second.messages[3].role(), Role::User);
+    assert_eq!(second.messages[1].role(), Role::System);
+    assert_eq!(second.messages[2].role(), Role::User);
+    assert_eq!(second.messages[3].role(), Role::Assistant);
+    assert_eq!(second.messages[4].role(), Role::User);
     assert!(
         second.messages.iter().any(|message| {
             message.role() == Role::System
@@ -6110,6 +6118,12 @@ async fn approval_resumption_keeps_structured_tool_messages() {
                     .contains("You are an agent running on Swage")
         }),
         "resumed request should retain orientation"
+    );
+    assert!(
+        second.messages.iter().any(|message| {
+            message.role() == Role::System && message.text_content().contains("## Working norms")
+        }),
+        "resumed request should retain the working norms"
     );
     let assistant_replay = second
         .messages
