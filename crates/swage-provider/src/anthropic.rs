@@ -1041,6 +1041,31 @@ mod tests {
         assert!(body.stream.is_none());
     }
 
+    #[test]
+    fn completion_request_hoists_output_requirements_to_system_field() {
+        let provider = AnthropicProvider::new("key", "model");
+        let declaration = "## Output Requirements\n\nReturn ONLY schema-compliant JSON.";
+        let request = CompletionRequest {
+            messages: vec![
+                ChatMessage::new(Role::User, "Return JSON"),
+                ChatMessage::new(Role::System, declaration),
+            ],
+            model: None,
+            max_tokens: None,
+            temperature: None,
+            stop_sequences: None,
+            metadata: None,
+            tool_definitions: vec![],
+        };
+
+        let body =
+            serde_json::to_value(provider.build_request_for_completion(&request, false)).unwrap();
+
+        assert_eq!(body["system"], declaration);
+        assert_eq!(body["messages"].as_array().unwrap().len(), 1);
+        assert_eq!(body["messages"][0]["role"], "user");
+    }
+
     // --- tool definitions in wire request ---
 
     #[test]

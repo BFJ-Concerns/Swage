@@ -861,7 +861,7 @@ async fn output_schema_retry_reuses_streaming_runtime() {
         .last()
         .expect("first request should declare its output requirements");
     let first_declaration_text = first_declaration.text_content();
-    assert_eq!(first_declaration.role(), Role::User);
+    assert_eq!(first_declaration.role(), Role::System);
     assert!(first_declaration_text.contains("## Output Requirements"));
     assert!(
         first_declaration_text.contains(

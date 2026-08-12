@@ -285,7 +285,7 @@ impl Agent {
         });
         let mut assembled_context = assembled_context;
         if let Some(requirements) = &output_requirements {
-            assembled_context.push(ChatMessage::new(Role::User, requirements));
+            assembled_context.push(ChatMessage::new(Role::System, requirements));
         }
         let mut llm_request = CompletionRequest {
             messages: assembled_context,
