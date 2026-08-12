@@ -248,22 +248,67 @@ fn intersect_tool_permissions(
 
 /// Expand an allow list to concrete tool names using the same config's own
 /// bundle definitions. `None` means the list allows everything ("*").
+fn expanded_names(
+    names: impl IntoIterator<Item = String>,
+    bundles: &std::collections::HashMap<String, Vec<String>>,
+) -> std::collections::BTreeSet<String> {
+    names
+        .into_iter()
+        .flat_map(|name| bundles.get(&name).cloned().unwrap_or_else(|| vec![name]))
+        .collect()
+}
+
 fn expanded_allow(
     permissions: &swage_config::model::ToolPermissionConfig,
 ) -> Option<std::collections::BTreeSet<String>> {
     if permissions.allow.iter().any(|tool| tool == "*") {
         return None;
     }
-    let mut concrete = std::collections::BTreeSet::new();
-    for entry in &permissions.allow {
-        match permissions.bundles.get(entry) {
-            Some(tools) => concrete.extend(tools.iter().cloned()),
-            None => {
-                concrete.insert(entry.clone());
-            }
-        }
-    }
-    Some(concrete)
+    Some(expanded_names(
+        permissions.allow.clone(),
+        &permissions.bundles,
+    ))
+}
+
+fn expanded_approval_entries(
+    permissions: &swage_config::model::ToolPermissionConfig,
+) -> Vec<swage_config::model::RequireApprovalEntry> {
+    permissions
+        .require_approval
+        .iter()
+        .flat_map(|entry| {
+            expanded_names([entry.tool_name().to_string()], &permissions.bundles)
+                .into_iter()
+                .map(|tool| match entry {
+                    swage_config::model::RequireApprovalEntry::Simple(_) => {
+                        swage_config::model::RequireApprovalEntry::Simple(tool)
+                    }
+                    swage_config::model::RequireApprovalEntry::WithOptions {
+                        timeout,
+                        timeout_policy,
+                        ..
+                    } => swage_config::model::RequireApprovalEntry::WithOptions {
+                        tool,
+                        timeout: *timeout,
+                        timeout_policy: timeout_policy.clone(),
+                    },
+                })
+        })
+        .collect()
+}
+
+pub(crate) fn effective_tool_permissions_record(
+    config: &swage_config::ResolvedConfig,
+) -> serde_json::Value {
+    let permissions = &config.tools.permissions;
+    let allow = expanded_allow(permissions)
+        .map(|tools| tools.into_iter().collect::<Vec<_>>())
+        .unwrap_or_else(|| vec!["*".to_string()]);
+    serde_json::json!({
+        "allow": allow,
+        "deny": permissions.deny,
+        "require_approval": expanded_approval_entries(permissions),
+    })
 }
 
 /// Confine a worker's resolved config to its dispatching context's grants.
@@ -313,39 +358,11 @@ pub(crate) fn apply_dispatch_bound(
         }
     }
     if let Some(ref effective_allow) = effective_allow {
-        config.tools.permissions.require_approval = config
-            .tools
-            .permissions
-            .require_approval
-            .iter()
-            .flat_map(|entry| {
-                let name = entry.tool_name();
-                config
-                    .tools
-                    .permissions
-                    .bundles
-                    .get(name)
-                    .cloned()
-                    .unwrap_or_else(|| vec![name.to_string()])
-                    .into_iter()
-                    .filter(|tool| effective_allow.contains(tool))
-                    .map(|tool| match entry {
-                        swage_config::model::RequireApprovalEntry::Simple(_) => {
-                            swage_config::model::RequireApprovalEntry::Simple(tool)
-                        }
-                        swage_config::model::RequireApprovalEntry::WithOptions {
-                            timeout,
-                            timeout_policy,
-                            ..
-                        } => swage_config::model::RequireApprovalEntry::WithOptions {
-                            tool,
-                            timeout: *timeout,
-                            timeout_policy: timeout_policy.clone(),
-                        },
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .collect();
+        config.tools.permissions.require_approval =
+            expanded_approval_entries(&config.tools.permissions)
+                .into_iter()
+                .filter(|entry| effective_allow.contains(entry.tool_name()))
+                .collect();
     }
     let worker_approval_names: std::collections::BTreeSet<String> = config
         .tools
@@ -362,18 +379,13 @@ pub(crate) fn apply_dispatch_bound(
         .collect();
     let mut carried = std::collections::BTreeSet::new();
     for entry in &bound.tools.permissions.require_approval {
-        let name = entry.tool_name().to_string();
         // Bound entries expand through the BOUND's own bundles, for the
         // same aliasing reason as the allow intersection. They carry as
         // plain demands — the worker's own approval defaults time them.
-        let names = bound
-            .tools
-            .permissions
-            .bundles
-            .get(&name)
-            .cloned()
-            .unwrap_or_else(|| vec![name]);
-        for concrete in names {
+        for concrete in expanded_names(
+            [entry.tool_name().to_string()],
+            &bound.tools.permissions.bundles,
+        ) {
             if effective_allow
                 .as_ref()
                 .is_none_or(|allowed| allowed.contains(&concrete))
@@ -605,6 +617,66 @@ mod tests {
                 .iter()
                 .any(|tool| tool == "browser_navigate"),
             "the worker's own denies survive"
+        );
+    }
+
+    #[test]
+    fn effective_permission_record_includes_a_dispatchers_bound_deny() {
+        let mut worker = swage_config::ResolvedConfig::default();
+        worker.tools.permissions.allow = vec!["shell".into(), "file_read".into()];
+        worker.tools.permissions.deny = vec![];
+        worker.tools.permissions.require_approval = vec![];
+
+        let mut bound = swage_config::ResolvedConfig::default();
+        bound.tools.permissions.allow = vec!["delegate".into(), "file_read".into()];
+        bound.tools.permissions.deny = vec!["file_read".into()];
+        bound.tools.permissions.require_approval = vec![];
+
+        let confined = apply_dispatch_bound(worker, &bound);
+        assert_eq!(
+            effective_tool_permissions_record(&confined),
+            serde_json::json!({
+                "allow": ["file_read"],
+                "deny": ["file_read"],
+                "require_approval": [],
+            }),
+            "the record must show the deny that makes an allowed tool unreachable"
+        );
+    }
+
+    #[test]
+    fn effective_permission_record_expands_bundle_labels_to_concrete_tools() {
+        let mut confined = swage_config::ResolvedConfig::default();
+        confined.tools.permissions.allow = vec!["reading".into()];
+        confined.tools.permissions.deny = vec!["shell".into()];
+        confined.tools.permissions.bundles = std::collections::HashMap::from([
+            (
+                "reading".to_string(),
+                vec!["knowledge_search".to_string(), "file_read".to_string()],
+            ),
+            (
+                "changes".to_string(),
+                vec!["file_write".to_string(), "shell".to_string()],
+            ),
+        ]);
+        confined.tools.permissions.require_approval =
+            vec![swage_config::model::RequireApprovalEntry::WithOptions {
+                tool: "changes".into(),
+                timeout: Some(30),
+                timeout_policy: Some(swage_core::ApprovalTimeoutPolicy::Interrupt),
+            }];
+
+        assert_eq!(
+            effective_tool_permissions_record(&confined),
+            serde_json::json!({
+                "allow": ["file_read", "knowledge_search"],
+                "deny": ["shell"],
+                "require_approval": [
+                    {"tool": "file_write", "timeout": 30, "timeout_policy": "interrupt"},
+                    {"tool": "shell", "timeout": 30, "timeout_policy": "interrupt"},
+                ],
+            }),
+            "bundle labels must not be required to interpret the record"
         );
     }
 
