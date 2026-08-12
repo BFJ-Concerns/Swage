@@ -3836,6 +3836,49 @@ mod tests {
         (storage, state, run)
     }
 
+    fn workflow_thread_exists(run_id: Uuid) -> bool {
+        let expected: String = format!("workflow-{run_id}").chars().take(15).collect();
+        std::fs::read_dir("/proc/self/task")
+            .expect("read process tasks")
+            .filter_map(Result::ok)
+            .any(|task| {
+                std::fs::read_to_string(task.path().join("comm"))
+                    .is_ok_and(|name| name.trim() == expected)
+            })
+    }
+
+    async fn wait_for_run_state(
+        storage: &SqliteStorage,
+        run_id: Uuid,
+        expected: &str,
+    ) -> WorkflowRunRecord {
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let run = storage
+                    .get_workflow_run(run_id)
+                    .await
+                    .expect("get workflow run")
+                    .expect("workflow run");
+                if run.state == expected {
+                    return run;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("run {run_id} did not reach {expected}"))
+    }
+
+    async fn wait_for_workflow_thread_exit(run_id: Uuid) {
+        tokio::time::timeout(std::time::Duration::from_millis(250), async {
+            while workflow_thread_exists(run_id) {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("workflow thread for run {run_id} remained alive"));
+    }
+
     fn spawn_event_loop(
         state: AppState,
         run_id: Uuid,
@@ -4072,6 +4115,44 @@ mod tests {
         ));
         drop(tx);
         task.await.expect("host loop");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_parked_run_releases_its_workflow_thread() {
+        let provider = Arc::new(ScriptedGateProvider {
+            replies: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            calls: AtomicUsize::new(0),
+        });
+        let (storage, state, run) = event_gate_fixture(provider).await;
+
+        launch_existing_run(
+            state,
+            run.clone(),
+            "return await wait({ timerMs: 120_000 });".into(),
+            None,
+        )
+        .await
+        .expect("launch parked run");
+
+        let parked = wait_for_run_state(&storage, run.id, "parked").await;
+        assert!(parked.wake_at.is_some(), "parked run records its wake time");
+        wait_for_workflow_thread_exit(run.id).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_completed_run_releases_its_workflow_thread() {
+        let provider = Arc::new(ScriptedGateProvider {
+            replies: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            calls: AtomicUsize::new(0),
+        });
+        let (storage, state, run) = event_gate_fixture(provider).await;
+
+        launch_existing_run(state, run.clone(), "return { done: true };".into(), None)
+            .await
+            .expect("launch completed run");
+
+        wait_for_run_state(&storage, run.id, "completed").await;
+        wait_for_workflow_thread_exit(run.id).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
