@@ -29,6 +29,7 @@ use swage_tool::tool::Tool;
 struct StreamingProvider {
     rounds: Mutex<Vec<Vec<StreamChunk>>>,
     calls: AtomicUsize,
+    requests: Mutex<Vec<CompletionRequest>>,
 }
 
 impl StreamingProvider {
@@ -36,11 +37,19 @@ impl StreamingProvider {
         Self {
             rounds: Mutex::new(rounds.into_iter().rev().collect()),
             calls: AtomicUsize::new(0),
+            requests: Mutex::new(Vec::new()),
         }
     }
 
     fn call_count(&self) -> usize {
         self.calls.load(Ordering::SeqCst)
+    }
+
+    fn requests(&self) -> Vec<CompletionRequest> {
+        self.requests
+            .lock()
+            .expect("mock provider request lock should not be poisoned")
+            .clone()
     }
 }
 
@@ -138,9 +147,13 @@ impl LlmProvider for StreamingProvider {
 
     fn stream(
         &self,
-        _request: CompletionRequest,
+        request: CompletionRequest,
     ) -> Pin<Box<dyn Stream<Item = StreamChunk> + Send>> {
         self.calls.fetch_add(1, Ordering::SeqCst);
+        self.requests
+            .lock()
+            .expect("mock provider request lock should not be poisoned")
+            .push(request);
         let chunks = self
             .rounds
             .lock()
@@ -812,17 +825,15 @@ async fn output_schema_retry_reuses_streaming_runtime() {
             },
         ],
     ]));
-    let config = resolved_config("agent-a").with_output_schema(
-        json!({
-            "type": "object",
-            "properties": {
-                "answer": { "type": "string" }
-            },
-            "required": ["answer"],
-            "additionalProperties": false
-        }),
-        1,
-    );
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "answer": { "type": "string" }
+        },
+        "required": ["answer"],
+        "additionalProperties": false
+    });
+    let config = resolved_config("agent-a").with_output_schema(schema.clone(), 1);
     let agent = AgentBuilder::new()
         .config(config)
         .provider(provider.clone())
@@ -844,7 +855,45 @@ async fn output_schema_retry_reuses_streaming_runtime() {
     assert_eq!(outbound.input_tokens, 5);
     assert_eq!(outbound.output_tokens, 5);
 
+    let requests = provider.requests();
+    let first_declaration = requests[0]
+        .messages
+        .last()
+        .expect("first request should declare its output requirements");
+    let first_declaration_text = first_declaration.text_content();
+    assert_eq!(first_declaration.role(), Role::System);
+    assert!(first_declaration_text.contains("## Output Requirements"));
+    assert!(
+        first_declaration_text.contains(
+            &serde_json::to_string_pretty(&schema).expect("test schema should serialise")
+        )
+    );
+    assert!(first_declaration_text.contains("\"additionalProperties\": false"));
+
+    let retry_feedback = requests[1]
+        .messages
+        .last()
+        .expect("retry request should contain validation feedback");
+    let retry_feedback_text = retry_feedback.text_content();
+    assert!(retry_feedback_text.contains("Validation errors:"));
+    assert!(retry_feedback_text.contains("no JSON found in response"));
+    assert!(retry_feedback_text.contains(&first_declaration_text));
+
     let events = drain_events(event_rx);
+    let prepared_requests: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::ProviderRequestPrepared { request, .. } => Some(request),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(prepared_requests.len(), 2);
+    assert!(
+        prepared_requests
+            .iter()
+            .all(|request| request.to_string().contains("Output Requirements"))
+    );
+
     assert!(events.iter().any(|event| matches!(
         event,
         AgentEvent::OutputSchemaRetry {
@@ -860,4 +909,80 @@ async fn output_schema_retry_reuses_streaming_runtime() {
             ..
         } if *value == json!({ "answer": "ok" })
     )));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn output_schema_declaration_is_scoped_to_schema_configured_turns() {
+    let valid_round = || {
+        vec![
+            StreamChunk::Delta {
+                content: "{\"answer\":\"ok\"}".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: Some(FinishReason::Stop),
+            },
+        ]
+    };
+
+    let (storage, space, session, thread) = setup_conversation("agent-a").await;
+    let schema_provider = Arc::new(StreamingProvider::new(vec![valid_round()]));
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "answer": { "type": "string" }
+        },
+        "required": ["answer"],
+        "additionalProperties": false
+    });
+    let schema_agent = AgentBuilder::new()
+        .config(resolved_config("agent-a").with_output_schema(schema, 1))
+        .provider(schema_provider.clone())
+        .storage(storage)
+        .build()
+        .expect("agent");
+    let (event_tx, _event_rx) = mpsc::unbounded_channel();
+    let outbound = schema_agent
+        .process_turn_streaming(
+            test_request(space.id, session.id, thread.id, "Return JSON", None),
+            event_tx,
+        )
+        .await
+        .expect("valid first response should complete");
+
+    assert_eq!(schema_provider.call_count(), 1);
+    assert_eq!(outbound.structured_output, Some(json!({ "answer": "ok" })));
+    assert_eq!(schema_provider.requests()[0].messages.len(), 2);
+
+    let (storage, space, session, thread) = setup_conversation("agent-a").await;
+    let plain_provider = Arc::new(StreamingProvider::new(vec![vec![
+        StreamChunk::Delta {
+            content: "ordinary response".into(),
+        },
+        StreamChunk::Done {
+            finish_reason: Some(FinishReason::Stop),
+        },
+    ]]));
+    let plain_agent = AgentBuilder::new()
+        .config(resolved_config("agent-a"))
+        .provider(plain_provider.clone())
+        .storage(storage)
+        .build()
+        .expect("agent");
+    let (event_tx, _event_rx) = mpsc::unbounded_channel();
+    let outbound = plain_agent
+        .process_turn_streaming(
+            test_request(space.id, session.id, thread.id, "Respond normally", None),
+            event_tx,
+        )
+        .await
+        .expect("schema-free turn should complete");
+
+    assert_eq!(outbound.structured_output, None);
+    let plain_requests = plain_provider.requests();
+    assert_eq!(plain_requests[0].messages.len(), 1);
+    assert_eq!(plain_requests[0].messages[0].role(), Role::User);
+    assert_eq!(
+        plain_requests[0].messages[0].text_content(),
+        "Respond normally"
+    );
 }
