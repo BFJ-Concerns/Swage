@@ -15,10 +15,9 @@ use crate::model::{
     NewMaterial, NewMessage, NewOrientationCard, NewSchedule, NewScheduleRun, NewSecretRecord,
     NewSession, NewSourceObservation, NewSpace, NewThread, NewToolCall, NewTurn,
     NewWorkflowJournalIntent, NewWorkflowRun, NewWorkflowRunEvent, NewWorkflowScript,
-    NewWorkspaceAttachment,
-    OrientationCard, OrientationCardLifecycle, PendingChannelOrigin, Schedule, ScheduleRun,
-    ScheduleRunUpdate, SecretRecord, Session, SourceObservation, Space, SpaceSlug, Thread,
-    ThreadBranch, ThreadState, ToolCallRecord, Turn, TurnState, UpdateSchedule,
+    NewWorkspaceAttachment, OrientationCard, OrientationCardLifecycle, PendingChannelOrigin,
+    Schedule, ScheduleRun, ScheduleRunUpdate, SecretRecord, Session, SourceObservation, Space,
+    SpaceSlug, Thread, ThreadBranch, ThreadState, ToolCallRecord, Turn, TurnState, UpdateSchedule,
     WorkflowJournalRecord, WorkflowRunEventRecord, WorkflowRunRecord, WorkflowScriptRecord,
     WorkflowScriptVersion, WorkspaceAttachment,
 };

@@ -13,8 +13,9 @@ use crate::{
 };
 
 fn named_host_error(error: &str, fallback: &str) -> (String, String) {
-    const NAMES: [(&str, &str); 9] = [
+    const NAMES: [(&str, &str); 10] = [
         ("BudgetExceededError", "BudgetExceededError"),
+        ("BudgetWindDownError", "BudgetWindDownError"),
         ("DeliveryNotGrantedError", "DeliveryNotGrantedError"),
         ("WorkflowCancelledError", "WorkflowCancelledError"),
         ("NondeterministicReplayError", "NondeterministicCallError"),
@@ -247,8 +248,7 @@ impl WorkflowEngine {
         let args_json = args_json.to_string();
         let host_cancellation = (*cancellation).clone();
 
-        let result = context
-            .async_with(async move |ctx| {
+        let execution = context.async_with(async move |ctx| {
                 // QuickJS installs Math as a base object and seeds random from ambient time.
                 // Replacing the function makes the nondeterministic surface fail explicitly.
                 ctx.eval::<(), _>(
@@ -772,8 +772,9 @@ impl WorkflowEngine {
                         // unbounded budget reads as undefined, and replay sees
                         // end-state, not what this moment saw. A script that
                         // BRANCHES on budget state must use budgetSnapshot():
-                        // journalled, so replay repeats the recorded reading
-                        // ({spent, remaining}; remaining null when unbounded).
+                        // journalled, so replay repeats the recorded reading.
+                        // The snapshot also names the working and reserved
+                        // closing allowances and whether wind-down has begun.
                         globalThis.budget = Object.freeze({
                             spent: () => __budgetSpent(),
                             remaining: () => __budgetRemaining(),
@@ -795,8 +796,12 @@ impl WorkflowEngine {
                     .await
                     .catch(&ctx)
                     .map_err(|error| error.to_string())
-            })
-            .await;
+            });
+        tokio::pin!(execution);
+        let result = tokio::select! {
+            result = &mut execution => result,
+            () = cancellation.cancelled() => return Err(WorkflowEngineError::Cancelled),
+        };
 
         if cancellation.is_cancelled() {
             return Err(WorkflowEngineError::Cancelled);
@@ -928,6 +933,7 @@ mod tests {
         gate_requests: Mutex<Vec<GateRequest>>,
         gate_verdict: Value,
         deliveries_up_to: Mutex<Vec<u64>>,
+        budget_snapshot: Value,
     }
 
     impl SurfaceHost {
@@ -944,6 +950,13 @@ mod tests {
                 gate_requests: Mutex::new(Vec::new()),
                 gate_verdict: Value::Null,
                 deliveries_up_to: Mutex::new(Vec::new()),
+                budget_snapshot: json!({
+                    "spent": 0,
+                    "remaining": null,
+                    "working_remaining": null,
+                    "closing_remaining": null,
+                    "winding_down": false,
+                }),
             }
         }
     }
@@ -1031,9 +1044,62 @@ mod tests {
             up_to_seq: u64,
             _: CancellationToken,
         ) -> Result<Value, String> {
-            self.deliveries_up_to.lock().expect("deliveries").push(up_to_seq);
+            self.deliveries_up_to
+                .lock()
+                .expect("deliveries")
+                .push(up_to_seq);
             Ok(json!({"delivered": up_to_seq}))
         }
+
+        async fn budget_snapshot(&self, _: CancellationToken) -> Result<Value, String> {
+            Ok(self.budget_snapshot.clone())
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn budget_surface_exposes_wind_down_state_and_named_signal() {
+        let host = Arc::new(SurfaceHost {
+            budget_snapshot: json!({
+                "spent": 8,
+                "remaining": 4,
+                "working_remaining": 0,
+                "closing_remaining": 4,
+                "winding_down": true,
+            }),
+            ..SurfaceHost::new()
+        });
+        host.agent_outputs.lock().unwrap().extend([Err(
+            "BudgetWindDownError: working token allowance exhausted".into(),
+        )]);
+        let output = WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                r#"
+                const snapshot = await budgetSnapshot();
+                let errorName = null;
+                try { await agent("ordinary work", {agent: "lead"}); }
+                catch (error) { errorName = error.name; }
+                return {snapshot, errorName};
+                "#,
+                "null",
+                CancellationToken::new(),
+                Some(host as Arc<dyn WorkflowHost>),
+                ScriptCapabilities::default(),
+            )
+            .await
+            .expect("wind-down observable");
+        assert_eq!(
+            serde_json::from_str::<Value>(&output).unwrap(),
+            json!({
+                "snapshot": {
+                    "spent": 8,
+                    "remaining": 4,
+                    "working_remaining": 0,
+                    "closing_remaining": 4,
+                    "winding_down": true,
+                },
+                "errorName": "BudgetWindDownError",
+            })
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1372,6 +1438,33 @@ mod tests {
         cancellation.cancel();
 
         let result = engine.execute("while (true) {}", cancellation).await;
+        assert!(matches!(result, Err(WorkflowEngineError::Cancelled)));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancellation_interrupts_a_suspended_host_call() {
+        let mut host = SurfaceHost::new();
+        host.timer_settles = false;
+        let cancellation = CancellationToken::new();
+        let engine = WorkflowEngine::new(EngineLimits::default());
+        let execution = engine.execute_hosted(
+            "return await wait({ timerMs: 120_000 });",
+            "null",
+            cancellation.clone(),
+            Some(Arc::new(host)),
+            ScriptCapabilities::default(),
+        );
+
+        tokio::pin!(execution);
+        tokio::select! {
+            result = &mut execution => panic!("host call settled before cancellation: {result:?}"),
+            () = tokio::time::sleep(std::time::Duration::from_millis(20)) => {}
+        }
+        cancellation.cancel();
+
+        let result = tokio::time::timeout(std::time::Duration::from_millis(100), execution)
+            .await
+            .expect("cancellation releases a suspended host call");
         assert!(matches!(result, Err(WorkflowEngineError::Cancelled)));
     }
 
