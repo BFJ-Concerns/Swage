@@ -2629,6 +2629,173 @@ mod tests {
         );
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn external_delegate_message_confines_child_to_sender_grants() {
+        use swage_agent::MessageRouter;
+        use swage_core::{FinishReason, MessageKind, StreamChunk};
+        use swage_storage::{
+            model::NewAgentMessage,
+            store::{ThreadStore, ToolCallStore, TurnStore},
+        };
+
+        struct NamedTool(&'static str);
+
+        #[async_trait::async_trait]
+        impl crate::tool::Tool for NamedTool {
+            fn name(&self) -> &str {
+                self.0
+            }
+
+            fn description(&self) -> &str {
+                "Test tool"
+            }
+
+            fn parameters(&self) -> serde_json::Value {
+                serde_json::json!({ "type": "object" })
+            }
+
+            async fn execute(
+                &self,
+                _arguments: serde_json::Value,
+                _ctx: &dyn swage_tool::context::ToolContext,
+            ) -> Result<serde_json::Value, swage_core::ToolError> {
+                Ok(serde_json::json!({ "ok": true }))
+            }
+        }
+
+        let (provider, captured_requests) = CapturingMultiRoundProvider::new(vec![
+            vec![
+                StreamChunk::ToolUse {
+                    call_id: "excluded-target-tool".into(),
+                    name: "target_only".into(),
+                    arguments: serde_json::json!({}),
+                },
+                StreamChunk::Done {
+                    finish_reason: None,
+                },
+            ],
+            vec![
+                StreamChunk::Delta {
+                    content: "External delegate remained confined".into(),
+                },
+                StreamChunk::Done {
+                    finish_reason: Some(FinishReason::Stop),
+                },
+            ],
+        ]);
+        let storage =
+            Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
+        let space = storage
+            .get_or_create_default()
+            .await
+            .expect("get default space");
+        let swage_home = SwageHomeGuard::new();
+        for (agent_id, allowed_tools) in [
+            ("agent-a", "[\"shared\"]"),
+            ("agent-b", "[\"shared\", \"target_only\"]"),
+        ] {
+            let agent_dir = swage_home
+                .path()
+                .join("spaces/default/agents")
+                .join(agent_id);
+            std::fs::create_dir_all(&agent_dir).expect("create agent config directory");
+            std::fs::write(
+                agent_dir.join("config.toml"),
+                format!(
+                    "[tools]\nallow = {allowed_tools}\ndeny = []\nbundles = {{}}\nrequire_approval = []\n"
+                ),
+            )
+            .expect("write agent permissions");
+        }
+
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::new(provider) as Arc<dyn LlmProvider>,
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![
+                Arc::new(NamedTool("shared")) as Arc<dyn crate::tool::Tool>,
+                Arc::new(NamedTool("target_only")) as Arc<dyn crate::tool::Tool>,
+            ]),
+            None,
+        );
+        let router = MessageRouter::new(state.storage.clone(), None);
+        let delegate_msg = router
+            .send_message(NewAgentMessage {
+                sender_agent_id: "agent-a".to_string(),
+                recipient_agent_id: "agent-b".to_string(),
+                kind: MessageKind::Delegate,
+                correlation_id: None,
+                payload: serde_json::json!({ "task": "exercise external confinement" }),
+            })
+            .await
+            .expect("create external delegate message");
+
+        execute_external_delegate_message(state, delegate_msg, space.id, None)
+            .await
+            .expect("external delegation should complete");
+
+        let child_sessions = storage
+            .list_sessions_by_agent_id("agent-b")
+            .await
+            .expect("list child sessions");
+        assert_eq!(child_sessions.len(), 1, "expected one child session");
+        assert_eq!(
+            child_sessions[0]
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get(crate::workflow::DISPATCH_BOUND_METADATA_KEY))
+                .and_then(serde_json::Value::as_str),
+            Some("agent-a"),
+            "external delegated child should persist its dispatching agent bound"
+        );
+
+        let captured_requests = captured_requests.lock().unwrap();
+        assert_eq!(captured_requests.len(), 2);
+        for request in captured_requests.iter() {
+            assert!(
+                request
+                    .tool_definitions
+                    .iter()
+                    .any(|definition| definition["name"] == "shared"),
+                "the sender/target intersection should retain their shared tool: {:?}",
+                request.tool_definitions
+            );
+            assert!(
+                request
+                    .tool_definitions
+                    .iter()
+                    .all(|definition| definition["name"] != "target_only"),
+                "the sender/target intersection should exclude the target-only tool: {:?}",
+                request.tool_definitions
+            );
+        }
+        drop(captured_requests);
+
+        let child_threads = storage
+            .list_by_session(child_sessions[0].id)
+            .await
+            .expect("list child threads");
+        let child_turns = storage
+            .list_turns_by_thread(child_threads[0].id)
+            .await
+            .expect("list child turns");
+        let tool_calls = storage
+            .list_tool_calls_by_turn(child_turns[0].id)
+            .await
+            .expect("list child tool calls");
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0].tool, "target_only");
+        assert_eq!(tool_calls[0].status.as_deref(), Some("error"));
+        assert!(
+            tool_calls[0]
+                .result
+                .as_deref()
+                .is_some_and(|result| result.contains("not permitted")),
+            "the excluded tool call should leave a denied audit record: {tool_calls:?}"
+        );
+    }
+
     #[tokio::test]
     async fn post_delegate_message_requires_space_id_before_persisting() {
         use swage_storage::store::AgentMessageStore;
