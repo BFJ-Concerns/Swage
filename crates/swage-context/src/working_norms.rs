@@ -34,8 +34,8 @@ impl ModelFamily {
     /// stays on stable public prefixes rather than trying to be clever.
     pub fn from_model_id(model_id: &str) -> Self {
         let id = model_id.trim().to_ascii_lowercase();
-        let o_series =
-            id.starts_with('o') && id[1..].starts_with(|character: char| character.is_ascii_digit());
+        let o_series = id.starts_with('o')
+            && id[1..].starts_with(|character: char| character.is_ascii_digit());
         if id.contains("claude") {
             Self::Claude
         } else if id.contains("gpt") || o_series {
@@ -157,7 +157,10 @@ mod tests {
         let text = WorkingNormsElement::for_model("gpt-5.6-luna").content()[0].text_content();
         assert!(text.contains("Work to completion"));
         assert!(text.contains("fully resolved before ending your turn"));
-        assert!(!text.contains("tool calls together"), "no Claude text on GPT");
+        assert!(
+            !text.contains("tool calls together"),
+            "no Claude text on GPT"
+        );
     }
 
     #[test]
