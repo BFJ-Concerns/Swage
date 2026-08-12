@@ -907,6 +907,30 @@ mod tests {
     }
 
     #[test]
+    fn build_request_keeps_output_requirements_in_system_message() {
+        let provider =
+            OpenAiProvider::from_config(ProviderConfig::new("key", "gpt-4o", "http://localhost"));
+        let declaration = "## Output Requirements\n\nReturn ONLY schema-compliant JSON.";
+        let request = CompletionRequest {
+            messages: vec![
+                ChatMessage::new(Role::User, "Return JSON"),
+                ChatMessage::new(Role::System, declaration),
+            ],
+            model: None,
+            max_tokens: None,
+            temperature: None,
+            stop_sequences: None,
+            metadata: None,
+            tool_definitions: vec![],
+        };
+
+        let body = serde_json::to_value(provider.build_request(&request, false)).unwrap();
+
+        assert_eq!(body["messages"][1]["role"], "system");
+        assert_eq!(body["messages"][1]["content"], declaration);
+    }
+
+    #[test]
     fn build_request_sets_stream_flag() {
         let provider =
             OpenAiProvider::from_config(ProviderConfig::new("key", "model", "http://localhost"));
