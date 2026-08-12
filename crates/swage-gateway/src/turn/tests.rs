@@ -6790,7 +6790,7 @@ async fn delegated_child_snapshot_records_exact_non_empty_effective_tool_grant()
             instructions: String::new(),
             model_id: None,
             tool_permissions: Some(serde_json::json!({
-                "allow": ["delegate", "file_read"], "deny": [], "bundles": {},
+                "allow": ["delegate", "file_read"], "deny": ["file_read"], "bundles": {},
                 "require_approval": []
             })),
             skills: vec![],
@@ -6911,7 +6911,7 @@ async fn delegated_child_snapshot_records_exact_non_empty_effective_tool_grant()
         snapshot["effective_tool_permissions"],
         serde_json::json!({
             "allow": ["file_read"],
-            "deny": [],
+            "deny": ["file_read"],
             "require_approval": [],
         }),
         "the audit record must carry the exact permissions used to build the dispatcher"
