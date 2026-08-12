@@ -28,6 +28,7 @@ use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use serde_json::{Value, json};
+use tokio::net::TcpListener;
 use tower::ServiceExt;
 
 use swage_gateway::server::build_router;
@@ -230,6 +231,76 @@ async fn sessions_are_isolated_between_spaces() {
         .expect("spaces should be an array");
     // Default + Alpha + Bravo = 3 spaces.
     assert_eq!(spaces.len(), 3, "should have default + 2 created spaces");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn default_conversation_rejects_explicit_space_target_without_creating_session() {
+    let (router, _storage) = make_test_router();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    let client = reqwest::Client::new();
+    let base_url = format!("http://{address}");
+
+    let spaces = client
+        .get(format!("{base_url}/api/spaces"))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap();
+    let default_space_id = spaces["spaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|space| space["is_default"] == true)
+        .and_then(|space| space["id"].as_str())
+        .expect("default space should be listed");
+    let sessions_url = format!("{base_url}/api/spaces/{default_space_id}/sessions");
+
+    let before = client
+        .get(&sessions_url)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap();
+    assert_eq!(before["conversations"].as_array().unwrap().len(), 0);
+
+    let response = client
+        .post(format!("{base_url}/api/conversations"))
+        .json(&json!({ "space_id": default_space_id }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let rejection = response.text().await.unwrap();
+    assert!(
+        rejection.contains("space_id"),
+        "rejection should name the undeclared field: {rejection}"
+    );
+
+    let after = client
+        .get(&sessions_url)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap();
+    assert_eq!(after["conversations"].as_array().unwrap().len(), 0);
+
+    server.abort();
 }
 
 // ---------------------------------------------------------------------------
