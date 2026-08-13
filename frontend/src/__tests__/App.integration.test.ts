@@ -444,7 +444,7 @@ describe("App", () => {
   it("renders the conversation and removes Settings after browser Back", async () => {
     let popstateHandler: EventListener | null = null;
     const addEventListener = window.addEventListener.bind(window);
-    vi.spyOn(window, "addEventListener").mockImplementation(
+    const addEventListenerSpy = vi.spyOn(window, "addEventListener").mockImplementation(
       (type: string, listener: EventListenerOrEventListenerObject, options?: boolean | AddEventListenerOptions) => {
         if (type === "popstate") {
           popstateHandler =
@@ -515,6 +515,7 @@ describe("App", () => {
     expect(websocketHarness.client.connect).toHaveBeenCalledTimes(
       websocketConnectCount,
     );
+    addEventListenerSpy.mockRestore();
   });
 
   it("connects exactly once when a conversation is picked from the sidebar", async () => {
