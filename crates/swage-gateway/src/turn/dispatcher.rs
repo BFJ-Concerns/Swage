@@ -306,6 +306,13 @@ pub(crate) async fn build_gateway_dispatcher(
     active_workspace_attachment_id: Option<Uuid>,
     ws_tx: mpsc::UnboundedSender<ServerEvent>,
 ) -> Result<GatewayDispatcherBuild, swage_core::SandboxError> {
+    #[cfg(test)]
+    if state.take_dispatcher_build_failure() {
+        return Err(swage_core::SandboxError::SpawnFailed {
+            message: "injected dispatcher build failure".into(),
+        });
+    }
+
     let workspace_policy = match space_id {
         Some(id) => Some(
             load_trusted_workspace_policy(&state.storage, id, active_workspace_attachment_id).await,
