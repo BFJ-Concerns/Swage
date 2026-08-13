@@ -1022,6 +1022,7 @@ pub trait WorkflowStore: Send + Sync {
         id: Uuid,
         state: &str,
         final_output: Option<serde_json::Value>,
+        handover: Option<serde_json::Value>,
         error_message: Option<&str>,
     ) -> Result<(), StorageError>;
     async fn interrupt_running_workflow_runs(&self) -> Result<u64, StorageError>;
@@ -2274,6 +2275,7 @@ mod tests {
             &self,
             _: Uuid,
             _: &str,
+            _: Option<serde_json::Value>,
             _: Option<serde_json::Value>,
             _: Option<&str>,
         ) -> Result<(), StorageError> {

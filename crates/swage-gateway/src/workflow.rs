@@ -192,6 +192,12 @@ struct TokenBudgetState {
     reserved: u64,
 }
 
+#[derive(Clone, Copy)]
+struct FailedAgentCallRef {
+    journal_entry_id: Uuid,
+    seq: u64,
+}
+
 fn token_reservation_per_call(budget: &WorkflowBudget) -> Option<u64> {
     let limit = budget.max_total_tokens?;
     let calls = budget
@@ -745,6 +751,7 @@ fn run_host_commands(
     replay: Vec<WorkflowJournalRecord>,
     agent_calls: Arc<AtomicU32>,
     spent_tokens: Arc<AtomicU64>,
+    failed_agent_call: Arc<Mutex<Option<FailedAgentCallRef>>>,
     park: CancellationToken,
     park_threshold_ms: u64,
     commands: mpsc::UnboundedReceiver<HostCommand>,
@@ -759,6 +766,7 @@ fn run_host_commands(
         replay,
         agent_calls,
         spent_tokens,
+        failed_agent_call,
         park,
         park_threshold_ms,
         commands,
@@ -775,6 +783,7 @@ async fn run_host_commands_inner(
     replay: Vec<WorkflowJournalRecord>,
     agent_calls: Arc<AtomicU32>,
     spent_tokens: Arc<AtomicU64>,
+    failed_agent_call: Arc<Mutex<Option<FailedAgentCallRef>>>,
     park: CancellationToken,
     park_threshold_ms: u64,
     mut commands: mpsc::UnboundedReceiver<HostCommand>,
@@ -1017,6 +1026,7 @@ async fn run_host_commands_inner(
                 let replay_agent_ranks = Arc::clone(&replay_agent_ranks);
                 let replay_release_rank = Arc::clone(&replay_release_rank);
                 let replay_release_notify = Arc::clone(&replay_release_notify);
+                let failed_agent_call = Arc::clone(&failed_agent_call);
                 in_flight.fetch_add(1, Ordering::SeqCst);
                 let in_flight = Arc::clone(&in_flight);
                 // The channel is the deterministic boundary. Assigning sequence
@@ -1032,17 +1042,24 @@ async fn run_host_commands_inner(
                     };
                     let hash = request_hash;
                     let existing = replay.get(current_seq as usize);
-                    let result = if let Some(entry) = existing {
+                    let (journal_entry_id, result) = if let Some(entry) = existing {
+                        let journal_entry_id = entry.id;
                         if entry.args_hash != hash {
-                            Err("NondeterministicReplayError".into())
+                            (
+                                Some(journal_entry_id),
+                                Err("NondeterministicReplayError".into()),
+                            )
                         } else if entry.status == "failed" {
                             // The original run observed this failure (and may
                             // have caught it); replay returns the recorded
                             // error rather than re-executing the call.
-                            Err(entry
-                                .error_message
-                                .clone()
-                                .unwrap_or_else(|| "recorded agent failure".to_string()))
+                            (
+                                Some(journal_entry_id),
+                                Err(entry
+                                    .error_message
+                                    .clone()
+                                    .unwrap_or_else(|| "recorded agent failure".to_string())),
+                            )
                         } else if entry.status == "completed" {
                             let result = entry
                                 .result
@@ -1059,18 +1076,21 @@ async fn run_host_commands_inner(
                                 )
                                 .await;
                             }
-                            result
+                            (Some(journal_entry_id), result)
                         } else {
-                            complete_agent_entry(
-                                &state,
-                                run_id,
-                                space_id,
-                                &dispatch_bound_agent_ids,
-                                entry.id,
-                                request,
-                                cancellation,
+                            (
+                                Some(journal_entry_id),
+                                complete_agent_entry(
+                                    &state,
+                                    run_id,
+                                    space_id,
+                                    &dispatch_bound_agent_ids,
+                                    journal_entry_id,
+                                    request,
+                                    cancellation,
+                                )
+                                .await,
                             )
-                            .await
                         }
                     } else {
                         match state
@@ -1087,20 +1107,32 @@ async fn run_host_commands_inner(
                             .await
                         {
                             Ok(intent) => {
-                                complete_agent_entry(
-                                    &state,
-                                    run_id,
-                                    space_id,
-                                    &dispatch_bound_agent_ids,
-                                    intent.id,
-                                    request,
-                                    cancellation,
+                                let journal_entry_id = intent.id;
+                                (
+                                    Some(journal_entry_id),
+                                    complete_agent_entry(
+                                        &state,
+                                        run_id,
+                                        space_id,
+                                        &dispatch_bound_agent_ids,
+                                        journal_entry_id,
+                                        request,
+                                        cancellation,
+                                    )
+                                    .await,
                                 )
-                                .await
                             }
-                            Err(error) => Err(error.to_string()),
+                            Err(error) => (None, Err(error.to_string())),
                         }
                     };
+                    if result.is_err()
+                        && let Some(journal_entry_id) = journal_entry_id
+                    {
+                        *failed_agent_call.lock().await = Some(FailedAgentCallRef {
+                            journal_entry_id,
+                            seq: current_seq,
+                        });
+                    }
                     let actual = if !completed_replay {
                         result
                             .as_ref()
@@ -2024,7 +2056,7 @@ async fn complete_workflow_call_entry(
                 let grant = script.delivery_grant.clone();
                 state
                     .storage
-                    .update_workflow_run_state(child.id, "running", None, None)
+                    .update_workflow_run_state(child.id, "running", None, None, None)
                     .await
                     .map_err(|error| error.to_string())?;
                 let running = state
@@ -2244,6 +2276,7 @@ fn run_wire(record: WorkflowRunRecord) -> Result<WorkflowRun, ApiError> {
         args: record.args,
         budget: budget_wire(&record.budget),
         final_output: record.final_output,
+        handover: record.handover,
         error_message: record.error_message,
         created_at: record.created_at,
         completed_at: record.completed_at,
@@ -2391,49 +2424,67 @@ async fn start_run(
 async fn failed_agent_call_handover(
     storage: &Arc<dyn Storage>,
     run_id: Uuid,
-    terminal_error: &str,
+    failed_call_ref: FailedAgentCallRef,
 ) -> Option<Value> {
     let journal = storage.list_workflow_journal(run_id).await.ok()?;
-    let failed_call = journal.iter().rev().find(|entry| {
-        entry.kind == "agent_call"
+    let failed_call = journal.iter().find(|entry| {
+        entry.id == failed_call_ref.journal_entry_id
+            && entry.seq == failed_call_ref.seq
+            && entry.kind == "agent_call"
             && entry.status == "failed"
-            && entry
-                .error_message
-                .as_deref()
-                .is_some_and(|error| terminal_error.contains(error))
     })?;
     let call_error = failed_call.error_message.as_deref()?;
-    let pending_events = storage
+    let previous_agent_call_seq = journal
+        .iter()
+        .filter(|entry| entry.kind == "agent_call" && entry.seq < failed_call.seq)
+        .map(|entry| entry.seq)
+        .max();
+    let events = storage
         .list_workflow_run_events(run_id)
         .await
         .ok()?
         .into_iter()
-        .filter(|event| event.delivered_at.is_none())
-        .map(|event| {
-            serde_json::json!({
+        .filter_map(|event| {
+            let delivery = match event.delivered_wake_seq {
+                Some(delivery_seq)
+                    if delivery_seq < failed_call.seq
+                        && previous_agent_call_seq
+                            .is_none_or(|previous| delivery_seq > previous) =>
+                {
+                    "delivered_to_failed_call"
+                }
+                None => "pending",
+                Some(_) => return None,
+            };
+            Some(serde_json::json!({
                 "id": event.id,
                 "seq": event.seq,
                 "kind": event.kind,
                 "journal_entry_id": event.journal_entry_id,
-            })
+                "delivery": delivery,
+            }))
         })
         .collect::<Vec<_>>();
     let last_journal_seq = journal.iter().map(|entry| entry.seq).max()?;
+    let events_delivered_to_failed_call = events
+        .iter()
+        .filter(|event| event["delivery"] == "delivered_to_failed_call")
+        .count();
+    let events_pending = events.len().saturating_sub(events_delivered_to_failed_call);
     Some(serde_json::json!({
         "classification": "interrupted",
-        "handover": {
-            "failure": format!("Agent call {} failed: {call_error}", failed_call.id),
-            "failed_call": {
-                "journal_entry_id": failed_call.id,
-                "seq": failed_call.seq,
-                "kind": failed_call.kind,
-                "label": failed_call.request.get("label").cloned().unwrap_or(Value::Null),
-                "error": call_error,
-            },
-            "last_journal_seq": last_journal_seq,
-            "events_pending": pending_events.len(),
-            "pending_events": pending_events,
-        }
+        "failure": format!("Agent call {} failed: {call_error}", failed_call.id),
+        "failed_call": {
+            "journal_entry_id": failed_call.id,
+            "seq": failed_call.seq,
+            "kind": failed_call.kind,
+            "label": failed_call.request.get("label").cloned().unwrap_or(Value::Null),
+            "error": call_error,
+        },
+        "last_journal_seq": last_journal_seq,
+        "events_delivered_to_failed_call": events_delivered_to_failed_call,
+        "events_pending": events_pending,
+        "events": events,
     }))
 }
 
@@ -2525,6 +2576,7 @@ async fn launch_existing_run(
         .sum();
     let agent_calls = Arc::new(AtomicU32::new(initial_agent_calls));
     let spent_tokens = Arc::new(AtomicU64::new(initial_spent_tokens));
+    let failed_agent_call = Arc::new(Mutex::new(None));
     let host_task = tokio::spawn(run_host_commands(
         state.clone(),
         record.id,
@@ -2535,6 +2587,7 @@ async fn launch_existing_run(
         replay,
         Arc::clone(&agent_calls),
         Arc::clone(&spent_tokens),
+        Arc::clone(&failed_agent_call),
         park.clone(),
         PARK_TIMER_THRESHOLD_MS,
         host_rx,
@@ -2598,7 +2651,7 @@ async fn launch_existing_run(
             active.lock().await.remove(&run_id);
             return;
         }
-        let (run_state, mut output, error) = match engine_result {
+        let (run_state, output, error) = match engine_result {
             Ok(Ok(json)) => match serde_json::from_str(&json) {
                 Ok(value) => ("completed", Some(value), None),
                 Err(problem) => ("failed", None, Some(problem.to_string())),
@@ -2607,14 +2660,19 @@ async fn launch_existing_run(
             Ok(Err(problem)) => ("failed", None, Some(problem.to_string())),
             Err(problem) => ("failed", None, Some(problem.to_string())),
         };
-        if run_state == "failed"
-            && output.is_none()
-            && let Some(error) = error.as_deref()
-        {
-            output = failed_agent_call_handover(&storage, run_id, error).await;
-        }
+        let handover = if run_state == "failed" && output.is_none() {
+            let failed_call = *failed_agent_call.lock().await;
+            match failed_call {
+                Some(failed_call) => {
+                    failed_agent_call_handover(&storage, run_id, failed_call).await
+                }
+                None => None,
+            }
+        } else {
+            None
+        };
         let _ = storage
-            .update_workflow_run_state(run_id, run_state, output, error.as_deref())
+            .update_workflow_run_state(run_id, run_state, output, handover, error.as_deref())
             .await;
         let _ = storage
             .create_audit_event(NewAuditEvent {
@@ -2793,7 +2851,7 @@ pub async fn cancel_run(
     if run.state == "parked" {
         state
             .storage
-            .update_workflow_run_state(id, "cancelled", None, None)
+            .update_workflow_run_state(id, "cancelled", None, None, None)
             .await
             .map_err(internal)?;
         let cancelled = state
@@ -3425,6 +3483,7 @@ mod tests {
             replay,
             Arc::new(AtomicU32::new(0)),
             Arc::new(AtomicU64::new(0)),
+            Arc::new(Mutex::new(None)),
             CancellationToken::new(),
             PARK_TIMER_THRESHOLD_MS,
             rx,
@@ -3673,6 +3732,7 @@ mod tests {
             vec![],
             Arc::new(AtomicU32::new(0)),
             Arc::new(AtomicU64::new(0)),
+            Arc::new(Mutex::new(None)),
             CancellationToken::new(),
             PARK_TIMER_THRESHOLD_MS,
             rx,
@@ -3815,6 +3875,7 @@ mod tests {
             vec![],
             Arc::new(AtomicU32::new(0)),
             Arc::new(AtomicU64::new(0)),
+            Arc::new(Mutex::new(None)),
             CancellationToken::new(),
             PARK_TIMER_THRESHOLD_MS,
             rx,
@@ -3987,6 +4048,7 @@ mod tests {
             vec![],
             Arc::new(AtomicU32::new(0)),
             Arc::new(AtomicU64::new(0)),
+            Arc::new(Mutex::new(None)),
             CancellationToken::new(),
             PARK_TIMER_THRESHOLD_MS,
             rx,
@@ -4178,6 +4240,7 @@ mod tests {
             replay,
             Arc::new(AtomicU32::new(0)),
             Arc::new(AtomicU64::new(0)),
+            Arc::new(Mutex::new(None)),
             CancellationToken::new(),
             PARK_TIMER_THRESHOLD_MS,
             rx,
@@ -4359,6 +4422,7 @@ mod tests {
             vec![],
             Arc::new(AtomicU32::new(0)),
             Arc::new(AtomicU64::new(0)),
+            Arc::new(Mutex::new(None)),
             park.clone(),
             50,
             rx,
@@ -4558,7 +4622,7 @@ mod tests {
             .await
             .expect("run a");
         storage
-            .update_workflow_run_state(interrupted.id, "interrupted", None, None)
+            .update_workflow_run_state(interrupted.id, "interrupted", None, None, None)
             .await
             .expect("interrupt");
         let due = storage
@@ -4664,6 +4728,7 @@ mod tests {
             vec![],
             Arc::new(AtomicU32::new(0)),
             Arc::clone(&spent),
+            Arc::new(Mutex::new(None)),
             CancellationToken::new(),
             PARK_TIMER_THRESHOLD_MS,
             rx,
@@ -4792,6 +4857,7 @@ mod tests {
             replay,
             Arc::new(AtomicU32::new(2)),
             Arc::new(AtomicU64::new(0)),
+            Arc::new(Mutex::new(None)),
             CancellationToken::new(),
             PARK_TIMER_THRESHOLD_MS,
             rx,
@@ -4891,7 +4957,7 @@ mod tests {
             .await
             .expect("refuse call");
         storage
-            .update_workflow_run_state(run.id, "interrupted", None, None)
+            .update_workflow_run_state(run.id, "interrupted", None, None, None)
             .await
             .expect("interrupt run");
         let state = AppState::new(
@@ -5066,6 +5132,7 @@ mod tests {
         );
         let source = r#"
             await postEvent("escalation", { decisionQueued: true });
+            await deliverEvents(1);
             await agent("make the lead decision", {
                 agent: "default",
                 label: "lead segment 3",
@@ -5098,17 +5165,15 @@ mod tests {
             .expect("run")
             .expect("present");
         assert_eq!(run.state, "failed");
+        assert_eq!(run.final_output, None);
         let handover = run
-            .final_output
+            .handover
             .unwrap_or_else(|| panic!("durable handover; terminal error: {:?}", run.error_message));
         assert_eq!(handover["classification"], "interrupted");
-        assert_eq!(handover["handover"]["failed_call"]["kind"], "agent_call");
-        assert_eq!(
-            handover["handover"]["failed_call"]["label"],
-            "lead segment 3"
-        );
+        assert_eq!(handover["failed_call"]["kind"], "agent_call");
+        assert_eq!(handover["failed_call"]["label"], "lead segment 3");
         assert!(
-            handover["handover"]["failed_call"]["error"]
+            handover["failed_call"]["error"]
                 .as_str()
                 .is_some_and(|error| error.starts_with("AgentCallError:"))
         );
@@ -5123,12 +5188,12 @@ mod tests {
             .expect("failed agent call");
         assert_eq!(failed_call.status, "failed");
         assert_eq!(
-            handover["handover"]["failed_call"]["journal_entry_id"],
+            handover["failed_call"]["journal_entry_id"],
             failed_call.id.to_string()
         );
-        assert_eq!(handover["handover"]["failed_call"]["seq"], failed_call.seq);
+        assert_eq!(handover["failed_call"]["seq"], failed_call.seq);
         assert_eq!(
-            handover["handover"]["last_journal_seq"],
+            handover["last_journal_seq"],
             journal.last().expect("last journal entry").seq
         );
 
@@ -5138,16 +5203,23 @@ mod tests {
             .expect("events");
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].kind, "escalation");
-        assert!(events[0].delivered_at.is_none());
-        assert_eq!(handover["handover"]["events_pending"], 1);
+        assert!(events[0].delivered_at.is_some());
+        assert_eq!(handover["events_delivered_to_failed_call"], 1);
+        assert_eq!(handover["events_pending"], 0);
+        assert_eq!(handover["events"][0]["id"], events[0].id.to_string());
+        assert_eq!(
+            handover["events"][0]["delivery"],
+            "delivered_to_failed_call"
+        );
         assert_eq!(provider.requests.lock().expect("requests").len(), 3);
 
         let Json(detail) = get_run(State(state.clone()), Path(started.id))
             .await
             .expect("run detail");
-        assert_eq!(detail.run.final_output.as_ref(), Some(&handover));
+        assert_eq!(detail.run.final_output, None);
+        assert_eq!(detail.run.handover.as_ref(), Some(&handover));
         assert_eq!(detail.journal.len(), journal.len());
-        assert_eq!(detail.wake_metrics.events_pending, 1);
+        assert_eq!(detail.wake_metrics.events_pending, 0);
 
         assert_eq!(resume_owed_workflow_runs(&state).await, 0);
         assert_eq!(provider.requests.lock().expect("requests").len(), 3);
@@ -5259,7 +5331,7 @@ mod tests {
         assert_eq!(provider.requests.lock().unwrap().len(), 5);
 
         storage
-            .update_workflow_run_state(started.id, "interrupted", None, None)
+            .update_workflow_run_state(started.id, "interrupted", None, None, None)
             .await
             .expect("simulate restart");
         let _ = resume_run(State(state.clone()), Path(started.id))
@@ -5433,7 +5505,7 @@ mod tests {
         assert_eq!(deliveries.load(Ordering::SeqCst), 1);
 
         storage
-            .update_workflow_run_state(started.id, "interrupted", None, None)
+            .update_workflow_run_state(started.id, "interrupted", None, None, None)
             .await
             .expect("simulate restart");
         let _resumed = resume_run(State(state.clone()), Path(started.id))
@@ -5687,7 +5759,7 @@ mod tests {
         // completed timer entry must replay instantly to the same winner,
         // adding no second timer entry to the journal.
         storage
-            .update_workflow_run_state(started.id, "interrupted", None, None)
+            .update_workflow_run_state(started.id, "interrupted", None, None, None)
             .await
             .expect("simulate restart");
         let _resumed = resume_run(State(state.clone()), Path(started.id))
