@@ -20,7 +20,8 @@ use swage_protocol::client::workflow::{
 use swage_storage::WorkflowJournalRecord;
 use swage_storage::{
     NewAuditEvent, NewSession, NewThread, NewWorkflowJournalIntent, NewWorkflowRun,
-    NewWorkflowRunEvent, NewWorkflowScript, ThreadStore, WorkflowRunRecord, WorkflowScriptRecord,
+    NewWorkflowRunEvent, NewWorkflowScript, Storage, ThreadStore, WorkflowRunRecord,
+    WorkflowScriptRecord,
 };
 use swage_workflow::{
     AgentCallRequest, AgentCallResult, EffectPayload, EffectReceipt, EffectRecoveryHost,
@@ -2387,6 +2388,55 @@ async fn start_run(
     launch_existing_run(state, record, source, delivery_grant).await
 }
 
+async fn failed_agent_call_handover(
+    storage: &Arc<dyn Storage>,
+    run_id: Uuid,
+    terminal_error: &str,
+) -> Option<Value> {
+    let journal = storage.list_workflow_journal(run_id).await.ok()?;
+    let failed_call = journal.iter().rev().find(|entry| {
+        entry.kind == "agent_call"
+            && entry.status == "failed"
+            && entry
+                .error_message
+                .as_deref()
+                .is_some_and(|error| terminal_error.contains(error))
+    })?;
+    let call_error = failed_call.error_message.as_deref()?;
+    let pending_events = storage
+        .list_workflow_run_events(run_id)
+        .await
+        .ok()?
+        .into_iter()
+        .filter(|event| event.delivered_at.is_none())
+        .map(|event| {
+            serde_json::json!({
+                "id": event.id,
+                "seq": event.seq,
+                "kind": event.kind,
+                "journal_entry_id": event.journal_entry_id,
+            })
+        })
+        .collect::<Vec<_>>();
+    let last_journal_seq = journal.iter().map(|entry| entry.seq).max()?;
+    Some(serde_json::json!({
+        "classification": "interrupted",
+        "handover": {
+            "failure": format!("Agent call {} failed: {call_error}", failed_call.id),
+            "failed_call": {
+                "journal_entry_id": failed_call.id,
+                "seq": failed_call.seq,
+                "kind": failed_call.kind,
+                "label": failed_call.request.get("label").cloned().unwrap_or(Value::Null),
+                "error": call_error,
+            },
+            "last_journal_seq": last_journal_seq,
+            "events_pending": pending_events.len(),
+            "pending_events": pending_events,
+        }
+    }))
+}
+
 async fn launch_existing_run(
     state: AppState,
     record: WorkflowRunRecord,
@@ -2548,7 +2598,7 @@ async fn launch_existing_run(
             active.lock().await.remove(&run_id);
             return;
         }
-        let (run_state, output, error) = match engine_result {
+        let (run_state, mut output, error) = match engine_result {
             Ok(Ok(json)) => match serde_json::from_str(&json) {
                 Ok(value) => ("completed", Some(value), None),
                 Err(problem) => ("failed", None, Some(problem.to_string())),
@@ -2557,6 +2607,12 @@ async fn launch_existing_run(
             Ok(Err(problem)) => ("failed", None, Some(problem.to_string())),
             Err(problem) => ("failed", None, Some(problem.to_string())),
         };
+        if run_state == "failed"
+            && output.is_none()
+            && let Some(error) = error.as_deref()
+        {
+            output = failed_agent_call_handover(&storage, run_id, error).await;
+        }
         let _ = storage
             .update_workflow_run_state(run_id, run_state, output, error.as_deref())
             .await;
@@ -4982,6 +5038,128 @@ mod tests {
             .await
             .expect("journal");
         assert!(!journal.iter().any(|entry| entry.kind == "wind_down"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn exhausted_agent_call_leaves_a_durable_handover() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let provider = Arc::new(ScriptedRecordingProvider {
+            outputs: std::sync::Mutex::new(std::collections::VecDeque::from(
+                (0..3)
+                    .map(|_| {
+                        vec![swage_core::StreamChunk::Done {
+                            finish_reason: None,
+                        }]
+                    })
+                    .collect::<Vec<_>>(),
+            )),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let source = r#"
+            await postEvent("escalation", { decisionQueued: true });
+            await agent("make the lead decision", {
+                agent: "default",
+                label: "lead segment 3",
+                maxAttempts: 3,
+                schema: {
+                    type: "object",
+                    required: ["decision"],
+                    properties: { decision: { type: "string" } }
+                }
+            });
+            return "unexpected";
+        "#;
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(space.id),
+            Json(StartInlineWorkflowRunRequest {
+                source: source.into(),
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start inline run");
+
+        wait_for_terminal(&state, started.id).await;
+
+        let run = storage
+            .get_workflow_run(started.id)
+            .await
+            .expect("run")
+            .expect("present");
+        assert_eq!(run.state, "failed");
+        let handover = run
+            .final_output
+            .unwrap_or_else(|| panic!("durable handover; terminal error: {:?}", run.error_message));
+        assert_eq!(handover["classification"], "interrupted");
+        assert_eq!(handover["handover"]["failed_call"]["kind"], "agent_call");
+        assert_eq!(
+            handover["handover"]["failed_call"]["label"],
+            "lead segment 3"
+        );
+        assert!(
+            handover["handover"]["failed_call"]["error"]
+                .as_str()
+                .is_some_and(|error| error.starts_with("AgentCallError:"))
+        );
+
+        let journal = storage
+            .list_workflow_journal(started.id)
+            .await
+            .expect("journal");
+        let failed_call = journal
+            .iter()
+            .find(|entry| entry.kind == "agent_call")
+            .expect("failed agent call");
+        assert_eq!(failed_call.status, "failed");
+        assert_eq!(
+            handover["handover"]["failed_call"]["journal_entry_id"],
+            failed_call.id.to_string()
+        );
+        assert_eq!(handover["handover"]["failed_call"]["seq"], failed_call.seq);
+        assert_eq!(
+            handover["handover"]["last_journal_seq"],
+            journal.last().expect("last journal entry").seq
+        );
+
+        let events = storage
+            .list_workflow_run_events(started.id)
+            .await
+            .expect("events");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, "escalation");
+        assert!(events[0].delivered_at.is_none());
+        assert_eq!(handover["handover"]["events_pending"], 1);
+        assert_eq!(provider.requests.lock().expect("requests").len(), 3);
+
+        let Json(detail) = get_run(State(state.clone()), Path(started.id))
+            .await
+            .expect("run detail");
+        assert_eq!(detail.run.final_output.as_ref(), Some(&handover));
+        assert_eq!(detail.journal.len(), journal.len());
+        assert_eq!(detail.wake_metrics.events_pending, 1);
+
+        assert_eq!(resume_owed_workflow_runs(&state).await, 0);
+        assert_eq!(provider.requests.lock().expect("requests").len(), 3);
+        assert_eq!(
+            storage
+                .get_workflow_run(started.id)
+                .await
+                .expect("run")
+                .expect("present")
+                .state,
+            "failed"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
