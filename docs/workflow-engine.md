@@ -7,9 +7,14 @@ description: How Swage runs workflow scripts — lifecycle, journalling, budget 
 Swage's workflow engine runs front-loaded JavaScript scripts that orchestrate
 agent work. A script defines a run's entire plan — which agents to call, in
 what order, with what structure — and the engine executes it inside a sandboxed
-QuickJS runtime on a dedicated OS thread. Every non-deterministic host call
-is journalled, so a crashed or restarted run replays from its journal and
-picks up where it left off.
+QuickJS runtime on a dedicated OS thread. Every non-deterministic host call is journalled, so a crashed or
+restarted run replays from its journal and picks up where it left off.
+The one deliberate exception is the synchronous budget accessors
+`budget.spent()` and `budget.remaining()` — these are live reads against
+an atomic counter, not journal entries, so they reflect end-state values
+during replay and must not be used for branching. Where a script needs a
+replay-safe budget reading, `budgetSnapshot()` provides a journalled
+snapshot that replays identically.
 
 ## Run lifecycle
 

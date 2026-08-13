@@ -97,7 +97,13 @@ defaults to `false`; controlled by the script's delivery grant.
 ## Journal and replay
 
 Every host call that could produce a different result on replay is
-journalled as a write-ahead intent:
+journalled as a write-ahead intent — with one deliberate exception:
+`budget.spent()` and `budget.remaining()` are live synchronous reads
+against an atomic counter, not journalled commands. They exist for
+informational display; branching on them is unsafe because replay sees
+end-state values. The journalled route for budget reads is
+`budgetSnapshot()`, which records the reading so replay returns the
+same values the original run saw.
 
 1. **Intent** — `create_workflow_journal_intent` creates a row in status
    `started`.
@@ -228,9 +234,10 @@ the live `accounting.spent` counter.
 | `closing_limit` | Once wind-down latches: `spent_at_transition + reserved_closing_tokens`. `None` before wind-down. |
 | `replayed_working_credit` | Accumulated spend from replayed working calls that settle before the wind-down latch. |
 
-Per-call reservation estimate: `limit / calls` where `calls` is
-`max_agent_calls` if set, otherwise
-`max(max_concurrent_agent_calls.unwrap_or(4), 1)`.
+Per-call reservation estimate: `(limit / calls).max(1)` where `calls`
+is `max_agent_calls` when set **and non-zero**, otherwise
+`max(max_concurrent_agent_calls.unwrap_or(4), 1)`. The final `.max(1)`
+clamp ensures every admitted call reserves at least one token.
 
 ## Durable run parking
 
