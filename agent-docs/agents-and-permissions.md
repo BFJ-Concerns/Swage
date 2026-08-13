@@ -181,8 +181,21 @@ process.
 | `sandbox.enabled` | bool | `true` |
 | `sandbox.allow_degraded_execution` | bool | `false` |
 
-When `enabled` is true and sandbox setup fails, the recovery path depends on
-the turn's attendance:
+Setting `sandbox.enabled = false` does not by itself disable sandboxing —
+it tells the dispatcher to skip sandbox setup, which counts as degraded
+execution. The dispatcher requires the explicit opt-in
+`sandbox.allow_degraded_execution = true` before it will proceed without a
+sandbox. Without that opt-in, dispatcher construction fails with
+`SandboxError::Unavailable`. To run unsandboxed, set both:
+
+```toml
+[sandbox]
+enabled = false
+allow_degraded_execution = true
+```
+
+When `enabled` is true and sandbox setup fails at runtime, the recovery
+path depends on the turn's attendance:
 
 - **Attended turns** (interactive client connected) — the turn pauses with an
   approval prompt asking whether to proceed unsandboxed. The client may
@@ -192,9 +205,10 @@ the turn's attendance:
   The degradation is recorded in the audit trail via an
   `execution_isolation_degraded` event.
 
-`allow_degraded_execution = true` opts in to unsandboxed execution without
-the approval prompt, for both attended and unattended turns. The degradation
-is recorded in the audit trail regardless of how it was authorised.
+`allow_degraded_execution = true` also opts in to unsandboxed execution
+without the approval prompt when sandbox setup fails at runtime, for both
+attended and unattended turns. The degradation is recorded in the audit
+trail regardless of how it was authorised.
 
 ### Approval channel
 
