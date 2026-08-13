@@ -13,7 +13,8 @@ use crate::{
 };
 
 fn named_host_error(error: &str, fallback: &str) -> (String, String) {
-    const NAMES: [(&str, &str); 10] = [
+    const NAMES: [(&str, &str); 11] = [
+        ("AgentCallError", "AgentCallError"),
         ("BudgetExceededError", "BudgetExceededError"),
         ("BudgetWindDownError", "BudgetWindDownError"),
         ("DeliveryNotGrantedError", "DeliveryNotGrantedError"),
@@ -189,7 +190,15 @@ pub enum WorkflowEngineError {
 
     #[error("workflow script failed: {0}")]
     Script(String),
+
+    #[error("workflow script failed: {message}")]
+    AgentCall {
+        host_reference: String,
+        message: String,
+    },
 }
+
+const AGENT_CALL_FAILURE_PREFIX: &str = "\u{1e}swage-agent-call:";
 
 /// Creates one isolated JavaScript runtime per workflow attempt.
 pub struct WorkflowEngine {
@@ -243,7 +252,8 @@ impl WorkflowEngine {
         type WorkflowIntrinsics = (Eval, Json, PromiseIntrinsic, MapSet, RegExpCompiler, RegExp);
         let context = AsyncContext::custom::<WorkflowIntrinsics>(&runtime).await?;
         let source = format!(
-            "(async () => {{ const value = await (async () => {{ {source} }})(); return JSON.stringify(value === undefined ? null : value); }})()"
+            "(async () => {{ try {{ const value = await (async () => {{ {source} }})(); return JSON.stringify(value === undefined ? null : value); }} catch (error) {{ if (error && typeof error.__swageAgentCallReference === 'string') {{ const rendered = String(error.name) + ': ' + String(error.message); const stack = error.stack == null ? '' : String(error.stack); return {prefix:?} + error.__swageAgentCallReference + ':' + rendered + (stack ? '\\n' + stack : ''); }} throw error; }} }})()",
+            prefix = AGENT_CALL_FAILURE_PREFIX,
         );
         let args_json = args_json.to_string();
         let host_cancellation = (*cancellation).clone();
@@ -322,10 +332,16 @@ impl WorkflowEngine {
                                         serde_json::json!({"ok": true, "value": result.output, "session": session}).to_string()
                                     }
                                     Err(error) => {
-                                        let (name, message) = named_host_error(&error, "AgentCallError");
+                                        let (host_reference, error) = error
+                                            .strip_prefix("AgentCallReference:")
+                                            .and_then(|rest| rest.split_once(':'))
+                                            .map_or((None, error.as_str()), |(reference, message)| {
+                                                (Some(reference), message)
+                                            });
+                                        let (name, message) = named_host_error(error, "AgentCallError");
                                         serde_json::json!({
                                             "ok": false,
-                                            "error": {"name": name, "message": message}
+                                            "error": {"name": name, "message": message, "host_reference": host_reference}
                                         }).to_string()
                                     }
                                 }
@@ -601,6 +617,11 @@ impl WorkflowEngine {
                             if (!response.ok) {
                                 const error = new Error(response.error.message);
                                 error.name = response.error.name;
+                                if (typeof response.error.host_reference === "string") {
+                                    Object.defineProperty(error, "__swageAgentCallReference", {
+                                        value: response.error.host_reference,
+                                    });
+                                }
                                 throw error;
                             }
                             return { value: response.value, session: response.session ?? null };
@@ -806,7 +827,21 @@ impl WorkflowEngine {
         if cancellation.is_cancelled() {
             return Err(WorkflowEngineError::Cancelled);
         }
-        result.map_err(WorkflowEngineError::Script)
+        match result {
+            Ok(output) => match output.strip_prefix(AGENT_CALL_FAILURE_PREFIX) {
+                Some(failure) => {
+                    let (host_reference, message) = failure
+                        .split_once(':')
+                        .unwrap_or((failure, "AgentCallError: agent call failed"));
+                    Err(WorkflowEngineError::AgentCall {
+                        host_reference: host_reference.to_string(),
+                        message: message.to_string(),
+                    })
+                }
+                None => Ok(output),
+            },
+            Err(error) => Err(WorkflowEngineError::Script(error)),
+        }
     }
 }
 
@@ -1684,6 +1719,10 @@ mod tests {
         );
         assert_eq!(
             named_host_error("provider unavailable", "AgentCallError"),
+            ("AgentCallError".into(), "provider unavailable".into())
+        );
+        assert_eq!(
+            named_host_error("AgentCallError: provider unavailable", "AgentCallError"),
             ("AgentCallError".into(), "provider unavailable".into())
         );
     }

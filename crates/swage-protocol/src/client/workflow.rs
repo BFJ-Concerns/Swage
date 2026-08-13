@@ -97,6 +97,8 @@ pub struct WorkflowRun {
     pub budget: WorkflowBudget,
     #[ts(type = "unknown")]
     pub final_output: Option<Value>,
+    #[ts(type = "unknown")]
+    pub handover: Option<Value>,
     pub error_message: Option<String>,
     pub created_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
