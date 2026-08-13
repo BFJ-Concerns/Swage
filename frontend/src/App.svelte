@@ -65,23 +65,27 @@
   // Child components receive a proxy shaped like ConversationStore that calls
   // these instead of the originals, keeping the URL and connection in sync.
 
+  async function selectAndNavigateOrThrow(id: string): Promise<void> {
+    activeSurface = "conversation";
+    await conversationStore.selectConversation(id);
+
+    // A deep-linked conversation may belong to a space other than the one
+    // currently in scope (or none, on first load). Bring the space into
+    // scope so the navigation and conversation list reflect it.
+    const conv = conversationStore.activeConversation;
+    if (conv && spaceStore.currentSpace?.id !== conv.space_id) {
+      await spaceStore.selectSpace(conv.space_id);
+      await conversationStore.loadConversations(conv.space_id);
+    }
+
+    connectionStore.connectTo(id);
+    // router is declared below but will be initialised before this is called.
+    router.navigate(`/conversations/${id}`);
+  }
+
   async function selectAndNavigate(id: string): Promise<void> {
     try {
-      activeSurface = "conversation";
-      await conversationStore.selectConversation(id);
-
-      // A deep-linked conversation may belong to a space other than the one
-      // currently in scope (or none, on first load). Bring the space into
-      // scope so the navigation and conversation list reflect it.
-      const conv = conversationStore.activeConversation;
-      if (conv && spaceStore.currentSpace?.id !== conv.space_id) {
-        await spaceStore.selectSpace(conv.space_id);
-        await conversationStore.loadConversations(conv.space_id);
-      }
-
-      connectionStore.connectTo(id);
-      // router is declared below but will be initialised before this is called.
-      router.navigate(`/conversations/${id}`);
+      await selectAndNavigateOrThrow(id);
     } catch (err) {
       console.error("Failed to select conversation:", err);
     }
@@ -162,7 +166,12 @@
   }
 
   const router = createRouter({
-    conversationStore: { selectConversation: selectAndNavigate },
+    conversationStore: {
+      get activeConversationId() {
+        return conversationStore.activeConversation?.id ?? null;
+      },
+      selectConversation: selectAndNavigateOrThrow,
+    },
     onRouteChange: handleRouteChange,
   });
 
