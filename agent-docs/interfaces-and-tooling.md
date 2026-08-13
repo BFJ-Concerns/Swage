@@ -81,8 +81,10 @@ projection-freshness check.
 
 ## Verification gate
 
-All build and verification logic lives in `xtask` (`xtask/src/main.rs`); the
+`xtask` (`xtask/src/main.rs`) orchestrates the verification gate; the
 `Justfile` is a thin dispatch into `cargo run -p xtask -- <subcommand>`.
+Most logic is Rust, but `xtask` shells out for some checks (e.g.
+`scripts/check-tracked-local-state.sh`).
 
 ### Recipes
 
