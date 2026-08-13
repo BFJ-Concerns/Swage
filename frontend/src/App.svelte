@@ -12,6 +12,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import AppLayout from "./lib/components/AppLayout.svelte";
+  import { getConversation } from "./lib/api/conversations";
   import { fetchSettings } from "./lib/api/settings";
   import type { ConversationStore } from "./lib/stores/conversations";
   import { createConversationStore } from "./lib/stores/conversations";
@@ -65,23 +66,27 @@
   // Child components receive a proxy shaped like ConversationStore that calls
   // these instead of the originals, keeping the URL and connection in sync.
 
+  async function selectAndNavigateOrThrow(id: string): Promise<void> {
+    activeSurface = "conversation";
+    await conversationStore.selectConversation(id);
+
+    // A deep-linked conversation may belong to a space other than the one
+    // currently in scope (or none, on first load). Bring the space into
+    // scope so the navigation and conversation list reflect it.
+    const conv = conversationStore.activeConversation;
+    if (conv && spaceStore.currentSpace?.id !== conv.space_id) {
+      await spaceStore.selectSpace(conv.space_id);
+      await conversationStore.loadConversations(conv.space_id);
+    }
+
+    connectionStore.connectTo(id);
+    // router is declared below but will be initialised before this is called.
+    router.navigate(`/conversations/${id}`);
+  }
+
   async function selectAndNavigate(id: string): Promise<void> {
     try {
-      activeSurface = "conversation";
-      await conversationStore.selectConversation(id);
-
-      // A deep-linked conversation may belong to a space other than the one
-      // currently in scope (or none, on first load). Bring the space into
-      // scope so the navigation and conversation list reflect it.
-      const conv = conversationStore.activeConversation;
-      if (conv && spaceStore.currentSpace?.id !== conv.space_id) {
-        await spaceStore.selectSpace(conv.space_id);
-        await conversationStore.loadConversations(conv.space_id);
-      }
-
-      connectionStore.connectTo(id);
-      // router is declared below but will be initialised before this is called.
-      router.navigate(`/conversations/${id}`);
+      await selectAndNavigateOrThrow(id);
     } catch (err) {
       console.error("Failed to select conversation:", err);
     }
@@ -159,10 +164,23 @@
 
   function handleRouteChange(route: Route): void {
     currentRoute = route;
+    notFound = route.notFound;
   }
 
   const router = createRouter({
-    conversationStore: { selectConversation: selectAndNavigate },
+    conversationStore: {
+      get activeConversationId() {
+        return conversationStore.activeConversation?.id ?? null;
+      },
+      checkConversationExists: async (id) => {
+        await getConversation(id);
+      },
+      clearActiveConversation: () => {
+        connectionStore.disconnect();
+        conversationStore.clearActiveConversation();
+      },
+      selectConversation: selectAndNavigateOrThrow,
+    },
     onRouteChange: handleRouteChange,
   });
 
@@ -327,10 +345,6 @@
       // 3. Apply the URL. If it points at a conversation, selectAndNavigate
       //    will bring its space into scope along the way.
       await router.init();
-
-      // Snapshot the not-found flag — set by the router if the URL pointed
-      // at a conversation that no longer exists on the server.
-      notFound = router.currentRoute.notFound;
     } catch {
       // Any failure here means the gateway is unreachable. Show a clear error
       // rather than a blank screen with no indication of what went wrong.

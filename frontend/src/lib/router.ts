@@ -45,6 +45,9 @@ export interface RouterOptions {
   // Injected at wiring time (App.svelte). Optional so the router can be
   // constructed and tested in isolation without a live store.
   conversationStore?: {
+    readonly activeConversationId: string | null;
+    checkConversationExists(id: string): Promise<void>;
+    clearActiveConversation(): void;
     selectConversation(id: string): Promise<void>;
   };
   onRouteChange?: (route: Route) => void;
@@ -129,10 +132,19 @@ export function createRouter(options?: RouterOptions): Router {
     updateRoute(route);
 
     if (route.conversationId && options?.conversationStore) {
+      const isActiveConversation =
+        route.conversationId === options.conversationStore.activeConversationId;
       try {
-        await options.conversationStore.selectConversation(route.conversationId);
+        if (isActiveConversation) {
+          await options.conversationStore.checkConversationExists(route.conversationId);
+        } else {
+          await options.conversationStore.selectConversation(route.conversationId);
+        }
       } catch (error) {
         if (error instanceof Error && error.message.startsWith("HTTP 404 ")) {
+          if (isActiveConversation) {
+            options.conversationStore.clearActiveConversation();
+          }
           // The ID in the URL is stale (conversation deleted or never existed).
           // Fall back to the root and flag the not-found state so the UI
           // can show an appropriate notice.
@@ -145,6 +157,10 @@ export function createRouter(options?: RouterOptions): Router {
             notFound: true,
           });
           window.history.replaceState(null, "", "/");
+        } else if (isActiveConversation) {
+          // A transient existence-check failure must not evict a working
+          // conversation or reject from the asynchronous popstate listener.
+          return;
         } else {
           throw error;
         }
