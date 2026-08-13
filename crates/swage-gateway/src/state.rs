@@ -6,6 +6,9 @@ use std::{
     },
 };
 
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
+
 use chrono::{DateTime, Utc};
 
 use tokio::sync::{Mutex as AsyncMutex, broadcast, oneshot};
@@ -133,6 +136,8 @@ pub struct AppState {
     pub codex_supervisor: Arc<AppServerSupervisor>,
     /// Reschedulable inter-agent message expiry task.
     agent_message_expiry: Arc<Mutex<Option<AgentMessageExpiryRuntime>>>,
+    #[cfg(test)]
+    dispatcher_build_failures_remaining: Arc<AtomicUsize>,
 }
 
 struct AgentMessageExpiryRuntime {
@@ -233,7 +238,24 @@ impl AppState {
             runtime_tool_dispatcher: Arc::new(RwLock::new(tool_dispatcher)),
             codex_supervisor,
             agent_message_expiry: Arc::new(Mutex::new(None)),
+            #[cfg(test)]
+            dispatcher_build_failures_remaining: Arc::new(AtomicUsize::new(0)),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_next_dispatcher_builds(&self, count: usize) {
+        self.dispatcher_build_failures_remaining
+            .store(count, Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn take_dispatcher_build_failure(&self) -> bool {
+        self.dispatcher_build_failures_remaining
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .is_ok()
     }
 
     pub fn clear_restart_required(&self) {

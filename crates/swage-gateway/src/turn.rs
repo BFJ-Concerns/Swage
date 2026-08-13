@@ -500,6 +500,22 @@ async fn record_terminal_state_and_release(
     Ok(())
 }
 
+async fn record_failed_turn_and_release_on_error<T>(
+    state: &AppState,
+    session_id: Uuid,
+    turn_id: Uuid,
+    result: Result<T, GatewayError>,
+) -> Result<T, GatewayError> {
+    match result {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            record_terminal_state_and_release(state, session_id, turn_id, TurnState::Failed)
+                .await?;
+            Err(error)
+        }
+    }
+}
+
 /// Orchestrate a complete agent turn: user message → provider stream → storage.
 ///
 /// # Flow
@@ -718,9 +734,10 @@ pub(crate) async fn process_turn_with_existing_turn(
     };
 
     if !before_inbound.modified_by_hooks.is_empty() {
-        release_active_turn_on_error(
+        record_failed_turn_and_release_on_error(
             state,
             session_id,
+            prepared_turn_id,
             state
                 .storage
                 .update_inbound_audit(
@@ -730,14 +747,16 @@ pub(crate) async fn process_turn_with_existing_turn(
                         modified_by_hooks: before_inbound.modified_by_hooks.clone(),
                     },
                 )
-                .await,
+                .await
+                .map_err(GatewayError::from),
         )
         .await?;
     }
 
-    release_active_turn_on_error(
+    record_failed_turn_and_release_on_error(
         state,
         session_id,
+        prepared_turn_id,
         state
             .storage
             .append_message(AppendMessage {
@@ -747,7 +766,8 @@ pub(crate) async fn process_turn_with_existing_turn(
                 content: before_inbound.canonical_content.clone(),
                 agent_id: session.agent_id.clone(),
             })
-            .await,
+            .await
+            .map_err(GatewayError::from),
     )
     .await?;
 
@@ -800,10 +820,13 @@ pub(crate) async fn process_turn_with_existing_turn(
     // selected assembly.
     // Runs fail-open assembly: custom JavaScript configs when configured, built-in
     // default otherwise. The LLM provider is passed for two-phase compaction.
-    let history_messages = release_active_turn_on_error(
+    let history_messages = record_failed_turn_and_release_on_error(
         state,
         session_id,
-        rebuild_thread_history_messages(state.storage.as_ref(), thread_id).await,
+        prepared_turn_id,
+        rebuild_thread_history_messages(state.storage.as_ref(), thread_id)
+            .await
+            .map_err(GatewayError::from),
     )
     .await?;
 
@@ -942,9 +965,10 @@ pub(crate) async fn process_turn_with_existing_turn(
                 .await?;
                 return Err(audit_error);
             }
-            let approval = release_active_turn_on_error(
+            let approval = record_failed_turn_and_release_on_error(
                 state,
                 session_id,
+                prepared_turn_id,
                 request_sandbox_degradation_approval(
                     state,
                     SandboxDegradationApprovalRequest {
@@ -980,13 +1004,15 @@ pub(crate) async fn process_turn_with_existing_turn(
                     )));
                 }
                 SandboxDegradationApproval::Interrupted => {
-                    release_active_turn_on_error(
+                    record_failed_turn_and_release_on_error(
                         state,
                         session_id,
+                        prepared_turn_id,
                         state
                             .storage
                             .update_turn_state(prepared_turn_id, TurnState::Interrupted)
-                            .await,
+                            .await
+                            .map_err(GatewayError::from),
                     )
                     .await?;
                     let _ = ws_tx.send(ServerEvent::Cancelled {});
@@ -999,9 +1025,10 @@ pub(crate) async fn process_turn_with_existing_turn(
 
             let mut unsandboxed_config = config.clone();
             unsandboxed_config.sandbox.allow_degraded_execution = true;
-            release_active_turn_on_error(
+            record_failed_turn_and_release_on_error(
                 state,
                 session_id,
+                prepared_turn_id,
                 build_gateway_dispatcher(
                     state,
                     &unsandboxed_config,

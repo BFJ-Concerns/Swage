@@ -4492,6 +4492,25 @@ async fn terminal_state_write_failure_still_clears_active_turn() {
     );
 }
 
+async fn assert_subsequent_turn_is_not_blocked(state: &AppState, session_id: Uuid) {
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let result = process_turn(
+        state,
+        session_id,
+        None,
+        "retry message".to_string(),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await;
+
+    assert!(
+        !matches!(result, Err(GatewayError::TurnInProgress { .. })),
+        "terminal cleanup must allow a subsequent turn to start, got: {result:?}"
+    );
+}
+
 #[tokio::test]
 async fn inbound_audit_write_failure_clears_active_turn() {
     let storage = Arc::new(MockStorage::new());
@@ -4518,6 +4537,15 @@ async fn inbound_audit_write_failure_clears_active_turn() {
         !state.active_turns.lock().await.contains_key(&session_id),
         "inbound-audit persistence failure must release the turn guard"
     );
+    let thread = state
+        .storage
+        .list_by_session(session_id)
+        .await
+        .unwrap()
+        .remove(0);
+    let turns = state.storage.list_turns_by_thread(thread.id).await.unwrap();
+    assert_eq!(turns[0].state, TurnState::Failed);
+    assert_subsequent_turn_is_not_blocked(&state, session_id).await;
 }
 
 #[tokio::test]
@@ -4543,6 +4571,15 @@ async fn initial_message_write_failure_clears_active_turn() {
         !state.active_turns.lock().await.contains_key(&session_id),
         "user-message persistence failure must release the turn guard"
     );
+    let thread = state
+        .storage
+        .list_by_session(session_id)
+        .await
+        .unwrap()
+        .remove(0);
+    let turns = state.storage.list_turns_by_thread(thread.id).await.unwrap();
+    assert_eq!(turns[0].state, TurnState::Failed);
+    assert_subsequent_turn_is_not_blocked(&state, session_id).await;
 }
 
 #[tokio::test]
@@ -4568,6 +4605,76 @@ async fn history_rebuild_failure_clears_active_turn() {
         !state.active_turns.lock().await.contains_key(&session_id),
         "history rebuild failure must release the turn guard"
     );
+    let thread = state
+        .storage
+        .list_by_session(session_id)
+        .await
+        .unwrap()
+        .remove(0);
+    let turns = state.storage.list_turns_by_thread(thread.id).await.unwrap();
+    assert_eq!(turns[0].state, TurnState::Failed);
+    assert_subsequent_turn_is_not_blocked(&state, session_id).await;
+}
+
+#[tokio::test]
+async fn approved_sandbox_fallback_build_failure_clears_active_turn() {
+    let (state, session_id) = make_state_with_session(vec![]).await;
+    state.fail_next_dispatcher_builds(2);
+
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let approval_channels = Arc::clone(&state.approval_channels);
+    let state_for_task = state.clone();
+    let task = tokio::spawn(async move {
+        process_turn(
+            &state_for_task,
+            session_id,
+            None,
+            "message".to_string(),
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
+        )
+        .await
+    });
+
+    let approval_id = match rx.recv().await.expect("approval event should be sent") {
+        ServerEvent::ApprovalRequired { approval_id, .. } => approval_id,
+        other => panic!("expected ApprovalRequired, got: {other:?}"),
+    };
+    approval_channels
+        .lock()
+        .unwrap()
+        .remove(&approval_id)
+        .expect("approval channel should be registered")
+        .send(swage_agent::ApprovalDecision {
+            decision: swage_agent::approval::ApprovalDecisionValue::Approved,
+            scope: swage_agent::approval::ApprovalDecisionScope::Once,
+            reason: None,
+        })
+        .expect("approval decision should be delivered");
+
+    let error = task
+        .await
+        .expect("turn task should finish")
+        .expect_err("the injected fallback dispatcher build must fail");
+    assert!(
+        error
+            .to_string()
+            .contains("injected dispatcher build failure"),
+        "unexpected error: {error}"
+    );
+    assert!(
+        !state.active_turns.lock().await.contains_key(&session_id),
+        "fallback dispatcher failure must release the turn guard"
+    );
+    let thread = state
+        .storage
+        .list_by_session(session_id)
+        .await
+        .unwrap()
+        .remove(0);
+    let turns = state.storage.list_turns_by_thread(thread.id).await.unwrap();
+    assert_eq!(turns[0].state, TurnState::Failed);
 }
 
 #[tokio::test]
