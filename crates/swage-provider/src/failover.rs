@@ -311,7 +311,7 @@ impl LlmProvider for FailoverProvider {
                 return;
             }
 
-            let mut last_error_msg: Option<String> = None;
+            let mut last_error_msg: Option<(String, bool)> = None;
 
             for idx in order {
                 if tx.is_closed() {
@@ -328,8 +328,22 @@ impl LlmProvider for FailoverProvider {
                 } {
                     match chunk {
                         StreamChunk::Error { message } if !output_started => {
-                            retryable_error = Some(message);
+                            retryable_error = Some((message, false));
                             break;
+                        }
+                        StreamChunk::ProviderAnomaly { message } if !output_started => {
+                            retryable_error = Some((message, true));
+                            break;
+                        }
+                        StreamChunk::ProviderAnomaly { message } => {
+                            cooldowns
+                                .lock()
+                                .expect("failover cooldown lock should not be poisoned")[idx] =
+                                Some(Instant::now());
+                            if tx.send(StreamChunk::ProviderAnomaly { message }).is_err() {
+                                return;
+                            }
+                            return;
                         }
                         StreamChunk::Error { message } => {
                             cooldowns
@@ -374,7 +388,7 @@ impl LlmProvider for FailoverProvider {
                     return;
                 }
 
-                let Some(message) = retryable_error else {
+                let Some((message, is_anomaly)) = retryable_error else {
                     for pending_chunk in pending_chunks {
                         if tx.send(pending_chunk).is_err() {
                             return;
@@ -391,15 +405,17 @@ impl LlmProvider for FailoverProvider {
                     .lock()
                     .expect("failover cooldown lock should not be poisoned")[idx] =
                     Some(Instant::now());
-                last_error_msg = Some(message);
+                last_error_msg = Some((message, is_anomaly));
             }
 
-            let _receiver_closed = tx
-                .send(StreamChunk::Error {
-                    message: last_error_msg
-                        .unwrap_or_else(|| "all failover providers failed".into()),
-                })
-                .is_err();
+            let terminal = match last_error_msg {
+                Some((message, true)) => StreamChunk::ProviderAnomaly { message },
+                Some((message, false)) => StreamChunk::Error { message },
+                None => StreamChunk::Error {
+                    message: "all failover providers failed".into(),
+                },
+            };
+            let _receiver_closed = tx.send(terminal).is_err();
         })
     }
 }

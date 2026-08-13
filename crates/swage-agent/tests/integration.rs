@@ -12,8 +12,9 @@ use uuid::Uuid;
 use swage_agent::context::TurnExecutionContext;
 use swage_agent::{AgentBuilder, AgentConfig, AgentEvent, TurnRequest};
 use swage_core::{
-    ChatMessage, CompletionRequest, CompletionResponse, FinishReason, ProviderError, Role,
-    StreamChunk, TokenUsage, ToolCompletionRequest, ToolCompletionResponse, ToolError,
+    ChatMessage, CompletionRequest, CompletionResponse, FinishReason, ProviderError,
+    ProviderResponseWitness, Role, StreamChunk, TokenUsage, ToolCompletionRequest,
+    ToolCompletionResponse, ToolError,
 };
 use swage_hook::{Hook, HookEvent, HookOutcome, HookRegistration, HookRegistry};
 use swage_provider::LlmProvider;
@@ -909,6 +910,61 @@ async fn output_schema_retry_reuses_streaming_runtime() {
             ..
         } if *value == json!({ "answer": "ok" })
     )));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn provider_anomaly_fails_before_output_schema_retry() {
+    let (storage, space, session, thread) = setup_conversation("agent-a").await;
+    let provider = Arc::new(StreamingProvider::new(vec![vec![
+        StreamChunk::ProviderResponseWitness(ProviderResponseWitness {
+            http_status: 200,
+            request_id: Some("req-empty".into()),
+            terminal_event: Some("message_stop".into()),
+            stop_reason: Some("end_turn".into()),
+            usage: TokenUsage {
+                input_tokens: 11,
+                output_tokens: 0,
+            },
+            content_blocks: vec![],
+        }),
+        StreamChunk::ProviderAnomaly {
+            message: "Anthropic stream completed without visible text or tool output".into(),
+        },
+    ]]));
+    let config = resolved_config("agent-a")
+        .with_output_schema(json!({"type": "object", "required": ["answer"]}), 2);
+    let agent = AgentBuilder::new()
+        .config(config)
+        .provider(provider.clone())
+        .storage(storage)
+        .build()
+        .expect("agent");
+
+    let (event_tx, event_rx) = mpsc::unbounded_channel();
+    let error = agent
+        .process_turn_streaming(
+            test_request(space.id, session.id, thread.id, "Return JSON", None),
+            event_tx,
+        )
+        .await
+        .expect_err("provider anomaly should fail the provider round");
+
+    assert!(matches!(
+        error,
+        swage_agent::AgentError::ProviderFailed(ProviderError::ProviderAnomaly(_))
+    ));
+    assert_eq!(provider.call_count(), 1, "schema retries must not run");
+    let events = drain_events(event_rx);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ProviderResponseCaptured { witness, .. }
+            if witness.request_id.as_deref() == Some("req-empty")
+    )));
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::OutputSchemaRetry { .. }))
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

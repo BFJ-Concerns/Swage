@@ -98,6 +98,17 @@ fn append_provider_visible_capture_error(report_json: &mut serde_json::Value, ro
     }));
 }
 
+fn append_provider_visible_response(
+    report_json: &mut serde_json::Value,
+    round: usize,
+    witness: swage_core::ProviderResponseWitness,
+) {
+    provider_visible_array(report_json, "responses").push(serde_json::json!({
+        "round": round,
+        "witness": witness,
+    }));
+}
+
 async fn redact_provider_visible_request(
     state: &AppState,
     mut request: serde_json::Value,
@@ -1235,6 +1246,33 @@ pub(crate) async fn process_turn_with_existing_turn(
                     {
                         record_integrity_lost.get_or_insert(format!(
                             "provider reasoning snapshot lost and the loss could not be recorded: {audit_error}"
+                        ));
+                    }
+                }
+            }
+            AgentEvent::ProviderResponseCaptured {
+                turn_id: snapshot_turn_id,
+                round,
+                witness,
+            } => {
+                append_provider_visible_response(&mut report_json, round, witness);
+                if let Err(e) = state
+                    .storage
+                    .store_snapshot(snapshot_turn_id, &report_json.to_string())
+                    .await
+                {
+                    tracing::warn!(error = %e, "failed to persist provider response witness");
+                    if let Err(audit_error) = record_durability::record_reconstruction_gap(
+                        state.storage.as_ref(),
+                        Some(session_id),
+                        snapshot_turn_id,
+                        "provider_response_witness",
+                        &e,
+                    )
+                    .await
+                    {
+                        record_integrity_lost.get_or_insert(format!(
+                            "provider response witness lost and the loss could not be recorded: {audit_error}"
                         ));
                     }
                 }
