@@ -403,6 +403,44 @@ describe("App", () => {
     expect(websocketHarness.client.connect).not.toHaveBeenCalled();
   });
 
+  it("shows the not-found notice when popstate restores a deleted conversation", async () => {
+    let popstateHandler: EventListener | null = null;
+    const addEventListener = window.addEventListener.bind(window);
+    const addEventListenerSpy = vi.spyOn(window, "addEventListener").mockImplementation(
+      (type: string, listener: EventListenerOrEventListenerObject, options?: boolean | AddEventListenerOptions) => {
+        if (type === "popstate") {
+          popstateHandler =
+            typeof listener === "function"
+              ? listener
+              : (event) => listener.handleEvent(event);
+          return;
+        }
+        addEventListener(type, listener, options);
+      },
+    );
+
+    vi.mocked(spacesApi.listSpaces).mockResolvedValueOnce([makeSpace()]);
+    vi.mocked(conversationsApi.getConversation).mockRejectedValueOnce(
+      new Error("HTTP 404 from GET /api/conversations/deleted-id"),
+    );
+
+    component = mount(App, { target: document.body });
+    await settleUi();
+    addEventListenerSpy.mockRestore();
+
+    expect(popstateHandler).not.toBeNull();
+    setPath("/conversations/deleted-id");
+    popstateHandler!(new PopStateEvent("popstate"));
+    await settleUi();
+
+    expect(conversationsApi.getConversation).toHaveBeenCalledWith("deleted-id");
+    expect(window.location.pathname).toBe("/");
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain(
+      "Conversation not found",
+    );
+    expect(websocketHarness.client.connect).not.toHaveBeenCalled();
+  });
+
   it("renders the conversation and removes Settings after browser Back", async () => {
     let popstateHandler: EventListener | null = null;
     const addEventListener = window.addEventListener.bind(window);
