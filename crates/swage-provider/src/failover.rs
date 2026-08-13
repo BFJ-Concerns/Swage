@@ -1062,6 +1062,115 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stream_fails_over_on_provider_anomaly_before_output() {
+        let primary_calls = Arc::new(StdMutex::new(0));
+        let primary = SequencedStreamProvider {
+            name: "p1",
+            call_count: Arc::clone(&primary_calls),
+            attempts: StdMutex::new(vec![vec![StreamChunk::ProviderAnomaly {
+                message: "empty provider stream".into(),
+            }]]),
+        };
+        let secondary_calls = Arc::new(StdMutex::new(0));
+        let secondary = SequencedStreamProvider {
+            name: "p2",
+            call_count: Arc::clone(&secondary_calls),
+            attempts: StdMutex::new(vec![vec![
+                StreamChunk::Delta {
+                    content: "recovered".into(),
+                },
+                StreamChunk::Done {
+                    finish_reason: Some(FinishReason::Stop),
+                },
+            ]]),
+        };
+        let failover =
+            FailoverProvider::with_defaults(vec![Arc::new(primary), Arc::new(secondary)]);
+
+        let chunks: Vec<_> = failover.stream(completion_req()).collect().await;
+
+        assert_eq!(*primary_calls.lock().unwrap(), 1);
+        assert_eq!(*secondary_calls.lock().unwrap(), 1);
+        assert!(chunks.iter().any(
+            |chunk| matches!(chunk, StreamChunk::Delta { content } if content == "recovered")
+        ));
+        assert!(
+            chunks
+                .iter()
+                .all(|chunk| !matches!(chunk, StreamChunk::ProviderAnomaly { .. }))
+        );
+        assert!(failover.cooldowns.lock().unwrap()[0].is_some());
+    }
+
+    #[tokio::test]
+    async fn stream_preserves_provider_anomaly_after_output_without_failover() {
+        let primary = SequencedStreamProvider {
+            name: "p1",
+            call_count: Arc::new(StdMutex::new(0)),
+            attempts: StdMutex::new(vec![vec![
+                StreamChunk::Delta {
+                    content: "partial".into(),
+                },
+                StreamChunk::ProviderAnomaly {
+                    message: "stream ended early".into(),
+                },
+            ]]),
+        };
+        let secondary_calls = Arc::new(StdMutex::new(0));
+        let secondary = SequencedStreamProvider {
+            name: "p2",
+            call_count: Arc::clone(&secondary_calls),
+            attempts: StdMutex::new(vec![vec![StreamChunk::Delta {
+                content: "duplicate".into(),
+            }]]),
+        };
+        let failover =
+            FailoverProvider::with_defaults(vec![Arc::new(primary), Arc::new(secondary)]);
+
+        let chunks: Vec<_> = failover.stream(completion_req()).collect().await;
+
+        assert_eq!(*secondary_calls.lock().unwrap(), 0);
+        assert!(matches!(
+            chunks.last(),
+            Some(StreamChunk::ProviderAnomaly { message }) if message == "stream ended early"
+        ));
+        assert!(failover.cooldowns.lock().unwrap()[0].is_some());
+    }
+
+    #[tokio::test]
+    async fn stream_preserves_provider_anomaly_when_every_provider_fails() {
+        let providers: Vec<Arc<dyn LlmProvider>> = ["p1", "p2"]
+            .into_iter()
+            .map(|name| {
+                Arc::new(SequencedStreamProvider {
+                    name,
+                    call_count: Arc::new(StdMutex::new(0)),
+                    attempts: StdMutex::new(vec![vec![StreamChunk::ProviderAnomaly {
+                        message: format!("{name} empty"),
+                    }]]),
+                }) as Arc<dyn LlmProvider>
+            })
+            .collect();
+        let failover = FailoverProvider::with_defaults(providers);
+
+        let chunks: Vec<_> = failover.stream(completion_req()).collect().await;
+
+        assert_eq!(chunks.len(), 1);
+        assert!(matches!(
+            &chunks[0],
+            StreamChunk::ProviderAnomaly { message } if message == "p2 empty"
+        ));
+        assert!(
+            failover
+                .cooldowns
+                .lock()
+                .unwrap()
+                .iter()
+                .all(Option::is_some)
+        );
+    }
+
+    #[tokio::test]
     async fn stream_forwards_post_output_error_without_failover() {
         let (primary, mut primary_tx, _) = ControlledProvider::new("p1");
         let secondary = SequencedProvider::new("p2", vec![Ok(ok_completion("duplicate"))]);
