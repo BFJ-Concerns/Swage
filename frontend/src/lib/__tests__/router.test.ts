@@ -206,8 +206,17 @@ describe("popstate", () => {
 describe("init with conversation store", () => {
   it("calls selectConversation when URL contains a conversation ID", async () => {
     window.history.replaceState(null, "", "/conversations/init-conv");
+    const checkConversationExists = vi.fn().mockResolvedValue(undefined);
+    const clearActiveConversation = vi.fn();
     const selectConversation = vi.fn().mockResolvedValue(undefined);
-    const router = createRouter({ conversationStore: { selectConversation } });
+    const router = createRouter({
+      conversationStore: {
+        activeConversationId: null,
+        checkConversationExists,
+        clearActiveConversation,
+        selectConversation,
+      },
+    });
 
     await router.init();
 
@@ -215,22 +224,82 @@ describe("init with conversation store", () => {
   });
 
   it("does not call selectConversation when URL is '/'", async () => {
+    const checkConversationExists = vi.fn().mockResolvedValue(undefined);
+    const clearActiveConversation = vi.fn();
     const selectConversation = vi.fn().mockResolvedValue(undefined);
-    const router = createRouter({ conversationStore: { selectConversation } });
+    const router = createRouter({
+      conversationStore: {
+        activeConversationId: null,
+        checkConversationExists,
+        clearActiveConversation,
+        selectConversation,
+      },
+    });
 
     await router.init();
 
     expect(selectConversation).not.toHaveBeenCalled();
   });
 
+  it("does not select the conversation that is already active", async () => {
+    window.history.replaceState(null, "", "/conversations/active-conv");
+    const checkConversationExists = vi.fn().mockResolvedValue(undefined);
+    const clearActiveConversation = vi.fn();
+    const selectConversation = vi.fn().mockResolvedValue(undefined);
+    const router = createRouter({
+      conversationStore: {
+        activeConversationId: "active-conv",
+        checkConversationExists,
+        clearActiveConversation,
+        selectConversation,
+      },
+    });
+
+    await router.init();
+
+    expect(checkConversationExists).toHaveBeenCalledOnce();
+    expect(checkConversationExists).toHaveBeenCalledWith("active-conv");
+    expect(selectConversation).not.toHaveBeenCalled();
+  });
+
+  it("selects a routed conversation when a different one is active", async () => {
+    window.history.replaceState(null, "", "/conversations/next-conv");
+    const checkConversationExists = vi.fn().mockResolvedValue(undefined);
+    const clearActiveConversation = vi.fn();
+    const selectConversation = vi.fn().mockResolvedValue(undefined);
+    const router = createRouter({
+      conversationStore: {
+        activeConversationId: "active-conv",
+        checkConversationExists,
+        clearActiveConversation,
+        selectConversation,
+      },
+    });
+
+    await router.init();
+
+    expect(checkConversationExists).not.toHaveBeenCalled();
+    expect(selectConversation).toHaveBeenCalledOnce();
+    expect(selectConversation).toHaveBeenCalledWith("next-conv");
+  });
+
   it("sets notFound and navigates to '/' when selectConversation rejects", async () => {
     window.history.replaceState(null, "", "/conversations/stale-id");
+    const checkConversationExists = vi.fn().mockResolvedValue(undefined);
+    const clearActiveConversation = vi.fn();
     const selectConversation = vi
       .fn()
       .mockRejectedValue(
         new Error("HTTP 404 from GET /api/conversations/stale-id"),
       );
-    const router = createRouter({ conversationStore: { selectConversation } });
+    const router = createRouter({
+      conversationStore: {
+        activeConversationId: null,
+        checkConversationExists,
+        clearActiveConversation,
+        selectConversation,
+      },
+    });
 
     await router.init();
 
@@ -239,14 +308,72 @@ describe("init with conversation store", () => {
     expect(window.location.pathname).toBe("/");
   });
 
+  it("clears an active conversation when its existence check returns 404", async () => {
+    window.history.replaceState(null, "", "/conversations/deleted-id");
+    const checkConversationExists = vi
+      .fn()
+      .mockRejectedValue(
+        new Error("HTTP 404 from GET /api/conversations/deleted-id"),
+      );
+    const clearActiveConversation = vi.fn();
+    const selectConversation = vi.fn().mockResolvedValue(undefined);
+    const router = createRouter({
+      conversationStore: {
+        activeConversationId: "deleted-id",
+        checkConversationExists,
+        clearActiveConversation,
+        selectConversation,
+      },
+    });
+
+    await router.init();
+
+    expect(clearActiveConversation).toHaveBeenCalledOnce();
+    expect(router.currentRoute.notFound).toBe(true);
+    expect(window.location.pathname).toBe("/");
+  });
+
+  it("keeps an active conversation when its existence check fails transiently", async () => {
+    window.history.replaceState(null, "", "/conversations/active-id");
+    const checkConversationExists = vi
+      .fn()
+      .mockRejectedValue(
+        new Error("HTTP 503 from GET /api/conversations/active-id"),
+      );
+    const clearActiveConversation = vi.fn();
+    const selectConversation = vi.fn().mockResolvedValue(undefined);
+    const router = createRouter({
+      conversationStore: {
+        activeConversationId: "active-id",
+        checkConversationExists,
+        clearActiveConversation,
+        selectConversation,
+      },
+    });
+
+    await expect(router.init()).resolves.toBeUndefined();
+    expect(clearActiveConversation).not.toHaveBeenCalled();
+    expect(router.currentRoute.conversationId).toBe("active-id");
+    expect(router.currentRoute.notFound).toBe(false);
+  });
+
   it("rethrows non-404 failures during route restore", async () => {
     window.history.replaceState(null, "", "/conversations/outage-id");
+    const checkConversationExists = vi.fn().mockResolvedValue(undefined);
+    const clearActiveConversation = vi.fn();
     const selectConversation = vi
       .fn()
       .mockRejectedValue(
         new Error("HTTP 503 from GET /api/conversations/outage-id"),
       );
-    const router = createRouter({ conversationStore: { selectConversation } });
+    const router = createRouter({
+      conversationStore: {
+        activeConversationId: null,
+        checkConversationExists,
+        clearActiveConversation,
+        selectConversation,
+      },
+    });
 
     await expect(router.init()).rejects.toThrow("HTTP 503");
     expect(window.location.pathname).toBe("/conversations/outage-id");
