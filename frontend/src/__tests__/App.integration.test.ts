@@ -387,6 +387,7 @@ describe("App", () => {
 
   it("falls back to the root with a notice for a stale deep link", async () => {
     vi.mocked(spacesApi.listSpaces).mockResolvedValueOnce([makeSpace()]);
+    vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([]);
     vi.mocked(conversationsApi.getConversation).mockRejectedValueOnce(
       new Error("HTTP 404 from GET /api/conversations/stale-id"),
     );
@@ -401,6 +402,10 @@ describe("App", () => {
       "Conversation not found",
     );
     expect(websocketHarness.client.connect).not.toHaveBeenCalled();
+    await openSpaceFromPicker("default");
+    expect(
+      document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Message"]'),
+    ).not.toBeNull();
   });
 
   it("shows the not-found notice when popstate restores a deleted conversation", async () => {
@@ -420,6 +425,12 @@ describe("App", () => {
     );
 
     const deletedConversation = makeConversationSummary({ id: "deleted-id" });
+    const replacementConversation: ConversationResponse = {
+      id: "replacement-id",
+      space_id: "proj-default",
+      created_at: "2026-04-07T12:03:00Z",
+      last_activity: "2026-04-07T12:03:00Z",
+    };
     vi.mocked(spacesApi.listSpaces).mockResolvedValueOnce([makeSpace()]);
     vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([
       deletedConversation,
@@ -441,6 +452,9 @@ describe("App", () => {
       .mockRejectedValueOnce(
         new Error("HTTP 404 from GET /api/conversations/deleted-id"),
       );
+    vi.mocked(conversationsApi.createConversation).mockResolvedValueOnce(
+      replacementConversation,
+    );
 
     setPath(`/conversations/${deletedConversation.id}`);
     component = mount(App, { target: document.body });
@@ -471,7 +485,33 @@ describe("App", () => {
     expect(document.body.textContent).not.toContain(
       "Present before server-side deletion",
     );
-    expect(document.querySelector('textarea[aria-label="Message"]')).toBeNull();
+
+    const dismissButton = document.querySelector<HTMLButtonElement>(".dismiss");
+    expect(dismissButton).not.toBeNull();
+    flushSync(() => dismissButton!.click());
+
+    const textarea = document.querySelector<HTMLTextAreaElement>(
+      'textarea[aria-label="Message"]',
+    );
+    expect(textarea).not.toBeNull();
+    flushSync(() => {
+      textarea!.value = "Continue after recovery";
+      textarea!.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+
+    const sendButton = document.querySelector<HTMLButtonElement>(".action.send");
+    expect(sendButton).not.toBeNull();
+    flushSync(() => sendButton!.click());
+    await settleUi();
+
+    expect(conversationsApi.createConversation).toHaveBeenCalledWith(
+      "proj-default",
+      null,
+    );
+    expect(websocketHarness.client.connect).toHaveBeenCalledTimes(2);
+    expect(websocketHarness.client.connect).toHaveBeenLastCalledWith(
+      replacementConversation.id,
+    );
   });
 
   it("shows the not-found notice when popstate restores a stale ID with no active conversation", async () => {
