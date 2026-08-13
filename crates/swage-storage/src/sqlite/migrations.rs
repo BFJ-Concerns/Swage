@@ -103,6 +103,7 @@ const ADD_WORKFLOW_RUN_PARKING: &str = "
         budget_json          TEXT NOT NULL,
         state                TEXT NOT NULL CHECK (state IN ('running', 'completed', 'failed', 'cancelled', 'interrupted', 'parked')),
         final_output_json    TEXT,
+        handover_json        TEXT,
         error_message        TEXT,
         engine_version       TEXT NOT NULL,
         created_at           TEXT NOT NULL,
@@ -114,13 +115,13 @@ const ADD_WORKFLOW_RUN_PARKING: &str = "
     );
     INSERT INTO workflow_runs_parking_new (
         id, space_id, script_version_id, source, source_hash, args_json,
-        budget_json, state, final_output_json, error_message, engine_version,
+        budget_json, state, final_output_json, handover_json, error_message, engine_version,
         created_at, completed_at, parent_run_id, parent_seq,
         dispatch_bound_agent_ids_json
     )
     SELECT
         id, space_id, script_version_id, source, source_hash, args_json,
-        budget_json, state, final_output_json, error_message, engine_version,
+        budget_json, state, final_output_json, NULL, error_message, engine_version,
         created_at, completed_at, parent_run_id, parent_seq,
         dispatch_bound_agent_ids_json
     FROM workflow_runs;
@@ -951,6 +952,7 @@ const COMPLETE_SCHEMA: &str = "
         budget_json         TEXT NOT NULL,
         state               TEXT NOT NULL CHECK (state IN ('running', 'completed', 'failed', 'cancelled', 'interrupted')),
         final_output_json   TEXT,
+        handover_json       TEXT,
         error_message       TEXT,
         engine_version      TEXT NOT NULL,
         created_at          TEXT NOT NULL,

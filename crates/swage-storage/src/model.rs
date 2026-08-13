@@ -1891,6 +1891,7 @@ pub struct WorkflowRunRecord {
     pub budget: serde_json::Value,
     pub state: String,
     pub final_output: Option<serde_json::Value>,
+    pub handover: Option<serde_json::Value>,
     pub error_message: Option<String>,
     pub engine_version: String,
     /// The full ordered lineage of agent contexts bounding this run. Worker
