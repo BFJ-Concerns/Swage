@@ -1658,11 +1658,7 @@ async fn run_host_commands_inner(
                             "remaining": remaining,
                             "working_remaining": budget.max_total_tokens.map(|_| {
                                 if reading_winding_down {
-                                    if snapshot_starts_wind_down {
-                                        working_remaining.unwrap_or(0)
-                                    } else {
-                                        0
-                                    }
+                                    0
                                 } else {
                                     working_remaining.unwrap_or(0)
                                 }
@@ -6144,7 +6140,7 @@ mod tests {
         assert_eq!(output["beyond_closing"], "BudgetExceededError");
         assert_eq!(output["snapshot"]["spent"], 12_164);
         assert_eq!(output["snapshot"]["remaining"], 836);
-        assert_eq!(output["snapshot"]["working_remaining"], 836);
+        assert_eq!(output["snapshot"]["working_remaining"], 0);
         assert_eq!(output["snapshot"]["closing_remaining"], 5_000);
         assert_eq!(output["after_closing"]["remaining"], 2_500);
         assert_eq!(output["after_closing"]["working_remaining"], 0);
@@ -6189,8 +6185,8 @@ mod tests {
                 args: Value::Null,
                 budget: Some(WorkflowBudget {
                     max_agent_calls: Some(5),
-                    max_total_tokens: Some(8),
-                    reserved_closing_tokens: Some(2),
+                    max_total_tokens: Some(10),
+                    reserved_closing_tokens: Some(3),
                     max_concurrent_agent_calls: Some(1),
                 }),
             }),
@@ -6207,11 +6203,17 @@ mod tests {
         assert_eq!(run.state, "completed", "run error: {:?}", run.error_message);
         let output = run.final_output.expect("output");
         assert_eq!(output["snapshot"]["winding_down"], true);
+        assert_eq!(output["snapshot"]["spent"], 6);
+        assert_eq!(output["snapshot"]["remaining"], 1);
+        assert_eq!(output["snapshot"]["working_remaining"], 0);
+        assert_eq!(output["snapshot"]["closing_remaining"], 3);
         assert_eq!(output["closingReport"], "closing report");
         assert_eq!(output["beyondClosing"], "BudgetExceededError");
         assert_eq!(output["finalSnapshot"]["winding_down"], true);
+        assert_eq!(output["finalSnapshot"]["spent"], 8);
+        assert_eq!(output["finalSnapshot"]["remaining"], 1);
         assert_eq!(output["finalSnapshot"]["working_remaining"], 0);
-        assert_eq!(output["finalSnapshot"]["closing_remaining"], 0);
+        assert_eq!(output["finalSnapshot"]["closing_remaining"], 1);
         assert_eq!(provider.requests.lock().expect("requests").len(), 4);
     }
 
