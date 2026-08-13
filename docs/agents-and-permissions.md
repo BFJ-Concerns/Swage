@@ -230,13 +230,23 @@ reaches.
 | Scope | Persistence | Reach |
 |---|---|---|
 | `Once` | None | The single pending call only |
-| `Session` | In-memory | All matching calls in this session |
+| `Session` | In-memory, until the gateway exits | All matching calls in any session in this gateway process |
 | `Permanent` | In-memory and persisted to disk | All matching calls in this space |
 | `PermanentGlobal` | In-memory and persisted to disk across all spaces | All matching calls everywhere |
 
+`Session` reaches further than its name suggests. The grant is not recorded
+against the session that approved it, or against a space: it is held in the
+gateway process and consulted whenever a new turn dispatcher is built. Every
+turn started after the approval — in any conversation, in any space — will
+run that tool without prompting, until the gateway is restarted. Turns
+already under way keep the permissions they started with. If you want an
+approval confined to the work in front of you, `Once` is the only scope that
+gives it.
+
 `Permanent` and `PermanentGlobal` also handle location-scoped approvals —
 trusting a workspace attachment so that file operations within it no longer
-prompt.
+prompt. Location approvals are the only kind recorded against a particular
+space.
 
 ### Timeout behaviour
 

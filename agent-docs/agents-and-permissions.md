@@ -221,12 +221,22 @@ a decision (`Approved` or `Rejected`) and a scope.
 | Scope | Persistence | Reach |
 |---|---|---|
 | `Once` | None — applies to the single pending call | This call only |
-| `Session` | In-memory `session_approval_grants` | This session |
+| `Session` | In-memory `session_approval_grants`, until the gateway exits | Any session in this gateway process |
 | `Permanent` | In-memory + persisted to disk | This space |
 | `PermanentGlobal` | In-memory + persisted to disk across all spaces | All spaces |
 
+`Session` is process-scoped, not session-scoped, despite the name.
+`ApprovalGrantKey` carries no session identifier, and `from_approval` sets
+`space_id: None` for tool and hook approvals, so the grant is stored under a
+global key. `build_permission_config` drops the matching `require_approval`
+entry whenever that key is present, for every dispatcher built afterwards —
+in any session, any space, until the gateway process exits. Existing
+dispatchers keep their original config; the grant takes effect on the next
+one built.
+
 `Permanent` and `PermanentGlobal` also handle location-scoped approvals
-(workspace attachment trust).
+(workspace attachment trust). Location grants are the one kind keyed by
+`space_id`.
 
 ### Timeout and rejection
 
