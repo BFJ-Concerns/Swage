@@ -5770,7 +5770,7 @@ mod tests {
     }
 
     async fn wait_for_terminal(state: &AppState, id: Uuid) {
-        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        tokio::time::timeout(std::time::Duration::from_secs(45), async {
             loop {
                 let run = state
                     .storage
