@@ -157,7 +157,10 @@ run had already committed to.
 
 During replay, a working call may settle before the replay cursor reaches the
 recorded wind-down transition. A `replayed_working_credit` accumulator holds
-this spend until `closing_limit` is constructed.
+this spend until `closing_limit` is constructed. Replay computes the limit from
+the journal's completed agent-call token counts before the transition sequence
+(not the live spent counter), plus the reserved closing tokens and any
+accumulated replay credit.
 
 ### Budget reads
 
