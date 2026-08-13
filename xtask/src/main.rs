@@ -345,7 +345,7 @@ fn run_test_suite() -> Result<()> {
         Ok("cargo") | Err(_) => record_stage_result(
             &mut failures,
             "Running Rust tests",
-            command("cargo", ["test", "--workspace"]),
+            command("cargo", ["test", "--workspace", "--no-fail-fast"]),
         ),
         Ok(other) => return Err(format!("unknown SWAGE_TEST_RUNNER '{other}'").into()),
     }
