@@ -824,9 +824,7 @@ pub(crate) async fn process_turn_with_existing_turn(
         state,
         session_id,
         prepared_turn_id,
-        rebuild_thread_history_messages(state.storage.as_ref(), thread_id)
-            .await
-            .map_err(GatewayError::from),
+        rebuild_thread_history_messages(state.storage.as_ref(), thread_id).await,
     )
     .await?;
 
