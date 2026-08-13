@@ -190,6 +190,7 @@ fn journal_wire(
 struct TokenBudgetState {
     spent: u64,
     reserved: u64,
+    closing_limit: Option<u64>,
 }
 
 #[derive(Clone, Copy)]
@@ -800,11 +801,36 @@ async fn run_host_commands_inner(
     // settlement share one lock so actual spend replaces the reservation
     // without exposing a stale gap between separate counters.
     let token_reservation = token_reservation_per_call(&budget);
+    let closing_transition_seq = replay.iter().find_map(|entry| {
+        (entry.kind == "wind_down"
+            || entry
+                .result
+                .as_ref()
+                .is_some_and(|reading| reading["winding_down"] == true))
+        .then_some(entry.seq)
+    });
+    let mut winding_down = closing_transition_seq.is_some();
+    let replayed_closing_token_limit = closing_transition_seq.map(|transition_seq| {
+        replay
+            .iter()
+            .filter(|entry| {
+                entry.seq < transition_seq
+                    && entry.kind == "agent_call"
+                    && entry.status == "completed"
+            })
+            .filter_map(|entry| entry.result.as_ref())
+            .map(|result| {
+                result["input_tokens"].as_u64().unwrap_or(0)
+                    + result["output_tokens"].as_u64().unwrap_or(0)
+            })
+            .sum::<u64>()
+            .saturating_add(budget.reserved_closing_tokens.unwrap_or(0))
+    });
     let token_budget = Arc::new(Mutex::new(TokenBudgetState {
         spent: spent_tokens.load(Ordering::SeqCst),
         reserved: 0,
+        closing_limit: replayed_closing_token_limit,
     }));
-    let mut winding_down = replay.iter().any(|entry| entry.kind == "wind_down");
     let effect_seq = Arc::new(AtomicU64::new(
         replay
             .iter()
@@ -916,6 +942,17 @@ async fn run_host_commands_inner(
                     seq.fetch_add(1, Ordering::SeqCst);
                     let result = if entry.args_hash == request_hash {
                         winding_down = true;
+                        let mut accounting = token_budget.lock().await;
+                        if accounting.closing_limit.is_none() {
+                            accounting.closing_limit = Some(
+                                entry
+                                    .result
+                                    .as_ref()
+                                    .and_then(|reading| reading["spent"].as_u64())
+                                    .unwrap_or(0)
+                                    .saturating_add(budget.reserved_closing_tokens.unwrap_or(0)),
+                            );
+                        }
                         Err("BudgetWindDownError: working token allowance exhausted".into())
                     } else {
                         Err("NondeterministicReplayError".into())
@@ -958,9 +995,9 @@ async fn run_host_commands_inner(
                                 let spent = spent_tokens.load(Ordering::SeqCst);
                                 let reading = serde_json::json!({
                                     "spent": spent,
-                                    "remaining": limit.saturating_sub(spent),
+                                    "remaining": 0,
                                     "working_remaining": 0,
-                                    "closing_remaining": limit.saturating_sub(spent),
+                                    "closing_remaining": reserve,
                                     "winding_down": true,
                                 });
                                 let recorded = match state
@@ -985,6 +1022,9 @@ async fn run_host_commands_inner(
                                 };
                                 if recorded.is_ok() {
                                     winding_down = true;
+                                    let mut accounting = token_budget.lock().await;
+                                    accounting.closing_limit =
+                                        Some(accounting.spent.saturating_add(reserve));
                                 }
                                 let result = recorded.and(Err(
                                     "BudgetWindDownError: working token allowance exhausted".into(),
@@ -993,7 +1033,12 @@ async fn run_host_commands_inner(
                                 continue;
                             }
                         }
-                        let available = limit
+                        let admission_limit = if winding_down {
+                            accounting.closing_limit.unwrap_or(limit)
+                        } else {
+                            limit
+                        };
+                        let available = admission_limit
                             .saturating_sub(accounting.spent.saturating_add(accounting.reserved));
                         if available < reservation {
                             drop(accounting);
@@ -1031,6 +1076,7 @@ async fn run_host_commands_inner(
                 let replay = Arc::clone(&replay);
                 let spent = Arc::clone(&spent_tokens);
                 let token_budget = Arc::clone(&token_budget);
+                let call_uses_closing_partition = winding_down;
                 let semaphore = Arc::clone(&semaphore);
                 let replay_agent_ranks = Arc::clone(&replay_agent_ranks);
                 let replay_release_rank = Arc::clone(&replay_release_rank);
@@ -1166,6 +1212,12 @@ async fn run_host_commands_inner(
                     accounting.spent = accounting.spent.saturating_add(actual);
                     spent.store(accounting.spent, Ordering::SeqCst);
                     accounting.reserved = accounting.reserved.saturating_sub(call_reservation);
+                    if !call_uses_closing_partition
+                        && actual > 0
+                        && let Some(limit) = accounting.closing_limit.as_mut()
+                    {
+                        *limit = limit.saturating_add(actual);
+                    }
                     let _ = reply.send(result);
                     in_flight.fetch_sub(1, Ordering::SeqCst);
                 });
@@ -1534,6 +1586,15 @@ async fn run_host_commands_inner(
                             .is_ok_and(|reading| reading["winding_down"] == true)
                         {
                             winding_down = true;
+                            let mut accounting = token_budget.lock().await;
+                            if accounting.closing_limit.is_none()
+                                && let Ok(reading) = &reading
+                            {
+                                accounting.closing_limit =
+                                    Some(reading["spent"].as_u64().unwrap_or(0).saturating_add(
+                                        budget.reserved_closing_tokens.unwrap_or(0),
+                                    ));
+                            }
                         }
                         reading
                     }
@@ -1557,33 +1618,59 @@ async fn run_host_commands_inner(
                                     working_limit.saturating_sub(committed)
                                         < token_reservation.unwrap_or(0)
                                 });
-                        drop(accounting);
                         let reading_winding_down = winding_down || snapshot_starts_wind_down;
-                        let remaining = budget
-                            .max_total_tokens
-                            .map(|limit| limit.saturating_sub(spent));
+                        let working_remaining = budget.max_total_tokens.map(|limit| {
+                            limit
+                                .saturating_sub(budget.reserved_closing_tokens.unwrap_or(0))
+                                .saturating_sub(spent)
+                        });
+                        let proposed_closing_limit = snapshot_starts_wind_down.then(|| {
+                            spent.saturating_add(budget.reserved_closing_tokens.unwrap_or(0))
+                        });
+                        let remaining = if reading_winding_down {
+                            if snapshot_starts_wind_down {
+                                working_remaining
+                            } else {
+                                Some(accounting.closing_limit.unwrap_or(0).saturating_sub(spent))
+                            }
+                        } else {
+                            budget
+                                .max_total_tokens
+                                .map(|limit| limit.saturating_sub(spent))
+                        };
                         let closing_remaining = budget.reserved_closing_tokens.map(|reserve| {
                             if reading_winding_down {
-                                remaining.unwrap_or(0)
+                                proposed_closing_limit
+                                    .or(accounting.closing_limit)
+                                    .map(|limit| limit.saturating_sub(spent))
+                                    .unwrap_or(0)
                             } else {
-                                reserve.min(remaining.unwrap_or(0))
+                                reserve.min(
+                                    budget
+                                        .max_total_tokens
+                                        .map(|limit| limit.saturating_sub(spent))
+                                        .unwrap_or(0),
+                                )
                             }
                         });
                         let reading = serde_json::json!({
                             "spent": spent,
                             "remaining": remaining,
-                            "working_remaining": budget.max_total_tokens.map(|limit| {
+                            "working_remaining": budget.max_total_tokens.map(|_| {
                                 if reading_winding_down {
-                                    0
+                                    if snapshot_starts_wind_down {
+                                        working_remaining.unwrap_or(0)
+                                    } else {
+                                        0
+                                    }
                                 } else {
-                                    limit.saturating_sub(
-                                        budget.reserved_closing_tokens.unwrap_or(0)
-                                    ).saturating_sub(spent)
+                                    working_remaining.unwrap_or(0)
                                 }
                             }),
                             "closing_remaining": closing_remaining,
                             "winding_down": reading_winding_down,
                         });
+                        drop(accounting);
                         let entry_id = match existing {
                             Some(entry) => Ok(entry.id),
                             None => state
@@ -1609,6 +1696,11 @@ async fn run_host_commands_inner(
                                 Ok(_) => {
                                     if snapshot_starts_wind_down {
                                         winding_down = true;
+                                        let mut accounting = token_budget.lock().await;
+                                        accounting.closing_limit =
+                                            Some(accounting.spent.saturating_add(
+                                                budget.reserved_closing_tokens.unwrap_or(0),
+                                            ));
                                     }
                                     Ok(reading)
                                 }
@@ -3236,13 +3328,21 @@ mod tests {
     struct StaggeredFailingProvider;
 
     fn scripted_text_output(content: &str) -> Vec<swage_core::StreamChunk> {
+        scripted_text_output_with_usage(content, 1, 1)
+    }
+
+    fn scripted_text_output_with_usage(
+        content: &str,
+        input_tokens: u32,
+        output_tokens: u32,
+    ) -> Vec<swage_core::StreamChunk> {
         vec![
             swage_core::StreamChunk::Delta {
                 content: content.into(),
             },
             swage_core::StreamChunk::Usage(swage_core::TokenUsage {
-                input_tokens: 1,
-                output_tokens: 1,
+                input_tokens,
+                output_tokens,
             }),
             swage_core::StreamChunk::Done {
                 finish_reason: None,
@@ -5976,7 +6076,84 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn snapshot_led_closing_calls_remain_bounded_by_total_capacity() {
+    async fn attempt_five_snapshot_enters_wind_down_through_the_consumer_expression() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let provider = Arc::new(ScriptedRecordingProvider {
+            outputs: std::sync::Mutex::new(std::collections::VecDeque::from(vec![
+                scripted_text_output_with_usage("working segment", 12_000, 164),
+                scripted_text_output_with_usage("the real closing report", 2_000, 500),
+                scripted_text_output("leaked working capacity"),
+            ])),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let source = r#"
+            await agent("working segment", {agent: "default"});
+            const snapshot = await budgetSnapshot();
+            const closingAllowance = 5000;
+            const windingDown =
+                snapshot.remaining !== null && snapshot.remaining <= closingAllowance;
+            if (!windingDown) throw new Error("consumer did not enter wind-down");
+            const closingReport = await agent("closing lead segment", {agent: "default"});
+            let beyondClosing = null;
+            try { await agent("past closing partition", {agent: "default"}); }
+            catch (error) { beyondClosing = error.name; }
+            return {
+                stopped_reason: "wind-down",
+                closing_report: closingReport,
+                beyond_closing: beyondClosing,
+                snapshot,
+                after_closing: await budgetSnapshot(),
+            };
+        "#;
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(space.id),
+            Json(StartInlineWorkflowRunRequest {
+                source: source.into(),
+                args: Value::Null,
+                budget: Some(WorkflowBudget {
+                    max_agent_calls: Some(6),
+                    max_total_tokens: Some(18_000),
+                    reserved_closing_tokens: Some(5_000),
+                    max_concurrent_agent_calls: Some(1),
+                }),
+            }),
+        )
+        .await
+        .expect("start inline run");
+        wait_for_terminal(&state, started.id).await;
+
+        let run = storage
+            .get_workflow_run(started.id)
+            .await
+            .expect("run")
+            .expect("present");
+        assert_eq!(run.state, "completed", "run error: {:?}", run.error_message);
+        let output = run.final_output.expect("real closing output");
+        assert_eq!(output["stopped_reason"], "wind-down");
+        assert_eq!(output["closing_report"], "the real closing report");
+        assert_eq!(output["beyond_closing"], "BudgetExceededError");
+        assert_eq!(output["snapshot"]["spent"], 12_164);
+        assert_eq!(output["snapshot"]["remaining"], 836);
+        assert_eq!(output["snapshot"]["working_remaining"], 836);
+        assert_eq!(output["snapshot"]["closing_remaining"], 5_000);
+        assert_eq!(output["after_closing"]["remaining"], 2_500);
+        assert_eq!(output["after_closing"]["working_remaining"], 0);
+        assert_eq!(output["after_closing"]["closing_remaining"], 2_500);
+        assert_eq!(provider.requests.lock().expect("requests").len(), 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn snapshot_led_closing_calls_remain_bounded_by_the_closing_partition() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
         let space = storage.get_or_create_default().await.expect("space");
         let provider = Arc::new(ScriptedRecordingProvider {
@@ -6032,6 +6209,8 @@ mod tests {
         assert_eq!(output["snapshot"]["winding_down"], true);
         assert_eq!(output["closingReport"], "closing report");
         assert_eq!(output["beyondClosing"], "BudgetExceededError");
+        assert_eq!(output["finalSnapshot"]["winding_down"], true);
+        assert_eq!(output["finalSnapshot"]["working_remaining"], 0);
         assert_eq!(output["finalSnapshot"]["closing_remaining"], 0);
         assert_eq!(provider.requests.lock().expect("requests").len(), 4);
     }
@@ -6163,8 +6342,8 @@ mod tests {
             .expect("script");
         let budget = WorkflowBudget {
             max_agent_calls: None,
-            max_total_tokens: Some(12),
-            reserved_closing_tokens: Some(4),
+            max_total_tokens: Some(14),
+            reserved_closing_tokens: Some(8),
             max_concurrent_agent_calls: Some(4),
         };
         let Json(started) = start_saved_run(
@@ -6183,7 +6362,12 @@ mod tests {
         let Json(detail) = get_run(State(state.clone()), Path(started.id))
             .await
             .expect("run detail");
-        assert_eq!(detail.run.state, WorkflowRunState::Completed);
+        assert_eq!(
+            detail.run.state,
+            WorkflowRunState::Completed,
+            "run error: {:?}",
+            detail.run.error_message
+        );
         let output = detail.run.final_output.as_ref().expect("output");
         assert_eq!(output["signal"], "BudgetWindDownError");
         assert_eq!(output["snapshot"]["winding_down"], true);
