@@ -117,7 +117,7 @@
       <MessageDisplay store={conversationStore} {streamingStore} {displayPreferences} />
       {#if streamingStore.pendingApproval}
         <ApprovalCard approval={streamingStore.pendingApproval} />
-      {:else}
+      {:else if !route?.notFound}
         <MessageInput store={streamingStore} {modelOptions} {modelCatalogueReady} selectedModelId={activeConversation?.selected_model_id ?? defaultModelId} {onNavigate} />
       {/if}
     </section>

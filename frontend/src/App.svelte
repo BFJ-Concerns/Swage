@@ -175,6 +175,10 @@
       checkConversationExists: async (id) => {
         await getConversation(id);
       },
+      clearActiveConversation: () => {
+        connectionStore.disconnect();
+        conversationStore.clearActiveConversation();
+      },
       selectConversation: selectAndNavigateOrThrow,
     },
     onRouteChange: handleRouteChange,
