@@ -385,7 +385,39 @@ describe("App", () => {
     expect(document.querySelector(".message-display")?.textContent).toContain("Restored from URL");
   });
 
+  it("falls back to the root with a notice for a stale deep link", async () => {
+    vi.mocked(spacesApi.listSpaces).mockResolvedValueOnce([makeSpace()]);
+    vi.mocked(conversationsApi.getConversation).mockRejectedValueOnce(
+      new Error("HTTP 404 from GET /api/conversations/stale-id"),
+    );
+
+    window.history.replaceState(null, "", "/conversations/stale-id");
+    component = mount(App, { target: document.body });
+    await settleUi();
+
+    expect(conversationsApi.getConversation).toHaveBeenCalledWith("stale-id");
+    expect(window.location.pathname).toBe("/");
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain(
+      "Conversation not found",
+    );
+    expect(websocketHarness.client.connect).not.toHaveBeenCalled();
+  });
+
   it("renders the conversation and removes Settings after browser Back", async () => {
+    let popstateHandler: EventListener | null = null;
+    const addEventListener = window.addEventListener.bind(window);
+    vi.spyOn(window, "addEventListener").mockImplementation(
+      (type: string, listener: EventListenerOrEventListenerObject, options?: boolean | AddEventListenerOptions) => {
+        if (type === "popstate") {
+          popstateHandler =
+            typeof listener === "function"
+              ? listener
+              : (event) => listener.handleEvent(event);
+          return;
+        }
+        addEventListener(type, listener, options);
+      },
+    );
     const defaultSpace = makeSpace();
     const linkedConversation = makeConversationSummary({
       id: "conv-settings-back",
@@ -424,11 +456,13 @@ describe("App", () => {
     expect(window.location.pathname).toBe("/settings/providers");
     expect(document.querySelector('[aria-label="Settings"]')).not.toBeNull();
 
-    const popped = new Promise<void>((resolve) => {
-      window.addEventListener("popstate", () => resolve(), { once: true });
-    });
-    window.history.back();
-    await popped;
+    const conversationFetchCount = vi.mocked(conversationsApi.getConversation).mock.calls
+      .length;
+    const websocketConnectCount = websocketHarness.client.connect.mock.calls.length;
+
+    expect(popstateHandler).not.toBeNull();
+    setPath(`/conversations/${linkedConversation.id}`);
+    popstateHandler!(new PopStateEvent("popstate"));
     await settleUi();
 
     expect(window.location.pathname).toBe(`/conversations/${linkedConversation.id}`);
@@ -437,6 +471,12 @@ describe("App", () => {
       "Conversation restored after Back",
     );
     expect(document.querySelector('[aria-label="Settings"]')).toBeNull();
+    expect(conversationsApi.getConversation).toHaveBeenCalledTimes(
+      conversationFetchCount,
+    );
+    expect(websocketHarness.client.connect).toHaveBeenCalledTimes(
+      websocketConnectCount,
+    );
   });
 
   it("connects exactly once when a conversation is picked from the sidebar", async () => {

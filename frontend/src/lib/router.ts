@@ -45,6 +45,7 @@ export interface RouterOptions {
   // Injected at wiring time (App.svelte). Optional so the router can be
   // constructed and tested in isolation without a live store.
   conversationStore?: {
+    readonly activeConversationId: string | null;
     selectConversation(id: string): Promise<void>;
   };
   onRouteChange?: (route: Route) => void;
@@ -128,7 +129,11 @@ export function createRouter(options?: RouterOptions): Router {
     const route = parseRoute(window.location.pathname);
     updateRoute(route);
 
-    if (route.conversationId && options?.conversationStore) {
+    if (
+      route.conversationId &&
+      options?.conversationStore &&
+      route.conversationId !== options.conversationStore.activeConversationId
+    ) {
       try {
         await options.conversationStore.selectConversation(route.conversationId);
       } catch (error) {
