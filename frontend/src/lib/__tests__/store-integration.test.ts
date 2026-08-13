@@ -137,6 +137,7 @@ describe("streaming store → conversation store: turn lifecycle", () => {
       expect.objectContaining({
         role: "assistant",
         content: "Rust is a systems language.",
+        turn_id: "turn-123",
       }),
     );
   });
