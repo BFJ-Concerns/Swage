@@ -198,6 +198,20 @@ struct TokenBudgetState {
     replayed_working_credit: u64,
 }
 
+fn completed_agent_tokens_before(replay: &[WorkflowJournalRecord], transition_seq: u64) -> u64 {
+    replay
+        .iter()
+        .filter(|entry| {
+            entry.seq < transition_seq && entry.kind == "agent_call" && entry.status == "completed"
+        })
+        .filter_map(|entry| entry.result.as_ref())
+        .fold(0, |spent, result| {
+            spent
+                .saturating_add(result["input_tokens"].as_u64().unwrap_or(0))
+                .saturating_add(result["output_tokens"].as_u64().unwrap_or(0))
+        })
+}
+
 #[derive(Clone, Copy)]
 struct FailedAgentCallRef {
     journal_entry_id: Uuid,
@@ -931,11 +945,7 @@ async fn run_host_commands_inner(
                         let mut accounting = token_budget.lock().await;
                         if accounting.closing_limit.is_none() {
                             accounting.closing_limit = Some(
-                                entry
-                                    .result
-                                    .as_ref()
-                                    .and_then(|reading| reading["spent"].as_u64())
-                                    .unwrap_or(0)
+                                completed_agent_tokens_before(&replay, current_seq)
                                     .saturating_add(budget.reserved_closing_tokens.unwrap_or(0))
                                     .saturating_add(accounting.replayed_working_credit),
                             );
@@ -952,19 +962,7 @@ async fn run_host_commands_inner(
                         // Retry that idempotent completion and latch only once
                         // the transition is durable.
                         let mut accounting = token_budget.lock().await;
-                        let transition_spent = replay
-                            .iter()
-                            .filter(|candidate| {
-                                candidate.seq < current_seq
-                                    && candidate.kind == "agent_call"
-                                    && candidate.status == "completed"
-                            })
-                            .filter_map(|candidate| candidate.result.as_ref())
-                            .map(|result| {
-                                result["input_tokens"].as_u64().unwrap_or(0)
-                                    + result["output_tokens"].as_u64().unwrap_or(0)
-                            })
-                            .sum::<u64>()
+                        let transition_spent = completed_agent_tokens_before(&replay, current_seq)
                             .saturating_add(accounting.replayed_working_credit);
                         let reserve = budget.reserved_closing_tokens.unwrap_or(0);
                         let reading = serde_json::json!({
@@ -1021,11 +1019,10 @@ async fn run_host_commands_inner(
                             let committed = accounting.spent.saturating_add(accounting.reserved);
                             let working_available = working_limit.saturating_sub(committed);
                             if working_available < reservation {
-                                drop(accounting);
                                 seq.fetch_add(1, Ordering::SeqCst);
-                                let spent = spent_tokens.load(Ordering::SeqCst);
+                                let transition_spent = accounting.spent;
                                 let reading = serde_json::json!({
-                                    "spent": spent,
+                                    "spent": transition_spent,
                                     "remaining": 0,
                                     "working_remaining": 0,
                                     "closing_remaining": reserve,
@@ -1066,11 +1063,11 @@ async fn run_host_commands_inner(
                                 };
                                 if recorded.is_ok() {
                                     winding_down = true;
-                                    let mut accounting = token_budget.lock().await;
                                     accounting.closing_limit =
-                                        Some(accounting.spent.saturating_add(reserve));
+                                        Some(transition_spent.saturating_add(reserve));
                                     accounting.replayed_working_credit = 0;
                                 }
+                                drop(accounting);
                                 let result = recorded.and(Err(
                                     "BudgetWindDownError: working token allowance exhausted".into(),
                                 ));
@@ -1635,13 +1632,9 @@ async fn run_host_commands_inner(
                         {
                             winding_down = true;
                             let mut accounting = token_budget.lock().await;
-                            if accounting.closing_limit.is_none()
-                                && let Ok(reading) = &reading
-                            {
+                            if accounting.closing_limit.is_none() && reading.is_ok() {
                                 accounting.closing_limit = Some(
-                                    reading["spent"]
-                                        .as_u64()
-                                        .unwrap_or(0)
+                                    completed_agent_tokens_before(&replay, current_seq)
                                         .saturating_add(budget.reserved_closing_tokens.unwrap_or(0))
                                         .saturating_add(accounting.replayed_working_credit),
                                 );
@@ -1655,7 +1648,7 @@ async fn run_host_commands_inner(
                         .clone()
                         .unwrap_or_else(|| "recorded budget failure".to_string())),
                     existing => {
-                        let accounting = token_budget.lock().await;
+                        let mut accounting = token_budget.lock().await;
                         let spent = accounting.spent;
                         let committed = spent.saturating_add(accounting.reserved);
                         let snapshot_starts_wind_down = !winding_down
@@ -1718,7 +1711,6 @@ async fn run_host_commands_inner(
                             "closing_remaining": closing_remaining,
                             "winding_down": reading_winding_down,
                         });
-                        drop(accounting);
                         let entry_id = match existing {
                             Some(entry) => Ok(entry.id),
                             None => state
@@ -1744,11 +1736,7 @@ async fn run_host_commands_inner(
                                 Ok(_) => {
                                     if snapshot_starts_wind_down {
                                         winding_down = true;
-                                        let mut accounting = token_budget.lock().await;
-                                        accounting.closing_limit =
-                                            Some(accounting.spent.saturating_add(
-                                                budget.reserved_closing_tokens.unwrap_or(0),
-                                            ));
+                                        accounting.closing_limit = proposed_closing_limit;
                                         accounting.replayed_working_credit = 0;
                                     }
                                     Ok(reading)
@@ -5621,6 +5609,224 @@ mod tests {
         drop(tx);
         task.await.expect("host loop");
         assert_eq!(provider.requests.lock().expect("requests").len(), 2);
+    }
+
+    async fn assert_replayed_wind_down_transition(completed_transition: bool) {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let run = storage
+            .create_workflow_run(NewWorkflowRun {
+                space_id: space.id,
+                parent_run_id: None,
+                parent_seq: None,
+                script_version_id: None,
+                source: Some("return null".into()),
+                source_hash: source_hash("return null"),
+                args: Value::Null,
+                budget: serde_json::json!({}),
+                engine_version: "test".into(),
+                dispatch_bound_agent_ids: vec![],
+            })
+            .await
+            .expect("run");
+        let request = |prompt: &str| AgentCallRequest {
+            prompt: prompt.into(),
+            agent: "default".into(),
+            model: None,
+            schema: None,
+            max_attempts: 1,
+            label: None,
+            session: None,
+        };
+        let work_request = request("completed work");
+        let work_json = serde_json::to_value(&work_request).expect("work request");
+        let work = storage
+            .create_workflow_journal_intent(NewWorkflowJournalIntent {
+                run_id: run.id,
+                seq: 0,
+                kind: "agent_call".into(),
+                args_hash: journal_args_hash(&work_json),
+                request: work_json,
+                effect_kind: None,
+                idempotency_key: None,
+                target_kind: None,
+            })
+            .await
+            .expect("work intent");
+        storage
+            .complete_workflow_journal_entry(
+                work.id,
+                serde_json::to_value(AgentCallResult {
+                    output: Value::String("completed work".into()),
+                    input_tokens: 1,
+                    output_tokens: 1,
+                    session_id: None,
+                    thread_id: None,
+                    turn_id: None,
+                })
+                .expect("work result"),
+            )
+            .await
+            .expect("completed work");
+        let transition_request = request("cross working boundary");
+        let transition_json =
+            serde_json::to_value(&transition_request).expect("transition request");
+        let transition = storage
+            .create_workflow_journal_intent(NewWorkflowJournalIntent {
+                run_id: run.id,
+                seq: 1,
+                kind: "wind_down".into(),
+                args_hash: journal_args_hash(&transition_json),
+                request: transition_json,
+                effect_kind: None,
+                idempotency_key: None,
+                target_kind: None,
+            })
+            .await
+            .expect("wind-down intent");
+        if completed_transition {
+            storage
+                .complete_workflow_journal_entry(
+                    transition.id,
+                    serde_json::json!({
+                        // Model the raced durable reading: the completed work
+                        // settled before the transition but was omitted here.
+                        "spent": 0,
+                        "remaining": 0,
+                        "working_remaining": 0,
+                        "closing_remaining": 2,
+                        "winding_down": true,
+                    }),
+                )
+                .await
+                .expect("completed wind-down transition");
+        }
+        let replay = storage
+            .list_workflow_journal(run.id)
+            .await
+            .expect("journal");
+        let provider = Arc::new(ScriptedRecordingProvider {
+            outputs: std::sync::Mutex::new(std::collections::VecDeque::from([
+                scripted_text_output("closing report"),
+            ])),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let (tx, rx) = mpsc::unbounded_channel();
+        let task = tokio::spawn(run_host_commands(
+            state,
+            run.id,
+            space.id,
+            vec![],
+            None,
+            WorkflowBudget {
+                max_agent_calls: Some(3),
+                max_total_tokens: Some(6),
+                reserved_closing_tokens: Some(2),
+                max_concurrent_agent_calls: Some(1),
+            },
+            replay,
+            Arc::new(AtomicU32::new(1)),
+            Arc::new(AtomicU64::new(2)),
+            Arc::new(Mutex::new(std::collections::HashMap::new())),
+            CancellationToken::new(),
+            PARK_TIMER_THRESHOLD_MS,
+            rx,
+        ));
+
+        let (work_reply, work_receive) = oneshot::channel();
+        tx.send(HostCommand::Agent {
+            request: work_request,
+            cancellation: CancellationToken::new(),
+            reply: work_reply,
+        })
+        .expect("replay completed work");
+        assert_eq!(
+            work_receive
+                .await
+                .expect("work reply")
+                .expect("recorded work")
+                .output,
+            Value::String("completed work".into())
+        );
+        let (transition_reply, transition_receive) = oneshot::channel();
+        tx.send(HostCommand::Agent {
+            request: transition_request,
+            cancellation: CancellationToken::new(),
+            reply: transition_reply,
+        })
+        .expect("replay wind-down transition");
+        assert_eq!(
+            transition_receive
+                .await
+                .expect("transition reply")
+                .expect_err("working partition exhausted"),
+            "BudgetWindDownError: working token allowance exhausted"
+        );
+        let closing_request = request("closing report");
+        let (closing_reply, closing_receive) = oneshot::channel();
+        tx.send(HostCommand::Agent {
+            request: closing_request.clone(),
+            cancellation: CancellationToken::new(),
+            reply: closing_reply,
+        })
+        .expect("closing call");
+        assert_eq!(
+            closing_receive
+                .await
+                .expect("closing reply")
+                .expect("closing result")
+                .output,
+            Value::String("closing report".into())
+        );
+        let (beyond_reply, beyond_receive) = oneshot::channel();
+        tx.send(HostCommand::Agent {
+            request: closing_request,
+            cancellation: CancellationToken::new(),
+            reply: beyond_reply,
+        })
+        .expect("past closing call");
+        assert_eq!(
+            beyond_receive
+                .await
+                .expect("past closing reply")
+                .expect_err("closing partition exhausted"),
+            "BudgetExceededError: token limit reached"
+        );
+        drop(tx);
+        task.await.expect("host loop");
+
+        let journal = storage
+            .list_workflow_journal(run.id)
+            .await
+            .expect("journal after replay");
+        let transitions = journal
+            .iter()
+            .filter(|entry| entry.kind == "wind_down")
+            .collect::<Vec<_>>();
+        assert_eq!(transitions.len(), 1, "transition completes in place");
+        assert_eq!(transitions[0].status, "completed");
+        if !completed_transition {
+            assert_eq!(transitions[0].result.as_ref().unwrap()["spent"], 2);
+        }
+        assert_eq!(provider.requests.lock().expect("requests").len(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn replay_reconstructs_closing_limit_when_transition_reading_omits_settled_work() {
+        assert_replayed_wind_down_transition(true).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn replay_completes_a_started_wind_down_transition_once() {
+        assert_replayed_wind_down_transition(false).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
