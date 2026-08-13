@@ -7,7 +7,7 @@ the system does recorded locally and reconstructable afterwards.
 ## Build and run
 
 Requires the Rust toolchain (see `rust-toolchain.toml`) and Node for the web
-UI. The gateway listens on loopback only.
+UI. The gateway binds loopback (`127.0.0.1`) unless you pass `--host`.
 
 ```bash
 cargo build --bin swage
@@ -33,13 +33,34 @@ directory), so run `stop` with the same environment you started with.
 
 Tool calls run inside a [bubblewrap](https://github.com/containers/bubblewrap)
 sandbox by default — install the `bubblewrap` package to get isolation. If
-sandbox setup fails (most commonly `bwrap` is not installed), the first turn
-pauses with an approval: *"Sandbox setup failed. Approve running this turn
-without sandbox isolation?"* Approving runs that turn unsandboxed and records
-the degradation in the audit trail; rejecting fails the turn. To decide this
-in configuration instead, set under `[sandbox]`: `enabled = false` to turn
-sandboxing off, or `allow_degraded_execution = true` to run unsandboxed
-without the per-turn prompt when setup fails.
+sandbox setup fails (most commonly `bwrap` is not installed), what happens
+next depends on whether anyone is there to answer. A turn you started from a
+connected client pauses with an approval: *"Sandbox setup failed. Approve
+running this turn without sandbox isolation?"* Approving runs that turn
+unsandboxed and records the degradation in the audit trail; rejecting fails
+the turn. A scheduled or delegated turn has nobody to ask, so it fails
+outright.
+
+To settle the question in configuration instead, opt in to unsandboxed
+execution explicitly:
+
+```toml
+[sandbox]
+allow_degraded_execution = true
+```
+
+Running without isolation always needs that opt-in, whether you chose it or
+sandbox setup failed. So turning sandboxing off takes both keys —
+`enabled = false` on its own makes every turn fail:
+
+```toml
+[sandbox]
+enabled = false
+allow_degraded_execution = true
+```
+
+[docs/agents-and-permissions.md](docs/agents-and-permissions.md) covers what
+the sandbox confines and how tool approvals work.
 
 ## Configure a provider first
 
@@ -109,8 +130,24 @@ above) before expecting turns to complete. The dev web UI
 gateway; point it at a non-default port with
 `SWAGE_GATEWAY_URL=http://127.0.0.1:3100 npm run dev`.
 
+## Going deeper
+
+Three pages in [`docs/`](docs/) cover the parts of the system a newcomer
+meets first:
+
+- [Workflow engine](docs/workflow-engine.md) — how a workflow script runs,
+  how a run survives a restart, and how its token budget is spent.
+- [Agents and permissions](docs/agents-and-permissions.md) — agent
+  definitions, what a tool call is allowed to do, approvals, and sandbox
+  isolation.
+- [Interfaces and tooling](docs/interfaces-and-tooling.md) — the web UI's
+  turn context inspector, the wire contract, and the verification gate.
+
+[`docs/README.md`](docs/README.md) indexes the set, and
+[`docs/architecture-flow.svg`](docs/architecture-flow.svg) is the
+system diagram.
+
 ## Development
 
 `just verify` runs the full gate (format, clippy, tests, frontend checks,
-projection freshness). See `CLAUDE.md` for repository conventions and
-`docs/` for architecture diagrams.
+projection freshness). See `CLAUDE.md` for repository conventions.
