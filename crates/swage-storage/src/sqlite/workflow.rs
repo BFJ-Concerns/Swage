@@ -68,7 +68,8 @@ fn run_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkflowRunRecord> {
     let script_version_id: Option<String> = row.get(4)?;
     let script_id: Option<String> = row.get(5)?;
     let final_output: Option<String> = row.get(13)?;
-    let completed_at: Option<String> = row.get(17)?;
+    let handover: Option<String> = row.get(14)?;
+    let completed_at: Option<String> = row.get(18)?;
     Ok(WorkflowRunRecord {
         id: uuid(row.get(0)?)?,
         space_id: uuid(row.get(1)?)?,
@@ -105,19 +106,29 @@ fn run_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkflowRunRecord> {
                     Box::new(error),
                 )
             })?,
-        error_message: row.get(14)?,
-        engine_version: row.get(15)?,
-        dispatch_bound_agent_ids: serde_json::from_str(&row.get::<_, String>(18)?).map_err(
+        handover: handover
+            .map(|value| serde_json::from_str(&value))
+            .transpose()
+            .map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    14,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })?,
+        error_message: row.get(15)?,
+        engine_version: row.get(16)?,
+        dispatch_bound_agent_ids: serde_json::from_str(&row.get::<_, String>(19)?).map_err(
             |error| {
                 rusqlite::Error::FromSqlConversionFailure(
-                    18,
+                    19,
                     rusqlite::types::Type::Text,
                     Box::new(error),
                 )
             },
         )?,
-        wake_at: row.get::<_, Option<String>>(19)?.map(time).transpose()?,
-        created_at: time(row.get(16)?)?,
+        wake_at: row.get::<_, Option<String>>(20)?.map(time).transpose()?,
+        created_at: time(row.get(17)?)?,
         completed_at: completed_at.map(time).transpose()?,
     })
 }
@@ -129,7 +140,7 @@ const RUN_COLUMNS: &str = "id, space_id, parent_run_id, parent_seq, script_versi
     (SELECT script_id FROM workflow_script_versions WHERE id = workflow_runs.script_version_id), \
     (SELECT name FROM workflow_scripts WHERE id = (SELECT script_id FROM workflow_script_versions WHERE id = workflow_runs.script_version_id)), \
     (SELECT version FROM workflow_script_versions WHERE id = workflow_runs.script_version_id), \
-    source, source_hash, args_json, budget_json, state, final_output_json, error_message, engine_version, created_at, completed_at, dispatch_bound_agent_ids_json, wake_at";
+    source, source_hash, args_json, budget_json, state, final_output_json, handover_json, error_message, engine_version, created_at, completed_at, dispatch_bound_agent_ids_json, wake_at";
 const JOURNAL_COLUMNS: &str = "id, run_id, seq, completed_order, kind, status, args_hash, request_json, result_json, error_message, effect_kind, idempotency_key, target_kind, started_at, completed_at";
 const RUN_EVENT_COLUMNS: &str = "id, run_id, journal_entry_id, seq, kind, payload_json, posted_at, delivered_wake_seq, delivered_at";
 
@@ -419,6 +430,7 @@ impl WorkflowStore for SqliteStorage {
         id: Uuid,
         state: &str,
         final_output: Option<serde_json::Value>,
+        handover: Option<serde_json::Value>,
         error_message: Option<&str>,
     ) -> Result<(), StorageError> {
         let state = state.to_string();
@@ -426,9 +438,13 @@ impl WorkflowStore for SqliteStorage {
             .map(|v| serde_json::to_string(&v))
             .transpose()
             .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
+        let handover = handover
+            .map(|value| serde_json::to_string(&value))
+            .transpose()
+            .map_err(|error| StorageError::QueryFailed(error.to_string()))?;
         let error = error_message.map(str::to_string);
         let now = Utc::now().to_rfc3339();
-        self.with_conn(move |conn| { conn.execute("UPDATE workflow_runs SET state=?2, final_output_json=?3, error_message=?4, wake_at=NULL, completed_at=CASE WHEN ?2='running' THEN NULL ELSE ?5 END WHERE id=?1", params![id.to_string(),state,output,error,now])?; Ok(()) }).await
+        self.with_conn(move |conn| { conn.execute("UPDATE workflow_runs SET state=?2, final_output_json=?3, handover_json=?4, error_message=?5, wake_at=NULL, completed_at=CASE WHEN ?2='running' THEN NULL ELSE ?6 END WHERE id=?1", params![id.to_string(),state,output,handover,error,now])?; Ok(()) }).await
     }
     async fn interrupt_running_workflow_runs(&self) -> Result<u64, StorageError> {
         self.with_conn(|conn| { let count=conn.execute("UPDATE workflow_runs SET state='interrupted', completed_at=NULL WHERE state='running'", [])?; Ok(count as u64) }).await

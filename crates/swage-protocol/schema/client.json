@@ -2923,6 +2923,7 @@
           ]
         },
         "final_output": true,
+        "handover": true,
         "id": {
           "type": "string",
           "format": "uuid"
