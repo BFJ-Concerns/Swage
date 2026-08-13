@@ -180,16 +180,30 @@ within the process.
 
 ### Configuration
 
-Sandboxing is enabled by default. Two config options govern what happens when
-setup fails:
+Sandboxing is enabled by default. Two config options govern sandbox
+behaviour:
 
 | Option | Default | Effect |
 |---|---|---|
-| `sandbox.enabled` | `true` | Set to `false` to disable sandboxing entirely |
-| `sandbox.allow_degraded_execution` | `false` | Set to `true` to proceed unsandboxed when setup fails, without requiring approval |
+| `sandbox.enabled` | `true` | Whether to set up sandbox isolation for each turn |
+| `sandbox.allow_degraded_execution` | `false` | Whether to allow execution without sandbox isolation |
 
-When sandbox setup fails, the recovery path depends on whether the turn is
-attended:
+Running without sandbox isolation is always treated as degraded execution,
+whether you chose it or whether sandbox setup failed at runtime. The
+gateway requires an explicit opt-in before it will proceed in either case:
+`sandbox.allow_degraded_execution` must be set to `true`. Without it,
+dispatcher construction fails.
+
+To disable sandboxing entirely, set both options together:
+
+```toml
+[sandbox]
+enabled = false
+allow_degraded_execution = true
+```
+
+When sandboxing is enabled and sandbox setup fails at runtime, the recovery
+path depends on whether the turn is attended:
 
 - **Attended turns** (interactive client connected) receive an approval
   prompt asking whether to proceed without sandbox isolation. The client can
@@ -199,10 +213,10 @@ attended:
   There is no approval prompt because no interactive client is available to
   answer it.
 
-Setting `allow_degraded_execution` to `true` opts in to unsandboxed execution
-for both attended and unattended turns, bypassing the approval prompt
-entirely. Degraded execution is always recorded in the audit trail regardless
-of how it was authorised.
+Setting `allow_degraded_execution` to `true` also bypasses the approval
+prompt for runtime sandbox failures, for both attended and unattended turns.
+Degraded execution is always recorded in the audit trail regardless of how
+it was authorised.
 
 ## Approval flow
 
