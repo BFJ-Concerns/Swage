@@ -56,8 +56,6 @@ function mockStreamingStore(): StreamingStore {
     get streamedContent() { return ""; },
     get turnError() { return null; },
     get turnStartedAt() { return null; },
-    get lastInputTokens() { return null; },
-    get lastOutputTokens() { return null; },
     get activeToolCalls() { return []; },
     get providerRetry() { return null; },
     get pendingApproval() { return null; },

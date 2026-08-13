@@ -40,6 +40,7 @@ function createMockConversationStore() {
     content: string;
     timestamp: string;
     turn_state: string;
+    turn_id?: string;
   }> = [];
 
   return {
@@ -205,6 +206,7 @@ describe("turn_complete", () => {
     const assistant = messages.find((m) => m.role === "assistant");
     expect(assistant).toBeDefined();
     expect(assistant!.content).toBe("The answer is 42.");
+    expect(assistant!.turn_id).toBe("t-1");
   });
 
   it("does not push an empty assistant message when no tokens arrived", () => {
