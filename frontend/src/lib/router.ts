@@ -46,6 +46,7 @@ export interface RouterOptions {
   // constructed and tested in isolation without a live store.
   conversationStore?: {
     readonly activeConversationId: string | null;
+    checkConversationExists(id: string): Promise<void>;
     selectConversation(id: string): Promise<void>;
   };
   onRouteChange?: (route: Route) => void;
@@ -129,13 +130,13 @@ export function createRouter(options?: RouterOptions): Router {
     const route = parseRoute(window.location.pathname);
     updateRoute(route);
 
-    if (
-      route.conversationId &&
-      options?.conversationStore &&
-      route.conversationId !== options.conversationStore.activeConversationId
-    ) {
+    if (route.conversationId && options?.conversationStore) {
       try {
-        await options.conversationStore.selectConversation(route.conversationId);
+        if (route.conversationId === options.conversationStore.activeConversationId) {
+          await options.conversationStore.checkConversationExists(route.conversationId);
+        } else {
+          await options.conversationStore.selectConversation(route.conversationId);
+        }
       } catch (error) {
         if (error instanceof Error && error.message.startsWith("HTTP 404 ")) {
           // The ID in the URL is stale (conversation deleted or never existed).

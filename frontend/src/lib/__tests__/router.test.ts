@@ -206,9 +206,14 @@ describe("popstate", () => {
 describe("init with conversation store", () => {
   it("calls selectConversation when URL contains a conversation ID", async () => {
     window.history.replaceState(null, "", "/conversations/init-conv");
+    const checkConversationExists = vi.fn().mockResolvedValue(undefined);
     const selectConversation = vi.fn().mockResolvedValue(undefined);
     const router = createRouter({
-      conversationStore: { activeConversationId: null, selectConversation },
+      conversationStore: {
+        activeConversationId: null,
+        checkConversationExists,
+        selectConversation,
+      },
     });
 
     await router.init();
@@ -217,9 +222,14 @@ describe("init with conversation store", () => {
   });
 
   it("does not call selectConversation when URL is '/'", async () => {
+    const checkConversationExists = vi.fn().mockResolvedValue(undefined);
     const selectConversation = vi.fn().mockResolvedValue(undefined);
     const router = createRouter({
-      conversationStore: { activeConversationId: null, selectConversation },
+      conversationStore: {
+        activeConversationId: null,
+        checkConversationExists,
+        selectConversation,
+      },
     });
 
     await router.init();
@@ -229,44 +239,56 @@ describe("init with conversation store", () => {
 
   it("does not select the conversation that is already active", async () => {
     window.history.replaceState(null, "", "/conversations/active-conv");
+    const checkConversationExists = vi.fn().mockResolvedValue(undefined);
     const selectConversation = vi.fn().mockResolvedValue(undefined);
     const router = createRouter({
       conversationStore: {
         activeConversationId: "active-conv",
+        checkConversationExists,
         selectConversation,
       },
     });
 
     await router.init();
 
+    expect(checkConversationExists).toHaveBeenCalledOnce();
+    expect(checkConversationExists).toHaveBeenCalledWith("active-conv");
     expect(selectConversation).not.toHaveBeenCalled();
   });
 
   it("selects a routed conversation when a different one is active", async () => {
     window.history.replaceState(null, "", "/conversations/next-conv");
+    const checkConversationExists = vi.fn().mockResolvedValue(undefined);
     const selectConversation = vi.fn().mockResolvedValue(undefined);
     const router = createRouter({
       conversationStore: {
         activeConversationId: "active-conv",
+        checkConversationExists,
         selectConversation,
       },
     });
 
     await router.init();
 
+    expect(checkConversationExists).not.toHaveBeenCalled();
     expect(selectConversation).toHaveBeenCalledOnce();
     expect(selectConversation).toHaveBeenCalledWith("next-conv");
   });
 
   it("sets notFound and navigates to '/' when selectConversation rejects", async () => {
     window.history.replaceState(null, "", "/conversations/stale-id");
+    const checkConversationExists = vi.fn().mockResolvedValue(undefined);
     const selectConversation = vi
       .fn()
       .mockRejectedValue(
         new Error("HTTP 404 from GET /api/conversations/stale-id"),
       );
     const router = createRouter({
-      conversationStore: { activeConversationId: null, selectConversation },
+      conversationStore: {
+        activeConversationId: null,
+        checkConversationExists,
+        selectConversation,
+      },
     });
 
     await router.init();
@@ -278,13 +300,18 @@ describe("init with conversation store", () => {
 
   it("rethrows non-404 failures during route restore", async () => {
     window.history.replaceState(null, "", "/conversations/outage-id");
+    const checkConversationExists = vi.fn().mockResolvedValue(undefined);
     const selectConversation = vi
       .fn()
       .mockRejectedValue(
         new Error("HTTP 503 from GET /api/conversations/outage-id"),
       );
     const router = createRouter({
-      conversationStore: { activeConversationId: null, selectConversation },
+      conversationStore: {
+        activeConversationId: null,
+        checkConversationExists,
+        selectConversation,
+      },
     });
 
     await expect(router.init()).rejects.toThrow("HTTP 503");
