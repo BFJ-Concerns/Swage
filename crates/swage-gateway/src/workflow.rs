@@ -1890,8 +1890,8 @@ async fn evaluate_run_gate(
     let config = state.active_config();
     let model_id = match &request.model {
         Some(model) => {
-            if config.models.entries.contains_key(model) {
-                model.clone()
+            if let Some(entry) = config.models.entries.get(model) {
+                entry.model_id.clone()
             } else {
                 return Err(format!(
                     "RunEventError: gate model '{model}' is not in the configured model catalogue"
