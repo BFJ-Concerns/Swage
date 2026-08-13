@@ -453,7 +453,7 @@ describe("App", () => {
     expect(websocketHarness.client.connect).toHaveBeenCalledTimes(1);
 
     expect(popstateHandler).not.toBeNull();
-    setPath("/settings/providers");
+    setPath("/");
     popstateHandler!(new PopStateEvent("popstate"));
     await settleUi();
     setPath(`/conversations/${deletedConversation.id}`);
@@ -467,6 +467,107 @@ describe("App", () => {
       "Conversation not found",
     );
     expect(websocketHarness.client.connect).toHaveBeenCalledTimes(1);
+    expect(websocketHarness.client.disconnect).toHaveBeenCalledOnce();
+    expect(document.body.textContent).not.toContain(
+      "Present before server-side deletion",
+    );
+    expect(document.querySelector('textarea[aria-label="Message"]')).toBeNull();
+  });
+
+  it("shows the not-found notice when popstate restores a stale ID with no active conversation", async () => {
+    let popstateHandler: EventListener | null = null;
+    const addEventListener = window.addEventListener.bind(window);
+    const addEventListenerSpy = vi.spyOn(window, "addEventListener").mockImplementation(
+      (type: string, listener: EventListenerOrEventListenerObject, options?: boolean | AddEventListenerOptions) => {
+        if (type === "popstate") {
+          popstateHandler =
+            typeof listener === "function"
+              ? listener
+              : (event) => listener.handleEvent(event);
+          return;
+        }
+        addEventListener(type, listener, options);
+      },
+    );
+
+    vi.mocked(spacesApi.listSpaces).mockResolvedValueOnce([makeSpace()]);
+    component = mount(App, { target: document.body });
+    await settleUi();
+    addEventListenerSpy.mockRestore();
+
+    vi.mocked(conversationsApi.getConversation).mockRejectedValueOnce(
+      new Error("HTTP 404 from GET /api/conversations/stale-id"),
+    );
+    expect(popstateHandler).not.toBeNull();
+    setPath("/conversations/stale-id");
+    popstateHandler!(new PopStateEvent("popstate"));
+    await settleUi();
+
+    expect(conversationsApi.getConversation).toHaveBeenCalledWith("stale-id");
+    expect(window.location.pathname).toBe("/");
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain(
+      "Conversation not found",
+    );
+    expect(websocketHarness.client.disconnect).not.toHaveBeenCalled();
+  });
+
+  it("keeps the active conversation when its route existence check fails transiently", async () => {
+    let popstateHandler: EventListener | null = null;
+    const addEventListener = window.addEventListener.bind(window);
+    const addEventListenerSpy = vi.spyOn(window, "addEventListener").mockImplementation(
+      (type: string, listener: EventListenerOrEventListenerObject, options?: boolean | AddEventListenerOptions) => {
+        if (type === "popstate") {
+          popstateHandler =
+            typeof listener === "function"
+              ? listener
+              : (event) => listener.handleEvent(event);
+          return;
+        }
+        addEventListener(type, listener, options);
+      },
+    );
+    const activeConversation = makeConversationSummary({ id: "active-id" });
+    vi.mocked(spacesApi.listSpaces).mockResolvedValueOnce([makeSpace()]);
+    vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([
+      activeConversation,
+    ]);
+    vi.mocked(conversationsApi.getConversation)
+      .mockResolvedValueOnce(
+        makeConversationDetail({
+          id: activeConversation.id,
+          messages: [
+            {
+              role: "assistant",
+              content: "Still active after gateway trouble",
+              timestamp: "2026-04-07T12:01:00Z",
+              turn_state: "completed",
+            },
+          ],
+        }),
+      )
+      .mockRejectedValueOnce(
+        new Error("HTTP 503 from GET /api/conversations/active-id"),
+      );
+
+    setPath(`/conversations/${activeConversation.id}`);
+    component = mount(App, { target: document.body });
+    await settleUi();
+    addEventListenerSpy.mockRestore();
+
+    expect(popstateHandler).not.toBeNull();
+    setPath("/");
+    popstateHandler!(new PopStateEvent("popstate"));
+    await settleUi();
+    setPath(`/conversations/${activeConversation.id}`);
+    popstateHandler!(new PopStateEvent("popstate"));
+    await settleUi();
+
+    expect(window.location.pathname).toBe(`/conversations/${activeConversation.id}`);
+    expect(document.querySelector(".message-display")?.textContent).toContain(
+      "Still active after gateway trouble",
+    );
+    expect(document.querySelector('[role="alert"]')).toBeNull();
+    expect(websocketHarness.client.disconnect).not.toHaveBeenCalled();
   });
 
   it("renders the conversation and removes Settings after browser Back", async () => {
