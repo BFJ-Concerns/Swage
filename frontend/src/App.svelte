@@ -12,6 +12,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import AppLayout from "./lib/components/AppLayout.svelte";
+  import { getConversation } from "./lib/api/conversations";
   import { fetchSettings } from "./lib/api/settings";
   import type { ConversationStore } from "./lib/stores/conversations";
   import { createConversationStore } from "./lib/stores/conversations";
@@ -170,6 +171,9 @@
     conversationStore: {
       get activeConversationId() {
         return conversationStore.activeConversation?.id ?? null;
+      },
+      checkConversationExists: async (id) => {
+        await getConversation(id);
       },
       selectConversation: selectAndNavigateOrThrow,
     },

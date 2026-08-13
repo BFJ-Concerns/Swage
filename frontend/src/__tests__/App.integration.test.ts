@@ -419,26 +419,54 @@ describe("App", () => {
       },
     );
 
+    const deletedConversation = makeConversationSummary({ id: "deleted-id" });
     vi.mocked(spacesApi.listSpaces).mockResolvedValueOnce([makeSpace()]);
-    vi.mocked(conversationsApi.getConversation).mockRejectedValueOnce(
-      new Error("HTTP 404 from GET /api/conversations/deleted-id"),
-    );
+    vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([
+      deletedConversation,
+    ]);
+    vi.mocked(conversationsApi.getConversation)
+      .mockResolvedValueOnce(
+        makeConversationDetail({
+          id: deletedConversation.id,
+          messages: [
+            {
+              role: "assistant",
+              content: "Present before server-side deletion",
+              timestamp: "2026-04-07T12:01:00Z",
+              turn_state: "completed",
+            },
+          ],
+        }),
+      )
+      .mockRejectedValueOnce(
+        new Error("HTTP 404 from GET /api/conversations/deleted-id"),
+      );
 
+    setPath(`/conversations/${deletedConversation.id}`);
     component = mount(App, { target: document.body });
     await settleUi();
     addEventListenerSpy.mockRestore();
 
+    expect(document.querySelector(".message-display")?.textContent).toContain(
+      "Present before server-side deletion",
+    );
+    expect(websocketHarness.client.connect).toHaveBeenCalledTimes(1);
+
     expect(popstateHandler).not.toBeNull();
-    setPath("/conversations/deleted-id");
+    setPath("/settings/providers");
+    popstateHandler!(new PopStateEvent("popstate"));
+    await settleUi();
+    setPath(`/conversations/${deletedConversation.id}`);
     popstateHandler!(new PopStateEvent("popstate"));
     await settleUi();
 
-    expect(conversationsApi.getConversation).toHaveBeenCalledWith("deleted-id");
+    expect(conversationsApi.getConversation).toHaveBeenCalledTimes(2);
+    expect(conversationsApi.getConversation).toHaveBeenLastCalledWith("deleted-id");
     expect(window.location.pathname).toBe("/");
     expect(document.querySelector('[role="alert"]')?.textContent).toContain(
       "Conversation not found",
     );
-    expect(websocketHarness.client.connect).not.toHaveBeenCalled();
+    expect(websocketHarness.client.connect).toHaveBeenCalledTimes(1);
   });
 
   it("renders the conversation and removes Settings after browser Back", async () => {
@@ -510,7 +538,7 @@ describe("App", () => {
     );
     expect(document.querySelector('[aria-label="Settings"]')).toBeNull();
     expect(conversationsApi.getConversation).toHaveBeenCalledTimes(
-      conversationFetchCount,
+      conversationFetchCount + 1,
     );
     expect(websocketHarness.client.connect).toHaveBeenCalledTimes(
       websocketConnectCount,
