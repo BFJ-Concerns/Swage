@@ -6,8 +6,10 @@ description: The web UI's context inspector, wire-contract architecture, verific
 
 ## Turn context inspector
 
-Every assistant turn in the web UI carries a small "context" link. Clicking it
-opens an inspector panel that shows the assembly report for that turn — a
+Assistant messages that carry a turn ID show a small "context" link in the web
+UI. Older turns and turns that failed before assembly have no turn ID, so no
+link appears for them. Clicking the link opens an inspector panel that shows
+the assembly report for that turn — a
 breakdown of every context element the system included, each element's token cost, whether any compaction was applied, and any warnings or errors the
 assembly raised.
 
@@ -36,13 +38,19 @@ per element.
 
 ## Wire-contract architecture
 
-All types that cross a process boundary — HTTP request and response bodies,
-WebSocket events, device commands — are defined once in the `swage-protocol`
-crate as plain serde types. Every consumer is a derived projection: Rust
-crates depend on the protocol crate directly, the frontend's TypeScript is
-generated from it via ts-rs, and the canonical published artefact is the JSON
-Schema generated via schemars and committed under
-`crates/swage-protocol/schema/`.
+The architecture's rule is that all types crossing a process boundary — HTTP
+request and response bodies, WebSocket events, device commands — are defined
+once in the `swage-protocol` crate as plain serde types. Every consumer is a
+derived projection: Rust crates depend on the protocol crate directly, the
+frontend's TypeScript is generated from it via ts-rs, and the canonical
+published artefact is the JSON Schema generated via schemars and committed
+under `crates/swage-protocol/schema/`.
+
+One known exception remains: the `AssemblyReport` type used by the context
+inspector lives in `swage-context`, not `swage-protocol`. It is persisted as
+opaque JSON and the frontend defines its own TypeScript transcription rather
+than importing a generated projection. Migrating the report shapes into the
+protocol crate's wire contract is queued but not yet done.
 
 The crate is organised into four surfaces, each emitting its own schema
 document:
@@ -70,8 +78,9 @@ and is caught by the verification gate.
 ## Verification gate
 
 Development verification runs through `just verify` (aliased as `just ci`).
-The Justfile dispatches into `xtask`, a workspace crate that holds all build
-and verification logic as Rust code rather than shell scripts.
+The Justfile dispatches into `xtask`, a workspace crate that orchestrates the
+gate. Most logic is Rust, but `xtask` shells out for some checks — for
+example, the tracked-local-state check runs `scripts/check-tracked-local-state.sh`.
 
 The gate runs six stages in order. The first four abort immediately on failure
 — a formatting problem or a type error is not worth running the full test
