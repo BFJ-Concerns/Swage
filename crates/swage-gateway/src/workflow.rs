@@ -3977,6 +3977,59 @@ mod tests {
         calls: AtomicUsize,
     }
 
+    struct RecordingGateProvider {
+        model_id: &'static str,
+        calls: AtomicUsize,
+        requests: std::sync::Mutex<Vec<swage_core::CompletionRequest>>,
+    }
+
+    impl RecordingGateProvider {
+        fn new(model_id: &'static str) -> Self {
+            Self {
+                model_id,
+                calls: AtomicUsize::new(0),
+                requests: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl swage_provider::LlmProvider for RecordingGateProvider {
+        fn model_id(&self) -> &str {
+            self.model_id
+        }
+
+        async fn complete(
+            &self,
+            request: swage_core::CompletionRequest,
+        ) -> Result<swage_core::CompletionResponse, swage_core::ProviderError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.requests.lock().expect("requests").push(request);
+            Ok(swage_core::CompletionResponse {
+                content: r#"{"wake":true,"reasoning":"event is decisive"}"#.into(),
+                input_tokens: 1,
+                output_tokens: 1,
+                finish_reason: swage_core::FinishReason::Stop,
+                cost: None,
+            })
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _request: swage_core::ToolCompletionRequest,
+        ) -> Result<swage_core::ToolCompletionResponse, swage_core::ProviderError> {
+            unimplemented!("gate evaluations use complete")
+        }
+
+        fn stream(
+            &self,
+            _request: swage_core::CompletionRequest,
+        ) -> std::pin::Pin<Box<dyn futures::Stream<Item = swage_core::StreamChunk> + Send>>
+        {
+            unimplemented!("gate evaluations use complete")
+        }
+    }
+
     #[async_trait::async_trait]
     impl swage_provider::LlmProvider for ScriptedGateProvider {
         fn model_id(&self) -> &str {
@@ -4052,6 +4105,186 @@ mod tests {
             None,
         );
         (storage, state, run)
+    }
+
+    async fn configured_event_gate_fixture() -> (
+        Arc<SqliteStorage>,
+        AppState,
+        swage_storage::WorkflowRunRecord,
+        Arc<RecordingGateProvider>,
+        Arc<RecordingGateProvider>,
+    ) {
+        let default = Arc::new(RecordingGateProvider::new("default-provider-model"));
+        let selected = Arc::new(RecordingGateProvider::new("provider-facing-model"));
+        let provider = Arc::new(swage_provider::failover::FailoverProvider::with_defaults(
+            vec![
+                Arc::clone(&default) as Arc<dyn swage_provider::LlmProvider>,
+                Arc::clone(&selected) as Arc<dyn swage_provider::LlmProvider>,
+            ],
+        ));
+        let config = swage_config::ResolvedConfig {
+            models: swage_config::ModelCatalogConfig {
+                default: "default".into(),
+                entries: [
+                    (
+                        "default".into(),
+                        swage_config::ModelEndpointConfig {
+                            provider_id: "default-provider".into(),
+                            model_id: "default-provider-model".into(),
+                            ..Default::default()
+                        },
+                    ),
+                    (
+                        "gate-alias".into(),
+                        swage_config::ModelEndpointConfig {
+                            provider_id: "selected-provider".into(),
+                            model_id: "provider-facing-model".into(),
+                            ..Default::default()
+                        },
+                    ),
+                ]
+                .into_iter()
+                .collect(),
+            },
+            ..Default::default()
+        };
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let run = storage
+            .create_workflow_run(NewWorkflowRun {
+                space_id: space.id,
+                parent_run_id: None,
+                parent_seq: None,
+                script_version_id: None,
+                source: Some("return null".into()),
+                source_hash: source_hash("return null"),
+                args: Value::Null,
+                budget: serde_json::json!({}),
+                engine_version: "test".into(),
+                dispatch_bound_agent_ids: vec![],
+            })
+            .await
+            .expect("run");
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            provider,
+            config,
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let entry = state
+            .create_workflow_journal_intent(NewWorkflowJournalIntent {
+                run_id: run.id,
+                seq: 0,
+                kind: "event".into(),
+                args_hash: "test-event".into(),
+                request: serde_json::json!({"kind": "completion"}),
+                effect_kind: None,
+                idempotency_key: None,
+                target_kind: None,
+            })
+            .await
+            .expect("event intent");
+        complete_event_post(
+            &state,
+            run.id,
+            entry.id,
+            RunEventPost {
+                kind: "completion".into(),
+                payload: serde_json::json!({"worker": "w1"}),
+            },
+        )
+        .await
+        .expect("pending event");
+        (storage, state, run, default, selected)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn configured_gate_model_sends_the_catalogue_entries_model_id() {
+        let (_storage, state, run, _default, selected) = configured_event_gate_fixture().await;
+
+        evaluate_run_gate(
+            &state,
+            run.id,
+            &GateRequest {
+                criteria: "wake on completion".into(),
+                model: Some("gate-alias".into()),
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .expect("gate verdict");
+
+        let requests = selected.requests.lock().expect("requests");
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].model.as_deref(), Some("provider-facing-model"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn configured_gate_model_reaches_its_non_default_provider() {
+        let (_storage, state, run, default, selected) = configured_event_gate_fixture().await;
+
+        evaluate_run_gate(
+            &state,
+            run.id,
+            &GateRequest {
+                criteria: "wake on completion".into(),
+                model: Some("gate-alias".into()),
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .expect("gate verdict");
+
+        assert_eq!(selected.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(default.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn gate_without_a_model_uses_the_default_model_and_provider() {
+        let (_storage, state, run, default, selected) = configured_event_gate_fixture().await;
+
+        evaluate_run_gate(
+            &state,
+            run.id,
+            &GateRequest {
+                criteria: "wake on completion".into(),
+                model: None,
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .expect("gate verdict");
+
+        assert_eq!(default.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(selected.calls.load(Ordering::SeqCst), 0);
+        let requests = default.requests.lock().expect("requests");
+        assert_eq!(requests[0].model.as_deref(), Some("default-provider-model"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn unknown_gate_model_retains_the_catalogue_error() {
+        let (_storage, state, run, default, selected) = configured_event_gate_fixture().await;
+
+        let error = evaluate_run_gate(
+            &state,
+            run.id,
+            &GateRequest {
+                criteria: "wake on completion".into(),
+                model: Some("missing".into()),
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("unknown model");
+
+        assert_eq!(
+            error,
+            "RunEventError: gate model 'missing' is not in the configured model catalogue"
+        );
+        assert_eq!(default.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(selected.calls.load(Ordering::SeqCst), 0);
     }
 
     fn workflow_thread_exists(run_id: Uuid) -> bool {
