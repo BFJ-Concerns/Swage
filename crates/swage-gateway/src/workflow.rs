@@ -757,7 +757,7 @@ fn run_host_commands(
     replay: Vec<WorkflowJournalRecord>,
     agent_calls: Arc<AtomicU32>,
     spent_tokens: Arc<AtomicU64>,
-    failed_agent_call: Arc<Mutex<Option<FailedAgentCallRef>>>,
+    failed_agent_calls: Arc<Mutex<std::collections::HashMap<String, FailedAgentCallRef>>>,
     park: CancellationToken,
     park_threshold_ms: u64,
     commands: mpsc::UnboundedReceiver<HostCommand>,
@@ -772,7 +772,7 @@ fn run_host_commands(
         replay,
         agent_calls,
         spent_tokens,
-        failed_agent_call,
+        failed_agent_calls,
         park,
         park_threshold_ms,
         commands,
@@ -789,7 +789,7 @@ async fn run_host_commands_inner(
     replay: Vec<WorkflowJournalRecord>,
     agent_calls: Arc<AtomicU32>,
     spent_tokens: Arc<AtomicU64>,
-    failed_agent_call: Arc<Mutex<Option<FailedAgentCallRef>>>,
+    failed_agent_calls: Arc<Mutex<std::collections::HashMap<String, FailedAgentCallRef>>>,
     park: CancellationToken,
     park_threshold_ms: u64,
     mut commands: mpsc::UnboundedReceiver<HostCommand>,
@@ -867,6 +867,9 @@ async fn run_host_commands_inner(
     // rather than the journal: an intent row is written inside the spawned
     // task, so the journal can lag the dispatch and miss live work.
     let in_flight = Arc::new(AtomicU32::new(0));
+    // The terminal handover is assembled only after every accepted agent
+    // call has settled and registered its failure reference.
+    let mut agent_tasks = tokio::task::JoinSet::new();
     while let Some(command) = commands.recv().await {
         match command {
             HostCommand::Record { kind, message } => {
@@ -1032,13 +1035,13 @@ async fn run_host_commands_inner(
                 let replay_agent_ranks = Arc::clone(&replay_agent_ranks);
                 let replay_release_rank = Arc::clone(&replay_release_rank);
                 let replay_release_notify = Arc::clone(&replay_release_notify);
-                let failed_agent_call = Arc::clone(&failed_agent_call);
+                let failed_agent_calls = Arc::clone(&failed_agent_calls);
                 in_flight.fetch_add(1, Ordering::SeqCst);
                 let in_flight = Arc::clone(&in_flight);
                 // The channel is the deterministic boundary. Assigning sequence
                 // numbers inside spawned tasks would make scheduler timing part of
                 // the journal, which is an especially unhelpful kind of experiment.
-                tokio::spawn(async move {
+                agent_tasks.spawn(async move {
                     let _permit = match semaphore.acquire().await {
                         Ok(permit) => permit,
                         Err(_) => {
@@ -1138,7 +1141,10 @@ async fn run_host_commands_inner(
                             journal_entry_id,
                             seq: current_seq,
                         };
-                        *failed_agent_call.lock().await = Some(failed_call_ref);
+                        failed_agent_calls
+                            .lock()
+                            .await
+                            .insert(failed_call_ref.host_reference(), failed_call_ref);
                         result.map_err(|error| {
                             format!(
                                 "AgentCallReference:{}:{error}",
@@ -1769,6 +1775,7 @@ async fn run_host_commands_inner(
             }
         }
     }
+    while agent_tasks.join_next().await.is_some() {}
 }
 
 async fn await_replay_release(rank: u64, next: &AtomicU64, notify: &Notify) {
@@ -2630,7 +2637,7 @@ async fn launch_existing_run(
         .sum();
     let agent_calls = Arc::new(AtomicU32::new(initial_agent_calls));
     let spent_tokens = Arc::new(AtomicU64::new(initial_spent_tokens));
-    let failed_agent_call = Arc::new(Mutex::new(None));
+    let failed_agent_calls = Arc::new(Mutex::new(std::collections::HashMap::new()));
     let host_task = tokio::spawn(run_host_commands(
         state.clone(),
         record.id,
@@ -2641,7 +2648,7 @@ async fn launch_existing_run(
         replay,
         Arc::clone(&agent_calls),
         Arc::clone(&spent_tokens),
-        Arc::clone(&failed_agent_call),
+        Arc::clone(&failed_agent_calls),
         park.clone(),
         PARK_TIMER_THRESHOLD_MS,
         host_rx,
@@ -2723,8 +2730,12 @@ async fn launch_existing_run(
         let handover = if run_state == "failed" && output.is_none() {
             match terminal_failed_call_reference {
                 Some(host_reference) => {
-                    let failed_call = *failed_agent_call.lock().await;
-                    match failed_call.filter(|failed| failed.host_reference() == host_reference) {
+                    let failed_call = failed_agent_calls
+                        .lock()
+                        .await
+                        .get(&host_reference)
+                        .copied();
+                    match failed_call {
                         Some(failed_call) => Some(
                             durable_failed_agent_call_handover(
                                 &storage,
@@ -3190,6 +3201,8 @@ mod tests {
         requests: std::sync::Mutex<Vec<swage_core::CompletionRequest>>,
     }
 
+    struct StaggeredFailingProvider;
+
     fn scripted_text_output(content: &str) -> Vec<swage_core::StreamChunk> {
         vec![
             swage_core::StreamChunk::Delta {
@@ -3238,6 +3251,52 @@ mod tests {
                 .pop_front()
                 .expect("scripted output");
             Box::pin(futures::stream::iter(output))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl swage_provider::LlmProvider for StaggeredFailingProvider {
+        fn model_id(&self) -> &str {
+            "staggered-failing-model"
+        }
+
+        async fn complete(
+            &self,
+            _request: swage_core::CompletionRequest,
+        ) -> Result<swage_core::CompletionResponse, swage_core::ProviderError> {
+            unimplemented!("workflow calls use streaming")
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _request: swage_core::ToolCompletionRequest,
+        ) -> Result<swage_core::ToolCompletionResponse, swage_core::ProviderError> {
+            unimplemented!("workflow calls use streaming")
+        }
+
+        fn stream(
+            &self,
+            request: swage_core::CompletionRequest,
+        ) -> std::pin::Pin<Box<dyn futures::Stream<Item = swage_core::StreamChunk> + Send>>
+        {
+            let is_terminal_call = request
+                .messages
+                .iter()
+                .flat_map(|message| message.content())
+                .any(|part| {
+                    matches!(part, swage_core::ContentPart::Text { text } if text.contains("terminal call fails first"))
+                });
+            let delay = if is_terminal_call { 10 } else { 200 };
+            Box::pin(futures::stream::once(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                swage_core::StreamChunk::Error {
+                    message: if is_terminal_call {
+                        "terminal call provider failure".into()
+                    } else {
+                        "later concurrent provider failure".into()
+                    },
+                }
+            }))
         }
     }
 
@@ -3554,7 +3613,7 @@ mod tests {
             replay,
             Arc::new(AtomicU32::new(0)),
             Arc::new(AtomicU64::new(0)),
-            Arc::new(Mutex::new(None)),
+            Arc::new(Mutex::new(std::collections::HashMap::new())),
             CancellationToken::new(),
             PARK_TIMER_THRESHOLD_MS,
             rx,
@@ -3803,7 +3862,7 @@ mod tests {
             vec![],
             Arc::new(AtomicU32::new(0)),
             Arc::new(AtomicU64::new(0)),
-            Arc::new(Mutex::new(None)),
+            Arc::new(Mutex::new(std::collections::HashMap::new())),
             CancellationToken::new(),
             PARK_TIMER_THRESHOLD_MS,
             rx,
@@ -3946,7 +4005,7 @@ mod tests {
             vec![],
             Arc::new(AtomicU32::new(0)),
             Arc::new(AtomicU64::new(0)),
-            Arc::new(Mutex::new(None)),
+            Arc::new(Mutex::new(std::collections::HashMap::new())),
             CancellationToken::new(),
             PARK_TIMER_THRESHOLD_MS,
             rx,
@@ -4119,7 +4178,7 @@ mod tests {
             vec![],
             Arc::new(AtomicU32::new(0)),
             Arc::new(AtomicU64::new(0)),
-            Arc::new(Mutex::new(None)),
+            Arc::new(Mutex::new(std::collections::HashMap::new())),
             CancellationToken::new(),
             PARK_TIMER_THRESHOLD_MS,
             rx,
@@ -4544,7 +4603,7 @@ mod tests {
             replay,
             Arc::new(AtomicU32::new(0)),
             Arc::new(AtomicU64::new(0)),
-            Arc::new(Mutex::new(None)),
+            Arc::new(Mutex::new(std::collections::HashMap::new())),
             CancellationToken::new(),
             PARK_TIMER_THRESHOLD_MS,
             rx,
@@ -4726,7 +4785,7 @@ mod tests {
             vec![],
             Arc::new(AtomicU32::new(0)),
             Arc::new(AtomicU64::new(0)),
-            Arc::new(Mutex::new(None)),
+            Arc::new(Mutex::new(std::collections::HashMap::new())),
             park.clone(),
             50,
             rx,
@@ -5032,7 +5091,7 @@ mod tests {
             vec![],
             Arc::new(AtomicU32::new(0)),
             Arc::clone(&spent),
-            Arc::new(Mutex::new(None)),
+            Arc::new(Mutex::new(std::collections::HashMap::new())),
             CancellationToken::new(),
             PARK_TIMER_THRESHOLD_MS,
             rx,
@@ -5161,7 +5220,7 @@ mod tests {
             replay,
             Arc::new(AtomicU32::new(2)),
             Arc::new(AtomicU64::new(0)),
-            Arc::new(Mutex::new(None)),
+            Arc::new(Mutex::new(std::collections::HashMap::new())),
             CancellationToken::new(),
             PARK_TIMER_THRESHOLD_MS,
             rx,
@@ -5543,6 +5602,93 @@ mod tests {
                 .expect("present")
                 .state,
             "failed"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn concurrent_failures_attribute_handover_to_the_terminal_call() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::new(StaggeredFailingProvider),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let source = r#"
+            await Promise.all([
+                agent("terminal call fails first", {
+                    agent: "default",
+                    label: "terminal call",
+                    maxAttempts: 1,
+                }),
+                agent("concurrent call fails later", {
+                    agent: "default",
+                    label: "later concurrent call",
+                    maxAttempts: 1,
+                }),
+            ]);
+        "#;
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(space.id),
+            Json(StartInlineWorkflowRunRequest {
+                source: source.into(),
+                args: Value::Null,
+                budget: Some(WorkflowBudget {
+                    max_agent_calls: None,
+                    max_total_tokens: None,
+                    reserved_closing_tokens: None,
+                    max_concurrent_agent_calls: Some(2),
+                }),
+            }),
+        )
+        .await
+        .expect("start inline run");
+
+        wait_for_terminal(&state, started.id).await;
+
+        let run = storage
+            .get_workflow_run(started.id)
+            .await
+            .expect("run")
+            .expect("present");
+        let handover = run.handover.expect("attributed terminal handover");
+        let journal = storage
+            .list_workflow_journal(started.id)
+            .await
+            .expect("journal");
+        let failed_call_error = handover["failed_call"]["error"]
+            .as_str()
+            .expect("attributed call error");
+        let terminal_call = journal
+            .iter()
+            .find(|entry| entry.request["label"] == "terminal call")
+            .expect("terminal failed call");
+        let later_call = journal
+            .iter()
+            .find(|entry| entry.request["label"] == "later concurrent call")
+            .expect("later failed call");
+
+        assert_eq!(run.state, "failed");
+        assert_eq!(terminal_call.status, "failed");
+        assert_eq!(later_call.status, "failed");
+        assert_eq!(handover["classification"], "interrupted");
+        assert_eq!(handover["failed_call"]["label"], "terminal call");
+        assert_eq!(
+            handover["failed_call"]["journal_entry_id"],
+            terminal_call.id.to_string()
+        );
+        assert_ne!(
+            handover["failed_call"]["journal_entry_id"],
+            later_call.id.to_string()
+        );
+        assert!(
+            run.error_message
+                .as_deref()
+                .is_some_and(|error| error.contains(failed_call_error))
         );
     }
 
