@@ -2460,6 +2460,9 @@ async fn failed_agent_call_handover(
         .ok()?
         .into_iter()
         .filter_map(|event| {
+            // This sequence window is deterministic for sequential agent calls.
+            // Concurrent calls need structural event-to-call linkage before this
+            // delivery can be attributed to one call without ambiguity.
             let delivery = match event.delivered_wake_seq {
                 Some(delivery_seq)
                     if delivery_seq < failed_call.seq
@@ -2503,13 +2506,31 @@ async fn failed_agent_call_handover(
     }))
 }
 
-fn degraded_failed_run_handover(terminal_error: Option<&str>) -> Value {
-    serde_json::json!({
+fn degraded_failed_run_handover(
+    terminal_error: Option<&str>,
+    reconstruction_failed: bool,
+) -> Value {
+    let mut handover = serde_json::json!({
         "classification": "interrupted_unattributed",
         "failure": "The workflow failed without an attributable agent-call identity.",
         "failed_call": Value::Null,
         "terminal_error": terminal_error,
-    })
+    });
+    if reconstruction_failed {
+        handover["reconstruction_failed"] = Value::Bool(true);
+    }
+    handover
+}
+
+async fn durable_failed_agent_call_handover(
+    storage: &Arc<dyn Storage>,
+    run_id: Uuid,
+    failed_call: FailedAgentCallRef,
+    terminal_error: Option<&str>,
+) -> Value {
+    failed_agent_call_handover(storage, run_id, failed_call)
+        .await
+        .unwrap_or_else(|| degraded_failed_run_handover(terminal_error, true))
 }
 
 async fn launch_existing_run(
@@ -2695,13 +2716,19 @@ async fn launch_existing_run(
                 Some(host_reference) => {
                     let failed_call = *failed_agent_call.lock().await;
                     match failed_call.filter(|failed| failed.host_reference() == host_reference) {
-                        Some(failed_call) => {
-                            failed_agent_call_handover(&storage, run_id, failed_call).await
-                        }
-                        None => Some(degraded_failed_run_handover(error.as_deref())),
+                        Some(failed_call) => Some(
+                            durable_failed_agent_call_handover(
+                                &storage,
+                                run_id,
+                                failed_call,
+                                error.as_deref(),
+                            )
+                            .await,
+                        ),
+                        None => Some(degraded_failed_run_handover(error.as_deref(), false)),
                     }
                 }
-                _ => Some(degraded_failed_run_handover(error.as_deref())),
+                _ => Some(degraded_failed_run_handover(error.as_deref(), false)),
             }
         } else {
             None
@@ -5212,6 +5239,9 @@ mod tests {
                 .as_str()
                 .is_some_and(|error| error.starts_with("AgentCallError:"))
         );
+        let terminal_error = run.error_message.as_deref().expect("terminal error");
+        assert!(terminal_error.contains("at <anonymous> (eval_script:"));
+        assert!(!terminal_error.contains("AgentCallError: AgentCallError:"));
 
         let journal = storage
             .list_workflow_journal(started.id)
@@ -5343,6 +5373,27 @@ mod tests {
                 .is_some_and(|error| error.contains("later unrelated script failure"))
         );
         assert_eq!(provider.requests.lock().expect("requests").len(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn failed_call_reconstruction_failure_still_leaves_a_handover() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let terminal_error = "workflow script failed: AgentCallError: terminal failure";
+        let handover = durable_failed_agent_call_handover(
+            &(Arc::clone(&storage) as Arc<dyn Storage>),
+            Uuid::new_v4(),
+            FailedAgentCallRef {
+                journal_entry_id: Uuid::new_v4(),
+                seq: 7,
+            },
+            Some(terminal_error),
+        )
+        .await;
+
+        assert_eq!(handover["classification"], "interrupted_unattributed");
+        assert_eq!(handover["failed_call"], Value::Null);
+        assert_eq!(handover["terminal_error"], terminal_error);
+        assert_eq!(handover["reconstruction_failed"], true);
     }
 
     #[tokio::test(flavor = "multi_thread")]

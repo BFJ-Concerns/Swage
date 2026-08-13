@@ -13,7 +13,8 @@ use crate::{
 };
 
 fn named_host_error(error: &str, fallback: &str) -> (String, String) {
-    const NAMES: [(&str, &str); 10] = [
+    const NAMES: [(&str, &str); 11] = [
+        ("AgentCallError", "AgentCallError"),
         ("BudgetExceededError", "BudgetExceededError"),
         ("BudgetWindDownError", "BudgetWindDownError"),
         ("DeliveryNotGrantedError", "DeliveryNotGrantedError"),
@@ -251,7 +252,7 @@ impl WorkflowEngine {
         type WorkflowIntrinsics = (Eval, Json, PromiseIntrinsic, MapSet, RegExpCompiler, RegExp);
         let context = AsyncContext::custom::<WorkflowIntrinsics>(&runtime).await?;
         let source = format!(
-            "(async () => {{ try {{ const value = await (async () => {{ {source} }})(); return JSON.stringify(value === undefined ? null : value); }} catch (error) {{ if (error && typeof error.__swageAgentCallReference === 'string') return {prefix:?} + error.__swageAgentCallReference + ':' + error.name + ': ' + error.message; throw error; }} }})()",
+            "(async () => {{ try {{ const value = await (async () => {{ {source} }})(); return JSON.stringify(value === undefined ? null : value); }} catch (error) {{ if (error && typeof error.__swageAgentCallReference === 'string') return {prefix:?} + error.__swageAgentCallReference + ':' + String(error.stack ?? error); throw error; }} }})()",
             prefix = AGENT_CALL_FAILURE_PREFIX,
         );
         let args_json = args_json.to_string();
@@ -1718,6 +1719,10 @@ mod tests {
         );
         assert_eq!(
             named_host_error("provider unavailable", "AgentCallError"),
+            ("AgentCallError".into(), "provider unavailable".into())
+        );
+        assert_eq!(
+            named_host_error("AgentCallError: provider unavailable", "AgentCallError"),
             ("AgentCallError".into(), "provider unavailable".into())
         );
     }
