@@ -14,7 +14,7 @@ use swage_core::{
     ToolReplayPart,
 };
 
-use crate::http::{HttpClient, SseEvent};
+use crate::http::{HttpClient, SseEvent, StreamResponseMetadata};
 use crate::provider::{LlmProvider, ProviderConfig, spawn_stream_forwarder};
 
 const ANTHROPIC_API_VERSION: &str = "2023-06-01";
@@ -249,7 +249,7 @@ impl AnthropicStreamWitness {
                     }
                 }
             }
-            Some(event_type) => self.witness.terminal_event = Some(event_type.to_owned()),
+            Some(_) => {}
             None => {}
         }
         if let Some(event_type) = event_type {
@@ -287,6 +287,61 @@ impl AnthropicStreamWitness {
             StreamChunk::Done { finish_reason }
         };
         [StreamChunk::ProviderResponseWitness(witness), terminal]
+    }
+}
+
+async fn forward_anthropic_stream(
+    metadata: StreamResponseMetadata,
+    sse_stream: impl Stream<Item = Result<SseEvent, ProviderError>>,
+    tx: tokio::sync::mpsc::UnboundedSender<StreamChunk>,
+) {
+    tokio::pin!(sse_stream);
+    let mut tool_acc = ToolUseAccumulator::new();
+    let mut witness = AnthropicStreamWitness::new(metadata.status, metadata.request_id);
+
+    while let Some(result) = sse_stream.next().await {
+        let event = match result {
+            Err(error) => {
+                let _ = tx.send(StreamChunk::Error {
+                    message: error.to_string(),
+                });
+                return;
+            }
+            Ok(event) => event,
+        };
+
+        witness.observe(&event);
+
+        if let Some(chunk) = tool_acc.process_event(&event) {
+            if matches!(chunk, StreamChunk::ToolUse { .. }) {
+                witness.record_tool_output();
+            }
+            if tx.send(chunk).is_err() {
+                return;
+            }
+            continue;
+        }
+
+        if event.event_type.as_deref() == Some("message_stop") {
+            for chunk in witness.terminal_chunks() {
+                if tx.send(chunk).is_err() {
+                    return;
+                }
+            }
+            return;
+        }
+
+        if let Some(chunk) = AnthropicProvider::parse_sse_event(&event)
+            && tx.send(chunk).is_err()
+        {
+            return;
+        }
+    }
+
+    for chunk in witness.terminal_chunks() {
+        if tx.send(chunk).is_err() {
+            return;
+        }
     }
 }
 
@@ -648,46 +703,7 @@ impl AnthropicProvider {
                 }
             };
 
-            tokio::pin!(sse_stream);
-            let mut tool_acc = ToolUseAccumulator::new();
-            let mut witness = AnthropicStreamWitness::new(metadata.status, metadata.request_id);
-
-            while let Some(result) = sse_stream.next().await {
-                let event = match result {
-                    Err(e) => {
-                        let _ = tx.send(StreamChunk::Error {
-                            message: e.to_string(),
-                        });
-                        break;
-                    }
-                    Ok(ev) => ev,
-                };
-
-                witness.observe(&event);
-
-                if let Some(chunk) = tool_acc.process_event(&event) {
-                    if matches!(chunk, StreamChunk::ToolUse { .. }) {
-                        witness.record_tool_output();
-                    }
-                    let _ = tx.send(chunk);
-                    continue;
-                }
-
-                if event.event_type.as_deref() == Some("message_stop") {
-                    for chunk in witness.terminal_chunks() {
-                        let _ = tx.send(chunk);
-                    }
-                    break;
-                }
-
-                if let Some(chunk) = AnthropicProvider::parse_sse_event(&event) {
-                    let is_done = matches!(chunk, StreamChunk::Done { .. });
-                    let _ = tx.send(chunk);
-                    if is_done {
-                        break;
-                    }
-                }
-            }
+            forward_anthropic_stream(metadata, sse_stream, tx).await;
         })
     }
 }
@@ -1009,48 +1025,7 @@ impl LlmProvider for AnthropicProvider {
                 }
             };
 
-            tokio::pin!(sse_stream);
-            let mut tool_acc = ToolUseAccumulator::new();
-            let mut witness = AnthropicStreamWitness::new(metadata.status, metadata.request_id);
-
-            while let Some(result) = sse_stream.next().await {
-                let event = match result {
-                    Err(e) => {
-                        let _ = tx.send(StreamChunk::Error {
-                            message: e.to_string(),
-                        });
-                        break;
-                    }
-                    Ok(ev) => ev,
-                };
-
-                witness.observe(&event);
-
-                // Tool_use blocks span multiple events — accumulator handles
-                // the three-event sequence and emits a single ToolUse chunk.
-                if let Some(chunk) = tool_acc.process_event(&event) {
-                    if matches!(chunk, StreamChunk::ToolUse { .. }) {
-                        witness.record_tool_output();
-                    }
-                    let _ = tx.send(chunk);
-                    continue;
-                }
-
-                if event.event_type.as_deref() == Some("message_stop") {
-                    for chunk in witness.terminal_chunks() {
-                        let _ = tx.send(chunk);
-                    }
-                    break;
-                }
-
-                if let Some(chunk) = AnthropicProvider::parse_sse_event(&event) {
-                    let is_done = matches!(chunk, StreamChunk::Done { .. });
-                    let _ = tx.send(chunk);
-                    if is_done {
-                        break;
-                    }
-                }
-            }
+            forward_anthropic_stream(metadata, sse_stream, tx).await;
         })
     }
 }
@@ -1070,12 +1045,22 @@ mod tests {
         }
     }
 
-    fn witness_chunks(events: &[SseEvent]) -> [StreamChunk; 2] {
-        let mut witness = AnthropicStreamWitness::new(200, Some("req_fixture".to_owned()));
-        for event in events {
-            witness.observe(event);
+    async fn fixture_chunks(events: Vec<SseEvent>) -> Vec<StreamChunk> {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        forward_anthropic_stream(
+            StreamResponseMetadata {
+                status: 200,
+                request_id: Some("req_fixture".to_owned()),
+            },
+            futures::stream::iter(events.into_iter().map(Ok)),
+            tx,
+        )
+        .await;
+        let mut chunks = Vec::new();
+        while let Some(chunk) = rx.recv().await {
+            chunks.push(chunk);
         }
-        witness.terminal_chunks()
+        chunks
     }
 
     // --- parse_sse_event ---
@@ -1123,9 +1108,9 @@ mod tests {
         assert!(matches!(chunk, StreamChunk::Done { .. }));
     }
 
-    #[test]
-    fn completed_empty_fixture_is_an_anomaly_with_terminal_witness() {
-        let chunks = witness_chunks(&[
+    #[tokio::test]
+    async fn completed_empty_fixture_is_an_anomaly_with_terminal_witness() {
+        let chunks = fixture_chunks(vec![
             event(
                 "message_start",
                 r#"{"type":"message_start","message":{"usage":{"input_tokens":17,"output_tokens":0}}}"#,
@@ -1135,24 +1120,32 @@ mod tests {
                 r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":0}}"#,
             ),
             event("message_stop", r#"{"type":"message_stop"}"#),
-        ]);
+        ])
+        .await;
 
-        let StreamChunk::ProviderResponseWitness(witness) = &chunks[0] else {
-            panic!("first chunk should retain the response witness");
-        };
+        let witness = chunks
+            .iter()
+            .find_map(|chunk| match chunk {
+                StreamChunk::ProviderResponseWitness(witness) => Some(witness),
+                _ => None,
+            })
+            .expect("stream should retain the response witness");
         assert_eq!(witness.http_status, 200);
         assert_eq!(witness.request_id.as_deref(), Some("req_fixture"));
         assert_eq!(witness.terminal_event.as_deref(), Some("message_stop"));
         assert_eq!(witness.stop_reason.as_deref(), Some("end_turn"));
         assert_eq!(witness.usage.input_tokens, 17);
         assert!(witness.content_blocks.is_empty());
-        assert!(matches!(chunks[1], StreamChunk::ProviderAnomaly { .. }));
+        assert!(matches!(
+            chunks.last(),
+            Some(StreamChunk::ProviderAnomaly { .. })
+        ));
     }
 
-    #[test]
-    fn completed_non_text_fixture_is_an_anomaly_without_retaining_content() {
+    #[tokio::test]
+    async fn completed_non_text_fixture_is_an_anomaly_without_retaining_content() {
         let secret_thinking = "private chain of thought";
-        let chunks = witness_chunks(&[
+        let chunks = fixture_chunks(vec![
             event(
                 "content_block_start",
                 r#"{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}"#,
@@ -1171,11 +1164,16 @@ mod tests {
                 r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":8}}"#,
             ),
             event("message_stop", r#"{"type":"message_stop"}"#),
-        ]);
+        ])
+        .await;
 
-        let StreamChunk::ProviderResponseWitness(witness) = &chunks[0] else {
-            panic!("first chunk should retain the response witness");
-        };
+        let witness = chunks
+            .iter()
+            .find_map(|chunk| match chunk {
+                StreamChunk::ProviderResponseWitness(witness) => Some(witness),
+                _ => None,
+            })
+            .expect("stream should retain the response witness");
         assert_eq!(
             witness.content_blocks,
             vec![ProviderContentBlockWitness {
@@ -1186,6 +1184,62 @@ mod tests {
         );
         let serialised = serde_json::to_string(witness).unwrap();
         assert!(!serialised.contains(secret_thinking));
+        assert!(matches!(
+            chunks.last(),
+            Some(StreamChunk::ProviderAnomaly { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn completed_tool_only_fixture_is_not_an_anomaly() {
+        let chunks = fixture_chunks(vec![
+            event(
+                "content_block_start",
+                r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"tool_1","name":"lookup","input":{}}}"#,
+            ),
+            event(
+                "content_block_delta",
+                r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"query\":\"status\"}"}}"#,
+            ),
+            event("content_block_stop", r#"{"type":"content_block_stop","index":0}"#),
+            event(
+                "message_delta",
+                r#"{"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":12}}"#,
+            ),
+            event("message_stop", r#"{"type":"message_stop"}"#),
+        ])
+        .await;
+
+        assert!(
+            chunks
+                .iter()
+                .any(|chunk| matches!(chunk, StreamChunk::ToolUse { .. }))
+        );
+        assert!(
+            chunks
+                .iter()
+                .all(|chunk| !matches!(chunk, StreamChunk::ProviderAnomaly { .. }))
+        );
+        assert!(matches!(
+            chunks.last(),
+            Some(StreamChunk::Done {
+                finish_reason: Some(FinishReason::ToolUse)
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn eof_without_message_stop_is_an_anomaly_with_terminal_witness() {
+        let chunks = fixture_chunks(vec![event(
+            "message_start",
+            r#"{"type":"message_start","message":{"usage":{"input_tokens":17,"output_tokens":0}}}"#,
+        )])
+        .await;
+
+        let StreamChunk::ProviderResponseWitness(witness) = &chunks[0] else {
+            panic!("first chunk should retain the response witness");
+        };
+        assert_eq!(witness.terminal_event.as_deref(), Some("message_start"));
         assert!(matches!(chunks[1], StreamChunk::ProviderAnomaly { .. }));
     }
 
