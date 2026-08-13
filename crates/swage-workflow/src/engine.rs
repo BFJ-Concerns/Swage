@@ -252,7 +252,7 @@ impl WorkflowEngine {
         type WorkflowIntrinsics = (Eval, Json, PromiseIntrinsic, MapSet, RegExpCompiler, RegExp);
         let context = AsyncContext::custom::<WorkflowIntrinsics>(&runtime).await?;
         let source = format!(
-            "(async () => {{ try {{ const value = await (async () => {{ {source} }})(); return JSON.stringify(value === undefined ? null : value); }} catch (error) {{ if (error && typeof error.__swageAgentCallReference === 'string') return {prefix:?} + error.__swageAgentCallReference + ':' + String(error.stack ?? error); throw error; }} }})()",
+            "(async () => {{ try {{ const value = await (async () => {{ {source} }})(); return JSON.stringify(value === undefined ? null : value); }} catch (error) {{ if (error && typeof error.__swageAgentCallReference === 'string') {{ const rendered = String(error.name) + ': ' + String(error.message); const stack = error.stack == null ? '' : String(error.stack); return {prefix:?} + error.__swageAgentCallReference + ':' + rendered + (stack ? '\\n' + stack : ''); }} throw error; }} }})()",
             prefix = AGENT_CALL_FAILURE_PREFIX,
         );
         let args_json = args_json.to_string();
