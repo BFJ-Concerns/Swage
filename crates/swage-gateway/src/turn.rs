@@ -98,6 +98,17 @@ fn append_provider_visible_capture_error(report_json: &mut serde_json::Value, ro
     }));
 }
 
+fn append_provider_visible_response(
+    report_json: &mut serde_json::Value,
+    round: usize,
+    witness: swage_core::ProviderResponseWitness,
+) {
+    provider_visible_array(report_json, "responses").push(serde_json::json!({
+        "round": round,
+        "witness": witness,
+    }));
+}
+
 async fn redact_provider_visible_request(
     state: &AppState,
     mut request: serde_json::Value,
@@ -469,6 +480,53 @@ fn render_delegation_result(result: &swage_storage::model::AgentMessage) -> Stri
     text
 }
 
+async fn release_active_turn(state: &AppState, session_id: Uuid) {
+    state.active_turns.lock().await.remove(&session_id);
+}
+
+async fn release_active_turn_on_error<T, E>(
+    state: &AppState,
+    session_id: Uuid,
+    result: Result<T, E>,
+) -> Result<T, E> {
+    if result.is_err() {
+        release_active_turn(state, session_id).await;
+    }
+    result
+}
+
+async fn record_terminal_state_and_release(
+    state: &AppState,
+    session_id: Uuid,
+    turn_id: Uuid,
+    turn_state: TurnState,
+) -> Result<(), GatewayError> {
+    release_active_turn_on_error(
+        state,
+        session_id,
+        state.storage.update_turn_state(turn_id, turn_state).await,
+    )
+    .await?;
+    release_active_turn(state, session_id).await;
+    Ok(())
+}
+
+async fn record_failed_turn_and_release_on_error<T>(
+    state: &AppState,
+    session_id: Uuid,
+    turn_id: Uuid,
+    result: Result<T, GatewayError>,
+) -> Result<T, GatewayError> {
+    match result {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            record_terminal_state_and_release(state, session_id, turn_id, TurnState::Failed)
+                .await?;
+            Err(error)
+        }
+    }
+}
+
 /// Orchestrate a complete agent turn: user message → provider stream → storage.
 ///
 /// # Flow
@@ -675,39 +733,54 @@ pub(crate) async fn process_turn_with_existing_turn(
     {
         Ok(result) => result,
         Err(error) => {
-            state
-                .storage
-                .update_turn_state(prepared_turn_id, TurnState::Failed)
-                .await?;
-            let mut turns = state.active_turns.lock().await;
-            turns.remove(&session_id);
+            record_terminal_state_and_release(
+                state,
+                session_id,
+                prepared_turn_id,
+                TurnState::Failed,
+            )
+            .await?;
             return Err(error);
         }
     };
 
     if !before_inbound.modified_by_hooks.is_empty() {
-        state
-            .storage
-            .update_inbound_audit(
-                prepared_turn_id,
-                &InboundAudit {
-                    canonical_input: before_inbound.canonical_content.clone(),
-                    modified_by_hooks: before_inbound.modified_by_hooks.clone(),
-                },
-            )
-            .await?;
+        record_failed_turn_and_release_on_error(
+            state,
+            session_id,
+            prepared_turn_id,
+            state
+                .storage
+                .update_inbound_audit(
+                    prepared_turn_id,
+                    &InboundAudit {
+                        canonical_input: before_inbound.canonical_content.clone(),
+                        modified_by_hooks: before_inbound.modified_by_hooks.clone(),
+                    },
+                )
+                .await
+                .map_err(GatewayError::from),
+        )
+        .await?;
     }
 
-    state
-        .storage
-        .append_message(AppendMessage {
-            thread_id,
-            turn_id: Some(prepared_turn_id),
-            role: Role::User,
-            content: before_inbound.canonical_content.clone(),
-            agent_id: session.agent_id.clone(),
-        })
-        .await?;
+    record_failed_turn_and_release_on_error(
+        state,
+        session_id,
+        prepared_turn_id,
+        state
+            .storage
+            .append_message(AppendMessage {
+                thread_id,
+                turn_id: Some(prepared_turn_id),
+                role: Role::User,
+                content: before_inbound.canonical_content.clone(),
+                agent_id: session.agent_id.clone(),
+            })
+            .await
+            .map_err(GatewayError::from),
+    )
+    .await?;
 
     // Step 7: Deliver completed detached delegations. A detached child's
     // Result waits in this agent's mailbox until its parent next turns;
@@ -748,12 +821,8 @@ pub(crate) async fn process_turn_with_existing_turn(
     }
     .await;
     if let Err(error) = delivery_result {
-        state
-            .storage
-            .update_turn_state(prepared_turn_id, TurnState::Failed)
+        record_terminal_state_and_release(state, session_id, prepared_turn_id, TurnState::Failed)
             .await?;
-        let mut turns = state.active_turns.lock().await;
-        turns.remove(&session_id);
         return Err(error);
     }
 
@@ -762,19 +831,25 @@ pub(crate) async fn process_turn_with_existing_turn(
     // selected assembly.
     // Runs fail-open assembly: custom JavaScript configs when configured, built-in
     // default otherwise. The LLM provider is passed for two-phase compaction.
-    let history_messages =
-        rebuild_thread_history_messages(state.storage.as_ref(), thread_id).await?;
+    let history_messages = record_failed_turn_and_release_on_error(
+        state,
+        session_id,
+        prepared_turn_id,
+        rebuild_thread_history_messages(state.storage.as_ref(), thread_id).await,
+    )
+    .await?;
 
     let assembly_name =
         match select_context_assembly(state, &config, session_id, prepared_turn_id).await {
             Ok(assembly_name) => assembly_name,
             Err(error) => {
-                state
-                    .storage
-                    .update_turn_state(prepared_turn_id, TurnState::Failed)
-                    .await?;
-                let mut turns = state.active_turns.lock().await;
-                turns.remove(&session_id);
+                record_terminal_state_and_release(
+                    state,
+                    session_id,
+                    prepared_turn_id,
+                    TurnState::Failed,
+                )
+                .await?;
                 return Err(error);
             }
         };
@@ -890,16 +965,22 @@ pub(crate) async fn process_turn_with_existing_turn(
             )
             .await
             {
-                state
-                    .storage
-                    .update_turn_state(prepared_turn_id, TurnState::Failed)
-                    .await?;
-                state.active_turns.lock().await.remove(&session_id);
+                record_terminal_state_and_release(
+                    state,
+                    session_id,
+                    prepared_turn_id,
+                    TurnState::Failed,
+                )
+                .await?;
                 return Err(audit_error);
             }
-            let approval = request_sandbox_degradation_approval(
+            let approval = record_failed_turn_and_release_on_error(
                 state,
-                SandboxDegradationApprovalRequest {
+                session_id,
+                prepared_turn_id,
+                request_sandbox_degradation_approval(
+                    state,
+                    SandboxDegradationApprovalRequest {
                     config: &config,
                     ws_tx: &ws_tx,
                     turn_id: prepared_turn_id,
@@ -912,47 +993,64 @@ pub(crate) async fn process_turn_with_existing_turn(
                         "error": error.to_string(),
                     }),
                     cancel_token: &cancel_token,
-                },
+                    },
+                )
+                .await,
             )
             .await?;
             match approval {
                 SandboxDegradationApproval::Approved => {}
                 SandboxDegradationApproval::Rejected => {
-                    state
-                        .storage
-                        .update_turn_state(prepared_turn_id, TurnState::Failed)
-                        .await?;
-                    let mut turns = state.active_turns.lock().await;
-                    turns.remove(&session_id);
+                    record_terminal_state_and_release(
+                        state,
+                        session_id,
+                        prepared_turn_id,
+                        TurnState::Failed,
+                    )
+                    .await?;
                     return Err(GatewayError::WebSocketError(format!(
                         "sandbox setup failed and unsandboxed execution was not approved: {error}"
                     )));
                 }
                 SandboxDegradationApproval::Interrupted => {
-                    state
-                        .storage
-                        .update_turn_state(prepared_turn_id, TurnState::Interrupted)
-                        .await?;
+                    record_failed_turn_and_release_on_error(
+                        state,
+                        session_id,
+                        prepared_turn_id,
+                        state
+                            .storage
+                            .update_turn_state(prepared_turn_id, TurnState::Interrupted)
+                            .await
+                            .map_err(GatewayError::from),
+                    )
+                    .await?;
                     let _ = ws_tx.send(ServerEvent::Cancelled {});
-                    let mut turns = state.active_turns.lock().await;
-                    turns.remove(&session_id);
+                    // Preserve the client-visible interrupt ordering: the old turn
+                    // remains active until its cancellation event has been sent.
+                    release_active_turn(state, session_id).await;
                     return Ok(());
                 }
             }
 
             let mut unsandboxed_config = config.clone();
             unsandboxed_config.sandbox.allow_degraded_execution = true;
-            build_gateway_dispatcher(
+            record_failed_turn_and_release_on_error(
                 state,
-                &unsandboxed_config,
-                &agent_config,
-                session.metadata.as_ref(),
-                Some(space_id),
-                session.active_workspace_attachment_id,
-                ws_tx.clone(),
+                session_id,
+                prepared_turn_id,
+                build_gateway_dispatcher(
+                    state,
+                    &unsandboxed_config,
+                    &agent_config,
+                    session.metadata.as_ref(),
+                    Some(space_id),
+                    session.active_workspace_attachment_id,
+                    ws_tx.clone(),
+                )
+                .await
+                .map_err(|fallback_error| GatewayError::WebSocketError(fallback_error.to_string())),
             )
-            .await
-            .map_err(|fallback_error| GatewayError::WebSocketError(fallback_error.to_string()))?
+            .await?
         }
         Err(error) => {
             let isolation = ExecutionIsolation::Degraded {
@@ -962,11 +1060,13 @@ pub(crate) async fn process_turn_with_existing_turn(
                 code: "sandbox_unavailable".into(),
                 message: format!("Sandbox setup failed; the turn was not executed: {error}"),
             });
-            state
-                .storage
-                .update_turn_state(prepared_turn_id, TurnState::Failed)
-                .await?;
-            state.active_turns.lock().await.remove(&session_id);
+            record_terminal_state_and_release(
+                state,
+                session_id,
+                prepared_turn_id,
+                TurnState::Failed,
+            )
+            .await?;
             record_degraded_execution(
                 state,
                 &isolation,
@@ -998,11 +1098,8 @@ pub(crate) async fn process_turn_with_existing_turn(
             "failed to shut down sandbox after degradation audit failure",
         )
         .await;
-        state
-            .storage
-            .update_turn_state(prepared_turn_id, TurnState::Failed)
+        record_terminal_state_and_release(state, session_id, prepared_turn_id, TurnState::Failed)
             .await?;
-        state.active_turns.lock().await.remove(&session_id);
         return Err(error);
     }
     let sandbox_guard = dispatcher_build.sandbox_guard;
@@ -1235,6 +1332,33 @@ pub(crate) async fn process_turn_with_existing_turn(
                     {
                         record_integrity_lost.get_or_insert(format!(
                             "provider reasoning snapshot lost and the loss could not be recorded: {audit_error}"
+                        ));
+                    }
+                }
+            }
+            AgentEvent::ProviderResponseCaptured {
+                turn_id: snapshot_turn_id,
+                round,
+                witness,
+            } => {
+                append_provider_visible_response(&mut report_json, round, witness);
+                if let Err(e) = state
+                    .storage
+                    .store_snapshot(snapshot_turn_id, &report_json.to_string())
+                    .await
+                {
+                    tracing::warn!(error = %e, "failed to persist provider response witness");
+                    if let Err(audit_error) = record_durability::record_reconstruction_gap(
+                        state.storage.as_ref(),
+                        Some(session_id),
+                        snapshot_turn_id,
+                        "provider_response_witness",
+                        &e,
+                    )
+                    .await
+                    {
+                        record_integrity_lost.get_or_insert(format!(
+                            "provider response witness lost and the loss could not be recorded: {audit_error}"
                         ));
                     }
                 }
@@ -1519,10 +1643,7 @@ pub(crate) async fn process_turn_with_existing_turn(
     }
 
     // Cleanup: remove the cancellation token regardless of outcome.
-    {
-        let mut turns = state.active_turns.lock().await;
-        turns.remove(&session_id);
-    }
+    release_active_turn(state, session_id).await;
 
     Ok(())
 }

@@ -328,6 +328,15 @@ impl LlmProvider for CircuitBreakerProvider {
                                         ));
                                     next_is_recorded = true;
                                 }
+                                StreamChunk::ProviderAnomaly { message } => {
+                                    state
+                                        .lock()
+                                        .expect("circuit-breaker state lock should not be poisoned")
+                                        .record_failure(&ProviderError::ProviderAnomaly(
+                                            message.clone(),
+                                        ));
+                                    next_is_recorded = true;
+                                }
                                 StreamChunk::Done { .. } => {
                                     state
                                         .lock()
@@ -338,6 +347,7 @@ impl LlmProvider for CircuitBreakerProvider {
                                 StreamChunk::Delta { .. }
                                 | StreamChunk::Reasoning { .. }
                                 | StreamChunk::Usage(_)
+                                | StreamChunk::ProviderResponseWitness(_)
                                 | StreamChunk::ProviderRetryStarted { .. }
                                 | StreamChunk::ProviderRetrySettled { .. }
                                 | StreamChunk::ToolUse { .. } => {}

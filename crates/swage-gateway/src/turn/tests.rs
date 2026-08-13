@@ -49,6 +49,121 @@ use crate::{
     websocket::ServerEvent,
 };
 
+#[test]
+fn provider_response_witness_is_appended_without_content_fields() {
+    let mut report = serde_json::json!({});
+    append_provider_visible_response(
+        &mut report,
+        2,
+        swage_core::ProviderResponseWitness {
+            http_status: 200,
+            request_id: Some("req-123".into()),
+            terminal_event: Some("message_stop".into()),
+            stop_reason: Some("end_turn".into()),
+            usage: swage_core::TokenUsage {
+                input_tokens: 9,
+                output_tokens: 0,
+            },
+            content_blocks: vec![swage_core::ProviderContentBlockWitness {
+                block_type: "thinking".into(),
+                count: 1,
+                bytes: 42,
+            }],
+        },
+    );
+
+    let response = &report["provider_visible"]["responses"][0];
+    assert_eq!(response["round"], 2);
+    assert_eq!(response["witness"]["request_id"], "req-123");
+    assert_eq!(response["witness"]["content_blocks"][0]["bytes"], 42);
+    assert!(response["witness"].get("content").is_none());
+    assert!(response["witness"].get("thinking").is_none());
+}
+
+fn provider_witness_chunks() -> Vec<StreamChunk> {
+    vec![
+        StreamChunk::ProviderResponseWitness(swage_core::ProviderResponseWitness {
+            http_status: 200,
+            request_id: Some("req-123".into()),
+            terminal_event: Some("message_stop".into()),
+            stop_reason: Some("end_turn".into()),
+            usage: swage_core::TokenUsage {
+                input_tokens: 9,
+                output_tokens: 2,
+            },
+            content_blocks: vec![swage_core::ProviderContentBlockWitness {
+                block_type: "text".into(),
+                count: 1,
+                bytes: 6,
+            }],
+        }),
+        StreamChunk::Delta {
+            content: "answer".into(),
+        },
+        StreamChunk::Done {
+            finish_reason: Some(FinishReason::Stop),
+        },
+    ]
+}
+
+#[tokio::test]
+async fn provider_response_event_persists_witness_through_gateway_turn() {
+    let (state, session_id) = make_state_with_session(provider_witness_chunks()).await;
+    let (tx, _rx) = mpsc::unbounded_channel();
+
+    process_turn(
+        &state,
+        session_id,
+        None,
+        "Hello".into(),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .expect("turn should complete");
+
+    let thread = state.storage.list_by_session(session_id).await.unwrap()[0].clone();
+    let turn = state.storage.list_turns_by_thread(thread.id).await.unwrap()[0].clone();
+    let snapshot = state
+        .storage
+        .get_snapshot(turn.id)
+        .await
+        .unwrap()
+        .expect("provider response event should persist a snapshot");
+    let snapshot: serde_json::Value = serde_json::from_str(&snapshot).unwrap();
+    let response = &snapshot["provider_visible"]["responses"][0];
+    assert_eq!(response["round"], 1);
+    assert_eq!(response["witness"]["request_id"], "req-123");
+}
+
+#[tokio::test]
+async fn provider_response_snapshot_failure_records_reconstruction_gap() {
+    let storage = Arc::new(MockStorage::new());
+    storage.fail_snapshot_writes();
+    let (state, session_id) =
+        make_state_with_storage(provider_witness_chunks(), Arc::clone(&storage)).await;
+    let (tx, _rx) = mpsc::unbounded_channel();
+
+    process_turn(
+        &state,
+        session_id,
+        None,
+        "Hello".into(),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .expect("a recorded reconstruction gap should allow the turn to complete");
+
+    let db = storage.db.lock().await;
+    assert!(db.audit_events.iter().any(|event| {
+        event.event_kind == "turn_record_degraded"
+            && event.metadata["record"] == "provider_response_witness"
+    }));
+}
+
 // -----------------------------------------------------------------------
 // Sandbox guard
 // -----------------------------------------------------------------------
@@ -528,6 +643,26 @@ impl Hook for BlockInboundHook {
     }
 }
 
+struct ModifyInboundHook;
+
+#[async_trait]
+impl Hook for ModifyInboundHook {
+    fn name(&self) -> &str {
+        "modify-inbound"
+    }
+
+    async fn execute(&self, event: &HookEvent) -> HookOutcome {
+        match event {
+            HookEvent::BeforeInbound { content } => {
+                HookOutcome::ContinueModified(Box::new(HookEvent::BeforeInbound {
+                    content: format!("{content} modified"),
+                }))
+            }
+            _ => HookOutcome::Continue,
+        }
+    }
+}
+
 struct PausingPostToolHook {
     reached: Arc<Notify>,
     release: Arc<Notify>,
@@ -576,6 +711,13 @@ impl Hook for ApprovePreToolHook {
 /// In-memory storage for testing.
 pub(crate) struct MockStorage {
     pub(crate) db: Mutex<InMemoryDb>,
+    fail_turn_state_writes: AtomicBool,
+    fail_turn_state_write_at: AtomicUsize,
+    turn_state_write_calls: AtomicUsize,
+    fail_inbound_audit_writes: AtomicBool,
+    fail_append_message_at: AtomicUsize,
+    append_message_calls: AtomicUsize,
+    fail_message_lists: AtomicBool,
     fail_secret_reads: AtomicBool,
     fail_audit_writes: AtomicBool,
     fail_snapshot_writes: AtomicBool,
@@ -793,10 +935,37 @@ impl MockStorage {
     pub(crate) fn new() -> Self {
         Self {
             db: Mutex::new(InMemoryDb::default()),
+            fail_turn_state_writes: AtomicBool::new(false),
+            fail_turn_state_write_at: AtomicUsize::new(0),
+            turn_state_write_calls: AtomicUsize::new(0),
+            fail_inbound_audit_writes: AtomicBool::new(false),
+            fail_append_message_at: AtomicUsize::new(0),
+            append_message_calls: AtomicUsize::new(0),
+            fail_message_lists: AtomicBool::new(false),
             fail_secret_reads: AtomicBool::new(false),
             fail_audit_writes: AtomicBool::new(false),
             fail_snapshot_writes: AtomicBool::new(false),
         }
+    }
+
+    fn fail_turn_state_writes(&self) {
+        self.fail_turn_state_writes.store(true, Ordering::SeqCst);
+    }
+
+    fn fail_turn_state_write_at(&self, call: usize) {
+        self.fail_turn_state_write_at.store(call, Ordering::SeqCst);
+    }
+
+    fn fail_inbound_audit_writes(&self) {
+        self.fail_inbound_audit_writes.store(true, Ordering::SeqCst);
+    }
+
+    fn fail_append_message_at(&self, call: usize) {
+        self.fail_append_message_at.store(call, Ordering::SeqCst);
+    }
+
+    fn fail_message_lists(&self) {
+        self.fail_message_lists.store(true, Ordering::SeqCst);
     }
 
     fn fail_secret_reads(&self) {
@@ -2257,6 +2426,14 @@ impl TurnStore for MockStorage {
     }
 
     async fn update_turn_state(&self, id: Uuid, state: TurnState) -> Result<(), StorageError> {
+        let call = self.turn_state_write_calls.fetch_add(1, Ordering::SeqCst) + 1;
+        if self.fail_turn_state_writes.load(Ordering::SeqCst)
+            || self.fail_turn_state_write_at.load(Ordering::SeqCst) == call
+        {
+            return Err(StorageError::QueryFailed(
+                "injected turn state write failure".into(),
+            ));
+        }
         let mut db = self.db.lock().await;
         if let Some(turn) = db.turns.get_mut(&id) {
             if matches!(
@@ -2327,6 +2504,11 @@ impl TurnStore for MockStorage {
         id: Uuid,
         audit: &swage_storage::InboundAudit,
     ) -> Result<(), StorageError> {
+        if self.fail_inbound_audit_writes.load(Ordering::SeqCst) {
+            return Err(StorageError::QueryFailed(
+                "injected inbound audit write failure".into(),
+            ));
+        }
         if let Some(t) = self.db.lock().await.turns.get_mut(&id) {
             t.inbound_audit = Some(audit.clone());
         }
@@ -2414,6 +2596,12 @@ impl MessageStore for MockStorage {
     }
 
     async fn append_message(&self, message: AppendMessage) -> Result<Message, StorageError> {
+        let call = self.append_message_calls.fetch_add(1, Ordering::SeqCst) + 1;
+        if self.fail_append_message_at.load(Ordering::SeqCst) == call {
+            return Err(StorageError::QueryFailed(
+                "injected append message failure".into(),
+            ));
+        }
         let mut db = self.db.lock().await;
         let position = db
             .messages
@@ -2439,6 +2627,11 @@ impl MessageStore for MockStorage {
     }
 
     async fn list_messages_by_thread(&self, thread_id: Uuid) -> Result<Vec<Message>, StorageError> {
+        if self.fail_message_lists.load(Ordering::SeqCst) {
+            return Err(StorageError::QueryFailed(
+                "injected message list failure".into(),
+            ));
+        }
         let db = self.db.lock().await;
         let mut msgs: Vec<Message> = db
             .messages
@@ -3520,7 +3713,14 @@ pub(crate) async fn make_state_with_config(
     config: swage_config::ResolvedConfig,
 ) -> (AppState, Uuid) {
     let storage = Arc::new(MockStorage::new());
+    make_state_with_config_and_storage(provider_chunks, config, storage).await
+}
 
+async fn make_state_with_config_and_storage(
+    provider_chunks: Vec<StreamChunk>,
+    config: swage_config::ResolvedConfig,
+    storage: Arc<MockStorage>,
+) -> (AppState, Uuid) {
     let space = storage
         .get_or_create_default()
         .await
@@ -4373,6 +4573,259 @@ async fn blocked_inbound_hook_marks_turn_failed_and_clears_active_turn() {
     let turns = state.storage.list_turns_by_thread(thread_id).await.unwrap();
     assert_eq!(turns.len(), 1, "expected placeholder turn to be created");
     assert_eq!(turns[0].state, TurnState::Failed);
+}
+
+#[tokio::test]
+async fn terminal_state_write_failure_still_clears_active_turn() {
+    let storage = Arc::new(MockStorage::new());
+    storage.fail_turn_state_writes();
+    let (mut state, session_id) = make_state_with_storage(vec![], storage).await;
+    let mut hook_registry = HookRegistry::new();
+    hook_registry.register(HookRegistration::new(Arc::new(BlockInboundHook)));
+    state.hook_registry = Some(Arc::new(hook_registry));
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let error = process_turn(
+        &state,
+        session_id,
+        None,
+        "blocked message".to_string(),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .expect_err("the injected terminal-state write must fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("injected turn state write failure")
+    );
+    assert!(
+        !state.active_turns.lock().await.contains_key(&session_id),
+        "terminal-state persistence failure must release the turn guard"
+    );
+}
+
+async fn assert_subsequent_turn_is_not_blocked(state: &AppState, session_id: Uuid) {
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let result = process_turn(
+        state,
+        session_id,
+        None,
+        "retry message".to_string(),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await;
+
+    assert!(
+        !matches!(result, Err(GatewayError::TurnInProgress { .. })),
+        "terminal cleanup must allow a subsequent turn to start, got: {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn inbound_audit_write_failure_clears_active_turn() {
+    let storage = Arc::new(MockStorage::new());
+    storage.fail_inbound_audit_writes();
+    let (mut state, session_id) = make_state_with_storage(vec![], storage).await;
+    let mut hook_registry = HookRegistry::new();
+    hook_registry.register(HookRegistration::new(Arc::new(ModifyInboundHook)));
+    state.hook_registry = Some(Arc::new(hook_registry));
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    process_turn(
+        &state,
+        session_id,
+        None,
+        "message".to_string(),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .expect_err("the injected inbound-audit write must fail");
+
+    assert!(
+        !state.active_turns.lock().await.contains_key(&session_id),
+        "inbound-audit persistence failure must release the turn guard"
+    );
+    let thread = state
+        .storage
+        .list_by_session(session_id)
+        .await
+        .unwrap()
+        .remove(0);
+    let turns = state.storage.list_turns_by_thread(thread.id).await.unwrap();
+    assert_eq!(turns[0].state, TurnState::Failed);
+    assert_subsequent_turn_is_not_blocked(&state, session_id).await;
+}
+
+#[tokio::test]
+async fn initial_message_write_failure_clears_active_turn() {
+    let storage = Arc::new(MockStorage::new());
+    storage.fail_append_message_at(1);
+    let (state, session_id) = make_state_with_storage(vec![], storage).await;
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    process_turn(
+        &state,
+        session_id,
+        None,
+        "message".to_string(),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .expect_err("the injected user-message write must fail");
+
+    assert!(
+        !state.active_turns.lock().await.contains_key(&session_id),
+        "user-message persistence failure must release the turn guard"
+    );
+    let thread = state
+        .storage
+        .list_by_session(session_id)
+        .await
+        .unwrap()
+        .remove(0);
+    let turns = state.storage.list_turns_by_thread(thread.id).await.unwrap();
+    assert_eq!(turns[0].state, TurnState::Failed);
+    assert_subsequent_turn_is_not_blocked(&state, session_id).await;
+}
+
+#[tokio::test]
+async fn history_rebuild_failure_clears_active_turn() {
+    let storage = Arc::new(MockStorage::new());
+    storage.fail_message_lists();
+    let (state, session_id) = make_state_with_storage(vec![], storage).await;
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    process_turn(
+        &state,
+        session_id,
+        None,
+        "message".to_string(),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .expect_err("the injected history read must fail");
+
+    assert!(
+        !state.active_turns.lock().await.contains_key(&session_id),
+        "history rebuild failure must release the turn guard"
+    );
+    let thread = state
+        .storage
+        .list_by_session(session_id)
+        .await
+        .unwrap()
+        .remove(0);
+    let turns = state.storage.list_turns_by_thread(thread.id).await.unwrap();
+    assert_eq!(turns[0].state, TurnState::Failed);
+    assert_subsequent_turn_is_not_blocked(&state, session_id).await;
+}
+
+#[tokio::test]
+async fn approved_sandbox_fallback_build_failure_clears_active_turn() {
+    let (state, session_id) = make_state_with_session(vec![]).await;
+    state.fail_next_dispatcher_builds(2);
+
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let approval_channels = Arc::clone(&state.approval_channels);
+    let state_for_task = state.clone();
+    let task = tokio::spawn(async move {
+        process_turn(
+            &state_for_task,
+            session_id,
+            None,
+            "message".to_string(),
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
+        )
+        .await
+    });
+
+    let approval_id = match rx.recv().await.expect("approval event should be sent") {
+        ServerEvent::ApprovalRequired { approval_id, .. } => approval_id,
+        other => panic!("expected ApprovalRequired, got: {other:?}"),
+    };
+    approval_channels
+        .lock()
+        .unwrap()
+        .remove(&approval_id)
+        .expect("approval channel should be registered")
+        .send(swage_agent::ApprovalDecision {
+            decision: swage_agent::approval::ApprovalDecisionValue::Approved,
+            scope: swage_agent::approval::ApprovalDecisionScope::Once,
+            reason: None,
+        })
+        .expect("approval decision should be delivered");
+
+    let error = task
+        .await
+        .expect("turn task should finish")
+        .expect_err("the injected fallback dispatcher build must fail");
+    assert!(
+        error
+            .to_string()
+            .contains("injected dispatcher build failure"),
+        "unexpected error: {error}"
+    );
+    assert!(
+        !state.active_turns.lock().await.contains_key(&session_id),
+        "fallback dispatcher failure must release the turn guard"
+    );
+    let thread = state
+        .storage
+        .list_by_session(session_id)
+        .await
+        .unwrap()
+        .remove(0);
+    let turns = state.storage.list_turns_by_thread(thread.id).await.unwrap();
+    assert_eq!(turns[0].state, TurnState::Failed);
+}
+
+#[tokio::test]
+async fn degradation_audit_and_terminal_state_failure_clears_active_turn() {
+    let storage = Arc::new(MockStorage::new());
+    storage.fail_audit_writes();
+    storage.fail_turn_state_write_at(1);
+    let mut config = swage_config::ResolvedConfig::default();
+    config.sandbox.enabled = false;
+    config.sandbox.allow_degraded_execution = true;
+    let (state, session_id) =
+        make_state_with_config_and_storage(vec![], config, Arc::clone(&storage)).await;
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let error = process_turn(
+        &state,
+        session_id,
+        None,
+        "message".to_string(),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .expect_err("the injected degradation terminal-state write must fail");
+    assert!(
+        error
+            .to_string()
+            .contains("injected turn state write failure"),
+        "unexpected error: {error}"
+    );
+    assert!(
+        !state.active_turns.lock().await.contains_key(&session_id),
+        "degradation audit failure must release the turn guard"
+    );
 }
 
 // -----------------------------------------------------------------------
@@ -7773,6 +8226,10 @@ async fn unknown_forced_context_assembly_fails_before_provider_and_audit() {
         .await
         .unwrap();
     assert_eq!(turns[0].state, TurnState::Failed);
+    assert!(
+        !state.active_turns.lock().await.contains_key(&session_id),
+        "context-assembly selection failure must release the turn guard"
+    );
 }
 
 #[tokio::test]

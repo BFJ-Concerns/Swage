@@ -106,6 +106,29 @@ pub struct TokenUsage {
     pub output_tokens: u32,
 }
 
+/// Content-free evidence describing one provider streaming response.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ProviderResponseWitness {
+    pub http_status: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_event: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<String>,
+    pub usage: TokenUsage,
+    #[serde(default)]
+    pub content_blocks: Vec<ProviderContentBlockWitness>,
+}
+
+/// Shape and size of provider content blocks without retaining their content.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProviderContentBlockWitness {
+    pub block_type: String,
+    pub count: u32,
+    pub bytes: u64,
+}
+
 /// Complete response from an LLM provider.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LlmResponse {
@@ -131,6 +154,8 @@ pub enum StreamChunk {
     },
     /// Token usage for the request (sent with or after Done).
     Usage(TokenUsage),
+    /// Redacted response metadata retained for audit and diagnosis.
+    ProviderResponseWitness(ProviderResponseWitness),
     /// Stream complete — no more chunks will follow.
     Done {
         /// Reason the model stopped, if the provider reported one.
@@ -161,6 +186,8 @@ pub enum StreamChunk {
     },
     /// A provider-side error terminated the stream.
     Error { message: String },
+    /// A completed provider response contained no usable model output.
+    ProviderAnomaly { message: String },
     /// The model is invoking a tool. The turn processor uses this to trigger
     /// execution.
     ToolUse {
