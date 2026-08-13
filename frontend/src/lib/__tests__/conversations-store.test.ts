@@ -334,10 +334,12 @@ describe("durable local updates", () => {
       content: "Reply",
       timestamp: "2026-01-01T00:01:00Z",
       turn_state: "completed",
+      turn_id: "turn-1",
     });
 
     expect(store.activeConversation!.messages).toHaveLength(2);
     expect(store.activeConversation!.messages[1].role).toBe("assistant");
+    expect(store.activeConversation!.messages[1].turn_id).toBe("turn-1");
     expect(store.conversations[0].message_preview).toBe("Reply");
   });
 
