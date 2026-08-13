@@ -121,9 +121,10 @@ Dispatch-bound intersection also handles approval requirements:
 After all bounds are applied, the gateway produces an
 `effective_tool_permissions_record` — a JSON object listing the effective
 allow, deny, and require_approval sets with all bundle labels expanded to
-concrete tool names. This record is injected into the child's context
-assembly, so the child's system prompt carries its actual permission
-boundary.
+concrete tool names. This record is attached to the delegated assembly report
+and emitted as part of the `ContextAssembled` event for audit and inspection.
+It is not injected into the child's model context — enforcement is handled at
+the dispatch and permission seam (`check_permission`), not via prompt text.
 
 ## Space-targeted session creation
 

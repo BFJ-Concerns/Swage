@@ -125,9 +125,11 @@ labels expanded to concrete tool names:
 { "allow": [...], "deny": [...], "require_approval": [...] }
 ```
 
-This record is injected into the delegated child's context assembly
-(`GatewayDelegatedContextAssembler`), so the child's system prompt knows its
-permission boundary.
+This record is attached to the delegated assembly report
+(`DelegatedAssembly.report`) and emitted via the `ContextAssembled` server
+event for audit and inspection. It is not injected into the child's model
+context — enforcement is handled at the dispatch/permission seam via
+`check_permission`, not via prompt text.
 
 ## Space-targeted session creation
 
