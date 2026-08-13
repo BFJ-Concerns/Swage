@@ -35,8 +35,6 @@ export interface StreamingStore {
   readonly streamedContent: string;
   readonly turnError: { code: string; message: string } | null;
   readonly turnStartedAt: string | null;
-  readonly lastInputTokens: number | null;
-  readonly lastOutputTokens: number | null;
   // Live tool calls for the current turn. Populated as tool_start/tool_end
   // events arrive. Cleared when the turn completes normally. Preserved (for
   // display) when a turn ends in error or is cancelled.
@@ -75,6 +73,7 @@ export interface StreamingStoreOptions {
         MessageView["turn_state"],
         "completed" | "failed" | "interrupted"
       >;
+      turn_id?: string;
     }): void;
   };
   /** Sends WebSocket events for outgoing user messages and cancellation. */
@@ -95,8 +94,6 @@ export function createStreamingStore(
   const streamedContentStore = writable("");
   const turnErrorStore = writable<{ code: string; message: string } | null>(null);
   const turnStartedAtStore = writable<string | null>(null);
-  const lastInputTokensStore = writable<number | null>(null);
-  const lastOutputTokensStore = writable<number | null>(null);
   // Tracks in-flight and completed tool calls for the current turn.
   const activeToolCallsStore = writable<ToolCallView[]>([]);
   const providerRetryStore = writable<ProviderRetryState | null>(null);
@@ -107,8 +104,6 @@ export function createStreamingStore(
   const streamedContentState = fromStore(streamedContentStore);
   const turnErrorState = fromStore(turnErrorStore);
   const turnStartedAtState = fromStore(turnStartedAtStore);
-  const lastInputTokensState = fromStore(lastInputTokensStore);
-  const lastOutputTokensState = fromStore(lastOutputTokensStore);
   const activeToolCallsState = fromStore(activeToolCallsStore);
   const providerRetryState = fromStore(providerRetryStore);
   const pendingApprovalState = fromStore(pendingApprovalStore);
@@ -121,11 +116,13 @@ export function createStreamingStore(
       MessageView["turn_state"],
       "completed" | "failed" | "interrupted"
     >,
+    turn_id?: string,
   ): void {
     options?.conversationStore?.appendAssistantMessage({
       content,
       timestamp: new Date().toISOString(),
       turn_state,
+      ...(turn_id === undefined ? {} : { turn_id }),
     });
   }
 
@@ -158,14 +155,6 @@ export function createStreamingStore(
 
     get turnStartedAt(): string | null {
       return turnStartedAtState.current;
-    },
-
-    get lastInputTokens(): number | null {
-      return lastInputTokensState.current;
-    },
-
-    get lastOutputTokens(): number | null {
-      return lastOutputTokensState.current;
     },
 
     get activeToolCalls(): ToolCallView[] {
@@ -269,16 +258,14 @@ export function createStreamingStore(
           // assistant message and return to idle state.
           {
             const streamedContent = get(streamedContentStore);
-          if (streamedContent) {
-            pushAssistantMessage(streamedContent, "completed");
-          }
+            if (streamedContent) {
+              pushAssistantMessage(streamedContent, "completed", event.turn_id);
+            }
           }
           streamedContentStore.set("");
           turnErrorStore.set(null);
           isStreamingStore.set(false);
           turnStartedAtStore.set(null);
-          lastInputTokensStore.set(event.input_tokens ?? null);
-          lastOutputTokensStore.set(event.output_tokens ?? null);
           // Tool calls are now captured in the message history — clear live state.
           activeToolCallsStore.set([]);
           providerRetryStore.set(null);
@@ -416,8 +403,6 @@ export function createStreamingStore(
       turnErrorStore.set(null);
       activeToolCallsStore.set([]);
       providerRetryStore.set(null);
-      lastInputTokensStore.set(null);
-      lastOutputTokensStore.set(null);
       turnStartedAtStore.set(new Date().toISOString());
       isStreamingStore.set(true);
 
@@ -479,12 +464,6 @@ export function withConversationAutoCreate(
     },
     get turnStartedAt(): string | null {
       return base.turnStartedAt;
-    },
-    get lastInputTokens(): number | null {
-      return base.lastInputTokens;
-    },
-    get lastOutputTokens(): number | null {
-      return base.lastOutputTokens;
     },
     get activeToolCalls(): ToolCallView[] {
       return base.activeToolCalls;

@@ -21,12 +21,6 @@ function makeStreamingStore(isStreaming = false): StreamingStore {
     get turnStartedAt() {
       return null;
     },
-    get lastInputTokens() {
-      return null;
-    },
-    get lastOutputTokens() {
-      return null;
-    },
     get activeToolCalls() {
       return [];
     },
