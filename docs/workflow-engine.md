@@ -6,7 +6,7 @@ description: How Swage runs workflow scripts — lifecycle, journalling, budget 
 
 Swage's workflow engine runs front-loaded JavaScript scripts that orchestrate
 agent work. A script defines a run's entire plan — which agents to call, in
-what order, with what budget — and the engine executes it inside a sandboxed
+what order, with what structure — and the engine executes it inside a sandboxed
 QuickJS runtime on a dedicated OS thread. Every non-deterministic host call
 is journalled, so a crashed or restarted run replays from its journal and
 picks up where it left off.
