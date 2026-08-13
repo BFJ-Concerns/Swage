@@ -754,7 +754,7 @@ impl LlmProvider for OpenAiProvider {
         let client = self.make_http_client();
 
         spawn_stream_forwarder(move |tx| async move {
-            let sse_stream = match client
+            let (_metadata, sse_stream) = match client
                 .post_stream("/chat/completions", &body, HeaderMap::new())
                 .await
             {

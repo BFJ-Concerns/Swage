@@ -311,7 +311,7 @@ impl LlmProvider for FailoverProvider {
                 return;
             }
 
-            let mut last_error_msg: Option<String> = None;
+            let mut last_error_msg: Option<(String, bool)> = None;
 
             for idx in order {
                 if tx.is_closed() {
@@ -328,8 +328,22 @@ impl LlmProvider for FailoverProvider {
                 } {
                     match chunk {
                         StreamChunk::Error { message } if !output_started => {
-                            retryable_error = Some(message);
+                            retryable_error = Some((message, false));
                             break;
+                        }
+                        StreamChunk::ProviderAnomaly { message } if !output_started => {
+                            retryable_error = Some((message, true));
+                            break;
+                        }
+                        StreamChunk::ProviderAnomaly { message } => {
+                            cooldowns
+                                .lock()
+                                .expect("failover cooldown lock should not be poisoned")[idx] =
+                                Some(Instant::now());
+                            if tx.send(StreamChunk::ProviderAnomaly { message }).is_err() {
+                                return;
+                            }
+                            return;
                         }
                         StreamChunk::Error { message } => {
                             cooldowns
@@ -374,7 +388,7 @@ impl LlmProvider for FailoverProvider {
                     return;
                 }
 
-                let Some(message) = retryable_error else {
+                let Some((message, is_anomaly)) = retryable_error else {
                     for pending_chunk in pending_chunks {
                         if tx.send(pending_chunk).is_err() {
                             return;
@@ -391,15 +405,17 @@ impl LlmProvider for FailoverProvider {
                     .lock()
                     .expect("failover cooldown lock should not be poisoned")[idx] =
                     Some(Instant::now());
-                last_error_msg = Some(message);
+                last_error_msg = Some((message, is_anomaly));
             }
 
-            let _receiver_closed = tx
-                .send(StreamChunk::Error {
-                    message: last_error_msg
-                        .unwrap_or_else(|| "all failover providers failed".into()),
-                })
-                .is_err();
+            let terminal = match last_error_msg {
+                Some((message, true)) => StreamChunk::ProviderAnomaly { message },
+                Some((message, false)) => StreamChunk::Error { message },
+                None => StreamChunk::Error {
+                    message: "all failover providers failed".into(),
+                },
+            };
+            let _receiver_closed = tx.send(terminal).is_err();
         })
     }
 }
@@ -1042,6 +1058,115 @@ mod tests {
                 .iter()
                 .any(|c| matches!(c, StreamChunk::Error { .. })),
             "expected an error chunk when all providers fail"
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_fails_over_on_provider_anomaly_before_output() {
+        let primary_calls = Arc::new(StdMutex::new(0));
+        let primary = SequencedStreamProvider {
+            name: "p1",
+            call_count: Arc::clone(&primary_calls),
+            attempts: StdMutex::new(vec![vec![StreamChunk::ProviderAnomaly {
+                message: "empty provider stream".into(),
+            }]]),
+        };
+        let secondary_calls = Arc::new(StdMutex::new(0));
+        let secondary = SequencedStreamProvider {
+            name: "p2",
+            call_count: Arc::clone(&secondary_calls),
+            attempts: StdMutex::new(vec![vec![
+                StreamChunk::Delta {
+                    content: "recovered".into(),
+                },
+                StreamChunk::Done {
+                    finish_reason: Some(FinishReason::Stop),
+                },
+            ]]),
+        };
+        let failover =
+            FailoverProvider::with_defaults(vec![Arc::new(primary), Arc::new(secondary)]);
+
+        let chunks: Vec<_> = failover.stream(completion_req()).collect().await;
+
+        assert_eq!(*primary_calls.lock().unwrap(), 1);
+        assert_eq!(*secondary_calls.lock().unwrap(), 1);
+        assert!(chunks.iter().any(
+            |chunk| matches!(chunk, StreamChunk::Delta { content } if content == "recovered")
+        ));
+        assert!(
+            chunks
+                .iter()
+                .all(|chunk| !matches!(chunk, StreamChunk::ProviderAnomaly { .. }))
+        );
+        assert!(failover.cooldowns.lock().unwrap()[0].is_some());
+    }
+
+    #[tokio::test]
+    async fn stream_preserves_provider_anomaly_after_output_without_failover() {
+        let primary = SequencedStreamProvider {
+            name: "p1",
+            call_count: Arc::new(StdMutex::new(0)),
+            attempts: StdMutex::new(vec![vec![
+                StreamChunk::Delta {
+                    content: "partial".into(),
+                },
+                StreamChunk::ProviderAnomaly {
+                    message: "stream ended early".into(),
+                },
+            ]]),
+        };
+        let secondary_calls = Arc::new(StdMutex::new(0));
+        let secondary = SequencedStreamProvider {
+            name: "p2",
+            call_count: Arc::clone(&secondary_calls),
+            attempts: StdMutex::new(vec![vec![StreamChunk::Delta {
+                content: "duplicate".into(),
+            }]]),
+        };
+        let failover =
+            FailoverProvider::with_defaults(vec![Arc::new(primary), Arc::new(secondary)]);
+
+        let chunks: Vec<_> = failover.stream(completion_req()).collect().await;
+
+        assert_eq!(*secondary_calls.lock().unwrap(), 0);
+        assert!(matches!(
+            chunks.last(),
+            Some(StreamChunk::ProviderAnomaly { message }) if message == "stream ended early"
+        ));
+        assert!(failover.cooldowns.lock().unwrap()[0].is_some());
+    }
+
+    #[tokio::test]
+    async fn stream_preserves_provider_anomaly_when_every_provider_fails() {
+        let providers: Vec<Arc<dyn LlmProvider>> = ["p1", "p2"]
+            .into_iter()
+            .map(|name| {
+                Arc::new(SequencedStreamProvider {
+                    name,
+                    call_count: Arc::new(StdMutex::new(0)),
+                    attempts: StdMutex::new(vec![vec![StreamChunk::ProviderAnomaly {
+                        message: format!("{name} empty"),
+                    }]]),
+                }) as Arc<dyn LlmProvider>
+            })
+            .collect();
+        let failover = FailoverProvider::with_defaults(providers);
+
+        let chunks: Vec<_> = failover.stream(completion_req()).collect().await;
+
+        assert_eq!(chunks.len(), 1);
+        assert!(matches!(
+            &chunks[0],
+            StreamChunk::ProviderAnomaly { message } if message == "p2 empty"
+        ));
+        assert!(
+            failover
+                .cooldowns
+                .lock()
+                .unwrap()
+                .iter()
+                .all(Option::is_some)
         );
     }
 
