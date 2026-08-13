@@ -210,6 +210,12 @@ reaches the recorded wind-down transition. The `replayed_working_credit`
 field accumulates this spend and is folded into `closing_limit` when
 wind-down latches.
 
+Replay constructs `closing_limit` from
+`completed_agent_tokens_before(replay, transition_seq) +
+reserved_closing_tokens + replayed_working_credit`, scanning the journal
+for completed agent-call token counts before the transition — not from
+the live `accounting.spent` counter.
+
 ### Token accounting
 
 `TokenBudgetState` fields:
@@ -222,8 +228,9 @@ wind-down latches.
 | `closing_limit` | Once wind-down latches: `spent_at_transition + reserved_closing_tokens`. `None` before wind-down. |
 | `replayed_working_credit` | Accumulated spend from replayed working calls that settle before the wind-down latch. |
 
-Per-call reservation estimate: `limit / max(max_agent_calls,
-max_concurrent_agent_calls, 4)`.
+Per-call reservation estimate: `limit / calls` where `calls` is
+`max_agent_calls` if set, otherwise
+`max(max_concurrent_agent_calls.unwrap_or(4), 1)`.
 
 ## Durable run parking
 
