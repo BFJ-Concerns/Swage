@@ -1,0 +1,9 @@
+# Swage
+
+> Agent-facing documentation index. Each linked page is the terse, canonical rendering of its subject; llms-full.txt carries the whole set in one file.
+
+<!-- doc-index:start (generated region; do not hand-edit. Regenerate with the project-docs skill: doc-indexes.sh) -->
+## General
+
+- [Interfaces and tooling](agent-docs/interfaces-and-tooling.md)
+<!-- doc-index:end -->
