@@ -34,6 +34,7 @@ export interface ConversationStore {
       MessageView["turn_state"],
       "completed" | "failed" | "interrupted"
     >;
+    turn_id?: string;
   }): void;
   refreshActiveConversation(): Promise<void>;
 }
@@ -92,6 +93,7 @@ export function createConversationStore(): ConversationStore {
       content: string;
       timestamp: string;
       turn_state: MessageView["turn_state"];
+      turn_id?: string;
     },
   ): void {
     const activeConversation = get(activeConversationStore);
@@ -107,6 +109,7 @@ export function createConversationStore(): ConversationStore {
           content: message.content,
           timestamp: message.timestamp,
           turn_state: message.turn_state,
+          ...(message.turn_id === undefined ? {} : { turn_id: message.turn_id }),
         },
       ],
     });
@@ -224,6 +227,7 @@ export function createConversationStore(): ConversationStore {
         content: message.content,
         timestamp: message.timestamp,
         turn_state: message.turn_state,
+        ...(message.turn_id === undefined ? {} : { turn_id: message.turn_id }),
       });
     },
 
