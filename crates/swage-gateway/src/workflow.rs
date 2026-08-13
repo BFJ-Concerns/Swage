@@ -6236,7 +6236,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn failed_wind_down_journal_write_does_not_latch_wind_down() {
+    async fn failed_refusal_transition_only_latches_wind_down_through_a_later_snapshot() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
         let space = storage.get_or_create_default().await.expect("space");
         let provider = Arc::new(ScriptedRecordingProvider {
@@ -6258,7 +6258,10 @@ mod tests {
             let refusal = null;
             try { await agent("cross working boundary", {agent: "default"}); }
             catch (error) { refusal = error.message; }
-            return {refusal, snapshot: await budgetSnapshot()};
+            let retriedRefusal = null;
+            try { await agent("retry working boundary", {agent: "default"}); }
+            catch (error) { retriedRefusal = error.message; }
+            return {refusal, retriedRefusal, snapshot: await budgetSnapshot()};
         "#;
         let (script, _) = storage
             .create_workflow_script(NewWorkflowScript {
@@ -6308,7 +6311,12 @@ mod tests {
                 .as_str()
                 .is_some_and(|message| message.contains("injected wind-down persistence failure"))
         );
-        assert_eq!(output["snapshot"]["winding_down"], false);
+        assert!(
+            output["retriedRefusal"]
+                .as_str()
+                .is_some_and(|message| message.contains("injected wind-down persistence failure"))
+        );
+        assert_eq!(output["snapshot"]["winding_down"], true);
         assert!(
             detail
                 .journal
