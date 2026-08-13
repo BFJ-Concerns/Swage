@@ -288,6 +288,10 @@ impl AnthropicStreamWitness {
         };
         [StreamChunk::ProviderResponseWitness(witness), terminal]
     }
+
+    fn witness_chunk(self) -> StreamChunk {
+        StreamChunk::ProviderResponseWitness(self.finish().0)
+    }
 }
 
 async fn forward_anthropic_stream(
@@ -302,6 +306,9 @@ async fn forward_anthropic_stream(
     while let Some(result) = sse_stream.next().await {
         let event = match result {
             Err(error) => {
+                if tx.send(witness.witness_chunk()).is_err() {
+                    return;
+                }
                 let _ = tx.send(StreamChunk::Error {
                     message: error.to_string(),
                 });
@@ -619,9 +626,6 @@ impl AnthropicProvider {
                     output_tokens,
                 }))
             }
-            Some("message_stop") => Some(StreamChunk::Done {
-                finish_reason: None,
-            }),
             Some("error") => {
                 let payload: ErrorPayload = match serde_json::from_str(&event.data) {
                     Ok(payload) => payload,
@@ -1045,14 +1049,16 @@ mod tests {
         }
     }
 
-    async fn fixture_chunks(events: Vec<SseEvent>) -> Vec<StreamChunk> {
+    async fn fixture_stream_chunks(
+        events: Vec<Result<SseEvent, ProviderError>>,
+    ) -> Vec<StreamChunk> {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         forward_anthropic_stream(
             StreamResponseMetadata {
                 status: 200,
                 request_id: Some("req_fixture".to_owned()),
             },
-            futures::stream::iter(events.into_iter().map(Ok)),
+            futures::stream::iter(events),
             tx,
         )
         .await;
@@ -1061,6 +1067,10 @@ mod tests {
             chunks.push(chunk);
         }
         chunks
+    }
+
+    async fn fixture_chunks(events: Vec<SseEvent>) -> Vec<StreamChunk> {
+        fixture_stream_chunks(events.into_iter().map(Ok).collect()).await
     }
 
     // --- parse_sse_event ---
@@ -1099,13 +1109,6 @@ mod tests {
                 ..
             })
         ));
-    }
-
-    #[test]
-    fn parse_message_stop_emits_done() {
-        let ev = event("message_stop", r#"{"type":"message_stop"}"#);
-        let chunk = AnthropicProvider::parse_sse_event(&ev).unwrap();
-        assert!(matches!(chunk, StreamChunk::Done { .. }));
     }
 
     #[tokio::test]
@@ -1241,6 +1244,50 @@ mod tests {
         };
         assert_eq!(witness.terminal_event.as_deref(), Some("message_start"));
         assert!(matches!(chunks[1], StreamChunk::ProviderAnomaly { .. }));
+    }
+
+    #[tokio::test]
+    async fn transport_error_retains_accumulated_witness_before_failing() {
+        let chunks = fixture_stream_chunks(vec![
+            Ok(event(
+                "message_start",
+                r#"{"type":"message_start","message":{"usage":{"input_tokens":17,"output_tokens":0}}}"#,
+            )),
+            Ok(event(
+                "content_block_start",
+                r#"{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}"#,
+            )),
+            Ok(event(
+                "content_block_delta",
+                r#"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"partial"}}"#,
+            )),
+            Err(ProviderError::StreamError("connection lost".to_owned())),
+        ])
+        .await;
+
+        let StreamChunk::ProviderResponseWitness(witness) = &chunks[0] else {
+            panic!("first chunk should retain the response witness");
+        };
+        assert_eq!(witness.http_status, 200);
+        assert_eq!(witness.request_id.as_deref(), Some("req_fixture"));
+        assert_eq!(
+            witness.terminal_event.as_deref(),
+            Some("content_block_delta")
+        );
+        assert_eq!(witness.usage.input_tokens, 17);
+        assert_eq!(
+            witness.content_blocks,
+            vec![ProviderContentBlockWitness {
+                block_type: "thinking".to_owned(),
+                count: 1,
+                bytes: 7,
+            }]
+        );
+        assert!(matches!(
+            &chunks[1],
+            StreamChunk::Error { message } if message.contains("connection lost")
+        ));
+        assert_eq!(chunks.len(), 2);
     }
 
     #[test]
