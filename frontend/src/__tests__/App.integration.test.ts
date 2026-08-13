@@ -385,7 +385,246 @@ describe("App", () => {
     expect(document.querySelector(".message-display")?.textContent).toContain("Restored from URL");
   });
 
+  it("falls back to the root with a notice for a stale deep link", async () => {
+    vi.mocked(spacesApi.listSpaces).mockResolvedValueOnce([makeSpace()]);
+    vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([]);
+    vi.mocked(conversationsApi.getConversation).mockRejectedValueOnce(
+      new Error("HTTP 404 from GET /api/conversations/stale-id"),
+    );
+
+    window.history.replaceState(null, "", "/conversations/stale-id");
+    component = mount(App, { target: document.body });
+    await settleUi();
+
+    expect(conversationsApi.getConversation).toHaveBeenCalledWith("stale-id");
+    expect(window.location.pathname).toBe("/");
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain(
+      "Conversation not found",
+    );
+    expect(websocketHarness.client.connect).not.toHaveBeenCalled();
+    await openSpaceFromPicker("default");
+    expect(
+      document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Message"]'),
+    ).not.toBeNull();
+  });
+
+  it("shows the not-found notice when popstate restores a deleted conversation", async () => {
+    let popstateHandler: EventListener | null = null;
+    const addEventListener = window.addEventListener.bind(window);
+    const addEventListenerSpy = vi.spyOn(window, "addEventListener").mockImplementation(
+      (type: string, listener: EventListenerOrEventListenerObject, options?: boolean | AddEventListenerOptions) => {
+        if (type === "popstate") {
+          popstateHandler =
+            typeof listener === "function"
+              ? listener
+              : (event) => listener.handleEvent(event);
+          return;
+        }
+        addEventListener(type, listener, options);
+      },
+    );
+
+    const deletedConversation = makeConversationSummary({ id: "deleted-id" });
+    const replacementConversation: ConversationResponse = {
+      id: "replacement-id",
+      space_id: "proj-default",
+      created_at: "2026-04-07T12:03:00Z",
+      last_activity: "2026-04-07T12:03:00Z",
+    };
+    vi.mocked(spacesApi.listSpaces).mockResolvedValueOnce([makeSpace()]);
+    vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([
+      deletedConversation,
+    ]);
+    vi.mocked(conversationsApi.getConversation)
+      .mockResolvedValueOnce(
+        makeConversationDetail({
+          id: deletedConversation.id,
+          messages: [
+            {
+              role: "assistant",
+              content: "Present before server-side deletion",
+              timestamp: "2026-04-07T12:01:00Z",
+              turn_state: "completed",
+            },
+          ],
+        }),
+      )
+      .mockRejectedValueOnce(
+        new Error("HTTP 404 from GET /api/conversations/deleted-id"),
+      );
+    vi.mocked(conversationsApi.createConversation).mockResolvedValueOnce(
+      replacementConversation,
+    );
+
+    setPath(`/conversations/${deletedConversation.id}`);
+    component = mount(App, { target: document.body });
+    await settleUi();
+    addEventListenerSpy.mockRestore();
+
+    expect(document.querySelector(".message-display")?.textContent).toContain(
+      "Present before server-side deletion",
+    );
+    expect(websocketHarness.client.connect).toHaveBeenCalledTimes(1);
+
+    expect(popstateHandler).not.toBeNull();
+    setPath("/");
+    popstateHandler!(new PopStateEvent("popstate"));
+    await settleUi();
+    setPath(`/conversations/${deletedConversation.id}`);
+    popstateHandler!(new PopStateEvent("popstate"));
+    await settleUi();
+
+    expect(conversationsApi.getConversation).toHaveBeenCalledTimes(2);
+    expect(conversationsApi.getConversation).toHaveBeenLastCalledWith("deleted-id");
+    expect(window.location.pathname).toBe("/");
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain(
+      "Conversation not found",
+    );
+    expect(websocketHarness.client.connect).toHaveBeenCalledTimes(1);
+    expect(websocketHarness.client.disconnect).toHaveBeenCalledOnce();
+    expect(document.body.textContent).not.toContain(
+      "Present before server-side deletion",
+    );
+
+    const dismissButton = document.querySelector<HTMLButtonElement>(".dismiss");
+    expect(dismissButton).not.toBeNull();
+    flushSync(() => dismissButton!.click());
+
+    const textarea = document.querySelector<HTMLTextAreaElement>(
+      'textarea[aria-label="Message"]',
+    );
+    expect(textarea).not.toBeNull();
+    flushSync(() => {
+      textarea!.value = "Continue after recovery";
+      textarea!.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+
+    const sendButton = document.querySelector<HTMLButtonElement>(".action.send");
+    expect(sendButton).not.toBeNull();
+    flushSync(() => sendButton!.click());
+    await settleUi();
+
+    expect(conversationsApi.createConversation).toHaveBeenCalledWith(
+      "proj-default",
+      null,
+    );
+    expect(websocketHarness.client.connect).toHaveBeenCalledTimes(2);
+    expect(websocketHarness.client.connect).toHaveBeenLastCalledWith(
+      replacementConversation.id,
+    );
+  });
+
+  it("shows the not-found notice when popstate restores a stale ID with no active conversation", async () => {
+    let popstateHandler: EventListener | null = null;
+    const addEventListener = window.addEventListener.bind(window);
+    const addEventListenerSpy = vi.spyOn(window, "addEventListener").mockImplementation(
+      (type: string, listener: EventListenerOrEventListenerObject, options?: boolean | AddEventListenerOptions) => {
+        if (type === "popstate") {
+          popstateHandler =
+            typeof listener === "function"
+              ? listener
+              : (event) => listener.handleEvent(event);
+          return;
+        }
+        addEventListener(type, listener, options);
+      },
+    );
+
+    vi.mocked(spacesApi.listSpaces).mockResolvedValueOnce([makeSpace()]);
+    component = mount(App, { target: document.body });
+    await settleUi();
+    addEventListenerSpy.mockRestore();
+
+    vi.mocked(conversationsApi.getConversation).mockRejectedValueOnce(
+      new Error("HTTP 404 from GET /api/conversations/stale-id"),
+    );
+    expect(popstateHandler).not.toBeNull();
+    setPath("/conversations/stale-id");
+    popstateHandler!(new PopStateEvent("popstate"));
+    await settleUi();
+
+    expect(conversationsApi.getConversation).toHaveBeenCalledWith("stale-id");
+    expect(window.location.pathname).toBe("/");
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain(
+      "Conversation not found",
+    );
+    expect(websocketHarness.client.disconnect).not.toHaveBeenCalled();
+  });
+
+  it("keeps the active conversation when its route existence check fails transiently", async () => {
+    let popstateHandler: EventListener | null = null;
+    const addEventListener = window.addEventListener.bind(window);
+    const addEventListenerSpy = vi.spyOn(window, "addEventListener").mockImplementation(
+      (type: string, listener: EventListenerOrEventListenerObject, options?: boolean | AddEventListenerOptions) => {
+        if (type === "popstate") {
+          popstateHandler =
+            typeof listener === "function"
+              ? listener
+              : (event) => listener.handleEvent(event);
+          return;
+        }
+        addEventListener(type, listener, options);
+      },
+    );
+    const activeConversation = makeConversationSummary({ id: "active-id" });
+    vi.mocked(spacesApi.listSpaces).mockResolvedValueOnce([makeSpace()]);
+    vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([
+      activeConversation,
+    ]);
+    vi.mocked(conversationsApi.getConversation)
+      .mockResolvedValueOnce(
+        makeConversationDetail({
+          id: activeConversation.id,
+          messages: [
+            {
+              role: "assistant",
+              content: "Still active after gateway trouble",
+              timestamp: "2026-04-07T12:01:00Z",
+              turn_state: "completed",
+            },
+          ],
+        }),
+      )
+      .mockRejectedValueOnce(
+        new Error("HTTP 503 from GET /api/conversations/active-id"),
+      );
+
+    setPath(`/conversations/${activeConversation.id}`);
+    component = mount(App, { target: document.body });
+    await settleUi();
+    addEventListenerSpy.mockRestore();
+
+    expect(popstateHandler).not.toBeNull();
+    setPath("/");
+    popstateHandler!(new PopStateEvent("popstate"));
+    await settleUi();
+    setPath(`/conversations/${activeConversation.id}`);
+    popstateHandler!(new PopStateEvent("popstate"));
+    await settleUi();
+
+    expect(window.location.pathname).toBe(`/conversations/${activeConversation.id}`);
+    expect(document.querySelector(".message-display")?.textContent).toContain(
+      "Still active after gateway trouble",
+    );
+    expect(document.querySelector('[role="alert"]')).toBeNull();
+    expect(websocketHarness.client.disconnect).not.toHaveBeenCalled();
+  });
+
   it("renders the conversation and removes Settings after browser Back", async () => {
+    let popstateHandler: EventListener | null = null;
+    const addEventListener = window.addEventListener.bind(window);
+    const addEventListenerSpy = vi.spyOn(window, "addEventListener").mockImplementation(
+      (type: string, listener: EventListenerOrEventListenerObject, options?: boolean | AddEventListenerOptions) => {
+        if (type === "popstate") {
+          popstateHandler =
+            typeof listener === "function"
+              ? listener
+              : (event) => listener.handleEvent(event);
+          return;
+        }
+        addEventListener(type, listener, options);
+      },
+    );
     const defaultSpace = makeSpace();
     const linkedConversation = makeConversationSummary({
       id: "conv-settings-back",
@@ -424,11 +663,13 @@ describe("App", () => {
     expect(window.location.pathname).toBe("/settings/providers");
     expect(document.querySelector('[aria-label="Settings"]')).not.toBeNull();
 
-    const popped = new Promise<void>((resolve) => {
-      window.addEventListener("popstate", () => resolve(), { once: true });
-    });
-    window.history.back();
-    await popped;
+    const conversationFetchCount = vi.mocked(conversationsApi.getConversation).mock.calls
+      .length;
+    const websocketConnectCount = websocketHarness.client.connect.mock.calls.length;
+
+    expect(popstateHandler).not.toBeNull();
+    setPath(`/conversations/${linkedConversation.id}`);
+    popstateHandler!(new PopStateEvent("popstate"));
     await settleUi();
 
     expect(window.location.pathname).toBe(`/conversations/${linkedConversation.id}`);
@@ -437,6 +678,13 @@ describe("App", () => {
       "Conversation restored after Back",
     );
     expect(document.querySelector('[aria-label="Settings"]')).toBeNull();
+    expect(conversationsApi.getConversation).toHaveBeenCalledTimes(
+      conversationFetchCount + 1,
+    );
+    expect(websocketHarness.client.connect).toHaveBeenCalledTimes(
+      websocketConnectCount,
+    );
+    addEventListenerSpy.mockRestore();
   });
 
   it("connects exactly once when a conversation is picked from the sidebar", async () => {

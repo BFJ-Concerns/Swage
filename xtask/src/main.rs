@@ -345,7 +345,7 @@ fn run_test_suite() -> Result<()> {
         Ok("cargo") | Err(_) => record_stage_result(
             &mut failures,
             "Running Rust tests",
-            command("cargo", ["test", "--workspace"]),
+            command("cargo", ["test", "--workspace", "--no-fail-fast"]),
         ),
         Ok(other) => return Err(format!("unknown SWAGE_TEST_RUNNER '{other}'").into()),
     }
@@ -453,8 +453,16 @@ fn verify() -> Result<()> {
         fmt_check()?;
         check()?;
         clippy()?;
-        run_test_suite()?;
-        check_projections_are_current()
+        let test_result = run_test_suite();
+        let projection_result = check_projections_are_current();
+        match (test_result, projection_result) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+            (Err(test_error), Err(projection_error)) => Err(format!(
+                "test suite failed: {test_error}; protocol projection freshness check failed: {projection_error}"
+            )
+            .into()),
+        }
     })
 }
 
