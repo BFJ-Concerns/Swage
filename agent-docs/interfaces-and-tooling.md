@@ -1,3 +1,7 @@
+---
+description: Turn context inspector API, wire-contract crate layout, verification gate stages, and client-side route handling
+---
+
 # Interfaces and tooling
 
 ## Turn context inspector
