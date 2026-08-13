@@ -181,9 +181,20 @@ process.
 | `sandbox.enabled` | bool | `true` |
 | `sandbox.allow_degraded_execution` | bool | `false` |
 
-When `enabled` is true and bwrap setup fails, the turn pauses with an
-approval prompt. `allow_degraded_execution = true` skips the prompt and runs
-unsandboxed; the degradation is recorded in the audit trail.
+When `enabled` is true and sandbox setup fails, the recovery path depends on
+the turn's attendance:
+
+- **Attended turns** (interactive client connected) — the turn pauses with an
+  approval prompt asking whether to proceed unsandboxed. The client may
+  approve (the turn retries with degraded execution), reject (the turn is
+  marked Failed), or the prompt may time out or be interrupted.
+- **Unattended or delegated turns** — the turn is blocked and marked Failed.
+  The degradation is recorded in the audit trail via an
+  `execution_isolation_degraded` event.
+
+`allow_degraded_execution = true` opts in to unsandboxed execution without
+the approval prompt, for both attended and unattended turns. The degradation
+is recorded in the audit trail regardless of how it was authorised.
 
 ### Approval channel
 
