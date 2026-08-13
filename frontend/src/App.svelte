@@ -163,6 +163,7 @@
 
   function handleRouteChange(route: Route): void {
     currentRoute = route;
+    notFound = route.notFound;
   }
 
   const router = createRouter({
@@ -336,10 +337,6 @@
       // 3. Apply the URL. If it points at a conversation, selectAndNavigate
       //    will bring its space into scope along the way.
       await router.init();
-
-      // Snapshot the not-found flag — set by the router if the URL pointed
-      // at a conversation that no longer exists on the server.
-      notFound = router.currentRoute.notFound;
     } catch {
       // Any failure here means the gateway is unreachable. Show a clear error
       // rather than a blank screen with no indication of what went wrong.
