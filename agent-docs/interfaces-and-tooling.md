@@ -50,7 +50,12 @@ internals.
 ## Wire-contract architecture
 
 All types that cross a process boundary live in `swage-protocol`
-(`crates/swage-protocol/`). The crate is organised into four surface modules:
+(`crates/swage-protocol/`). One named exception: the `AssemblyReport` shapes
+live in `swage-context`, not `swage-protocol` — they are persisted as opaque
+JSON with a hand-written frontend transcription (`api/turns.ts:43`); migration
+into the protocol crate is queued.
+
+The crate is organised into four surface modules:
 
 | Surface | Module | Anchor type | Scope |
 |---|---|---|---|
@@ -75,9 +80,8 @@ Drift shows as uncommitted changes, caught by the verify gate's
 projection-freshness check.
 
 > [!NOTE]
-> The crate's doc comment (`lib.rs:9-11`) still reads "Only the client surface
-> exists so far." All four surfaces have types and committed schema documents;
-> the comment is stale.
+> The doc comment at `lib.rs:9-11` is stale — the committed schema documents
+> and the four surface modules are authoritative.
 
 ## Verification gate
 
