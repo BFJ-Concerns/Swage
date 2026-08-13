@@ -2506,20 +2506,29 @@ async fn failed_agent_call_handover(
     }))
 }
 
-fn degraded_failed_run_handover(
-    terminal_error: Option<&str>,
-    reconstruction_failed: bool,
-) -> Value {
-    let mut handover = serde_json::json!({
+fn degraded_failed_run_handover(terminal_error: Option<&str>) -> Value {
+    serde_json::json!({
         "classification": "interrupted_unattributed",
         "failure": "The workflow failed without an attributable agent-call identity.",
         "failed_call": Value::Null,
         "terminal_error": terminal_error,
-    });
-    if reconstruction_failed {
-        handover["reconstruction_failed"] = Value::Bool(true);
-    }
-    handover
+    })
+}
+
+fn reconstruction_failed_handover(
+    failed_call: FailedAgentCallRef,
+    terminal_error: Option<&str>,
+) -> Value {
+    serde_json::json!({
+        "classification": "reconstruction_failed",
+        "failure": "The journal read-back failed for a known agent call.",
+        "failed_call": {
+            "journal_entry_id": failed_call.journal_entry_id,
+            "seq": failed_call.seq,
+        },
+        "terminal_error": terminal_error,
+        "reconstruction_failed": true,
+    })
 }
 
 async fn durable_failed_agent_call_handover(
@@ -2530,7 +2539,7 @@ async fn durable_failed_agent_call_handover(
 ) -> Value {
     failed_agent_call_handover(storage, run_id, failed_call)
         .await
-        .unwrap_or_else(|| degraded_failed_run_handover(terminal_error, true))
+        .unwrap_or_else(|| reconstruction_failed_handover(failed_call, terminal_error))
 }
 
 async fn launch_existing_run(
@@ -2725,10 +2734,10 @@ async fn launch_existing_run(
                             )
                             .await,
                         ),
-                        None => Some(degraded_failed_run_handover(error.as_deref(), false)),
+                        None => Some(degraded_failed_run_handover(error.as_deref())),
                     }
                 }
-                _ => Some(degraded_failed_run_handover(error.as_deref(), false)),
+                _ => Some(degraded_failed_run_handover(error.as_deref())),
             }
         } else {
             None
@@ -5234,12 +5243,12 @@ mod tests {
         assert_eq!(handover["classification"], "interrupted");
         assert_eq!(handover["failed_call"]["kind"], "agent_call");
         assert_eq!(handover["failed_call"]["label"], "lead segment 3");
-        assert!(
-            handover["failed_call"]["error"]
-                .as_str()
-                .is_some_and(|error| error.starts_with("AgentCallError:"))
-        );
+        let call_error = handover["failed_call"]["error"]
+            .as_str()
+            .expect("failed call error");
+        assert!(call_error.starts_with("AgentCallError:"));
         let terminal_error = run.error_message.as_deref().expect("terminal error");
+        assert!(terminal_error.contains(call_error));
         assert!(terminal_error.contains("at <anonymous> (eval_script:"));
         assert!(!terminal_error.contains("AgentCallError: AgentCallError:"));
 
@@ -5378,21 +5387,86 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn failed_call_reconstruction_failure_still_leaves_a_handover() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let terminal_error = "workflow script failed: AgentCallError: terminal failure";
-        let handover = durable_failed_agent_call_handover(
-            &(Arc::clone(&storage) as Arc<dyn Storage>),
-            Uuid::new_v4(),
-            FailedAgentCallRef {
-                journal_entry_id: Uuid::new_v4(),
-                seq: 7,
-            },
-            Some(terminal_error),
-        )
-        .await;
+        let space = storage.get_or_create_default().await.expect("space");
+        let source = r#"await agent("known failing call", {agent: "default", maxAttempts: 1});"#;
+        let run = storage
+            .create_workflow_run(NewWorkflowRun {
+                space_id: space.id,
+                parent_run_id: None,
+                parent_seq: None,
+                script_version_id: None,
+                source: Some(source.into()),
+                source_hash: source_hash(source),
+                args: Value::Null,
+                budget: serde_json::to_value(WorkflowBudget::default()).expect("budget"),
+                engine_version: "test".into(),
+                dispatch_bound_agent_ids: vec![],
+            })
+            .await
+            .expect("run");
+        let request = AgentCallRequest {
+            prompt: "known failing call".into(),
+            agent: "default".into(),
+            model: None,
+            schema: None,
+            max_attempts: 1,
+            label: None,
+            session: None,
+        };
+        let request = serde_json::to_value(request).expect("request");
+        let mismatched = storage
+            .create_workflow_journal_intent(NewWorkflowJournalIntent {
+                run_id: run.id,
+                seq: 0,
+                kind: "log".into(),
+                args_hash: journal_args_hash(&request),
+                request,
+                effect_kind: None,
+                idempotency_key: None,
+                target_kind: None,
+            })
+            .await
+            .expect("journal intent");
+        storage
+            .fail_workflow_journal_entry(mismatched.id, "AgentCallError: terminal failure")
+            .await
+            .expect("failed journal entry");
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
 
-        assert_eq!(handover["classification"], "interrupted_unattributed");
-        assert_eq!(handover["failed_call"], Value::Null);
-        assert_eq!(handover["terminal_error"], terminal_error);
+        launch_existing_run(state.clone(), run.clone(), source.into(), None)
+            .await
+            .expect("launch run");
+        wait_for_terminal(&state, run.id).await;
+        let terminal = storage
+            .get_workflow_run(run.id)
+            .await
+            .expect("run")
+            .expect("present");
+        let handover = terminal.handover.expect("durable handover");
+
+        assert_eq!(terminal.state, "failed");
+        assert_eq!(handover["classification"], "reconstruction_failed");
+        assert_eq!(
+            handover["failure"],
+            "The journal read-back failed for a known agent call."
+        );
+        assert_eq!(
+            handover["failed_call"]["journal_entry_id"],
+            mismatched.id.to_string()
+        );
+        assert_eq!(handover["failed_call"]["seq"], mismatched.seq);
+        assert!(
+            handover["terminal_error"]
+                .as_str()
+                .is_some_and(|error| error.contains("AgentCallError: terminal failure"))
+        );
         assert_eq!(handover["reconstruction_failed"], true);
     }
 
