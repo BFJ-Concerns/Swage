@@ -198,6 +198,12 @@ struct FailedAgentCallRef {
     seq: u64,
 }
 
+impl FailedAgentCallRef {
+    fn host_reference(self) -> String {
+        self.journal_entry_id.to_string()
+    }
+}
+
 fn token_reservation_per_call(budget: &WorkflowBudget) -> Option<u64> {
     let limit = budget.max_total_tokens?;
     let calls = budget
@@ -1125,14 +1131,23 @@ async fn run_host_commands_inner(
                             Err(error) => (None, Err(error.to_string())),
                         }
                     };
-                    if result.is_err()
+                    let result = if result.is_err()
                         && let Some(journal_entry_id) = journal_entry_id
                     {
-                        *failed_agent_call.lock().await = Some(FailedAgentCallRef {
+                        let failed_call_ref = FailedAgentCallRef {
                             journal_entry_id,
                             seq: current_seq,
-                        });
-                    }
+                        };
+                        *failed_agent_call.lock().await = Some(failed_call_ref);
+                        result.map_err(|error| {
+                            format!(
+                                "AgentCallReference:{}:{error}",
+                                failed_call_ref.host_reference()
+                            )
+                        })
+                    } else {
+                        result
+                    };
                     let actual = if !completed_replay {
                         result
                             .as_ref()
@@ -2488,6 +2503,15 @@ async fn failed_agent_call_handover(
     }))
 }
 
+fn degraded_failed_run_handover(terminal_error: Option<&str>) -> Value {
+    serde_json::json!({
+        "classification": "interrupted_unattributed",
+        "failure": "The workflow failed without an attributable agent-call identity.",
+        "failed_call": Value::Null,
+        "terminal_error": terminal_error,
+    })
+}
+
 async fn launch_existing_run(
     state: AppState,
     record: WorkflowRunRecord,
@@ -2651,6 +2675,12 @@ async fn launch_existing_run(
             active.lock().await.remove(&run_id);
             return;
         }
+        let terminal_failed_call_reference = match &engine_result {
+            Ok(Err(swage_workflow::WorkflowEngineError::AgentCall { host_reference, .. })) => {
+                Some(host_reference.clone())
+            }
+            _ => None,
+        };
         let (run_state, output, error) = match engine_result {
             Ok(Ok(json)) => match serde_json::from_str(&json) {
                 Ok(value) => ("completed", Some(value), None),
@@ -2661,12 +2691,17 @@ async fn launch_existing_run(
             Err(problem) => ("failed", None, Some(problem.to_string())),
         };
         let handover = if run_state == "failed" && output.is_none() {
-            let failed_call = *failed_agent_call.lock().await;
-            match failed_call {
-                Some(failed_call) => {
-                    failed_agent_call_handover(&storage, run_id, failed_call).await
+            match terminal_failed_call_reference {
+                Some(host_reference) => {
+                    let failed_call = *failed_agent_call.lock().await;
+                    match failed_call.filter(|failed| failed.host_reference() == host_reference) {
+                        Some(failed_call) => {
+                            failed_agent_call_handover(&storage, run_id, failed_call).await
+                        }
+                        None => Some(degraded_failed_run_handover(error.as_deref())),
+                    }
                 }
-                None => None,
+                _ => Some(degraded_failed_run_handover(error.as_deref())),
             }
         } else {
             None
@@ -5132,8 +5167,8 @@ mod tests {
         );
         let source = r#"
             await postEvent("escalation", { decisionQueued: true });
-            await deliverEvents(1);
-            await agent("make the lead decision", {
+            const grounding = await deliverEvents(1);
+            await agent(`make the lead decision from ${JSON.stringify(grounding)}`, {
                 agent: "default",
                 label: "lead segment 3",
                 maxAttempts: 3,
@@ -5212,6 +5247,11 @@ mod tests {
             "delivered_to_failed_call"
         );
         assert_eq!(provider.requests.lock().expect("requests").len(), 3);
+        assert!(provider.requests.lock().expect("requests")[0]
+            .messages
+            .iter()
+            .flat_map(|message| message.content())
+            .any(|part| matches!(part, swage_core::ContentPart::Text { text } if text.contains(r#""delivered":1"#))));
 
         let Json(detail) = get_run(State(state.clone()), Path(started.id))
             .await
@@ -5232,6 +5272,77 @@ mod tests {
                 .state,
             "failed"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn caught_agent_failure_does_not_blame_the_call_for_a_later_script_error() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let provider = Arc::new(ScriptedRecordingProvider {
+            outputs: std::sync::Mutex::new(std::collections::VecDeque::from(vec![vec![
+                swage_core::StreamChunk::Done {
+                    finish_reason: None,
+                },
+            ]])),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let source = r#"
+            try {
+                await agent("failure the script handles", {
+                    agent: "default",
+                    label: "handled call",
+                    maxAttempts: 1,
+                    schema: {
+                        type: "object",
+                        required: ["decision"],
+                        properties: { decision: { type: "string" } }
+                    }
+                });
+            } catch (_) {}
+            throw new Error("later unrelated script failure");
+        "#;
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(space.id),
+            Json(StartInlineWorkflowRunRequest {
+                source: source.into(),
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start inline run");
+
+        wait_for_terminal(&state, started.id).await;
+
+        let run = storage
+            .get_workflow_run(started.id)
+            .await
+            .expect("run")
+            .expect("present");
+        assert_eq!(run.state, "failed");
+        assert!(
+            run.error_message
+                .as_deref()
+                .is_some_and(|error| { error.contains("later unrelated script failure") })
+        );
+        let handover = run.handover.expect("degraded terminal handover");
+        assert_eq!(handover["classification"], "interrupted_unattributed");
+        assert_eq!(handover["failed_call"], Value::Null);
+        assert!(
+            handover["terminal_error"]
+                .as_str()
+                .is_some_and(|error| error.contains("later unrelated script failure"))
+        );
+        assert_eq!(provider.requests.lock().expect("requests").len(), 1);
     }
 
     #[tokio::test(flavor = "multi_thread")]
