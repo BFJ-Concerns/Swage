@@ -18,6 +18,12 @@ pub struct SseEvent {
     pub data: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamResponseMetadata {
+    pub status: u16,
+    pub request_id: Option<String>,
+}
+
 // ---------------------------------------------------------------------------
 // HttpClient
 // ---------------------------------------------------------------------------
@@ -76,7 +82,13 @@ impl HttpClient {
         path: &str,
         body: &impl Serialize,
         extra_headers: HeaderMap,
-    ) -> Result<impl Stream<Item = Result<SseEvent, ProviderError>>, ProviderError> {
+    ) -> Result<
+        (
+            StreamResponseMetadata,
+            impl Stream<Item = Result<SseEvent, ProviderError>>,
+        ),
+        ProviderError,
+    > {
         let url = format!("{}{}", self.base_url, path);
 
         let response = self
@@ -101,7 +113,16 @@ impl HttpClient {
             return Err(map_http_error(status, body_text, retry_after));
         }
 
-        Ok(sse_stream_from_bytes(response.bytes_stream()))
+        let request_id = response
+            .headers()
+            .get("request-id")
+            .or_else(|| response.headers().get("x-request-id"))
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        Ok((
+            StreamResponseMetadata { status, request_id },
+            sse_stream_from_bytes(response.bytes_stream()),
+        ))
     }
 }
 

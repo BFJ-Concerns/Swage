@@ -125,6 +125,11 @@ pub enum ProviderError {
     #[error("stream error: {0}")]
     StreamError(String),
 
+    /// A provider response completed successfully at the transport layer but
+    /// contained no usable model output (transient).
+    #[error("provider response anomaly: {0}")]
+    ProviderAnomaly(String),
+
     /// Provider returned a well-formed response with unexpected content (permanent).
     #[error("invalid response: {0}")]
     InvalidResponse(String),
@@ -142,6 +147,7 @@ impl ProviderError {
                 | ProviderError::Timeout { .. }
                 | ProviderError::Network { .. }
                 | ProviderError::StreamError(_)
+                | ProviderError::ProviderAnomaly(_)
         )
     }
 }

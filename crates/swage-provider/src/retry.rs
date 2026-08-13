@@ -216,8 +216,18 @@ impl LlmProvider for RetryProvider {
                 } {
                     match chunk {
                         StreamChunk::Error { message } if !output_started => {
-                            retryable_error = Some(message);
+                            retryable_error = Some((message, false));
                             break;
+                        }
+                        StreamChunk::ProviderAnomaly { message } if !output_started => {
+                            retryable_error = Some((message, true));
+                            break;
+                        }
+                        StreamChunk::ProviderAnomaly { message } => {
+                            if tx.send(StreamChunk::ProviderAnomaly { message }).is_err() {
+                                return;
+                            }
+                            return;
                         }
                         StreamChunk::Error { message } => {
                             if tx.send(StreamChunk::Error { message }).is_err() {
@@ -263,7 +273,7 @@ impl LlmProvider for RetryProvider {
                     }
                 }
 
-                let Some(message) = retryable_error else {
+                let Some((message, is_anomaly)) = retryable_error else {
                     if let Some(retry_attempt) = active_retry.take()
                         && tx
                             .send(StreamChunk::ProviderRetrySettled {
@@ -297,7 +307,12 @@ impl LlmProvider for RetryProvider {
                     {
                         return;
                     }
-                    if tx.send(StreamChunk::Error { message }).is_err() {
+                    let terminal = if is_anomaly {
+                        StreamChunk::ProviderAnomaly { message }
+                    } else {
+                        StreamChunk::Error { message }
+                    };
+                    if tx.send(terminal).is_err() {
                         return;
                     }
                     return;
@@ -340,7 +355,7 @@ mod tests {
 
     use async_trait::async_trait;
     use futures::{SinkExt, StreamExt};
-    use swage_core::{FinishReason, TokenUsage};
+    use swage_core::{FinishReason, ProviderResponseWitness, TokenUsage};
 
     use super::*;
 
@@ -869,15 +884,25 @@ mod tests {
                 call_count: Arc::clone(&call_count),
                 attempts: Mutex::new(vec![
                     vec![
+                        StreamChunk::ProviderResponseWitness(ProviderResponseWitness {
+                            http_status: 200,
+                            request_id: Some("discarded-attempt".into()),
+                            ..ProviderResponseWitness::default()
+                        }),
                         StreamChunk::Usage(TokenUsage {
                             input_tokens: 100,
                             output_tokens: 50,
                         }),
-                        StreamChunk::Error {
+                        StreamChunk::ProviderAnomaly {
                             message: "first attempt failed".into(),
                         },
                     ],
                     vec![
+                        StreamChunk::ProviderResponseWitness(ProviderResponseWitness {
+                            http_status: 200,
+                            request_id: Some("successful-attempt".into()),
+                            ..ProviderResponseWitness::default()
+                        }),
                         StreamChunk::Delta {
                             content: "success".into(),
                         },
@@ -916,6 +941,14 @@ mod tests {
         assert_eq!(usage.len(), 1, "discarded attempts must not report usage");
         assert_eq!(usage[0].input_tokens, 10);
         assert_eq!(usage[0].output_tokens, 5);
+        let request_ids: Vec<_> = chunks
+            .iter()
+            .filter_map(|chunk| match chunk {
+                StreamChunk::ProviderResponseWitness(witness) => witness.request_id.as_deref(),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(request_ids, ["discarded-attempt", "successful-attempt"]);
     }
 
     #[tokio::test]

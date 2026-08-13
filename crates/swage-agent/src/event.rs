@@ -4,7 +4,7 @@
 //! and forwards them to connected clients. This decouples the agent's
 //! execution loop from transport concerns.
 
-use swage_core::ApprovalTimeoutPolicy;
+use swage_core::{ApprovalTimeoutPolicy, ProviderResponseWitness};
 use uuid::Uuid;
 
 use crate::approval::ApprovalDecisionValue;
@@ -50,6 +50,13 @@ pub enum AgentEvent {
         turn_id: Uuid,
         round: usize,
         request: serde_json::Value,
+    },
+
+    /// Content-free evidence describing a provider response attempt.
+    ProviderResponseCaptured {
+        turn_id: Uuid,
+        round: usize,
+        witness: ProviderResponseWitness,
     },
 
     /// Provider reasoning side-channel content was received.

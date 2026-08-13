@@ -49,6 +49,37 @@ use crate::{
     websocket::ServerEvent,
 };
 
+#[test]
+fn provider_response_witness_is_appended_without_content_fields() {
+    let mut report = serde_json::json!({});
+    append_provider_visible_response(
+        &mut report,
+        2,
+        swage_core::ProviderResponseWitness {
+            http_status: 200,
+            request_id: Some("req-123".into()),
+            terminal_event: Some("message_stop".into()),
+            stop_reason: Some("end_turn".into()),
+            usage: swage_core::TokenUsage {
+                input_tokens: 9,
+                output_tokens: 0,
+            },
+            content_blocks: vec![swage_core::ProviderContentBlockWitness {
+                block_type: "thinking".into(),
+                count: 1,
+                bytes: 42,
+            }],
+        },
+    );
+
+    let response = &report["provider_visible"]["responses"][0];
+    assert_eq!(response["round"], 2);
+    assert_eq!(response["witness"]["request_id"], "req-123");
+    assert_eq!(response["witness"]["content_blocks"][0]["bytes"], 42);
+    assert!(response["witness"].get("content").is_none());
+    assert!(response["witness"].get("thinking").is_none());
+}
+
 // -----------------------------------------------------------------------
 // Sandbox guard
 // -----------------------------------------------------------------------

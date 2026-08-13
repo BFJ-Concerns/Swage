@@ -808,6 +808,13 @@ impl Agent {
                             *total_input_tokens += usage.input_tokens;
                             *total_output_tokens += usage.output_tokens;
                         }
+                        Some(StreamChunk::ProviderResponseWitness(witness)) => {
+                            let _ = event_tx.send(AgentEvent::ProviderResponseCaptured {
+                                turn_id: execution.turn_id,
+                                round,
+                                witness,
+                            });
+                        }
                         Some(StreamChunk::ProviderRetryStarted { attempt, max_retries, provider, wait_ms }) => {
                             let _ = event_tx.send(AgentEvent::ProviderRetryStarted {
                                 turn_id: execution.turn_id,
@@ -831,6 +838,13 @@ impl Agent {
                             let _ = event_tx.send(AgentEvent::Error { message: message.clone() });
                             return Err(AgentError::ProviderFailed(
                                 swage_core::ProviderError::StreamError(message),
+                            ));
+                        }
+                        Some(StreamChunk::ProviderAnomaly { message }) => {
+                            self.fail_turn_and_idle(execution.turn_id, execution.thread_id).await;
+                            let _ = event_tx.send(AgentEvent::Error { message: message.clone() });
+                            return Err(AgentError::ProviderFailed(
+                                swage_core::ProviderError::ProviderAnomaly(message),
                             ));
                         }
                         Some(StreamChunk::ToolUse { call_id, name, arguments }) if collect_tool_calls => {
