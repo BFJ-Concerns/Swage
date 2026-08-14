@@ -206,6 +206,14 @@
     modelCatalogueReady = true;
   }
 
+  async function refreshModelCatalogueAfterSave(): Promise<void> {
+    try {
+      await refreshModelCatalogue();
+    } catch (error) {
+      console.error("Failed to refresh model settings after saving:", error);
+    }
+  }
+
   // ---------------------------------------------------------------------------
   // Theme — light (riso) / dark (cyanotype) / system
   // ---------------------------------------------------------------------------
@@ -409,7 +417,7 @@
     {defaultModelId}
     route={currentRoute}
     onNavigate={navigate}
-    onSettingsSaved={refreshModelCatalogue}
+    onSettingsSaved={refreshModelCatalogueAfterSave}
     />
 
   {#if notFound}
