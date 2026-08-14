@@ -1,0 +1,875 @@
+<!-- generated from agent-docs/ by the project-docs skill (doc-indexes.sh); do not edit -->
+
+
+<!-- source: agent-docs/agents-and-permissions.md -->
+
+# Agents and permissions
+
+## Agent definitions
+
+A durable agent definition is a DB-stored record (`AgentDefinition` in
+`swage-storage`) that gives a session its character. Each definition carries:
+
+| Field | Purpose |
+|---|---|
+| `id` | Stable agent id; sessions carry it as `sessions.agent_id` |
+| `space_id` | `None` = global; `Some(uuid)` = space-scoped, shadows a global definition with the same id within that space |
+| `display_name` | Human-readable label |
+| `description` | Free-text description |
+| `instructions` | Appended after operator instructions (never precede them); replaces outright when operator instructions are empty |
+| `model_id` | Model preference; applied only when the model id exists in `config.models.entries`, otherwise ignored with a warning |
+| `tool_permissions` | Optional JSON overlay (serialised `ToolPermissionConfig`); intersects with the resolved config's grants — narrows, never widens |
+| `skills` | Skill ids this definition activates |
+| `output_schema` | Optional JSON Schema enforced on every final response |
+| `output_max_retries` | Override for schema-validation retry limit |
+
+### Overlay onto the config cascade
+
+`apply_agent_definition` (in `turn/configuration.rs`) overlays a definition
+onto the session's resolved file config (Global → Space → Agent `.toml`
+files). The overlay:
+
+1. Appends instructions after operator instructions.
+2. Sets the default model if the id is present in `config.models.entries`.
+3. Intersects tool permissions via `intersect_tool_permissions` — allow sets
+   are intersected, deny sets are unioned. A malformed overlay is logged and
+   ignored (the config's own grants stand).
+4. Sets `declared_skills` and, when present, `output_schema` and
+   `output_max_retries`.
+
+## Tool permission model
+
+### Resolution order
+
+`check_permission` (`swage-tool/src/permission.rs`) evaluates in strict
+order:
+
+1. **Deny wins.** If the tool is in `deny`, return `PermissionDenied(ExplicitlyDenied)`.
+2. **Allow gate.** The tool must match the `allow` list — by direct name,
+   `"*"` wildcard, or bundle expansion. No match → `PermissionDenied(NotAllowed)`.
+3. **Approval check.** If the tool matches a `require_approval` entry
+   (direct or bundle-expanded), return `RequiresApproval` with optional
+   per-entry `timeout_secs` and `timeout_policy` overrides.
+4. **Allow.** Return `Allowed`.
+
+`require_approval` entries never grant access — they only gate tools already
+in the allow set. An entry for a tool outside `allow` is inert.
+
+### Defaults
+
+The file-config default (`ToolPermissionConfig::default()` in
+`swage-config/src/model.rs`) is:
+
+- `allow: ["*"]` — all tools permitted
+- `deny: []`
+- Eight high-risk tools gated behind `require_approval`:
+  `shell`, `file_edit`, `file_write`, `python_execute`, `browser_click`,
+  `browser_type`, `browser_select`, `browser_scroll`
+- Default bundles: `browsing`, `browser_actions`, `scheduling`,
+  `knowledge-read`, `knowledge-write`, `knowledge-curation`,
+  `knowledge-citation`, `knowledge-orientation-curation`
+
+### Effect of a restricted allow list
+
+When an agent definition sets `allow: ["tool_a", "tool_b"]`, the overlay
+intersects with the config's default `["*"]`. Since `*` on the config side
+defers to the overlay, the effective allow becomes `["tool_a", "tool_b"]`.
+The default `require_approval` entries for `shell`, `file_edit`, etc. remain
+in the config but are inert: `check_permission` rejects those tools at the
+allow gate (step 2) before reaching the approval check (step 3). Setting
+`allow: []` yields zero permitted tools.
+
+## Dispatch-bound grant intersection
+
+When an agent delegates a child, the child's effective permissions are the
+intersection of its own config and every ancestor dispatcher's grants.
+
+### Lineage
+
+`GatewayDelegationHandler.handle_delegation` (in `turn/delegation.rs`):
+
+1. Loads the target agent's file config and overlays its durable definition
+   (`apply_agent_definition`).
+2. Fetches the sender's dispatch-bound lineage from session metadata
+   (`dispatch_bound_agent_ids`), then appends the sender's own agent id.
+3. Calls `apply_dispatch_bounds` with the full lineage — each ancestor's
+   resolved config (file config + its own definition) is loaded and applied
+   in order via `apply_dispatch_bound`.
+4. Stores the lineage in the child's session metadata so further delegation
+   continues to narrow.
+
+### Intersection mechanics
+
+`apply_dispatch_bound` (`turn/configuration.rs`) operates on **expanded**
+allow sets (bundles resolved to concrete tool names before intersecting,
+preventing a shared bundle label from smuggling a wider definition):
+
+1. **Allow intersection.** Both worker and bound allow lists are expanded
+   through their respective bundles. Set-intersection produces the effective
+   allow. Wildcard on either side defers to the other.
+2. **Deny union.** The bound's denies are appended.
+3. **Worker approval pruning.** The worker's own `require_approval` entries
+   are explicitly filtered to only tools in the effective allow set — unlike
+   the agent-definition overlay, where inert entries simply remain.
+4. **Bound approval carry-forward.** The bound's `require_approval` entries
+   are expanded through the bound's own bundles and carried onto the worker
+   for any tool that is (a) in the effective allow set and (b) not already
+   approval-gated by the worker. Carried entries use the worker's own
+   timeout defaults.
+
+### Audit record
+
+`effective_tool_permissions_record` produces a JSON object with all bundle
+labels expanded to concrete tool names:
+
+```json
+{ "allow": [...], "deny": [...], "require_approval": [...] }
+```
+
+This record is attached to the delegated assembly report
+(`DelegatedAssembly.report`) and emitted via the `ContextAssembled` server
+event for audit and inspection. It is not injected into the child's model
+context — enforcement is handled at the dispatch/permission seam via
+`check_permission`, not via prompt text.
+
+## Space-targeted session creation
+
+`CreateConversationRequest` (`swage-protocol/src/client/conversation.rs`)
+carries `#[serde(deny_unknown_fields)]`. Its only fields are
+`selected_model_id` and `agent_id` (both optional). Any unrecognised field —
+including `space_id` — is rejected at deserialisation as a 422 error. This
+is a structural guarantee from `deny_unknown_fields`, not a
+space_id-specific validation.
+
+Space-targeted creation uses a separate path-based endpoint:
+
+```
+POST /api/spaces/{space_id}/sessions
+```
+
+The handler (`create_space_session` in `handlers.rs`) accepts the same
+`CreateConversationRequest` body (or no body) and creates the session
+directly in the named space, returning 201 on success or 404 if the space is
+not found.
+
+## Sandbox and approval flow
+
+### Sandbox isolation
+
+Local tool calls that are eligible for sandboxed execution run inside a
+two-layer sandbox (`swage-sandbox`):
+
+1. **Bubblewrap (bwrap)** — Linux namespace isolation (PID, network, mount,
+   user, IPC, UTS). `--unshare-all` with `--die-with-parent`. Read-only
+   root bind with read-write overlays for the working directory and
+   configured mounts.
+2. **Landlock** — kernel-enforced per-path filesystem access control,
+   applied inside the child process. Supports ABI 1 (Linux 5.13+), ABI 2
+   (5.19+, adds `REFER`), ABI 3 (6.2+, adds `TRUNCATE`). Degrades
+   gracefully on older kernels. Read-only system paths: `/bin`, `/lib`,
+   `/lib64`, `/usr/bin`, `/usr/lib`, `/usr/lib64`, `/etc/ld.so.cache`.
+   Always-writable paths: the working directory and `/tmp`, plus any
+   configured write paths. Restrictions are irrevocable within the process.
+
+The execution boundary is selected before this sandbox path. When a session
+targets a non-local device, tool calls go to that device. On a local device,
+tools that require gateway state or host facilities execute directly in the
+gateway process; tools with resolved secret parameters also stay on the host
+so their raw values do not cross sandbox IPC. These host/device executions
+are not confined by the bubblewrap and Landlock layers described here.
+
+Credential isolation strips `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, and
+`GOOGLE_API_KEY` from the sandbox child environment. Provider
+`api_key_env` names are configurable, however, and any differently named
+environment variable is not stripped by this mechanism. LLM completions use
+the host IPC proxy, so the child does not need provider credentials for
+completion requests.
+
+### Sandbox configuration
+
+| Option | Type | Default |
+|---|---|---|
+| `sandbox.enabled` | bool | `true` |
+| `sandbox.allow_degraded_execution` | bool | `false` |
+
+Setting `sandbox.enabled = false` does not by itself disable sandboxing —
+it tells the dispatcher to skip sandbox setup, which counts as degraded
+execution. The dispatcher requires the explicit opt-in
+`sandbox.allow_degraded_execution = true` before it will proceed without a
+sandbox. Without that opt-in, dispatcher construction fails with
+`SandboxError::Unavailable`. To run unsandboxed, set both:
+
+```toml
+[sandbox]
+enabled = false
+allow_degraded_execution = true
+```
+
+When `enabled` is true and sandbox setup fails at runtime, the recovery
+path depends on the turn's attendance:
+
+- **Attended turns** (interactive client connected) — the turn pauses with an
+  approval prompt asking whether to proceed unsandboxed. The client may
+  approve (the turn retries with degraded execution), reject (the turn is
+  marked Failed), or the prompt may time out or be interrupted.
+- **Unattended or delegated turns** — the turn is blocked and marked Failed.
+  The degradation is recorded in the audit trail via an
+  `execution_isolation_degraded` event.
+
+`allow_degraded_execution = true` also opts in to unsandboxed execution
+without the approval prompt when sandbox setup fails at runtime, for both
+attended and unattended turns. The degradation is recorded in the audit
+trail regardless of how it was authorised.
+
+### Approval channel
+
+When `check_permission` returns `RequiresApproval`, the turn pauses and
+sends an `ApprovalRequest` to the connected client. The client responds with
+a decision (`Approved` or `Rejected`) and a scope.
+
+**Scopes** (`ApprovalDecisionScope`):
+
+| Scope | Persistence | Reach |
+|---|---|---|
+| `Once` | None — applies to the single pending call | This call only |
+| `Session` | In-memory `session_approval_grants`, until the gateway exits | Any session in this gateway process |
+| `Permanent` | In-memory + persisted to disk | This space |
+| `PermanentGlobal` | In-memory + persisted to disk across all spaces | All spaces |
+
+`Session` is process-scoped, not session-scoped, despite the name.
+`ApprovalGrantKey` carries no session identifier, and `from_approval` sets
+`space_id: None` for tool and hook approvals, so the grant is stored under a
+global key. `build_permission_config` drops the matching `require_approval`
+entry whenever that key is present, for every dispatcher built afterwards —
+in any session, any space, until the gateway process exits. Existing
+dispatchers keep their original config; the grant takes effect on the next
+one built.
+
+Both `Permanent` tool grants and location grants (workspace attachment trust)
+are keyed by `space_id`. `Session` grants are global: tool and hook approvals
+get `space_id: None` from `from_approval`, and location approvals explicitly
+use a global location key. `PermanentGlobal` grants are global as well.
+
+### Timeout and rejection
+
+| Setting | Default | Source |
+|---|---|---|
+| `hitl.timeout` | `300` seconds (5 minutes) | `HitlConfig::default()` |
+| `hitl.timeout_policy` | `Reject` | `HitlConfig::default()` |
+
+Per-tool overrides via `RequireApprovalEntry::WithOptions { timeout, timeout_policy }`.
+
+**Timeout policies:**
+
+- `Reject` — treat timeout as rejection; the agent receives feedback and the
+  turn continues.
+- `Interrupt` — mark the turn as Interrupted; no further tool calls or
+  completions are issued.
+
+
+<!-- source: agent-docs/interfaces-and-tooling.md -->
+
+# Interfaces and tooling
+
+## Turn context inspector
+
+Each assistant message with a `turn_id` shows a "context" button
+(`MessageDisplay.svelte:273`). Clicking it sets the reactive `inspectedTurnId`
+and opens `TurnContextInspector.svelte`, which fetches
+`GET /api/turns/{id}/context` (`handlers.rs:1239`, route at `server.rs:246`).
+
+The endpoint reads a JSON snapshot from the `context_snapshots` table
+(`turn_id TEXT PRIMARY KEY REFERENCES turns(id) ON DELETE CASCADE`,
+`report_json TEXT NOT NULL`, `created_at TEXT NOT NULL`) and returns
+`{ "turn_id": ..., "report": ... }`. 404 means no snapshot exists for that
+turn.
+
+The inspector panel displays:
+
+| Section | Shown when | Content |
+|---|---|---|
+| Summary | Always | Assembly name, total tokens, element count, duration |
+| Elements | Always | Table: element name, source (with optional preview), token count |
+| Compaction | `compaction_applied` is non-empty | Element name, requested vs actual strategy, tokens before/after, messages removed |
+| Fallbacks | `errors` is non-empty | Error message and which fallback assembly was used |
+| Warnings | `warnings` is non-empty | Each warning string |
+
+The Rust-side `AssemblyReport` type lives in `swage-context` (`report.rs:81`),
+not `swage-protocol` — it is persisted as opaque JSON, not projected as a
+wire type. The frontend defines its own TypeScript transcription
+(`api/turns.ts:43`).
+
+`swage-tui` has a terminal-UI equivalent (`ui/inspector.rs:64`), toggled by
+keybinding. It shows per-element fill bars and a budget percentage.
+
+## Turn identity in streamed messages
+
+The `turn_complete` WebSocket event carries the turn's `turn_id`
+(`client/websocket.rs:134`). The streaming store passes it to
+`conversationStore.appendAssistantMessage` at turn-complete
+(`streaming.ts:256`), which merges it into the persisted message object
+(`conversations.ts:90`). This lets the context-inspector button appear on a
+just-completed message without a page reload — the `turn_id` guard at
+`MessageDisplay.svelte:273` matches live messages and API-loaded messages
+alike.
+
+The `RouterOptions.conversationStore` interface (`router.ts:47`) is a
+four-member contract — `activeConversationId`, `checkConversationExists`,
+`clearActiveConversation`, `selectConversation` — decoupled from Svelte store
+internals.
+
+## Wire-contract architecture
+
+All types that cross a process boundary live in `swage-protocol`
+(`crates/swage-protocol/`). One named exception: the `AssemblyReport` shapes
+live in `swage-context`, not `swage-protocol` — they are persisted as opaque
+JSON with a hand-written frontend transcription (`api/turns.ts:43`); migration
+into the protocol crate is queued.
+
+The crate is organised into four surface modules:
+
+| Surface | Module | Anchor type | Scope |
+|---|---|---|---|
+| Client | `src/client/` (directory, 11 submodules) | `ClientSurface` | Conversations, streaming, approvals, schedules, knowledge, voice, workflows, channels, delivery, spaces, provider sign-in |
+| Hosting | `src/hosting.rs` | `HostingSurface` | Presence, operator overview, agent definitions, approvals, configuration |
+| Device | `src/device.rs` | `DeviceSurface` | Device registration, remote tool execution |
+| Channel | `src/channel.rs` | `ChannelSurface` | Inbound messages (DM/thread), delivery log, channel status |
+
+Each manually maintained anchor struct must reference every wire type on its
+surface. A `schemars::schema_for!` call walks only the type graph reachable from
+that anchor, so a new top-level type must be added to the anchor unless an
+existing field already reaches it.
+
+### Projections
+
+| Projection | Output | Mechanism |
+|---|---|---|
+| TypeScript (ts-rs) | `frontend/src/lib/protocol/` (114 files at ref 2be38e3) | `projections.rs` test manually calls `export_all` for each top-level export, then trims trailing whitespace |
+| JSON Schema (schemars) | `crates/swage-protocol/schema/{client,hosting,device,channel}.json` | `projections.rs` tests per surface, via the anchor type |
+
+Running `cargo test -p swage-protocol` regenerates all projections in place.
+New top-level wire types must be added to the appropriate anchor for JSON
+Schema and to the explicit `export_all` list for TypeScript unless already
+reachable from an existing entry. Drift shows as uncommitted changes, caught by
+the verify gate's projection-freshness check; an unregistered type creates no
+drift for that check to detect.
+
+> [!NOTE]
+> The doc comment at `lib.rs:9-11` is stale — the committed schema documents
+> and the four surface modules are authoritative.
+
+## Verification gate
+
+`xtask` (`xtask/src/main.rs`) orchestrates the verification gate; the
+`Justfile` is a thin dispatch into `cargo run -p xtask -- <subcommand>`.
+Most logic is Rust, but `xtask` shells out for some checks (e.g.
+`scripts/check-tracked-local-state.sh`).
+
+### Recipes
+
+| Recipe | What it runs |
+|---|---|
+| `just check` | `cargo check --workspace` + frontend type check (`npm run check`) |
+| `just test` | Full test suite with failure aggregation (see below) |
+| `just verify` (alias: `just ci`) | The gate CI runs; stages below in order |
+
+### Verify stages
+
+Stages 1--4 abort on failure (`?` operator). Stages 5--6 run regardless;
+their results are combined.
+
+| # | Stage | Short-circuits? |
+|---|---|---|
+| 1 | Tracked-local-state check (`scripts/check-tracked-local-state.sh`) | Yes |
+| 2 | Format check (`cargo fmt --all -- --check` + `just --fmt --check`) | Yes |
+| 3 | Type check (`cargo check --workspace` + frontend) | Yes |
+| 4 | Clippy (`-D warnings`) | Yes |
+| 5 | Test suite (Rust with `--no-fail-fast`, frontend, desktop smoke) | No |
+| 6 | Projection freshness (`git diff --exit-code` on generated files) | No |
+
+When both tests and projections fail, both errors surface in one message.
+The test suite aggregates Rust, frontend, and desktop-smoke failures into a
+`Vec<String>` rather than aborting on the first.
+
+The verify body runs inside `run_with_final_sweep`, which runs
+`cargo sweep` after the gate (even on failure) and reports the artefact
+budget.
+
+## Client-side route preservation
+
+The SPA router (`frontend/src/lib/router.ts`) is framework-free: `parseRoute`
+pattern-matches the URL; `createRouter` manages `pushState` navigation and
+`popstate` listening.
+
+`applyLocation()` (`router.ts:130`) runs on every URL change. When the URL
+contains a conversation ID:
+
+- **Already active:** calls `checkConversationExists` — a lightweight `GET`
+  that confirms the conversation exists without re-fetching it. On 404,
+  clears the active conversation and falls back to root with a not-found
+  notice. On transient failure (non-404), the conversation is kept and the
+  error is swallowed.
+- **Different conversation:** calls `selectConversation`, which fully loads
+  it. On 404, falls back to root. On other errors, the error propagates.
+
+The `conversationStore` dependency is injected as a four-member interface
+(`router.ts:47`), wired in `App.svelte:170`. `clearActiveConversation`
+disconnects the WebSocket before clearing the store, preventing orphaned
+connections.
+
+Route changes propagate `notFound` state to the UI, so the "conversation not
+found" notice appears for `popstate`-triggered navigations and initial page
+loads alike.
+
+
+<!-- source: agent-docs/workflow-engine.md -->
+
+# Workflow engine
+
+The workflow engine executes front-loaded JavaScript scripts inside a
+sandboxed QuickJS runtime. Each run is a single script evaluation; the host
+(the gateway) journals every non-deterministic call so a crashed or parked
+run replays from its journal.
+
+Primary sources: `crates/swage-workflow/src/engine.rs` (the JS sandbox and
+host bindings), `crates/swage-workflow/src/host.rs` (the `WorkflowHost`
+trait), `crates/swage-gateway/src/workflow.rs` (journalling, parking,
+budget, handover, wake loop).
+
+## Run lifecycle
+
+States: `running`, `completed`, `failed`, `cancelled`, `interrupted`,
+`parked`.
+
+Creation paths (all converge on the internal `start_run`):
+
+- `start_inline_run` — HTTP, inline source and args.
+- `start_saved_run` — HTTP, resolves a saved script's head version.
+- `GatewayWorkflowLauncher::start_by_name` — programmatic, from agent
+  dispatch. Carries `dispatch_bound_agent_ids`.
+
+Hard limit: 4 concurrent active runs.
+
+`start_run` validates the budget, creates a `NewWorkflowRun` record
+(with `source_hash` as SHA-256 of source, `engine_version:
+"rquickjs-0.12.0"`), then calls `launch_existing_run`.
+
+`launch_existing_run` is the shared path for new and resumed runs:
+
+1. Loads the journal replay from storage.
+2. Computes `initial_agent_calls` and `initial_spent_tokens` from
+   completed journal entries.
+3. Spawns the host-command loop (`run_host_commands`).
+4. Creates a `ChannelWorkflowHost` wrapping the command channel.
+5. Determines `ScriptCapabilities` — `composition` is disabled for child
+   runs (`parent_run_id.is_some()`).
+6. Spawns a dedicated OS thread with a single-threaded Tokio runtime
+   running `WorkflowEngine::execute_hosted`.
+7. Spawns a Tokio task awaiting the engine result, then resolves the
+   terminal state.
+
+Terminal state resolution:
+
+- Park token cancelled (cancellation token not cancelled) → run is
+  **parked** (state already set by storage call).
+- `Ok(json)` → `completed` with `final_output`.
+- `WorkflowEngineError::Cancelled` → `cancelled`.
+- Any other error → `failed` with `error_message` and a handover record.
+
+## Scripts
+
+Scripts are JavaScript evaluated in a sandboxed QuickJS runtime with only
+these intrinsics: `Eval`, `Json`, `Promise`, `MapSet`, `RegExpCompiler`,
+`RegExp`. `globalThis.eval` is deleted; `Math.random` throws
+`NondeterministicCallError`. `Date`, `setTimeout`, `fetch`, `process` are
+absent.
+
+### Defaults header
+
+A script may export `const defaults = { ... };` before its body. These
+are merged into every `agent()` / `agentStart()` call — call-site values
+override, but `undefined` at the call site falls back to the default.
+
+### Global API
+
+| Function | Returns | Notes |
+|---|---|---|
+| `agent(prompt, options?)` | `Promise<Value>` | Synchronous (awaited) agent call. Requires `options.agent`. |
+| `agentStart(prompt, options?)` | Handle | Fire-and-forget dispatch. Handle has `.done`, `.session`, `.result`, `.label`. |
+| `wait({ watches?, timerMs? })` | `Promise<WakeResult>` | Races handle completions against a journalled timer. Returns `{wake: "completion", handle, value/error}` or `{wake: "timer"}`. |
+| `workflow(name, args?)` | `Promise<Value>` | Child workflow call. Only present when `capabilities.composition` is true. |
+| `deliver(payload, options?)` | `Promise<EffectReceipt>` | Delivery effect. Only present when `capabilities.delivery` is true. |
+| `postEvent(kind, payload?)` | `Promise<Value>` | Appends to the run's durable pending-event queue. Kind: `"completion"`, `"failure"`, or `"escalation"`. |
+| `gate(options?)` | `Promise<Value>` | Wake-gate evaluation. Options: `criteria` (string), `model` (optional override). |
+| `deliverEvents(upToSeq)` | `Promise<Value>` | Stamps pending events as delivered up to a sequence number. |
+| `parallel(thunks)` | `Promise<Array>` | `Promise.all` with per-thunk error swallowing (failing thunks collapse to `null`). |
+| `pipeline(items, ...stages)` | `Promise<Array>` | Per-item stage chain; failing items collapse to `null` at the failing stage. |
+| `budgetSnapshot()` | `Promise<Value>` | Journalled budget reading. Returns `{spent, remaining, working_remaining, closing_remaining, winding_down}`. |
+| `budget.spent()` | `number` | Synchronous, not journalled — NOT safe for branching (replay sees end-state values). |
+| `budget.remaining()` | `number \| undefined` | Synchronous, not journalled — NOT safe for branching. |
+| `log(message)` | — | Records via `host.record("log", ...)`. `console.log/warn/error` alias this. |
+| `phase(title)` | — | Records via `host.record("phase", ...)`. |
+
+### Composition bounds
+
+`ScriptCapabilities { delivery: bool, composition: bool }`. Child runs
+have `composition: false`, bounding nesting to one level. `delivery`
+defaults to `false`; controlled by the script's delivery grant.
+
+## Journal and replay
+
+Every host call that could produce a different result on replay is
+journalled as a write-ahead intent — with one deliberate exception:
+`budget.spent()` and `budget.remaining()` are live synchronous reads
+against an atomic counter, not journalled commands. They exist for
+informational display; branching on them is unsafe because replay sees
+end-state values. The journalled route for budget reads is
+`budgetSnapshot()`, which records the reading so replay returns the
+same values the original run saw.
+
+1. **Intent** — `create_workflow_journal_intent` creates a row in status
+   `started`.
+2. **Settlement** — `complete_workflow_journal_entry` (status `completed`
+   with result) or `fail_workflow_journal_entry` (status `failed` with
+   error).
+
+Calls refused at admission (budget exceeded) use
+`create_failed_workflow_journal_entry` — a single atomic write in status
+`failed`.
+
+### Sequence numbering
+
+The `seq` counter is incremented at the channel boundary (the
+host-command loop), not inside spawned tasks. This makes journal ordering
+deterministic and independent of scheduler timing.
+
+### Replay matching
+
+Journal entries store `args_hash` — SHA-256 of the canonical JSON
+serialisation of the request (computed by `journal_args_hash`). On
+replay, the current request's hash is compared against the recorded
+entry's hash. A mismatch produces `NondeterministicReplayError`.
+
+### Replay behaviour by status
+
+| Recorded status | Replay behaviour |
+|---|---|
+| `completed` | Return the recorded result without re-executing. Concurrent calls wait for completion-order release. |
+| `failed` | Return the recorded error without re-executing. |
+| `started` | The original run crashed between intent and settlement. Re-execute the work and settle the existing entry. |
+
+### Completion-order preservation
+
+Concurrent host calls can complete in any order. The original run's
+`completed_order` column records the interleaving. On replay, completed
+entries wait in `await_replay_release` until a rank counter reaches their
+rank, preserving the original interleaving for deterministic scripts.
+
+### Journal entry kinds
+
+| Kind | Source | Notes |
+|---|---|---|
+| `agent_call` | `agent()` / `agentStart()` | Spawned on semaphore. Cancellation errors are NOT settled (re-executed on resume). |
+| `effect` | `deliver()` | Carries `idempotency_key` and `effect_kind`. Recovery uses `recover_started_effect`. |
+| `log` / `phase` | `log()` / `phase()` | Fire-and-forget. Immediately completed with `null`. |
+| `workflow_call` | `workflow()` | Child runs found by `(parent_run_id, parent_seq)` to avoid duplicates. |
+| `timer` | `wait()` | Three-state lifecycle: started → completed (timer won via `confirm_timer`) or stays started (timer lost via `abandon_timer`). |
+| `event` | `postEvent()` / `deliverEvents()` | Event posts and delivery stamps. |
+| `gate` | `gate()` | Wake-gate evaluations, spawned like agent calls. |
+| `budget` | `budgetSnapshot()` | Recorded reading replayed, not re-read, to preserve branch determinism. |
+| `wind_down` | Agent admission | Written when working allowance is exhausted. The triggering agent call is refused. |
+
+### Effect recovery
+
+When a `deliver` entry is found in status `started` during replay, the
+recovery strategy depends on `EffectKind`:
+
+- `IdempotencyKey` — resend directly (the idempotency key makes
+  re-delivery safe).
+- `CheckBeforeRedo` — probe first; if evidence of prior delivery exists,
+  use it; otherwise resend.
+
+## Budget partitions
+
+`WorkflowBudget` fields:
+
+| Field | Type | Purpose |
+|---|---|---|
+| `max_agent_calls` | `Option<u32>` | Hard cap on agent call count (excluding budget-refused calls). |
+| `max_total_tokens` | `Option<u64>` | Total token ceiling across all agent calls. |
+| `reserved_closing_tokens` | `Option<u64>` | Tokens held back from ordinary work for calls after wind-down. Part of, not in addition to, `max_total_tokens`. |
+| `max_concurrent_agent_calls` | `Option<u32>` | Concurrency semaphore size (default 4). |
+
+### Two partitions
+
+The budget is carved from `max_total_tokens`:
+
+- **Working partition**: `max_total_tokens - reserved_closing_tokens`.
+  Funds ordinary agent calls.
+- **Closing partition**: `reserved_closing_tokens`. Funds agent calls
+  after wind-down.
+
+### Wind-down trigger
+
+Wind-down latches when a new agent call (or `budgetSnapshot()`) finds the
+working partition's remaining capacity falls below one per-call
+reservation estimate. The trigger:
+
+1. Computes `working_limit = limit - reserve`.
+2. Computes `committed = spent + working_reserved + closing_reserved`.
+3. If `working_limit - committed < reservation`:
+   - Writes a `wind_down` journal entry with a budget reading.
+   - Latches `closing_limit = spent + reserve`.
+   - Returns `BudgetWindDownError` to the script.
+
+Once `winding_down` is true, new agent calls are admitted against
+`closing_limit`. If `closing_limit - (spent + closing_reserved) <
+reservation`, the call is refused with `BudgetExceededError`.
+
+### In-flight working calls after wind-down
+
+Working-partition calls admitted before wind-down that settle after it
+extend `closing_limit` by their actual spend. This prevents working calls
+from consuming the closing allowance — their spend is added to the
+ceiling, not counted against it.
+
+During replay, a working call may settle before the replay cursor
+reaches the recorded wind-down transition. The `replayed_working_credit`
+field accumulates this spend and is folded into `closing_limit` when
+wind-down latches.
+
+Replay constructs `closing_limit` from
+`completed_agent_tokens_before(replay, transition_seq) +
+reserved_closing_tokens + replayed_working_credit`, scanning the journal
+for completed agent-call token counts before the transition — not from
+the live `accounting.spent` counter.
+
+### Token accounting
+
+`TokenBudgetState` fields:
+
+| Field | Purpose |
+|---|---|
+| `spent` | Total tokens consumed by settled agent calls. |
+| `working_reserved` | Tokens reserved by in-flight working-partition calls (estimated). |
+| `closing_reserved` | Tokens reserved by in-flight closing-partition calls. |
+| `closing_limit` | Once wind-down latches: `spent_at_transition + reserved_closing_tokens`. `None` before wind-down. |
+| `replayed_working_credit` | Accumulated spend from replayed working calls that settle before the wind-down latch. |
+
+Per-call reservation estimate: `(limit / calls).max(1)` where `calls`
+is `max_agent_calls` when set **and non-zero**, otherwise
+`max(max_concurrent_agent_calls.unwrap_or(4), 1)`. The final `.max(1)`
+clamp ensures every admitted call reserves at least one token.
+
+## Durable run parking
+
+### Threshold
+
+`PARK_TIMER_THRESHOLD_MS = 60_000` (one minute). Timers shorter than
+this run as in-process sleeps.
+
+### Parking conditions
+
+A timer parks the run when all three hold:
+
+1. Remaining sleep ≥ `PARK_TIMER_THRESHOLD_MS`.
+2. No other timer is armed (`pending_timers` is empty).
+3. No host work is outstanding (`in_flight == 0`).
+
+### How parking works
+
+1. `storage.set_workflow_run_parked(run_id, due)` sets state to `parked`
+   with `wake_at`.
+2. The `park` cancellation token fires, which triggers the `halt` token
+   (combined with `cancellation`), stopping the engine.
+3. The timer's reply sender is stashed (never resolved — the engine is
+   being torn down).
+4. Later timers arriving while parking join: their reply senders are
+   stashed, and `wake_at` is lowered to `min(current_due, new_due)`.
+
+Post-park, the run is removed from `active_workflow_runs`. No terminal
+state update — the run is dormant, not finished.
+
+### Resumption
+
+The wake loop (`spawn_workflow_wake_loop`) runs on a 5-second tick
+(`WORKFLOW_WAKE_TICK`). Each pass calls `resumable_workflow_runs`, which
+lists:
+
+- All `interrupted` runs.
+- All `parked` runs whose `wake_at ≤ now`.
+
+Each resumable run goes through `resume_workflow_run_record`:
+
+1. Compare-and-swap state transition to `running`
+   (`try_transition_workflow_run_state`).
+2. `launch_existing_run` replays the journal and continues execution.
+
+### Timer replay on wake
+
+A replayed timer entry in status `started` re-arms with remaining time:
+`effective_ms = ms - elapsed` where `elapsed` is wall-clock time since
+`started_at`. A four-hour sleep interrupted at hour three owes one hour.
+
+### Boot recovery
+
+At gateway startup, `interrupt_running_workflow_runs` bulk-transitions
+all `running` runs to `interrupted`. The wake loop's first pass
+(immediate at spawn) picks these up alongside due parked runs and
+relaunches them by replay.
+
+## Run events and the wake gate
+
+### Event posting
+
+`postEvent(kind, payload)` appends to the run's durable pending-event
+queue. Accepted kinds: `"completion"`, `"failure"`, `"escalation"`.
+Events are journalled (exactly-once under replay) and assigned a
+monotonic `seq`. Each event record links to its journal entry via
+`journal_entry_id`.
+
+### Wake-gate evaluation
+
+`gate({ criteria, model? })` evaluates pending events against the
+script's criteria:
+
+1. Loads pending (undelivered) events from storage.
+2. If no events: returns `{wake: false, reasoning: "no pending events"}`.
+3. Builds a prompt with the criteria and a JSON array of pending events.
+4. Calls a model (the gate model override, or the default model) with
+   `max_tokens: 500`.
+5. Parses a `{wake: bool, reasoning: string}` JSON from the response.
+6. On parse failure, fails open: `wake: true`.
+7. Returns `{wake, reasoning, events, read_up_to_seq}`.
+
+The events ride along in the response so a waking script can ground the
+lead without a second read.
+
+Gate evaluations are journalled — a replayed gate returns its recorded
+verdict.
+
+### Event delivery
+
+`deliverEvents(upToSeq)` stamps pending events up to a sequence number
+as delivered. Journalled, idempotent.
+
+## Worker session continuity
+
+`AgentSessionRef { session_id: Uuid, thread_id: Uuid }` is the
+continuation token.
+
+Flow:
+
+1. Host returns `session_id` and `thread_id` in `AgentCallResult`.
+2. Engine wraps them in the `agentStart` handle's `.session` field.
+3. Script passes `handle.session` back as `options.session` in the next
+   `agent()` / `agentStart()` call.
+4. `AgentCallRequest.session` carries it to the host, which routes the
+   turn to the existing session/thread.
+
+Session validation: `run_ephemeral_agent_call` verifies the session was
+created by this run (checking completed `agent_call` journal entries for
+a matching `session_id`). Unrecognised sessions are rejected.
+
+Replay determinism: tokens come from journalled results, so a replayed
+run rebuilds identical tokens. `AgentCallRequest.session` uses
+`skip_serializing_if = "Option::is_none"` — without it, the args hash
+would change and replay would fail.
+
+## Cancellation
+
+The `CancellationToken` is installed as the QuickJS interrupt handler
+(checked between JS opcodes) and raced against the execution future via
+`tokio::select!`. Result: `WorkflowEngineError::Cancelled`.
+
+`cancel_run` cancels the token. For parked runs (no engine to signal),
+it directly sets state to `cancelled` in storage.
+
+## Failure attribution and handover records
+
+When a run fails, a handover record preserves diagnostic context for the
+next handler.
+
+### Attribution path
+
+1. A spawned agent task observes an error and creates a
+   `FailedAgentCallRef { journal_entry_id, seq }`.
+2. It inserts the ref into `failed_agent_calls` keyed by
+   `journal_entry_id.to_string()`.
+3. The error message carries
+   `"AgentCallReference:{journal_entry_id}:{error}"`.
+4. The engine captures the reference inside
+   `WorkflowEngineError::AgentCall { host_reference, message }`.
+5. At terminal state resolution, the `host_reference` looks up
+   `failed_agent_calls` to recover the ref.
+
+### Handover construction
+
+`failed_agent_call_handover` reads the full journal, finds the matching
+failed `agent_call` entry, computes `previous_agent_call_seq`, and
+filters events into a delivery window:
+
+- `"delivered_to_failed_call"` — events delivered between the previous
+  agent call and the failed call.
+- `"pending"` — undelivered events.
+
+Result:
+
+```json
+{
+  "classification": "interrupted",
+  "failure": "Agent call {id} failed: {error}",
+  "failed_call": {
+    "journal_entry_id": "...",
+    "seq": 0,
+    "kind": "agent_call",
+    "label": "...",
+    "error": "..."
+  },
+  "last_journal_seq": 0,
+  "events_delivered_to_failed_call": 0,
+  "events_pending": 0,
+  "events": []
+}
+```
+
+### Classification values
+
+| Classification | Condition |
+|---|---|
+| `interrupted` | Full handover — failed agent call identified, journal reconstructed. |
+| `interrupted_unattributed` | No `host_reference`, or the reference was not in `failed_agent_calls`. |
+| `reconstruction_failed` | Reference existed but journal reconstruction returned `None`. |
+
+### Persistence
+
+The handover is stored via `update_workflow_run_state` in the
+`handover_json` column of `workflow_runs`.
+
+## Concurrency control
+
+| Mechanism | Scope | Default |
+|---|---|---|
+| Active-run limit | Gateway-wide | 4 concurrent runs |
+| Agent-call semaphore | Per-run | `max_concurrent_agent_calls` (default 4) |
+| `in_flight` counter | Per-run | Guards parking — no park while > 0 |
+| `agent_calls` counter | Per-run lifetime | Checked against `max_agent_calls` budget |
+
+The `in_flight` counter tracks agent calls, workflow calls, and gate
+evaluations. It is incremented in the host-command loop (deterministic
+boundary) and decremented in the spawned task on completion. The park
+guard reads this counter — the journal can lag a dispatch, so it must not
+be the guard.
+
+## Storage
+
+SQLite. Key tables:
+
+- `workflow_runs` — run records with `state`, `handover_json`,
+  `wake_at`, `dispatch_bound_agent_ids_json`.
+- `workflow_journal` — journal entries with `seq`, `completed_order`,
+  `kind`, `status`, `args_hash`, `request_json`, `result_json`,
+  `effect_kind`, `idempotency_key`.
+- `workflow_run_events` — run events with `seq`, `kind`,
+  `payload_json`, `delivered_wake_seq`, `delivered_at`. Partial index on
+  `(run_id, seq) WHERE delivered_at IS NULL` for pending-event queries.
