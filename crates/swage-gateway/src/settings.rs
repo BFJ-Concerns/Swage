@@ -461,16 +461,26 @@ pub async fn discover_models(
     query: Option<String>,
     draft_provider: Option<SaveProviderSettings>,
 ) -> Result<ModelDiscoveryResponse, ApiError> {
-    let provider = match draft_provider {
-        Some(provider) => provider.into_endpoint_config(),
-        None => provider_for_discovery(state, &provider_id).await?,
+    let (provider, draft_api_key) = match draft_provider {
+        Some(provider) => {
+            let key = provider
+                .api_key
+                .clone()
+                .filter(|value| !value.trim().is_empty());
+            (provider.into_endpoint_config(), key)
+        }
+        None => (provider_for_discovery(state, &provider_id).await?, None),
     };
 
     let mut models = match provider.protocol {
         swage_config::Protocol::OpenRouter => discover_openrouter_models().await?,
         swage_config::Protocol::OpenAi => {
             if let Some(base_url) = provider.base_url.as_deref() {
-                discover_openai_compatible_models(base_url).await?
+                let api_key = match draft_api_key {
+                    Some(key) => Some(key),
+                    None => discovery_credential(state, &provider).await,
+                };
+                discover_openai_compatible_models(base_url, api_key.as_deref()).await?
             } else {
                 known_models(&["gpt-4.1", "gpt-4.1-mini", "gpt-4o", "gpt-4o-mini"])
             }
@@ -979,14 +989,43 @@ fn known_models(ids: &[&str]) -> Vec<DiscoveredModel> {
         .collect()
 }
 
+/// Resolve the credential a discovery request should present, mirroring the
+/// runtime order: governed secret reference first, then the legacy
+/// environment-variable fallback. Discovery proceeds unauthenticated when
+/// neither resolves — the endpoint's own response reports whether it minds.
+async fn discovery_credential(
+    state: &AppState,
+    provider: &swage_config::ProviderEndpointConfig,
+) -> Option<String> {
+    if let Some(reference) = provider.api_key_secret_ref.as_deref() {
+        match state.secret_manager.resolve(reference).await {
+            Ok(resolved) => return Some(resolved.value),
+            Err(error) => {
+                tracing::warn!("model discovery could not resolve {reference}: {error}");
+            }
+        }
+    }
+    if let Some(api_key_env) = provider.api_key_env.as_deref()
+        && let Ok(value) = std::env::var(api_key_env)
+    {
+        return Some(value);
+    }
+    None
+}
+
 async fn discover_openai_compatible_models(
     base_url: &str,
+    api_key: Option<&str>,
 ) -> Result<Vec<DiscoveredModel>, ApiError> {
     let client = reqwest::Client::new();
     let mut last_error = None;
 
     for url in openai_compatible_model_urls(base_url) {
-        let response = match client.get(&url).send().await {
+        let mut request = client.get(&url);
+        if let Some(api_key) = api_key {
+            request = request.bearer_auth(api_key);
+        }
+        let response = match request.send().await {
             Ok(response) => response,
             Err(error) => {
                 last_error = Some(format!("{url}: {error}"));
