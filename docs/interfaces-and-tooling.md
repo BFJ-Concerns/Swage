@@ -66,14 +66,19 @@ document:
 - **Channel** — inbound messages (direct and threaded), delivery log, and
   channel status. The contract external integrators speak.
 
-Each surface module has an anchor struct whose fields reference every wire type
-on that surface. A single schema-generation call on the anchor produces a
-complete JSON Schema document with the full type graph, so adding a new type to
-the surface is enough to include it in the schema — no manual registration.
+Each surface module has a manually maintained anchor struct whose fields
+reference every wire type on that surface. A schema-generation call walks the
+type graph reachable from that anchor. A new top-level wire type must therefore
+be added to the surface anchor (unless an existing anchor field already reaches
+it) and to the explicit `ts-rs` export list in
+`crates/swage-protocol/tests/projections.rs` (unless an existing export already
+reaches it).
 
 Running `cargo test -p swage-protocol` regenerates all projections (TypeScript
-bindings and JSON Schemas) in place. Any drift shows up as uncommitted changes
-and is caught by the verification gate.
+bindings and JSON Schemas) in place for the types registered through those two
+paths. Any drift shows up as uncommitted changes and is caught by the
+verification gate, but the freshness check cannot detect an omitted type that
+was never made reachable.
 
 ## Verification gate
 
