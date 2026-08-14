@@ -52,7 +52,7 @@ rust-embed = { workspace = true }
 mime_guess = { workspace = true }
 clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
-cron = "0.16"
+cron = "0.17"
 chromiumoxide = "0.9.1"
 jsonschema = { workspace = true }
 
@@ -60,6 +60,6 @@ jsonschema = { workspace = true }
 swage-safety = { path = "../swage-safety" }
 swage-hook = { path = "../swage-hook" }
 tower = { version = "0.5", features = ["util"] }
-tokio-tungstenite = "0.29"
+tokio-tungstenite = "0.30"
 tempfile = { workspace = true }
 base64 = { workspace = true }
