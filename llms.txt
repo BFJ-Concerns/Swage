@@ -5,7 +5,7 @@
 <!-- doc-index:start (generated region; do not hand-edit. Regenerate with the project-docs skill: doc-indexes.sh) -->
 ## General
 
-- [Agents and permissions](agent-docs/agents-and-permissions.md): Agent definitions, tool permissions, approval mechanics, dispatch-bound grant intersection, and space-targeted session creation
+- [Agents and permissions](agent-docs/agents-and-permissions.md): Agent definitions, operator guidance (AGENTS.md), tool permissions, approval mechanics, dispatch-bound grant intersection, and space-targeted session creation
 - [Interfaces and tooling](agent-docs/interfaces-and-tooling.md): Turn context inspector API, wire-contract crate layout, verification gate stages, and client-side route handling
 - [Workflow engine](agent-docs/workflow-engine.md): Run lifecycle, journal/replay, budget partitions, parking, wake gate, worker sessions, cancellation, and failure handover
 <!-- doc-index:end -->

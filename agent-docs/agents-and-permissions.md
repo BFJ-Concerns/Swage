@@ -1,5 +1,5 @@
 ---
-description: Agent definitions, tool permissions, approval mechanics, dispatch-bound grant intersection, and space-targeted session creation
+description: Agent definitions, operator guidance (AGENTS.md), tool permissions, approval mechanics, dispatch-bound grant intersection, and space-targeted session creation
 ---
 
 # Agents and permissions
@@ -35,6 +35,63 @@ files). The overlay:
    ignored (the config's own grants stand).
 4. Sets `declared_skills` and, when present, `output_schema` and
    `output_max_retries`.
+
+## Operator guidance (`AGENTS.md`)
+
+Operator-authored guidance is a second instruction source, parallel to the
+`instructions/` directory. A file named `AGENTS.md` at the root of a
+guidance directory is read, and its content enters every turn as an
+instruction rule in the prompts element.
+
+### Where it is read from
+
+Two kinds of root are checked, in this order:
+
+1. **Config root** (`~/.swage/` or `$SWAGE_HOME`) — always read. The
+   resulting rule carries the `Global` provenance level.
+2. **Trusted workspace roots** — the active workspace and any workspace
+   attachments whose trust bit is set. Each produces a rule at the `Space`
+   provenance level.
+
+Untrusted workspace attachments contribute nothing: workspace content enters
+the model's instructions only after the operator has trusted the attachment
+(the same trust gate that governs file-operation location prompts). There is
+no config knob to disable global guidance — an `AGENTS.md` at the config
+root is always read.
+
+### Ordering and layering
+
+Global guidance appears before workspace guidance, so workspace rules
+refine the operator's baseline rather than the reverse. Both layers append
+after the resolved instruction baseline (the merged `instructions/`
+content), extending it without replacing it. Agent-definition instructions
+then append after operator guidance, preserving the full chain:
+resolved instructions → operator guidance → agent-definition instructions.
+
+### Error handling
+
+An absent `AGENTS.md` is silently skipped — a root without a guidance file
+simply contributes nothing. A path that exists but is not a regular file
+(e.g. a directory named `AGENTS.md`) is treated the same way. An
+unreadable or non-UTF-8 file is logged as a warning and skipped — guidance
+never fails a turn.
+
+### Code path
+
+Both foreground and delegated turns call `operator_guidance_rules`
+(in `turn/operator_guidance.rs`), which reads the config root's guidance
+file then each trusted workspace root's, and returns the ordered rule vec.
+The reading itself is in `swage_config::agent_guidance::read_agent_guidance`.
+The rules are passed to `build_assembly_elements` (in `turn/context.rs`),
+which appends them after the resolved-instructions rule so the
+`PromptsElement` emits them in the correct order.
+
+### Visibility in the context inspector
+
+The turn context inspector's prompts element shows the provenance of each
+rule by hierarchy level — e.g. `prompt rules (3 total: 1 Global, 2 Space)`.
+Operator guidance rules from the config root appear as `Global`; those from
+workspace roots appear as `Space`.
 
 ## Tool permission model
 

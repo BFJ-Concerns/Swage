@@ -101,6 +101,9 @@ for throwaway instances: `SWAGE_HOME=/tmp/swage-test swage gateway start`.
 Everything is under `~/.swage/` (or `$SWAGE_HOME`):
 
 - `config.toml` — providers, models, sandboxing, and platform settings.
+- `AGENTS.md` — global operator guidance, read into every turn as an
+  instruction rule. Workspace roots may carry their own `AGENTS.md` too —
+  see [Operator guidance](docs/agents-and-permissions.md#operator-guidance-agentsmd).
 - `instructions/` — global operator instructions, as `.md` files composed in
   filename order (`01-base.md`, `02-style.md`, …). They layer *after* the
   built-in orientation: every session already knows what it is running on,
@@ -114,7 +117,9 @@ Everything is under `~/.swage/` (or `$SWAGE_HOME`):
   reconstructable from.
 
 The configuration cascade is Global → Space → Agent: the more specific
-level extends or shadows the more general one.
+level extends or shadows the more general one. `AGENTS.md` extends the
+cascade (global then workspace) rather than participating in the shadowing
+— both levels are always additive.
 
 ## Isolated development instance
 
@@ -143,8 +148,8 @@ meets first:
 - [Workflow engine](docs/workflow-engine.md) — how a workflow script runs,
   how a run survives a restart, and how its token budget is spent.
 - [Agents and permissions](docs/agents-and-permissions.md) — agent
-  definitions, what a tool call is allowed to do, approvals, and sandbox
-  isolation.
+  definitions, operator guidance (`AGENTS.md`), what a tool call is allowed
+  to do, approvals, and sandbox isolation.
 - [Interfaces and tooling](docs/interfaces-and-tooling.md) — the web UI's
   turn context inspector, the wire contract, and the verification gate.
 
