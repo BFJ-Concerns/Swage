@@ -42,6 +42,17 @@ rather than the session silently running with an unintended permission set.
 
 ## Tool permission model
 
+### Permission bypass
+
+The top-level `dangerously_skip_permissions = true` setting bypasses this
+permission model rather than participating in its resolution rules. If it is
+enabled in either the session-resolved configuration or the gateway's startup
+configuration, the effective tool policy becomes wildcard allow with no
+denies or approval requirements. The turn also auto-approves the remaining
+tool, location, and hook gates, including prompts for out-of-workspace
+locations. The deny, allow, and approval guarantees below apply only while
+this setting is false in both configurations.
+
 ### Default grants
 
 A fresh configuration allows all tools (`allow: ["*"]`) and gates eight
@@ -233,8 +244,8 @@ reaches.
 |---|---|---|
 | `Once` | None | The single pending call only |
 | `Session` | In-memory, until the gateway exits | All matching calls in any session in this gateway process |
-| `Permanent` | In-memory and persisted to disk | All matching calls in this space |
-| `PermanentGlobal` | In-memory and persisted to disk across all spaces | All matching calls everywhere |
+| `Permanent` | In-memory and persisted to disk | All matching calls in this space while the gateway runs; after restart, subject to agent-level `require_approval` configuration |
+| `PermanentGlobal` | In-memory and persisted to disk across all spaces | All matching calls everywhere while the gateway runs; after restart, subject to space- and agent-level `require_approval` configuration |
 
 `Session` reaches further than its name suggests. The grant is not recorded
 against the session that approved it, or against a space: it is held in the
@@ -244,6 +255,14 @@ run that tool without prompting, until the gateway is restarted. Turns
 already under way keep the permissions they started with. If you want an
 approval confined to the work in front of you, `Once` is the only scope that
 gives it.
+
+For tool approvals, permanent persistence removes the tool from the
+`require_approval` list in the selected space or global TOML file. That list
+uses replacement semantics in the Global → Space → Agent cascade. An agent
+file can therefore restore a gate persisted at space scope, and a space or
+agent file can restore one persisted globally. The in-memory grant masks that
+narrower requirement until the gateway exits; after a restart, the narrower
+configuration applies again.
 
 `Permanent` and `PermanentGlobal` also handle location-scoped approvals —
 trusting a workspace attachment so that file operations within it no longer

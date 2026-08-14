@@ -38,6 +38,16 @@ files). The overlay:
 
 ## Tool permission model
 
+### Permission bypass
+
+`dangerously_skip_permissions = true` is a top-level escape hatch from this
+permission model, not another layer within it. If either the session-resolved
+configuration or the gateway's startup configuration enables it,
+`build_permission_config` returns wildcard allow with no denies or approval
+requirements. The turn also pre-approves all remaining tool, location, and
+hook gates, including out-of-workspace location prompts. The resolution rules
+below apply only while this setting is false in both configurations.
+
 ### Resolution order
 
 `check_permission` (`swage-tool/src/permission.rs`) evaluates in strict
@@ -224,8 +234,8 @@ a decision (`Approved` or `Rejected`) and a scope.
 |---|---|---|
 | `Once` | None — applies to the single pending call | This call only |
 | `Session` | In-memory `session_approval_grants`, until the gateway exits | Any session in this gateway process |
-| `Permanent` | In-memory + persisted to disk | This space |
-| `PermanentGlobal` | In-memory + persisted to disk across all spaces | All spaces |
+| `Permanent` | In-memory + persisted to disk | This space while the gateway runs; after restart, subject to agent-level `require_approval` configuration |
+| `PermanentGlobal` | In-memory + persisted to disk across all spaces | All spaces while the gateway runs; after restart, subject to space- and agent-level `require_approval` configuration |
 
 `Session` is process-scoped, not session-scoped, despite the name.
 `ApprovalGrantKey` carries no session identifier, and `from_approval` sets
@@ -235,6 +245,14 @@ entry whenever that key is present, for every dispatcher built afterwards —
 in any session, any space, until the gateway process exits. Existing
 dispatchers keep their original config; the grant takes effect on the next
 one built.
+
+For tool approvals, the persisted reach in the table is conditional after a
+restart. Persistence removes the tool from `require_approval` in the space or
+global TOML file. That field uses replacement semantics in the Global → Space
+→ Agent cascade, so an agent file can replace a persisted space list, and a
+space or agent file can replace a persisted global list. The process-local
+grant masks such a narrower approval requirement until the gateway exits;
+after restart, the narrower configuration takes effect again.
 
 `Permanent` and `PermanentGlobal` also handle location-scoped approvals
 (workspace attachment trust). Location grants are the one kind keyed by
