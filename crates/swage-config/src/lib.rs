@@ -1,6 +1,7 @@
 // Hierarchical TOML configuration with cascade merging, instruction assembly,
 // and validation for the Swage platform.
 
+pub mod agent_guidance;
 pub mod discovery;
 pub mod error;
 pub mod instructions;
