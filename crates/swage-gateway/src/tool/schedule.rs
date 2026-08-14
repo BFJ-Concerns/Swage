@@ -20,7 +20,7 @@ use uuid::Uuid;
 
 use swage_core::{GatewayError, ToolError};
 use swage_protocol::client::schedule as wire;
-use swage_storage::ScheduleCreator;
+use swage_storage::{ScheduleCreator, Storage};
 use swage_tool::context::ToolContext;
 
 use crate::state::AppState;
@@ -210,9 +210,10 @@ impl Tool for ScheduleTool {
                                     schedule)."
                 },
                 "space_id": {
-                    "type": "string",
+                    "type": ["string", "null"],
                     "description": "For session=fresh: the UUID of the space each new run's \
-                                    session is created in."
+                                    session is created in. Omit it to use this conversation's \
+                                    space."
                 },
                 "agent_id": {
                     "type": "string",
@@ -291,7 +292,7 @@ impl ScheduleTool {
     ) -> Result<Value, ToolError> {
         let message = required_str(SCHEDULE_TOOL, params, "message")?.to_owned();
         let spec = build_spec(params)?;
-        let session = build_session(params)?;
+        let session = build_session(state.storage.as_ref(), params, session_id).await?;
         let gate = build_gate(params)?;
 
         let request = wire::CreateScheduleRequest {
@@ -453,17 +454,57 @@ fn build_spec(params: &Value) -> Result<wire::ScheduleSpec, ToolError> {
 }
 
 /// Assemble a session policy from the flat session parameters.
-fn build_session(params: &Value) -> Result<wire::SessionPolicy, ToolError> {
+async fn build_session(
+    storage: &dyn Storage,
+    params: &Value,
+    calling_session_id: Uuid,
+) -> Result<wire::SessionPolicy, ToolError> {
     let session = required_str(SCHEDULE_TOOL, params, "session")?;
     match session {
-        "fresh" => Ok(wire::SessionPolicy::Fresh {
-            space_id: parse_uuid(
-                SCHEDULE_TOOL,
-                "space_id",
-                required_str(SCHEDULE_TOOL, params, "space_id")?,
-            )?,
-            agent_id: required_str(SCHEDULE_TOOL, params, "agent_id")?.to_owned(),
-        }),
+        "fresh" => {
+            let explicit_space_id = match params.get("space_id") {
+                None | Some(Value::Null) => None,
+                Some(Value::String(value)) if value.trim().is_empty() => None,
+                Some(Value::String(value)) => Some(parse_uuid(SCHEDULE_TOOL, "space_id", value)
+                    .map_err(|_| {
+                        invalid(
+                            SCHEDULE_TOOL,
+                            format!(
+                                "'space_id' must be a UUID when provided, got '{value}'; omit it to use this conversation's space"
+                            ),
+                        )
+                    })?),
+                Some(_) => {
+                    return Err(invalid(
+                        SCHEDULE_TOOL,
+                        "'space_id' must be a UUID string when provided; omit it to use this conversation's space",
+                    ));
+                }
+            };
+            let space_id = match explicit_space_id {
+                Some(space_id) => space_id,
+                None => {
+                    storage
+                        .get_session(calling_session_id)
+                        .await
+                        .map_err(|error| ToolError::ExecutionFailed {
+                            name: SCHEDULE_TOOL.to_owned(),
+                            message: format!("failed to resolve the calling session: {error}"),
+                        })?
+                        .ok_or_else(|| {
+                            invalid(
+                                SCHEDULE_TOOL,
+                                format!("calling session '{calling_session_id}' was not found"),
+                            )
+                        })?
+                        .space_id
+                }
+            };
+            Ok(wire::SessionPolicy::Fresh {
+                space_id,
+                agent_id: required_str(SCHEDULE_TOOL, params, "agent_id")?.to_owned(),
+            })
+        }
         "continuation" => Ok(wire::SessionPolicy::Continuation {
             session_id: parse_uuid(
                 SCHEDULE_TOOL,
@@ -610,7 +651,10 @@ impl Tool for WakeMeLaterTool {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
+    use swage_storage::{NewSession, SessionStore, SpaceStore, SqliteStorage};
 
     #[test]
     fn parse_delay_accepts_units() {
@@ -657,5 +701,131 @@ mod tests {
             build_gate_update(&json!({"gate_action": "set", "gate_model": "small"})).unwrap(),
             Some(wire::ScheduleGateUpdate::Set(_))
         ));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fresh_session_defaults_to_the_calling_sessions_space() {
+        let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+        let space = storage.get_or_create_default().await.unwrap();
+        let session = storage
+            .create_session(NewSession {
+                space_id: space.id,
+                agent_id: "assistant".into(),
+                metadata: None,
+                active_workspace_attachment_id: None,
+            })
+            .await
+            .unwrap();
+
+        let policy = build_session(
+            storage.as_ref(),
+            &json!({"session": "fresh", "agent_id": "assistant"}),
+            session.id,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            policy,
+            wire::SessionPolicy::Fresh {
+                space_id: space.id,
+                agent_id: "assistant".into(),
+            }
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fresh_session_preserves_an_explicit_space_without_resolving_the_caller() {
+        let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+        let explicit_space_id = Uuid::new_v4();
+
+        let policy = build_session(
+            storage.as_ref(),
+            &json!({
+                "session": "fresh",
+                "space_id": explicit_space_id,
+                "agent_id": "assistant"
+            }),
+            Uuid::new_v4(),
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(
+            policy,
+            wire::SessionPolicy::Fresh { space_id, .. } if space_id == explicit_space_id
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fresh_session_rejects_a_missing_calling_session_when_space_is_omitted() {
+        let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+
+        let error = build_session(
+            storage.as_ref(),
+            &json!({"session": "fresh", "agent_id": "assistant"}),
+            Uuid::new_v4(),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(error, ToolError::InvalidParameters { .. }));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fresh_session_rejects_an_invalid_explicit_space() {
+        let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+
+        let error = build_session(
+            storage.as_ref(),
+            &json!({
+                "session": "fresh",
+                "space_id": "not-a-uuid",
+                "agent_id": "assistant"
+            }),
+            Uuid::new_v4(),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ToolError::InvalidParameters { message, .. }
+                if message.contains("omit it to use this conversation's space")
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fresh_session_defaults_null_and_blank_spaces_to_the_calling_session() {
+        let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+        let space = storage.get_or_create_default().await.unwrap();
+        let session = storage
+            .create_session(NewSession {
+                space_id: space.id,
+                agent_id: "assistant".into(),
+                metadata: None,
+                active_workspace_attachment_id: None,
+            })
+            .await
+            .unwrap();
+
+        for space_id in [Value::Null, Value::String("  ".into())] {
+            let policy = build_session(
+                storage.as_ref(),
+                &json!({
+                    "session": "fresh",
+                    "space_id": space_id,
+                    "agent_id": "assistant"
+                }),
+                session.id,
+            )
+            .await
+            .unwrap();
+
+            assert!(matches!(
+                policy,
+                wire::SessionPolicy::Fresh { space_id, .. } if space_id == space.id
+            ));
+        }
     }
 }
