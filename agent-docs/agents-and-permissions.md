@@ -244,9 +244,10 @@ in any session, any space, until the gateway process exits. Existing
 dispatchers keep their original config; the grant takes effect on the next
 one built.
 
-`Permanent` and `PermanentGlobal` also handle location-scoped approvals
-(workspace attachment trust). Location grants are the one kind keyed by
-`space_id`.
+Both `Permanent` tool grants and location grants (workspace attachment trust)
+are keyed by `space_id`. `Session` grants are global: tool and hook approvals
+get `space_id: None` from `from_approval`, and location approvals explicitly
+use a global location key. `PermanentGlobal` grants are global as well.
 
 ### Timeout and rejection
 

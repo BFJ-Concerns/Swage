@@ -68,20 +68,24 @@ The crate is organised into four surface modules:
 | Device | `src/device.rs` | `DeviceSurface` | Device registration, remote tool execution |
 | Channel | `src/channel.rs` | `ChannelSurface` | Inbound messages (DM/thread), delivery log, channel status |
 
-Each anchor struct references every wire type on its surface, so a single
-`schemars::schema_for!` call on the anchor produces the complete JSON Schema
-document.
+Each manually maintained anchor struct must reference every wire type on its
+surface. A `schemars::schema_for!` call walks only the type graph reachable from
+that anchor, so a new top-level type must be added to the anchor unless an
+existing field already reaches it.
 
 ### Projections
 
 | Projection | Output | Mechanism |
 |---|---|---|
-| TypeScript (ts-rs) | `frontend/src/lib/protocol/` (114 files at ref 2be38e3) | `projections.rs` test exports all four surfaces, then trims trailing whitespace |
+| TypeScript (ts-rs) | `frontend/src/lib/protocol/` (114 files at ref 2be38e3) | `projections.rs` test manually calls `export_all` for each top-level export, then trims trailing whitespace |
 | JSON Schema (schemars) | `crates/swage-protocol/schema/{client,hosting,device,channel}.json` | `projections.rs` tests per surface, via the anchor type |
 
 Running `cargo test -p swage-protocol` regenerates all projections in place.
-Drift shows as uncommitted changes, caught by the verify gate's
-projection-freshness check.
+New top-level wire types must be added to the appropriate anchor for JSON
+Schema and to the explicit `export_all` list for TypeScript unless already
+reachable from an existing entry. Drift shows as uncommitted changes, caught by
+the verify gate's projection-freshness check; an unregistered type creates no
+drift for that check to detect.
 
 > [!NOTE]
 > The doc comment at `lib.rs:9-11` is stale — the committed schema documents
