@@ -1,7 +1,7 @@
 {
   "name": "swage-desktop",
   "private": true,
-  "version": "0.202607.500",
+  "version": "0.2.0",
   "type": "module",
   "scripts": {
     "dev": "electron ./src/main.mjs",
