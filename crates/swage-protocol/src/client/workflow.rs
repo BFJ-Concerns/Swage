@@ -49,6 +49,10 @@ pub struct WorkflowScriptListResponse {
 pub struct WorkflowBudget {
     pub max_agent_calls: Option<u32>,
     pub max_total_tokens: Option<u64>,
+    /// Tokens held back from ordinary work for calls made after the run has
+    /// observed its wind-down boundary. This allowance is part of, not in
+    /// addition to, `max_total_tokens`.
+    pub reserved_closing_tokens: Option<u64>,
     pub max_concurrent_agent_calls: Option<u32>,
 }
 
@@ -75,6 +79,9 @@ pub enum WorkflowRunState {
     Failed,
     Cancelled,
     Interrupted,
+    /// Sleeping on a durable wait with its engine torn down; the waker
+    /// resumes it by journal replay when it is due.
+    Parked,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
@@ -90,6 +97,8 @@ pub struct WorkflowRun {
     pub budget: WorkflowBudget,
     #[ts(type = "unknown")]
     pub final_output: Option<Value>,
+    #[ts(type = "unknown")]
+    pub handover: Option<Value>,
     pub error_message: Option<String>,
     pub created_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
@@ -104,6 +113,18 @@ pub enum WorkflowJournalEntryKind {
     Phase,
     WorkflowCall,
     Timer,
+    /// A pending-queue operation: an event posted, or events stamped
+    /// delivered by a wake.
+    Event,
+    /// A wake-gate evaluation: a cheap model judged the pending events; its
+    /// verdict and reasoning are the entry's result.
+    Gate,
+    /// A journalled budget reading — what the script saw when it checked
+    /// its allowance, replayed rather than re-read.
+    Budget,
+    /// The working allowance was exhausted. The triggering agent call was
+    /// not started; replay returns the same wind-down signal at this point.
+    WindDown,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
@@ -154,6 +175,21 @@ pub struct WorkflowJournalEntry {
 pub struct WorkflowRunDetailResponse {
     pub run: WorkflowRun,
     pub journal: Vec<WorkflowJournalEntry>,
+    /// The run's own wake economics, derived from the journal and event
+    /// queue — the falsification signal for a gated long run: a sustained
+    /// high wake rate means the design's economics are failing.
+    pub wake_metrics: WorkflowWakeMetrics,
+}
+
+/// Derived counters over a run's wake machinery. `events_pending` counts
+/// undelivered queue entries now; the rest count journalled history.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+pub struct WorkflowWakeMetrics {
+    pub gate_evaluations: u32,
+    pub gate_wakes: u32,
+    pub gate_suppressions: u32,
+    pub events_posted: u32,
+    pub events_pending: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]

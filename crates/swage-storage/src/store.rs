@@ -14,12 +14,12 @@ use crate::model::{
     NewCurationAssertion, NewDeliveryRecord, NewDeviceRegistration, NewKnowledgeCitation,
     NewMaterial, NewMessage, NewOrientationCard, NewSchedule, NewScheduleRun, NewSecretRecord,
     NewSession, NewSourceObservation, NewSpace, NewThread, NewToolCall, NewTurn,
-    NewWorkflowJournalIntent, NewWorkflowRun, NewWorkflowScript, NewWorkspaceAttachment,
-    OrientationCard, OrientationCardLifecycle, PendingChannelOrigin, Schedule, ScheduleRun,
-    ScheduleRunUpdate, SecretRecord, Session, SourceObservation, Space, SpaceSlug, Thread,
-    ThreadBranch, ThreadState, ToolCallRecord, Turn, TurnState, UpdateSchedule,
-    WorkflowJournalRecord, WorkflowRunRecord, WorkflowScriptRecord, WorkflowScriptVersion,
-    WorkspaceAttachment,
+    NewWorkflowJournalIntent, NewWorkflowRun, NewWorkflowRunEvent, NewWorkflowScript,
+    NewWorkspaceAttachment, OrientationCard, OrientationCardLifecycle, PendingChannelOrigin,
+    Schedule, ScheduleRun, ScheduleRunUpdate, SecretRecord, Session, SourceObservation, Space,
+    SpaceSlug, Thread, ThreadBranch, ThreadState, ToolCallRecord, Turn, TurnState, UpdateSchedule,
+    WorkflowJournalRecord, WorkflowRunEventRecord, WorkflowRunRecord, WorkflowScriptRecord,
+    WorkflowScriptVersion, WorkspaceAttachment,
 };
 
 // ---------------------------------------------------------------------------
@@ -1022,9 +1022,61 @@ pub trait WorkflowStore: Send + Sync {
         id: Uuid,
         state: &str,
         final_output: Option<serde_json::Value>,
+        handover: Option<serde_json::Value>,
         error_message: Option<&str>,
     ) -> Result<(), StorageError>;
     async fn interrupt_running_workflow_runs(&self) -> Result<u64, StorageError>;
+    /// Atomically move a run from one expected state to another. `false`
+    /// means the run was no longer in `from` — the caller lost the race
+    /// (a concurrent cancellation, another waker) and must not proceed.
+    async fn try_transition_workflow_run_state(
+        &self,
+        id: Uuid,
+        from: &str,
+        to: &str,
+    ) -> Result<bool, StorageError>;
+    /// Park a run on a durable wait: state `parked`, due at `wake_at`, its
+    /// engine torn down until the waker resumes it by replay.
+    async fn set_workflow_run_parked(
+        &self,
+        id: Uuid,
+        wake_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), StorageError>;
+    /// Parked runs whose `wake_at` has arrived, oldest due first.
+    async fn list_due_parked_workflow_runs(
+        &self,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<WorkflowRunRecord>, StorageError>;
+    /// Runs a crash or shutdown left interrupted, oldest first — the boot
+    /// resume's work list.
+    async fn list_interrupted_workflow_runs(&self) -> Result<Vec<WorkflowRunRecord>, StorageError>;
+    /// Append to the run's pending-event queue. `seq` is assigned by the
+    /// store, dense per run; the insert is idempotent on
+    /// `journal_entry_id` — a replayed post returns its existing row.
+    async fn create_workflow_run_event(
+        &self,
+        event: NewWorkflowRunEvent,
+    ) -> Result<WorkflowRunEventRecord, StorageError>;
+    /// The run's undelivered events, ordered by seq ascending.
+    async fn list_pending_workflow_run_events(
+        &self,
+        run_id: Uuid,
+    ) -> Result<Vec<WorkflowRunEventRecord>, StorageError>;
+    /// All of the run's events, delivered or not, ordered by seq ascending.
+    async fn list_workflow_run_events(
+        &self,
+        run_id: Uuid,
+    ) -> Result<Vec<WorkflowRunEventRecord>, StorageError>;
+    /// Stamp pending events up to and including `up_to_seq` as delivered by
+    /// the wake at `delivered_wake_seq` (a journal seq). Already-delivered
+    /// events are untouched, so the call is idempotent. Returns the number
+    /// stamped.
+    async fn mark_workflow_run_events_delivered(
+        &self,
+        run_id: Uuid,
+        up_to_seq: u64,
+        delivered_wake_seq: u64,
+    ) -> Result<u64, StorageError>;
     async fn create_workflow_journal_intent(
         &self,
         intent: NewWorkflowJournalIntent,
@@ -2224,11 +2276,64 @@ mod tests {
             _: Uuid,
             _: &str,
             _: Option<serde_json::Value>,
+            _: Option<serde_json::Value>,
             _: Option<&str>,
         ) -> Result<(), StorageError> {
             unimplemented!()
         }
         async fn interrupt_running_workflow_runs(&self) -> Result<u64, StorageError> {
+            unimplemented!()
+        }
+        async fn try_transition_workflow_run_state(
+            &self,
+            _: Uuid,
+            _: &str,
+            _: &str,
+        ) -> Result<bool, StorageError> {
+            unimplemented!()
+        }
+        async fn set_workflow_run_parked(
+            &self,
+            _: Uuid,
+            _: chrono::DateTime<chrono::Utc>,
+        ) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+        async fn list_due_parked_workflow_runs(
+            &self,
+            _: chrono::DateTime<chrono::Utc>,
+        ) -> Result<Vec<WorkflowRunRecord>, StorageError> {
+            unimplemented!()
+        }
+        async fn list_interrupted_workflow_runs(
+            &self,
+        ) -> Result<Vec<WorkflowRunRecord>, StorageError> {
+            unimplemented!()
+        }
+        async fn create_workflow_run_event(
+            &self,
+            _: NewWorkflowRunEvent,
+        ) -> Result<WorkflowRunEventRecord, StorageError> {
+            unimplemented!()
+        }
+        async fn list_pending_workflow_run_events(
+            &self,
+            _: Uuid,
+        ) -> Result<Vec<WorkflowRunEventRecord>, StorageError> {
+            unimplemented!()
+        }
+        async fn list_workflow_run_events(
+            &self,
+            _: Uuid,
+        ) -> Result<Vec<WorkflowRunEventRecord>, StorageError> {
+            unimplemented!()
+        }
+        async fn mark_workflow_run_events_delivered(
+            &self,
+            _: Uuid,
+            _: u64,
+            _: u64,
+        ) -> Result<u64, StorageError> {
             unimplemented!()
         }
         async fn create_workflow_journal_intent(

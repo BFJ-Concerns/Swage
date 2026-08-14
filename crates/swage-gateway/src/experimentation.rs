@@ -26,6 +26,11 @@ use crate::state::AppState;
 /// The context-assembly choice point: which named assembly composes a turn.
 pub const LOCATION_CONTEXT_ASSEMBLY: &str = "context.assembly";
 
+/// The working-norms choice point: which norms text a bare-proxy model's
+/// session receives for its family. The built-in text serves until
+/// alternatives register; every draw is recorded like any location's.
+pub const LOCATION_WORKING_NORMS: &str = "context.working_norms";
+
 /// Why the selected variant was selected. Recorded verbatim; the reasons are
 /// the audit trail's vocabulary, so they name situations, not code paths.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -52,6 +57,17 @@ pub struct VariantDecision {
     pub reason: SelectionReason,
 }
 
+/// A forced variant names no candidate registered at its choice point.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "experimentation location '{location_id}' forced unknown variant '{forced_variant}'; available variants: {available_variants:?}"
+)]
+pub struct VariantSelectionError {
+    pub location_id: String,
+    pub forced_variant: String,
+    pub available_variants: Vec<String>,
+}
+
 /// Select the variant that serves one use of a location.
 ///
 /// `registered` lists the alternatives (the default may be among them);
@@ -64,19 +80,12 @@ pub fn select_variant(
     registered: &[&str],
     default: &str,
     draw_seed: Uuid,
-) -> VariantDecision {
+) -> Result<VariantDecision, VariantSelectionError> {
     if !config.is_enabled_for(location_id) {
-        return VariantDecision {
+        return Ok(VariantDecision {
             variant: default.to_owned(),
             reason: SelectionReason::Disabled,
-        };
-    }
-
-    if let Some(forced) = config.forced_variant_for(location_id) {
-        return VariantDecision {
-            variant: forced.to_owned(),
-            reason: SelectionReason::Forced,
-        };
+        });
     }
 
     // The candidate pool is the registered variants plus the default.
@@ -86,21 +95,35 @@ pub fn select_variant(
     }
     pool.extend_from_slice(registered);
 
+    if let Some(forced) = config.forced_variant_for(location_id) {
+        if !pool.contains(&forced) {
+            return Err(VariantSelectionError {
+                location_id: location_id.to_owned(),
+                forced_variant: forced.to_owned(),
+                available_variants: pool.iter().map(|variant| (*variant).to_owned()).collect(),
+            });
+        }
+        return Ok(VariantDecision {
+            variant: forced.to_owned(),
+            reason: SelectionReason::Forced,
+        });
+    }
+
     if pool.len() < 2 {
-        return VariantDecision {
+        return Ok(VariantDecision {
             variant: default.to_owned(),
             reason: SelectionReason::DefaultOnly,
-        };
+        });
     }
 
     // Uniform draw, seeded from the caller-supplied id: deterministic given
     // the seed, unbiased across seeds. Allocation strategy (bandits) is a
     // deliberate later replacement for this one line.
     let index = (draw_seed.as_u128() % pool.len() as u128) as usize;
-    VariantDecision {
+    Ok(VariantDecision {
         variant: pool[index].to_owned(),
         reason: SelectionReason::Drawn,
-    }
+    })
 }
 
 /// Record a selection to the audit trail. Every decision is recorded — the
@@ -175,7 +198,8 @@ mod tests {
             &["candidate"],
             "default",
             Uuid::new_v4(),
-        );
+        )
+        .expect("disabled selection should succeed");
         assert_eq!(decision.variant, "default");
         assert_eq!(decision.reason, SelectionReason::Disabled);
     }
@@ -189,8 +213,27 @@ mod tests {
             &["candidate"],
             "default",
             Uuid::new_v4(),
-        );
+        )
+        .expect("disabled selection should succeed");
         assert_eq!(decision.reason, SelectionReason::Disabled);
+    }
+
+    #[test]
+    fn unknown_forced_variant_names_location_rejection_and_available_pool() {
+        let config = config_with_location(true, true, Some("typo"));
+        let error = select_variant(
+            &config,
+            LOCATION_CONTEXT_ASSEMBLY,
+            &["candidate", "other"],
+            "default",
+            Uuid::new_v4(),
+        )
+        .expect_err("unknown force must fail");
+
+        assert_eq!(
+            error.to_string(),
+            "experimentation location 'context.assembly' forced unknown variant 'typo'; available variants: [\"default\", \"candidate\", \"other\"]"
+        );
     }
 
     #[test]
@@ -202,7 +245,8 @@ mod tests {
             &["candidate", "other"],
             "default",
             Uuid::new_v4(),
-        );
+        )
+        .expect("registered force should succeed");
         assert_eq!(decision.variant, "candidate");
         assert_eq!(decision.reason, SelectionReason::Forced);
     }
@@ -216,7 +260,8 @@ mod tests {
             &[],
             "default",
             Uuid::new_v4(),
-        );
+        )
+        .expect("default-only selection should succeed");
         assert_eq!(decision.variant, "default");
         assert_eq!(decision.reason, SelectionReason::DefaultOnly);
     }
@@ -232,14 +277,16 @@ mod tests {
             &["a", "b", "c"],
             "default",
             seed,
-        );
+        )
+        .expect("draw should succeed");
         let second = select_variant(
             &config,
             LOCATION_CONTEXT_ASSEMBLY,
             &["a", "b", "c"],
             "default",
             seed,
-        );
+        )
+        .expect("draw should succeed");
         assert_eq!(
             first.variant, second.variant,
             "the same seed must reproduce the same decision"
@@ -259,7 +306,8 @@ mod tests {
                 &["a", "b"],
                 "default",
                 seed,
-            );
+            )
+            .expect("draw should succeed");
             seen.insert(decision.variant);
         }
         assert!(

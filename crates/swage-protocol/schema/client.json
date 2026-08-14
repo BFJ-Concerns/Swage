@@ -596,7 +596,8 @@
             "null"
           ]
         }
-      }
+      },
+      "additionalProperties": false
     },
     "CreateScheduleRequest": {
       "description": "Create a schedule.",
@@ -2725,6 +2726,15 @@
           ],
           "format": "uint64",
           "minimum": 0
+        },
+        "reserved_closing_tokens": {
+          "description": "Tokens held back from ordinary work for calls made after the run has\nobserved its wind-down boundary. This allowance is part of, not in\naddition to, `max_total_tokens`.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
         }
       }
     },
@@ -2846,14 +2856,38 @@
       ]
     },
     "WorkflowJournalEntryKind": {
-      "type": "string",
-      "enum": [
-        "agent_call",
-        "effect",
-        "log",
-        "phase",
-        "workflow_call",
-        "timer"
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "agent_call",
+            "effect",
+            "log",
+            "phase",
+            "workflow_call",
+            "timer"
+          ]
+        },
+        {
+          "description": "A pending-queue operation: an event posted, or events stamped\ndelivered by a wake.",
+          "type": "string",
+          "const": "event"
+        },
+        {
+          "description": "A wake-gate evaluation: a cheap model judged the pending events; its\nverdict and reasoning are the entry's result.",
+          "type": "string",
+          "const": "gate"
+        },
+        {
+          "description": "A journalled budget reading — what the script saw when it checked\nits allowance, replayed rather than re-read.",
+          "type": "string",
+          "const": "budget"
+        },
+        {
+          "description": "The working allowance was exhausted. The triggering agent call was\nnot started; replay returns the same wind-down signal at this point.",
+          "type": "string",
+          "const": "wind_down"
+        }
       ]
     },
     "WorkflowJournalEntryStatus": {
@@ -2889,6 +2923,7 @@
           ]
         },
         "final_output": true,
+        "handover": true,
         "id": {
           "type": "string",
           "format": "uuid"
@@ -2953,11 +2988,16 @@
         },
         "run": {
           "$ref": "#/$defs/WorkflowRun"
+        },
+        "wake_metrics": {
+          "description": "The run's own wake economics, derived from the journal and event\nqueue — the falsification signal for a gated long run: a sustained\nhigh wake rate means the design's economics are failing.",
+          "$ref": "#/$defs/WorkflowWakeMetrics"
         }
       },
       "required": [
         "run",
-        "journal"
+        "journal",
+        "wake_metrics"
       ]
     },
     "WorkflowRunListResponse": {
@@ -2986,13 +3026,22 @@
       ]
     },
     "WorkflowRunState": {
-      "type": "string",
-      "enum": [
-        "running",
-        "completed",
-        "failed",
-        "cancelled",
-        "interrupted"
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "running",
+            "completed",
+            "failed",
+            "cancelled",
+            "interrupted"
+          ]
+        },
+        {
+          "description": "Sleeping on a durable wait with its engine torn down; the waker\nresumes it by journal replay when it is due.",
+          "type": "string",
+          "const": "parked"
+        }
       ]
     },
     "WorkflowScript": {
@@ -3052,6 +3101,44 @@
       },
       "required": [
         "scripts"
+      ]
+    },
+    "WorkflowWakeMetrics": {
+      "description": "Derived counters over a run's wake machinery. `events_pending` counts\nundelivered queue entries now; the rest count journalled history.",
+      "type": "object",
+      "properties": {
+        "events_pending": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "events_posted": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "gate_evaluations": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "gate_suppressions": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "gate_wakes": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "gate_evaluations",
+        "gate_wakes",
+        "gate_suppressions",
+        "events_posted",
+        "events_pending"
       ]
     },
     "WorkspaceAttachmentListResponse": {
