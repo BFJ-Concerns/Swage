@@ -56,6 +56,7 @@ mod context;
 mod delegation;
 mod dispatcher;
 mod history;
+mod operator_guidance;
 mod workspace;
 
 pub(crate) use configuration::*;
@@ -65,6 +66,7 @@ pub(crate) use dispatcher::*;
 #[cfg(test)]
 use history::compact_tool_replay_messages;
 use history::rebuild_thread_history_messages;
+pub(crate) use operator_guidance::*;
 pub(crate) use workspace::*;
 
 // Gateway messaging spans three surfaces: REST endpoints for durable messages
@@ -877,8 +879,11 @@ pub(crate) async fn process_turn_with_existing_turn(
     let available_skills =
         available_skills_for_agent(&space_slug, &session.agent_id, swage_root_opt.as_deref());
 
+    let operator_guidance = operator_guidance_rules(swage_root_opt.as_deref(), &workspace_policy);
+
     let elements = build_assembly_elements(
         &config.instructions,
+        operator_guidance,
         active_skills,
         history_messages,
         memory_content.map(|content| (content, space.name.clone())),
