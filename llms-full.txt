@@ -37,7 +37,74 @@ files). The overlay:
 4. Sets `declared_skills` and, when present, `output_schema` and
    `output_max_retries`.
 
+## Operator guidance (`AGENTS.md`)
+
+Operator-authored guidance is a second instruction source, parallel to the
+`instructions/` directory. A file named `AGENTS.md` at the root of a
+guidance directory is read, and its content enters every turn as an
+instruction rule in the prompts element.
+
+### Where it is read from
+
+Two kinds of root are checked, in this order:
+
+1. **Config root** (`~/.swage/` or `$SWAGE_HOME`) — always read. The
+   resulting rule carries the `Global` provenance level.
+2. **Trusted workspace roots** — the active workspace and any workspace
+   attachments whose trust bit is set. Each produces a rule at the `Space`
+   provenance level.
+
+Untrusted workspace attachments contribute nothing: workspace content enters
+the model's instructions only after the operator has trusted the attachment
+(the same trust gate that governs file-operation location prompts). There is
+no config knob to disable global guidance — an `AGENTS.md` at the config
+root is always read.
+
+### Ordering and layering
+
+Global guidance appears before workspace guidance, so workspace rules
+refine the operator's baseline rather than the reverse. Both layers append
+after the resolved instruction baseline (the merged `instructions/`
+content), extending it without replacing it. Agent-definition instructions
+then append after operator guidance, preserving the full chain:
+resolved instructions → operator guidance → agent-definition instructions.
+
+### Error handling
+
+An absent `AGENTS.md` is silently skipped — a root without a guidance file
+simply contributes nothing. A path that exists but is not a regular file
+(e.g. a directory named `AGENTS.md`) is treated the same way. An
+unreadable or non-UTF-8 file is logged as a warning and skipped — guidance
+never fails a turn.
+
+### Code path
+
+Both foreground and delegated turns call `operator_guidance_rules`
+(in `turn/operator_guidance.rs`), which reads the config root's guidance
+file then each trusted workspace root's, and returns the ordered rule vec.
+The reading itself is in `swage_config::agent_guidance::read_agent_guidance`.
+The rules are passed to `build_assembly_elements` (in `turn/context.rs`),
+which appends them after the resolved-instructions rule so the
+`PromptsElement` emits them in the correct order.
+
+### Visibility in the context inspector
+
+The turn context inspector's prompts element shows the provenance of each
+rule by hierarchy level — e.g. `prompt rules (3 total: 1 Global, 2 Space)`.
+Operator guidance rules from the config root appear as `Global`; those from
+workspace roots appear as `Space`.
+
 ## Tool permission model
+
+### Permission bypass
+
+`dangerously_skip_permissions = true` is a top-level escape hatch from this
+permission model, not another layer within it. If either the session-resolved
+configuration or the gateway's startup configuration enables it,
+`build_permission_config` returns wildcard allow with no denies or approval
+requirements. The turn also pre-approves all remaining tool, location, and
+hook gates, including out-of-workspace location prompts. The resolution rules
+below apply only while this setting is false in both configurations.
 
 ### Resolution order
 
@@ -233,8 +300,8 @@ a decision (`Approved` or `Rejected`) and a scope.
 |---|---|---|
 | `Once` | None — applies to the single pending call | This call only |
 | `Session` | In-memory `session_approval_grants`, until the gateway exits | Any session in this gateway process |
-| `Permanent` | In-memory + persisted to disk | This space |
-| `PermanentGlobal` | In-memory + persisted to disk across all spaces | All spaces |
+| `Permanent` | In-memory + persisted to disk | This space while the gateway runs; after restart, subject to agent-level `require_approval` configuration |
+| `PermanentGlobal` | In-memory + persisted to disk across all spaces | All spaces while the gateway runs; after restart, subject to space- and agent-level `require_approval` configuration |
 
 `Session` is process-scoped, not session-scoped, despite the name.
 `ApprovalGrantKey` carries no session identifier, and `from_approval` sets
@@ -245,10 +312,20 @@ in any session, any space, until the gateway process exits. Existing
 dispatchers keep their original config; the grant takes effect on the next
 one built.
 
-Both `Permanent` tool grants and location grants (workspace attachment trust)
-are keyed by `space_id`. `Session` grants are global: tool and hook approvals
-get `space_id: None` from `from_approval`, and location approvals explicitly
-use a global location key. `PermanentGlobal` grants are global as well.
+For tool approvals, the persisted reach in the table is conditional after a
+restart. Persistence removes the tool from `require_approval` in the space or
+global TOML file. That field uses replacement semantics in the Global → Space
+→ Agent cascade, so an agent file can replace a persisted space list, and a
+space or agent file can replace a persisted global list. The process-local
+grant masks such a narrower approval requirement until the gateway exits;
+after restart, the narrower configuration takes effect again.
+
+`Permanent` and `PermanentGlobal` also handle location-scoped approvals
+(workspace attachment trust). Both `Permanent` tool grants and location
+grants are keyed by `space_id`. `Session` grants are global: tool and hook
+approvals get `space_id: None` from `from_approval`, and location approvals
+explicitly use a global location key. `PermanentGlobal` grants are global as
+well.
 
 ### Timeout and rejection
 

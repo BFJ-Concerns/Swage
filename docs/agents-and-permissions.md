@@ -1,5 +1,5 @@
 ---
-description: How Swage defines agents, resolves tool permissions, enforces approval, isolates tool execution, and handles delegated grant inheritance
+description: How Swage defines agents, reads operator guidance from AGENTS.md, resolves tool permissions, enforces approval, isolates tool execution, and handles delegated grant inheritance
 ---
 
 # Agents and permissions
@@ -39,6 +39,47 @@ overlays the agent definition on top. The overlay:
 A malformed permission overlay (one that fails to parse as
 `ToolPermissionConfig`) is logged and ignored — the config's own grants stand
 rather than the session silently running with an unintended permission set.
+
+## Operator guidance (`AGENTS.md`)
+
+Alongside the `instructions/` directory, Swage reads a file named
+`AGENTS.md` from the root of each guidance directory and folds its content
+into every turn's prompt as an operator-authored instruction rule.
+
+### Sources
+
+Two kinds of root are checked, in this order:
+
+1. **Config root** (`~/.swage/` or `$SWAGE_HOME`) — always read. This is
+   global guidance that applies to every session.
+2. **Trusted workspace roots** — the active workspace and any workspace
+   attachments the operator has trusted. Each contributes its own
+   `AGENTS.md` if one exists.
+
+Untrusted workspace attachments contribute nothing — their `AGENTS.md` is
+never read. Trust is the only gate; there is no separate setting to disable
+global guidance.
+
+### Ordering
+
+Global guidance appears before workspace guidance. Both layers append after
+the resolved instruction baseline (the merged `instructions/` content),
+extending it without replacing it. Agent-definition instructions then
+append after operator guidance, so the full chain is: resolved instructions
+→ global `AGENTS.md` → workspace `AGENTS.md` → agent-definition
+instructions.
+
+### Error handling
+
+A missing `AGENTS.md` is silently skipped. A path that exists but is not a
+regular file is also skipped. An unreadable file is logged as a warning and
+skipped — guidance never fails a turn.
+
+### Visibility
+
+The turn context inspector's prompts element shows the provenance of each
+instruction rule by hierarchy level. Operator guidance from the config root
+appears as "Global"; guidance from workspace roots appears as "Space".
 
 ## Tool permission model
 
