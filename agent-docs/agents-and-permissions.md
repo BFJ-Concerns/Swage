@@ -165,7 +165,8 @@ not found.
 
 ### Sandbox isolation
 
-Tool calls run inside a two-layer sandbox (`swage-sandbox`):
+Local tool calls that are eligible for sandboxed execution run inside a
+two-layer sandbox (`swage-sandbox`):
 
 1. **Bubblewrap (bwrap)** — Linux namespace isolation (PID, network, mount,
    user, IPC, UTS). `--unshare-all` with `--die-with-parent`. Read-only
@@ -178,6 +179,13 @@ Tool calls run inside a two-layer sandbox (`swage-sandbox`):
    `/lib64`, `/usr/bin`, `/usr/lib`, `/usr/lib64`, `/etc/ld.so.cache`.
    Always-writable paths: the working directory and `/tmp`, plus any
    configured write paths. Restrictions are irrevocable within the process.
+
+The execution boundary is selected before this sandbox path. When a session
+targets a non-local device, tool calls go to that device. On a local device,
+tools that require gateway state or host facilities execute directly in the
+gateway process; tools with resolved secret parameters also stay on the host
+so their raw values do not cross sandbox IPC. These host/device executions
+are not confined by the bubblewrap and Landlock layers described here.
 
 Credential isolation strips `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, and
 `GOOGLE_API_KEY` from the sandbox child environment. Provider
@@ -255,8 +263,11 @@ grant masks such a narrower approval requirement until the gateway exits;
 after restart, the narrower configuration takes effect again.
 
 `Permanent` and `PermanentGlobal` also handle location-scoped approvals
-(workspace attachment trust). Location grants are the one kind keyed by
-`space_id`.
+(workspace attachment trust). Both `Permanent` tool grants and location
+grants are keyed by `space_id`. `Session` grants are global: tool and hook
+approvals get `space_id: None` from `from_approval`, and location approvals
+explicitly use a global location key. `PermanentGlobal` grants are global as
+well.
 
 ### Timeout and rejection
 

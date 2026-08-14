@@ -159,8 +159,16 @@ unexpected field.
 
 ## Sandbox isolation
 
-Tool calls run inside a two-layer sandbox that confines what a tool process
-can reach.
+Local tool calls that are eligible for sandboxed execution run inside a
+two-layer sandbox that confines what the sandbox child process can reach.
+
+The executor chooses the host/device boundary before this sandbox path. If a
+session targets a non-local device, tool calls are sent to that device. On a
+local device, tools that need live gateway state or host facilities execute
+directly in the gateway process; tools with resolved secret parameters also
+stay on the host so raw secret values do not cross sandbox IPC. These direct
+host and remote-device executions do not receive the bubblewrap and Landlock
+isolation described below.
 
 ### Bubblewrap
 
