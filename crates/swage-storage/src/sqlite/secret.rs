@@ -101,10 +101,10 @@ impl ManagedSecretEncryptor {
     fn encrypt_value(&self, plaintext: &str) -> Result<EncryptedManagedSecretValue, StorageError> {
         let mut nonce_bytes = [0_u8; 12];
         rand::fill(&mut nonce_bytes);
-        let nonce = Nonce::from_slice(&nonce_bytes);
+        let nonce = Nonce::from(nonce_bytes);
         let ciphertext = self
             .cipher
-            .encrypt(nonce, plaintext.as_bytes())
+            .encrypt(&nonce, plaintext.as_bytes())
             .map_err(|error| {
                 StorageError::QueryFailed(format!(
                     "managed secret encryption failed with {MANAGED_SECRET_ALGORITHM}: {error}"
@@ -139,11 +139,9 @@ impl ManagedSecretEncryptor {
         let nonce = BASE64.decode(nonce_b64).map_err(|error| {
             StorageError::QueryFailed(format!("managed secret nonce is invalid base64: {error}"))
         })?;
-        if nonce.len() != 12 {
-            return Err(StorageError::QueryFailed(
-                "managed secret nonce must decode to exactly 12 bytes".into(),
-            ));
-        }
+        let nonce = <&Nonce>::try_from(nonce.as_slice()).map_err(|_| {
+            StorageError::QueryFailed("managed secret nonce must decode to exactly 12 bytes".into())
+        })?;
         let ciphertext = BASE64.decode(ciphertext_b64).map_err(|error| {
             StorageError::QueryFailed(format!(
                 "managed secret ciphertext is invalid base64: {error}"
@@ -151,7 +149,7 @@ impl ManagedSecretEncryptor {
         })?;
         let plaintext = self
             .cipher
-            .decrypt(Nonce::from_slice(&nonce), ciphertext.as_ref())
+            .decrypt(nonce, ciphertext.as_ref())
             .map_err(|error| {
                 StorageError::QueryFailed(format!(
                     "managed secret decryption failed with {MANAGED_SECRET_ALGORITHM}: {error}"
