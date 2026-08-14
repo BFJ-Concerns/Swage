@@ -6791,33 +6791,38 @@ mod tests {
         let failed_call_error = handover["failed_call"]["error"]
             .as_str()
             .expect("attributed call error");
+        let terminal_error = run.error_message.as_deref().expect("terminal error");
         let terminal_call = journal
             .iter()
-            .find(|entry| entry.request["label"] == "terminal call")
+            .find(|entry| {
+                entry.status == "failed"
+                    && entry
+                        .error_message
+                        .as_deref()
+                        .is_some_and(|error| terminal_error.contains(error))
+            })
             .expect("terminal failed call");
-        let later_call = journal
+        let concurrent_call = journal
             .iter()
-            .find(|entry| entry.request["label"] == "later concurrent call")
-            .expect("later failed call");
-
+            .find(|entry| entry.status == "failed" && entry.id != terminal_call.id)
+            .expect("other concurrent failed call");
         assert_eq!(run.state, "failed");
         assert_eq!(terminal_call.status, "failed");
-        assert_eq!(later_call.status, "failed");
+        assert_eq!(concurrent_call.status, "failed");
         assert_eq!(handover["classification"], "interrupted");
-        assert_eq!(handover["failed_call"]["label"], "terminal call");
+        assert_eq!(
+            handover["failed_call"]["label"],
+            terminal_call.request["label"]
+        );
         assert_eq!(
             handover["failed_call"]["journal_entry_id"],
             terminal_call.id.to_string()
         );
         assert_ne!(
             handover["failed_call"]["journal_entry_id"],
-            later_call.id.to_string()
+            concurrent_call.id.to_string()
         );
-        assert!(
-            run.error_message
-                .as_deref()
-                .is_some_and(|error| error.contains(failed_call_error))
-        );
+        assert!(terminal_error.contains(failed_call_error));
     }
 
     #[tokio::test(flavor = "multi_thread")]
