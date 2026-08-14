@@ -8,17 +8,23 @@ use rquickjs::{
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
-use crate::{AgentCallRequest, EffectPayload, WorkflowCallRequest, WorkflowHost};
+use crate::{
+    AgentCallRequest, EffectPayload, GateRequest, RunEventPost, WorkflowCallRequest, WorkflowHost,
+};
 
 fn named_host_error(error: &str, fallback: &str) -> (String, String) {
-    const NAMES: [(&str, &str); 7] = [
+    const NAMES: [(&str, &str); 11] = [
+        ("AgentCallError", "AgentCallError"),
         ("BudgetExceededError", "BudgetExceededError"),
+        ("BudgetWindDownError", "BudgetWindDownError"),
         ("DeliveryNotGrantedError", "DeliveryNotGrantedError"),
         ("WorkflowCancelledError", "WorkflowCancelledError"),
         ("NondeterministicReplayError", "NondeterministicCallError"),
         ("EmptyAgentOutputError", "EmptyAgentOutputError"),
         ("WorkflowCompositionError", "WorkflowCompositionError"),
         ("WaitTimerError", "WaitTimerError"),
+        ("RunEventError", "RunEventError"),
+        ("BudgetSnapshotError", "BudgetSnapshotError"),
     ];
     NAMES
         .iter()
@@ -184,7 +190,15 @@ pub enum WorkflowEngineError {
 
     #[error("workflow script failed: {0}")]
     Script(String),
+
+    #[error("workflow script failed: {message}")]
+    AgentCall {
+        host_reference: String,
+        message: String,
+    },
 }
+
+const AGENT_CALL_FAILURE_PREFIX: &str = "\u{1e}swage-agent-call:";
 
 /// Creates one isolated JavaScript runtime per workflow attempt.
 pub struct WorkflowEngine {
@@ -238,13 +252,13 @@ impl WorkflowEngine {
         type WorkflowIntrinsics = (Eval, Json, PromiseIntrinsic, MapSet, RegExpCompiler, RegExp);
         let context = AsyncContext::custom::<WorkflowIntrinsics>(&runtime).await?;
         let source = format!(
-            "(async () => {{ const value = await (async () => {{ {source} }})(); return JSON.stringify(value === undefined ? null : value); }})()"
+            "(async () => {{ try {{ const value = await (async () => {{ {source} }})(); return JSON.stringify(value === undefined ? null : value); }} catch (error) {{ if (error && typeof error.__swageAgentCallReference === 'string') {{ const rendered = String(error.name) + ': ' + String(error.message); const stack = error.stack == null ? '' : String(error.stack); return {prefix:?} + error.__swageAgentCallReference + ':' + rendered + (stack ? '\\n' + stack : ''); }} throw error; }} }})()",
+            prefix = AGENT_CALL_FAILURE_PREFIX,
         );
         let args_json = args_json.to_string();
         let host_cancellation = (*cancellation).clone();
 
-        let result = context
-            .async_with(async move |ctx| {
+        let execution = context.async_with(async move |ctx| {
                 // QuickJS installs Math as a base object and seeds random from ambient time.
                 // Replacing the function makes the nondeterministic surface fail explicitly.
                 ctx.eval::<(), _>(
@@ -305,13 +319,29 @@ impl WorkflowEngine {
                                                 "error": {"name": "EmptyAgentOutputError", "message": "agent returned empty output"}
                                             }).to_string();
                                         }
-                                        serde_json::json!({"ok": true, "value": result.output}).to_string()
+                                        // The worker's continuation token rides beside the
+                                        // output so `agentStart` handles can expose it
+                                        // without touching agent()'s bare-value contract.
+                                        let session = result
+                                            .session_id
+                                            .zip(result.thread_id)
+                                            .map(|(session_id, thread_id)| serde_json::json!({
+                                                "session_id": session_id,
+                                                "thread_id": thread_id,
+                                            }));
+                                        serde_json::json!({"ok": true, "value": result.output, "session": session}).to_string()
                                     }
                                     Err(error) => {
-                                        let (name, message) = named_host_error(&error, "AgentCallError");
+                                        let (host_reference, error) = error
+                                            .strip_prefix("AgentCallReference:")
+                                            .and_then(|rest| rest.split_once(':'))
+                                            .map_or((None, error.as_str()), |(reference, message)| {
+                                                (Some(reference), message)
+                                            });
+                                        let (name, message) = named_host_error(error, "AgentCallError");
                                         serde_json::json!({
                                             "ok": false,
-                                            "error": {"name": name, "message": message}
+                                            "error": {"name": name, "message": message, "host_reference": host_reference}
                                         }).to_string()
                                     }
                                 }
@@ -417,6 +447,95 @@ impl WorkflowEngine {
                     ).map_err(|error| error.to_string())?;
                     ctx.globals().set("__confirmTimer", confirm).map_err(|error| error.to_string())?;
 
+                    let post_event_host = Arc::clone(&host);
+                    let post_event_cancellation = host_cancellation.clone();
+                    let post_event = Function::new(
+                        ctx.clone(),
+                        Async(move |kind: String, payload_json: String| {
+                            let host = Arc::clone(&post_event_host);
+                            let cancellation = post_event_cancellation.clone();
+                            async move {
+                                let payload: serde_json::Value = match serde_json::from_str(&payload_json) {
+                                    Ok(payload) => payload,
+                                    Err(error) => return serde_json::json!({
+                                        "ok": false,
+                                        "error": {"name": "RunEventError", "message": error.to_string()}
+                                    }).to_string(),
+                                };
+                                match host.post_run_event(RunEventPost { kind, payload }, cancellation).await {
+                                    Ok(value) => serde_json::json!({"ok": true, "value": value}).to_string(),
+                                    Err(error) => {
+                                        let (name, message) = named_host_error(&error, "RunEventError");
+                                        serde_json::json!({
+                                            "ok": false,
+                                            "error": {"name": name, "message": message}
+                                        }).to_string()
+                                    }
+                                }
+                            }
+                        }),
+                    ).map_err(|error| error.to_string())?;
+                    ctx.globals().set("__postEvent", post_event).map_err(|error| error.to_string())?;
+
+                    let gate_host = Arc::clone(&host);
+                    let gate_cancellation = host_cancellation.clone();
+                    let gate = Function::new(
+                        ctx.clone(),
+                        Async(move |request_json: String| {
+                            let host = Arc::clone(&gate_host);
+                            let cancellation = gate_cancellation.clone();
+                            async move {
+                                let request: GateRequest = match serde_json::from_str(&request_json) {
+                                    Ok(request) => request,
+                                    Err(error) => return serde_json::json!({
+                                        "ok": false,
+                                        "error": {"name": "RunEventError", "message": error.to_string()}
+                                    }).to_string(),
+                                };
+                                match host.evaluate_wake_gate(request, cancellation).await {
+                                    Ok(value) => serde_json::json!({"ok": true, "value": value}).to_string(),
+                                    Err(error) => {
+                                        let (name, message) = named_host_error(&error, "RunEventError");
+                                        serde_json::json!({
+                                            "ok": false,
+                                            "error": {"name": name, "message": message}
+                                        }).to_string()
+                                    }
+                                }
+                            }
+                        }),
+                    ).map_err(|error| error.to_string())?;
+                    ctx.globals().set("__gate", gate).map_err(|error| error.to_string())?;
+
+                    let deliver_events_host = Arc::clone(&host);
+                    let deliver_events_cancellation = host_cancellation.clone();
+                    let deliver_events = Function::new(
+                        ctx.clone(),
+                        Async(move |up_to_seq: f64| {
+                            let host = Arc::clone(&deliver_events_host);
+                            let cancellation = deliver_events_cancellation.clone();
+                            async move {
+                                if !up_to_seq.is_finite() || up_to_seq < 0.0 {
+                                    return serde_json::json!({
+                                        "ok": false,
+                                        "error": {"name": "RunEventError", "message": "upToSeq must be a non-negative finite number"}
+                                    }).to_string();
+                                }
+                                match host.deliver_run_events(up_to_seq as u64, cancellation).await {
+                                    Ok(value) => serde_json::json!({"ok": true, "value": value}).to_string(),
+                                    Err(error) => {
+                                        let (name, message) = named_host_error(&error, "RunEventError");
+                                        serde_json::json!({
+                                            "ok": false,
+                                            "error": {"name": name, "message": message}
+                                        }).to_string()
+                                    }
+                                }
+                            }
+                        }),
+                    ).map_err(|error| error.to_string())?;
+                    ctx.globals().set("__deliverEvents", deliver_events).map_err(|error| error.to_string())?;
+
                     if capabilities.delivery {
                         let delivery_host = Arc::clone(&host);
                         let delivery_cancellation = host_cancellation.clone();
@@ -449,6 +568,29 @@ impl WorkflowEngine {
                         ctx.globals().set("__deliver", deliver).map_err(|error| error.to_string())?;
                     }
 
+                    let budget_snapshot_host = Arc::clone(&host);
+                    let budget_snapshot_cancellation = host_cancellation.clone();
+                    let budget_snapshot = Function::new(
+                        ctx.clone(),
+                        Async(move || {
+                            let host = Arc::clone(&budget_snapshot_host);
+                            let cancellation = budget_snapshot_cancellation.clone();
+                            async move {
+                                match host.budget_snapshot(cancellation).await {
+                                    Ok(value) => serde_json::json!({"ok": true, "value": value}).to_string(),
+                                    Err(error) => {
+                                        let (name, message) = named_host_error(&error, "BudgetSnapshotError");
+                                        serde_json::json!({
+                                            "ok": false,
+                                            "error": {"name": name, "message": message}
+                                        }).to_string()
+                                    }
+                                }
+                            }
+                        }),
+                    ).map_err(|error| error.to_string())?;
+                    ctx.globals().set("__budgetSnapshot", budget_snapshot).map_err(|error| error.to_string())?;
+
                     let spent_host = Arc::clone(&host);
                     let spent = Function::new(ctx.clone(), move || spent_host.budget_spent())
                         .map_err(|error| error.to_string())?;
@@ -467,6 +609,22 @@ impl WorkflowEngine {
                                 throw error;
                             }
                             return response.value;
+                        };
+                        // Agent responses carry a continuation token beside the
+                        // value; only agentStart handles surface it.
+                        const unwrapAgentResponse = (json) => {
+                            const response = JSON.parse(json);
+                            if (!response.ok) {
+                                const error = new Error(response.error.message);
+                                error.name = response.error.name;
+                                if (typeof response.error.host_reference === "string") {
+                                    Object.defineProperty(error, "__swageAgentCallReference", {
+                                        value: response.error.host_reference,
+                                    });
+                                }
+                                throw error;
+                            }
+                            return { value: response.value, session: response.session ?? null };
                         };
                         // Script-level defaults fill options a call site leaves
                         // unset; only *defined* call-site values override, so a
@@ -493,25 +651,35 @@ impl WorkflowEngine {
                                 schema: merged.schema ?? null,
                                 max_attempts: merged.maxAttempts ?? 3,
                                 label: merged.label ?? null,
+                                session: merged.session ?? null,
                             };
                         };
                         globalThis.agent = async (prompt, options = {}) => {
                             const request = buildAgentRequest(options);
-                            return unwrapHostResponse(await __agent(String(prompt), JSON.stringify(request)));
+                            const response = unwrapAgentResponse(await __agent(String(prompt), JSON.stringify(request)));
+                            return response.value;
                         };
                         // Dispatch without awaiting: the returned handle
                         // carries the result promise wait() races, plus
-                        // `label`/`done` for the script's own bookkeeping.
+                        // `label`/`done` for the script's own bookkeeping and
+                        // `session` — the worker's continuation token, set
+                        // when the call completes. Pass it back whole as the
+                        // `session` option to land the worker's next turn in
+                        // the same session: worker restates, worker proceeds,
+                        // one session.
                         globalThis.agentStart = (prompt, options = {}) => {
                             const request = buildAgentRequest(options);
                             const handle = {
                                 label: request.label,
                                 done: false,
+                                session: request.session ?? null,
                             };
                             handle.result = __agent(String(prompt), JSON.stringify(request))
                                 .then((json) => {
+                                    const response = unwrapAgentResponse(json);
                                     handle.done = true;
-                                    return unwrapHostResponse(json);
+                                    handle.session = response.session ?? handle.session;
+                                    return response.value;
                                 }, (error) => {
                                     handle.done = true;
                                     throw error;
@@ -577,6 +745,23 @@ impl WorkflowEngine {
                                 }))
                             );
                         }
+                        // The run's durable pending-event queue: completions,
+                        // failures, and escalations accumulate as data
+                        // between lead wakes. postEvent appends (journalled,
+                        // exactly-once on resume); gate() asks a cheap model
+                        // whether the pending events are worth waking the
+                        // lead for — a suppressed event stays pending and
+                        // rides the next wake; deliverEvents(upToSeq) stamps
+                        // events delivered once a wake has carried them.
+                        globalThis.postEvent = async (kind, payload = null) =>
+                            unwrapHostResponse(await __postEvent(String(kind), JSON.stringify(payload ?? null)));
+                        globalThis.gate = async (options = {}) =>
+                            unwrapHostResponse(await __gate(JSON.stringify({
+                                criteria: options.criteria ?? "",
+                                model: options.model ?? null,
+                            })));
+                        globalThis.deliverEvents = async (upToSeq) =>
+                            unwrapHostResponse(await __deliverEvents(upToSeq));
                         globalThis.parallel = async (thunks) => Promise.all(
                             thunks.map(async (thunk, index) => {
                                 try { return await thunk(); }
@@ -604,10 +789,19 @@ impl WorkflowEngine {
                                 return previous;
                             })
                         );
+                        // Synchronous budget reads are live diagnostics — an
+                        // unbounded budget reads as undefined, and replay sees
+                        // end-state, not what this moment saw. A script that
+                        // BRANCHES on budget state must use budgetSnapshot():
+                        // journalled, so replay repeats the recorded reading.
+                        // The snapshot also names the working and reserved
+                        // closing allowances and whether wind-down has begun.
                         globalThis.budget = Object.freeze({
                             spent: () => __budgetSpent(),
                             remaining: () => __budgetRemaining(),
                         });
+                        globalThis.budgetSnapshot = async () =>
+                            unwrapHostResponse(await __budgetSnapshot());
                         globalThis.log = (message) => __log(String(message));
                         globalThis.phase = (title) => __phase(String(title));
                         globalThis.console = { log, warn: log, error: log };
@@ -623,13 +817,31 @@ impl WorkflowEngine {
                     .await
                     .catch(&ctx)
                     .map_err(|error| error.to_string())
-            })
-            .await;
+            });
+        tokio::pin!(execution);
+        let result = tokio::select! {
+            result = &mut execution => result,
+            () = cancellation.cancelled() => return Err(WorkflowEngineError::Cancelled),
+        };
 
         if cancellation.is_cancelled() {
             return Err(WorkflowEngineError::Cancelled);
         }
-        result.map_err(WorkflowEngineError::Script)
+        match result {
+            Ok(output) => match output.strip_prefix(AGENT_CALL_FAILURE_PREFIX) {
+                Some(failure) => {
+                    let (host_reference, message) = failure
+                        .split_once(':')
+                        .unwrap_or((failure, "AgentCallError: agent call failed"));
+                    Err(WorkflowEngineError::AgentCall {
+                        host_reference: host_reference.to_string(),
+                        message: message.to_string(),
+                    })
+                }
+                None => Ok(output),
+            },
+            Err(error) => Err(WorkflowEngineError::Script(error)),
+        }
     }
 }
 
@@ -752,6 +964,11 @@ mod tests {
         timer_calls: Mutex<Vec<u64>>,
         timer_settles: bool,
         agent_delay_ms: u64,
+        event_posts: Mutex<Vec<RunEventPost>>,
+        gate_requests: Mutex<Vec<GateRequest>>,
+        gate_verdict: Value,
+        deliveries_up_to: Mutex<Vec<u64>>,
+        budget_snapshot: Value,
     }
 
     impl SurfaceHost {
@@ -764,6 +981,17 @@ mod tests {
                 timer_calls: Mutex::new(Vec::new()),
                 timer_settles: true,
                 agent_delay_ms: 0,
+                event_posts: Mutex::new(Vec::new()),
+                gate_requests: Mutex::new(Vec::new()),
+                gate_verdict: Value::Null,
+                deliveries_up_to: Mutex::new(Vec::new()),
+                budget_snapshot: json!({
+                    "spent": 0,
+                    "remaining": null,
+                    "working_remaining": null,
+                    "closing_remaining": null,
+                    "winding_down": false,
+                }),
             }
         }
     }
@@ -789,8 +1017,8 @@ mod tests {
                 output,
                 input_tokens: 1,
                 output_tokens: 1,
-                session_id: None,
-                thread_id: None,
+                session_id: Some(uuid::Uuid::from_u128(0xA)),
+                thread_id: Some(uuid::Uuid::from_u128(0xB)),
                 turn_id: None,
             })
         }
@@ -826,6 +1054,87 @@ mod tests {
         async fn confirm_timer(&self, _: u64) -> Result<(), String> {
             Ok(())
         }
+
+        async fn post_run_event(
+            &self,
+            event: RunEventPost,
+            _: CancellationToken,
+        ) -> Result<Value, String> {
+            let mut posts = self.event_posts.lock().expect("posts");
+            posts.push(event.clone());
+            Ok(json!({"seq": posts.len(), "kind": event.kind, "payload": event.payload}))
+        }
+
+        async fn evaluate_wake_gate(
+            &self,
+            request: GateRequest,
+            _: CancellationToken,
+        ) -> Result<Value, String> {
+            self.gate_requests.lock().expect("gates").push(request);
+            Ok(self.gate_verdict.clone())
+        }
+
+        async fn deliver_run_events(
+            &self,
+            up_to_seq: u64,
+            _: CancellationToken,
+        ) -> Result<Value, String> {
+            self.deliveries_up_to
+                .lock()
+                .expect("deliveries")
+                .push(up_to_seq);
+            Ok(json!({"delivered": up_to_seq}))
+        }
+
+        async fn budget_snapshot(&self, _: CancellationToken) -> Result<Value, String> {
+            Ok(self.budget_snapshot.clone())
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn budget_surface_exposes_wind_down_state_and_named_signal() {
+        let host = Arc::new(SurfaceHost {
+            budget_snapshot: json!({
+                "spent": 8,
+                "remaining": 4,
+                "working_remaining": 0,
+                "closing_remaining": 4,
+                "winding_down": true,
+            }),
+            ..SurfaceHost::new()
+        });
+        host.agent_outputs.lock().unwrap().extend([Err(
+            "BudgetWindDownError: working token allowance exhausted".into(),
+        )]);
+        let output = WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                r#"
+                const snapshot = await budgetSnapshot();
+                let errorName = null;
+                try { await agent("ordinary work", {agent: "lead"}); }
+                catch (error) { errorName = error.name; }
+                return {snapshot, errorName};
+                "#,
+                "null",
+                CancellationToken::new(),
+                Some(host as Arc<dyn WorkflowHost>),
+                ScriptCapabilities::default(),
+            )
+            .await
+            .expect("wind-down observable");
+        assert_eq!(
+            serde_json::from_str::<Value>(&output).unwrap(),
+            json!({
+                "snapshot": {
+                    "spent": 8,
+                    "remaining": 4,
+                    "working_remaining": 0,
+                    "closing_remaining": 4,
+                    "winding_down": true,
+                },
+                "errorName": "BudgetWindDownError",
+            })
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -895,6 +1204,97 @@ mod tests {
             serde_json::from_str::<Value>(&output).expect("output"),
             json!(["one-gathered|one|0", null, "three-gathered|three|2"])
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn agent_start_surfaces_the_continuation_token_and_the_session_option_returns_it() {
+        let host = Arc::new(SurfaceHost::new());
+        host.agent_outputs
+            .lock()
+            .unwrap()
+            .extend([Ok(json!("restated")), Ok(json!("worked"))]);
+        let output = WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                r#"
+                const worker = agentStart("restate the brief", { agent: "worker" });
+                const before = worker.session;
+                await worker.result;
+                // The same worker session does the work: pass the token back.
+                const value = await agent("proceed", { agent: "worker", session: worker.session });
+                return { before, token: worker.session, value };
+                "#,
+                "null",
+                CancellationToken::new(),
+                Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                ScriptCapabilities::default(),
+            )
+            .await
+            .expect("continuity run");
+        let value: Value = serde_json::from_str(&output).expect("output");
+        // No token before completion; the host's identity after.
+        assert_eq!(value["before"], Value::Null);
+        assert_eq!(
+            value["token"],
+            json!({
+                "session_id": uuid::Uuid::from_u128(0xA),
+                "thread_id": uuid::Uuid::from_u128(0xB),
+            })
+        );
+        assert_eq!(value["value"], "worked");
+        // The continuation reached the host typed, not as loose JSON.
+        let requests = host.agent_requests.lock().unwrap();
+        assert_eq!(requests[0].session, None);
+        assert_eq!(
+            requests[1].session,
+            Some(crate::AgentSessionRef {
+                session_id: uuid::Uuid::from_u128(0xA),
+                thread_id: uuid::Uuid::from_u128(0xB),
+            })
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn events_post_gate_and_deliver_through_the_host() {
+        let host = Arc::new(SurfaceHost {
+            gate_verdict: json!({
+                "wake": true,
+                "reasoning": "a pipeline settled with evidence attached",
+                "events": [{"seq": 1, "kind": "completion", "payload": {"worker": "w1"}}],
+                "read_up_to_seq": 1,
+            }),
+            ..SurfaceHost::new()
+        });
+        let output = WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                r#"
+                await postEvent("completion", { worker: "w1" });
+                const verdict = await gate({ criteria: "wake when any pipeline settles" });
+                if (verdict.wake) {
+                    // The wake happens here (an agent call in a real run);
+                    // events are stamped delivered only once carried.
+                    await deliverEvents(verdict.read_up_to_seq);
+                }
+                return verdict;
+                "#,
+                "null",
+                CancellationToken::new(),
+                Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                ScriptCapabilities::default(),
+            )
+            .await
+            .expect("events run");
+        let verdict: Value = serde_json::from_str(&output).expect("verdict");
+        assert_eq!(verdict["wake"], true);
+        assert_eq!(verdict["read_up_to_seq"], 1);
+        let posts = host.event_posts.lock().unwrap();
+        assert_eq!(posts.len(), 1);
+        assert_eq!(posts[0].kind, "completion");
+        assert_eq!(posts[0].payload, json!({"worker": "w1"}));
+        assert_eq!(
+            host.gate_requests.lock().unwrap()[0].criteria,
+            "wake when any pipeline settles"
+        );
+        assert_eq!(host.deliveries_up_to.lock().unwrap().as_slice(), [1]);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1073,6 +1473,33 @@ mod tests {
         cancellation.cancel();
 
         let result = engine.execute("while (true) {}", cancellation).await;
+        assert!(matches!(result, Err(WorkflowEngineError::Cancelled)));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancellation_interrupts_a_suspended_host_call() {
+        let mut host = SurfaceHost::new();
+        host.timer_settles = false;
+        let cancellation = CancellationToken::new();
+        let engine = WorkflowEngine::new(EngineLimits::default());
+        let execution = engine.execute_hosted(
+            "return await wait({ timerMs: 120_000 });",
+            "null",
+            cancellation.clone(),
+            Some(Arc::new(host)),
+            ScriptCapabilities::default(),
+        );
+
+        tokio::pin!(execution);
+        tokio::select! {
+            result = &mut execution => panic!("host call settled before cancellation: {result:?}"),
+            () = tokio::time::sleep(std::time::Duration::from_millis(20)) => {}
+        }
+        cancellation.cancel();
+
+        let result = tokio::time::timeout(std::time::Duration::from_millis(100), execution)
+            .await
+            .expect("cancellation releases a suspended host call");
         assert!(matches!(result, Err(WorkflowEngineError::Cancelled)));
     }
 
@@ -1292,6 +1719,10 @@ mod tests {
         );
         assert_eq!(
             named_host_error("provider unavailable", "AgentCallError"),
+            ("AgentCallError".into(), "provider unavailable".into())
+        );
+        assert_eq!(
+            named_host_error("AgentCallError: provider unavailable", "AgentCallError"),
             ("AgentCallError".into(), "provider unavailable".into())
         );
     }

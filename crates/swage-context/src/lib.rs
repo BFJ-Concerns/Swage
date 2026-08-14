@@ -18,3 +18,4 @@ pub mod selective_eviction;
 pub mod skills;
 pub mod structured_extraction;
 pub mod tokeniser;
+pub mod working_norms;

@@ -29,8 +29,8 @@ pub use config::{AgentConfig, CompactionThreshold};
 pub use context_transfer::TransferredContext;
 pub use delegation::{
     ActiveDelegation, ActiveDelegations, DelegatedAssembly, DelegationContextAssembler,
-    DelegationExecutor, DelegationHandler, DelegationOutcome, DetachedDelegation,
-    active_delegations,
+    DelegationExecutor, DelegationHandler, DelegationOutcome, DelegationSnapshotRecorder,
+    DetachedDelegation, active_delegations,
 };
 pub use error::AgentError;
 pub use event::AgentEvent;

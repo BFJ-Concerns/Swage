@@ -1047,7 +1047,7 @@ mod tests {
             client.clone(),
         );
 
-        link_chat(&state, &client, &telegram_state, 1, 777).await;
+        Box::pin(link_chat(&state, &client, &telegram_state, 1, 777)).await;
         telegram_state.push_update(2, 777, "hello");
         poll_once(&state, &client).await.unwrap();
 
@@ -1187,7 +1187,7 @@ mod tests {
             MockProvider::new(vec![MockProvider::text_round("before restart")]),
             client.clone(),
         );
-        link_chat(&state, &client, &telegram, 1, 777).await;
+        Box::pin(link_chat(&state, &client, &telegram, 1, 777)).await;
         telegram.push_update(2, 777, "before");
         poll_once(&state, &client).await.unwrap();
         let first_session = storage
@@ -1249,7 +1249,7 @@ mod tests {
         let requests = provider.requests();
         let state = test_state(storage.clone(), provider, client.clone());
 
-        link_chat(&state, &client, &telegram, 1, 777).await;
+        Box::pin(link_chat(&state, &client, &telegram, 1, 777)).await;
         telegram.push_update(2, 777, "A");
         let first_state = state.clone();
         let first_client = client.clone();
@@ -1301,7 +1301,7 @@ mod tests {
         let client = connect_mock_client(base_url).await;
 
         let (state, storage) = file_state(&db_path, MockProvider::new(vec![]), client.clone());
-        link_chat(&state, &client, &telegram, 1, 777).await;
+        Box::pin(link_chat(&state, &client, &telegram, 1, 777)).await;
         let session = storage
             .find_session_by_channel_origin("telegram", client.bot_id().unwrap(), "777")
             .await
@@ -1470,7 +1470,7 @@ mod tests {
             client.clone(),
         );
 
-        link_chat(&state, &client, &telegram, 1, 777).await;
+        Box::pin(link_chat(&state, &client, &telegram, 1, 777)).await;
         telegram.fail_send.store(true, Ordering::SeqCst);
         telegram.push_update(2, 777, "fail send");
         let _ = poll_once(&state, &client).await;

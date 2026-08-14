@@ -20,10 +20,12 @@ pub(crate) fn contains_user_visible_content(chunk: &StreamChunk) -> bool {
             true
         }
         StreamChunk::Usage(_)
+        | StreamChunk::ProviderResponseWitness(_)
         | StreamChunk::Done { .. }
         | StreamChunk::ProviderRetryStarted { .. }
         | StreamChunk::ProviderRetrySettled { .. }
-        | StreamChunk::Error { .. } => false,
+        | StreamChunk::Error { .. }
+        | StreamChunk::ProviderAnomaly { .. } => false,
     }
 }
 
@@ -40,8 +42,12 @@ pub(crate) fn may_forward_before_attempt_commits(chunk: &StreamChunk) -> bool {
         | StreamChunk::Reasoning { .. }
         | StreamChunk::ToolUse { .. }
         | StreamChunk::ProviderRetryStarted { .. }
-        | StreamChunk::ProviderRetrySettled { .. } => true,
-        StreamChunk::Usage(_) | StreamChunk::Done { .. } | StreamChunk::Error { .. } => false,
+        | StreamChunk::ProviderRetrySettled { .. }
+        | StreamChunk::ProviderResponseWitness(_) => true,
+        StreamChunk::Usage(_)
+        | StreamChunk::Done { .. }
+        | StreamChunk::Error { .. }
+        | StreamChunk::ProviderAnomaly { .. } => false,
     }
 }
 

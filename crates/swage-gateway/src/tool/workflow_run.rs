@@ -38,6 +38,7 @@ impl Tool for WorkflowRunTool {
                     "properties": {
                         "max_agent_calls": {"type": "integer", "description": "Most agent calls the run may make."},
                         "max_total_tokens": {"type": "integer", "description": "Token ceiling across all the run's agent calls."},
+                        "reserved_closing_tokens": {"type": "integer", "description": "Tokens held back from ordinary work and released when the run enters wind-down."},
                         "max_concurrent_agent_calls": {"type": "integer", "description": "Most agent calls in flight at once."}
                     }
                 },

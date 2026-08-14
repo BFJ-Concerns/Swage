@@ -23,7 +23,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.202607.500"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.95"
 
@@ -133,16 +133,16 @@ serde_json = "1"
 toml = "1.1"
 
 # Error handling
-thiserror = "2"
+thiserror = "=2.0.19"
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["rt"] }
-async-trait = "0.1"
-futures = "0.3"
-rquickjs = { version = "=0.12.0", features = ["futures"] }
-rquickjs-core = "=0.12.0"
-rquickjs-sys = "=0.12.0"
+async-trait = "=0.1.91"
+futures = "=0.3.33"
+rquickjs = { version = "=0.12.2", features = ["futures"] }
+rquickjs-core = "=0.12.2"
+rquickjs-sys = "=0.12.2"
 
 # Identifiers and time
 uuid = { version = "1", features = ["v4", "serde"] }
@@ -150,9 +150,9 @@ chrono = { version = "0.4", features = ["serde"] }
 
 # Random number generation (used in retry jitter)
 rand = "0.10"
-base64 = "0.22"
+base64 = "0.23"
 sha2 = "0.11"
-aes-gcm-siv = "0.11"
+aes-gcm-siv = "0.12"
 
 # Observability
 tracing = "0.1"
@@ -164,10 +164,10 @@ bytes = "1"
 
 # Web framework
 axum = { version = "0.8", features = ["ws"] }
-tower-http = { version = "0.6", features = ["cors", "trace"] }
+tower-http = { version = "0.7", features = ["cors", "trace"] }
 
 # Database
-rusqlite = { version = "0.39", features = ["bundled"] }
+rusqlite = { version = "=0.40.1", features = ["bundled"] }
 
 # Pattern matching (leak detection)
 aho-corasick = "1"
@@ -184,7 +184,7 @@ mime_guess = "2"
 libc = "0.2"
 
 # JSON Schema validation
-jsonschema = "0.46"
+jsonschema = "=0.49.6"
 
 # Wire-contract projections (swage-protocol): TypeScript bindings and JSON Schema
 ts-rs = { version = "12", features = ["uuid-impl", "chrono-impl"] }

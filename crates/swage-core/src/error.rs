@@ -125,6 +125,11 @@ pub enum ProviderError {
     #[error("stream error: {0}")]
     StreamError(String),
 
+    /// A provider response completed successfully at the transport layer but
+    /// contained no usable model output (transient).
+    #[error("provider response anomaly: {0}")]
+    ProviderAnomaly(String),
+
     /// Provider returned a well-formed response with unexpected content (permanent).
     #[error("invalid response: {0}")]
     InvalidResponse(String),
@@ -142,6 +147,7 @@ impl ProviderError {
                 | ProviderError::Timeout { .. }
                 | ProviderError::Network { .. }
                 | ProviderError::StreamError(_)
+                | ProviderError::ProviderAnomaly(_)
         )
     }
 }
@@ -299,9 +305,9 @@ pub enum ToolError {
 
     /// Tool requires human approval before it may execute.
     ///
-    /// Returned by the permission check when the tool appears in `require_approval`
-    /// rather than the allow list. This is not a retriable error — approval is a
-    /// distinct control flow handled by the HITL subsystem.
+    /// Returned by the permission check when an allowed tool also appears in
+    /// `require_approval`. This is not a retriable error — approval is a distinct
+    /// control flow handled by the HITL subsystem.
     #[error("tool {name} requires approval before execution")]
     RequiresApproval {
         name: String,

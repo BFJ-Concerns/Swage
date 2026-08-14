@@ -1891,8 +1891,17 @@ pub struct WorkflowRunRecord {
     pub budget: serde_json::Value,
     pub state: String,
     pub final_output: Option<serde_json::Value>,
+    pub handover: Option<serde_json::Value>,
     pub error_message: Option<String>,
     pub engine_version: String,
+    /// The full ordered lineage of agent contexts bounding this run. Worker
+    /// sessions intersect their grants with every member — re-resolved at
+    /// every worker turn, so nested dispatch cannot expand authority and
+    /// suspension never freezes it. Empty means operator-started.
+    pub dispatch_bound_agent_ids: Vec<String>,
+    /// When a parked run is due to wake. Set only while `state` is
+    /// `parked`; cleared on every other state transition.
+    pub wake_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
 }
@@ -1908,6 +1917,36 @@ pub struct NewWorkflowRun {
     pub args: serde_json::Value,
     pub budget: serde_json::Value,
     pub engine_version: String,
+    /// See `WorkflowRunRecord::dispatch_bound_agent_ids`.
+    pub dispatch_bound_agent_ids: Vec<String>,
+}
+
+/// One entry in a run's durable pending-event queue. Events are data —
+/// completions, failures, escalations posted between lead wakes — never
+/// instructions. `seq` is assigned by the store, dense per run;
+/// `journal_entry_id` keys the row to the journal entry that posted it, so a
+/// replayed post finds its existing row instead of duplicating it. A pending
+/// event has `delivered_at` NULL; delivery stamps the journal seq of the
+/// wake that carried it.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WorkflowRunEventRecord {
+    pub id: Uuid,
+    pub run_id: Uuid,
+    pub journal_entry_id: Uuid,
+    pub seq: u64,
+    pub kind: String,
+    pub payload: serde_json::Value,
+    pub posted_at: DateTime<Utc>,
+    pub delivered_wake_seq: Option<u64>,
+    pub delivered_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Clone, Debug)]
+pub struct NewWorkflowRunEvent {
+    pub run_id: Uuid,
+    pub journal_entry_id: Uuid,
+    pub kind: String,
+    pub payload: serde_json::Value,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -124,6 +124,20 @@ pub struct DelegationExecutor {
     /// Caller-owned assembly path for the child session. The gateway uses this
     /// to apply the same context elements as every other session entry point.
     pub context_assembler: Option<Arc<dyn DelegationContextAssembler>>,
+    /// Optional caller-owned persistence policy for delegated context reports.
+    /// The gateway supplies this because its audit durability contract and
+    /// escalation machinery live above the agent runtime.
+    pub snapshot_recorder: Option<Arc<dyn DelegationSnapshotRecorder>>,
+}
+
+#[async_trait::async_trait]
+pub trait DelegationSnapshotRecorder: Send + Sync {
+    async fn record(
+        &self,
+        session_id: Uuid,
+        turn_id: Uuid,
+        report: &serde_json::Value,
+    ) -> Result<(), AgentError>;
 }
 
 /// Assembles model context after the delegated child session has been created.
@@ -162,6 +176,7 @@ impl DelegationExecutor {
         target_instructions: String,
         target_context_transfer_config: swage_config::ContextTransferConfig,
         target_tool_dispatcher: Option<ToolDispatcher>,
+        session_metadata: serde_json::Value,
         cancel_token: tokio_util::sync::CancellationToken,
         started_tx: Option<tokio::sync::oneshot::Sender<DetachedDelegation>>,
     ) -> Result<AgentMessage, AgentError> {
@@ -180,7 +195,7 @@ impl DelegationExecutor {
             .create_session(NewSession {
                 space_id,
                 agent_id: target_agent_id.clone(),
-                metadata: None,
+                metadata: Some(session_metadata),
                 active_workspace_attachment_id: None,
             })
             .await?;
@@ -275,13 +290,16 @@ impl DelegationExecutor {
             )
         };
 
-        if let Some(report) = assembly_report
-            && let Err(error) = self
+        if let Some(report) = assembly_report {
+            if let Some(recorder) = &self.snapshot_recorder {
+                recorder.record(session.id, turn_id, &report).await?;
+            } else if let Err(error) = self
                 .storage
                 .store_snapshot(turn_id, &report.to_string())
                 .await
-        {
-            tracing::warn!(%turn_id, %error, "failed to persist delegated context snapshot");
+            {
+                tracing::warn!(%turn_id, %error, "failed to persist delegated context snapshot");
+            }
         }
 
         // 4. Build agent config with schema override.
@@ -724,6 +742,7 @@ mod tests {
             router,
             active_delegations: ActiveDelegations::new(),
             context_assembler: None,
+            snapshot_recorder: None,
         };
         let config = AgentConfig::new("agent-b").with_workspace(std::env::temp_dir(), vec![]);
 
@@ -736,6 +755,7 @@ mod tests {
                 String::new(),
                 swage_config::ContextTransferConfig::default(),
                 None,
+                serde_json::json!({"dispatch_bound_agent_id": "agent-a"}),
                 tokio_util::sync::CancellationToken::new(),
                 None,
             )
@@ -751,6 +771,14 @@ mod tests {
             .await
             .expect("list child sessions");
         assert_eq!(sessions.len(), 1, "expected one child session");
+        assert_eq!(
+            sessions[0]
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("dispatch_bound_agent_id"))
+                .and_then(serde_json::Value::as_str),
+            Some("agent-a")
+        );
         let threads = storage
             .list_by_session(sessions[0].id)
             .await

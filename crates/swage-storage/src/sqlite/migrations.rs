@@ -82,8 +82,110 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
             "048_knowledge_orientation_cards",
             CREATE_KNOWLEDGE_ORIENTATION_CARDS,
         ),
+        ("050_workflow_run_events", CREATE_WORKFLOW_RUN_EVENTS),
+        ("051_workflow_run_parking", ADD_WORKFLOW_RUN_PARKING),
     ]
 }
+
+/// Durable waits: a run sleeping on a long timer parks — no engine, no
+/// per-run OS thread — recording when it is due (`wake_at`); a background
+/// waker resumes it by journal replay. The state CHECK gains 'parked', which
+/// SQLite cannot widen in place, so the table is rebuilt with explicit
+/// column lists (the ALTER-added columns sit at the end of the old table).
+const ADD_WORKFLOW_RUN_PARKING: &str = "
+    CREATE TABLE workflow_runs_parking_new (
+        id                   TEXT NOT NULL PRIMARY KEY,
+        space_id             TEXT NOT NULL REFERENCES spaces(id) ON DELETE CASCADE,
+        script_version_id    TEXT REFERENCES workflow_script_versions(id),
+        source               TEXT,
+        source_hash          TEXT NOT NULL,
+        args_json            TEXT NOT NULL,
+        budget_json          TEXT NOT NULL,
+        state                TEXT NOT NULL CHECK (state IN ('running', 'completed', 'failed', 'cancelled', 'interrupted', 'parked')),
+        final_output_json    TEXT,
+        handover_json        TEXT,
+        error_message        TEXT,
+        engine_version       TEXT NOT NULL,
+        created_at           TEXT NOT NULL,
+        completed_at         TEXT,
+        parent_run_id        TEXT REFERENCES workflow_runs(id),
+        parent_seq           INTEGER,
+        dispatch_bound_agent_ids_json TEXT NOT NULL,
+        wake_at              TEXT
+    );
+    INSERT INTO workflow_runs_parking_new (
+        id, space_id, script_version_id, source, source_hash, args_json,
+        budget_json, state, final_output_json, handover_json, error_message, engine_version,
+        created_at, completed_at, parent_run_id, parent_seq,
+        dispatch_bound_agent_ids_json
+    )
+    SELECT
+        id, space_id, script_version_id, source, source_hash, args_json,
+        budget_json, state, final_output_json, NULL, error_message, engine_version,
+        created_at, completed_at, parent_run_id, parent_seq,
+        dispatch_bound_agent_ids_json
+    FROM workflow_runs;
+    DROP TABLE workflow_runs;
+    ALTER TABLE workflow_runs_parking_new RENAME TO workflow_runs;
+    CREATE INDEX IF NOT EXISTS idx_workflow_runs_space_created
+        ON workflow_runs(space_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_workflow_runs_state
+        ON workflow_runs(state);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_workflow_runs_parent_call
+        ON workflow_runs(parent_run_id, parent_seq)
+        WHERE parent_run_id IS NOT NULL;
+";
+
+/// A run's durable pending-event queue: completions, failures, and
+/// escalations accumulate as data between lead wakes. Events stay pending
+/// until a wake delivers them — a gate that suppresses a wake consumes
+/// nothing, so suppressed events ride the next wake for retrospective
+/// review. Each row is keyed to the journal entry that posted it, making the
+/// post exactly-once under replay. The journal's kind CHECK also widens for
+/// the two new host-call kinds (event, gate); SQLite cannot widen a CHECK in
+/// place, so the table is rebuilt, existing rows carrying over unchanged.
+const CREATE_WORKFLOW_RUN_EVENTS: &str = "
+    CREATE TABLE IF NOT EXISTS workflow_run_events (
+        id                 TEXT NOT NULL PRIMARY KEY,
+        run_id             TEXT NOT NULL REFERENCES workflow_runs(id) ON DELETE CASCADE,
+        journal_entry_id   TEXT NOT NULL UNIQUE,
+        seq                INTEGER NOT NULL,
+        kind               TEXT NOT NULL CHECK (kind IN ('completion', 'failure', 'escalation')),
+        payload_json       TEXT NOT NULL,
+        posted_at          TEXT NOT NULL,
+        delivered_wake_seq INTEGER,
+        delivered_at       TEXT,
+        UNIQUE (run_id, seq)
+    );
+    CREATE INDEX IF NOT EXISTS idx_workflow_run_events_pending
+        ON workflow_run_events(run_id, seq)
+        WHERE delivered_at IS NULL;
+
+    CREATE TABLE workflow_journal_events_new (
+        id                TEXT NOT NULL PRIMARY KEY,
+        run_id            TEXT NOT NULL REFERENCES workflow_runs(id) ON DELETE CASCADE,
+        seq               INTEGER NOT NULL,
+        completed_order   INTEGER,
+        kind              TEXT NOT NULL CHECK (kind IN ('agent_call', 'effect', 'log', 'phase', 'workflow_call', 'timer', 'event', 'gate', 'budget', 'wind_down')),
+        status            TEXT NOT NULL CHECK (status IN ('started', 'completed', 'failed')),
+        args_hash         TEXT NOT NULL,
+        request_json      TEXT NOT NULL,
+        result_json       TEXT,
+        error_message     TEXT,
+        effect_kind       TEXT,
+        idempotency_key   TEXT,
+        target_kind       TEXT,
+        started_at        TEXT NOT NULL,
+        completed_at      TEXT,
+        UNIQUE (run_id, seq),
+        UNIQUE (run_id, completed_order)
+    );
+    INSERT INTO workflow_journal_events_new SELECT * FROM workflow_journal;
+    DROP TABLE workflow_journal;
+    ALTER TABLE workflow_journal_events_new RENAME TO workflow_journal;
+    CREATE INDEX IF NOT EXISTS idx_workflow_journal_run_seq
+        ON workflow_journal(run_id, seq);
+";
 
 /// Composed workflow runs: a child run started by a parent's `workflow()`
 /// call records which parent and which journal seq started it, so a resumed
@@ -850,10 +952,12 @@ const COMPLETE_SCHEMA: &str = "
         budget_json         TEXT NOT NULL,
         state               TEXT NOT NULL CHECK (state IN ('running', 'completed', 'failed', 'cancelled', 'interrupted')),
         final_output_json   TEXT,
+        handover_json       TEXT,
         error_message       TEXT,
         engine_version      TEXT NOT NULL,
         created_at          TEXT NOT NULL,
-        completed_at        TEXT
+        completed_at        TEXT,
+        dispatch_bound_agent_ids_json TEXT NOT NULL DEFAULT '[]'
     );
 
     CREATE INDEX IF NOT EXISTS idx_workflow_runs_space_created
@@ -1324,6 +1428,17 @@ pub fn run_migrations(conn: &Connection) -> Result<(), StorageError> {
     conn.execute_batch(CREATE_MIGRATIONS_TABLE)
         .map_err(|e| StorageError::MigrationFailed(e.to_string()))?;
 
+    // SQLite's table-rebuild recipe: run the migration pass with foreign-key
+    // enforcement OFF. With it on, dropping a rebuilt table performs an
+    // implicit DELETE whose ON DELETE actions fire — a parent-table rebuild
+    // would cascade-wipe its children (the workflow journal and event queue,
+    // for workflow_runs) while appearing to succeed. The pragma is a no-op
+    // inside a transaction, so it must live here, around the per-migration
+    // transactions; a foreign_key_check before re-enabling keeps the
+    // integrity guarantee the enforcement normally provides.
+    conn.execute_batch("PRAGMA foreign_keys=OFF;")
+        .map_err(|e| StorageError::MigrationFailed(e.to_string()))?;
+
     for (name, sql) in migrations() {
         // Check whether this migration has already been applied.
         let already_applied: bool = conn
@@ -1359,6 +1474,19 @@ pub fn run_migrations(conn: &Connection) -> Result<(), StorageError> {
         )
         .map_err(|e| StorageError::MigrationFailed(e.to_string()))?;
     }
+
+    let violations: i64 = conn
+        .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+            row.get(0)
+        })
+        .map_err(|e| StorageError::MigrationFailed(e.to_string()))?;
+    if violations > 0 {
+        return Err(StorageError::MigrationFailed(format!(
+            "{violations} foreign-key violation(s) after migrations; refusing to continue"
+        )));
+    }
+    conn.execute_batch("PRAGMA foreign_keys=ON;")
+        .map_err(|e| StorageError::MigrationFailed(e.to_string()))?;
 
     // Seed the default space if it does not already exist.
     seed_default_space(conn)

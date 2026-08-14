@@ -30,8 +30,9 @@ pub use message::{ChatMessage, ContentPart, Role, ToolReplayPart};
 pub use message_rendering::{render_message_for_model_context, role_label_for_model_context};
 pub use messaging::{ContextTransferMode, MessageKind, MessageStatus};
 pub use request::{
-    CompletionRequest, CompletionResponse, FinishReason, LlmRequest, LlmResponse, StreamChunk,
-    TokenUsage, ToolCompletionRequest, ToolCompletionResponse,
+    CompletionRequest, CompletionResponse, FinishReason, LlmRequest, LlmResponse,
+    ProviderContentBlockWitness, ProviderResponseWitness, StreamChunk, TokenUsage,
+    ToolCompletionRequest, ToolCompletionResponse,
 };
 pub use tool::{
     CompactToolReplay, ToolCall, ToolDefinition, ToolReplayReasoning, ToolResult,

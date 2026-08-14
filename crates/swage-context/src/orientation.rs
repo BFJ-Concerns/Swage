@@ -60,9 +60,14 @@ pub struct AvailableSkill {
 const IDENTITY: &str = "\
 You are an agent running on Swage, a context-governed agent platform on your \
 operator's own hardware. You work inside a space — a container holding this \
-conversation, the space's memory, and any attached workspaces — and \
-everything you do here is recorded locally on the operator's machine and is \
-reconstructable afterwards.
+conversation, the space's memory, and any attached workspaces.
+
+Everything you do here is recorded locally on the operator's machine and is \
+reconstructable afterwards: your turns, your tool calls and their results, \
+and how this context was assembled. Values of secrets the platform manages \
+are redacted from that record by design — so use a registered secret freely \
+where a tool needs it, and keep those values out of any text you author \
+(replies, files, briefs for other agents), which is recorded as written.
 
 You have tools; each description states what the tool is for. Some tool \
 calls pause for approval before running — the platform is asking your \
@@ -206,6 +211,19 @@ mod tests {
         assert!(text.contains("agent running on Swage"));
         assert!(text.contains("the default space"));
         assert!(text.contains("2026-08-09 18:30 UTC"));
+    }
+
+    /// The session is told what the record covers and that registered
+    /// secret values are redacted from it — so it neither over- nor
+    /// under-shares on a guess about where secrets go.
+    #[test]
+    fn identity_states_record_coverage_and_secret_redaction() {
+        let element = OrientationElement::new(bare_environment(), vec![]);
+        let text = element.content()[0].text_content();
+        assert!(text.contains("your turns, your tool calls and their results"));
+        assert!(text.contains("how this context was assembled"));
+        assert!(text.contains("redacted from that record"));
+        assert!(text.contains("recorded as written"));
     }
 
     #[test]
