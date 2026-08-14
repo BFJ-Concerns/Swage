@@ -1009,8 +1009,12 @@ describe("App", () => {
     vi.mocked(settingsApi.fetchSettings)
       .mockResolvedValueOnce(makeSettings())
       .mockResolvedValueOnce(configured)
-      .mockResolvedValueOnce(saved);
-    vi.mocked(settingsApi.saveSettings).mockResolvedValueOnce(saved);
+      .mockResolvedValueOnce(saved)
+      .mockResolvedValueOnce(saved)
+      .mockRejectedValueOnce(new Error("transient catalogue failure"));
+    vi.mocked(settingsApi.saveSettings)
+      .mockResolvedValueOnce(saved)
+      .mockResolvedValueOnce(configured);
     vi.mocked(spacesApi.listSpaces).mockResolvedValueOnce([makeSpace()]);
     vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([
       makeConversationSummary({ id: "conv-settings-model" }),
@@ -1058,6 +1062,17 @@ describe("App", () => {
       content: "Send with the newly saved model",
       selected_model_id: "local/new-model",
     });
+
+    flushSync(() => settingsButton!.click());
+    await settleUi();
+    const existingModelButton = Array.from(document.querySelectorAll("button")).find(
+      (button) => button.textContent?.trim().startsWith("local/existing-model"),
+    );
+    flushSync(() => existingModelButton!.click());
+    await waitForText("Saved automatically. New turns will use the updated runtime.");
+    expect(document.body.textContent).not.toContain("transient catalogue failure");
+    expect(settingsApi.saveSettings).toHaveBeenCalledTimes(2);
+    expect(settingsApi.fetchSettings).toHaveBeenCalledTimes(5);
   });
 
   it("switches to the operator surface and renders the overview", async () => {
