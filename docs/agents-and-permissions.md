@@ -52,13 +52,13 @@ Two kinds of root are checked, in this order:
 
 1. **Config root** (`~/.swage/` or `$SWAGE_HOME`) — always read. This is
    global guidance that applies to every session.
-2. **Trusted workspace roots** — the active workspace and any workspace
-   attachments the operator has trusted. Each contributes its own
-   `AGENTS.md` if one exists.
+2. **Trusted, readable workspace roots** — the active workspace and any
+   workspace attachments that are both trusted and readable. Each
+   contributes its own `AGENTS.md` if one exists.
 
-Untrusted workspace attachments contribute nothing — their `AGENTS.md` is
-never read. Trust is the only gate; there is no separate setting to disable
-global guidance.
+A workspace root that is not trusted, or that is trusted but not readable
+(e.g. a write-only attachment), contributes nothing — its `AGENTS.md` is
+never read. There is no separate setting to disable global guidance.
 
 ### Ordering
 
