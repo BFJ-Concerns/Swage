@@ -18,6 +18,7 @@ import App from "../App.svelte";
 import * as conversationsApi from "../lib/api/conversations";
 import * as materialsApi from "../lib/api/materials";
 import * as operatorApi from "../lib/api/operator";
+import * as settingsApi from "../lib/api/settings";
 import * as spacesApi from "../lib/api/spaces";
 import type {
   ClientEvent,
@@ -29,6 +30,7 @@ import type {
   Space,
   ServerEvent,
   WorkspaceAttachment,
+  SettingsResponse,
 } from "../lib/types";
 
 type MountedComponent = ReturnType<typeof mount>;
@@ -104,6 +106,13 @@ vi.mock("../lib/api/operator", () => ({
   fetchScheduleRuns: vi.fn(),
 }));
 
+vi.mock("../lib/api/settings", () => ({
+  discoverModels: vi.fn(),
+  fetchSettings: vi.fn(),
+  restartGateway: vi.fn(),
+  saveSettings: vi.fn(),
+}));
+
 vi.mock("../lib/api/websocket", () => ({
   createWebSocketClient: websocketHarness.factory,
 }));
@@ -161,6 +170,57 @@ function makeConversationDetail(
     last_activity: "2026-04-07T12:00:00Z",
     messages: [],
     ...overrides,
+  };
+}
+
+function makeSettings(models: SettingsResponse["models"] = {}): SettingsResponse {
+  const defaultModel = Object.keys(models)[0] ?? "";
+  return {
+    providers: defaultModel
+      ? {
+          local: {
+            protocol: "openai",
+            base_url: "http://provider.test/v1",
+            has_credential: true,
+            command: null,
+            state_dir: null,
+          },
+        }
+      : {},
+    default_provider: defaultModel ? "local" : "",
+    models,
+    default_model: defaultModel,
+    generation_presets: {},
+    tool_runtime: {
+      shell_timeout_secs: 30,
+      python_execute: {
+        enabled: true,
+        timeout_secs: 30,
+        startup_timeout_secs: 10,
+        idle_ttl_secs: 60,
+        warm_target: 1,
+        max_workers: 1,
+        runtime_policy: "bundled_then_system",
+        runtime_path: null,
+        require_sandbox: true,
+      },
+      max_output_bytes: 100_000,
+      plugin_directory: null,
+      search: null,
+    },
+    tool_permissions: { allow: ["*"], deny: [], bundles: {}, require_approval: [] },
+    hitl: { timeout: 300, timeout_policy: "reject" },
+    sandbox: { enabled: true },
+    context: { assembly: "default", timeout: 5, budget: null },
+    pricing: { models: {} },
+    observability: { force_on: false },
+    communication: {
+      context_transfer: { mode: "none", allowed_fields: [], summary_budget: null, targets: {} },
+      message_ttl_secs: 86_400,
+      expiry_interval_secs: 60,
+    },
+    restart_required: false,
+    can_restart: false,
   };
 }
 
@@ -277,6 +337,9 @@ describe("App", () => {
     vi.mocked(materialsApi.listSpaceMaterials).mockResolvedValue([]);
     vi.mocked(materialsApi.listSessionMaterials).mockResolvedValue([]);
     vi.mocked(operatorApi.fetchOperatorOverview).mockResolvedValue(makeOperatorOverview());
+    vi.mocked(settingsApi.fetchSettings).mockRejectedValue(
+      new Error("settings are not configured in this test"),
+    );
     // SpacePicker fetches workspace/session detail on card selection — return
     // empty arrays by default so the picker renders without errors. Individual
     // tests can override these mocks if they exercise the detail panel.
@@ -924,6 +987,77 @@ describe("App", () => {
 
     expect(document.querySelector(".action.stop")).toBeNull();
     expect(document.querySelector(".message-display")?.textContent).toContain("Streamed reply.");
+  });
+
+  it("refreshes saved models before returning to the conversation and sending", async () => {
+    const configured = makeSettings({
+      "local/existing-model": {
+        provider_id: "local",
+        model_id: "existing-model",
+        aliases: [],
+        generation_preset: null,
+      },
+      "local/new-model": {
+        provider_id: "local",
+        model_id: "new-model",
+        aliases: [],
+        generation_preset: null,
+      },
+    });
+    const saved = structuredClone(configured);
+    saved.default_model = "local/new-model";
+    vi.mocked(settingsApi.fetchSettings)
+      .mockResolvedValueOnce(makeSettings())
+      .mockResolvedValueOnce(configured)
+      .mockResolvedValueOnce(saved);
+    vi.mocked(settingsApi.saveSettings).mockResolvedValueOnce(saved);
+    vi.mocked(spacesApi.listSpaces).mockResolvedValueOnce([makeSpace()]);
+    vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([
+      makeConversationSummary({ id: "conv-settings-model" }),
+    ]);
+    vi.mocked(conversationsApi.getConversation).mockResolvedValueOnce(
+      makeConversationDetail({ id: "conv-settings-model" }),
+    );
+
+    setPath("/conversations/conv-settings-model");
+    component = mount(App, { target: document.body });
+    await settleUi();
+    expect(document.body.textContent).toContain("No models are configured");
+
+    const settingsButton = Array.from(document.querySelectorAll("button")).find(
+      (button) => button.textContent?.trim() === "Settings",
+    );
+    flushSync(() => settingsButton!.click());
+    await settleUi();
+    const newModelButton = Array.from(document.querySelectorAll("button")).find(
+      (button) => button.textContent?.trim().startsWith("local/new-model"),
+    );
+    flushSync(() => newModelButton!.click());
+    await waitForText("Saved automatically. New turns will use the updated runtime.");
+
+    const closeButton = document.querySelector<HTMLButtonElement>(
+      'button[aria-label="Close settings"]',
+    );
+    flushSync(() => closeButton!.click());
+    await settleUi();
+    expect(document.body.textContent).toContain("local/new-model");
+
+    const textarea = document.querySelector<HTMLTextAreaElement>("textarea");
+    flushSync(() => {
+      textarea!.value = "Send with the newly saved model";
+      textarea!.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    const sendButton = document.querySelector<HTMLButtonElement>(".action.send");
+    expect(sendButton?.disabled).toBe(false);
+    flushSync(() => sendButton!.click());
+    await settleUi();
+
+    expect(settingsApi.fetchSettings).toHaveBeenCalledTimes(3);
+    expect(websocketHarness.client.send).toHaveBeenCalledWith({
+      type: "send_message",
+      content: "Send with the newly saved model",
+      selected_model_id: "local/new-model",
+    });
   });
 
   it("switches to the operator surface and renders the overview", async () => {

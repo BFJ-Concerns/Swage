@@ -25,6 +25,8 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- The conversation composer now reflects newly saved provider and model settings without requiring a page reload.
+- Fresh-session schedules can now use the calling conversation's space without requiring its UUID.
 - Workflow runs now retain their reserved token allowance for final closing work, even when earlier agent calls are still running.
 - Failed workflow runs now retain a durable handover identifying the failed call and the events delivered or still pending.
 - Provider responses that complete without usable text or tool output are now treated as failures, allowing retries or failover instead of silently producing an empty result.
@@ -36,4 +38,3 @@ All notable changes to Swage are documented in this file.
 - Conversation and space-session creation now rejects undeclared request fields instead of silently ignoring them, preventing accidental creation in the wrong space.
 - Delegated and dispatched workers now remain limited to the tools and approvals granted by every agent in their dispatch chain, including after nested delegation and after permissions change while a run is paused.
 - Workflow runs now replay consistently across gateway restarts and parked waits, without resurrecting runs cancelled concurrently.
-
