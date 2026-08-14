@@ -169,10 +169,12 @@ Tool calls run inside a two-layer sandbox (`swage-sandbox`):
    Always-writable paths: the working directory and `/tmp`, plus any
    configured write paths. Restrictions are irrevocable within the process.
 
-Credential isolation: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`,
-`GOOGLE_API_KEY` are stripped from the child environment. LLM completions
-are proxied through the host via IPC — credentials never enter the sandboxed
-process.
+Credential isolation strips `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, and
+`GOOGLE_API_KEY` from the sandbox child environment. Provider
+`api_key_env` names are configurable, however, and any differently named
+environment variable is not stripped by this mechanism. LLM completions use
+the host IPC proxy, so the child does not need provider credentials for
+completion requests.
 
 ### Sandbox configuration
 
@@ -221,12 +223,22 @@ a decision (`Approved` or `Rejected`) and a scope.
 | Scope | Persistence | Reach |
 |---|---|---|
 | `Once` | None — applies to the single pending call | This call only |
-| `Session` | In-memory `session_approval_grants` | This session |
+| `Session` | In-memory `session_approval_grants`, until the gateway exits | Any session in this gateway process |
 | `Permanent` | In-memory + persisted to disk | This space |
 | `PermanentGlobal` | In-memory + persisted to disk across all spaces | All spaces |
 
+`Session` is process-scoped, not session-scoped, despite the name.
+`ApprovalGrantKey` carries no session identifier, and `from_approval` sets
+`space_id: None` for tool and hook approvals, so the grant is stored under a
+global key. `build_permission_config` drops the matching `require_approval`
+entry whenever that key is present, for every dispatcher built afterwards —
+in any session, any space, until the gateway process exits. Existing
+dispatchers keep their original config; the grant takes effect on the next
+one built.
+
 `Permanent` and `PermanentGlobal` also handle location-scoped approvals
-(workspace attachment trust).
+(workspace attachment trust). Location grants are the one kind keyed by
+`space_id`.
 
 ### Timeout and rejection
 
