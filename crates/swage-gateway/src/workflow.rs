@@ -6746,18 +6746,18 @@ mod tests {
             None,
         );
         let source = r#"
-            await Promise.all([
-                agent("terminal call fails first", {
-                    agent: "default",
-                    label: "terminal call",
-                    maxAttempts: 1,
-                }),
-                agent("concurrent call fails later", {
-                    agent: "default",
-                    label: "later concurrent call",
-                    maxAttempts: 1,
-                }),
-            ]);
+            const terminalCall = agent("terminal call fails first", {
+                agent: "default",
+                label: "terminal call",
+                maxAttempts: 1,
+            });
+            const concurrentCall = agent("concurrent call fails later", {
+                agent: "default",
+                label: "later concurrent call",
+                maxAttempts: 1,
+            });
+            await terminalCall;
+            await concurrentCall;
         "#;
         let Json(started) = start_inline_run(
             State(state.clone()),
