@@ -199,6 +199,21 @@
   let defaultModelId = $state<string | null>(null);
   const desktopRuntime = getDesktopRuntime();
 
+  async function refreshModelCatalogue(): Promise<void> {
+    const settings = await fetchSettings();
+    modelOptions = Object.keys(settings.models);
+    defaultModelId = settings.default_model;
+    modelCatalogueReady = true;
+  }
+
+  async function refreshModelCatalogueAfterSave(): Promise<void> {
+    try {
+      await refreshModelCatalogue();
+    } catch (error) {
+      console.error("Failed to refresh model settings after saving:", error);
+    }
+  }
+
   // ---------------------------------------------------------------------------
   // Theme — light (riso) / dark (cyanotype) / system
   // ---------------------------------------------------------------------------
@@ -334,10 +349,7 @@
       //    scoped runtime state loads when a space is opened — either via the
       //    picker or by a deep-linked conversation that selects its space.
       try {
-        const settings = await fetchSettings();
-        modelOptions = Object.keys(settings.models);
-        defaultModelId = settings.default_model;
-        modelCatalogueReady = true;
+        await refreshModelCatalogue();
       } catch (error) {
         console.error("Failed to load model settings:", error);
       }
@@ -405,6 +417,7 @@
     {defaultModelId}
     route={currentRoute}
     onNavigate={navigate}
+    onSettingsSaved={refreshModelCatalogueAfterSave}
     />
 
   {#if notFound}
