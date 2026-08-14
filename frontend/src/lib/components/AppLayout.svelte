@@ -39,6 +39,7 @@
     defaultModelId?: string | null;
     route?: Route;
     onNavigate?: (path: string) => void;
+    onSettingsSaved?: () => void | Promise<void>;
   }
 
   let {
@@ -59,6 +60,7 @@
     defaultModelId = null,
     route,
     onNavigate,
+    onSettingsSaved,
   }: Props = $props();
 
   const currentSpace = $derived(spaceStore?.currentSpace ?? null);
@@ -101,7 +103,7 @@
     {#if settingsSpace}
       <SpaceSettingsPage space={settingsSpace} tab={settingsSpaceTab ?? undefined} />
     {:else}
-      <SettingsPage tab={settingsTab ?? undefined} />
+      <SettingsPage tab={settingsTab ?? undefined} {onSettingsSaved} />
     {/if}
   </div>
 {:else if !currentSpace}

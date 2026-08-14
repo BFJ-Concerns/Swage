@@ -39,9 +39,15 @@
     tab?: SettingsTabId;
     spaceId?: string | null;
     sessionId?: string | null;
+    onSettingsSaved?: () => void | Promise<void>;
   }
 
-  let { tab = "providers", spaceId = null, sessionId = null }: Props = $props();
+  let {
+    tab = "providers",
+    spaceId = null,
+    sessionId = null,
+    onSettingsSaved,
+  }: Props = $props();
 
   // settings is the working copy — bind:value mutates it freely. saveSettings
   // returns a fresh server snapshot which we replace it with. Null until the
@@ -142,6 +148,7 @@
       // password field returns to the "Stored credential" placeholder.
       for (const provider of Object.values(settings.providers)) provider.api_key = "";
       lastPersistedSettingsFingerprint = settingsFingerprint() ?? "";
+      await onSettingsSaved?.();
       status =
         options.message ??
         "Saved. New turns will use the updated runtime.";
