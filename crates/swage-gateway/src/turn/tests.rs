@@ -9228,17 +9228,20 @@ fn sandbox_config_skips_missing_trusted_workspace_paths() {
         },
         active_workspace: Some(TrustedWorkspacePath {
             path: working_directory,
+            is_trusted: true,
             can_read: true,
             can_write: true,
         }),
         attachments: vec![
             TrustedWorkspacePath {
                 path: existing_workspace.clone(),
+                is_trusted: true,
                 can_read: true,
                 can_write: false,
             },
             TrustedWorkspacePath {
                 path: missing_workspace.clone(),
+                is_trusted: true,
                 can_read: true,
                 can_write: true,
             },
@@ -9285,11 +9288,13 @@ fn agent_workspace_uses_active_workspace_and_attachment_grants() {
         },
         active_workspace: Some(TrustedWorkspacePath {
             path: active_workspace.clone(),
+            is_trusted: true,
             can_read: true,
             can_write: true,
         }),
         attachments: vec![TrustedWorkspacePath {
             path: attachment_workspace.clone(),
+            is_trusted: true,
             can_read: true,
             can_write: false,
         }],
@@ -9354,6 +9359,7 @@ fn named_assembly_elements_include_prompts_skills_memory_and_history() {
     let elements = build_assembly_elements(
         instructions,
         vec![],
+        vec![],
         history,
         Some((String::new(), "My Space".to_string())),
         test_environment(),
@@ -9384,6 +9390,7 @@ fn named_assembly_elements_include_prompts_skills_memory_and_history() {
 fn default_assembly_elements_exclude_memory() {
     let elements = build_assembly_elements(
         "",
+        vec![],
         vec![],
         vec![ChatMessage::new(Role::User, "Hello")],
         None,
@@ -9436,6 +9443,7 @@ async fn named_assembly_loads_memory_and_can_compose_it() {
         "Be helpful.",
         vec![],
         vec![],
+        vec![],
         memory.map(|content| (content, "My Space".to_string())),
         test_environment(),
         vec![],
@@ -9477,6 +9485,7 @@ fn build_assembly_elements_memory_element_contains_provided_content() {
         "Be helpful.",
         vec![],
         vec![],
+        vec![],
         Some((
             "Important space context".to_string(),
             "My Space".to_string(),
@@ -9505,6 +9514,172 @@ fn build_assembly_elements_memory_element_contains_provided_content() {
     assert!(
         text.is_some_and(|t| t.contains("Important space context")),
         "memory message should contain the provided content"
+    );
+}
+
+fn guidance_workspace(path: &std::path::Path, is_trusted: bool) -> TrustedWorkspacePath {
+    TrustedWorkspacePath {
+        path: path.to_path_buf(),
+        is_trusted,
+        can_read: true,
+        can_write: false,
+    }
+}
+
+/// Operator guidance reads the config root's AGENTS.md first, then a trusted
+/// workspace's — global before workspace, each rule naming its source file.
+#[test]
+fn operator_guidance_reads_global_before_trusted_workspace() {
+    let config_root = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    std::fs::write(config_root.path().join("AGENTS.md"), "GLOBAL GUIDANCE").unwrap();
+    std::fs::write(workspace.path().join("AGENTS.md"), "WORKSPACE GUIDANCE").unwrap();
+
+    let policy = TrustedWorkspacePolicy {
+        active_workspace: Some(guidance_workspace(workspace.path(), true)),
+        ..Default::default()
+    };
+
+    let rules = operator_guidance_rules(Some(config_root.path()), &policy);
+    assert_eq!(rules.len(), 2);
+    assert_eq!(rules[0].content, "GLOBAL GUIDANCE");
+    assert_eq!(rules[0].source_level, HierarchyLevel::Global);
+    assert_eq!(rules[0].file_path, config_root.path().join("AGENTS.md"));
+    assert_eq!(rules[1].content, "WORKSPACE GUIDANCE");
+    assert_eq!(rules[1].source_level, HierarchyLevel::Space);
+    assert_eq!(rules[1].file_path, workspace.path().join("AGENTS.md"));
+}
+
+/// An untrusted workspace contributes nothing, even when its AGENTS.md
+/// exists and the attachment is readable.
+#[test]
+fn operator_guidance_ignores_untrusted_workspace() {
+    let config_root = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    std::fs::write(config_root.path().join("AGENTS.md"), "GLOBAL GUIDANCE").unwrap();
+    std::fs::write(workspace.path().join("AGENTS.md"), "MUST NOT APPEAR").unwrap();
+
+    let policy = TrustedWorkspacePolicy {
+        active_workspace: Some(guidance_workspace(workspace.path(), false)),
+        ..Default::default()
+    };
+
+    let rules = operator_guidance_rules(Some(config_root.path()), &policy);
+    assert_eq!(
+        rules.len(),
+        1,
+        "untrusted workspace must contribute nothing"
+    );
+    assert_eq!(rules[0].content, "GLOBAL GUIDANCE");
+}
+
+/// Absent guidance files are not an error: roots without AGENTS.md simply
+/// contribute no rules, and a missing config root contributes nothing.
+#[test]
+fn operator_guidance_absent_files_contribute_nothing() {
+    let config_root = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+
+    let policy = TrustedWorkspacePolicy {
+        active_workspace: Some(guidance_workspace(workspace.path(), true)),
+        ..Default::default()
+    };
+
+    assert!(operator_guidance_rules(Some(config_root.path()), &policy).is_empty());
+    assert!(operator_guidance_rules(None, &policy).is_empty());
+}
+
+/// Trusted attachment grants contribute alongside the active workspace,
+/// deduplicated by path, active workspace first.
+#[test]
+fn operator_guidance_includes_trusted_attachments_once() {
+    let active = tempfile::tempdir().unwrap();
+    let attachment = tempfile::tempdir().unwrap();
+    std::fs::write(active.path().join("AGENTS.md"), "ACTIVE").unwrap();
+    std::fs::write(attachment.path().join("AGENTS.md"), "ATTACHED").unwrap();
+
+    let policy = TrustedWorkspacePolicy {
+        active_workspace: Some(guidance_workspace(active.path(), true)),
+        attachments: vec![
+            guidance_workspace(active.path(), true),
+            guidance_workspace(attachment.path(), true),
+        ],
+        ..Default::default()
+    };
+
+    let rules = operator_guidance_rules(None, &policy);
+    let contents: Vec<&str> = rules.iter().map(|rule| rule.content.as_str()).collect();
+    assert_eq!(contents, vec!["ACTIVE", "ATTACHED"]);
+}
+
+/// The trust gate holds through the real policy loader, not just
+/// hand-built policy literals: two stored attachments differing only in
+/// their trust bit produce guidance for the trusted one and nothing for
+/// the untrusted one.
+#[tokio::test]
+async fn operator_guidance_honours_trust_from_stored_attachments() {
+    let storage: Arc<dyn swage_storage::store::Storage> = Arc::new(MockStorage::new());
+    let workspace = tempfile::tempdir().unwrap();
+    std::fs::write(workspace.path().join("AGENTS.md"), "STORED GUIDANCE").unwrap();
+
+    let mut rules_by_trust = Vec::new();
+    for is_trusted in [false, true] {
+        let space_id = Uuid::new_v4();
+        let attachment = storage
+            .create_workspace_attachment(NewWorkspaceAttachment {
+                space_id,
+                label: "workspace".into(),
+                path: workspace.path().display().to_string(),
+                permissions: vec!["read".into()],
+                is_trusted,
+            })
+            .await
+            .unwrap();
+
+        let policy = load_trusted_workspace_policy(&storage, space_id, Some(attachment.id)).await;
+        rules_by_trust.push(operator_guidance_rules(None, &policy));
+    }
+
+    assert!(
+        rules_by_trust[0].is_empty(),
+        "an untrusted stored attachment must contribute no guidance"
+    );
+    assert_eq!(
+        rules_by_trust[1].len(),
+        1,
+        "a trusted stored attachment must contribute its guidance"
+    );
+    assert_eq!(rules_by_trust[1][0].content, "STORED GUIDANCE");
+}
+
+/// Guidance rules extend the resolved instruction baseline rather than
+/// replacing it: the prompts element carries the resolved instructions
+/// first, then the guidance content, in one system message.
+#[test]
+fn assembly_elements_layer_operator_guidance_after_instructions() {
+    let config_root = tempfile::tempdir().unwrap();
+    std::fs::write(config_root.path().join("AGENTS.md"), "GUIDANCE TEXT").unwrap();
+    let guidance =
+        operator_guidance_rules(Some(config_root.path()), &TrustedWorkspacePolicy::default());
+
+    let elements = build_assembly_elements(
+        "BASELINE INSTRUCTIONS",
+        guidance,
+        vec![],
+        vec![],
+        None,
+        test_environment(),
+        vec![],
+        "claude-test-model",
+    );
+
+    let prompts = elements.iter().find(|e| e.name() == "prompts").unwrap();
+    let text = prompts.content()[0].text_content();
+    let baseline = text.find("BASELINE INSTRUCTIONS").unwrap();
+    let guidance = text.find("GUIDANCE TEXT").unwrap();
+    assert!(
+        baseline < guidance,
+        "resolved instructions must precede operator guidance"
     );
 }
 

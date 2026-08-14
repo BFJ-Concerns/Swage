@@ -12,6 +12,7 @@ pub(crate) struct WorkspacePermissionSummary {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TrustedWorkspacePath {
     pub(crate) path: PathBuf,
+    pub(crate) is_trusted: bool,
     pub(crate) can_read: bool,
     pub(crate) can_write: bool,
 }
@@ -88,6 +89,7 @@ pub(crate) async fn load_trusted_workspace_policy(
         });
         let grant = TrustedWorkspacePath {
             path,
+            is_trusted: attachment.is_trusted,
             can_read,
             can_write,
         };
