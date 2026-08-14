@@ -148,8 +148,16 @@ unexpected field.
 
 ## Sandbox isolation
 
-Tool calls run inside a two-layer sandbox that confines what a tool process
-can reach.
+Local tool calls that are eligible for sandboxed execution run inside a
+two-layer sandbox that confines what the sandbox child process can reach.
+
+The executor chooses the host/device boundary before this sandbox path. If a
+session targets a non-local device, tool calls are sent to that device. On a
+local device, tools that need live gateway state or host facilities execute
+directly in the gateway process; tools with resolved secret parameters also
+stay on the host so raw secret values do not cross sandbox IPC. These direct
+host and remote-device executions do not receive the bubblewrap and Landlock
+isolation described below.
 
 ### Bubblewrap
 
@@ -160,10 +168,12 @@ PID, network, mount, user, IPC, and UTS namespaces are all unshared
 explicit read-write overlays for the working directory and any configured
 additional mounts.
 
-Credential isolation is enforced: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`,
-and `GOOGLE_API_KEY` are stripped from the child's environment. All LLM
-completions are proxied back through the host via IPC, so API credentials
-never enter the sandboxed process.
+The sandbox launcher strips `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, and
+`GOOGLE_API_KEY` from the child's environment. This is a fixed list:
+provider `api_key_env` names are configurable, and a differently named
+environment variable is not stripped by this mechanism. LLM completions are
+proxied back through the host via IPC, so the child does not need provider
+credentials for completion requests.
 
 ### Landlock
 

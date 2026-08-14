@@ -155,7 +155,8 @@ not found.
 
 ### Sandbox isolation
 
-Tool calls run inside a two-layer sandbox (`swage-sandbox`):
+Local tool calls that are eligible for sandboxed execution run inside a
+two-layer sandbox (`swage-sandbox`):
 
 1. **Bubblewrap (bwrap)** — Linux namespace isolation (PID, network, mount,
    user, IPC, UTS). `--unshare-all` with `--die-with-parent`. Read-only
@@ -169,10 +170,19 @@ Tool calls run inside a two-layer sandbox (`swage-sandbox`):
    Always-writable paths: the working directory and `/tmp`, plus any
    configured write paths. Restrictions are irrevocable within the process.
 
-Credential isolation: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`,
-`GOOGLE_API_KEY` are stripped from the child environment. LLM completions
-are proxied through the host via IPC — credentials never enter the sandboxed
-process.
+The execution boundary is selected before this sandbox path. When a session
+targets a non-local device, tool calls go to that device. On a local device,
+tools that require gateway state or host facilities execute directly in the
+gateway process; tools with resolved secret parameters also stay on the host
+so their raw values do not cross sandbox IPC. These host/device executions
+are not confined by the bubblewrap and Landlock layers described here.
+
+Credential isolation strips `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, and
+`GOOGLE_API_KEY` from the sandbox child environment. Provider
+`api_key_env` names are configurable, however, and any differently named
+environment variable is not stripped by this mechanism. LLM completions use
+the host IPC proxy, so the child does not need provider credentials for
+completion requests.
 
 ### Sandbox configuration
 

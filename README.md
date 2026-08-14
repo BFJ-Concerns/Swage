@@ -31,9 +31,14 @@ directory), so run `stop` with the same environment you started with.
 
 ## The first turn may ask about sandboxing
 
-Tool calls run inside a [bubblewrap](https://github.com/containers/bubblewrap)
-sandbox by default — install the `bubblewrap` package to get isolation. If
-sandbox setup fails (most commonly `bwrap` is not installed), what happens
+Local tool calls that are eligible for sandboxed execution run inside a
+[bubblewrap](https://github.com/containers/bubblewrap) sandbox by default —
+install the `bubblewrap` package to get isolation. Tools that require live
+gateway state or host facilities execute directly in the gateway process,
+and sessions targeting a non-local device use that device's execution path;
+those calls do not receive the gateway's bubblewrap and Landlock isolation.
+
+If sandbox setup fails (most commonly `bwrap` is not installed), what happens
 next depends on whether anyone is there to answer. A turn you started from a
 connected client pauses with an approval: *"Sandbox setup failed. Approve
 running this turn without sandbox isolation?"* Approving runs that turn
