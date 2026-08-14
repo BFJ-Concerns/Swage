@@ -69,7 +69,9 @@ pub(crate) fn delegated_target_instructions_for_space(
 /// Constructs typed elements from the resolved turn inputs:
 /// - `OrientationElement` — baseline identity, place, and capability; always
 ///   produces content, so an empty configuration still orients the session
-/// - `PromptsElement` — from the merged instruction string
+/// - `PromptsElement` — from the merged instruction string, followed by the
+///   operator-guidance rules (the standard agent-guidance files, resolved by
+///   `operator_guidance_rules` from the config root and trusted workspaces)
 /// - `SkillsElement`  — from the active skill set
 /// - `MemoryElement`  — only for a named assembly, from pre-loaded space
 ///   memory content (may be empty)
@@ -85,6 +87,7 @@ pub(crate) fn delegated_target_instructions_for_space(
 /// discard.
 pub(crate) fn build_assembly_elements(
     instructions: &str,
+    operator_guidance: Vec<PromptRule>,
     active_skills: Vec<ActiveSkill>,
     history: Vec<ChatMessage>,
     memory: Option<(String, String)>,
@@ -96,7 +99,7 @@ pub(crate) fn build_assembly_elements(
     // The config resolver has already merged hierarchy levels and assembled
     // the text — we wrap it as a single Global-level rule so the PromptsElement
     // produces the expected system message.
-    let rules = if instructions.is_empty() {
+    let mut rules = if instructions.is_empty() {
         vec![]
     } else {
         vec![PromptRule {
@@ -106,6 +109,10 @@ pub(crate) fn build_assembly_elements(
             file_path: PathBuf::from("resolved-instructions"),
         }]
     };
+    // Operator guidance extends the resolved baseline rather than replacing
+    // it: the rules arrive pre-ordered (global config root before trusted
+    // workspace roots) and append after the resolved instructions.
+    rules.extend(operator_guidance);
 
     let mut elements: Vec<Box<dyn ContextElement>> = vec![
         Box::new(OrientationElement::new(environment, available_skills)),

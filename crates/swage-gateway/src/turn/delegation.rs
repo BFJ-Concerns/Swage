@@ -7,7 +7,8 @@ use super::{
     delegated_target_instructions_for_space, dispatch_bound_agent_ids_for_turn,
     dispatch_bound_metadata, effective_tool_permissions_record, execute_context_assembly,
     load_active_skills_for_agent, load_memory_for_assembly, load_session_config, load_space_memory,
-    mpsc, resolve_swage_root, select_context_assembly, shutdown_sandbox_guard,
+    load_trusted_workspace_policy, mpsc, operator_guidance_rules, resolve_swage_root,
+    select_context_assembly, shutdown_sandbox_guard,
 };
 use swage_agent::{
     DelegatedAssembly, DelegationContextAssembler, DelegationOutcome, DelegationSnapshotRecorder,
@@ -82,8 +83,20 @@ impl DelegationContextAssembler for GatewayDelegatedContextAssembler {
             &self.agent_id,
             self.swage_root.as_deref(),
         );
+        // Delegated children read the same operator-guidance sources as
+        // foreground turns: the trust policy is re-derived here because the
+        // assembler holds only the working directory, not the policy.
+        let workspace_policy = load_trusted_workspace_policy(
+            &self.state.storage,
+            self.space.id,
+            session.active_workspace_attachment_id,
+        )
+        .await;
+        let operator_guidance =
+            operator_guidance_rules(self.swage_root.as_deref(), &workspace_policy);
         let elements = build_assembly_elements(
             &self.config.instructions,
+            operator_guidance,
             active_skills,
             delegated_history,
             memory_content.map(|content| (content, self.space.name.clone())),
