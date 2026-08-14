@@ -9608,6 +9608,47 @@ fn operator_guidance_includes_trusted_attachments_once() {
     assert_eq!(contents, vec!["ACTIVE", "ATTACHED"]);
 }
 
+/// The trust gate holds through the real policy loader, not just
+/// hand-built policy literals: two stored attachments differing only in
+/// their trust bit produce guidance for the trusted one and nothing for
+/// the untrusted one.
+#[tokio::test]
+async fn operator_guidance_honours_trust_from_stored_attachments() {
+    let storage: Arc<dyn swage_storage::store::Storage> = Arc::new(MockStorage::new());
+    let workspace = tempfile::tempdir().unwrap();
+    std::fs::write(workspace.path().join("AGENTS.md"), "STORED GUIDANCE").unwrap();
+
+    let mut rules_by_trust = Vec::new();
+    for is_trusted in [false, true] {
+        let space_id = Uuid::new_v4();
+        let attachment = storage
+            .create_workspace_attachment(NewWorkspaceAttachment {
+                space_id,
+                label: "workspace".into(),
+                path: workspace.path().display().to_string(),
+                permissions: vec!["read".into()],
+                is_trusted,
+            })
+            .await
+            .unwrap();
+
+        let policy =
+            load_trusted_workspace_policy(&storage, space_id, Some(attachment.id)).await;
+        rules_by_trust.push(operator_guidance_rules(None, &policy));
+    }
+
+    assert!(
+        rules_by_trust[0].is_empty(),
+        "an untrusted stored attachment must contribute no guidance"
+    );
+    assert_eq!(
+        rules_by_trust[1].len(),
+        1,
+        "a trusted stored attachment must contribute its guidance"
+    );
+    assert_eq!(rules_by_trust[1][0].content, "STORED GUIDANCE");
+}
+
 /// Guidance rules extend the resolved instruction baseline rather than
 /// replacing it: the prompts element carries the resolved instructions
 /// first, then the guidance content, in one system message.
