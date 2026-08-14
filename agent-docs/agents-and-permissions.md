@@ -49,13 +49,13 @@ Two kinds of root are checked, in this order:
 
 1. **Config root** (`~/.swage/` or `$SWAGE_HOME`) — always read. The
    resulting rule carries the `Global` provenance level.
-2. **Trusted workspace roots** — the active workspace and any workspace
-   attachments whose trust bit is set. Each produces a rule at the `Space`
-   provenance level.
+2. **Trusted, readable workspace roots** — the active workspace and any
+   workspace attachments that are both trusted and readable. Each produces
+   a rule at the `Space` provenance level.
 
-Untrusted workspace attachments contribute nothing: workspace content enters
-the model's instructions only after the operator has trusted the attachment
-(the same trust gate that governs file-operation location prompts). There is
+A workspace root that is not trusted, or that is trusted but not readable
+(e.g. a write-only attachment), contributes nothing: workspace content
+enters the model's instructions only when both conditions are met. There is
 no config knob to disable global guidance — an `AGENTS.md` at the config
 root is always read.
 
@@ -80,7 +80,7 @@ never fails a turn.
 
 Both foreground and delegated turns call `operator_guidance_rules`
 (in `turn/operator_guidance.rs`), which reads the config root's guidance
-file then each trusted workspace root's, and returns the ordered rule vec.
+file then each trusted, readable workspace root's, and returns the ordered rule vec.
 The reading itself is in `swage_config::agent_guidance::read_agent_guidance`.
 The rules are passed to `build_assembly_elements` (in `turn/context.rs`),
 which appends them after the resolved-instructions rule so the
