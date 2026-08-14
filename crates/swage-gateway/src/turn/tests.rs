@@ -9565,7 +9565,11 @@ fn operator_guidance_ignores_untrusted_workspace() {
     };
 
     let rules = operator_guidance_rules(Some(config_root.path()), &policy);
-    assert_eq!(rules.len(), 1, "untrusted workspace must contribute nothing");
+    assert_eq!(
+        rules.len(),
+        1,
+        "untrusted workspace must contribute nothing"
+    );
     assert_eq!(rules[0].content, "GLOBAL GUIDANCE");
 }
 
@@ -9632,8 +9636,7 @@ async fn operator_guidance_honours_trust_from_stored_attachments() {
             .await
             .unwrap();
 
-        let policy =
-            load_trusted_workspace_policy(&storage, space_id, Some(attachment.id)).await;
+        let policy = load_trusted_workspace_policy(&storage, space_id, Some(attachment.id)).await;
         rules_by_trust.push(operator_guidance_rules(None, &policy));
     }
 

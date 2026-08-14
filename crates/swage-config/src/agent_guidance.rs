@@ -37,7 +37,11 @@ mod tests {
     #[test]
     fn reads_guidance_file_content() {
         let tmp = TempDir::new().unwrap();
-        fs::write(tmp.path().join(AGENT_GUIDANCE_FILE), "Prefer short replies.").unwrap();
+        fs::write(
+            tmp.path().join(AGENT_GUIDANCE_FILE),
+            "Prefer short replies.",
+        )
+        .unwrap();
 
         let content = read_agent_guidance(tmp.path()).unwrap();
         assert_eq!(content.as_deref(), Some("Prefer short replies."));
