@@ -7,7 +7,7 @@ the system does recorded locally and reconstructable afterwards.
 ## Build and run
 
 Requires the Rust toolchain (see `rust-toolchain.toml`) and Node for the web
-UI. The gateway binds loopback (`127.0.0.1`) unless you pass `--host`.
+UI. The gateway listens on loopback only.
 
 ```bash
 cargo build --bin swage
