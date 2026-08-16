@@ -38,14 +38,12 @@
   interface Props {
     tab?: SettingsTabId;
     spaceId?: string | null;
-    sessionId?: string | null;
     onSettingsSaved?: () => void | Promise<void>;
   }
 
   let {
     tab = "providers",
     spaceId = null,
-    sessionId = null,
     onSettingsSaved,
   }: Props = $props();
 

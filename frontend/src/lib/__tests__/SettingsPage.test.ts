@@ -5,6 +5,7 @@ import { mount, unmount } from "svelte";
 import SettingsPage from "../components/SettingsPage.svelte";
 import type { SettingsPayload, SettingsResponse } from "../types";
 
+import * as agentDefinitionsApi from "../api/agent-definitions";
 import * as settingsApi from "../api/settings";
 import * as workflowApi from "../api/workflows";
 import * as operatorApi from "../api/operator";
@@ -14,6 +15,10 @@ vi.mock("../api/settings", () => ({
   fetchSettings: vi.fn(),
   restartGateway: vi.fn(),
   saveSettings: vi.fn(),
+}));
+
+vi.mock("../api/agent-definitions", () => ({
+  listEffectiveAgentDefinitions: vi.fn(),
 }));
 
 vi.mock("../api/workflows", () => ({
@@ -167,6 +172,7 @@ describe("SettingsPage", () => {
       provider_id: "openai",
       models: [{ id: "gpt-4.1-mini", name: "gpt-4.1-mini", context_window: null }],
     });
+    vi.mocked(agentDefinitionsApi.listEffectiveAgentDefinitions).mockResolvedValue([]);
     vi.mocked(workflowApi.listRecoveryExports).mockResolvedValue({ exports: [] });
     vi.mocked(workflowApi.exportRecoveryBundle).mockResolvedValue({});
     vi.mocked(workflowApi.downloadRecoveryExport).mockResolvedValue({});
@@ -387,6 +393,16 @@ describe("SettingsPage", () => {
     expect(document.body.textContent).toContain("Display preferences saved.");
     expect(preferenceEvents).toHaveLength(2);
     window.removeEventListener("swage:display-preferences-changed", onPreferenceChange);
+  });
+
+  it("lists effective agent definitions for the selected space", async () => {
+    component = mount(SettingsPage, {
+      target: document.body,
+      props: { tab: "agents", spaceId: "selected-space" },
+    });
+    await flushUi();
+
+    expect(agentDefinitionsApi.listEffectiveAgentDefinitions).toHaveBeenCalledWith("selected-space");
   });
 
   it("keeps fresh schedule creation gated in global Settings", async () => {
