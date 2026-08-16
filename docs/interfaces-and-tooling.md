@@ -46,18 +46,17 @@ frontend's TypeScript is generated from it via ts-rs, and the canonical
 published artefact is the JSON Schema generated via schemars and committed
 under `crates/swage-protocol/schema/`.
 
-One known exception remains: the `AssemblyReport` type used by the context
-inspector lives in `swage-context`, not `swage-protocol`. It is persisted as
-opaque JSON and the frontend defines its own TypeScript transcription rather
-than importing a generated projection. Migrating the report shapes into the
-protocol crate's wire contract is queued but not yet done.
+The assembly report used by the context inspector is part of the client
+surface. Both the stored-context response and the `context_assembled`
+WebSocket event use that protocol type, and the frontend imports its generated
+TypeScript projection.
 
 The crate is organised into four surfaces, each emitting its own schema
 document:
 
 - **Client** — conversations, streaming, approvals, schedules, knowledge,
-  voice, workflows, channels, delivery, spaces, and provider sign-in. This is
-  the largest surface, split across eleven submodules.
+  voice, workflows, channels, delivery, spaces, settings, materials, recovery,
+  context reports, and provider sign-in.
 - **Hosting** — presence, operator overview, agent definitions, approvals,
   and configuration. The contract between the gateway and its hosting
   operator.
