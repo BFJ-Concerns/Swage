@@ -170,6 +170,11 @@ describe("createConversation", () => {
 
     await store.createConversation("proj-1");
 
+    expect(api.createConversation).toHaveBeenCalledWith(
+      "proj-1",
+      undefined,
+      undefined,
+    );
     expect(store.conversations).toHaveLength(1);
     expect(store.conversations[0].id).toBe("new-conv");
     expect(store.activeConversation?.id).toBe("new-conv");
@@ -458,6 +463,10 @@ describe("createConversation (space-scoped)", () => {
 
     await store.createConversation("proj-1");
 
-    expect(api.createConversation).toHaveBeenCalledWith("proj-1", undefined);
+    expect(api.createConversation).toHaveBeenCalledWith(
+      "proj-1",
+      undefined,
+      undefined,
+    );
   });
 });
