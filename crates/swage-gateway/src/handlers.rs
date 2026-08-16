@@ -4135,8 +4135,10 @@ mod tests {
 
         let (router, storage) = make_router();
         let turn_id = Uuid::new_v4();
-        let mut report = swage_protocol::client::context::AssemblyReport::default();
-        report.total_tokens = 1024;
+        let report = swage_protocol::client::context::AssemblyReport {
+            total_tokens: 1024,
+            ..Default::default()
+        };
         let report_json = serde_json::to_string(&report).unwrap();
 
         // Store a snapshot directly — simulates what the context engine writes.
