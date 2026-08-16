@@ -27,10 +27,10 @@ The inspector panel displays:
 | Fallbacks | `errors` is non-empty | Error message and which fallback assembly was used |
 | Warnings | `warnings` is non-empty | Each warning string |
 
-The Rust-side `AssemblyReport` type lives in `swage-context` (`report.rs:81`),
-not `swage-protocol` — it is persisted as opaque JSON, not projected as a
-wire type. The frontend defines its own TypeScript transcription
-(`api/turns.ts:43`).
+`AssemblyReport` and `TurnContextResponse` live in
+`swage-protocol::client::context`. The stored-context endpoint and
+`ContextAssembled` WebSocket event use the same typed report; the frontend
+imports the generated `AssemblyReport.ts` projection.
 
 `swage-tui` has a terminal-UI equivalent (`ui/inspector.rs:64`), toggled by
 keybinding. It shows per-element fill bars and a budget percentage.
@@ -54,16 +54,15 @@ internals.
 ## Wire-contract architecture
 
 All types that cross a process boundary live in `swage-protocol`
-(`crates/swage-protocol/`). One named exception: the `AssemblyReport` shapes
-live in `swage-context`, not `swage-protocol` — they are persisted as opaque
-JSON with a hand-written frontend transcription (`api/turns.ts:43`); migration
-into the protocol crate is queued.
+(`crates/swage-protocol/`). Gateway modules consume or re-export those Rust
+types, and frontend wire types come from generated projections under
+`frontend/src/lib/protocol/`.
 
 The crate is organised into four surface modules:
 
 | Surface | Module | Anchor type | Scope |
 |---|---|---|---|
-| Client | `src/client/` (directory, 11 submodules) | `ClientSurface` | Conversations, streaming, approvals, schedules, knowledge, voice, workflows, channels, delivery, spaces, provider sign-in |
+| Client | `src/client/` | `ClientSurface` | Conversations, streaming, approvals, schedules, knowledge, voice, workflows, channels, delivery, spaces, settings, materials, recovery, context reports, provider sign-in |
 | Hosting | `src/hosting.rs` | `HostingSurface` | Presence, operator overview, agent definitions, approvals, configuration |
 | Device | `src/device.rs` | `DeviceSurface` | Device registration, remote tool execution |
 | Channel | `src/channel.rs` | `ChannelSurface` | Inbound messages (DM/thread), delivery log, channel status |
@@ -77,7 +76,7 @@ existing field already reaches it.
 
 | Projection | Output | Mechanism |
 |---|---|---|
-| TypeScript (ts-rs) | `frontend/src/lib/protocol/` (114 files at ref 2be38e3) | `projections.rs` test manually calls `export_all` for each top-level export, then trims trailing whitespace |
+| TypeScript (ts-rs) | `frontend/src/lib/protocol/` | `projections.rs` test manually calls `export_all` for each top-level export, then trims trailing whitespace |
 | JSON Schema (schemars) | `crates/swage-protocol/schema/{client,hosting,device,channel}.json` | `projections.rs` tests per surface, via the anchor type |
 
 Running `cargo test -p swage-protocol` regenerates all projections in place.
@@ -86,10 +85,6 @@ Schema and to the explicit `export_all` list for TypeScript unless already
 reachable from an existing entry. Drift shows as uncommitted changes, caught by
 the verify gate's projection-freshness check; an unregistered type creates no
 drift for that check to detect.
-
-> [!NOTE]
-> The doc comment at `lib.rs:9-11` is stale — the committed schema documents
-> and the four surface modules are authoritative.
 
 ## Verification gate
 

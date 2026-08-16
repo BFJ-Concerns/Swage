@@ -114,16 +114,17 @@ impl DelegationContextAssembler for GatewayDelegatedContextAssembler {
             &self.space.slug,
             &self.agent_id,
         );
-        let mut report = serde_json::to_value(output.report).unwrap_or_else(|error| {
+        let mut assembly_report = output.report;
+        assembly_report.effective_tool_permissions = Some(self.effective_tool_permissions.clone());
+        let report = serde_json::to_value(&assembly_report).unwrap_or_else(|error| {
             tracing::warn!(%error, "failed to serialise delegated assembly report");
             serde_json::json!({ "error": "serialisation failed" })
         });
-        report["effective_tool_permissions"] = self.effective_tool_permissions.clone();
         let _ = self
             .context_event_tx
             .send(crate::websocket::ServerEvent::ContextAssembled {
                 turn_id,
-                report: report.clone(),
+                report: assembly_report,
             });
         Ok(DelegatedAssembly {
             messages: output.messages,

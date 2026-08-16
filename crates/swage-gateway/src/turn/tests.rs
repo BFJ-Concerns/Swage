@@ -9938,7 +9938,7 @@ async fn context_assembled_precedes_first_token() {
             assert_eq!(*event_turn_id, turn_id, "turn_id should match");
             // Report should have an "elements" array from the assembly engine.
             assert!(
-                report.get("elements").is_some(),
+                !report.elements.is_empty(),
                 "report should contain elements key"
             );
         }

@@ -1,6 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde_json::json;
-use swage_client::websocket::ServerEvent;
+use swage_client::websocket::{AssemblyReport, ElementReport, ServerEvent};
 use swage_tui::app::{EventOutcome, handle_server_event};
 use swage_tui::keybindings::{AppAction, map_key_event};
 use swage_tui::state::{ConversationState, SpaceInfo};
@@ -84,17 +84,28 @@ fn context_assembled_event_populates_inspector_report() {
         &mut state,
         ServerEvent::ContextAssembled {
             turn_id: Uuid::new_v4(),
-            report: json!({
-                "elements": [
-                    {"name": "system_prompts", "token_count": 200},
-                    {"name": "history", "token_count": 1500},
-                    {"name": "skills", "token_count": 300},
-                    {"name": "memory", "token_count": 100}
-                ],
-                "total_tokens": 2100,
-                "budget": 4096,
-                "warnings": []
-            }),
+            report: AssemblyReport {
+                elements: [
+                    ("system_prompts", 200),
+                    ("history", 1500),
+                    ("skills", 300),
+                    ("memory", 100),
+                ]
+                .into_iter()
+                .map(|(name, token_count)| ElementReport {
+                    name: name.to_string(),
+                    source: "integration fixture".to_string(),
+                    token_count,
+                    preview: None,
+                    priority: 0,
+                    named_assembly: None,
+                })
+                .collect(),
+                total_tokens: 2100,
+                budget: Some(4096),
+                budget_remaining: Some(1996),
+                ..AssemblyReport::default()
+            },
         },
     );
 

@@ -12,7 +12,7 @@ use crate::ui::input::InputState;
 use crate::ui::space_selector::SpaceSelectorState;
 use crate::ui::{RenderParams, calculate_layout, compute_input_height, render};
 use swage_client::error::ClientError;
-use swage_client::websocket::ServerEvent;
+use swage_client::websocket::{AssemblyReport, ServerEvent};
 
 #[derive(Debug, Clone, Copy)]
 struct PendingReconnect {
@@ -595,37 +595,22 @@ pub fn handle_server_event(state: &mut ConversationState, event: ServerEvent) ->
 // Context report parsing
 // ---------------------------------------------------------------------------
 
-/// Parses an `AssemblyReport` JSON value (as sent by the gateway in
-/// `ContextAssembled` events) into a `ContextReport` for the inspector panel.
-///
-/// Missing or malformed fields degrade gracefully — the display shows what
-/// it can rather than crashing on an unexpected server response.
-fn parse_context_report(report: &serde_json::Value) -> ContextReport {
-    let total_tokens = report
-        .get("total_tokens")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
-
-    let budget_tokens = report.get("budget").and_then(|v| v.as_u64());
-
+/// Adapts the typed assembly report from a `ContextAssembled` event into the
+/// inspector panel's view model.
+fn parse_context_report(report: &AssemblyReport) -> ContextReport {
     let sections = report
-        .get("elements")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|el| {
-                    let name = el.get("name")?.as_str()?.to_string();
-                    let token_count = el.get("token_count")?.as_u64()?;
-                    Some(ContextSection { name, token_count })
-                })
-                .collect()
+        .elements
+        .iter()
+        .map(|element| ContextSection {
+            name: element.name.clone(),
+            token_count: element.token_count as u64,
         })
-        .unwrap_or_default();
+        .collect();
 
     ContextReport {
         sections,
-        total_tokens,
-        budget_tokens,
+        total_tokens: report.total_tokens as u64,
+        budget_tokens: report.budget.map(|budget| budget as u64),
     }
 }
 
@@ -764,19 +749,30 @@ mod tests {
     #[test]
     fn context_assembled_parses_report_into_context_report() {
         let mut state = make_state();
-        let report_json = json!({
-            "assembly_name": "default",
-            "elements": [
-                { "name": "history", "source": "thread-1", "token_count": 300, "priority": 0 },
-                { "name": "prompts", "source": "global", "token_count": 150, "priority": 100 }
+        let report_json = AssemblyReport {
+            elements: vec![
+                swage_client::websocket::ElementReport {
+                    name: "history".into(),
+                    source: "thread-1".into(),
+                    token_count: 300,
+                    preview: None,
+                    priority: 0,
+                    named_assembly: None,
+                },
+                swage_client::websocket::ElementReport {
+                    name: "prompts".into(),
+                    source: "global".into(),
+                    token_count: 150,
+                    preview: None,
+                    priority: 100,
+                    named_assembly: None,
+                },
             ],
-            "total_tokens": 450,
-            "budget": 4096,
-            "budget_remaining": 3646,
-            "compaction_applied": [],
-            "warnings": [],
-            "errors": []
-        });
+            total_tokens: 450,
+            budget: Some(4096),
+            budget_remaining: Some(3646),
+            ..Default::default()
+        };
         handle_server_event(
             &mut state,
             ServerEvent::ContextAssembled {
@@ -798,10 +794,13 @@ mod tests {
     }
 
     #[test]
-    fn context_assembled_with_missing_fields_degrades_gracefully() {
+    fn context_assembled_handles_report_without_elements_or_budget() {
         let mut state = make_state();
         // Minimal report: no elements, no budget.
-        let report_json = json!({ "total_tokens": 99 });
+        let report_json = AssemblyReport {
+            total_tokens: 99,
+            ..Default::default()
+        };
         handle_server_event(
             &mut state,
             ServerEvent::ContextAssembled {
@@ -1197,25 +1196,28 @@ mod tests {
     // --- parse_context_report ---
 
     #[test]
-    fn parse_context_report_handles_empty_json_object() {
-        let report = parse_context_report(&json!({}));
+    fn parse_context_report_handles_empty_report() {
+        let report = parse_context_report(&AssemblyReport::default());
         assert_eq!(report.total_tokens, 0);
         assert!(report.budget_tokens.is_none());
         assert!(report.sections.is_empty());
     }
 
     #[test]
-    fn parse_context_report_skips_elements_with_missing_fields() {
-        let report_json = json!({
-            "total_tokens": 100,
-            "elements": [
-                { "name": "ok", "token_count": 80 },
-                { "name": "no_count" },
-                { "token_count": 20 }
-            ]
-        });
+    fn parse_context_report_maps_typed_elements() {
+        let report_json = AssemblyReport {
+            total_tokens: 100,
+            elements: vec![swage_client::websocket::ElementReport {
+                name: "ok".into(),
+                source: "test".into(),
+                token_count: 80,
+                preview: None,
+                priority: 0,
+                named_assembly: None,
+            }],
+            ..Default::default()
+        };
         let report = parse_context_report(&report_json);
-        // Only the first element has both required fields.
         assert_eq!(report.sections.len(), 1);
         assert_eq!(report.sections[0].name, "ok");
         assert_eq!(report.sections[0].token_count, 80);
