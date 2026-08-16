@@ -1,0 +1,30 @@
+#!/bin/sh
+# Run a heavy build command through the machine-wide build-slot wrapper
+# when this machine has one, falling through to direct execution where it
+# is absent (CI, other machines). While holding a slot, the workspace the
+# wrapper hands out is mapped onto Cargo's target directory; when the
+# workspace last built a different checkout, checkout-local artefacts are
+# evicted first (Cargo's mtime freshness would otherwise serve another
+# worktree's binaries at the same paths), then the eviction is
+# acknowledged so the wrapper can trust the workspace again.
+set -u
+
+root="${BUILD_SLOTS_ROOT:-/tmp/build-slots}"
+if [ -z "${BUILD_SLOT:-}" ] && [ -x "$root/bin/build-slot" ]; then
+  exec "$root/bin/build-slot" -- "$0" "$@"
+fi
+
+if [ -n "${BUILD_SLOT_WORKSPACE:-}" ]; then
+  CARGO_TARGET_DIR="$BUILD_SLOT_WORKSPACE"
+  export CARGO_TARGET_DIR
+  if [ "${BUILD_SLOT_CHECKOUT_CHANGED:-0}" = "1" ]; then
+    cargo metadata --format-version 1 2>/dev/null \
+      | python3 -c 'import json,sys; m=json.load(sys.stdin); [print(p["name"]) for p in m["packages"] if p["source"] is None]' \
+      | while IFS= read -r pkg; do
+          cargo clean -p "$pkg" >/dev/null 2>&1 || true
+        done
+    [ -n "${BUILD_SLOT_EVICTION_ACK:-}" ] && touch "$BUILD_SLOT_EVICTION_ACK"
+  fi
+fi
+
+exec "$@"
