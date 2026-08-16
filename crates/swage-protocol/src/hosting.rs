@@ -200,6 +200,16 @@ pub struct AgentDefinitionListResponse {
 }
 
 /// An agent definition available when creating a session in one space.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum EffectiveAgentDefinitionSourceScope {
+    BuiltIn,
+    Global,
+    Space,
+}
+
+/// An agent definition available when creating a session in one space.
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
 pub struct EffectiveAgentDefinitionResponse {
     pub id: String,
@@ -215,6 +225,7 @@ pub struct EffectiveAgentDefinitionResponse {
     #[ts(type = "number | null")]
     pub output_max_retries: Option<u32>,
     pub is_builtin: bool,
+    pub source_scope: EffectiveAgentDefinitionSourceScope,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]

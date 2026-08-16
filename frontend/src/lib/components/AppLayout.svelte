@@ -102,12 +102,17 @@
   <div class="settings-window">
     <header class="settings-chrome">
       <h2>Settings</h2>
+      <nav aria-label="Settings sections">
+        <button class:active={settingsTab === "providers"} onclick={() => onNavigate?.("/settings/providers")}>Providers</button>
+        <button class:active={settingsTab === "agents"} onclick={() => onNavigate?.("/settings/agents")}>Agents</button>
+        <button class:active={settingsTab === "automation"} onclick={() => onNavigate?.("/settings/automation")}>Automation</button>
+      </nav>
       <button class="close" onclick={closeSettings} aria-label="Close settings">×</button>
     </header>
     {#if settingsSpace}
       <SpaceSettingsPage space={settingsSpace} tab={settingsSpaceTab ?? undefined} />
     {:else}
-      <SettingsPage tab={settingsTab ?? undefined} {onSettingsSaved} />
+      <SettingsPage tab={settingsTab ?? undefined} spaceId={currentSpace?.id ?? null} sessionId={activeConversation?.id ?? null} {onSettingsSaved} />
     {/if}
   </div>
 {:else if !currentSpace}

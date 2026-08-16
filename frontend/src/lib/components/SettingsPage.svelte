@@ -5,15 +5,14 @@
   with Settings label + × CLOSE, and the parked nav with the page list) lives
   in AppLayout; this component only owns the .settings-pane content.
 
-  Sub-pages are driven by the route. AppLayout renders the page list and
-  navigates between /settings/providers, /settings/generation, and
-  /settings/automation; this component just reads the tab and shows the
-  matching field set.
+  Sub-pages are driven by the route. AppLayout renders the working page list;
+  this component just reads the tab and shows the matching field set.
 -->
 <script lang="ts">
   import { onMount } from "svelte";
   import { fetchSettings, restartGateway, saveSettings } from "../api/settings";
   import AutomationSettingsSurface from "./settings/AutomationSettingsSurface.svelte";
+  import AgentDefinitionsPanel from "./AgentDefinitionsPanel.svelte";
   import DisplayPreferencesSettingsSurface from "./settings/DisplayPreferencesSettingsSurface.svelte";
   import GenerationSettingsSurface from "./settings/GenerationSettingsSurface.svelte";
   import InformationalSettingsSurface from "./settings/InformationalSettingsSurface.svelte";
@@ -21,10 +20,11 @@
   import RecoverySettingsSurface from "./settings/RecoverySettingsSurface.svelte";
   import type { GenerationPresetConfig, SettingsResponse } from "../types";
 
-  // Only providers, generation, automation, and recovery have working
-  // backends. The rest are shells; see the per-page motes below.
+  // Agents, providers, generation, automation, and recovery have working
+  // backends. The remaining partial pages are identified below.
   type SettingsTabId =
     | "providers"
+    | "agents"
     | "generation"
     | "automation"
     | "plugins"
@@ -175,6 +175,10 @@
       title: "Providers",
       sub: "Connection settings for the LLM gateways Swage talks to. Credentials are stored on the server and never returned over the wire.",
     },
+    agents: {
+      title: "Agent definitions",
+      sub: "The effective agent definitions available when starting a conversation in the selected space.",
+    },
     generation: {
       title: "Generation",
       sub: "Reusable parameter sets for sampling — temperature, max tokens, stop sequences. Each model can pick a preset or fall back to the provider default.",
@@ -216,6 +220,7 @@
   // Pages rendered in the compact settings-shell layout. Some are fully wired
   // frontend surfaces; the non-functional subset gets an explicit banner.
   const SHELL_LAYOUT_TABS: ReadonlySet<SettingsTabId> = new Set([
+    "agents",
     "plugins",
     "channels",
     "devices",
@@ -290,7 +295,9 @@
       </div>
     {/if}
 
-    {#if tab === "plugins"}
+    {#if tab === "agents"}
+      <AgentDefinitionsPanel {spaceId} />
+    {:else if tab === "plugins"}
       <!--
         Debt marker: this visible settings page is intentionally a shell until
         Swage has a platform plugin model.
