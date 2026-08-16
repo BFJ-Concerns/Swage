@@ -3310,7 +3310,7 @@ mod tests {
         ];
         let (state, _) = crate::turn::tests::make_state_with_approval_gated_echo(rounds).await;
         let space = state
-            .storage
+            .space_store
             .get_or_create_default()
             .await
             .expect("default space");
