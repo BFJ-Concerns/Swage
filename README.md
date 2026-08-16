@@ -154,6 +154,11 @@ on that network with full API access and every configured provider key.
 Public-internet exposure is not supported until an authentication layer
 exists.
 
+**Host firewall.** A gateway bound to a LAN address is still unreachable from
+other devices if the host's own firewall drops inbound connections on the
+chosen port. Verify that the firewall permits traffic to the port before
+expecting LAN clients to connect.
+
 ## Isolated development instance
 
 To run a second gateway beside a real installation, give it its own data
