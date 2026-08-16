@@ -94,21 +94,25 @@ interface MountOptions {
   onNavigate?: (path: string) => void;
   onSelectSurface?: (surface: "conversation" | "operator") => void;
   routePath?: string;
+  agentDefinitions?: import("../protocol/EffectiveAgentDefinitionResponse").EffectiveAgentDefinitionResponse[];
+  streamingStore?: StreamingStore;
+  conversationStore?: ConversationStore;
 }
 
 function mountLayout(options: MountOptions = {}): MountedComponent {
   return mount(AppLayout, {
     target: document.body,
     props: {
-      conversationStore: mockConversationStore(),
+      conversationStore: options.conversationStore ?? mockConversationStore(),
       connectionStore: mockConnectionStore(),
-      streamingStore: mockStreamingStore(),
+      streamingStore: options.streamingStore ?? mockStreamingStore(),
       spaceStore: mockSpaceStore(options.hasCurrentSpace ?? true),
       onRetry: () => {},
       activeSurface: options.activeSurface ?? "conversation",
       onSelectSurface: options.onSelectSurface ?? (() => {}),
       onNavigate: options.onNavigate,
       route: options.routePath ? parseRoute(options.routePath) : undefined,
+      agentDefinitions: options.agentDefinitions ?? [],
     },
   });
 }
@@ -169,6 +173,69 @@ describe("AppLayout shell navigation", () => {
     expect(document.querySelector('textarea[aria-label="Message"]')).not.toBeNull();
   });
 
+  it("offers the shipped default and effective definitions when starting a conversation", () => {
+    component = mountLayout({
+      agentDefinitions: [
+        {
+          id: "gateway", display_name: "Built-in assistant", description: "", instructions: "",
+          model_id: null, tool_permissions: null, skills: [], output_schema: null,
+          output_max_retries: null, is_builtin: true, source_scope: "built_in",
+        },
+        {
+          id: "researcher", display_name: "Researcher", description: "", instructions: "cite",
+          model_id: null, tool_permissions: null, skills: [], output_schema: null,
+          output_max_retries: null, is_builtin: false, source_scope: "global",
+        },
+      ],
+    });
+
+    const options = Array.from(document.querySelectorAll('select[aria-label="Agent"] option'))
+      .map((option) => option.textContent);
+    expect(options).toEqual(["Built-in assistant", "Researcher"]);
+  });
+
+  it("uses the selected agent when the sidebar starts a conversation", () => {
+    const conversationStore = mockConversationStore();
+    const createConversation = vi.spyOn(conversationStore, "createConversation");
+    component = mountLayout({
+      conversationStore,
+      agentDefinitions: [{
+        id: "researcher", display_name: "Researcher", description: "", instructions: "cite",
+        model_id: null, tool_permissions: null, skills: [], output_schema: null,
+        output_max_retries: null, is_builtin: false, source_scope: "global",
+      }],
+    });
+    const picker = document.querySelector('select[aria-label="Agent"]') as HTMLSelectElement;
+    picker.value = "researcher";
+    picker.dispatchEvent(new Event("change", { bubbles: true }));
+    flushSync();
+    (document.querySelector("button.new-btn") as HTMLButtonElement).click();
+
+    expect(createConversation).toHaveBeenCalledWith(undefined, undefined, "researcher");
+  });
+
+  it("passes the selected agent when the first message creates a conversation", () => {
+    const startTurn = vi.fn();
+    component = mountLayout({
+      streamingStore: { ...mockStreamingStore(), startTurn },
+      agentDefinitions: [{
+        id: "researcher", display_name: "Researcher", description: "", instructions: "cite",
+        model_id: null, tool_permissions: null, skills: [], output_schema: null,
+        output_max_retries: null, is_builtin: false, source_scope: "global",
+      }],
+    });
+    const picker = document.querySelector('select[aria-label="Agent"]') as HTMLSelectElement;
+    picker.value = "researcher";
+    picker.dispatchEvent(new Event("change", { bubbles: true }));
+    const message = document.querySelector('textarea[aria-label="Message"]') as HTMLTextAreaElement;
+    message.value = "Hello";
+    message.dispatchEvent(new Event("input", { bubbles: true }));
+    flushSync();
+    (document.querySelector("button.send") as HTMLButtonElement).click();
+
+    expect(startTurn).toHaveBeenCalledWith("Hello", null, "researcher");
+  });
+
   it("renders the space switcher in the shell", () => {
     component = mountLayout();
 
@@ -221,6 +288,19 @@ describe("AppLayout shell navigation", () => {
     );
 
     expect(onNavigate).toHaveBeenCalledWith("/");
+  });
+
+  it("navigates to the agent definitions settings tab", () => {
+    const onNavigate = vi.fn();
+    component = mountLayout({ onNavigate, routePath: "/settings/providers" });
+    const settingsNavigation = document.querySelector('nav[aria-label="Settings sections"]');
+    const agents = Array.from(settingsNavigation?.querySelectorAll("button") ?? []).find(
+      (button) => button.textContent?.trim() === "Agents",
+    );
+
+    flushSync(() => agents?.click());
+
+    expect(onNavigate).toHaveBeenCalledWith("/settings/agents");
   });
 
   it("opens global settings without a selected space", () => {

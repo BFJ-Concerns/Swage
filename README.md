@@ -7,7 +7,12 @@ the system does recorded locally and reconstructable afterwards.
 ## Build and run
 
 Requires the Rust toolchain (see `rust-toolchain.toml`) and Node for the web
-UI. The gateway listens on loopback only.
+UI. The gateway binds to `127.0.0.1` (loopback) by default. An operator may
+bind to a trusted private-network address such as a LAN or tailnet IP — see
+[Network binding](#network-binding) below. Public exposure is not supported:
+the gateway has no authentication layer, so binding to a public address
+exposes the full API and every configured provider key to anyone who can
+reach the port.
 
 ```bash
 cargo build --bin swage
@@ -121,6 +126,39 @@ level extends or shadows the more general one. `AGENTS.md` extends the
 cascade (global then workspace) rather than participating in the shadowing
 — both levels are always additive.
 
+## Network binding
+
+The gateway's listen address and port are configurable through `config.toml`
+and CLI flags. The defaults are `127.0.0.1` (loopback) on port `3000`.
+
+**Config file** (`~/.swage/config.toml` or `$SWAGE_HOME/config.toml`):
+
+```toml
+[server]
+host = "192.0.2.30"   # a LAN or tailnet address
+port = 3000
+```
+
+**CLI flags** (override the config file for a single invocation):
+
+```bash
+./target/debug/swage gateway start --host 192.0.2.30 --port 3000
+```
+
+The `--host` and `--port` flags are accepted by `gateway start`,
+`gateway restart`, and `gateway install`.
+
+**Security boundary.** The gateway has no authentication. Binding to a
+private-network address is an explicit operator choice that trusts every host
+on that network with full API access and every configured provider key.
+Public-internet exposure is not supported until an authentication layer
+exists.
+
+**Host firewall.** A gateway bound to a LAN address is still unreachable from
+other devices if the host's own firewall drops inbound connections on the
+chosen port. Verify that the firewall permits traffic to the port before
+expecting LAN clients to connect.
+
 ## Isolated development instance
 
 To run a second gateway beside a real installation, give it its own data
@@ -130,7 +168,7 @@ two instances sharing one collide), and its own port:
 ```bash
 SWAGE_HOME=/tmp/swage-dev \
 XDG_RUNTIME_DIR=/tmp/swage-dev-run \
-./target/debug/swage gateway start --port 3100
+./target/debug/swage gateway start --host 127.0.0.1 --port 3100
 ```
 
 Stop it with `gateway stop` under the same two variables. The isolated data
