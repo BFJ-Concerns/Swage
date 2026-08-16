@@ -1,8 +1,49 @@
 ---
-description: The web UI's context inspector, wire-contract architecture, verification gate, and route handling
+description: Network binding, the web UI's context inspector, wire-contract architecture, verification gate, and route handling
 ---
 
 # Interfaces and tooling
+
+## Network binding
+
+The gateway listens on a single TCP address configured through `ServerConfig`
+(`crates/swage-config/src/model.rs`). The two knobs are **host** (default
+`127.0.0.1`) and **port** (default `3000`).
+
+### Configuration
+
+Set the address in `config.toml`:
+
+```toml
+[server]
+host = "192.0.2.30"
+port = 3000
+```
+
+Or override per invocation with CLI flags:
+
+```bash
+swage gateway start --host 192.0.2.30 --port 3000
+```
+
+CLI flags take precedence over `config.toml`. Both `--host` and `--port` are
+accepted by `gateway start`, `gateway restart`, and `gateway install`.
+
+### Bind address resolution
+
+At startup the gateway parses `host:port` into a `SocketAddr` and binds a TCP
+listener to it (`startup.rs`). If `host` is not a valid IP address or the port
+is already in use, the gateway exits with a diagnostic. The runtime-metadata
+file written for CLI discovery records the actual bound address, which may
+differ from the configured one when port `0` (OS-assigned) is used.
+
+### Security boundary
+
+The gateway has no authentication layer. Binding to any address other than
+loopback exposes the full API — including every configured provider key — to
+every host that can reach the port. The intended use is trusted
+private-network addresses (a LAN segment, a tailnet, or similar).
+Public-internet binding is not supported until authentication exists.
 
 ## Turn context inspector
 
