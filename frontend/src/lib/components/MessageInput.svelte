@@ -16,6 +16,7 @@
     onNavigate?: (path: string) => void;
     agentDefinitions?: EffectiveAgentDefinitionResponse[];
     canSelectAgent?: boolean;
+    selectedAgentId?: string;
   }
 
   let {
@@ -26,6 +27,7 @@
     onNavigate,
     agentDefinitions = [],
     canSelectAgent = false,
+    selectedAgentId = $bindable(""),
   }: Props = $props();
 
   const hasNoConfiguredModels = $derived(modelCatalogueReady && modelOptions.length === 0);
@@ -33,7 +35,6 @@
   // Local draft content — cleared after every successful send.
   let content = $state("");
   let selectedModel = $state("");
-  let selectedAgentId = $state("");
 
   $effect(() => {
     const fallback = selectedModelId ?? modelOptions[0] ?? "";
