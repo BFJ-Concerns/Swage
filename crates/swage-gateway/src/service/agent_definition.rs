@@ -5,8 +5,8 @@
 //! goes through the resource's own store, and the recorded change carries
 //! the whole prior and new state of the definition.
 
-use uuid::Uuid;
 use std::collections::BTreeMap;
+use uuid::Uuid;
 
 use swage_core::GatewayError;
 use swage_storage::NewAgentDefinition;
@@ -361,11 +361,17 @@ mod validation_tests {
     async fn effective_registry_merges_scopes_and_synthesises_the_default() {
         let storage = SqliteStorage::in_memory().unwrap();
         let current = storage
-            .create(NewSpace { name: "Current".into(), slug: "current".into() })
+            .create(NewSpace {
+                name: "Current".into(),
+                slug: "current".into(),
+            })
             .await
             .unwrap();
         let other = storage
-            .create(NewSpace { name: "Other".into(), slug: "other".into() })
+            .create(NewSpace {
+                name: "Other".into(),
+                slug: "other".into(),
+            })
             .await
             .unwrap();
 
@@ -383,7 +389,9 @@ mod validation_tests {
         foreign.space_id = Some(other.id);
         storage.upsert_agent_definition(foreign).await.unwrap();
 
-        let effective = effective_agent_definitions(&storage, current.id).await.unwrap();
+        let effective = effective_agent_definitions(&storage, current.id)
+            .await
+            .unwrap();
         let ids = effective
             .iter()
             .map(|entry| entry.definition.id.as_str())
