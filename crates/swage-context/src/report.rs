@@ -162,6 +162,8 @@ mod tests {
             compaction_applied: vec![],
             warnings: vec![],
             errors: vec![],
+            effective_tool_permissions: None,
+            provider_visible: None,
             duration: std::time::Duration::from_millis(12),
         };
 
