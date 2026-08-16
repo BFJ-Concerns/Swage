@@ -728,6 +728,10 @@ pub async fn import_gateway_recovery_bundle(
             "imported schedule '{}' from a recovery bundle",
             imported.message
         );
+        // Restores write the exported row verbatim (validated by its origin
+        // gateway, ids remapped above) — the service create path would
+        // re-resolve and re-arm it, changing what was exported. The record
+        // still reads the stored state back like every other mutation.
         state.storage.create_schedule(imported).await?;
         let new_state = crate::schedule::schedule_snapshot(state, schedule_id).await?;
         // An import is a configuration change like any other: recorded, or

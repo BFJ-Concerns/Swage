@@ -195,8 +195,8 @@ pub trait AgentMemoryStore: Send + Sync {
 /// Store for durable agent definitions.
 ///
 /// Writes are whole-definition upserts because mutations arrive through the
-/// recorded configuration-change path, which validates and diffs complete
-/// definitions rather than field patches.
+/// audited configuration-change path, which validates and records complete
+/// prior/new definition states rather than field patches.
 #[async_trait]
 pub trait AgentDefinitionStore: Send + Sync {
     async fn upsert_agent_definition(

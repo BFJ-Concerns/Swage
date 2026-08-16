@@ -153,7 +153,7 @@ pub struct CreateAgentDefinitionRequest {
     pub skills: Vec<String>,
     #[ts(type = "unknown")]
     pub output_schema: Option<serde_json::Value>,
-    #[ts(type = "number")]
+    #[ts(type = "number | null")]
     pub output_max_retries: Option<u32>,
 }
 
@@ -171,7 +171,7 @@ pub struct UpdateAgentDefinitionRequest {
     pub skills: Vec<String>,
     #[ts(type = "unknown")]
     pub output_schema: Option<serde_json::Value>,
-    #[ts(type = "number")]
+    #[ts(type = "number | null")]
     pub output_max_retries: Option<u32>,
 }
 
@@ -188,7 +188,7 @@ pub struct AgentDefinitionResponse {
     pub skills: Vec<String>,
     #[ts(type = "unknown")]
     pub output_schema: Option<serde_json::Value>,
-    #[ts(type = "number")]
+    #[ts(type = "number | null")]
     pub output_max_retries: Option<u32>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -230,6 +230,7 @@ pub struct HostingSurface {
     approvals: ApprovalListResponse,
     approval_decision: ApprovalDecisionRequest,
     operator_overview: OperatorOverviewResponse,
+    agent_definition_scope: AgentDefinitionScopeQuery,
     agent_definition_list: AgentDefinitionListResponse,
     agent_definition_create: CreateAgentDefinitionRequest,
     agent_definition_update: UpdateAgentDefinitionRequest,
