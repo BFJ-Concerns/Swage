@@ -3047,6 +3047,9 @@
     "WorkflowScript": {
       "type": "object",
       "properties": {
+        "built_in": {
+          "type": "boolean"
+        },
         "created_at": {
           "type": "string",
           "format": "date-time"
@@ -3084,6 +3087,7 @@
         "name",
         "description",
         "head_version",
+        "built_in",
         "has_delivery_grant",
         "created_at",
         "updated_at"

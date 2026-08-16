@@ -33,12 +33,144 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::{
+    builtin_workflows::{self, BUILTIN_WORKFLOWS, BuiltinWorkflow},
     error::ApiError,
     state::AppState,
     subscription::SubscriptionState,
     websocket::ServerEvent,
     workflow_delivery::{DeliveryCapability, capability_from_grant},
 };
+
+#[derive(Clone)]
+struct EffectiveWorkflow {
+    id: Uuid,
+    space_id: Uuid,
+    name: String,
+    description: String,
+    head_version: u32,
+    source: String,
+    script_version_id: Option<Uuid>,
+    delivery_grant: Option<Value>,
+    created_at: chrono::DateTime<chrono::Utc>,
+    updated_at: chrono::DateTime<chrono::Utc>,
+    built_in: bool,
+}
+
+impl EffectiveWorkflow {
+    fn from_builtin(space_id: Uuid, workflow: &'static BuiltinWorkflow) -> Self {
+        let released_at = builtin_workflows::released_at(workflow);
+        Self {
+            id: builtin_workflows::id(space_id, workflow.name),
+            space_id,
+            name: workflow.name.into(),
+            description: workflow.description.into(),
+            head_version: 1,
+            source: workflow.source.into(),
+            script_version_id: None,
+            delivery_grant: None,
+            created_at: released_at,
+            updated_at: released_at,
+            built_in: true,
+        }
+    }
+}
+
+async fn authored_workflow(
+    state: &AppState,
+    record: WorkflowScriptRecord,
+) -> Result<EffectiveWorkflow, String> {
+    let head = state
+        .storage
+        .get_workflow_script_head(record.id)
+        .await
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "workflow script has no version".to_string())?;
+    Ok(EffectiveWorkflow {
+        id: record.id,
+        space_id: record.space_id,
+        name: record.name,
+        description: record.description,
+        head_version: head.version,
+        source: head.source,
+        script_version_id: Some(head.id),
+        delivery_grant: record.delivery_grant,
+        created_at: record.created_at,
+        updated_at: record.updated_at,
+        built_in: false,
+    })
+}
+
+async fn resolve_workflow_by_name(
+    state: &AppState,
+    space_id: Uuid,
+    name: &str,
+) -> Result<Option<EffectiveWorkflow>, String> {
+    if let Some(record) = state
+        .storage
+        .list_workflow_scripts(space_id)
+        .await
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .find(|script| script.name == name)
+    {
+        return authored_workflow(state, record).await.map(Some);
+    }
+    Ok(builtin_workflows::find_by_name(name)
+        .map(|workflow| EffectiveWorkflow::from_builtin(space_id, workflow)))
+}
+
+async fn resolve_workflow_by_id(
+    state: &AppState,
+    id: Uuid,
+) -> Result<Option<EffectiveWorkflow>, String> {
+    if let Some(record) = state
+        .storage
+        .get_workflow_script(id)
+        .await
+        .map_err(|error| error.to_string())?
+    {
+        return authored_workflow(state, record).await.map(Some);
+    }
+    for space in state
+        .space_store
+        .list_all()
+        .await
+        .map_err(|error| error.to_string())?
+    {
+        if let Some(workflow) = BUILTIN_WORKFLOWS
+            .iter()
+            .find(|workflow| builtin_workflows::id(space.id, workflow.name) == id)
+        {
+            return Ok(Some(EffectiveWorkflow::from_builtin(space.id, workflow)));
+        }
+    }
+    Ok(None)
+}
+
+async fn list_effective_workflows(
+    state: &AppState,
+    space_id: Uuid,
+) -> Result<Vec<EffectiveWorkflow>, String> {
+    let records = state
+        .storage
+        .list_workflow_scripts(space_id)
+        .await
+        .map_err(|error| error.to_string())?;
+    let authored_names: std::collections::HashSet<_> =
+        records.iter().map(|record| record.name.clone()).collect();
+    let mut workflows = Vec::with_capacity(records.len() + BUILTIN_WORKFLOWS.len());
+    for record in records {
+        workflows.push(authored_workflow(state, record).await?);
+    }
+    workflows.extend(
+        BUILTIN_WORKFLOWS
+            .iter()
+            .filter(|workflow| !authored_names.contains(workflow.name))
+            .map(|workflow| EffectiveWorkflow::from_builtin(space_id, workflow)),
+    );
+    workflows.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(workflows)
+}
 
 impl AppState {
     async fn create_workflow_journal_intent(
@@ -314,22 +446,9 @@ impl WorkflowLauncher for GatewayWorkflowLauncher {
             .await
             .map_err(|error| error.to_string())?
             .ok_or_else(|| format!("session {session_id} was not found"))?;
-        let script = self
-            .state
-            .storage
-            .list_workflow_scripts(session.space_id)
-            .await
-            .map_err(|error| error.to_string())?
-            .into_iter()
-            .find(|script| script.name == name)
+        let script = resolve_workflow_by_name(&self.state, session.space_id, name)
+            .await?
             .ok_or_else(|| format!("workflow script {name:?} was not found"))?;
-        let version = self
-            .state
-            .storage
-            .get_workflow_script_head(script.id)
-            .await
-            .map_err(|error| error.to_string())?
-            .ok_or_else(|| "workflow script has no version".to_string())?;
         let mut dispatch_bound_agent_ids =
             crate::turn::dispatch_bound_agent_ids(session.metadata.as_ref())
                 .map_err(|error| error.to_string())?;
@@ -337,8 +456,8 @@ impl WorkflowLauncher for GatewayWorkflowLauncher {
         let run = start_run(
             self.state.clone(),
             session.space_id,
-            Some(version.id),
-            version.source,
+            script.script_version_id,
+            script.source,
             args,
             budget.unwrap_or_default(),
             script.delivery_grant,
@@ -2224,25 +2343,14 @@ async fn complete_workflow_call_entry(
     request: WorkflowCallRequest,
     cancellation: CancellationToken,
 ) -> Result<Value, String> {
-    let script = state
-        .storage
-        .list_workflow_scripts(space_id)
-        .await
-        .map_err(|error| error.to_string())?
-        .into_iter()
-        .find(|script| script.name == request.name)
+    let script = resolve_workflow_by_name(state, space_id, &request.name)
+        .await?
         .ok_or_else(|| {
             format!(
                 "WorkflowCompositionError: workflow script {:?} was not found",
                 request.name
             )
         })?;
-    let version = state
-        .storage
-        .get_workflow_script_head(script.id)
-        .await
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| "WorkflowCompositionError: workflow script has no version".to_string())?;
     let existing_child = state
         .storage
         .find_child_workflow_run(parent_run_id, parent_seq)
@@ -2256,16 +2364,21 @@ async fn complete_workflow_call_entry(
                 // script's current head: the record's script_version_id and
                 // source_hash identify what ran, and a script update between
                 // crash and resume must not swap the source underneath them.
-                let recorded_version_id = child
-                    .script_version_id
-                    .ok_or_else(|| "child workflow run has no script version".to_string())?;
-                let source = state
-                    .storage
-                    .get_workflow_script_version(recorded_version_id)
-                    .await
-                    .map_err(|error| error.to_string())?
-                    .ok_or_else(|| "child workflow script version is missing".to_string())?
-                    .source;
+                let source = match child.script_version_id {
+                    Some(recorded_version_id) => {
+                        state
+                            .storage
+                            .get_workflow_script_version(recorded_version_id)
+                            .await
+                            .map_err(|error| error.to_string())?
+                            .ok_or_else(|| "child workflow script version is missing".to_string())?
+                            .source
+                    }
+                    None => child
+                        .source
+                        .clone()
+                        .ok_or_else(|| "child workflow run has no recorded source".to_string())?,
+                };
                 let grant = script.delivery_grant.clone();
                 state
                     .storage
@@ -2301,9 +2414,12 @@ async fn complete_workflow_call_entry(
                     space_id,
                     parent_run_id: Some(parent_run_id),
                     parent_seq: Some(parent_seq),
-                    script_version_id: Some(version.id),
-                    source: None,
-                    source_hash: source_hash(&version.source),
+                    script_version_id: script.script_version_id,
+                    source: script
+                        .script_version_id
+                        .is_none()
+                        .then(|| script.source.clone()),
+                    source_hash: source_hash(&script.source),
                     args: request.args.clone(),
                     // The child inherits the parent's limits rather than
                     // running unbounded. Coarse — each child gets the full
@@ -2323,7 +2439,7 @@ async fn complete_workflow_call_entry(
             launch_existing_run(
                 state.clone(),
                 record.clone(),
-                version.source.clone(),
+                script.source.clone(),
                 script.delivery_grant.clone(),
             )
             .await
@@ -2456,9 +2572,24 @@ fn script_wire(record: WorkflowScriptRecord, head_version: u32) -> WorkflowScrip
         name: record.name,
         description: record.description,
         head_version,
+        built_in: false,
         has_delivery_grant: record.delivery_grant.is_some(),
         created_at: record.created_at,
         updated_at: record.updated_at,
+    }
+}
+
+fn effective_script_wire(workflow: EffectiveWorkflow) -> WorkflowScript {
+    WorkflowScript {
+        id: workflow.id,
+        space_id: workflow.space_id,
+        name: workflow.name,
+        description: workflow.description,
+        head_version: workflow.head_version,
+        built_in: workflow.built_in,
+        has_delivery_grant: workflow.delivery_grant.is_some(),
+        created_at: workflow.created_at,
+        updated_at: workflow.updated_at,
     }
 }
 
@@ -2525,21 +2656,18 @@ pub async fn list_scripts(
     State(state): State<AppState>,
     Path(space_id): Path<Uuid>,
 ) -> Result<Json<WorkflowScriptListResponse>, ApiError> {
-    let records = state
-        .storage
-        .list_workflow_scripts(space_id)
+    state
+        .space_store
+        .get(space_id)
         .await
-        .map_err(internal)?;
-    let mut scripts = Vec::with_capacity(records.len());
-    for record in records {
-        let head = state
-            .storage
-            .get_workflow_script_head(record.id)
-            .await
-            .map_err(internal)?
-            .ok_or_else(|| internal("workflow script has no version"))?;
-        scripts.push(script_wire(record, head.version));
-    }
+        .map_err(internal)?
+        .ok_or_else(|| ApiError::not_found("space", space_id))?;
+    let scripts = list_effective_workflows(&state, space_id)
+        .await
+        .map_err(internal)?
+        .into_iter()
+        .map(effective_script_wire)
+        .collect();
     Ok(Json(WorkflowScriptListResponse { scripts }))
 }
 
@@ -2547,19 +2675,11 @@ pub async fn get_script(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<WorkflowScript>, ApiError> {
-    let record = state
-        .storage
-        .get_workflow_script(id)
+    let workflow = resolve_workflow_by_id(&state, id)
         .await
         .map_err(internal)?
         .ok_or_else(|| ApiError::not_found("workflow script", id))?;
-    let head = state
-        .storage
-        .get_workflow_script_head(id)
-        .await
-        .map_err(internal)?
-        .ok_or_else(|| internal("workflow script has no version"))?;
-    Ok(Json(script_wire(record, head.version)))
+    Ok(Json(effective_script_wire(workflow)))
 }
 
 pub async fn update_script(
@@ -2567,6 +2687,15 @@ pub async fn update_script(
     Path(id): Path<Uuid>,
     Json(request): Json<UpdateWorkflowScriptRequest>,
 ) -> Result<Json<WorkflowScript>, ApiError> {
+    if resolve_workflow_by_id(&state, id)
+        .await
+        .map_err(internal)?
+        .is_some_and(|workflow| workflow.built_in)
+    {
+        return Err(ApiError::conflict(
+            "built-in workflow scripts are immutable; create a same-named workflow in the space to customise it".into(),
+        ));
+    }
     let _record = state
         .storage
         .get_workflow_script(id)
@@ -3003,24 +3132,16 @@ pub async fn start_saved_run(
     Path(id): Path<Uuid>,
     Json(request): Json<StartWorkflowRunRequest>,
 ) -> Result<Json<WorkflowRun>, ApiError> {
-    let script = state
-        .storage
-        .get_workflow_script(id)
+    let script = resolve_workflow_by_id(&state, id)
         .await
         .map_err(internal)?
         .ok_or_else(|| ApiError::not_found("workflow script", id))?;
-    let version = state
-        .storage
-        .get_workflow_script_head(id)
-        .await
-        .map_err(internal)?
-        .ok_or_else(|| internal("workflow script has no version"))?;
     Ok(Json(
         start_run(
             state,
             script.space_id,
-            Some(version.id),
-            version.source,
+            script.script_version_id,
+            script.source,
             request.args,
             request.budget.unwrap_or_default(),
             script.delivery_grant,
@@ -3285,6 +3406,241 @@ mod tests {
         SessionStore, SpaceStore, SqliteStorage, Storage, TurnStore, WorkflowStore,
     };
     use swage_workflow::AgentSessionRef;
+
+    fn workflow_test_state() -> (AppState, Arc<SqliteStorage>) {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        (state, storage)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn empty_space_lists_the_three_built_in_workflows() {
+        let (state, storage) = workflow_test_state();
+        let space = storage.get_or_create_default().await.expect("space");
+
+        let Json(list) = list_scripts(State(state), Path(space.id))
+            .await
+            .expect("workflow list");
+
+        assert_eq!(list.scripts.len(), 3);
+        assert_eq!(
+            list.scripts
+                .iter()
+                .map(|script| script.name.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "front-loaded-run",
+                "research-sweep",
+                "segment-orchestration"
+            ]
+        );
+        assert!(list.scripts.iter().all(|script| script.built_in));
+        assert!(
+            list.scripts
+                .iter()
+                .all(|script| script.space_id == space.id)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn authored_workflow_shadows_the_same_named_builtin() {
+        let (state, storage) = workflow_test_state();
+        let space = storage.get_or_create_default().await.expect("space");
+        let (authored, _) = storage
+            .create_workflow_script(NewWorkflowScript {
+                space_id: space.id,
+                name: "research-sweep".into(),
+                description: "Operator variant".into(),
+                source: "return 'operator';".into(),
+                delivery_grant: None,
+            })
+            .await
+            .expect("authored script");
+
+        let effective = resolve_workflow_by_name(&state, space.id, "research-sweep")
+            .await
+            .expect("resolve")
+            .expect("effective script");
+        assert_eq!(effective.id, authored.id);
+        assert_eq!(effective.source, "return 'operator';");
+        assert!(!effective.built_in);
+
+        let Json(list) = list_scripts(State(state), Path(space.id))
+            .await
+            .expect("workflow list");
+        assert_eq!(list.scripts.len(), 3);
+        let listed = list
+            .scripts
+            .iter()
+            .find(|script| script.name == "research-sweep")
+            .expect("listed operator variant");
+        assert_eq!(listed.id, authored.id);
+        assert!(!listed.built_in);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn listed_builtin_can_be_read_and_started_but_not_updated() {
+        let (state, storage) = workflow_test_state();
+        let space = storage.get_or_create_default().await.expect("space");
+        let Json(list) = list_scripts(State(state.clone()), Path(space.id))
+            .await
+            .expect("workflow list");
+        let listed = list
+            .scripts
+            .into_iter()
+            .find(|script| script.name == "research-sweep")
+            .expect("research sweep");
+
+        let Json(read) = get_script(State(state.clone()), Path(listed.id))
+            .await
+            .expect("read built-in");
+        assert_eq!(read.id, listed.id);
+        assert!(read.built_in);
+
+        let update_error = update_script(
+            State(state.clone()),
+            Path(listed.id),
+            Json(UpdateWorkflowScriptRequest {
+                description: Some("changed".into()),
+                ..Default::default()
+            }),
+        )
+        .await
+        .expect_err("built-in update must fail");
+        assert!(
+            matches!(update_error.0, swage_core::GatewayError::SpaceConflict(message) if message.contains("immutable"))
+        );
+
+        let Json(started) = start_saved_run(
+            State(state.clone()),
+            Path(listed.id),
+            Json(StartWorkflowRunRequest {
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start listed built-in");
+        wait_for_terminal(&state, started.id).await;
+        let run = storage
+            .get_workflow_run(started.id)
+            .await
+            .expect("run query")
+            .expect("run");
+        assert_eq!(run.state, "failed");
+        assert_eq!(
+            run.source.as_deref(),
+            Some(
+                builtin_workflows::find_by_name("research-sweep")
+                    .unwrap()
+                    .source
+            )
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn workflow_tool_name_resolution_falls_back_to_a_builtin() {
+        let (state, storage) = workflow_test_state();
+        let space = storage.get_or_create_default().await.expect("space");
+        let session = storage
+            .create_session(NewSession {
+                space_id: space.id,
+                agent_id: "gateway".into(),
+                metadata: None,
+                active_workspace_attachment_id: None,
+            })
+            .await
+            .expect("session");
+
+        let started = GatewayWorkflowLauncher::new(state.clone())
+            .start_by_name(session.id, "research-sweep", Value::Null, None, false)
+            .await
+            .expect("built-in name resolution");
+        let run_id: Uuid = serde_json::from_value(started["id"].clone()).expect("run id");
+        wait_for_terminal(&state, run_id).await;
+        let run = storage
+            .get_workflow_run(run_id)
+            .await
+            .expect("run query")
+            .expect("run");
+        assert_eq!(
+            run.source.as_deref(),
+            Some(
+                builtin_workflows::find_by_name("research-sweep")
+                    .unwrap()
+                    .source
+            )
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn workflow_composition_resolves_a_builtin_child() {
+        let (state, storage) = workflow_test_state();
+        let space = storage.get_or_create_default().await.expect("space");
+        let (parent, _) = storage
+            .create_workflow_script(NewWorkflowScript {
+                space_id: space.id,
+                name: "parent".into(),
+                description: String::new(),
+                source: "return await workflow('research-sweep', {});".into(),
+                delivery_grant: None,
+            })
+            .await
+            .expect("parent");
+
+        let Json(started) = start_saved_run(
+            State(state.clone()),
+            Path(parent.id),
+            Json(StartWorkflowRunRequest {
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start parent");
+        wait_for_terminal(&state, started.id).await;
+        let parent_run = storage
+            .get_workflow_run(started.id)
+            .await
+            .expect("parent query")
+            .expect("parent run");
+        assert_eq!(parent_run.state, "failed");
+        assert!(
+            !parent_run
+                .error_message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("was not found")
+        );
+        let child = storage
+            .list_workflow_runs(space.id)
+            .await
+            .expect("runs")
+            .into_iter()
+            .find(|run| run.parent_run_id == Some(started.id))
+            .expect("built-in child run");
+        assert_eq!(
+            child.source.as_deref(),
+            Some(
+                builtin_workflows::find_by_name("research-sweep")
+                    .unwrap()
+                    .source
+            )
+        );
+        assert!(
+            child
+                .error_message
+                .as_deref()
+                .is_some_and(|message| message.contains("args.topic"))
+        );
+    }
 
     #[test]
     fn budget_reserve_requires_a_total_token_ceiling() {
