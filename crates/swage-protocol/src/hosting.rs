@@ -199,7 +199,7 @@ pub struct AgentDefinitionListResponse {
     pub definitions: Vec<AgentDefinitionResponse>,
 }
 
-/// An agent definition available when creating a session in one space.
+/// Where an effective agent definition comes from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 #[ts(rename_all = "snake_case")]
