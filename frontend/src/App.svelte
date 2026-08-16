@@ -14,6 +14,8 @@
   import AppLayout from "./lib/components/AppLayout.svelte";
   import { getConversation } from "./lib/api/conversations";
   import { fetchSettings } from "./lib/api/settings";
+  import { listEffectiveAgentDefinitions } from "./lib/api/agent-definitions";
+  import type { EffectiveAgentDefinitionResponse } from "./lib/protocol/EffectiveAgentDefinitionResponse";
   import type { ConversationStore } from "./lib/stores/conversations";
   import { createConversationStore } from "./lib/stores/conversations";
   import { createConnectionStore } from "./lib/stores/connection";
@@ -98,12 +100,13 @@
   // turn can be dispatched.
   async function createAndNavigate(
     selectedModelId?: string | null,
+    agentId?: string | null,
   ): Promise<string | null> {
     try {
       activeSurface = "conversation";
       // Use the currently selected space — should always be set after startup.
       const spaceId = spaceStore.currentSpace?.id ?? "";
-      await conversationStore.createConversation(spaceId, selectedModelId);
+      await conversationStore.createConversation(spaceId, selectedModelId, agentId);
       const id = conversationStore.activeConversation?.id;
       if (id) {
         connectionStore.connectTo(id);
@@ -197,6 +200,7 @@
   let modelOptions = $state<string[]>([]);
   let modelCatalogueReady = $state(false);
   let defaultModelId = $state<string | null>(null);
+  let agentDefinitions = $state<EffectiveAgentDefinitionResponse[]>([]);
   const desktopRuntime = getDesktopRuntime();
 
   async function refreshModelCatalogue(): Promise<void> {
@@ -334,6 +338,7 @@
       router.navigate("/");
       // Load the new space's conversations.
       await conversationStore.loadConversations(spaceId);
+      agentDefinitions = await listEffectiveAgentDefinitions(spaceId);
     } catch (err) {
       console.error("Failed to switch space:", err);
     }
@@ -357,6 +362,9 @@
       // 3. Apply the URL. If it points at a conversation, selectAndNavigate
       //    will bring its space into scope along the way.
       await router.init();
+      if (spaceStore.currentSpace) {
+        agentDefinitions = await listEffectiveAgentDefinitions(spaceStore.currentSpace.id);
+      }
     } catch {
       // Any failure here means the gateway is unreachable. Show a clear error
       // rather than a blank screen with no indication of what went wrong.
@@ -415,6 +423,7 @@
     {modelOptions}
     {modelCatalogueReady}
     {defaultModelId}
+    {agentDefinitions}
     route={currentRoute}
     onNavigate={navigate}
     onSettingsSaved={refreshModelCatalogueAfterSave}

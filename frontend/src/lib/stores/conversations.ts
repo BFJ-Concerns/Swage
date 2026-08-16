@@ -17,7 +17,7 @@ export interface ConversationStore {
   // spaceId is required by the underlying store but optional here so that
   // the router-aware proxy in App.svelte can satisfy this interface without
   // threading spaceId through every intermediate component.
-  createConversation(spaceId?: string, selectedModelId?: string | null): Promise<void>;
+  createConversation(spaceId?: string, selectedModelId?: string | null, agentId?: string | null): Promise<void>;
   deleteConversation(id: string): Promise<void>;
   // Drops the active conversation without touching the server — used when the
   // selected space changes so a conversation from the old space can't linger
@@ -158,12 +158,14 @@ export function createConversationStore(): ConversationStore {
       }
     },
 
-    async createConversation(spaceId, selectedModelId) {
+    async createConversation(spaceId, selectedModelId, agentId) {
       if (!spaceId) {
         throw new Error("spaceId is required to create a conversation");
       }
 
-      const resp = await api.createConversation(spaceId, selectedModelId);
+      const resp = agentId === undefined
+        ? await api.createConversation(spaceId, selectedModelId)
+        : await api.createConversation(spaceId, selectedModelId, agentId);
 
       // Build the detail object locally — avoids an extra round-trip.
       const detail: ConversationDetail = {
