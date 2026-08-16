@@ -296,10 +296,7 @@ pub async fn list_effective_agent_definitions(
     State(state): State<AppState>,
     Path(space_id): Path<Uuid>,
 ) -> Result<Json<EffectiveAgentDefinitionListResponse>, ApiError> {
-    let definitions = crate::service::effective_agent_definitions(
-        state.storage.as_ref(),
-        space_id,
-    )
+    let definitions = crate::service::effective_agent_definitions(state.storage.as_ref(), space_id)
         .await?
         .into_iter()
         .map(|effective| {
