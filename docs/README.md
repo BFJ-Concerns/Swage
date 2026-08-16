@@ -21,6 +21,6 @@ back — and is the fastest way to place any of these subjects in context.
 ## General
 
 - **[Agents and permissions](agents-and-permissions.md)** — How Swage defines agents, reads operator guidance from AGENTS.md, resolves tool permissions, enforces approval, isolates tool execution, and handles delegated grant inheritance
-- **[Interfaces and tooling](interfaces-and-tooling.md)** — The web UI's context inspector, wire-contract architecture, verification gate, and route handling
+- **[Interfaces and tooling](interfaces-and-tooling.md)** — Network binding, the web UI's context inspector, wire-contract architecture, verification gate, and route handling
 - **[Workflow engine](workflow-engine.md)** — How Swage runs workflow scripts — lifecycle, journalling, budget management, durable parking, and failure handling
 <!-- doc-index:end -->
