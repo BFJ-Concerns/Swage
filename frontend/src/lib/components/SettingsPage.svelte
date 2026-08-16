@@ -431,8 +431,8 @@
     {:else if tab === "automation"}
       <AutomationSettingsSurface
         bind:settings
-        {spaceId}
-        {sessionId}
+        spaceId={null}
+        sessionId={null}
         onValidation={(bundlesInvalid, approvalsInvalid, message) => {
           hasInvalidBundlesJson = bundlesInvalid;
           hasInvalidApprovalJson = approvalsInvalid;

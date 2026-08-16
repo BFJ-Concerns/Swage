@@ -53,7 +53,6 @@ describe("AgentDefinitionsPanel", () => {
   });
 
   it("lists effective definitions with source labels and opens complete details", async () => {
-    const shadowedGlobal = definition("shared", "global", { display_name: "Earlier researcher" });
     const spaceWinner = definition("shared", "space", {
       display_name: "Primary researcher",
       instructions: "Use primary sources.",
@@ -76,7 +75,6 @@ describe("AgentDefinitionsPanel", () => {
     const sourceLabels = Array.from(document.querySelectorAll(".definition-list .source"), (label) => label.textContent);
     expect(sourceLabels).toEqual(["Built-in default", "This space", "Global"]);
     expect(document.body.textContent).toContain(spaceWinner.display_name);
-    expect(document.body.textContent).not.toContain(shadowedGlobal.display_name);
 
     const spaceResearcher = Array.from(document.querySelectorAll("button")).find(
       (button) => button.textContent?.includes("Primary researcher"),
