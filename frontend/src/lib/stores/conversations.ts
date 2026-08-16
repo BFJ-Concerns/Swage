@@ -35,6 +35,7 @@ export interface ConversationStore {
       "completed" | "failed" | "interrupted"
     >;
     turn_id?: string;
+    tool_calls?: MessageView["tool_calls"];
   }): void;
   refreshActiveConversation(): Promise<void>;
 }
@@ -94,6 +95,7 @@ export function createConversationStore(): ConversationStore {
       timestamp: string;
       turn_state: MessageView["turn_state"];
       turn_id?: string;
+      tool_calls?: MessageView["tool_calls"];
     },
   ): void {
     const activeConversation = get(activeConversationStore);
@@ -110,6 +112,7 @@ export function createConversationStore(): ConversationStore {
           timestamp: message.timestamp,
           turn_state: message.turn_state,
           ...(message.turn_id === undefined ? {} : { turn_id: message.turn_id }),
+          ...(message.tool_calls === undefined ? {} : { tool_calls: message.tool_calls }),
         },
       ],
     });
@@ -228,6 +231,7 @@ export function createConversationStore(): ConversationStore {
         timestamp: message.timestamp,
         turn_state: message.turn_state,
         ...(message.turn_id === undefined ? {} : { turn_id: message.turn_id }),
+        ...(message.tool_calls === undefined ? {} : { tool_calls: message.tool_calls }),
       });
     },
 
