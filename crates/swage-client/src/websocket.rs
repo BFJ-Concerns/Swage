@@ -386,14 +386,18 @@ mod tests {
     #[test]
     fn context_assembled_event_deserialises() {
         let id = Uuid::new_v4();
-        let json =
-            format!(r#"{{"type":"context_assembled","turn_id":"{id}","report":{{"elements":0}}}}"#);
-        let event: ServerEvent = serde_json::from_str(&json).unwrap();
+        let json = serde_json::json!({
+            "type": "context_assembled",
+            "turn_id": id,
+            "report": AssemblyReport::default(),
+        });
+        let event: ServerEvent = serde_json::from_value(json).unwrap();
         let ServerEvent::ContextAssembled { turn_id, report } = event else {
             panic!("expected ContextAssembled");
         };
         assert_eq!(turn_id, id);
-        assert!(report.is_object());
+        assert_eq!(report.assembly_name, "default");
+        assert!(report.elements.is_empty());
     }
 
     #[test]

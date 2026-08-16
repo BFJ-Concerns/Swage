@@ -595,11 +595,8 @@ pub fn handle_server_event(state: &mut ConversationState, event: ServerEvent) ->
 // Context report parsing
 // ---------------------------------------------------------------------------
 
-/// Parses an `AssemblyReport` JSON value (as sent by the gateway in
-/// `ContextAssembled` events) into a `ContextReport` for the inspector panel.
-///
-/// Missing or malformed fields degrade gracefully — the display shows what
-/// it can rather than crashing on an unexpected server response.
+/// Adapts the typed assembly report from a `ContextAssembled` event into the
+/// inspector panel's view model.
 fn parse_context_report(report: &AssemblyReport) -> ContextReport {
     let sections = report
         .elements

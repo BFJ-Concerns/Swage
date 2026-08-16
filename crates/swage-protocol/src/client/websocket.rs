@@ -118,7 +118,6 @@ pub enum ServerEvent {
     /// inspection. Only delivered to connections subscribed to the `"context"`
     /// channel unless the report contains errors, in which case it is always
     /// sent so the client can surface assembly failures to the user.
-    ///
     ContextAssembled {
         turn_id: Uuid,
         report: AssemblyReport,
