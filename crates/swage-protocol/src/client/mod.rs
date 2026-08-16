@@ -9,6 +9,7 @@ pub mod delivery;
 pub mod knowledge;
 pub mod provider_signin;
 pub mod schedule;
+pub mod settings;
 pub mod space;
 pub mod turn;
 pub mod voice;
@@ -49,6 +50,10 @@ pub struct ClientSurface {
     turn_poll: turn::TurnPollResponse,
     send_message: turn::SendMessageRequest,
     message_response: turn::MessageResponse,
+    settings: settings::SettingsResponse,
+    save_settings: settings::SaveSettingsRequest,
+    model_discovery: settings::ModelDiscoveryResponse,
+    restart_status: settings::RestartStatusResponse,
     knowledge_search: knowledge::KnowledgeSearchResponse,
     orientation_find: knowledge::OrientationFindResponse,
     create_schedule_request: schedule::CreateScheduleRequest,

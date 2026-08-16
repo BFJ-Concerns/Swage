@@ -1,133 +1,40 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use serde::{Deserialize, Serialize};
+use serde::{Serialize, de::DeserializeOwned};
 use serde_json::json;
 
 use crate::error::ApiError;
 use crate::secret::{CreateSecretRequest, RotateSecretRequest};
 use crate::state::AppState;
 
-#[derive(Debug, Clone, Serialize)]
-pub struct SettingsResponse {
-    pub providers: HashMap<String, ProviderSettings>,
-    pub default_provider: String,
-    pub models: HashMap<String, ModelSettings>,
-    pub default_model: String,
-    pub generation_presets: HashMap<String, swage_config::GenerationPresetConfig>,
-    pub tool_runtime: ToolRuntimeSettings,
-    pub tool_permissions: swage_config::ToolPermissionConfig,
-    pub hitl: swage_config::HitlConfig,
-    pub sandbox: swage_config::SandboxConfig,
-    pub context: swage_config::ContextConfig,
-    pub pricing: swage_config::PricingConfig,
-    pub observability: swage_config::ObservabilityConfig,
-    pub communication: swage_config::CommunicationConfig,
-    pub restart_required: bool,
-    pub can_restart: bool,
+pub use swage_protocol::client::settings::{
+    DiscoveredModel, ModelDiscoveryResponse, ModelSettings, ProviderSettings,
+    RestartStatusResponse, SaveProviderSettings, SaveSettingsRequest, SettingsResponse,
+    ToolRuntimeSettings,
+};
+
+fn wire_from_config<W: DeserializeOwned, C: Serialize>(value: C) -> W {
+    serde_json::from_value(serde_json::to_value(value).expect("config serialises"))
+        .expect("config and wire settings shapes match")
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProviderSettings {
-    pub protocol: swage_config::Protocol,
-    pub base_url: Option<String>,
-    pub api_key_secret_ref: Option<String>,
-    pub api_key_env: Option<String>,
-    pub has_credential: bool,
-    pub command: Option<String>,
-    pub state_dir: Option<PathBuf>,
+fn config_from_wire<C: DeserializeOwned, W: Serialize>(value: W) -> Result<C, ApiError> {
+    serde_json::from_value(
+        serde_json::to_value(value)
+            .map_err(|error| ApiError::validation(format!("invalid settings: {error}")))?,
+    )
+    .map_err(|error| ApiError::validation(format!("invalid settings: {error}")))
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ModelSettings {
-    pub provider_id: String,
-    pub model_id: String,
-    pub aliases: Vec<String>,
-    pub context_window: Option<u32>,
-    pub generation_preset: Option<String>,
-    #[serde(default)]
-    pub capabilities: swage_config::ModelCapabilitiesConfig,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolRuntimeSettings {
-    pub shell_timeout_secs: u64,
-    pub python_execute: swage_config::PythonExecuteToolConfig,
-    pub max_output_bytes: usize,
-    pub plugin_directory: Option<String>,
-    pub search: Option<swage_config::SearchProviderConfig>,
-}
-
-impl From<&swage_config::ToolConfig> for ToolRuntimeSettings {
-    fn from(config: &swage_config::ToolConfig) -> Self {
-        Self {
-            shell_timeout_secs: config.shell_timeout_secs,
-            python_execute: config.python_execute.clone(),
-            max_output_bytes: config.max_output_bytes,
-            plugin_directory: config.plugin_directory.clone(),
-            search: config.search.clone(),
-        }
+fn tool_runtime_from_config(config: &swage_config::ToolConfig) -> ToolRuntimeSettings {
+    ToolRuntimeSettings {
+        shell_timeout_secs: config.shell_timeout_secs,
+        python_execute: wire_from_config(config.python_execute.clone()),
+        max_output_bytes: config.max_output_bytes,
+        plugin_directory: config.plugin_directory.clone(),
+        search: wire_from_config(config.search.clone()),
     }
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct SaveSettingsRequest {
-    pub default_provider: String,
-    pub providers: HashMap<String, SaveProviderSettings>,
-    pub default_model: String,
-    pub models: HashMap<String, ModelSettings>,
-    #[serde(default)]
-    pub generation_presets: HashMap<String, swage_config::GenerationPresetConfig>,
-    #[serde(default)]
-    pub tool_runtime: Option<ToolRuntimeSettings>,
-    #[serde(default)]
-    pub tool_permissions: Option<swage_config::ToolPermissionConfig>,
-    #[serde(default)]
-    pub hitl: Option<swage_config::HitlConfig>,
-    #[serde(default)]
-    pub sandbox: Option<swage_config::SandboxConfig>,
-    #[serde(default)]
-    pub context: Option<swage_config::ContextConfig>,
-    #[serde(default)]
-    pub pricing: Option<swage_config::PricingConfig>,
-    #[serde(default)]
-    pub observability: Option<swage_config::ObservabilityConfig>,
-    #[serde(default)]
-    pub communication: Option<swage_config::CommunicationConfig>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct SaveProviderSettings {
-    pub protocol: swage_config::Protocol,
-    pub base_url: Option<String>,
-    pub api_key_secret_ref: Option<String>,
-    pub api_key_env: Option<String>,
-    #[serde(default)]
-    pub api_key: Option<String>,
-    #[serde(default)]
-    pub command: Option<String>,
-    #[serde(default)]
-    pub state_dir: Option<PathBuf>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct DiscoveredModel {
-    pub id: String,
-    pub name: String,
-    pub context_window: Option<u32>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct ModelDiscoveryResponse {
-    pub provider_id: String,
-    pub models: Vec<DiscoveredModel>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct RestartStatusResponse {
-    pub restart_required: bool,
-    pub can_restart: bool,
-    pub guidance: String,
 }
 
 pub async fn load_settings(state: &AppState) -> SettingsResponse {
@@ -140,7 +47,7 @@ pub async fn load_settings(state: &AppState) -> SettingsResponse {
             (
                 id.clone(),
                 ProviderSettings {
-                    protocol: provider.protocol.clone(),
+                    protocol: wire_from_config(provider.protocol.clone()),
                     base_url: provider.base_url.clone(),
                     api_key_secret_ref: provider.api_key_secret_ref.clone(),
                     api_key_env: provider.api_key_env.clone(),
@@ -166,7 +73,7 @@ pub async fn load_settings(state: &AppState) -> SettingsResponse {
                     aliases: model.aliases.clone(),
                     context_window: model.context_window,
                     generation_preset: model.generation_preset.clone(),
-                    capabilities: model.capabilities.clone(),
+                    capabilities: wire_from_config(model.capabilities.clone()),
                 },
             )
         })
@@ -177,15 +84,15 @@ pub async fn load_settings(state: &AppState) -> SettingsResponse {
         default_provider: config.providers.default.clone(),
         models,
         default_model: config.models.default.clone(),
-        generation_presets: config.generation.presets.clone(),
-        tool_runtime: ToolRuntimeSettings::from(&config.tools),
-        tool_permissions: config.tools.permissions.clone(),
-        hitl: config.hitl.clone(),
-        sandbox: config.sandbox.clone(),
-        context: config.context.clone(),
-        pricing: config.pricing.clone(),
-        observability: config.observability.clone(),
-        communication: config.communication,
+        generation_presets: wire_from_config(config.generation.presets.clone()),
+        tool_runtime: tool_runtime_from_config(&config.tools),
+        tool_permissions: wire_from_config(config.tools.permissions.clone()),
+        hitl: wire_from_config(config.hitl.clone()),
+        sandbox: wire_from_config(config.sandbox.clone()),
+        context: wire_from_config(config.context.clone()),
+        pricing: wire_from_config(config.pricing.clone()),
+        observability: wire_from_config(config.observability.clone()),
+        communication: wire_from_config(config.communication),
         restart_required: state.restart_required(),
         can_restart: state.managed_gateway,
     }
@@ -212,13 +119,26 @@ pub async fn save_settings(
         communication,
     } = request;
 
+    let generation_presets: HashMap<String, swage_config::GenerationPresetConfig> =
+        config_from_wire(generation_presets)?;
+    let tool_permissions: Option<swage_config::ToolPermissionConfig> =
+        config_from_wire(tool_permissions)?;
+    let hitl: Option<swage_config::HitlConfig> = config_from_wire(hitl)?;
+    let sandbox: Option<swage_config::SandboxConfig> = config_from_wire(sandbox)?;
+    let context: Option<swage_config::ContextConfig> = config_from_wire(context)?;
+    let pricing: Option<swage_config::PricingConfig> = config_from_wire(pricing)?;
+    let observability: Option<swage_config::ObservabilityConfig> =
+        config_from_wire(observability)?;
+    let communication: Option<swage_config::CommunicationConfig> =
+        config_from_wire(communication)?;
+
     let mut providers = HashMap::new();
     for (provider_id, provider) in requested_providers {
         let secret_ref = persist_provider_key(state, &provider_id, &provider).await?;
         providers.insert(
             provider_id,
             swage_config::ProviderEndpointConfig {
-                protocol: provider.protocol,
+                protocol: config_from_wire(provider.protocol)?,
                 api_key_secret_ref: secret_ref.or(provider.api_key_secret_ref),
                 api_key_env: provider.api_key_env,
                 base_url: provider.base_url,
@@ -239,7 +159,8 @@ pub async fn save_settings(
                     aliases: model.aliases.clone(),
                     context_window: model.context_window,
                     generation_preset: model.generation_preset.clone(),
-                    capabilities: model.capabilities.clone(),
+                    capabilities: config_from_wire(model.capabilities.clone())
+                        .expect("validated model capabilities convert"),
                 },
             )
         })
@@ -305,7 +226,8 @@ pub async fn save_settings(
                     aliases: model.aliases,
                     context_window: model.context_window,
                     generation_preset: model.generation_preset,
-                    capabilities: model.capabilities,
+                    capabilities: config_from_wire(model.capabilities)
+                        .expect("validated model capabilities convert"),
                 },
             )
         })
@@ -467,7 +389,7 @@ pub async fn discover_models(
                 .api_key
                 .clone()
                 .filter(|value| !value.trim().is_empty());
-            (provider.into_endpoint_config(), key)
+            (save_provider_into_endpoint_config(provider)?, key)
         }
         None => (provider_for_discovery(state, &provider_id).await?, None),
     };
@@ -540,17 +462,17 @@ pub async fn discover_models(
     })
 }
 
-impl SaveProviderSettings {
-    fn into_endpoint_config(self) -> swage_config::ProviderEndpointConfig {
-        swage_config::ProviderEndpointConfig {
-            protocol: self.protocol,
-            base_url: self.base_url,
-            api_key_secret_ref: self.api_key_secret_ref,
-            api_key_env: self.api_key_env,
-            command: self.command,
-            state_dir: self.state_dir,
-        }
-    }
+fn save_provider_into_endpoint_config(
+    provider: SaveProviderSettings,
+) -> Result<swage_config::ProviderEndpointConfig, ApiError> {
+    Ok(swage_config::ProviderEndpointConfig {
+        protocol: config_from_wire(provider.protocol)?,
+        base_url: provider.base_url,
+        api_key_secret_ref: provider.api_key_secret_ref,
+        api_key_env: provider.api_key_env,
+        command: provider.command,
+        state_dir: provider.state_dir,
+    })
 }
 
 #[cfg(test)]
@@ -573,7 +495,7 @@ fn settings_response_from_saved_config(
             (
                 id.clone(),
                 ProviderSettings {
-                    protocol: provider.protocol.clone(),
+                    protocol: wire_from_config(provider.protocol.clone()),
                     base_url: provider.base_url.clone(),
                     api_key_secret_ref: provider.api_key_secret_ref.clone(),
                     api_key_env: provider.api_key_env.clone(),
@@ -591,15 +513,15 @@ fn settings_response_from_saved_config(
         default_provider,
         models,
         default_model,
-        generation_presets,
-        tool_runtime: ToolRuntimeSettings::from(&active_config.tools),
-        tool_permissions,
-        hitl,
-        sandbox,
-        context,
-        pricing: active_config.pricing,
-        observability: active_config.observability,
-        communication: active_config.communication,
+        generation_presets: wire_from_config(generation_presets),
+        tool_runtime: tool_runtime_from_config(&active_config.tools),
+        tool_permissions: wire_from_config(tool_permissions),
+        hitl: wire_from_config(hitl),
+        sandbox: wire_from_config(sandbox),
+        context: wire_from_config(context),
+        pricing: wire_from_config(active_config.pricing),
+        observability: wire_from_config(active_config.observability),
+        communication: wire_from_config(active_config.communication),
         restart_required: true,
         can_restart: state.managed_gateway,
     }
@@ -738,13 +660,18 @@ fn apply_runtime_settings_to_partial(
             idle_ttl_secs: Some(tool_runtime.python_execute.idle_ttl_secs),
             warm_target: Some(tool_runtime.python_execute.warm_target),
             max_workers: Some(tool_runtime.python_execute.max_workers),
-            runtime_policy: Some(tool_runtime.python_execute.runtime_policy),
+            runtime_policy: Some(
+                config_from_wire(tool_runtime.python_execute.runtime_policy)
+                    .expect("validated runtime policy converts"),
+            ),
             runtime_path: Some(tool_runtime.python_execute.runtime_path),
             require_sandbox: Some(tool_runtime.python_execute.require_sandbox),
         });
         tools.max_output_bytes = Some(tool_runtime.max_output_bytes);
         tools.plugin_directory = Some(tool_runtime.plugin_directory);
-        tools.search = Some(tool_runtime.search);
+        tools.search = Some(
+            config_from_wire(tool_runtime.search).expect("validated search settings convert"),
+        );
     }
     if let Some(tool_permissions) = tool_permissions {
         let tools = partial.tools.get_or_insert_with(Default::default);
@@ -821,10 +748,11 @@ fn apply_tool_runtime_settings(
     runtime: ToolRuntimeSettings,
 ) {
     config.shell_timeout_secs = runtime.shell_timeout_secs;
-    config.python_execute = runtime.python_execute;
+    config.python_execute = config_from_wire(runtime.python_execute)
+        .expect("validated Python settings convert");
     config.max_output_bytes = runtime.max_output_bytes;
     config.plugin_directory = runtime.plugin_directory;
-    config.search = runtime.search;
+    config.search = config_from_wire(runtime.search).expect("validated search settings convert");
 }
 
 fn validate_tool_runtime_settings(runtime: &ToolRuntimeSettings) -> Result<(), ApiError> {
@@ -880,7 +808,7 @@ fn validate_tool_runtime_settings(runtime: &ToolRuntimeSettings) -> Result<(), A
 }
 
 fn validate_tool_permissions(
-    permissions: &swage_config::ToolPermissionConfig,
+    permissions: &swage_protocol::client::settings::ToolPermissionConfig,
 ) -> Result<(), ApiError> {
     validate_named_list("tool allow rules", &permissions.allow)?;
     validate_named_list("tool deny rules", &permissions.deny)?;
@@ -1210,10 +1138,10 @@ mod tests {
             String::new(),
             HashMap::new(),
             HashMap::new(),
-            swage_config::ToolPermissionConfig::default(),
-            swage_config::HitlConfig::default(),
-            swage_config::SandboxConfig::default(),
-            swage_config::ContextConfig::default(),
+            wire_from_config(swage_config::ToolPermissionConfig::default()),
+            wire_from_config(swage_config::HitlConfig::default()),
+            wire_from_config(swage_config::SandboxConfig::default()),
+            wire_from_config(swage_config::ContextConfig::default()),
         );
 
         let provider = response.providers.get("llama-cpp").expect("provider");
@@ -1247,7 +1175,7 @@ mod tests {
             providers: [(
                 "local".to_string(),
                 SaveProviderSettings {
-                    protocol: swage_config::Protocol::OpenAi,
+                    protocol: swage_protocol::client::settings::ProviderProtocol::OpenAi,
                     base_url: Some("http://127.0.0.1:65535/v1".to_string()),
                     api_key_secret_ref: None,
                     api_key_env: None,
@@ -1267,7 +1195,7 @@ mod tests {
                     aliases: vec![],
                     context_window: Some(4096),
                     generation_preset: Some("quick".to_string()),
-                    capabilities: swage_config::ModelCapabilitiesConfig {
+                    capabilities: swage_protocol::client::settings::ModelCapabilitiesConfig {
                         reasoning_replay: true,
                     },
                 },
@@ -1276,7 +1204,7 @@ mod tests {
             .collect(),
             generation_presets: [(
                 "quick".to_string(),
-                swage_config::GenerationPresetConfig {
+                swage_protocol::client::settings::GenerationPresetConfig {
                     max_tokens: Some(123),
                     temperature: Some(0.2),
                     stop_sequences: vec![],
@@ -1286,18 +1214,18 @@ mod tests {
             .into_iter()
             .collect(),
             tool_runtime: None,
-            tool_permissions: Some(swage_config::ToolPermissionConfig {
+            tool_permissions: Some(swage_protocol::client::settings::ToolPermissionConfig {
                 allow: vec!["file_read".to_string()],
                 deny: vec!["shell".to_string()],
                 bundles: HashMap::new(),
                 require_approval: vec![],
             }),
-            hitl: Some(swage_config::HitlConfig::default()),
-            sandbox: Some(swage_config::SandboxConfig {
+            hitl: Some(wire_from_config(swage_config::HitlConfig::default())),
+            sandbox: Some(swage_protocol::client::settings::SandboxConfig {
                 enabled: false,
                 allow_degraded_execution: true,
             }),
-            context: Some(swage_config::ContextConfig {
+            context: Some(swage_protocol::client::settings::ContextConfig {
                 assembly: "default".to_string(),
                 timeout: 7,
                 budget: Some(2048),
@@ -1378,17 +1306,16 @@ mod tests {
                 .is_none()
         );
 
-        let python_execute = swage_config::PythonExecuteToolConfig {
-            enabled: false,
-            ..Default::default()
-        };
+        let mut python_execute: swage_protocol::client::settings::PythonExecuteToolConfig =
+            wire_from_config(swage_config::PythonExecuteToolConfig::default());
+        python_execute.enabled = false;
         let plugin_root = swage_home.path().join("plugins").display().to_string();
         let request = SaveSettingsRequest {
             default_provider: "local".to_string(),
             providers: [(
                 "local".to_string(),
                 SaveProviderSettings {
-                    protocol: swage_config::Protocol::OpenAi,
+                    protocol: swage_protocol::client::settings::ProviderProtocol::OpenAi,
                     base_url: Some("http://127.0.0.1:65535/v1".to_string()),
                     api_key_secret_ref: None,
                     api_key_env: None,
@@ -1408,7 +1335,7 @@ mod tests {
                     aliases: vec![],
                     context_window: None,
                     generation_preset: None,
-                    capabilities: swage_config::ModelCapabilitiesConfig::default(),
+                    capabilities: swage_protocol::client::settings::ModelCapabilitiesConfig::default(),
                 },
             )]
             .into_iter()
@@ -1419,7 +1346,7 @@ mod tests {
                 python_execute,
                 max_output_bytes: 12_345,
                 plugin_directory: Some(plugin_root.clone()),
-                search: Some(swage_config::SearchProviderConfig {
+                search: Some(swage_protocol::client::settings::SearchProviderConfig {
                     provider_type: "searxng".to_string(),
                     base_url: "http://127.0.0.1:8080".to_string(),
                     api_key: None,
@@ -1501,7 +1428,7 @@ mod tests {
             providers: [(
                 "local".to_string(),
                 SaveProviderSettings {
-                    protocol: swage_config::Protocol::OpenAi,
+                    protocol: swage_protocol::client::settings::ProviderProtocol::OpenAi,
                     base_url: Some("http://127.0.0.1:65535/v1".to_string()),
                     api_key_secret_ref: None,
                     api_key_env: None,
@@ -1521,7 +1448,7 @@ mod tests {
                     aliases: vec![],
                     context_window: None,
                     generation_preset: None,
-                    capabilities: swage_config::ModelCapabilitiesConfig::default(),
+                    capabilities: swage_protocol::client::settings::ModelCapabilitiesConfig::default(),
                 },
             )]
             .into_iter()
@@ -1532,9 +1459,9 @@ mod tests {
             hitl: None,
             sandbox: None,
             context: None,
-            pricing: Some(pricing),
-            observability: Some(observability),
-            communication: Some(communication.clone()),
+            pricing: Some(wire_from_config(pricing)),
+            observability: Some(wire_from_config(observability)),
+            communication: Some(wire_from_config(communication.clone())),
         };
 
         let response = save_settings(&state, request)
@@ -1567,15 +1494,15 @@ mod tests {
             models: HashMap::new(),
             generation_presets: HashMap::new(),
             tool_runtime: None,
-            tool_permissions: Some(swage_config::ToolPermissionConfig {
+            tool_permissions: Some(swage_protocol::client::settings::ToolPermissionConfig {
                 allow: vec!["*".into()],
                 deny: vec!["".into()],
                 bundles: HashMap::new(),
                 require_approval: vec![],
             }),
-            hitl: Some(swage_config::HitlConfig::default()),
-            sandbox: Some(swage_config::SandboxConfig::default()),
-            context: Some(swage_config::ContextConfig::default()),
+            hitl: Some(wire_from_config(swage_config::HitlConfig::default())),
+            sandbox: Some(wire_from_config(swage_config::SandboxConfig::default())),
+            context: Some(wire_from_config(swage_config::ContextConfig::default())),
             pricing: None,
             observability: None,
             communication: None,
@@ -1584,16 +1511,16 @@ mod tests {
         let error = validate_settings_request(&request).expect_err("empty deny rule is invalid");
         assert!(error.0.to_string().contains("tool deny rules"));
 
-        request.tool_permissions = Some(swage_config::ToolPermissionConfig::default());
-        request.hitl = Some(swage_config::HitlConfig {
+        request.tool_permissions = Some(wire_from_config(swage_config::ToolPermissionConfig::default()));
+        request.hitl = Some(swage_protocol::client::settings::HitlConfig {
             timeout: 0,
-            timeout_policy: swage_core::ApprovalTimeoutPolicy::Reject,
+            timeout_policy: swage_protocol::client::settings::ApprovalTimeoutPolicy::Reject,
         });
         let error = validate_settings_request(&request).expect_err("zero HITL timeout is invalid");
         assert!(error.0.to_string().contains("hitl timeout"));
 
-        request.hitl = Some(swage_config::HitlConfig::default());
-        request.context = Some(swage_config::ContextConfig {
+        request.hitl = Some(wire_from_config(swage_config::HitlConfig::default()));
+        request.context = Some(swage_protocol::client::settings::ContextConfig {
             assembly: "default".into(),
             timeout: 61,
             budget: None,
@@ -1602,10 +1529,10 @@ mod tests {
             .expect_err("context timeout above range is invalid");
         assert!(error.0.to_string().contains("context timeout"));
 
-        request.context = Some(swage_config::ContextConfig::default());
+        request.context = Some(wire_from_config(swage_config::ContextConfig::default()));
         request.tool_runtime = Some(ToolRuntimeSettings {
             shell_timeout_secs: 0,
-            python_execute: swage_config::PythonExecuteToolConfig::default(),
+            python_execute: wire_from_config(swage_config::PythonExecuteToolConfig::default()),
             max_output_bytes: 100_000,
             plugin_directory: None,
             search: None,
@@ -1613,10 +1540,9 @@ mod tests {
         let error = validate_settings_request(&request).expect_err("zero shell timeout is invalid");
         assert!(error.0.to_string().contains("shell timeout"));
 
-        let python_execute = swage_config::PythonExecuteToolConfig {
-            runtime_path: Some("/definitely/missing/python".to_string()),
-            ..Default::default()
-        };
+        let mut python_execute: swage_protocol::client::settings::PythonExecuteToolConfig =
+            wire_from_config(swage_config::PythonExecuteToolConfig::default());
+        python_execute.runtime_path = Some("/definitely/missing/python".to_string());
         request.tool_runtime = Some(ToolRuntimeSettings {
             shell_timeout_secs: 30,
             python_execute,
@@ -1630,7 +1556,7 @@ mod tests {
 
         request.tool_runtime = Some(ToolRuntimeSettings {
             shell_timeout_secs: 30,
-            python_execute: swage_config::PythonExecuteToolConfig::default(),
+            python_execute: wire_from_config(swage_config::PythonExecuteToolConfig::default()),
             max_output_bytes: 100_000,
             plugin_directory: Some("/definitely/missing/plugins".to_string()),
             search: None,

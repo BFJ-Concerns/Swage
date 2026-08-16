@@ -298,7 +298,7 @@ mod tests {
 
         let context = ServerEvent::ContextAssembled {
             turn_id: Uuid::new_v4(),
-            report: serde_json::json!({"errors": []}),
+            report: swage_protocol::client::context::AssemblyReport::default(),
         };
         assert!(state.should_deliver(&context));
     }
@@ -375,7 +375,7 @@ mod tests {
         let state = unsubscribed();
         let event = ServerEvent::ContextAssembled {
             turn_id: Uuid::new_v4(),
-            report: serde_json::json!({"errors": []}),
+            report: swage_protocol::client::context::AssemblyReport::default(),
         };
         assert!(!state.should_deliver(&event));
     }
@@ -385,7 +385,7 @@ mod tests {
         let state = subscribed_to(&["context"]);
         let event = ServerEvent::ContextAssembled {
             turn_id: Uuid::new_v4(),
-            report: serde_json::json!({"errors": []}),
+            report: swage_protocol::client::context::AssemblyReport::default(),
         };
         assert!(state.should_deliver(&event));
     }
@@ -397,14 +397,15 @@ mod tests {
         let state = unsubscribed();
         let event = ServerEvent::ContextAssembled {
             turn_id: Uuid::new_v4(),
-            report: serde_json::json!({
-                "errors": [{
-                    "assembly_name": "custom",
-                    "error_kind": "timeout",
-                    "message": "assembly timed out",
-                    "fallback_used": "default"
-                }]
-            }),
+            report: swage_protocol::client::context::AssemblyReport {
+                errors: vec![swage_protocol::client::context::AssemblyError {
+                    assembly_name: "custom".into(),
+                    error_kind: "timeout".into(),
+                    message: "assembly timed out".into(),
+                    fallback_used: "default".into(),
+                }],
+                ..Default::default()
+            },
         };
         assert!(state.should_deliver(&event));
     }
@@ -415,7 +416,7 @@ mod tests {
         let state = unsubscribed();
         let event = ServerEvent::ContextAssembled {
             turn_id: Uuid::new_v4(),
-            report: serde_json::json!({"errors": []}),
+            report: swage_protocol::client::context::AssemblyReport::default(),
         };
         assert!(
             !state.should_deliver(&event),
@@ -500,7 +501,7 @@ mod tests {
         let state = subscribed_to(&["tools"]);
         let event = ServerEvent::ContextAssembled {
             turn_id: Uuid::new_v4(),
-            report: serde_json::json!({"errors": []}),
+            report: swage_protocol::client::context::AssemblyReport::default(),
         };
         assert!(!state.should_deliver(&event));
     }
