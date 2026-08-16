@@ -287,7 +287,10 @@ async fn model_schedule_mutations_record_prior_and_new_state_and_provenance() {
         )
         .await
         .unwrap();
-    let schedule_id = created.result["schedule"]["id"].as_str().unwrap().to_owned();
+    let schedule_id = created.result["schedule"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     let schedule_id = schedule_id.as_str();
 
     let updated = dispatcher
@@ -410,8 +413,10 @@ async fn invalid_schedule_is_rejected_before_any_write() {
     assert!(state.storage.list_schedules().await.unwrap().is_empty());
     let audits = state.storage.list_audit_events().await.unwrap();
     assert!(
-        !audits.iter().any(|event| event.event_kind == "configuration_change"
-            && event.entity_kind == "schedule"),
+        !audits
+            .iter()
+            .any(|event| event.event_kind == "configuration_change"
+                && event.entity_kind == "schedule"),
         "a rejected mutation leaves no configuration_change record"
     );
 }
