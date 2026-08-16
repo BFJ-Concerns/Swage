@@ -11,14 +11,8 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use axum::{
-    Router,
-    body::{Body, to_bytes},
-    http::{Request, StatusCode},
-};
 use chrono::Utc;
-use serde_json::{Value, json};
-use tower::ServiceExt;
+use serde_json::json;
 use uuid::Uuid;
 
 use swage_core::{
@@ -29,7 +23,7 @@ use swage_gateway::service::ConversationService;
 use swage_gateway::tool::schedule::{ScheduleTool, WakeMeLaterTool};
 use swage_gateway::tool::{Tool, ToolDispatcher, ToolRegistry};
 use swage_gateway::tool_executor::GatewayToolContext;
-use swage_gateway::{schedule, server::build_router, state::AppState};
+use swage_gateway::{schedule, state::AppState};
 use swage_protocol::client::schedule::ScheduleStatus;
 use swage_provider::LlmProvider;
 use swage_storage::{ScheduleRunState, SqliteStorage, UpdateSchedule};
@@ -86,25 +80,6 @@ fn test_state() -> AppState {
         ToolDispatcher::allow_all(vec![]),
         None,
     )
-}
-
-async fn post_json(router: &Router, uri: &str, body: Value) -> (StatusCode, Value) {
-    let response = router
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri(uri)
-                .header("content-type", "application/json")
-                .body(Body::from(body.to_string()))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    let status = response.status();
-    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let body = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-    (status, body)
 }
 
 /// The scheduling bundle as the config seeds it — the grant unit the tools
