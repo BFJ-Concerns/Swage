@@ -45,6 +45,10 @@ every host that can reach the port. The intended use is trusted
 private-network addresses (a LAN segment, a tailnet, or similar).
 Public-internet binding is not supported until authentication exists.
 
+The host machine's own firewall must also permit inbound connections on the
+chosen port — a correctly bound gateway is unreachable from the LAN if the
+firewall drops the traffic.
+
 ## Turn context inspector
 
 Assistant messages that carry a turn ID show a small "context" link in the web
