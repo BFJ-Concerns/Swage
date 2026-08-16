@@ -392,8 +392,7 @@ async fn schedule_lifecycle_create_edit_pause_resume_trigger_delete() {
     );
     assert!(configuration_events.iter().all(|event| {
         event.metadata["source"] == "operator_http"
-            && (!event.metadata["prior_state"].is_null()
-                || !event.metadata["new_state"].is_null())
+            && (!event.metadata["prior_state"].is_null() || !event.metadata["new_state"].is_null())
     }));
     let delete_event = configuration_events
         .iter()

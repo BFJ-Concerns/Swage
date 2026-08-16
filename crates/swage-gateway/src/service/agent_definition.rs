@@ -10,7 +10,7 @@ use uuid::Uuid;
 use swage_core::GatewayError;
 use swage_storage::NewAgentDefinition;
 
-use crate::config_change::{record_config_change, ConfigChange};
+use crate::config_change::{ConfigChange, record_config_change};
 use crate::state::AppState;
 
 /// The outcome a mutation surface reports: which definition changed and a
@@ -32,14 +32,15 @@ pub async fn upsert_agent_definition(
     validate_definition(&definition)?;
 
     let prior = snapshot_definition(state, &definition.id, definition.space_id).await?;
-    let action_word = if prior.is_some() { "updated" } else { "created" };
+    let action_word = if prior.is_some() {
+        "updated"
+    } else {
+        "created"
+    };
     let scope = definition
         .space_id
         .map_or_else(|| "globally".to_string(), |id| format!("in space {id}"));
-    let summary = format!(
-        "{action_word} agent definition '{}' {scope}",
-        definition.id
-    );
+    let summary = format!("{action_word} agent definition '{}' {scope}", definition.id);
 
     let agent_id = definition.id.clone();
     let space_id = definition.space_id;
@@ -150,7 +151,11 @@ pub fn validate_definition(definition: &NewAgentDefinition) -> Result<(), Gatewa
                 ))
             })?;
     }
-    if definition.skills.iter().any(|skill| skill.trim().is_empty()) {
+    if definition
+        .skills
+        .iter()
+        .any(|skill| skill.trim().is_empty())
+    {
         return Err(GatewayError::ValidationError(
             "declared skill names must not be empty".into(),
         ));

@@ -213,8 +213,10 @@ async fn agent_definition_http_crud_records_every_mutation() {
     assert_eq!(changes.len(), 2, "create and update each leave a record");
     let update_event = changes
         .iter()
-        .find(|event| event.metadata["action"] == "upsert_agent_definition"
-            && !event.metadata["prior_state"].is_null())
+        .find(|event| {
+            event.metadata["action"] == "upsert_agent_definition"
+                && !event.metadata["prior_state"].is_null()
+        })
         .expect("the update's record carries the state it replaced");
     assert_eq!(
         update_event.metadata["prior_state"]["display_name"],
