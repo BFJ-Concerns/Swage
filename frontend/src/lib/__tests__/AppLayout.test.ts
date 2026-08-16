@@ -96,13 +96,14 @@ interface MountOptions {
   routePath?: string;
   agentDefinitions?: import("../protocol/EffectiveAgentDefinitionResponse").EffectiveAgentDefinitionResponse[];
   streamingStore?: StreamingStore;
+  conversationStore?: ConversationStore;
 }
 
 function mountLayout(options: MountOptions = {}): MountedComponent {
   return mount(AppLayout, {
     target: document.body,
     props: {
-      conversationStore: mockConversationStore(),
+      conversationStore: options.conversationStore ?? mockConversationStore(),
       connectionStore: mockConnectionStore(),
       streamingStore: options.streamingStore ?? mockStreamingStore(),
       spaceStore: mockSpaceStore(options.hasCurrentSpace ?? true),
@@ -176,7 +177,7 @@ describe("AppLayout shell navigation", () => {
     component = mountLayout({
       agentDefinitions: [
         {
-          id: "gateway", display_name: "Swage default", description: "", instructions: "",
+          id: "gateway", display_name: "Built-in assistant", description: "", instructions: "",
           model_id: null, tool_permissions: null, skills: [], output_schema: null,
           output_max_retries: null, is_builtin: true,
         },
@@ -190,7 +191,27 @@ describe("AppLayout shell navigation", () => {
 
     const options = Array.from(document.querySelectorAll('select[aria-label="Agent"] option'))
       .map((option) => option.textContent);
-    expect(options).toEqual(["Swage default", "Researcher"]);
+    expect(options).toEqual(["Built-in assistant", "Researcher"]);
+  });
+
+  it("uses the selected agent when the sidebar starts a conversation", () => {
+    const conversationStore = mockConversationStore();
+    const createConversation = vi.spyOn(conversationStore, "createConversation");
+    component = mountLayout({
+      conversationStore,
+      agentDefinitions: [{
+        id: "researcher", display_name: "Researcher", description: "", instructions: "cite",
+        model_id: null, tool_permissions: null, skills: [], output_schema: null,
+        output_max_retries: null, is_builtin: false,
+      }],
+    });
+    const picker = document.querySelector('select[aria-label="Agent"]') as HTMLSelectElement;
+    picker.value = "researcher";
+    picker.dispatchEvent(new Event("change", { bubbles: true }));
+    flushSync();
+    (document.querySelector("button.new-btn") as HTMLButtonElement).click();
+
+    expect(createConversation).toHaveBeenCalledWith(undefined, undefined, "researcher");
   });
 
   it("passes the selected agent when the first message creates a conversation", () => {

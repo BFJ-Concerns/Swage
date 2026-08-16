@@ -68,6 +68,7 @@
 
   const currentSpace = $derived(spaceStore?.currentSpace ?? null);
   const activeConversation = $derived(conversationStore.activeConversation);
+  let selectedAgentId = $state("");
   const settingsTab = $derived(route?.settingsTab ?? null);
   const settingsSpaceSlug = $derived(route?.settingsSpaceSlug ?? null);
   const settingsSpaceTab = $derived(route?.settingsSpaceTab ?? null);
@@ -116,14 +117,14 @@
   <main class="operator"><OperatorDashboard /></main>
 {:else}
   <main class="conversation">
-    <aside><ConversationList store={conversationStore} /></aside>
+    <aside><ConversationList store={conversationStore} {selectedAgentId} /></aside>
     <section aria-label="Conversation">
       {#if activeConversation}<ConnectionIndicator store={connectionStore} {onRetry} />{/if}
       <MessageDisplay store={conversationStore} {streamingStore} {displayPreferences} />
       {#if streamingStore.pendingApproval}
         <ApprovalCard approval={streamingStore.pendingApproval} />
       {:else}
-        <MessageInput store={streamingStore} {modelOptions} {modelCatalogueReady} selectedModelId={activeConversation?.selected_model_id ?? defaultModelId} {agentDefinitions} canSelectAgent={!activeConversation} {onNavigate} />
+        <MessageInput store={streamingStore} {modelOptions} {modelCatalogueReady} selectedModelId={activeConversation?.selected_model_id ?? defaultModelId} {agentDefinitions} canSelectAgent={!activeConversation} bind:selectedAgentId {onNavigate} />
       {/if}
     </section>
   </main>

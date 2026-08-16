@@ -135,10 +135,10 @@
     loadConversations: (spaceId) =>
       conversationStore.loadConversations(spaceId),
     selectConversation: selectAndNavigate,
-    // No-arg wrapper: the proxy captures spaceId from spaceStore at
-    // call time so ConversationList doesn't need to know about spaces.
-    createConversation: async () => {
-      await createAndNavigate();
+    // The proxy captures spaceId from spaceStore at call time so child
+    // components don't need to know about spaces.
+    createConversation: async (_spaceId, selectedModelId, agentId) => {
+      await createAndNavigate(selectedModelId, agentId);
     },
     deleteConversation: (id) => conversationStore.deleteConversation(id),
     clearActiveConversation: () => conversationStore.clearActiveConversation(),
