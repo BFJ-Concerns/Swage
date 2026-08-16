@@ -48,7 +48,7 @@ pub struct SaveProviderSettings {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(deny_unknown_fields)]
 pub struct ModelCapabilitiesConfig {
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default)]
     pub reasoning_replay: bool,
 }
 impl ModelCapabilitiesConfig {
@@ -71,16 +71,13 @@ pub struct ModelSettings {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(deny_unknown_fields)]
 pub struct GenerationPresetConfig {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub max_tokens: Option<u32>,
     #[ts(optional)]
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f64>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub stop_sequences: Vec<String>,
     #[ts(optional, type = "unknown")]
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<serde_json::Value>,
 }
 impl GenerationPresetConfig {

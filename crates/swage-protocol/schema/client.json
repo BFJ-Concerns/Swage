@@ -1510,6 +1510,7 @@
         "metadata": true,
         "stop_sequences": {
           "type": "array",
+          "default": [],
           "items": {
             "type": "string"
           }
@@ -1766,7 +1767,8 @@
       "type": "object",
       "properties": {
         "reasoning_replay": {
-          "type": "boolean"
+          "type": "boolean",
+          "default": false
         }
       },
       "additionalProperties": false
@@ -1817,7 +1819,9 @@
         },
         "capabilities": {
           "$ref": "#/$defs/ModelCapabilitiesConfig",
-          "default": {}
+          "default": {
+            "reasoning_replay": false
+          }
         },
         "context_window": {
           "type": [
