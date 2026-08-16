@@ -8,7 +8,7 @@ use crate::error::ClientError;
 
 pub use swage_protocol::client::{
     approval::ApprovalDecisionScope,
-    context::AssemblyReport,
+    context::{AssemblyReport, ElementReport},
     websocket::{ClientEvent, SchemaValidationError, ServerEvent},
 };
 /// Connected WebSocket session to a Swage gateway conversation endpoint.
