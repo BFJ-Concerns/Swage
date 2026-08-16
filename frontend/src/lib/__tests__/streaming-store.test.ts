@@ -41,6 +41,7 @@ function createMockConversationStore() {
     timestamp: string;
     turn_state: string;
     turn_id?: string;
+    tool_calls?: Array<{ call_id: string }>;
   }> = [];
 
   return {
@@ -207,6 +208,42 @@ describe("turn_complete", () => {
     expect(assistant).toBeDefined();
     expect(assistant!.content).toBe("The answer is 42.");
     expect(assistant!.turn_id).toBe("t-1");
+  });
+
+  it("attaches completed tool calls to the finalised assistant message", () => {
+    const conv = createMockConversationStore();
+    const store = createStreamingStore({ conversationStore: conv });
+
+    store.startTurn("read the file");
+    store.handleServerEvent({
+      type: "tool_start",
+      call_id: "call-1",
+      tool: "file_read",
+      arguments: { path: "README.md" },
+    });
+    store.handleServerEvent({
+      type: "tool_end",
+      call_id: "call-1",
+      tool: "file_read",
+      result: "contents",
+      status: "success",
+      duration_ms: 8,
+      truncated: false,
+      total_bytes: 8,
+    });
+    store.handleServerEvent({ type: "token", content: "Here is the file." });
+    store.handleServerEvent({ type: "turn_complete", turn_id: "t-1" });
+
+    const assistant = conv.getMessages().find((message) => message.role === "assistant");
+    expect(assistant?.tool_calls).toEqual([
+      expect.objectContaining({
+        call_id: "call-1",
+        tool: "file_read",
+        result: "contents",
+        status: "success",
+      }),
+    ]);
+    expect(store.activeToolCalls).toEqual([]);
   });
 
   it("does not push an empty assistant message when no tokens arrived", () => {

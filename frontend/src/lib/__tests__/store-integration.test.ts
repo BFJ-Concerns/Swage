@@ -142,6 +142,41 @@ describe("streaming store → conversation store: turn lifecycle", () => {
     );
   });
 
+  it("moves streamed tool calls into the completed conversation turn", async () => {
+    const conversationStore = createConversationStore();
+    await seedActiveConversation(conversationStore);
+    const streamingStore = createStreamingStore({ conversationStore });
+
+    streamingStore.startTurn("Read README.md");
+    streamingStore.handleServerEvent({
+      type: "tool_start",
+      call_id: "call-1",
+      tool: "file_read",
+      arguments: { path: "README.md" },
+    });
+    streamingStore.handleServerEvent({
+      type: "tool_end",
+      call_id: "call-1",
+      tool: "file_read",
+      result: "contents",
+      status: "success",
+      duration_ms: 8,
+      truncated: false,
+      total_bytes: 8,
+    });
+    streamingStore.handleServerEvent({ type: "token", content: "Done." });
+    streamingStore.handleServerEvent({ type: "turn_complete", turn_id: "turn-123" });
+
+    const assistant = conversationStore.activeConversation!.messages.at(-1);
+    expect(assistant).toEqual(
+      expect.objectContaining({
+        role: "assistant",
+        content: "Done.",
+        tool_calls: [expect.objectContaining({ call_id: "call-1" })],
+      }),
+    );
+  });
+
   it("preserves partial response in conversation store on error", async () => {
     const conversationStore = createConversationStore();
     await seedActiveConversation(conversationStore);

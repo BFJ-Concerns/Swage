@@ -231,6 +231,26 @@ describe("historical tool calls from committed messages", () => {
     expect(toolCalls.length).toBeGreaterThanOrEqual(2);
   });
 
+  it("renders persisted tool calls before the assistant response", () => {
+    const store = makeConversationStore([
+      makeAssistantMessage("Here is the result.", [makeToolCall()]),
+    ]);
+
+    component = mount(MessageDisplay, {
+      target: document.body,
+      props: { store, streamingStore: makeStreamingStore() },
+    });
+
+    const assistant = document.querySelector(".message.assistant");
+    const toolCalls = assistant?.querySelector(".tool-calls-history");
+    const response = assistant?.querySelector(".assistant-content");
+    expect(toolCalls).not.toBeNull();
+    expect(response).not.toBeNull();
+    expect(
+      toolCalls!.compareDocumentPosition(response!) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
   it("does not render .tool-call for messages without tool calls", () => {
     const store = makeConversationStore([
       makeAssistantMessage("Plain response, no tools."),
