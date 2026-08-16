@@ -10,6 +10,10 @@ All notable changes to Swage are documented in this file.
 - New conversations can now choose from the effective agent definitions available to their space, including the shipped default.
 - Sessions now receive operator guidance from standard `AGENTS.md` files: a global file in the Swage config root and one at the root of each trusted, readable attached workspace, layered after the baseline instructions (global before workspace) and visible in the turn context inspector. Untrusted workspaces contribute nothing.
 
+### Changed
+
+- Tool approval prompting now defaults to disabled and remains available through explicit operator configuration.
+
 ## 0.2.0 — 2026-08-13
 
 ### Added

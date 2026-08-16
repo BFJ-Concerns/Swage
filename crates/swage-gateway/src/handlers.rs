@@ -1699,7 +1699,7 @@ async fn execute_external_delegate_message(
         .expect("a delegated session always has at least its sender bound");
     let active_workspace_attachment_id =
         active_workspace_attachment_for_sender_turn(&state, sender_turn_id).await?;
-    let target_agent_config = crate::turn::build_agent_config_for_space_workspace(
+    let mut target_agent_config = crate::turn::build_agent_config_for_space_workspace(
         &state,
         delegate_msg.recipient_agent_id.clone(),
         &target_resolved,
@@ -1709,6 +1709,7 @@ async fn execute_external_delegate_message(
         active_workspace_attachment_id,
     )
     .await;
+    target_agent_config.approval_prompts_enabled = false;
     let target_context_transfer_config = target_resolved.communication.context_transfer.clone();
     let target_instructions = crate::turn::delegated_target_instructions_for_space(
         &target_resolved.instructions,
@@ -2556,6 +2557,141 @@ mod tests {
         );
 
         server.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn external_delegate_post_executes_granted_approval_gated_tool_without_parking() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use swage_core::{FinishReason, StreamChunk};
+        use swage_storage::store::{AgentMessageStore, ApprovalStore};
+
+        struct CountingEchoTool(Arc<AtomicUsize>);
+
+        #[async_trait::async_trait]
+        impl crate::tool::Tool for CountingEchoTool {
+            fn name(&self) -> &str {
+                "echo"
+            }
+
+            fn description(&self) -> &str {
+                "Echo the input back"
+            }
+
+            fn parameters(&self) -> serde_json::Value {
+                serde_json::json!({
+                    "type": "object",
+                    "properties": { "text": { "type": "string" } },
+                    "required": ["text"]
+                })
+            }
+
+            async fn execute(
+                &self,
+                arguments: serde_json::Value,
+                _ctx: &dyn swage_tool::context::ToolContext,
+            ) -> Result<serde_json::Value, swage_core::ToolError> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(serde_json::json!({ "output": arguments["text"] }))
+            }
+        }
+
+        let (provider, _) = CapturingMultiRoundProvider::new(vec![
+            vec![
+                StreamChunk::ToolUse {
+                    call_id: "external-delegate-echo".into(),
+                    name: "echo".into(),
+                    arguments: serde_json::json!({ "text": "delegated" }),
+                },
+                StreamChunk::Done {
+                    finish_reason: None,
+                },
+            ],
+            vec![
+                StreamChunk::Delta {
+                    content: "External delegated tool completed".into(),
+                },
+                StreamChunk::Done {
+                    finish_reason: Some(FinishReason::Stop),
+                },
+            ],
+        ]);
+        let storage = Arc::new(MockStorage::new());
+        let space = storage
+            .get_or_create_default()
+            .await
+            .expect("create default space");
+        let executions = Arc::new(AtomicUsize::new(0));
+        let mut config = swage_config::ResolvedConfig::default();
+        config.tools.permissions.require_approval =
+            vec![swage_config::RequireApprovalEntry::Simple("echo".into())];
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::new(provider) as Arc<dyn LlmProvider>,
+            config,
+            crate::tool::ToolDispatcher::allow_all(vec![Arc::new(CountingEchoTool(Arc::clone(
+                &executions,
+            )))
+                as Arc<dyn crate::tool::Tool>]),
+            None,
+        );
+        let router = build_router(state);
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/messages")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::json!({
+                            "sender_agent_id": "agent-a",
+                            "recipient_agent_id": "agent-b",
+                            "kind": "delegate",
+                            "space_id": space.id,
+                            "payload": { "task": "Use echo" }
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = body_json(response).await;
+        let message_id = body["id"]
+            .as_str()
+            .expect("message id string")
+            .parse::<Uuid>()
+            .expect("message id uuid");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            let message = storage
+                .get_agent_message(message_id)
+                .await
+                .expect("message lookup")
+                .expect("message exists");
+            if matches!(
+                message.status,
+                swage_core::MessageStatus::Delivered | swage_core::MessageStatus::Failed
+            ) {
+                assert_eq!(message.status, swage_core::MessageStatus::Delivered);
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "external delegate should complete without waiting for approval"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+
+        assert_eq!(executions.load(Ordering::SeqCst), 1);
+        assert!(
+            storage.list_approvals().await.unwrap().is_empty(),
+            "an external unattended delegate must not create approval rows"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -104,7 +104,9 @@ mod tests {
     use swage_core::{FinishReason, StreamChunk};
 
     use super::*;
-    use crate::turn::tests::{make_state_with_config, make_state_with_session};
+    use crate::turn::tests::{
+        make_state_with_approval_gated_echo, make_state_with_config, make_state_with_session,
+    };
 
     #[test]
     fn placeholder_turn_constraint_maps_to_turn_in_progress() {
@@ -161,6 +163,55 @@ mod tests {
         assert!(
             provider_request["request"]["body"]["messages"].is_array(),
             "automated turn snapshot should include provider-visible messages"
+        );
+    }
+
+    #[tokio::test]
+    async fn scheduled_turn_executes_granted_approval_gated_tool_without_parking() {
+        let rounds = vec![
+            vec![
+                StreamChunk::ToolUse {
+                    call_id: "scheduled-echo".into(),
+                    name: "echo".into(),
+                    arguments: serde_json::json!({ "text": "scheduled" }),
+                },
+                StreamChunk::Done {
+                    finish_reason: None,
+                },
+            ],
+            vec![
+                StreamChunk::Delta {
+                    content: "Scheduled tool completed".into(),
+                },
+                StreamChunk::Done {
+                    finish_reason: None,
+                },
+            ],
+        ];
+        let (state, session_id) = make_state_with_approval_gated_echo(rounds).await;
+        let turn_id = create_placeholder_turn(&state, session_id, "gateway", "Use echo")
+            .await
+            .expect("create scheduled placeholder");
+
+        let response = run_placeholder_turn(&state, session_id, "Use echo", turn_id)
+            .await
+            .expect("scheduled turn should execute without an approval answer");
+
+        assert_eq!(response, "Scheduled tool completed");
+        assert!(
+            state.storage.list_approvals().await.unwrap().is_empty(),
+            "an unattended scheduled turn must not create approval rows"
+        );
+        let calls = state
+            .storage
+            .list_tool_calls_by_turn(turn_id)
+            .await
+            .unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].status.as_deref(), Some("success"));
+        assert_eq!(
+            calls[0].result.as_deref(),
+            Some("{\"output\":\"scheduled\"}")
         );
     }
 

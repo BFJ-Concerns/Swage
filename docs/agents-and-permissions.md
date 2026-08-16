@@ -6,7 +6,8 @@ description: How Swage defines agents, reads operator guidance from AGENTS.md, r
 
 Swage governs what every agent session can do through a layered permission
 system: agent definitions narrow what the file-based config cascade grants,
-delegation chains narrow further, and human approval gates high-risk calls.
+delegation chains narrow further, and attended sessions can require human
+approval for configured tool calls.
 
 ## Agent definitions
 
@@ -96,11 +97,10 @@ this setting is false in both configurations.
 
 ### Default grants
 
-A fresh configuration allows all tools (`allow: ["*"]`) and gates eight
-high-risk tools behind human approval: `shell`, `file_edit`, `file_write`,
-`python_execute`, `browser_click`, `browser_type`, `browser_select`, and
-`browser_scroll`. This default is defined in `ToolPermissionConfig::default()`
-and applies unless a config file or agent definition narrows it.
+A fresh configuration allows all tools (`allow: ["*"]`), denies none, and has
+an empty `require_approval` list. This default is defined in
+`ToolPermissionConfig::default()` and applies unless a config file or agent
+definition narrows it or adds approval requirements.
 
 ### Resolution order
 
@@ -112,8 +112,10 @@ permission config in a fixed order:
 2. **Allow gate.** The tool must appear in `allow`, either by direct name,
    the `"*"` wildcard, or through a named bundle that expands to include it.
    If no match is found, the call is rejected.
-3. **Approval check.** If the tool matches a `require_approval` entry, the
-   call pauses for human approval before proceeding.
+3. **Approval check.** In an attended session, if the tool matches a
+   `require_approval` entry, the call pauses for human approval before
+   proceeding. Unattended scheduled, channel, workflow-worker, and delegated
+   turns auto-approve gates for calls that passed the deny and allow checks.
 4. **Allowed.** The call proceeds.
 
 Because the allow gate precedes the approval check, `require_approval`
@@ -126,11 +128,8 @@ tool is rejected at step 2 before the approval check at step 3 is reached.
 When an agent definition sets a narrow allow list — say
 `allow: ["knowledge_search", "knowledge_orient"]` — the overlay intersects
 it with the config's default `["*"]`. Since `*` on the config side defers to
-the overlay, the effective allow becomes just those two tools. The eight
-default `require_approval` entries remain in the config but are functionally
-inert: any of those tools would be rejected at the allow gate before the
-approval check. Setting `allow: []` yields zero permitted tools — a
-fully locked-down agent.
+the overlay, the effective allow becomes just those two tools. Setting
+`allow: []` yields zero permitted tools — a fully locked-down agent.
 
 ## Dispatch-bound grant intersection
 
