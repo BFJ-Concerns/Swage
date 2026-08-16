@@ -18,7 +18,9 @@ use swage_protocol::{
     client::{channel as channel_wire, schedule as schedule_wire},
     hosting::{
         AgentDefinitionListResponse, AgentDefinitionMutationResponse, AgentDefinitionResponse,
-        AgentDefinitionScopeQuery, CreateAgentDefinitionRequest, UpdateAgentDefinitionRequest,
+        AgentDefinitionScopeQuery, CreateAgentDefinitionRequest,
+        EffectiveAgentDefinitionListResponse, EffectiveAgentDefinitionResponse,
+        EffectiveAgentDefinitionSourceScope, UpdateAgentDefinitionRequest,
     },
 };
 
@@ -288,6 +290,44 @@ pub async fn list_agent_definitions(
         .map(agent_definition_response)
         .collect();
     Ok(Json(AgentDefinitionListResponse { definitions }))
+}
+
+pub async fn list_effective_agent_definitions(
+    State(state): State<AppState>,
+    Path(space_id): Path<Uuid>,
+) -> Result<Json<EffectiveAgentDefinitionListResponse>, ApiError> {
+    let definitions = crate::service::effective_agent_definitions(state.storage.as_ref(), space_id)
+        .await?
+        .into_iter()
+        .map(effective_agent_definition_response)
+        .collect();
+    Ok(Json(EffectiveAgentDefinitionListResponse { definitions }))
+}
+
+fn effective_agent_definition_response(
+    effective: crate::service::EffectiveAgentDefinition,
+) -> EffectiveAgentDefinitionResponse {
+    let definition = effective.definition;
+    let source_scope = if effective.is_builtin {
+        EffectiveAgentDefinitionSourceScope::BuiltIn
+    } else if definition.space_id.is_some() {
+        EffectiveAgentDefinitionSourceScope::Space
+    } else {
+        EffectiveAgentDefinitionSourceScope::Global
+    };
+    EffectiveAgentDefinitionResponse {
+        id: definition.id,
+        display_name: definition.display_name,
+        description: definition.description,
+        instructions: definition.instructions,
+        model_id: definition.model_id,
+        tool_permissions: definition.tool_permissions,
+        skills: definition.skills,
+        output_schema: definition.output_schema,
+        output_max_retries: definition.output_max_retries,
+        is_builtin: effective.is_builtin,
+        source_scope,
+    }
 }
 
 fn new_agent_definition(
@@ -2228,6 +2268,44 @@ mod tests {
     async fn body_json(resp: axum::response::Response) -> serde_json::Value {
         let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
         serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[test]
+    fn effective_agent_response_maps_each_source_scope() {
+        fn effective(
+            space_id: Option<Uuid>,
+            is_builtin: bool,
+        ) -> crate::service::EffectiveAgentDefinition {
+            crate::service::EffectiveAgentDefinition {
+                definition: swage_storage::NewAgentDefinition {
+                    id: "agent".into(),
+                    space_id,
+                    display_name: "Agent".into(),
+                    description: String::new(),
+                    instructions: String::new(),
+                    model_id: None,
+                    tool_permissions: None,
+                    skills: Vec::new(),
+                    output_schema: None,
+                    output_max_retries: None,
+                },
+                is_builtin,
+            }
+        }
+
+        assert_eq!(
+            effective_agent_definition_response(effective(None, true)).source_scope,
+            EffectiveAgentDefinitionSourceScope::BuiltIn
+        );
+        assert_eq!(
+            effective_agent_definition_response(effective(None, false)).source_scope,
+            EffectiveAgentDefinitionSourceScope::Global
+        );
+        assert_eq!(
+            effective_agent_definition_response(effective(Some(Uuid::new_v4()), false))
+                .source_scope,
+            EffectiveAgentDefinitionSourceScope::Space
+        );
     }
 
     async fn wait_for_terminal_message_status(

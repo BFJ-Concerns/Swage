@@ -15,6 +15,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { flushSync, mount, unmount } from "svelte";
 
 import App from "../App.svelte";
+import * as agentDefinitionsApi from "../lib/api/agent-definitions";
 import * as conversationsApi from "../lib/api/conversations";
 import * as materialsApi from "../lib/api/materials";
 import * as operatorApi from "../lib/api/operator";
@@ -89,6 +90,10 @@ vi.mock("../lib/api/conversations", () => ({
   createConversation: vi.fn(),
   getConversation: vi.fn(),
   deleteConversation: vi.fn(),
+}));
+
+vi.mock("../lib/api/agent-definitions", () => ({
+  listEffectiveAgentDefinitions: vi.fn(),
 }));
 
 vi.mock("../lib/api/materials", () => ({
@@ -336,6 +341,7 @@ describe("App", () => {
     delete window.swageDesktop;
     vi.mocked(materialsApi.listSpaceMaterials).mockResolvedValue([]);
     vi.mocked(materialsApi.listSessionMaterials).mockResolvedValue([]);
+    vi.mocked(agentDefinitionsApi.listEffectiveAgentDefinitions).mockResolvedValue([]);
     vi.mocked(operatorApi.fetchOperatorOverview).mockResolvedValue(makeOperatorOverview());
     vi.mocked(settingsApi.fetchSettings).mockRejectedValue(
       new Error("settings are not configured in this test"),
@@ -569,6 +575,7 @@ describe("App", () => {
 
     expect(conversationsApi.createConversation).toHaveBeenCalledWith(
       "proj-default",
+      null,
       null,
     );
     expect(websocketHarness.client.connect).toHaveBeenCalledTimes(2);
@@ -828,7 +835,11 @@ describe("App", () => {
     flushSync(() => newButton!.click());
     await settleUi();
 
-    expect(conversationsApi.createConversation).toHaveBeenCalledWith(defaultSpace.id, undefined);
+    expect(conversationsApi.createConversation).toHaveBeenCalledWith(
+      defaultSpace.id,
+      undefined,
+      null,
+    );
     expect(websocketHarness.client.connect).toHaveBeenCalledTimes(1);
     expect(websocketHarness.client.connect).toHaveBeenCalledWith("conv-new");
     expect(window.location.pathname).toBe("/conversations/conv-new");
