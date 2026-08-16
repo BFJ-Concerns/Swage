@@ -163,9 +163,7 @@ export function createConversationStore(): ConversationStore {
         throw new Error("spaceId is required to create a conversation");
       }
 
-      const resp = agentId === undefined
-        ? await api.createConversation(spaceId, selectedModelId)
-        : await api.createConversation(spaceId, selectedModelId, agentId);
+      const resp = await api.createConversation(spaceId, selectedModelId, agentId);
 
       // Build the detail object locally — avoids an extra round-trip.
       const detail: ConversationDetail = {
