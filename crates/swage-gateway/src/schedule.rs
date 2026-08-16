@@ -418,6 +418,8 @@ pub(crate) async fn pause_schedule_change(
     session_id: Option<Uuid>,
 ) -> Result<wire::Schedule, GatewayError> {
     let intended = resolve_pause_schedule(state, schedule_id).await?;
+    validate_schedule_shape(&intended)?;
+    validate_resolved_schedule(state, &intended).await?;
 
     let prior = schedule_snapshot(state, schedule_id).await?;
     let summary = format!("paused schedule '{}'", intended.message);
@@ -471,6 +473,8 @@ pub(crate) async fn resume_schedule_change(
     session_id: Option<Uuid>,
 ) -> Result<wire::Schedule, GatewayError> {
     let intended = resolve_resume_schedule(state, schedule_id).await?;
+    validate_schedule_shape(&intended)?;
+    validate_resolved_schedule(state, &intended).await?;
 
     let prior = schedule_snapshot(state, schedule_id).await?;
     let summary = format!("resumed schedule '{}'", intended.message);
