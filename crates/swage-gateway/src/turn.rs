@@ -939,6 +939,7 @@ pub(crate) async fn process_turn_with_existing_turn(
     if let Some(max_retries) = max_output_retries_override {
         agent_config.max_output_retries = max_retries;
     }
+    agent_config.approval_prompts_enabled = attendance == TurnAttendance::Attended;
 
     // Step 9: Resolve tool permissions from config cascade and build the
     // ToolDispatcher with the resolved permission set. When sandboxing is

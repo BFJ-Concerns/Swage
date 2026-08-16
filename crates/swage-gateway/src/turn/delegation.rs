@@ -257,7 +257,7 @@ impl DelegationHandler for GatewayDelegationHandler {
         let active_workspace_attachment_id = self
             .active_workspace_attachment_for_turn(sender_turn_id)
             .await?;
-        let target_agent_config = build_agent_config_for_space_workspace(
+        let mut target_agent_config = build_agent_config_for_space_workspace(
             &self.state,
             target_agent_id.to_string(),
             &target_resolved,
@@ -267,6 +267,7 @@ impl DelegationHandler for GatewayDelegationHandler {
             active_workspace_attachment_id,
         )
         .await;
+        target_agent_config.approval_prompts_enabled = false;
         let target_instructions = delegated_target_instructions_for_space(
             &target_resolved.instructions,
             &space.slug,

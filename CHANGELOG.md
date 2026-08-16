@@ -14,6 +14,7 @@ All notable changes to Swage are documented in this file.
 
 - Client-facing settings, asynchronous turns, context assembly reports, materials, attachments, and recovery listings now use the shared Rust wire contract and its generated TypeScript and JSON Schema projections.
 - Unknown keys under `[generation.presets.*]` and `[models.entries.*.capabilities]` now fail configuration loading instead of being ignored. Most other sections already rejected unknown keys through validation and still do; per-model pricing entries remain lenient.
+- Tool approval prompting now defaults to disabled and remains available through explicit operator configuration.
 
 ## 0.2.0 — 2026-08-13
 
