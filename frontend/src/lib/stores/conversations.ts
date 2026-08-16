@@ -74,7 +74,7 @@ export function createConversationStore(): ConversationStore {
     const nextSummary: ConversationSummary = {
       ...updatedSummary,
       last_activity: message.timestamp,
-      message_preview: message.content,
+      ...(message.content ? { message_preview: message.content } : {}),
       has_interrupted_turn:
         updatedSummary.has_interrupted_turn || message.turn_state === "interrupted",
     };
