@@ -728,8 +728,8 @@ pub async fn import_gateway_recovery_bundle(
             "imported schedule '{}' from a recovery bundle",
             imported.message
         );
-        let new_state = serde_json::to_value(&imported).unwrap_or(serde_json::Value::Null);
         state.storage.create_schedule(imported).await?;
+        let new_state = crate::schedule::schedule_snapshot(state, schedule_id).await?;
         // An import is a configuration change like any other: recorded, or
         // the whole import fails rather than leaving silent rows.
         crate::config_change::record_config_change(
@@ -742,7 +742,7 @@ pub async fn import_gateway_recovery_bundle(
                 session_id: None,
                 summary: &summary,
                 prior_state: None,
-                new_state: Some(new_state),
+                new_state,
             },
         )
         .await?;

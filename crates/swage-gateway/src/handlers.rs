@@ -308,7 +308,9 @@ fn new_agent_definition(
     }
 }
 
-fn mutation_response(change: crate::service::AgentDefinitionChange) -> AgentDefinitionMutationResponse {
+fn mutation_response(
+    change: crate::service::AgentDefinitionChange,
+) -> AgentDefinitionMutationResponse {
     AgentDefinitionMutationResponse {
         agent_id: change.agent_id,
         space_id: change.space_id,
