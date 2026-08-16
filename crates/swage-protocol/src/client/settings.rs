@@ -141,21 +141,25 @@ pub enum ApprovalTimeoutPolicy {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(deny_unknown_fields)]
+pub struct RequireApprovalOptions {
+    pub tool: String,
+    #[ts(type = "number | null")]
+    pub timeout: Option<u64>,
+    pub timeout_policy: Option<ApprovalTimeoutPolicy>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(untagged)]
 pub enum RequireApprovalEntry {
     Simple(String),
-    WithOptions {
-        tool: String,
-        #[ts(type = "number | null")]
-        timeout: Option<u64>,
-        timeout_policy: Option<ApprovalTimeoutPolicy>,
-    },
+    WithOptions(#[ts(inline)] RequireApprovalOptions),
 }
 impl RequireApprovalEntry {
     pub fn tool_name(&self) -> &str {
         match self {
             Self::Simple(name) => name,
-            Self::WithOptions { tool, .. } => tool,
+            Self::WithOptions(options) => &options.tool,
         }
     }
 }
@@ -249,12 +253,14 @@ pub enum ContextTransferField {
     Assistant,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(deny_unknown_fields)]
 pub struct ContextTransferTargetConfig {
     pub mode: ContextTransferMode,
     pub allowed_fields: Vec<ContextTransferField>,
     pub summary_budget: Option<u32>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(deny_unknown_fields)]
 pub struct ContextTransferConfig {
     pub mode: ContextTransferMode,
     pub allowed_fields: Vec<ContextTransferField>,

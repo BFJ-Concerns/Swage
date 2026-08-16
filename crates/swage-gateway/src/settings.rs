@@ -1117,6 +1117,40 @@ mod tests {
     }
 
     #[test]
+    fn settings_wire_shapes_reject_unknown_nested_fields() {
+        use swage_protocol::client::settings as wire;
+
+        let approval = json!({
+            "allow": [],
+            "deny": [],
+            "bundles": {},
+            "require_approval": [{
+                "tool": "shell",
+                "timeout": 60,
+                "timeout_polciy": "interrupt"
+            }]
+        });
+        assert!(serde_json::from_value::<wire::ToolPermissionConfig>(approval).is_err());
+
+        let context_transfer = json!({
+            "mode": "explicit",
+            "allowed_fields": ["user"],
+            "summary_budget": 512,
+            "targets": {},
+            "typo": true
+        });
+        assert!(serde_json::from_value::<wire::ContextTransferConfig>(context_transfer).is_err());
+
+        let target = json!({
+            "mode": "summary",
+            "allowed_fields": ["user"],
+            "summary_budget": 256,
+            "typo": true
+        });
+        assert!(serde_json::from_value::<wire::ContextTransferTargetConfig>(target).is_err());
+    }
+
+    #[test]
     fn openai_compatible_model_urls_accept_v1_and_plain_roots() {
         assert_eq!(
             openai_compatible_model_urls("http://127.0.0.1:8080/v1"),
