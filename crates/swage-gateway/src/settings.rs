@@ -127,10 +127,8 @@ pub async fn save_settings(
     let sandbox: Option<swage_config::SandboxConfig> = config_from_wire(sandbox)?;
     let context: Option<swage_config::ContextConfig> = config_from_wire(context)?;
     let pricing: Option<swage_config::PricingConfig> = config_from_wire(pricing)?;
-    let observability: Option<swage_config::ObservabilityConfig> =
-        config_from_wire(observability)?;
-    let communication: Option<swage_config::CommunicationConfig> =
-        config_from_wire(communication)?;
+    let observability: Option<swage_config::ObservabilityConfig> = config_from_wire(observability)?;
+    let communication: Option<swage_config::CommunicationConfig> = config_from_wire(communication)?;
 
     let mut providers = HashMap::new();
     for (provider_id, provider) in requested_providers {
@@ -669,9 +667,8 @@ fn apply_runtime_settings_to_partial(
         });
         tools.max_output_bytes = Some(tool_runtime.max_output_bytes);
         tools.plugin_directory = Some(tool_runtime.plugin_directory);
-        tools.search = Some(
-            config_from_wire(tool_runtime.search).expect("validated search settings convert"),
-        );
+        tools.search =
+            Some(config_from_wire(tool_runtime.search).expect("validated search settings convert"));
     }
     if let Some(tool_permissions) = tool_permissions {
         let tools = partial.tools.get_or_insert_with(Default::default);
@@ -748,8 +745,8 @@ fn apply_tool_runtime_settings(
     runtime: ToolRuntimeSettings,
 ) {
     config.shell_timeout_secs = runtime.shell_timeout_secs;
-    config.python_execute = config_from_wire(runtime.python_execute)
-        .expect("validated Python settings convert");
+    config.python_execute =
+        config_from_wire(runtime.python_execute).expect("validated Python settings convert");
     config.max_output_bytes = runtime.max_output_bytes;
     config.plugin_directory = runtime.plugin_directory;
     config.search = config_from_wire(runtime.search).expect("validated search settings convert");
@@ -1335,7 +1332,8 @@ mod tests {
                     aliases: vec![],
                     context_window: None,
                     generation_preset: None,
-                    capabilities: swage_protocol::client::settings::ModelCapabilitiesConfig::default(),
+                    capabilities:
+                        swage_protocol::client::settings::ModelCapabilitiesConfig::default(),
                 },
             )]
             .into_iter()
@@ -1448,7 +1446,8 @@ mod tests {
                     aliases: vec![],
                     context_window: None,
                     generation_preset: None,
-                    capabilities: swage_protocol::client::settings::ModelCapabilitiesConfig::default(),
+                    capabilities:
+                        swage_protocol::client::settings::ModelCapabilitiesConfig::default(),
                 },
             )]
             .into_iter()
@@ -1511,7 +1510,9 @@ mod tests {
         let error = validate_settings_request(&request).expect_err("empty deny rule is invalid");
         assert!(error.0.to_string().contains("tool deny rules"));
 
-        request.tool_permissions = Some(wire_from_config(swage_config::ToolPermissionConfig::default()));
+        request.tool_permissions = Some(wire_from_config(
+            swage_config::ToolPermissionConfig::default(),
+        ));
         request.hitl = Some(swage_protocol::client::settings::HitlConfig {
             timeout: 0,
             timeout_policy: swage_protocol::client::settings::ApprovalTimeoutPolicy::Reject,

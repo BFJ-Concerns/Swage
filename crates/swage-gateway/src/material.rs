@@ -9,7 +9,9 @@ use swage_storage::{Attachment, AttachmentScopeKind, Material, MaterialSourceKin
 
 use crate::{state::AppState, tool::workspace::validate_path};
 
-pub use swage_protocol::client::material::{CreateMaterialRequest, MaterialListResponse, MaterialResponse, PromoteMaterialRequest};
+pub use swage_protocol::client::material::{
+    CreateMaterialRequest, MaterialListResponse, MaterialResponse, PromoteMaterialRequest,
+};
 
 pub async fn create_material(
     state: &AppState,

@@ -14,7 +14,10 @@ use crate::state::AppState;
 
 const ATTACHMENT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
 
-pub use swage_protocol::client::material::{AttachmentListResponse, AttachmentResponse, BackgroundJobResponse, CreateAttachmentRequest, QueuedAttachmentResponse};
+pub use swage_protocol::client::material::{
+    AttachmentListResponse, AttachmentResponse, BackgroundJobResponse, CreateAttachmentRequest,
+    QueuedAttachmentResponse,
+};
 
 pub async fn create_attachment(
     state: &AppState,

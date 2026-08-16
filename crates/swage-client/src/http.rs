@@ -23,12 +23,12 @@ pub use swage_protocol::hosting::{
     PresenceGatewayResponse, PresenceSnapshotResponse,
 };
 
+pub use swage_protocol::client::turn::{
+    MessageResponse, SendMessageRequest, SubmitTurnRequest, SubmitTurnResponse, TurnPollResponse,
+};
 pub use swage_protocol::client::voice::{
     SynthesiseSpeechRequest, SynthesiseSpeechResponse, TranscribeAudioRequest,
     TranscribeAudioResponse, VoiceCapabilitiesResponse,
-};
-pub use swage_protocol::client::turn::{
-    MessageResponse, SendMessageRequest, SubmitTurnRequest, SubmitTurnResponse, TurnPollResponse,
 };
 
 // ---------------------------------------------------------------------------
