@@ -1241,13 +1241,13 @@ pub async fn get_turn_context(
         )
             .into_response()),
         Some(report_json) => {
-            let report: swage_protocol::client::context::AssemblyReport = serde_json::from_str(&report_json)
-                .map_err(|e| ApiError(GatewayError::ConfigError(e.to_string())))?;
-            Ok(Json(swage_protocol::client::context::TurnContextResponse {
-                turn_id,
-                report,
-            })
-            .into_response())
+            let report: swage_protocol::client::context::AssemblyReport =
+                serde_json::from_str(&report_json)
+                    .map_err(|e| ApiError(GatewayError::ConfigError(e.to_string())))?;
+            Ok(
+                Json(swage_protocol::client::context::TurnContextResponse { turn_id, report })
+                    .into_response(),
+            )
         }
     }
 }
@@ -1486,7 +1486,6 @@ pub async fn get_turn(
         parent_turn_id: turn.parent_turn_id,
     }))
 }
-
 
 /// `POST /api/messages` — send a typed message to an agent.
 ///
@@ -2222,6 +2221,54 @@ mod tests {
             spawn_live_server(provider as Arc<dyn LlmProvider>, storage).await;
 
         let client = GatewayClient::new(&base_url);
+        let http = reqwest::Client::new();
+        let settings = http
+            .get(format!("{base_url}/api/settings"))
+            .send()
+            .await
+            .expect("fetch settings through live gateway")
+            .error_for_status()
+            .expect("settings response succeeds")
+            .json::<swage_protocol::client::settings::SettingsResponse>()
+            .await
+            .expect("settings response matches protocol");
+        assert!(!settings.can_restart);
+
+        let discovery = http
+            .post(format!(
+                "{base_url}/api/settings/providers/anthropic/models"
+            ))
+            .json(&swage_protocol::client::settings::SaveProviderSettings {
+                protocol: swage_protocol::client::settings::ProviderProtocol::Anthropic,
+                base_url: None,
+                api_key_secret_ref: None,
+                api_key_env: None,
+                api_key: None,
+                command: None,
+                state_dir: None,
+            })
+            .send()
+            .await
+            .expect("discover models through live gateway")
+            .error_for_status()
+            .expect("model discovery succeeds")
+            .json::<swage_protocol::client::settings::ModelDiscoveryResponse>()
+            .await
+            .expect("model discovery response matches protocol");
+        assert_eq!(discovery.provider_id, "anthropic");
+        assert!(!discovery.models.is_empty());
+
+        let restart = http
+            .get(format!("{base_url}/api/settings/restart-required"))
+            .send()
+            .await
+            .expect("fetch restart status through live gateway")
+            .error_for_status()
+            .expect("restart status succeeds")
+            .json::<swage_protocol::client::settings::RestartStatusResponse>()
+            .await
+            .expect("restart status response matches protocol");
+        assert!(!restart.restart_required);
         let conversation = client
             .create_conversation()
             .await
@@ -2251,7 +2298,23 @@ mod tests {
         };
         assert_eq!(poll.turn_id, turn_id);
         assert_eq!(poll.state, "completed");
-        assert_eq!(poll.assistant_response.as_deref(), Some("Hello from the async route"));
+        assert_eq!(
+            poll.assistant_response.as_deref(),
+            Some("Hello from the async route")
+        );
+
+        let context = http
+            .get(format!("{base_url}/api/turns/{turn_id}/context"))
+            .send()
+            .await
+            .expect("fetch turn context through live gateway")
+            .error_for_status()
+            .expect("turn context succeeds")
+            .json::<swage_protocol::client::context::TurnContextResponse>()
+            .await
+            .expect("turn context response matches protocol");
+        assert_eq!(context.turn_id, turn_id);
+        assert!(!context.report.elements.is_empty());
 
         let turns = client
             .list_turns(conversation.id, None, None)
@@ -2283,10 +2346,7 @@ mod tests {
         let message_id = sent_message.id;
         let message_status = wait_for_terminal_message_status(&client, message_id).await;
         assert!(
-            matches!(
-                message_status.status.as_str(),
-                "delivered" | "failed"
-            ),
+            matches!(message_status.status.as_str(), "delivered" | "failed"),
             "delegate execution should transition the message out of pending"
         );
 
