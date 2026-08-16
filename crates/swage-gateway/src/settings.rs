@@ -129,14 +129,9 @@ pub async fn save_settings(
         communication,
     } = request;
 
-    let generation_presets = generation_presets;
     let tool_permissions: Option<swage_config::ToolPermissionConfig> =
         config_from_wire(tool_permissions)?;
     let hitl: Option<swage_config::HitlConfig> = config_from_wire(hitl)?;
-    let sandbox = sandbox;
-    let context = context;
-    let pricing = pricing;
-    let observability = observability;
     let communication: Option<swage_config::CommunicationConfig> = config_from_wire(communication)?;
 
     let mut providers = HashMap::new();
