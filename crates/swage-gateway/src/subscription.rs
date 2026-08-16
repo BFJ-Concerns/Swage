@@ -125,10 +125,7 @@ impl SubscriptionState {
             ServerEvent::ContextAssembled { report, .. } => {
                 // Always deliver when the report has errors — the client needs
                 // to know that assembly failed even if it has not subscribed.
-                let has_errors = report
-                    .get("errors")
-                    .and_then(|e| e.as_array())
-                    .is_some_and(|arr| !arr.is_empty());
+                let has_errors = !report.errors.is_empty();
 
                 has_errors || self.is_subscribed(ObservabilityChannel::Context)
             }

@@ -43,6 +43,9 @@
     "knowledge_search": {
       "$ref": "#/$defs/KnowledgeSearchResponse"
     },
+    "message_response": {
+      "$ref": "#/$defs/MessageResponse"
+    },
     "orientation_find": {
       "$ref": "#/$defs/OrientationFindResponse"
     },
@@ -60,6 +63,9 @@
     },
     "schedule_run_list": {
       "$ref": "#/$defs/ScheduleRunListResponse"
+    },
+    "send_message": {
+      "$ref": "#/$defs/SendMessageRequest"
     },
     "server_event": {
       "$ref": "#/$defs/ServerEvent"
@@ -79,6 +85,12 @@
     "start_workflow_run_request": {
       "$ref": "#/$defs/StartWorkflowRunRequest"
     },
+    "submit_turn": {
+      "$ref": "#/$defs/SubmitTurnRequest"
+    },
+    "submit_turn_response": {
+      "$ref": "#/$defs/SubmitTurnResponse"
+    },
     "synthesise_speech": {
       "$ref": "#/$defs/SynthesiseSpeechRequest"
     },
@@ -87,6 +99,12 @@
     },
     "trigger_schedule_response": {
       "$ref": "#/$defs/TriggerScheduleResponse"
+    },
+    "turn_context": {
+      "$ref": "#/$defs/TurnContextResponse"
+    },
+    "turn_poll": {
+      "$ref": "#/$defs/TurnPollResponse"
     },
     "update_schedule_request": {
       "$ref": "#/$defs/UpdateScheduleRequest"
@@ -140,6 +158,12 @@
     "conversation_list",
     "conversation_detail",
     "conversation_thread",
+    "turn_context",
+    "submit_turn",
+    "submit_turn_response",
+    "turn_poll",
+    "send_message",
+    "message_response",
     "knowledge_search",
     "orientation_find",
     "create_schedule_request",
@@ -172,6 +196,95 @@
         "session",
         "permanent",
         "permanent_global"
+      ]
+    },
+    "AssemblyError": {
+      "type": "object",
+      "properties": {
+        "assembly_name": {
+          "type": "string"
+        },
+        "error_kind": {
+          "type": "string"
+        },
+        "fallback_used": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "assembly_name",
+        "error_kind",
+        "message",
+        "fallback_used"
+      ]
+    },
+    "AssemblyReport": {
+      "type": "object",
+      "properties": {
+        "assembly_name": {
+          "type": "string"
+        },
+        "budget": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        },
+        "budget_remaining": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int"
+        },
+        "compaction_applied": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CompactionRecord"
+          }
+        },
+        "duration": {
+          "$ref": "#/$defs/Duration"
+        },
+        "effective_tool_permissions": true,
+        "elements": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ElementReport"
+          }
+        },
+        "errors": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AssemblyError"
+          }
+        },
+        "provider_visible": true,
+        "total_tokens": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "assembly_name",
+        "elements",
+        "total_tokens",
+        "compaction_applied",
+        "warnings",
+        "errors",
+        "duration"
       ]
     },
     "ChannelLinkCodeResponse": {
@@ -346,6 +459,77 @@
             "name"
           ]
         }
+      ]
+    },
+    "CompactionRecord": {
+      "type": "object",
+      "properties": {
+        "actual_strategy": {
+          "type": "string"
+        },
+        "budget": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        },
+        "element": {
+          "type": "string"
+        },
+        "failure_reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "messages_removed": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "requested_strategy": {
+          "type": "string"
+        },
+        "source_message_range": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "maxItems": 2,
+          "minItems": 2,
+          "prefixItems": [
+            {
+              "type": "integer",
+              "format": "uint",
+              "minimum": 0
+            },
+            {
+              "type": "integer",
+              "format": "uint",
+              "minimum": 0
+            }
+          ]
+        },
+        "tokens_after": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "tokens_before": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "element",
+        "requested_strategy",
+        "actual_strategy",
+        "messages_removed",
+        "tokens_before",
+        "tokens_after"
       ]
     },
     "ConversationBranchResponse": {
@@ -812,6 +996,67 @@
         }
       ]
     },
+    "Duration": {
+      "type": "object",
+      "properties": {
+        "nanos": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "secs": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "secs",
+        "nanos"
+      ]
+    },
+    "ElementReport": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "named_assembly": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NamedAssemblyReport"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "preview": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "priority": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "source": {
+          "type": "string"
+        },
+        "token_count": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "name",
+        "source",
+        "token_count",
+        "priority"
+      ]
+    },
     "ExternalChannelIntegration": {
       "description": "An external channel integration that can receive delivered output.",
       "type": "string",
@@ -928,6 +1173,22 @@
         "passage"
       ]
     },
+    "MessageResponse": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "status": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "status"
+      ]
+    },
     "MessageView": {
       "type": "object",
       "properties": {
@@ -975,6 +1236,28 @@
         "content",
         "timestamp",
         "tool_calls"
+      ]
+    },
+    "NamedAssemblyReport": {
+      "type": "object",
+      "properties": {
+        "assembly_name": {
+          "type": "string"
+        },
+        "child_elements": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ElementReport"
+          }
+        },
+        "resolved_level": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "assembly_name",
+        "resolved_level",
+        "child_elements"
       ]
     },
     "OrientationCardResult": {
@@ -1471,6 +1754,48 @@
         "message"
       ]
     },
+    "SendMessageRequest": {
+      "type": "object",
+      "properties": {
+        "correlation_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "payload": true,
+        "recipient_agent_id": {
+          "type": "string"
+        },
+        "sender_agent_id": {
+          "type": "string"
+        },
+        "sender_turn_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "space_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        }
+      },
+      "required": [
+        "sender_agent_id",
+        "recipient_agent_id",
+        "kind",
+        "payload"
+      ]
+    },
     "ServerEvent": {
       "description": "Events sent by the server to the client over the WebSocket connection.",
       "oneOf": [
@@ -1575,10 +1900,12 @@
           ]
         },
         {
-          "description": "Context assembly completed for a turn.\n\nContains the full assembly report for diagnostics and token budget\ninspection. Only delivered to connections subscribed to the `\"context\"`\nchannel unless the report contains errors, in which case it is always\nsent so the client can surface assembly failures to the user.\n\nThe report is carried as `serde_json::Value` to decouple the wire\nformat from swage-context's internal types — the shape matches\n`swage_context::report::AssemblyReport` when serialised.",
+          "description": "Context assembly completed for a turn.\n\nContains the full assembly report for diagnostics and token budget\ninspection. Only delivered to connections subscribed to the `\"context\"`\nchannel unless the report contains errors, in which case it is always\nsent so the client can surface assembly failures to the user.",
           "type": "object",
           "properties": {
-            "report": true,
+            "report": {
+              "$ref": "#/$defs/AssemblyReport"
+            },
             "turn_id": {
               "type": "string",
               "format": "uuid"
@@ -2421,6 +2748,46 @@
         "args"
       ]
     },
+    "SubmitTurnRequest": {
+      "type": "object",
+      "properties": {
+        "conversation_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "message": {
+          "type": "string"
+        },
+        "output_schema": true,
+        "thread_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        }
+      },
+      "required": [
+        "conversation_id",
+        "message"
+      ]
+    },
+    "SubmitTurnResponse": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string"
+        },
+        "turn_id": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "required": [
+        "turn_id",
+        "status"
+      ]
+    },
     "SynthesiseSpeechRequest": {
       "type": "object",
       "properties": {
@@ -2526,6 +2893,66 @@
       },
       "required": [
         "run"
+      ]
+    },
+    "TurnContextResponse": {
+      "type": "object",
+      "properties": {
+        "report": {
+          "$ref": "#/$defs/AssemblyReport"
+        },
+        "turn_id": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "required": [
+        "turn_id",
+        "report"
+      ]
+    },
+    "TurnPollResponse": {
+      "type": "object",
+      "properties": {
+        "assistant_response": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "input_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "output_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "parent_turn_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "state": {
+          "type": "string"
+        },
+        "structured_output": true,
+        "turn_id": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "required": [
+        "turn_id",
+        "state"
       ]
     },
     "TurnState": {

@@ -12,7 +12,7 @@ use crate::ui::input::InputState;
 use crate::ui::space_selector::SpaceSelectorState;
 use crate::ui::{RenderParams, calculate_layout, compute_input_height, render};
 use swage_client::error::ClientError;
-use swage_client::websocket::ServerEvent;
+use swage_client::websocket::{AssemblyReport, ServerEvent};
 
 #[derive(Debug, Clone, Copy)]
 struct PendingReconnect {
@@ -600,32 +600,20 @@ pub fn handle_server_event(state: &mut ConversationState, event: ServerEvent) ->
 ///
 /// Missing or malformed fields degrade gracefully — the display shows what
 /// it can rather than crashing on an unexpected server response.
-fn parse_context_report(report: &serde_json::Value) -> ContextReport {
-    let total_tokens = report
-        .get("total_tokens")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
-
-    let budget_tokens = report.get("budget").and_then(|v| v.as_u64());
-
+fn parse_context_report(report: &AssemblyReport) -> ContextReport {
     let sections = report
-        .get("elements")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|el| {
-                    let name = el.get("name")?.as_str()?.to_string();
-                    let token_count = el.get("token_count")?.as_u64()?;
-                    Some(ContextSection { name, token_count })
-                })
-                .collect()
+        .elements
+        .iter()
+        .map(|element| ContextSection {
+            name: element.name.clone(),
+            token_count: element.token_count as u64,
         })
-        .unwrap_or_default();
+        .collect();
 
     ContextReport {
         sections,
-        total_tokens,
-        budget_tokens,
+        total_tokens: report.total_tokens as u64,
+        budget_tokens: report.budget.map(|budget| budget as u64),
     }
 }
 

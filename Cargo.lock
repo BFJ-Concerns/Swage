@@ -3579,6 +3579,7 @@ dependencies = [
  "serde_json",
  "swage-config",
  "swage-core",
+ "swage-protocol",
  "swage-provider",
  "swage-python",
  "tempfile",
