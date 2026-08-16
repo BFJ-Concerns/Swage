@@ -179,12 +179,12 @@ describe("AppLayout shell navigation", () => {
         {
           id: "gateway", display_name: "Built-in assistant", description: "", instructions: "",
           model_id: null, tool_permissions: null, skills: [], output_schema: null,
-          output_max_retries: null, is_builtin: true,
+          output_max_retries: null, is_builtin: true, source_scope: "built_in",
         },
         {
           id: "researcher", display_name: "Researcher", description: "", instructions: "cite",
           model_id: null, tool_permissions: null, skills: [], output_schema: null,
-          output_max_retries: null, is_builtin: false,
+          output_max_retries: null, is_builtin: false, source_scope: "global",
         },
       ],
     });
@@ -202,7 +202,7 @@ describe("AppLayout shell navigation", () => {
       agentDefinitions: [{
         id: "researcher", display_name: "Researcher", description: "", instructions: "cite",
         model_id: null, tool_permissions: null, skills: [], output_schema: null,
-        output_max_retries: null, is_builtin: false,
+        output_max_retries: null, is_builtin: false, source_scope: "global",
       }],
     });
     const picker = document.querySelector('select[aria-label="Agent"]') as HTMLSelectElement;
@@ -221,7 +221,7 @@ describe("AppLayout shell navigation", () => {
       agentDefinitions: [{
         id: "researcher", display_name: "Researcher", description: "", instructions: "cite",
         model_id: null, tool_permissions: null, skills: [], output_schema: null,
-        output_max_retries: null, is_builtin: false,
+        output_max_retries: null, is_builtin: false, source_scope: "global",
       }],
     });
     const picker = document.querySelector('select[aria-label="Agent"]') as HTMLSelectElement;
@@ -288,6 +288,19 @@ describe("AppLayout shell navigation", () => {
     );
 
     expect(onNavigate).toHaveBeenCalledWith("/");
+  });
+
+  it("navigates to the agent definitions settings tab", () => {
+    const onNavigate = vi.fn();
+    component = mountLayout({ onNavigate, routePath: "/settings/providers" });
+    const settingsNavigation = document.querySelector('nav[aria-label="Settings sections"]');
+    const agents = Array.from(settingsNavigation?.querySelectorAll("button") ?? []).find(
+      (button) => button.textContent?.trim() === "Agents",
+    );
+
+    flushSync(() => agents?.click());
+
+    expect(onNavigate).toHaveBeenCalledWith("/settings/agents");
   });
 
   it("opens global settings without a selected space", () => {
