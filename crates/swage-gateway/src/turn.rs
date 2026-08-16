@@ -1252,7 +1252,7 @@ pub(crate) async fn process_turn_with_existing_turn(
                 // Deliver the ContextAssembled event (subscription-gated).
                 let assembled_event = ServerEvent::ContextAssembled {
                     turn_id: started_id,
-                    report: report_json.clone(),
+                    report: assembly_report.clone(),
                 };
                 if subscription.lock().await.should_deliver(&assembled_event) {
                     let _ = ws_tx.send(assembled_event);

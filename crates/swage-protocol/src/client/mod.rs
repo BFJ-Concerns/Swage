@@ -4,11 +4,13 @@
 pub mod approval;
 pub mod channel;
 pub mod conversation;
+pub mod context;
 pub mod delivery;
 pub mod knowledge;
 pub mod provider_signin;
 pub mod schedule;
 pub mod space;
+pub mod turn;
 pub mod voice;
 pub mod websocket;
 pub mod workflow;
@@ -41,6 +43,12 @@ pub struct ClientSurface {
     conversation_list: conversation::ConversationListResponse,
     conversation_detail: conversation::ConversationDetail,
     conversation_thread: conversation::ConversationThreadDetail,
+    turn_context: context::TurnContextResponse,
+    submit_turn: turn::SubmitTurnRequest,
+    submit_turn_response: turn::SubmitTurnResponse,
+    turn_poll: turn::TurnPollResponse,
+    send_message: turn::SendMessageRequest,
+    message_response: turn::MessageResponse,
     knowledge_search: knowledge::KnowledgeSearchResponse,
     orientation_find: knowledge::OrientationFindResponse,
     create_schedule_request: schedule::CreateScheduleRequest,

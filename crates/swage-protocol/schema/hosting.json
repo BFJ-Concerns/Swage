@@ -12,6 +12,9 @@
     "agent_definition_mutation": {
       "$ref": "#/$defs/AgentDefinitionMutationResponse"
     },
+    "agent_definition_scope": {
+      "$ref": "#/$defs/AgentDefinitionScopeQuery"
+    },
     "agent_definition_update": {
       "$ref": "#/$defs/UpdateAgentDefinitionRequest"
     },
@@ -20,9 +23,6 @@
     },
     "approvals": {
       "$ref": "#/$defs/ApprovalListResponse"
-    },
-    "configuration_change": {
-      "$ref": "#/$defs/ConfigurationChangeResponse"
     },
     "devices": {
       "$ref": "#/$defs/DeviceListResponse"
@@ -38,9 +38,6 @@
     },
     "presence": {
       "$ref": "#/$defs/PresenceSnapshotResponse"
-    },
-    "undo_configuration_case": {
-      "$ref": "#/$defs/UndoConfigurationCaseRequest"
     }
   },
   "required": [
@@ -48,9 +45,8 @@
     "heartbeat",
     "approvals",
     "approval_decision",
-    "undo_configuration_case",
-    "configuration_change",
     "operator_overview",
+    "agent_definition_scope",
     "agent_definition_list",
     "agent_definition_create",
     "agent_definition_update",
@@ -74,22 +70,25 @@
       ]
     },
     "AgentDefinitionMutationResponse": {
+      "description": "The outcome of an agent-definition mutation. The full account of the\nchange — prior and new state under a named action — lives in the audit\ntrail.",
       "type": "object",
       "properties": {
-        "entity_id": {
+        "agent_id": {
           "type": "string"
+        },
+        "space_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
         },
         "summary": {
           "type": "string"
-        },
-        "version_id": {
-          "type": "string",
-          "format": "uuid"
         }
       },
       "required": [
-        "version_id",
-        "entity_id",
+        "agent_id",
         "summary"
       ]
     },
@@ -155,6 +154,19 @@
         "created_at",
         "updated_at"
       ]
+    },
+    "AgentDefinitionScopeQuery": {
+      "description": "Scope filter for durable agent-definition reads and deletes.",
+      "type": "object",
+      "properties": {
+        "space_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        }
+      }
     },
     "ApprovalDecisionRequest": {
       "type": "object",
@@ -333,35 +345,6 @@
       "required": [
         "session_id",
         "state"
-      ]
-    },
-    "ConfigurationChangeResponse": {
-      "description": "The new change-case record produced by undoing a configuration case.",
-      "type": "object",
-      "properties": {
-        "entity_id": {
-          "type": "string"
-        },
-        "entity_kind": {
-          "type": "string"
-        },
-        "risk_band": {
-          "type": "string"
-        },
-        "summary": {
-          "type": "string"
-        },
-        "version_id": {
-          "type": "string",
-          "format": "uuid"
-        }
-      },
-      "required": [
-        "version_id",
-        "entity_kind",
-        "entity_id",
-        "summary",
-        "risk_band"
       ]
     },
     "CreateAgentDefinitionRequest": {
@@ -1163,19 +1146,6 @@
             "session_id"
           ]
         }
-      ]
-    },
-    "UndoConfigurationCaseRequest": {
-      "description": "Ask the operator control plane to undo a recorded configuration case.",
-      "type": "object",
-      "properties": {
-        "case_id": {
-          "type": "string",
-          "format": "uuid"
-        }
-      },
-      "required": [
-        "case_id"
       ]
     },
     "UpdateAgentDefinitionRequest": {

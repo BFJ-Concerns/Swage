@@ -1241,14 +1241,12 @@ pub async fn get_turn_context(
         )
             .into_response()),
         Some(report_json) => {
-            // Parse back to Value so the HTTP response is clean JSON, not a
-            // double-encoded string.
-            let report: serde_json::Value = serde_json::from_str(&report_json)
+            let report: swage_protocol::client::context::AssemblyReport = serde_json::from_str(&report_json)
                 .map_err(|e| ApiError(GatewayError::ConfigError(e.to_string())))?;
-            Ok(Json(serde_json::json!({
-                "turn_id": turn_id,
-                "report": report,
-            }))
+            Ok(Json(swage_protocol::client::context::TurnContextResponse {
+                turn_id,
+                report,
+            })
             .into_response())
         }
     }
@@ -1320,38 +1318,9 @@ pub async fn shutdown(
 // approval decisions, agent messaging, and turn listing.
 // ---------------------------------------------------------------------------
 
-/// Request body for async turn submission.
-#[derive(Debug, Deserialize)]
-pub struct SubmitTurnRequest {
-    /// The conversation (session) to submit the turn in.
-    pub conversation_id: Uuid,
-    /// Optional target thread. When absent, the session's root thread is used.
-    pub thread_id: Option<Uuid>,
-    /// The user message to process.
-    pub message: String,
-    /// Optional output schema that overrides the agent's configured schema
-    /// for this single turn.
-    pub output_schema: Option<serde_json::Value>,
-}
-
-/// Response for async turn submission.
-#[derive(Debug, Serialize)]
-pub struct SubmitTurnResponse {
-    pub turn_id: Uuid,
-    pub status: String,
-}
-
-/// Response for turn polling.
-#[derive(Debug, Serialize)]
-pub struct TurnPollResponse {
-    pub turn_id: Uuid,
-    pub state: String,
-    pub assistant_response: Option<String>,
-    pub structured_output: Option<serde_json::Value>,
-    pub input_tokens: Option<i64>,
-    pub output_tokens: Option<i64>,
-    pub parent_turn_id: Option<Uuid>,
-}
+pub use swage_protocol::client::turn::{
+    MessageResponse, SendMessageRequest, SubmitTurnRequest, SubmitTurnResponse, TurnPollResponse,
+};
 
 /// `POST /api/turns` — submit a turn for async processing.
 ///
@@ -1518,24 +1487,6 @@ pub async fn get_turn(
     }))
 }
 
-/// Request body for sending an inter-agent message.
-#[derive(Debug, Deserialize)]
-pub struct SendMessageRequest {
-    pub sender_agent_id: String,
-    pub recipient_agent_id: String,
-    pub kind: String,
-    pub correlation_id: Option<Uuid>,
-    pub space_id: Option<Uuid>,
-    pub sender_turn_id: Option<Uuid>,
-    pub payload: serde_json::Value,
-}
-
-/// Response for message operations.
-#[derive(Debug, Serialize)]
-pub struct MessageResponse {
-    pub id: Uuid,
-    pub status: String,
-}
 
 /// `POST /api/messages` — send a typed message to an agent.
 ///

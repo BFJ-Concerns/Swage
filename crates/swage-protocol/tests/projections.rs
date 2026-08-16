@@ -47,6 +47,12 @@ fn typescript_bindings_are_regenerated() {
     client::conversation::ConversationDetail::export_all(&cfg).expect("export conversation detail");
     client::conversation::ConversationThreadDetail::export_all(&cfg)
         .expect("export conversation thread");
+    client::context::TurnContextResponse::export_all(&cfg).expect("export turn context");
+    client::turn::SubmitTurnRequest::export_all(&cfg).expect("export submit turn");
+    client::turn::SubmitTurnResponse::export_all(&cfg).expect("export submit turn response");
+    client::turn::TurnPollResponse::export_all(&cfg).expect("export turn polling");
+    client::turn::SendMessageRequest::export_all(&cfg).expect("export send message");
+    client::turn::MessageResponse::export_all(&cfg).expect("export message response");
     client::knowledge::KnowledgeSearchResponse::export_all(&cfg)
         .expect("export knowledge search response");
     client::knowledge::OrientationFindResponse::export_all(&cfg)
