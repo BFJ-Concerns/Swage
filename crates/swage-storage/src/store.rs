@@ -6,11 +6,11 @@ use swage_core::StorageError;
 use crate::model::{
     ActiveSkillRecord, AgentDefinition, AgentMemoryRecord, AgentMessage, AppendMessage,
     ApprovalRequest, ApprovalState, Attachment, AttachmentStatus, AuditEvent, BackgroundJob,
-    ChannelInboundMessage, ChannelLink, ConfigurationVersion, ContextSnapshotRecord,
+    ChannelInboundMessage, ChannelLink, ContextSnapshotRecord,
     CurationAssertion, DeliveryRecord, DeviceRegistration, ExtractionDerivation, InboundAudit,
     KnowledgeCitation, KnowledgeSearchHit, Material, Message, NewAgentDefinition,
     NewAgentMemoryRecord, NewAgentMessage, NewApprovalRequest, NewAttachment, NewAuditEvent,
-    NewBackgroundJob, NewChannelInboundMessage, NewChannelLink, NewConfigurationVersion,
+    NewBackgroundJob, NewChannelInboundMessage, NewChannelLink,
     NewCurationAssertion, NewDeliveryRecord, NewDeviceRegistration, NewKnowledgeCitation,
     NewMaterial, NewMessage, NewOrientationCard, NewSchedule, NewScheduleRun, NewSecretRecord,
     NewSession, NewSourceObservation, NewSpace, NewThread, NewToolCall, NewTurn,
@@ -342,32 +342,6 @@ pub trait OrientationCardStore: Send + Sync {
         actor: String,
         session_id: Option<Uuid>,
     ) -> Result<OrientationCardLifecycle, StorageError>;
-}
-
-#[async_trait]
-pub trait ConfigurationVersionStore: Send + Sync {
-    async fn create_configuration_version(
-        &self,
-        version: NewConfigurationVersion,
-    ) -> Result<ConfigurationVersion, StorageError>;
-    async fn get_configuration_version(
-        &self,
-        id: Uuid,
-    ) -> Result<Option<ConfigurationVersion>, StorageError>;
-    async fn list_configuration_versions(
-        &self,
-        space_id: Option<Uuid>,
-    ) -> Result<Vec<ConfigurationVersion>, StorageError>;
-    async fn list_configuration_versions_for_entity(
-        &self,
-        entity_kind: &str,
-        entity_id: &str,
-    ) -> Result<Vec<ConfigurationVersion>, StorageError>;
-    async fn get_latest_configuration_version(
-        &self,
-        entity_kind: &str,
-        entity_id: &str,
-    ) -> Result<Option<ConfigurationVersion>, StorageError>;
 }
 
 #[async_trait]
@@ -1127,7 +1101,6 @@ pub trait Storage:
     + AuditStore
     + AgentMemoryStore
     + AgentDefinitionStore
-    + ConfigurationVersionStore
     + ObservationStore
     + CurationAssertionStore
     + CitationStore
@@ -1162,7 +1135,6 @@ impl<T> Storage for T where
         + AuditStore
         + AgentMemoryStore
         + AgentDefinitionStore
-        + ConfigurationVersionStore
         + ObservationStore
         + CurationAssertionStore
         + CitationStore
@@ -1438,46 +1410,6 @@ mod tests {
             _: Option<&str>,
             _: usize,
         ) -> Result<Vec<AgentMemoryRecord>, StorageError> {
-            unimplemented!()
-        }
-    }
-
-    #[async_trait]
-    impl ConfigurationVersionStore for StubStorage {
-        async fn create_configuration_version(
-            &self,
-            _: NewConfigurationVersion,
-        ) -> Result<ConfigurationVersion, StorageError> {
-            unimplemented!()
-        }
-
-        async fn get_configuration_version(
-            &self,
-            _: Uuid,
-        ) -> Result<Option<ConfigurationVersion>, StorageError> {
-            unimplemented!()
-        }
-
-        async fn list_configuration_versions(
-            &self,
-            _: Option<Uuid>,
-        ) -> Result<Vec<ConfigurationVersion>, StorageError> {
-            unimplemented!()
-        }
-
-        async fn list_configuration_versions_for_entity(
-            &self,
-            _: &str,
-            _: &str,
-        ) -> Result<Vec<ConfigurationVersion>, StorageError> {
-            unimplemented!()
-        }
-
-        async fn get_latest_configuration_version(
-            &self,
-            _: &str,
-            _: &str,
-        ) -> Result<Option<ConfigurationVersion>, StorageError> {
             unimplemented!()
         }
     }
@@ -2580,34 +2512,6 @@ mod tests {
                 Some("tag"),
                 10,
             ));
-        }
-        let stub = StubStorage;
-        _assert(&stub);
-    }
-
-    #[test]
-    fn configuration_version_store_compile_check() {
-        fn _assert<T: ConfigurationVersionStore>(t: &T) {
-            let id = Uuid::new_v4();
-            std::mem::drop(t.create_configuration_version(NewConfigurationVersion {
-                id,
-                space_id: Some(Uuid::new_v4()),
-                session_id: None,
-                entity_kind: "space".into(),
-                entity_id: "space-1".into(),
-                version_number: 1,
-                operation_kind: "create_space".into(),
-                source: "test".into(),
-                summary: "created space".into(),
-                snapshot: serde_json::json!({"name": "workspace-core"}),
-                diff: serde_json::json!([]),
-                previous_version_id: None,
-                undone_version_id: None,
-            }));
-            std::mem::drop(t.get_configuration_version(id));
-            std::mem::drop(t.list_configuration_versions(Some(Uuid::new_v4())));
-            std::mem::drop(t.list_configuration_versions_for_entity("space", "space-1"));
-            std::mem::drop(t.get_latest_configuration_version("space", "space-1"));
         }
         let stub = StubStorage;
         _assert(&stub);

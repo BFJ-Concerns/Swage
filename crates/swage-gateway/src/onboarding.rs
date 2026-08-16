@@ -710,22 +710,42 @@ pub async fn import_gateway_recovery_bundle(
                 })?,
             },
         };
-        state
-            .storage
-            .create_schedule(NewSchedule {
-                id: Uuid::new_v4(),
-                message: schedule.message,
-                status: parse_recovery_value::<ScheduleStatus>(&schedule.status)?,
-                kind: parse_recovery_value::<ScheduleKind>(&schedule.kind)?,
-                expression: schedule.expression,
-                session_policy,
-                creator: schedule.creator,
-                delivery_routing: schedule.delivery_routing,
-                gate: schedule.gate,
-                next_run_at: schedule.next_run_at,
-                last_run_at: schedule.last_run_at,
-            })
-            .await?;
+        let imported = NewSchedule {
+            id: Uuid::new_v4(),
+            message: schedule.message,
+            status: parse_recovery_value::<ScheduleStatus>(&schedule.status)?,
+            kind: parse_recovery_value::<ScheduleKind>(&schedule.kind)?,
+            expression: schedule.expression,
+            session_policy,
+            creator: schedule.creator,
+            delivery_routing: schedule.delivery_routing,
+            gate: schedule.gate,
+            next_run_at: schedule.next_run_at,
+            last_run_at: schedule.last_run_at,
+        };
+        let schedule_id = imported.id;
+        let summary = format!(
+            "imported schedule '{}' from a recovery bundle",
+            imported.message
+        );
+        let new_state = serde_json::to_value(&imported).unwrap_or(serde_json::Value::Null);
+        state.storage.create_schedule(imported).await?;
+        // An import is a configuration change like any other: recorded, or
+        // the whole import fails rather than leaving silent rows.
+        crate::config_change::record_config_change(
+            state,
+            crate::config_change::ConfigChange {
+                entity_kind: "schedule",
+                entity_id: &schedule_id.to_string(),
+                action: "import_schedule",
+                source: "recovery_bundle_import",
+                session_id: None,
+                summary: &summary,
+                prior_state: None,
+                new_state: Some(new_state),
+            },
+        )
+        .await?;
     }
 
     Ok(())

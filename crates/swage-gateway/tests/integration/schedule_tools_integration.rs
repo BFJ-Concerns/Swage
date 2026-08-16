@@ -25,7 +25,6 @@ use swage_core::{
     CompletionRequest, CompletionResponse, ProviderError, StreamChunk, ToolCompletionRequest,
     ToolCompletionResponse,
 };
-use swage_gateway::change_case::{ChangeOperation, apply_change, undo_case};
 use swage_gateway::service::ConversationService;
 use swage_gateway::tool::schedule::{ScheduleTool, WakeMeLaterTool};
 use swage_gateway::tool::{Tool, ToolDispatcher, ToolRegistry};
@@ -33,9 +32,7 @@ use swage_gateway::tool_executor::GatewayToolContext;
 use swage_gateway::{schedule, server::build_router, state::AppState};
 use swage_protocol::client::schedule::ScheduleStatus;
 use swage_provider::LlmProvider;
-use swage_storage::{
-    NewAgentDefinition, NewSchedule, ScheduleRunState, SqliteStorage, UpdateSchedule,
-};
+use swage_storage::{ScheduleRunState, SqliteStorage, UpdateSchedule};
 use swage_tool::context::MockToolContext;
 use swage_tool::permission::PermissionConfig;
 use swage_tool::rate_limit::{RateLimitConfig, RateLimiter};
@@ -270,7 +267,7 @@ async fn scheduling_bundle_can_pause_and_resume_a_schedule_through_the_tool() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn model_schedule_mutations_record_state_diffs_and_provenance() {
+async fn model_schedule_mutations_record_prior_and_new_state_and_provenance() {
     let state = test_state();
     let space = state.space_store.get_or_create_default().await.unwrap();
     let dispatcher = dispatcher(permissions(&["scheduling"], &[]));
@@ -290,10 +287,8 @@ async fn model_schedule_mutations_record_state_diffs_and_provenance() {
         )
         .await
         .unwrap();
-    let schedule_id = created.result["schedule"]["id"].as_str().unwrap();
-    let create_version = created.result["change_case"]["version_id"]
-        .as_str()
-        .unwrap();
+    let schedule_id = created.result["schedule"]["id"].as_str().unwrap().to_owned();
+    let schedule_id = schedule_id.as_str();
 
     let updated = dispatcher
         .dispatch(
@@ -306,9 +301,7 @@ async fn model_schedule_mutations_record_state_diffs_and_provenance() {
         )
         .await
         .unwrap();
-    let update_version = updated.result["change_case"]["version_id"]
-        .as_str()
-        .unwrap();
+    assert_eq!(updated.result["schedule"]["message"], "second task");
     let paused = dispatcher
         .dispatch(
             "schedule",
@@ -320,7 +313,7 @@ async fn model_schedule_mutations_record_state_diffs_and_provenance() {
         )
         .await
         .unwrap();
-    let pause_version = paused.result["change_case"]["version_id"].as_str().unwrap();
+    assert_eq!(paused.result["schedule"]["status"], "paused");
     let resumed = dispatcher
         .dispatch(
             "schedule",
@@ -332,9 +325,7 @@ async fn model_schedule_mutations_record_state_diffs_and_provenance() {
         )
         .await
         .unwrap();
-    let resume_version = resumed.result["change_case"]["version_id"]
-        .as_str()
-        .unwrap();
+    assert_eq!(resumed.result["schedule"]["status"], "active");
     let removed = dispatcher
         .dispatch(
             "schedule",
@@ -346,427 +337,82 @@ async fn model_schedule_mutations_record_state_diffs_and_provenance() {
         )
         .await
         .unwrap();
-    let delete_version = removed.result["change_case"]["version_id"]
-        .as_str()
-        .unwrap();
+    assert_eq!(removed.result["removed"], true);
 
-    let mut versions = state
-        .storage
-        .list_configuration_versions_for_entity("schedule", schedule_id)
-        .await
-        .unwrap();
-    versions.reverse();
-    assert_eq!(
-        versions.len(),
-        5,
-        "blind-accept records every landed mutation"
-    );
-    assert_eq!(
-        versions
-            .iter()
-            .map(|v| v.id.to_string())
-            .collect::<Vec<_>>(),
-        vec![
-            create_version,
-            update_version,
-            pause_version,
-            resume_version,
-            delete_version
-        ]
-    );
-    assert_eq!(versions[0].snapshot["message"], "first task");
-    assert_eq!(versions[0].diff["message"]["from"], serde_json::Value::Null);
-    assert_eq!(versions[0].diff["message"]["to"], "first task");
-    assert_eq!(versions[1].snapshot["message"], "second task");
-    assert_eq!(versions[1].diff["message"]["from"], "first task");
-    assert_eq!(versions[1].diff["message"]["to"], "second task");
-    assert_eq!(versions[2].diff["status"]["from"], "active");
-    assert_eq!(versions[2].diff["status"]["to"], "paused");
-    assert_eq!(versions[3].diff["status"]["from"], "paused");
-    assert_eq!(versions[3].diff["status"]["to"], "active");
-    assert!(versions[4].snapshot.is_null());
-    assert_eq!(versions[4].diff["message"]["from"], "second task");
-    assert_eq!(versions[4].diff["message"]["to"], serde_json::Value::Null);
-    assert!(
-        versions
-            .iter()
-            .all(|v| v.source == "schedule" && v.session_id == Some(session_id))
-    );
-    let space_versions = state
-        .storage
-        .list_configuration_versions(Some(space.id))
-        .await
-        .unwrap();
-    assert_eq!(
-        space_versions
-            .iter()
-            .filter(|version| version.entity_id == schedule_id)
-            .count(),
-        5,
-        "space history includes the schedule removal as well as its earlier mutations"
-    );
-
+    // Every landed mutation leaves one configuration_change audit event
+    // carrying the whole prior and new state under a named action.
     let audit = state
         .storage
         .list_audit_events_by_session(session_id)
         .await
         .unwrap();
-    assert_eq!(
-        audit
+    let changes: Vec<_> = audit
+        .iter()
+        .filter(|event| {
+            event.event_kind == "configuration_change" && event.entity_id == schedule_id
+        })
+        .collect();
+    assert_eq!(changes.len(), 5, "every landed mutation is recorded");
+
+    let by_action = |action: &str| {
+        changes
             .iter()
-            .filter(|event| event.entity_kind == "schedule")
-            .count(),
-        5
-    );
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn undo_surface_restores_schedule_state_and_records_the_undo() {
-    let state = test_state();
-    let router = build_router(state.clone());
-    let space = state.space_store.get_or_create_default().await.unwrap();
-    let dispatcher = dispatcher(permissions(&["scheduling"], &[]));
-    let session_id = tool_session(&state, space.id).await;
-    let ctx = host_context(&state, "researcher", session_id);
-
-    let created = dispatcher
-        .dispatch(
-            "schedule",
-            json!({
-                "action": "create", "message": "original task", "timing": "every",
-                "every": "every 1 hours", "session": "fresh", "space_id": space.id,
-                "agent_id": "gateway"
-            }),
-            &ctx,
-            "researcher",
-        )
-        .await
-        .unwrap();
-    let schedule_id = created.result["schedule"]["id"].as_str().unwrap();
-    let update = dispatcher
-        .dispatch(
-            "schedule",
-            json!({
-                "action": "update", "schedule_id": schedule_id, "message": "changed task",
-                "timing": "every", "every": "every 2 hours"
-            }),
-            &ctx,
-            "researcher",
-        )
-        .await
-        .unwrap();
-    let updated_case = update.result["change_case"]["version_id"].as_str().unwrap();
-
-    let (status, undo) = post_json(
-        &router,
-        "/api/operator/configuration/undo",
-        json!({"case_id": updated_case}),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    let restored = state
-        .storage
-        .get_schedule(schedule_id.parse().unwrap())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(
-        restored.message, "original task",
-        "the resource itself is restored"
-    );
-    assert_eq!(restored.expression, "every 1 hours");
-
-    assert_eq!(
-        undo["summary"],
-        format!("undid configuration case {updated_case}: restored schedule {schedule_id}")
-    );
-    let undo_version = undo["version_id"].as_str().unwrap();
-    let recorded = state
-        .storage
-        .get_configuration_version(undo_version.parse().unwrap())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(recorded.operation_kind, "undo");
-    assert_eq!(
-        recorded.undone_version_id.unwrap().to_string(),
-        updated_case
-    );
-    assert_eq!(recorded.diff["message"]["from"], "changed task");
-    assert_eq!(recorded.diff["message"]["to"], "original task");
-    assert_eq!(recorded.source, "operator_http");
-    assert_eq!(recorded.session_id, None);
-    let audit = state.storage.list_audit_events().await.unwrap();
-    assert!(
-        audit
-            .iter()
-            .any(|event| event.metadata["version_id"] == undo_version
-                && event.summary == undo["summary"])
-    );
-
-    let removed = dispatcher
-        .dispatch(
-            "schedule",
-            json!({"action": "remove", "schedule_id": schedule_id}),
-            &ctx,
-            "researcher",
-        )
-        .await
-        .unwrap();
-    let absence_version = removed.result["change_case"]["version_id"]
-        .as_str()
-        .unwrap();
-    let (status, _) = post_json(
-        &router,
-        "/api/operator/configuration/undo",
-        json!({"case_id": absence_version}),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    let restored = state
-        .storage
-        .get_schedule(schedule_id.parse().unwrap())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(restored.message, "original task");
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn undoing_schedule_creation_restores_absence_and_records_the_deletion() {
-    let state = test_state();
-    let router = build_router(state.clone());
-    let space = state.space_store.get_or_create_default().await.unwrap();
-    let dispatcher = dispatcher(permissions(&["scheduling"], &[]));
-    let ctx = host_context(&state, "researcher", tool_session(&state, space.id).await);
-    let created = dispatcher
-        .dispatch(
-            "schedule",
-            json!({
-                "action": "create", "message": "temporary task", "timing": "every",
-                "every": "every 1 hours", "session": "fresh", "space_id": space.id,
-                "agent_id": "gateway"
-            }),
-            &ctx,
-            "researcher",
-        )
-        .await
-        .unwrap();
-    let schedule_id = created.result["schedule"]["id"].as_str().unwrap();
-    let created_case = created.result["change_case"]["version_id"]
-        .as_str()
-        .unwrap();
-
-    let (status, undo) = post_json(
-        &router,
-        "/api/operator/configuration/undo",
-        json!({"case_id": created_case}),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert!(
-        state
-            .storage
-            .get_schedule(schedule_id.parse().unwrap())
-            .await
-            .unwrap()
-            .is_none()
-    );
-    assert_eq!(
-        undo["summary"],
-        format!("undid configuration case {created_case}: removed schedule {schedule_id}")
-    );
-
-    let undo_version = undo["version_id"].as_str().unwrap();
-    let recorded = state
-        .storage
-        .get_configuration_version(undo_version.parse().unwrap())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(recorded.operation_kind, "undo");
-    assert_eq!(
-        recorded.undone_version_id.unwrap().to_string(),
-        created_case
-    );
-    assert_eq!(recorded.diff["id"]["from"], schedule_id);
-    assert!(recorded.diff["id"]["to"].is_null());
-    assert!(recorded.snapshot.is_null());
-    let audit = state.storage.list_audit_events().await.unwrap();
-    assert!(audit.iter().any(|event| {
-        event.metadata["version_id"] == undo_version && event.summary == undo["summary"]
-    }));
-
-    let (status, second_undo) = post_json(
-        &router,
-        "/api/operator/configuration/undo",
-        json!({"case_id": created_case}),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(
-        second_undo["summary"],
-        format!(
-            "undid configuration case {created_case}: schedule {schedule_id} was already absent; nothing was removed"
-        )
-    );
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn agent_definition_undo_uses_the_same_prior_state_and_prior_absence_rule() {
-    let state = test_state();
-    let original = NewAgentDefinition {
-        id: "case-test-agent".into(),
-        space_id: None,
-        display_name: "Original".into(),
-        description: "first state".into(),
-        instructions: "Keep the first instructions".into(),
-        model_id: None,
-        tool_permissions: None,
-        skills: vec![],
-        output_schema: None,
-        output_max_retries: None,
+            .find(|event| event.metadata["action"] == action)
+            .unwrap_or_else(|| panic!("no recorded {action}"))
     };
-    let created = apply_change(
-        &state,
-        ChangeOperation::UpsertAgentDefinition {
-            definition: original.clone(),
-        },
-        "test",
-        None,
-    )
-    .await
-    .unwrap();
-    let mut updated = original.clone();
-    updated.display_name = "Updated".into();
-    updated.instructions = "Use the changed instructions".into();
-    let update_case = apply_change(
-        &state,
-        ChangeOperation::UpsertAgentDefinition {
-            definition: updated,
-        },
-        "test",
-        None,
-    )
-    .await
-    .unwrap();
+    let create = by_action("create_schedule");
+    assert!(create.metadata["prior_state"].is_null());
+    assert_eq!(create.metadata["new_state"]["message"], "first task");
+    let update = by_action("update_schedule");
+    assert_eq!(update.metadata["prior_state"]["message"], "first task");
+    assert_eq!(update.metadata["new_state"]["message"], "second task");
+    let pause = by_action("pause_schedule");
+    assert_eq!(pause.metadata["prior_state"]["status"], "active");
+    assert_eq!(pause.metadata["new_state"]["status"], "paused");
+    let resume = by_action("resume_schedule");
+    assert_eq!(resume.metadata["prior_state"]["status"], "paused");
+    assert_eq!(resume.metadata["new_state"]["status"], "active");
+    let delete = by_action("delete_schedule");
+    assert_eq!(delete.metadata["prior_state"]["message"], "second task");
+    assert!(delete.metadata["new_state"].is_null());
 
-    undo_case(&state, update_case.version_id, "operator_http", None)
-        .await
-        .unwrap();
-    let restored = state
-        .storage
-        .list_agent_definitions(None)
-        .await
-        .unwrap()
-        .into_iter()
-        .find(|definition| definition.id == "case-test-agent")
-        .unwrap();
-    assert_eq!(restored.display_name, "Original");
-    assert_eq!(restored.instructions, "Keep the first instructions");
-
-    let undo = undo_case(&state, created.version_id, "operator_http", None)
-        .await
-        .unwrap();
-    assert_eq!(
-        undo.summary,
-        format!(
-            "undid configuration case {}: removed agent definition 'case-test-agent'",
-            created.version_id
-        )
-    );
     assert!(
-        !state
-            .storage
-            .list_agent_definitions(None)
-            .await
-            .unwrap()
-            .into_iter()
-            .any(|definition| definition.id == "case-test-agent")
-    );
-
-    let second_undo = undo_case(&state, created.version_id, "operator_http", None)
-        .await
-        .unwrap();
-    assert_eq!(
-        second_undo.summary,
-        format!(
-            "undid configuration case {}: agent definition 'case-test-agent' was already absent; nothing was removed",
-            created.version_id
-        )
+        changes
+            .iter()
+            .all(|event| event.metadata["source"] == "schedule"
+                && event.session_id == Some(session_id)),
+        "provenance names the tool surface and the authoring session"
     );
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn change_case_validation_rejects_invalid_schedule_before_any_write() {
+async fn invalid_schedule_is_rejected_before_any_write() {
     let state = test_state();
     let space = state.space_store.get_or_create_default().await.unwrap();
     let dispatcher = dispatcher(permissions(&["scheduling"], &[]));
     let ctx = host_context(&state, "researcher", tool_session(&state, space.id).await);
-    let created = dispatcher
+
+    let rejected = dispatcher
         .dispatch(
             "schedule",
             json!({
-                "action": "create", "message": "valid task", "timing": "every",
-                "every": "every 1 hours", "session": "fresh", "space_id": space.id,
+                "action": "create", "message": "broken task", "timing": "every",
+                "every": "not an interval", "session": "fresh", "space_id": space.id,
                 "agent_id": "gateway"
             }),
             &ctx,
             "researcher",
         )
-        .await
-        .unwrap();
-    let stored = state
-        .storage
-        .get_schedule(
-            created.result["schedule"]["id"]
-                .as_str()
-                .unwrap()
-                .parse()
-                .unwrap(),
-        )
-        .await
-        .unwrap()
-        .unwrap();
-    let invalid_id = Uuid::new_v4();
-    let invalid = NewSchedule {
-        id: invalid_id,
-        message: stored.message,
-        status: stored.status,
-        kind: stored.kind,
-        expression: "not an interval".into(),
-        session_policy: stored.session_policy,
-        creator: stored.creator,
-        delivery_routing: stored.delivery_routing,
-        gate: stored.gate,
-        next_run_at: stored.next_run_at,
-        last_run_at: stored.last_run_at,
-    };
+        .await;
+    assert!(rejected.is_err(), "an invalid interval never lands");
+
+    // Nothing was written: no schedule row and no recorded change.
+    assert!(state.storage.list_schedules().await.unwrap().is_empty());
+    let audits = state.storage.list_audit_events().await.unwrap();
     assert!(
-        apply_change(
-            &state,
-            ChangeOperation::CreateSchedule { schedule: invalid },
-            "test",
-            None
-        )
-        .await
-        .is_err()
-    );
-    assert!(
-        state
-            .storage
-            .get_schedule(invalid_id)
-            .await
-            .unwrap()
-            .is_none()
-    );
-    assert!(
-        state
-            .storage
-            .list_configuration_versions_for_entity("schedule", &invalid_id.to_string())
-            .await
-            .unwrap()
-            .is_empty()
+        !audits.iter().any(|event| event.event_kind == "configuration_change"
+            && event.entity_kind == "schedule"),
+        "a rejected mutation leaves no configuration_change record"
     );
 }
 
@@ -795,29 +441,9 @@ async fn ordinary_schedule_edit_preserves_a_concurrent_tick_lifecycle() {
         .unwrap()
         .parse()
         .unwrap();
-    let stale = state
-        .storage
-        .get_schedule(schedule_id)
-        .await
-        .unwrap()
-        .unwrap();
-    let intended = NewSchedule {
-        id: stale.id,
-        message: "after tick".into(),
-        status: stale.status,
-        kind: stale.kind,
-        expression: stale.expression,
-        session_policy: stale.session_policy,
-        creator: stale.creator,
-        delivery_routing: stale.delivery_routing,
-        gate: stale.gate,
-        next_run_at: stale.next_run_at,
-        last_run_at: stale.last_run_at,
-    };
-
-    // Model the lifecycle advance that can land after resolution but before
-    // the configuration apply. The stale intended state must not replay the
-    // old due instant or erase the tick timestamp.
+    // The scheduler's tick advances lifecycle state the edit must not
+    // replay: an edit without a timing change leaves status, the due
+    // instant, and the tick timestamp untouched.
     let tick_at = Utc::now();
     state
         .storage
@@ -832,17 +458,19 @@ async fn ordinary_schedule_edit_preserves_a_concurrent_tick_lifecycle() {
         )
         .await
         .unwrap();
-    apply_change(
-        &state,
-        ChangeOperation::UpdateSchedule {
-            schedule: intended,
-            rearm: false,
-        },
-        "schedule",
-        Some(session_id),
-    )
-    .await
-    .unwrap();
+    dispatcher
+        .dispatch(
+            "schedule",
+            json!({
+                "action": "update",
+                "schedule_id": schedule_id.to_string(),
+                "message": "after tick"
+            }),
+            &ctx,
+            "researcher",
+        )
+        .await
+        .unwrap();
 
     let stored = state
         .storage
@@ -881,11 +509,6 @@ async fn wake_me_later_schedules_a_one_off_continuation_of_the_calling_session()
         .unwrap()
         .parse()
         .unwrap();
-    let version_id: Uuid = output.result["change_case"]["version_id"]
-        .as_str()
-        .unwrap()
-        .parse()
-        .unwrap();
 
     // The wake is a one-off schedule that continues this very session.
     let schedule = state
@@ -906,22 +529,21 @@ async fn wake_me_later_schedules_a_one_off_continuation_of_the_calling_session()
         schedule.kind,
         swage_storage::ScheduleKind::OneShot
     ));
-    let version = state
+    // The wake is recorded like any other configuration change, attributed
+    // to the tool surface and the calling session.
+    let audits = state
         .storage
-        .get_configuration_version(version_id)
+        .list_audit_events_by_session(session.id)
         .await
-        .unwrap()
         .unwrap();
-    assert_eq!(version.space_id, Some(space.id));
     assert!(
-        state
-            .storage
-            .list_configuration_versions(Some(space.id))
-            .await
-            .unwrap()
-            .iter()
-            .any(|version| version.id == version_id),
-        "the continuation wake remains visible in its owning space's configuration history"
+        audits.iter().any(|event| {
+            event.event_kind == "configuration_change"
+                && event.entity_id == schedule_id.to_string()
+                && event.metadata["action"] == "create_schedule"
+                && event.metadata["source"] == "wake_me_later"
+        }),
+        "the continuation wake leaves a configuration_change record"
     );
 }
 

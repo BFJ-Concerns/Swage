@@ -919,7 +919,6 @@ pub(crate) struct InMemoryDb {
     pub(crate) approvals: HashMap<Uuid, ApprovalRequest>,
     pub(crate) audit_events: Vec<swage_storage::AuditEvent>,
     pub(crate) agent_memories: Vec<swage_storage::AgentMemoryRecord>,
-    pub(crate) configuration_versions: Vec<swage_storage::ConfigurationVersion>,
     pub(crate) agent_messages: HashMap<Uuid, AgentMessage>,
     pub(crate) schedules: HashMap<Uuid, Schedule>,
     pub(crate) schedule_runs: HashMap<Uuid, ScheduleRun>,
@@ -3154,93 +3153,6 @@ impl swage_storage::store::AgentMemoryStore for MockStorage {
         records.sort_by_key(|record| std::cmp::Reverse(record.updated_at));
         records.truncate(limit);
         Ok(records)
-    }
-}
-
-#[async_trait]
-impl swage_storage::store::ConfigurationVersionStore for MockStorage {
-    async fn create_configuration_version(
-        &self,
-        version: swage_storage::NewConfigurationVersion,
-    ) -> Result<swage_storage::ConfigurationVersion, StorageError> {
-        let record = swage_storage::ConfigurationVersion {
-            id: version.id,
-            space_id: version.space_id,
-            session_id: version.session_id,
-            entity_kind: version.entity_kind,
-            entity_id: version.entity_id,
-            version_number: version.version_number,
-            operation_kind: version.operation_kind,
-            source: version.source,
-            summary: version.summary,
-            snapshot: version.snapshot,
-            diff: version.diff,
-            previous_version_id: version.previous_version_id,
-            undone_version_id: version.undone_version_id,
-            created_at: chrono::Utc::now(),
-        };
-        self.db
-            .lock()
-            .await
-            .configuration_versions
-            .push(record.clone());
-        Ok(record)
-    }
-
-    async fn get_configuration_version(
-        &self,
-        id: Uuid,
-    ) -> Result<Option<swage_storage::ConfigurationVersion>, StorageError> {
-        Ok(self
-            .db
-            .lock()
-            .await
-            .configuration_versions
-            .iter()
-            .find(|version| version.id == id)
-            .cloned())
-    }
-
-    async fn list_configuration_versions(
-        &self,
-        space_id: Option<Uuid>,
-    ) -> Result<Vec<swage_storage::ConfigurationVersion>, StorageError> {
-        let mut versions = self.db.lock().await.configuration_versions.clone();
-        if let Some(space_id) = space_id {
-            versions.retain(|version| version.space_id == Some(space_id));
-        }
-        versions.sort_by_key(|version| std::cmp::Reverse(version.created_at));
-        Ok(versions)
-    }
-
-    async fn list_configuration_versions_for_entity(
-        &self,
-        entity_kind: &str,
-        entity_id: &str,
-    ) -> Result<Vec<swage_storage::ConfigurationVersion>, StorageError> {
-        let mut versions = self
-            .db
-            .lock()
-            .await
-            .configuration_versions
-            .iter()
-            .filter(|version| version.entity_kind == entity_kind && version.entity_id == entity_id)
-            .cloned()
-            .collect::<Vec<_>>();
-        versions.sort_by_key(|version| std::cmp::Reverse(version.version_number));
-        Ok(versions)
-    }
-
-    async fn get_latest_configuration_version(
-        &self,
-        entity_kind: &str,
-        entity_id: &str,
-    ) -> Result<Option<swage_storage::ConfigurationVersion>, StorageError> {
-        Ok(self
-            .list_configuration_versions_for_entity(entity_kind, entity_id)
-            .await?
-            .into_iter()
-            .next())
     }
 }
 

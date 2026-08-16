@@ -45,10 +45,6 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
         ),
         ("025_materials", CREATE_MATERIAL_TABLES),
         ("028_deduplicate_attachment_ingestion_content", ""),
-        (
-            "031_configuration_versioning",
-            CREATE_CONFIGURATION_VERSION_TABLE,
-        ),
         ("032_agent_memory", CREATE_AGENT_MEMORY_TABLE),
         (
             "033_workspace_attachments",
@@ -420,32 +416,6 @@ const CREATE_DELIVERY_AND_AUDIT_TABLES: &str = "
             strftime('%Y-%m-%dT%H:%M:%fZ','now')
         );
     END;
-";
-
-const CREATE_CONFIGURATION_VERSION_TABLE: &str = "
-    CREATE TABLE IF NOT EXISTS configuration_versions (
-        id                     TEXT NOT NULL PRIMARY KEY,
-        space_id             TEXT REFERENCES spaces(id) ON DELETE CASCADE,
-        session_id             TEXT REFERENCES sessions(id) ON DELETE SET NULL,
-        entity_kind            TEXT NOT NULL,
-        entity_id              TEXT NOT NULL,
-        version_number         INTEGER NOT NULL,
-        operation_kind         TEXT NOT NULL,
-        source                 TEXT NOT NULL,
-        summary                TEXT NOT NULL,
-        snapshot_json          TEXT NOT NULL,
-        diff_json              TEXT NOT NULL,
-        previous_version_id    TEXT REFERENCES configuration_versions(id) ON DELETE SET NULL,
-        undone_version_id      TEXT REFERENCES configuration_versions(id) ON DELETE SET NULL,
-        created_at             TEXT NOT NULL
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_configuration_versions_space
-        ON configuration_versions(space_id, created_at DESC);
-    CREATE INDEX IF NOT EXISTS idx_configuration_versions_entity
-        ON configuration_versions(entity_kind, entity_id, version_number DESC);
-    CREATE INDEX IF NOT EXISTS idx_configuration_versions_session
-        ON configuration_versions(session_id, created_at DESC);
 ";
 
 const CREATE_AGENT_MEMORY_TABLE: &str = "
