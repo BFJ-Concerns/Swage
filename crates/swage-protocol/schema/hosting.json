@@ -628,7 +628,7 @@
       ]
     },
     "EffectiveAgentDefinitionSourceScope": {
-      "description": "An agent definition available when creating a session in one space.",
+      "description": "Where an effective agent definition comes from.",
       "type": "string",
       "enum": [
         "built_in",

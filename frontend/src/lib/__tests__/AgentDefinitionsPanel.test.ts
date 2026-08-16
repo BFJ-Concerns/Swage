@@ -53,36 +53,37 @@ describe("AgentDefinitionsPanel", () => {
   });
 
   it("lists effective definitions with source labels and opens complete details", async () => {
+    const shadowedGlobal = definition("shared", "global", { display_name: "Earlier researcher" });
+    const spaceWinner = definition("shared", "space", {
+      display_name: "Primary researcher",
+      instructions: "Use primary sources.",
+      model_id: "research/model",
+      tool_permissions: { allow: ["web_search"] },
+      skills: ["citations", "analysis"],
+      output_schema: { type: "object", required: ["answer"] },
+    });
     const definitions = [
-      definition("gateway", "built_in", { display_name: "Swage default" }),
-      definition("shared", "space", {
-        display_name: "Space researcher",
-        instructions: "Use primary sources.",
-        model_id: "research/model",
-        tool_permissions: { allow: ["web_search"] },
-        skills: ["citations", "analysis"],
-        output_schema: { type: "object", required: ["answer"] },
-      }),
-      definition("global-only", "global", { display_name: "Global helper" }),
+      definition("gateway", "built_in", { display_name: "Standard assistant" }),
+      spaceWinner,
+      definition("global-only", "global", { display_name: "Shared helper" }),
     ];
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response(JSON.stringify({ definitions }), { status: 200 }),
     );
     component = mount(AgentDefinitionsPanel, { target: document.body, props: { spaceId: "space-1" } });
-    await vi.waitFor(() => expect(document.body.textContent).toContain("Swage default"));
+    await vi.waitFor(() => expect(document.body.textContent).toContain("Standard assistant"));
 
-    expect(document.body.textContent).toContain("Swage default");
-    expect(document.body.textContent).toContain("Built-in default");
-    expect(document.body.textContent).toContain("This space");
-    expect(document.body.textContent).toContain("Global");
-    expect(document.body.textContent).not.toContain("Global researcher");
+    const sourceLabels = Array.from(document.querySelectorAll(".definition-list .source"), (label) => label.textContent);
+    expect(sourceLabels).toEqual(["Built-in default", "This space", "Global"]);
+    expect(document.body.textContent).toContain(spaceWinner.display_name);
+    expect(document.body.textContent).not.toContain(shadowedGlobal.display_name);
 
     const spaceResearcher = Array.from(document.querySelectorAll("button")).find(
-      (button) => button.textContent?.includes("Space researcher"),
+      (button) => button.textContent?.includes("Primary researcher"),
     );
     flushSync(() => spaceResearcher?.click());
 
-    const detail = document.querySelector('[aria-label="Space researcher configuration"]');
+    const detail = document.querySelector('[aria-label="Primary researcher configuration"]');
     expect(detail?.textContent).toContain("Use primary sources.");
     expect(detail?.textContent).toContain("research/model");
     expect(detail?.textContent).toContain("web_search");
