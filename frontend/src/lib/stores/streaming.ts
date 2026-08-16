@@ -262,7 +262,7 @@ export function createStreamingStore(
           {
             const streamedContent = get(streamedContentStore);
             const activeToolCalls = get(activeToolCallsStore);
-            if (streamedContent) {
+            if (streamedContent || activeToolCalls.length > 0) {
               pushAssistantMessage(
                 streamedContent,
                 "completed",
