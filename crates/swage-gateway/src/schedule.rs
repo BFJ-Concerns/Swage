@@ -418,8 +418,11 @@ pub(crate) async fn pause_schedule_change(
     session_id: Option<Uuid>,
 ) -> Result<wire::Schedule, GatewayError> {
     let intended = resolve_pause_schedule(state, schedule_id).await?;
+    // Shape only: pausing is a recovery action, and a schedule whose
+    // environment has drifted (its gate model unregistered, its
+    // continuation session gone) must still be pausable. Resume re-arms
+    // execution and keeps the full resolved validation.
     validate_schedule_shape(&intended)?;
-    validate_resolved_schedule(state, &intended).await?;
 
     let prior = schedule_snapshot(state, schedule_id).await?;
     let summary = format!("paused schedule '{}'", intended.message);
@@ -550,7 +553,7 @@ fn validate_schedule_shape(schedule: &NewSchedule) -> Result<(), GatewayError> {
 
 /// The schedule's current stored state, `None` when absent — the snapshots
 /// a recorded configuration change carries.
-async fn schedule_snapshot(
+pub(crate) async fn schedule_snapshot(
     state: &AppState,
     schedule_id: Uuid,
 ) -> Result<Option<serde_json::Value>, GatewayError> {
