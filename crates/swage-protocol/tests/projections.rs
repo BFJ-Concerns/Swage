@@ -57,6 +57,17 @@ fn typescript_bindings_are_regenerated() {
     client::settings::SaveSettingsRequest::export_all(&cfg).expect("export save settings");
     client::settings::ModelDiscoveryResponse::export_all(&cfg).expect("export model discovery");
     client::settings::RestartStatusResponse::export_all(&cfg).expect("export restart status");
+    client::material::CreateAttachmentRequest::export_all(&cfg).expect("export attachment request");
+    client::material::QueuedAttachmentResponse::export_all(&cfg).expect("export queued attachment");
+    client::material::AttachmentListResponse::export_all(&cfg).expect("export attachments");
+    client::material::CreateMaterialRequest::export_all(&cfg).expect("export material request");
+    client::material::PromoteMaterialRequest::export_all(&cfg).expect("export material promotion");
+    client::material::MaterialListResponse::export_all(&cfg).expect("export materials");
+    client::recovery::RecoveryExportListResponse::export_all(&cfg).expect("export recovery list");
+    client::space::UpdateWorkspaceTrustRequest::export_all(&cfg).expect("export workspace trust");
+    client::conversation::CreateConversationBranchRequest::export_all(&cfg).expect("export conversation branch request");
+    client::voice::TranscribeAudioResponse::export_all(&cfg).expect("export transcription response");
+    client::voice::SynthesiseSpeechResponse::export_all(&cfg).expect("export speech response");
     client::knowledge::KnowledgeSearchResponse::export_all(&cfg)
         .expect("export knowledge search response");
     client::knowledge::OrientationFindResponse::export_all(&cfg)

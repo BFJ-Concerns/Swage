@@ -1,6 +1,5 @@
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
 use tokio::fs;
 use uuid::Uuid;
 
@@ -10,48 +9,7 @@ use swage_storage::{Attachment, AttachmentScopeKind, Material, MaterialSourceKin
 
 use crate::{state::AppState, tool::workspace::validate_path};
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct CreateMaterialRequest {
-    pub scope_kind: String,
-    pub session_id: Option<Uuid>,
-    pub space_id: Option<Uuid>,
-    pub title: String,
-    pub relative_path: String,
-    pub mime_type: Option<String>,
-    pub content_text: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct PromoteMaterialRequest {
-    pub scope_kind: String,
-    pub session_id: Option<Uuid>,
-    pub space_id: Option<Uuid>,
-    pub relative_path: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct MaterialResponse {
-    pub id: Uuid,
-    pub scope_kind: String,
-    pub session_id: Option<Uuid>,
-    pub space_id: Option<Uuid>,
-    pub source_kind: String,
-    pub source_attachment_id: Option<Uuid>,
-    pub status: String,
-    pub title: String,
-    pub relative_path: String,
-    pub absolute_path: String,
-    pub mime_type: String,
-    pub content_text: String,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    pub updated_at: chrono::DateTime<chrono::Utc>,
-    pub archived_at: Option<chrono::DateTime<chrono::Utc>>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct MaterialListResponse {
-    pub materials: Vec<MaterialResponse>,
-}
+pub use swage_protocol::client::material::{CreateMaterialRequest, MaterialListResponse, MaterialResponse, PromoteMaterialRequest};
 
 pub async fn create_material(
     state: &AppState,
