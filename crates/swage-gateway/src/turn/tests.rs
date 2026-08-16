@@ -4898,7 +4898,7 @@ async fn make_state_with_tool_provider(provider: Arc<dyn LlmProvider>) -> (AppSt
     (state, session_id)
 }
 
-async fn make_state_with_capturing_tools(
+pub(crate) async fn make_state_with_capturing_tools(
     rounds: Vec<Vec<StreamChunk>>,
 ) -> (
     AppState,
@@ -4947,6 +4947,25 @@ async fn make_state_with_capturing_tools(
     );
 
     (state, session_id, captured)
+}
+
+pub(crate) async fn make_state_with_approval_gated_echo(
+    rounds: Vec<Vec<StreamChunk>>,
+) -> (AppState, Uuid) {
+    let (state, session_id, _) = make_state_with_capturing_tools(rounds).await;
+    let mut runtime_config = state.active_config();
+    runtime_config.tools.permissions.require_approval =
+        vec![swage_config::model::RequireApprovalEntry::Simple(
+            "echo".into(),
+        )];
+    state.replace_runtime(
+        runtime_config,
+        state.active_provider(),
+        crate::tool::ToolDispatcher::allow_all(vec![
+            Arc::new(EchoMockTool) as Arc<dyn crate::tool::Tool>
+        ]),
+    );
+    (state, session_id)
 }
 
 // -----------------------------------------------------------------------
@@ -6447,6 +6466,91 @@ fn orphaned_nested_replay_is_rejected() {
         .expect_err("orphaned nested replay must not be regrouped silently");
 
     assert!(matches!(error, StorageError::Corruption { .. }));
+}
+
+#[tokio::test]
+async fn attended_turn_prompts_and_records_rejected_granted_tool_call() {
+    let rounds = vec![
+        vec![
+            StreamChunk::ToolUse {
+                call_id: "attended-rejection".into(),
+                name: "echo".into(),
+                arguments: serde_json::json!({ "text": "must not execute" }),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ],
+        vec![
+            StreamChunk::Delta {
+                content: "The operator rejected the call.".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ],
+    ];
+    let (state, session_id) = make_state_with_approval_gated_echo(rounds).await;
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let task_state = state.clone();
+    let task = tokio::spawn(async move {
+        process_turn(
+            &task_state,
+            session_id,
+            None,
+            "Use echo".into(),
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
+        )
+        .await
+    });
+
+    let approval_id = loop {
+        match rx.recv().await.expect("attended turn should emit events") {
+            ServerEvent::ApprovalRequired { approval_id, .. } => break approval_id,
+            _ => continue,
+        }
+    };
+    state
+        .approval_channels
+        .lock()
+        .unwrap()
+        .remove(&approval_id)
+        .expect("approval decision channel should be registered")
+        .send(swage_agent::ApprovalDecision {
+            decision: swage_agent::approval::ApprovalDecisionValue::Rejected,
+            scope: swage_agent::approval::ApprovalDecisionScope::Once,
+            reason: Some("operator declined".into()),
+        })
+        .expect("rejection should be delivered");
+    task.await
+        .expect("turn task should finish")
+        .expect("rejection should be returned to the model visibly");
+
+    let approval = state
+        .storage
+        .get_approval(approval_id)
+        .await
+        .expect("approval lookup")
+        .expect("approval row should remain recorded");
+    assert_eq!(approval.state, ApprovalState::Rejected);
+    let thread = state.storage.list_by_session(session_id).await.unwrap()[0].clone();
+    let turn = state.storage.list_turns_by_thread(thread.id).await.unwrap()[0].clone();
+    let calls = state
+        .storage
+        .list_tool_calls_by_turn(turn.id)
+        .await
+        .unwrap();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].status.as_deref(), Some("rejected"));
+    assert!(
+        calls[0]
+            .result
+            .as_deref()
+            .is_some_and(|result| result.contains("operator declined")),
+        "the recorded call should expose the rejection to the model"
+    );
 }
 
 #[tokio::test]
