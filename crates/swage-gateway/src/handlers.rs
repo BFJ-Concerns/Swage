@@ -4140,10 +4140,7 @@ mod tests {
         let report_json = serde_json::to_string(&report).unwrap();
 
         // Store a snapshot directly — simulates what the context engine writes.
-        storage
-            .store_snapshot(turn_id, &report_json)
-            .await
-            .unwrap();
+        storage.store_snapshot(turn_id, &report_json).await.unwrap();
 
         let resp = router
             .oneshot(
