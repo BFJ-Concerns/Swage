@@ -19,7 +19,7 @@ export type CreateWorkspaceAttachmentRequest = Omit<
   permissions?: string[];
   is_trusted?: boolean;
 };
-export interface UpdateWorkspaceTrustRequest { is_trusted: boolean }
+export type { UpdateWorkspaceTrustRequest } from "./protocol/UpdateWorkspaceTrustRequest";
 
 export type Space = SpaceResponse & {
   /** Client-side recency marker until the gateway persists last_opened_at. */
@@ -143,77 +143,24 @@ export type MessageView = Omit<WireMessageView, "role" | "tool_calls" | "thread_
 // -------------------------------------------------------------------------
 
 export type MaterialScopeKind = "session" | "space";
+export type { MaterialResponse as MaterialRecord } from "./protocol/MaterialResponse";
+export type { AttachmentResponse as AttachmentRecord } from "./protocol/AttachmentResponse";
+export type { BackgroundJobResponse as BackgroundJobRecord } from "./protocol/BackgroundJobResponse";
+export type { QueuedAttachmentResponse as AttachmentQueuedResponse } from "./protocol/QueuedAttachmentResponse";
 
-export interface MaterialRecord {
-  id: string;
-  scope_kind: MaterialScopeKind;
-  session_id: string | null;
-  space_id: string | null;
-  source_kind: string;
-  source_attachment_id: string | null;
-  status: string;
-  title: string;
-  relative_path: string;
-  absolute_path: string;
-  mime_type: string;
-  content_text: string;
-  created_at: string;
-  updated_at: string;
-  archived_at: string | null;
-}
-
-export interface AttachmentRecord {
-  id: string;
-  scope_kind: MaterialScopeKind;
-  session_id: string | null;
-  space_id: string | null;
-  kind: string;
-  status: string;
-  filename: string;
-  mime_type: string;
-  byte_count: number;
-  ingested_markdown: string | null;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface BackgroundJobRecord {
-  id: string;
-  kind: string;
-  state: string;
-  attachment_id: string | null;
-  result: Record<string, unknown> | null;
-  error_message: string | null;
-  attempt_count: number;
-  created_at: string;
-  updated_at: string;
-  started_at: string | null;
-  completed_at: string | null;
-}
-
-export interface CreateAttachmentRequest {
+import type { CreateAttachmentRequest as WireCreateAttachmentRequest } from "./protocol/CreateAttachmentRequest";
+import type { CreateMaterialRequest as WireCreateMaterialRequest } from "./protocol/CreateMaterialRequest";
+export type CreateAttachmentRequest = Omit<WireCreateAttachmentRequest, "scope_kind" | "session_id" | "space_id"> & {
   scope_kind: MaterialScopeKind;
   session_id?: string;
   space_id?: string;
-  filename: string;
-  mime_type: string;
-  content_base64: string;
-}
-
-export interface AttachmentQueuedResponse {
-  attachment: AttachmentRecord;
-  job: BackgroundJobRecord;
-}
-
-export interface CreateMaterialRequest {
+};
+export type CreateMaterialRequest = Omit<WireCreateMaterialRequest, "scope_kind" | "session_id" | "space_id" | "mime_type"> & {
   scope_kind: MaterialScopeKind;
   session_id?: string;
   space_id?: string;
-  title: string;
-  relative_path: string;
   mime_type?: string;
-  content_text: string;
-}
+};
 
 // -------------------------------------------------------------------------
 // Operator surface types
@@ -226,22 +173,8 @@ export type { ChannelStatusResponse as ChannelStatusSummary } from "./protocol/C
 export type { ApprovalSummary as OperatorApprovalSummary } from "./protocol/ApprovalSummary";
 export type { OperatorOverviewResponse as OperatorOverview } from "./protocol/OperatorOverviewResponse";
 
-export interface RecoveryExportSummary {
-  id: string;
-  created_at: string;
-  size_bytes: number;
-  spaces: number;
-  workspaces: number;
-  sessions: number;
-  secrets: number;
-  channel_links: number;
-  devices: number;
-  schedules: number;
-}
-
-export interface RecoveryExportListResponse {
-  exports: RecoveryExportSummary[];
-}
+export type { RecoveryExportSummary } from "./protocol/RecoveryExportSummary";
+export type { RecoveryExportListResponse } from "./protocol/RecoveryExportListResponse";
 
 // -------------------------------------------------------------------------
 // WebSocket event types

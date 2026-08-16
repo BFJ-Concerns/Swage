@@ -7,7 +7,9 @@ pub mod conversation;
 pub mod context;
 pub mod delivery;
 pub mod knowledge;
+pub mod material;
 pub mod provider_signin;
+pub mod recovery;
 pub mod schedule;
 pub mod settings;
 pub mod space;
@@ -54,6 +56,12 @@ pub struct ClientSurface {
     save_settings: settings::SaveSettingsRequest,
     model_discovery: settings::ModelDiscoveryResponse,
     restart_status: settings::RestartStatusResponse,
+    queued_attachment: material::QueuedAttachmentResponse,
+    attachment_list: material::AttachmentListResponse,
+    create_material: material::CreateMaterialRequest,
+    promote_material: material::PromoteMaterialRequest,
+    material_list: material::MaterialListResponse,
+    recovery_exports: recovery::RecoveryExportListResponse,
     knowledge_search: knowledge::KnowledgeSearchResponse,
     orientation_find: knowledge::OrientationFindResponse,
     create_schedule_request: schedule::CreateScheduleRequest,

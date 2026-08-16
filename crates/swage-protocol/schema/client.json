@@ -4,6 +4,9 @@
   "description": "Anchor type for the client surface's schema document.\n\nEvery wire type on the surface is reachable from here, so a single\n`schema_for!` call produces one document with the full type graph in\n`$defs`. The struct itself never crosses the wire — it exists only so\nthe schema generator has a root to walk from.",
   "type": "object",
   "properties": {
+    "attachment_list": {
+      "$ref": "#/$defs/AttachmentListResponse"
+    },
     "channel_link_code_response": {
       "$ref": "#/$defs/ChannelLinkCodeResponse"
     },
@@ -28,6 +31,9 @@
     "create_conversation_request": {
       "$ref": "#/$defs/CreateConversationRequest"
     },
+    "create_material": {
+      "$ref": "#/$defs/CreateMaterialRequest"
+    },
     "create_schedule_request": {
       "$ref": "#/$defs/CreateScheduleRequest"
     },
@@ -43,6 +49,9 @@
     "knowledge_search": {
       "$ref": "#/$defs/KnowledgeSearchResponse"
     },
+    "material_list": {
+      "$ref": "#/$defs/MaterialListResponse"
+    },
     "message_response": {
       "$ref": "#/$defs/MessageResponse"
     },
@@ -52,8 +61,17 @@
     "orientation_find": {
       "$ref": "#/$defs/OrientationFindResponse"
     },
+    "promote_material": {
+      "$ref": "#/$defs/PromoteMaterialRequest"
+    },
     "provider_sign_in_state": {
       "$ref": "#/$defs/ProviderSignInState"
+    },
+    "queued_attachment": {
+      "$ref": "#/$defs/QueuedAttachmentResponse"
+    },
+    "recovery_exports": {
+      "$ref": "#/$defs/RecoveryExportListResponse"
     },
     "restart_status": {
       "$ref": "#/$defs/RestartStatusResponse"
@@ -180,6 +198,12 @@
     "save_settings",
     "model_discovery",
     "restart_status",
+    "queued_attachment",
+    "attachment_list",
+    "create_material",
+    "promote_material",
+    "material_list",
+    "recovery_exports",
     "knowledge_search",
     "orientation_find",
     "create_schedule_request",
@@ -308,6 +332,150 @@
         "warnings",
         "errors",
         "duration"
+      ]
+    },
+    "AttachmentListResponse": {
+      "type": "object",
+      "properties": {
+        "attachments": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AttachmentResponse"
+          }
+        }
+      },
+      "required": [
+        "attachments"
+      ]
+    },
+    "AttachmentResponse": {
+      "type": "object",
+      "properties": {
+        "byte_count": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "filename": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "ingested_markdown": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "type": "string"
+        },
+        "mime_type": {
+          "type": "string"
+        },
+        "scope_kind": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "space_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "status": {
+          "type": "string"
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "scope_kind",
+        "kind",
+        "status",
+        "filename",
+        "mime_type",
+        "byte_count",
+        "created_at",
+        "updated_at"
+      ]
+    },
+    "BackgroundJobResponse": {
+      "type": "object",
+      "properties": {
+        "attachment_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "attempt_count": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "completed_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "error_message": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "result": true,
+        "started_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "state": {
+          "type": "string"
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "state",
+        "attempt_count",
+        "created_at",
+        "updated_at"
       ]
     },
     "ChannelLinkCodeResponse": {
@@ -929,6 +1097,49 @@
       },
       "additionalProperties": false
     },
+    "CreateMaterialRequest": {
+      "type": "object",
+      "properties": {
+        "content_text": {
+          "type": "string"
+        },
+        "mime_type": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "relative_path": {
+          "type": "string"
+        },
+        "scope_kind": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "space_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "scope_kind",
+        "title",
+        "relative_path",
+        "content_text"
+      ]
+    },
     "CreateScheduleRequest": {
       "description": "Create a schedule.",
       "type": "object",
@@ -1387,6 +1598,102 @@
         "passage"
       ]
     },
+    "MaterialListResponse": {
+      "type": "object",
+      "properties": {
+        "materials": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MaterialResponse"
+          }
+        }
+      },
+      "required": [
+        "materials"
+      ]
+    },
+    "MaterialResponse": {
+      "type": "object",
+      "properties": {
+        "absolute_path": {
+          "type": "string"
+        },
+        "archived_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "content_text": {
+          "type": "string"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "mime_type": {
+          "type": "string"
+        },
+        "relative_path": {
+          "type": "string"
+        },
+        "scope_kind": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "source_attachment_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "source_kind": {
+          "type": "string"
+        },
+        "space_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "status": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "scope_kind",
+        "source_kind",
+        "status",
+        "title",
+        "relative_path",
+        "absolute_path",
+        "mime_type",
+        "content_text",
+        "created_at",
+        "updated_at"
+      ]
+    },
     "MessageResponse": {
       "type": "object",
       "properties": {
@@ -1639,6 +1946,35 @@
         "models"
       ]
     },
+    "PromoteMaterialRequest": {
+      "type": "object",
+      "properties": {
+        "relative_path": {
+          "type": "string"
+        },
+        "scope_kind": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "space_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        }
+      },
+      "required": [
+        "scope_kind",
+        "relative_path"
+      ]
+    },
     "ProviderAccount": {
       "type": "object",
       "properties": {
@@ -1800,6 +2136,100 @@
       "type": "string",
       "enum": [
         "bundled_then_system"
+      ]
+    },
+    "QueuedAttachmentResponse": {
+      "type": "object",
+      "properties": {
+        "attachment": {
+          "$ref": "#/$defs/AttachmentResponse"
+        },
+        "job": {
+          "$ref": "#/$defs/BackgroundJobResponse"
+        }
+      },
+      "required": [
+        "attachment",
+        "job"
+      ]
+    },
+    "RecoveryExportListResponse": {
+      "type": "object",
+      "properties": {
+        "exports": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RecoveryExportSummary"
+          }
+        }
+      },
+      "required": [
+        "exports"
+      ]
+    },
+    "RecoveryExportSummary": {
+      "type": "object",
+      "properties": {
+        "channel_links": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "devices": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "schedules": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "secrets": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "sessions": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "size_bytes": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "spaces": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "workspaces": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "id",
+        "created_at",
+        "size_bytes",
+        "spaces",
+        "workspaces",
+        "sessions",
+        "secrets",
+        "channel_links",
+        "devices",
+        "schedules"
       ]
     },
     "RequireApprovalEntry": {
