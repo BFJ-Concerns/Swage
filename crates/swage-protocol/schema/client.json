@@ -25,8 +25,14 @@
     "conversation_thread": {
       "$ref": "#/$defs/ConversationThreadDetail"
     },
+    "create_attachment_request": {
+      "$ref": "#/$defs/CreateAttachmentRequest"
+    },
     "create_channel_link_code_request": {
       "$ref": "#/$defs/CreateChannelLinkCodeRequest"
+    },
+    "create_conversation_branch_request": {
+      "$ref": "#/$defs/CreateConversationBranchRequest"
     },
     "create_conversation_request": {
       "$ref": "#/$defs/CreateConversationRequest"
@@ -124,8 +130,14 @@
     "synthesise_speech": {
       "$ref": "#/$defs/SynthesiseSpeechRequest"
     },
+    "synthesise_speech_response": {
+      "$ref": "#/$defs/SynthesiseSpeechResponse"
+    },
     "transcribe_audio": {
       "$ref": "#/$defs/TranscribeAudioRequest"
+    },
+    "transcribe_audio_response": {
+      "$ref": "#/$defs/TranscribeAudioResponse"
     },
     "trigger_schedule_response": {
       "$ref": "#/$defs/TriggerScheduleResponse"
@@ -144,6 +156,9 @@
     },
     "update_workflow_script_request": {
       "$ref": "#/$defs/UpdateWorkflowScriptRequest"
+    },
+    "update_workspace_trust_request": {
+      "$ref": "#/$defs/UpdateWorkspaceTrustRequest"
     },
     "voice_capabilities": {
       "$ref": "#/$defs/VoiceCapabilitiesResponse"
@@ -175,15 +190,19 @@
     "server_event",
     "voice_capabilities",
     "transcribe_audio",
+    "transcribe_audio_response",
     "synthesise_speech",
+    "synthesise_speech_response",
     "create_channel_link_code_request",
     "create_space_request",
     "update_space_request",
     "space_list",
     "create_workspace_attachment_request",
+    "update_workspace_trust_request",
     "workspace_attachment_list",
     "channel_link_code_response",
     "create_conversation_request",
+    "create_conversation_branch_request",
     "conversation",
     "conversation_list",
     "conversation_detail",
@@ -198,6 +217,7 @@
     "save_settings",
     "model_discovery",
     "restart_status",
+    "create_attachment_request",
     "queued_attachment",
     "attachment_list",
     "create_material",
@@ -800,6 +820,7 @@
           }
         }
       },
+      "additionalProperties": false,
       "required": [
         "mode",
         "allowed_fields",
@@ -843,6 +864,7 @@
           "minimum": 0
         }
       },
+      "additionalProperties": false,
       "required": [
         "mode",
         "allowed_fields"
@@ -1042,6 +1064,43 @@
         "messages"
       ]
     },
+    "CreateAttachmentRequest": {
+      "type": "object",
+      "properties": {
+        "content_base64": {
+          "type": "string"
+        },
+        "filename": {
+          "type": "string"
+        },
+        "mime_type": {
+          "type": "string"
+        },
+        "scope_kind": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "space_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        }
+      },
+      "required": [
+        "scope_kind",
+        "filename",
+        "mime_type",
+        "content_base64"
+      ]
+    },
     "CreateChannelLinkCodeRequest": {
       "description": "Request a short-lived code that links a channel conversation to a space.",
       "type": "object",
@@ -1078,6 +1137,23 @@
       },
       "required": [
         "integration"
+      ]
+    },
+    "CreateConversationBranchRequest": {
+      "type": "object",
+      "properties": {
+        "from_message_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "thread_id": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "required": [
+        "thread_id",
+        "from_message_id"
       ]
     },
     "CreateConversationRequest": {
@@ -2246,34 +2322,38 @@
           "type": "string"
         },
         {
-          "type": "object",
-          "properties": {
-            "timeout": {
-              "type": [
-                "integer",
-                "null"
-              ],
-              "format": "uint64",
-              "minimum": 0
-            },
-            "timeout_policy": {
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/ApprovalTimeoutPolicy"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "tool": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "tool"
-          ]
+          "$ref": "#/$defs/RequireApprovalOptions"
         }
+      ]
+    },
+    "RequireApprovalOptions": {
+      "type": "object",
+      "properties": {
+        "timeout": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "timeout_policy": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ApprovalTimeoutPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tool": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "tool"
       ]
     },
     "RestartStatusResponse": {
@@ -4035,6 +4115,31 @@
         "text"
       ]
     },
+    "SynthesiseSpeechResponse": {
+      "type": "object",
+      "properties": {
+        "audio_bytes": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint8",
+            "maximum": 255,
+            "minimum": 0
+          }
+        },
+        "mime_type": {
+          "type": "string"
+        },
+        "voice": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "audio_bytes",
+        "mime_type",
+        "voice"
+      ]
+    },
     "ToolCallView": {
       "type": "object",
       "properties": {
@@ -4182,6 +4287,17 @@
       "required": [
         "audio_bytes",
         "mime_type"
+      ]
+    },
+    "TranscribeAudioResponse": {
+      "type": "object",
+      "properties": {
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "text"
       ]
     },
     "TriggerScheduleResponse": {
@@ -4350,6 +4466,17 @@
           ]
         }
       }
+    },
+    "UpdateWorkspaceTrustRequest": {
+      "type": "object",
+      "properties": {
+        "is_trusted": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "is_trusted"
+      ]
     },
     "VoiceCapabilitiesResponse": {
       "type": "object",
