@@ -200,7 +200,7 @@ pub struct SearchProviderConfig {
 ///
 /// Follows the same allow/deny/bundle model as `swage_tool::PermissionConfig`.
 /// When no permissions are configured at any level, tools remain broadly
-/// available, but high-risk tools are gated by human approval.
+/// available without interactive approval prompts.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolPermissionConfig {
     pub allow: Vec<String>,
@@ -210,7 +210,7 @@ pub struct ToolPermissionConfig {
     ///
     /// Each entry is either a plain tool name (uses global HITL defaults) or
     /// an object with per-tool timeout and policy overrides. Defaults to empty
-    /// — high-risk defaults apply unless explicitly overridden.
+    /// — prompting is enabled only through explicit operator configuration.
     #[serde(default)]
     pub require_approval: Vec<RequireApprovalEntry>,
 }
@@ -271,25 +271,9 @@ impl Default for ToolPermissionConfig {
             allow: vec!["*".into()],
             deny: vec![],
             bundles,
-            require_approval: default_high_risk_tool_approvals(),
+            require_approval: vec![],
         }
     }
-}
-
-fn default_high_risk_tool_approvals() -> Vec<RequireApprovalEntry> {
-    [
-        "shell",
-        "file_edit",
-        "file_write",
-        "python_execute",
-        "browser_click",
-        "browser_type",
-        "browser_select",
-        "browser_scroll",
-    ]
-    .into_iter()
-    .map(|tool| RequireApprovalEntry::Simple(tool.to_string()))
-    .collect()
 }
 
 /// Settings for the gateway-hosted browser tools.
@@ -1297,7 +1281,7 @@ timeout_policy = "reject"
     // --- ToolPermissionConfig tests ---
 
     #[test]
-    fn tool_permission_config_default_gates_high_risk_tools() {
+    fn tool_permission_config_default_has_no_approval_prompts() {
         let cfg = ToolPermissionConfig::default();
         assert_eq!(cfg.allow, vec!["*".to_string()]);
         assert!(cfg.deny.is_empty());
@@ -1351,22 +1335,7 @@ timeout_policy = "reject"
                 .expect("knowledge orientation curation bundle"),
             &vec!["knowledge_curate_orientation".to_string()]
         );
-        assert_eq!(
-            cfg.require_approval
-                .iter()
-                .map(RequireApprovalEntry::tool_name)
-                .collect::<Vec<_>>(),
-            vec![
-                "shell",
-                "file_edit",
-                "file_write",
-                "python_execute",
-                "browser_click",
-                "browser_type",
-                "browser_select",
-                "browser_scroll"
-            ]
-        );
+        assert!(cfg.require_approval.is_empty());
     }
 
     #[test]
@@ -1528,24 +1497,9 @@ timeout_policy = "reject"
     // --- require_approval field in ToolPermissionConfig tests ---
 
     #[test]
-    fn tool_permission_config_require_approval_defaults_gate_high_risk_tools() {
+    fn tool_permission_config_require_approval_defaults_empty() {
         let cfg = ToolPermissionConfig::default();
-        assert_eq!(
-            cfg.require_approval
-                .iter()
-                .map(RequireApprovalEntry::tool_name)
-                .collect::<Vec<_>>(),
-            vec![
-                "shell",
-                "file_edit",
-                "file_write",
-                "python_execute",
-                "browser_click",
-                "browser_type",
-                "browser_select",
-                "browser_scroll"
-            ]
-        );
+        assert!(cfg.require_approval.is_empty());
     }
 
     #[test]
