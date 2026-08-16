@@ -49,7 +49,7 @@ pub mod background_loop;
 pub mod browser;
 pub mod capabilities;
 pub mod capability_bundle;
-pub mod change_case;
+pub mod config_change;
 pub mod channel_gateway;
 pub mod cli;
 pub mod codex;

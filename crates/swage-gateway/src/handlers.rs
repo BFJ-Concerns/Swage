@@ -18,8 +18,7 @@ use swage_protocol::{
     client::{channel as channel_wire, schedule as schedule_wire},
     hosting::{
         AgentDefinitionListResponse, AgentDefinitionMutationResponse, AgentDefinitionResponse,
-        AgentDefinitionScopeQuery, ConfigurationChangeResponse, CreateAgentDefinitionRequest,
-        UndoConfigurationCaseRequest, UpdateAgentDefinitionRequest,
+        AgentDefinitionScopeQuery, CreateAgentDefinitionRequest, UpdateAgentDefinitionRequest,
     },
 };
 
@@ -309,11 +308,11 @@ fn new_agent_definition(
     }
 }
 
-fn mutation_response(case: crate::change_case::AppliedCase) -> AgentDefinitionMutationResponse {
+fn mutation_response(change: crate::service::AgentDefinitionChange) -> AgentDefinitionMutationResponse {
     AgentDefinitionMutationResponse {
-        version_id: case.version_id,
-        entity_id: case.entity_id,
-        summary: case.summary,
+        agent_id: change.agent_id,
+        space_id: change.space_id,
+        summary: change.summary,
     }
 }
 
@@ -335,14 +334,9 @@ pub async fn create_agent_definition(
             output_max_retries: request.output_max_retries,
         },
     );
-    let applied = crate::change_case::apply_change(
-        &state,
-        crate::change_case::ChangeOperation::UpsertAgentDefinition { definition },
-        "operator_http",
-        None,
-    )
-    .await?;
-    Ok(Json(mutation_response(applied)))
+    let change =
+        crate::service::upsert_agent_definition(&state, definition, "operator_http", None).await?;
+    Ok(Json(mutation_response(change)))
 }
 
 pub async fn update_agent_definition(
@@ -350,16 +344,14 @@ pub async fn update_agent_definition(
     Path(agent_id): Path<String>,
     Json(request): Json<UpdateAgentDefinitionRequest>,
 ) -> Result<Json<AgentDefinitionMutationResponse>, ApiError> {
-    let applied = crate::change_case::apply_change(
+    let change = crate::service::upsert_agent_definition(
         &state,
-        crate::change_case::ChangeOperation::UpsertAgentDefinition {
-            definition: new_agent_definition(agent_id, request),
-        },
+        new_agent_definition(agent_id, request),
         "operator_http",
         None,
     )
     .await?;
-    Ok(Json(mutation_response(applied)))
+    Ok(Json(mutation_response(change)))
 }
 
 pub async fn delete_agent_definition(
@@ -367,17 +359,15 @@ pub async fn delete_agent_definition(
     Path(agent_id): Path<String>,
     Query(query): Query<AgentDefinitionScopeQuery>,
 ) -> Result<Json<AgentDefinitionMutationResponse>, ApiError> {
-    let applied = crate::change_case::apply_change(
+    let change = crate::service::delete_agent_definition(
         &state,
-        crate::change_case::ChangeOperation::DeleteAgentDefinition {
-            agent_id,
-            space_id: query.space_id,
-        },
+        &agent_id,
+        query.space_id,
         "operator_http",
         None,
     )
     .await?;
-    Ok(Json(mutation_response(applied)))
+    Ok(Json(mutation_response(change)))
 }
 
 /// `GET /api/operator/search` — search durable operator-visible history.
@@ -787,21 +777,6 @@ pub async fn delete_schedule(
     } else {
         Err(ApiError::not_found("schedule", id))
     }
-}
-
-/// `POST /api/operator/configuration/undo` — undo a recorded configuration case.
-pub async fn undo_configuration_case(
-    State(state): State<AppState>,
-    Json(req): Json<UndoConfigurationCaseRequest>,
-) -> Result<Json<ConfigurationChangeResponse>, ApiError> {
-    let applied = crate::change_case::undo_case(&state, req.case_id, "operator_http", None).await?;
-    Ok(Json(ConfigurationChangeResponse {
-        version_id: applied.version_id,
-        entity_kind: applied.entity_kind,
-        entity_id: applied.entity_id,
-        summary: applied.summary,
-        risk_band: applied.risk_band.as_str().to_owned(),
-    }))
 }
 
 /// `GET /api/presence` — inspect gateway, client, and machine presence.

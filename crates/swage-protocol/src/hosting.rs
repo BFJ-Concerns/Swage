@@ -84,22 +84,6 @@ pub struct ApprovalDecisionRequest {
     pub reason: Option<String>,
 }
 
-/// Ask the operator control plane to undo a recorded configuration case.
-#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
-pub struct UndoConfigurationCaseRequest {
-    pub case_id: Uuid,
-}
-
-/// The new change-case record produced by undoing a configuration case.
-#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
-pub struct ConfigurationChangeResponse {
-    pub version_id: Uuid,
-    pub entity_kind: String,
-    pub entity_id: String,
-    pub summary: String,
-    pub risk_band: String,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
 pub struct OperatorGatewaySummary {
     pub status: String,
@@ -215,10 +199,13 @@ pub struct AgentDefinitionListResponse {
     pub definitions: Vec<AgentDefinitionResponse>,
 }
 
+/// The outcome of an agent-definition mutation. The full account of the
+/// change — prior and new state under a named action — lives in the audit
+/// trail.
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
 pub struct AgentDefinitionMutationResponse {
-    pub version_id: Uuid,
-    pub entity_id: String,
+    pub agent_id: String,
+    pub space_id: Option<Uuid>,
     pub summary: String,
 }
 
@@ -242,8 +229,6 @@ pub struct HostingSurface {
     heartbeat: MachineHeartbeatRequest,
     approvals: ApprovalListResponse,
     approval_decision: ApprovalDecisionRequest,
-    undo_configuration_case: UndoConfigurationCaseRequest,
-    configuration_change: ConfigurationChangeResponse,
     operator_overview: OperatorOverviewResponse,
     agent_definition_list: AgentDefinitionListResponse,
     agent_definition_create: CreateAgentDefinitionRequest,

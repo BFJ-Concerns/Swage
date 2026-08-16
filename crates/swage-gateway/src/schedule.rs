@@ -31,6 +31,7 @@ use swage_storage::{
 use crate::channel_gateway::{
     DeliveryRoutingRequest, deliver_to_targets, resolve_delivery_targets,
 };
+use crate::config_change::{ConfigChange, record_config_change};
 use crate::service::ConversationService;
 use crate::state::AppState;
 
@@ -217,9 +218,7 @@ pub async fn create_schedule(
     request: wire::CreateScheduleRequest,
     creator: ScheduleCreator,
 ) -> Result<wire::Schedule, GatewayError> {
-    let (schedule, _) =
-        create_schedule_change(state, request, creator, "operator_http", None).await?;
-    Ok(schedule)
+    create_schedule_change(state, request, creator, "operator_http", None).await
 }
 
 pub(crate) async fn create_schedule_change(
@@ -228,17 +227,37 @@ pub(crate) async fn create_schedule_change(
     creator: ScheduleCreator,
     source: &str,
     session_id: Option<Uuid>,
-) -> Result<(wire::Schedule, crate::change_case::AppliedCase), GatewayError> {
+) -> Result<wire::Schedule, GatewayError> {
     let intended = resolve_create_schedule(state, request, creator).await?;
+    validate_schedule_shape(&intended)?;
+    validate_resolved_schedule(state, &intended).await?;
+    if state.storage.get_schedule(intended.id).await?.is_some() {
+        return Err(GatewayError::ValidationError(format!(
+            "schedule {} already exists",
+            intended.id
+        )));
+    }
+
     let schedule_id = intended.id;
-    let applied = crate::change_case::apply_change(
+    let summary = format!("created schedule '{}'", intended.message);
+    state.storage.create_schedule(intended).await?;
+    let new_state = schedule_snapshot(state, schedule_id).await?;
+
+    record_config_change(
         state,
-        crate::change_case::ChangeOperation::CreateSchedule { schedule: intended },
-        source,
-        session_id,
+        ConfigChange {
+            entity_kind: "schedule",
+            entity_id: &schedule_id.to_string(),
+            action: "create_schedule",
+            source,
+            session_id,
+            summary: &summary,
+            prior_state: None,
+            new_state,
+        },
     )
     .await?;
-    Ok((get_schedule_wire(state, schedule_id).await?, applied))
+    get_schedule_wire(state, schedule_id).await
 }
 
 pub(crate) async fn resolve_create_schedule(
@@ -294,9 +313,7 @@ pub async fn update_schedule(
     schedule_id: Uuid,
     request: wire::UpdateScheduleRequest,
 ) -> Result<wire::Schedule, GatewayError> {
-    let (schedule, _) =
-        update_schedule_change(state, schedule_id, request, "operator_http", None).await?;
-    Ok(schedule)
+    update_schedule_change(state, schedule_id, request, "operator_http", None).await
 }
 
 pub(crate) async fn update_schedule_change(
@@ -305,20 +322,32 @@ pub(crate) async fn update_schedule_change(
     request: wire::UpdateScheduleRequest,
     source: &str,
     session_id: Option<Uuid>,
-) -> Result<(wire::Schedule, crate::change_case::AppliedCase), GatewayError> {
+) -> Result<wire::Schedule, GatewayError> {
     let rearm = request.spec.is_some();
     let intended = resolve_update_schedule(state, schedule_id, request).await?;
-    let applied = crate::change_case::apply_change(
+    validate_schedule_shape(&intended)?;
+    validate_resolved_schedule(state, &intended).await?;
+
+    let prior = schedule_snapshot(state, schedule_id).await?;
+    let summary = format!("updated schedule '{}'", intended.message);
+    apply_schedule_edit(state, &intended, rearm).await?;
+    let new_state = schedule_snapshot(state, schedule_id).await?;
+
+    record_config_change(
         state,
-        crate::change_case::ChangeOperation::UpdateSchedule {
-            schedule: intended,
-            rearm,
+        ConfigChange {
+            entity_kind: "schedule",
+            entity_id: &schedule_id.to_string(),
+            action: "update_schedule",
+            source,
+            session_id,
+            summary: &summary,
+            prior_state: prior,
+            new_state,
         },
-        source,
-        session_id,
     )
     .await?;
-    Ok((get_schedule_wire(state, schedule_id).await?, applied))
+    get_schedule_wire(state, schedule_id).await
 }
 
 pub(crate) async fn resolve_update_schedule(
@@ -379,8 +408,7 @@ pub async fn pause_schedule(
     state: &AppState,
     schedule_id: Uuid,
 ) -> Result<wire::Schedule, GatewayError> {
-    let (schedule, _) = pause_schedule_change(state, schedule_id, "operator_http", None).await?;
-    Ok(schedule)
+    pause_schedule_change(state, schedule_id, "operator_http", None).await
 }
 
 pub(crate) async fn pause_schedule_change(
@@ -388,16 +416,29 @@ pub(crate) async fn pause_schedule_change(
     schedule_id: Uuid,
     source: &str,
     session_id: Option<Uuid>,
-) -> Result<(wire::Schedule, crate::change_case::AppliedCase), GatewayError> {
+) -> Result<wire::Schedule, GatewayError> {
     let intended = resolve_pause_schedule(state, schedule_id).await?;
-    let applied = crate::change_case::apply_change(
+
+    let prior = schedule_snapshot(state, schedule_id).await?;
+    let summary = format!("paused schedule '{}'", intended.message);
+    apply_schedule_pause(state, &intended).await?;
+    let new_state = schedule_snapshot(state, schedule_id).await?;
+
+    record_config_change(
         state,
-        crate::change_case::ChangeOperation::PauseSchedule { schedule: intended },
-        source,
-        session_id,
+        ConfigChange {
+            entity_kind: "schedule",
+            entity_id: &schedule_id.to_string(),
+            action: "pause_schedule",
+            source,
+            session_id,
+            summary: &summary,
+            prior_state: prior,
+            new_state,
+        },
     )
     .await?;
-    Ok((get_schedule_wire(state, schedule_id).await?, applied))
+    get_schedule_wire(state, schedule_id).await
 }
 
 pub(crate) async fn resolve_pause_schedule(
@@ -420,8 +461,7 @@ pub async fn resume_schedule(
     state: &AppState,
     schedule_id: Uuid,
 ) -> Result<wire::Schedule, GatewayError> {
-    let (schedule, _) = resume_schedule_change(state, schedule_id, "operator_http", None).await?;
-    Ok(schedule)
+    resume_schedule_change(state, schedule_id, "operator_http", None).await
 }
 
 pub(crate) async fn resume_schedule_change(
@@ -429,16 +469,29 @@ pub(crate) async fn resume_schedule_change(
     schedule_id: Uuid,
     source: &str,
     session_id: Option<Uuid>,
-) -> Result<(wire::Schedule, crate::change_case::AppliedCase), GatewayError> {
+) -> Result<wire::Schedule, GatewayError> {
     let intended = resolve_resume_schedule(state, schedule_id).await?;
-    let applied = crate::change_case::apply_change(
+
+    let prior = schedule_snapshot(state, schedule_id).await?;
+    let summary = format!("resumed schedule '{}'", intended.message);
+    apply_schedule_resume(state, &intended).await?;
+    let new_state = schedule_snapshot(state, schedule_id).await?;
+
+    record_config_change(
         state,
-        crate::change_case::ChangeOperation::ResumeSchedule { schedule: intended },
-        source,
-        session_id,
+        ConfigChange {
+            entity_kind: "schedule",
+            entity_id: &schedule_id.to_string(),
+            action: "resume_schedule",
+            source,
+            session_id,
+            summary: &summary,
+            prior_state: prior,
+            new_state,
+        },
     )
     .await?;
-    Ok((get_schedule_wire(state, schedule_id).await?, applied))
+    get_schedule_wire(state, schedule_id).await
 }
 
 pub(crate) async fn resolve_resume_schedule(
@@ -477,12 +530,98 @@ pub(crate) async fn get_schedule_wire(
     map_schedule(get_schedule(state, schedule_id).await?)
 }
 
+fn validate_schedule_shape(schedule: &NewSchedule) -> Result<(), GatewayError> {
+    if schedule.message.trim().is_empty() {
+        return Err(GatewayError::ValidationError(
+            "schedule message must not be empty".into(),
+        ));
+    }
+    if schedule.expression.trim().is_empty() {
+        return Err(GatewayError::ValidationError(
+            "schedule expression must not be empty".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// The schedule's current stored state, `None` when absent — the snapshots
+/// a recorded configuration change carries.
+async fn schedule_snapshot(
+    state: &AppState,
+    schedule_id: Uuid,
+) -> Result<Option<serde_json::Value>, GatewayError> {
+    Ok(state
+        .storage
+        .get_schedule(schedule_id)
+        .await?
+        .map(|schedule| serde_json::to_value(schedule).unwrap_or(serde_json::Value::Null)))
+}
+
+/// Apply configuration without replaying lifecycle fields read before the
+/// scheduler's most recent tick. Timing edits deliberately re-arm
+/// status/next-run; ordinary edits leave all scheduler-owned state in place,
+/// including `last_run_at`.
+async fn apply_schedule_edit(
+    state: &AppState,
+    schedule: &NewSchedule,
+    rearm: bool,
+) -> Result<Schedule, GatewayError> {
+    state
+        .storage
+        .update_schedule(
+            schedule.id,
+            UpdateSchedule {
+                message: Some(schedule.message.clone()),
+                status: rearm.then_some(schedule.status),
+                kind: Some(schedule.kind),
+                expression: Some(schedule.expression.clone()),
+                delivery_routing: Some(schedule.delivery_routing.clone()),
+                gate: Some(schedule.gate.clone()),
+                next_run_at: rearm.then_some(schedule.next_run_at),
+                last_run_at: None,
+            },
+        )
+        .await
+        .map_err(Into::into)
+}
+
+async fn apply_schedule_pause(
+    state: &AppState,
+    schedule: &NewSchedule,
+) -> Result<Schedule, GatewayError> {
+    state
+        .storage
+        .update_schedule(
+            schedule.id,
+            UpdateSchedule {
+                status: Some(schedule.status),
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(Into::into)
+}
+
+async fn apply_schedule_resume(
+    state: &AppState,
+    schedule: &NewSchedule,
+) -> Result<Schedule, GatewayError> {
+    state
+        .storage
+        .update_schedule(
+            schedule.id,
+            UpdateSchedule {
+                status: Some(schedule.status),
+                next_run_at: Some(schedule.next_run_at),
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(Into::into)
+}
+
 pub async fn delete_schedule(state: &AppState, schedule_id: Uuid) -> Result<bool, GatewayError> {
-    Ok(
-        delete_schedule_change(state, schedule_id, "operator_http", None)
-            .await?
-            .is_some(),
-    )
+    delete_schedule_change(state, schedule_id, "operator_http", None).await
 }
 
 pub(crate) async fn delete_schedule_change(
@@ -490,25 +629,32 @@ pub(crate) async fn delete_schedule_change(
     schedule_id: Uuid,
     source: &str,
     session_id: Option<Uuid>,
-) -> Result<Option<crate::change_case::AppliedCase>, GatewayError> {
+) -> Result<bool, GatewayError> {
     let Some(schedule) = state.storage.get_schedule(schedule_id).await? else {
-        return Ok(None);
+        return Ok(false);
     };
-    let applied = crate::change_case::apply_change(
+    let prior = Some(serde_json::to_value(schedule).unwrap_or(serde_json::Value::Null));
+
+    if !state.storage.delete_schedule(schedule_id).await? {
+        return Ok(false);
+    }
+    let summary = format!("deleted schedule {schedule_id}");
+
+    record_config_change(
         state,
-        crate::change_case::ChangeOperation::DeleteSchedule {
-            schedule_id,
-            space_id: crate::change_case::resolve_schedule_space_id(
-                state,
-                &schedule.session_policy,
-            )
-            .await?,
+        ConfigChange {
+            entity_kind: "schedule",
+            entity_id: &schedule_id.to_string(),
+            action: "delete_schedule",
+            source,
+            session_id,
+            summary: &summary,
+            prior_state: prior,
+            new_state: None,
         },
-        source,
-        session_id,
     )
     .await?;
-    Ok(Some(applied))
+    Ok(true)
 }
 
 pub async fn list_schedule_runs(
