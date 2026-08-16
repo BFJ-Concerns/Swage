@@ -612,6 +612,9 @@
             "type": "string"
           }
         },
+        "source_scope": {
+          "$ref": "#/$defs/EffectiveAgentDefinitionSourceScope"
+        },
         "tool_permissions": true
       },
       "required": [
@@ -620,7 +623,17 @@
         "description",
         "instructions",
         "skills",
-        "is_builtin"
+        "is_builtin",
+        "source_scope"
+      ]
+    },
+    "EffectiveAgentDefinitionSourceScope": {
+      "description": "An agent definition available when creating a session in one space.",
+      "type": "string",
+      "enum": [
+        "built_in",
+        "global",
+        "space"
       ]
     },
     "ExternalChannelIntegration": {
