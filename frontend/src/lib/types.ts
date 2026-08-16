@@ -76,9 +76,7 @@ export type GenerationPresetConfig = Omit<
   temperature?: number | null;
   metadata?: unknown | null;
 };
-export type SandboxConfig = Omit<WireSandboxConfig, "allow_degraded_execution"> & {
-  allow_degraded_execution?: boolean;
-};
+export type SandboxConfig = WireSandboxConfig;
 export type SettingsResponse = Omit<
   WireSettingsResponse,
   "providers" | "models" | "generation_presets" | "sandbox"

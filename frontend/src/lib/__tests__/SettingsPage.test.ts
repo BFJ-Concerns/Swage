@@ -103,6 +103,7 @@ function emptySettings(): SettingsResponse {
     },
     sandbox: {
       enabled: true,
+      allow_degraded_execution: false,
     },
     context: {
       assembly: "default",

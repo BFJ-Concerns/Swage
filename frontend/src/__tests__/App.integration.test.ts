@@ -210,7 +210,7 @@ function makeSettings(models: SettingsResponse["models"] = {}): SettingsResponse
     },
     tool_permissions: { allow: ["*"], deny: [], bundles: {}, require_approval: [] },
     hitl: { timeout: 300, timeout_policy: "reject" },
-    sandbox: { enabled: true },
+    sandbox: { enabled: true, allow_degraded_execution: false },
     context: { assembly: "default", timeout: 5, budget: null },
     pricing: { models: {} },
     observability: { force_on: false },
