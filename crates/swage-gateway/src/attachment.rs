@@ -1,6 +1,5 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use chrono::Utc;
-use serde::{Deserialize, Serialize};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -15,57 +14,10 @@ use crate::state::AppState;
 
 const ATTACHMENT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct CreateAttachmentRequest {
-    pub scope_kind: String,
-    pub session_id: Option<Uuid>,
-    pub space_id: Option<Uuid>,
-    pub filename: String,
-    pub mime_type: String,
-    pub content_base64: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct AttachmentResponse {
-    pub id: Uuid,
-    pub scope_kind: String,
-    pub session_id: Option<Uuid>,
-    pub space_id: Option<Uuid>,
-    pub kind: String,
-    pub status: String,
-    pub filename: String,
-    pub mime_type: String,
-    pub byte_count: i64,
-    pub ingested_markdown: Option<String>,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    pub updated_at: chrono::DateTime<chrono::Utc>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct AttachmentListResponse {
-    pub attachments: Vec<AttachmentResponse>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct BackgroundJobResponse {
-    pub id: Uuid,
-    pub kind: String,
-    pub state: String,
-    pub attachment_id: Option<Uuid>,
-    pub result: Option<serde_json::Value>,
-    pub error_message: Option<String>,
-    pub attempt_count: i64,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    pub updated_at: chrono::DateTime<chrono::Utc>,
-    pub started_at: Option<chrono::DateTime<chrono::Utc>>,
-    pub completed_at: Option<chrono::DateTime<chrono::Utc>>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct QueuedAttachmentResponse {
-    pub attachment: AttachmentResponse,
-    pub job: BackgroundJobResponse,
-}
+pub use swage_protocol::client::material::{
+    AttachmentListResponse, AttachmentResponse, BackgroundJobResponse, CreateAttachmentRequest,
+    QueuedAttachmentResponse,
+};
 
 pub async fn create_attachment(
     state: &AppState,

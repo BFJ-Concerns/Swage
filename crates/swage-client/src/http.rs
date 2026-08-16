@@ -23,6 +23,9 @@ pub use swage_protocol::hosting::{
     PresenceGatewayResponse, PresenceSnapshotResponse,
 };
 
+pub use swage_protocol::client::turn::{
+    MessageResponse, SendMessageRequest, SubmitTurnRequest, SubmitTurnResponse, TurnPollResponse,
+};
 pub use swage_protocol::client::voice::{
     SynthesiseSpeechRequest, SynthesiseSpeechResponse, TranscribeAudioRequest,
     TranscribeAudioResponse, VoiceCapabilitiesResponse,
@@ -609,12 +612,12 @@ impl GatewayClient {
         output_schema: Option<serde_json::Value>,
     ) -> Result<Uuid, ClientError> {
         let url = format!("{}/api/turns", self.base_url);
-        let body = serde_json::json!({
-            "conversation_id": conversation_id,
-            "thread_id": thread_id,
-            "message": message,
-            "output_schema": output_schema,
-        });
+        let body = SubmitTurnRequest {
+            conversation_id,
+            thread_id,
+            message: message.to_owned(),
+            output_schema,
+        };
 
         let response = self
             .client
@@ -625,7 +628,7 @@ impl GatewayClient {
             .map_err(|e| self.map_reqwest_error(e, &url))?;
 
         let response = self.check_success(response, &url).await?;
-        let body: serde_json::Value =
+        let body: SubmitTurnResponse =
             response
                 .json()
                 .await
@@ -633,20 +636,12 @@ impl GatewayClient {
                     address: url.clone(),
                     source: e,
                 })?;
-        let turn_id = body["turn_id"]
-            .as_str()
-            .and_then(|s| Uuid::parse_str(s).ok())
-            .ok_or_else(|| ClientError::UnexpectedResponse {
-                address: url.clone(),
-                status: 200,
-                body: "missing or invalid turn_id in response".into(),
-            })?;
-        Ok(turn_id)
+        Ok(body.turn_id)
     }
 
     /// Poll a turn for status and result.
     /// Calls `GET /api/turns/{id}`.
-    pub async fn poll_turn(&self, turn_id: Uuid) -> Result<serde_json::Value, ClientError> {
+    pub async fn poll_turn(&self, turn_id: Uuid) -> Result<TurnPollResponse, ClientError> {
         let url = format!("{}/api/turns/{turn_id}", self.base_url);
 
         let response = self
@@ -675,7 +670,7 @@ impl GatewayClient {
         kind: &str,
         correlation_id: Option<Uuid>,
         payload: serde_json::Value,
-    ) -> Result<serde_json::Value, ClientError> {
+    ) -> Result<MessageResponse, ClientError> {
         self.send_agent_message_with_space(
             None,
             sender_agent_id,
@@ -697,7 +692,7 @@ impl GatewayClient {
         kind: &str,
         correlation_id: Option<Uuid>,
         payload: serde_json::Value,
-    ) -> Result<serde_json::Value, ClientError> {
+    ) -> Result<MessageResponse, ClientError> {
         self.send_agent_message_with_space(
             Some(space_id),
             sender_agent_id,
@@ -717,16 +712,17 @@ impl GatewayClient {
         kind: &str,
         correlation_id: Option<Uuid>,
         payload: serde_json::Value,
-    ) -> Result<serde_json::Value, ClientError> {
+    ) -> Result<MessageResponse, ClientError> {
         let url = format!("{}/api/messages", self.base_url);
-        let body = serde_json::json!({
-            "sender_agent_id": sender_agent_id,
-            "recipient_agent_id": recipient_agent_id,
-            "kind": kind,
-            "correlation_id": correlation_id,
-            "space_id": space_id,
-            "payload": payload,
-        });
+        let body = SendMessageRequest {
+            sender_agent_id: sender_agent_id.to_owned(),
+            recipient_agent_id: recipient_agent_id.to_owned(),
+            kind: kind.to_owned(),
+            correlation_id,
+            space_id,
+            sender_turn_id: None,
+            payload,
+        };
 
         let response = self
             .client
@@ -751,7 +747,7 @@ impl GatewayClient {
     pub async fn get_message_status(
         &self,
         message_id: Uuid,
-    ) -> Result<serde_json::Value, ClientError> {
+    ) -> Result<MessageResponse, ClientError> {
         let url = format!("{}/api/messages/{message_id}", self.base_url);
 
         let response = self

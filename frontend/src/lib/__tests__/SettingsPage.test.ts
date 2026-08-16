@@ -118,6 +118,7 @@ function emptySettings(): SettingsResponse {
     },
     sandbox: {
       enabled: true,
+      allow_degraded_execution: false,
     },
     context: {
       assembly: "default",
@@ -158,10 +159,10 @@ describe("SettingsPage", () => {
       default_model: payload.default_model,
       generation_presets: payload.generation_presets,
       tool_runtime: payload.tool_runtime ?? emptySettings().tool_runtime,
-      tool_permissions: payload.tool_permissions,
-      hitl: payload.hitl,
+      tool_permissions: payload.tool_permissions ?? emptySettings().tool_permissions,
+      hitl: payload.hitl ?? emptySettings().hitl,
       sandbox: payload.sandbox,
-      context: payload.context,
+      context: payload.context ?? emptySettings().context,
       pricing: payload.pricing ?? emptySettings().pricing,
       observability: payload.observability ?? emptySettings().observability,
       communication: payload.communication ?? emptySettings().communication,

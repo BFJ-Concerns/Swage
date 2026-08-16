@@ -728,6 +728,18 @@ describe("output_schema_failed events", () => {
 // ---------------------------------------------------------------------------
 
 describe("context_assembled events", () => {
+  const report = {
+    assembly_name: "default",
+    elements: [],
+    total_tokens: 0,
+    budget: null,
+    budget_remaining: null,
+    compaction_applied: [],
+    warnings: [],
+    errors: [],
+    duration: { secs: 0, nanos: 0 },
+  };
+
   it("does not throw or crash the streaming store", () => {
     const store = createStreamingStore();
     store.startTurn("question");
@@ -736,7 +748,7 @@ describe("context_assembled events", () => {
       store.handleServerEvent({
         type: "context_assembled",
         turn_id: "t-1",
-        report: { elements: [], errors: [] },
+        report,
       }),
     ).not.toThrow();
   });
@@ -748,7 +760,7 @@ describe("context_assembled events", () => {
     store.handleServerEvent({
       type: "context_assembled",
       turn_id: "t-1",
-      report: { errors: [] },
+      report,
     });
 
     // Assembly reporting does not affect the streaming lifecycle.

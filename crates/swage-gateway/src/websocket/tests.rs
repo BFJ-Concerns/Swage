@@ -267,11 +267,10 @@ fn client_event_unsubscribe_deserialises() {
 #[test]
 fn server_event_context_assembled_serialises() {
     let turn_id = Uuid::new_v4();
-    let report = serde_json::json!({
-        "assembly_name": "default",
-        "total_tokens": 512,
-        "errors": [],
-    });
+    let report = swage_protocol::client::context::AssemblyReport {
+        total_tokens: 512,
+        ..Default::default()
+    };
     let event = ServerEvent::ContextAssembled { turn_id, report };
     let json = serde_json::to_value(&event).unwrap();
     assert_eq!(json["type"], "context_assembled");
@@ -283,10 +282,16 @@ fn server_event_context_assembled_serialises() {
 #[test]
 fn server_event_context_assembled_round_trips() {
     let turn_id = Uuid::new_v4();
-    let report = serde_json::json!({
-        "assembly_name": "custom",
-        "errors": [{"assembly_name": "custom", "error_kind": "timeout", "message": "timed out", "fallback_used": "default"}],
-    });
+    let report = swage_protocol::client::context::AssemblyReport {
+        assembly_name: "custom".into(),
+        errors: vec![swage_protocol::client::context::AssemblyError {
+            assembly_name: "custom".into(),
+            error_kind: "timeout".into(),
+            message: "timed out".into(),
+            fallback_used: "default".into(),
+        }],
+        ..Default::default()
+    };
     let event = ServerEvent::ContextAssembled { turn_id, report };
     let serialised = serde_json::to_string(&event).unwrap();
     // Verify type tag is present in the raw JSON string.

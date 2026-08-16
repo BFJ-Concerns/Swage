@@ -90,24 +90,7 @@ pub struct RecoveryExportSnapshot {
     pub bundle: GatewayRecoveryBundle,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RecoveryExportSummary {
-    pub id: Uuid,
-    pub created_at: DateTime<Utc>,
-    pub size_bytes: usize,
-    pub spaces: usize,
-    pub workspaces: usize,
-    pub sessions: usize,
-    pub secrets: usize,
-    pub channel_links: usize,
-    pub devices: usize,
-    pub schedules: usize,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct RecoveryExportListResponse {
-    pub exports: Vec<RecoveryExportSummary>,
-}
+pub use swage_protocol::client::recovery::{RecoveryExportListResponse, RecoveryExportSummary};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ImportGatewayRecoveryRequest {

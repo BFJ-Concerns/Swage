@@ -5,6 +5,9 @@
 
 use serde::{Deserialize, Serialize};
 use swage_core::ChatMessage;
+pub use swage_protocol::client::context::{
+    AssemblyError, AssemblyReport, CompactionRecord, ElementReport, NamedAssemblyReport,
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Output wrapper
@@ -70,177 +73,6 @@ impl<'de> Deserialize<'de> for AssemblyOutput {
         let raw = AssemblyOutputDef::deserialize(deserializer)?;
         AssemblyOutput::try_from(raw).map_err(serde::de::Error::custom)
     }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Report
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// A structured account of a single context assembly run.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AssemblyReport {
-    /// Name of the assembly that produced this output ("default" or a
-    /// user-defined assembly name).
-    pub assembly_name: String,
-
-    /// Per-element details in assembly order.
-    pub elements: Vec<ElementReport>,
-
-    /// Total estimated token count across all included messages.
-    pub total_tokens: usize,
-
-    /// Configured token budget, if any.
-    pub budget: Option<usize>,
-
-    /// Tokens remaining within the budget — negative when the budget is exceeded.
-    /// `None` when no budget is configured.
-    pub budget_remaining: Option<isize>,
-
-    /// Compaction actions taken to fit content within budget.
-    pub compaction_applied: Vec<CompactionRecord>,
-
-    /// Non-fatal issues: skipped rules, budget warnings, etc.
-    pub warnings: Vec<String>,
-
-    /// Errors from failed assemblies captured during fail-open fallback.
-    pub errors: Vec<AssemblyError>,
-
-    /// Wall-clock time taken to produce the assembled context.
-    pub duration: std::time::Duration,
-}
-
-impl AssemblyReport {
-    /// Construct a blank report for a named assembly. Use this as the starting
-    /// point and populate fields incrementally as the assembly runs.
-    pub fn new(assembly_name: impl Into<String>) -> Self {
-        Self {
-            assembly_name: assembly_name.into(),
-            elements: Vec::new(),
-            total_tokens: 0,
-            budget: None,
-            budget_remaining: None,
-            compaction_applied: Vec::new(),
-            warnings: Vec::new(),
-            errors: Vec::new(),
-            duration: std::time::Duration::ZERO,
-        }
-    }
-}
-
-impl Default for AssemblyReport {
-    /// Returns an empty report for the "default" assembly — useful in tests
-    /// and as a neutral starting point.
-    fn default() -> Self {
-        Self::new("default")
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Per-element breakdown
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// A summary of a single element's contribution to the assembled context.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ElementReport {
-    /// Element type name, e.g. `"history"`, `"prompts"`, `"memory"`.
-    pub name: String,
-
-    /// Provenance string from the element, e.g. `"space: my-space"`.
-    pub source: String,
-
-    /// Estimated token cost of this element's contribution.
-    pub token_count: usize,
-
-    /// Truncated content preview for inspection tooling. `None` when the
-    /// element did not provide a preview.
-    pub preview: Option<String>,
-
-    /// Ordering priority — higher values appear earlier in the assembled output.
-    pub priority: i32,
-
-    /// When this element was produced by a named assembly (Python script),
-    /// this carries the assembly's name, hierarchy level, and nested element
-    /// reports from the child assembly execution.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub named_assembly: Option<NamedAssemblyReport>,
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Named assembly report
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Report for an element produced by a named (Python) assembly, carrying
-/// provenance and the child elements that the assembly assembled internally.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NamedAssemblyReport {
-    /// Name of the assembly script, e.g. `"summarise"`.
-    pub assembly_name: String,
-
-    /// Hierarchy level where the assembly was resolved, serialised as a
-    /// string (e.g. `"space"`, `"agent"`, `"global"`).
-    pub resolved_level: String,
-
-    /// Per-element reports from the child assembly's execution.
-    pub child_elements: Vec<ElementReport>,
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Compaction record
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// A record of a single compaction action taken to bring content within budget.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CompactionRecord {
-    /// Name of the element that was compacted, e.g. `"history"`.
-    pub element: String,
-
-    /// Strategy that was originally requested, e.g. `"structured_extraction"`.
-    pub requested_strategy: String,
-
-    /// Strategy actually applied — may differ from `requested_strategy` when
-    /// the requested strategy failed and truncation was used as fallback.
-    pub actual_strategy: String,
-
-    /// Number of messages removed by this compaction pass.
-    pub messages_removed: usize,
-
-    /// Estimated token count before compaction.
-    pub tokens_before: usize,
-
-    /// Estimated token count after compaction.
-    pub tokens_after: usize,
-
-    /// Turn indices that the compaction drew from, e.g. `(2, 8)` meaning
-    /// messages at positions 2..8 were candidates.
-    pub source_message_range: Option<(usize, usize)>,
-
-    /// Token budget allocated for the compacted output.
-    pub budget: Option<usize>,
-
-    /// Why the requested strategy was not used — set when fallback to
-    /// truncation was triggered (e.g. LLM timeout, parse failure).
-    pub failure_reason: Option<String>,
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Assembly error
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// An error from a failed assembly, recorded when fail-open falls back to the
-/// default assembly instead of propagating the failure.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AssemblyError {
-    /// Name of the assembly that failed.
-    pub assembly_name: String,
-
-    /// Error category: `"timeout"`, `"panic"`, `"invalid_output"`, etc.
-    pub error_kind: String,
-
-    /// Human-readable description of what went wrong.
-    pub message: String,
-
-    /// Which assembly handled the fallback; currently always `"default"`.
-    pub fallback_used: String,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -330,6 +162,8 @@ mod tests {
             compaction_applied: vec![],
             warnings: vec![],
             errors: vec![],
+            effective_tool_permissions: None,
+            provider_visible: None,
             duration: std::time::Duration::from_millis(12),
         };
 
