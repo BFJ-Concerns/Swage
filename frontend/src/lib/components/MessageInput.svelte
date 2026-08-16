@@ -4,6 +4,8 @@
 -->
 <script lang="ts">
   import type { StreamingStore } from "../stores/streaming";
+  import type { EffectiveAgentDefinitionResponse } from "../protocol/EffectiveAgentDefinitionResponse";
+  import AgentPicker from "./AgentPicker.svelte";
 
   interface Props {
     // Injected by App.svelte once all stores are wired.
@@ -12,6 +14,8 @@
     modelOptions?: string[];
     modelCatalogueReady?: boolean;
     onNavigate?: (path: string) => void;
+    agentDefinitions?: EffectiveAgentDefinitionResponse[];
+    canSelectAgent?: boolean;
   }
 
   let {
@@ -20,6 +24,8 @@
     modelOptions = [],
     modelCatalogueReady = false,
     onNavigate,
+    agentDefinitions = [],
+    canSelectAgent = false,
   }: Props = $props();
 
   const hasNoConfiguredModels = $derived(modelCatalogueReady && modelOptions.length === 0);
@@ -27,6 +33,7 @@
   // Local draft content — cleared after every successful send.
   let content = $state("");
   let selectedModel = $state("");
+  let selectedAgentId = $state("");
 
   $effect(() => {
     const fallback = selectedModelId ?? modelOptions[0] ?? "";
@@ -55,7 +62,7 @@
     // Guard: no-op when there is nothing to send or a turn is in progress.
     if (!store || !trimmed || store.isStreaming || hasNoConfiguredModels) return;
 
-    store.startTurn(trimmed, selectedModel || null);
+    store.startTurn(trimmed, selectedModel || null, selectedAgentId || null);
 
     // Clear draft and return focus to the textarea so the user can keep typing.
     content = "";
@@ -90,20 +97,26 @@
       onkeydown={handleKeydown}
       aria-label="Message"
     ></textarea>
-    {#if modelOptions.length > 0}
+    {#if modelOptions.length > 0 || canSelectAgent}
       <div class="field-toolbar">
-        <select
-          class="model-select"
-          bind:value={selectedModel}
-          aria-label="Model"
-          disabled={!store || store?.isStreaming}
-        >
-          {#each modelOptions as modelId (modelId)}
-            <option value={modelId}>{modelId}</option>
-          {/each}
-        </select>
+        {#if canSelectAgent}
+          <AgentPicker definitions={agentDefinitions} bind:selectedAgentId disabled={!store || store?.isStreaming} />
+        {/if}
+        {#if modelOptions.length > 0}
+          <select
+            class="model-select"
+            bind:value={selectedModel}
+            aria-label="Model"
+            disabled={!store || store?.isStreaming}
+          >
+            {#each modelOptions as modelId (modelId)}
+              <option value={modelId}>{modelId}</option>
+            {/each}
+          </select>
+        {/if}
       </div>
-    {:else if hasNoConfiguredModels}
+    {/if}
+    {#if hasNoConfiguredModels}
       <p class="model-guidance">
         No models are configured. Add a provider in
         <button type="button" onclick={() => onNavigate?.("/settings/providers")}>Settings</button>.
@@ -175,6 +188,7 @@
     align-items: center;
     padding: 6px 14px;
     border-top: 1px dotted var(--rule-soft);
+    gap: 1rem;
   }
 
   .model-select {

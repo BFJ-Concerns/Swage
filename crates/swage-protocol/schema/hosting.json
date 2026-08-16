@@ -27,6 +27,9 @@
     "devices": {
       "$ref": "#/$defs/DeviceListResponse"
     },
+    "effective_agent_definition_list": {
+      "$ref": "#/$defs/EffectiveAgentDefinitionListResponse"
+    },
     "heartbeat": {
       "$ref": "#/$defs/MachineHeartbeatRequest"
     },
@@ -48,6 +51,7 @@
     "operator_overview",
     "agent_definition_scope",
     "agent_definition_list",
+    "effective_agent_definition_list",
     "agent_definition_create",
     "agent_definition_update",
     "agent_definition_mutation",
@@ -552,6 +556,71 @@
         "workspace_roots",
         "capabilities",
         "registered_at"
+      ]
+    },
+    "EffectiveAgentDefinitionListResponse": {
+      "type": "object",
+      "properties": {
+        "definitions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/EffectiveAgentDefinitionResponse"
+          }
+        }
+      },
+      "required": [
+        "definitions"
+      ]
+    },
+    "EffectiveAgentDefinitionResponse": {
+      "description": "An agent definition available when creating a session in one space.",
+      "type": "object",
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "display_name": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "instructions": {
+          "type": "string"
+        },
+        "is_builtin": {
+          "type": "boolean"
+        },
+        "model_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "output_max_retries": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "output_schema": true,
+        "skills": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "tool_permissions": true
+      },
+      "required": [
+        "id",
+        "display_name",
+        "description",
+        "instructions",
+        "skills",
+        "is_builtin"
       ]
     },
     "ExternalChannelIntegration": {

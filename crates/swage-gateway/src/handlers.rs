@@ -18,7 +18,9 @@ use swage_protocol::{
     client::{channel as channel_wire, schedule as schedule_wire},
     hosting::{
         AgentDefinitionListResponse, AgentDefinitionMutationResponse, AgentDefinitionResponse,
-        AgentDefinitionScopeQuery, CreateAgentDefinitionRequest, UpdateAgentDefinitionRequest,
+        AgentDefinitionScopeQuery, CreateAgentDefinitionRequest,
+        EffectiveAgentDefinitionListResponse, EffectiveAgentDefinitionResponse,
+        UpdateAgentDefinitionRequest,
     },
 };
 
@@ -288,6 +290,35 @@ pub async fn list_agent_definitions(
         .map(agent_definition_response)
         .collect();
     Ok(Json(AgentDefinitionListResponse { definitions }))
+}
+
+pub async fn list_effective_agent_definitions(
+    State(state): State<AppState>,
+    Path(space_id): Path<Uuid>,
+) -> Result<Json<EffectiveAgentDefinitionListResponse>, ApiError> {
+    let definitions = crate::service::effective_agent_definitions(
+        state.storage.as_ref(),
+        space_id,
+    )
+        .await?
+        .into_iter()
+        .map(|effective| {
+            let definition = effective.definition;
+            EffectiveAgentDefinitionResponse {
+                id: definition.id,
+                display_name: definition.display_name,
+                description: definition.description,
+                instructions: definition.instructions,
+                model_id: definition.model_id,
+                tool_permissions: definition.tool_permissions,
+                skills: definition.skills,
+                output_schema: definition.output_schema,
+                output_max_retries: definition.output_max_retries,
+                is_builtin: effective.is_builtin,
+            }
+        })
+        .collect();
+    Ok(Json(EffectiveAgentDefinitionListResponse { definitions }))
 }
 
 fn new_agent_definition(

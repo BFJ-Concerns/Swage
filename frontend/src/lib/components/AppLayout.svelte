@@ -18,6 +18,7 @@
   import type { ConversationStore } from "../stores/conversations";
   import type { SpaceStore } from "../stores/spaces";
   import type { StreamingStore } from "../stores/streaming";
+  import type { EffectiveAgentDefinitionResponse } from "../protocol/EffectiveAgentDefinitionResponse";
 
   type Surface = "conversation" | "operator";
 
@@ -40,6 +41,7 @@
     route?: Route;
     onNavigate?: (path: string) => void;
     onSettingsSaved?: () => void | Promise<void>;
+    agentDefinitions?: EffectiveAgentDefinitionResponse[];
   }
 
   let {
@@ -61,6 +63,7 @@
     route,
     onNavigate,
     onSettingsSaved,
+    agentDefinitions = [],
   }: Props = $props();
 
   const currentSpace = $derived(spaceStore?.currentSpace ?? null);
@@ -120,7 +123,7 @@
       {#if streamingStore.pendingApproval}
         <ApprovalCard approval={streamingStore.pendingApproval} />
       {:else}
-        <MessageInput store={streamingStore} {modelOptions} {modelCatalogueReady} selectedModelId={activeConversation?.selected_model_id ?? defaultModelId} {onNavigate} />
+        <MessageInput store={streamingStore} {modelOptions} {modelCatalogueReady} selectedModelId={activeConversation?.selected_model_id ?? defaultModelId} {agentDefinitions} canSelectAgent={!activeConversation} {onNavigate} />
       {/if}
     </section>
   </main>
