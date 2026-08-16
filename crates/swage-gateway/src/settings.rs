@@ -14,9 +14,17 @@ pub use swage_protocol::client::settings::{
     ToolRuntimeSettings,
 };
 
+fn try_wire_from_config<W: DeserializeOwned, C: Serialize>(value: C) -> Result<W, ApiError> {
+    serde_json::from_value(
+        serde_json::to_value(value)
+            .map_err(|error| ApiError::validation(format!("invalid runtime settings: {error}")))?,
+    )
+    .map_err(|error| ApiError::validation(format!("invalid runtime settings: {error}")))
+}
+
+#[cfg(test)]
 fn wire_from_config<W: DeserializeOwned, C: Serialize>(value: C) -> W {
-    serde_json::from_value(serde_json::to_value(value).expect("config serialises"))
-        .expect("config and wire settings shapes match")
+    try_wire_from_config(value).expect("test config and wire settings shapes match")
 }
 
 fn config_from_wire<C: DeserializeOwned, W: Serialize>(value: W) -> Result<C, ApiError> {
@@ -27,27 +35,29 @@ fn config_from_wire<C: DeserializeOwned, W: Serialize>(value: W) -> Result<C, Ap
     .map_err(|error| ApiError::validation(format!("invalid settings: {error}")))
 }
 
-fn tool_runtime_from_config(config: &swage_config::ToolConfig) -> ToolRuntimeSettings {
-    ToolRuntimeSettings {
+fn tool_runtime_from_config(
+    config: &swage_config::ToolConfig,
+) -> Result<ToolRuntimeSettings, ApiError> {
+    Ok(ToolRuntimeSettings {
         shell_timeout_secs: config.shell_timeout_secs,
-        python_execute: wire_from_config(config.python_execute.clone()),
+        python_execute: try_wire_from_config(config.python_execute.clone())?,
         max_output_bytes: config.max_output_bytes,
         plugin_directory: config.plugin_directory.clone(),
-        search: wire_from_config(config.search.clone()),
-    }
+        search: try_wire_from_config(config.search.clone())?,
+    })
 }
 
-pub async fn load_settings(state: &AppState) -> SettingsResponse {
+pub async fn load_settings(state: &AppState) -> Result<SettingsResponse, ApiError> {
     let config = state.active_config();
     let providers = config
         .providers
         .entries
         .iter()
-        .map(|(id, provider)| {
-            (
+        .map(|(id, provider)| -> Result<_, ApiError> {
+            Ok((
                 id.clone(),
                 ProviderSettings {
-                    protocol: wire_from_config(provider.protocol.clone()),
+                    protocol: try_wire_from_config(provider.protocol.clone())?,
                     base_url: provider.base_url.clone(),
                     api_key_secret_ref: provider.api_key_secret_ref.clone(),
                     api_key_env: provider.api_key_env.clone(),
@@ -56,16 +66,16 @@ pub async fn load_settings(state: &AppState) -> SettingsResponse {
                     command: provider.command.clone(),
                     state_dir: provider.state_dir.clone(),
                 },
-            )
+            ))
         })
-        .collect();
+        .collect::<Result<_, _>>()?;
 
     let models = config
         .models
         .entries
         .iter()
-        .map(|(id, model)| {
-            (
+        .map(|(id, model)| -> Result<_, ApiError> {
+            Ok((
                 id.clone(),
                 ModelSettings {
                     provider_id: model.provider_id.clone(),
@@ -73,29 +83,29 @@ pub async fn load_settings(state: &AppState) -> SettingsResponse {
                     aliases: model.aliases.clone(),
                     context_window: model.context_window,
                     generation_preset: model.generation_preset.clone(),
-                    capabilities: wire_from_config(model.capabilities.clone()),
+                    capabilities: model.capabilities.clone(),
                 },
-            )
+            ))
         })
-        .collect();
+        .collect::<Result<_, _>>()?;
 
-    SettingsResponse {
+    Ok(SettingsResponse {
         providers,
         default_provider: config.providers.default.clone(),
         models,
         default_model: config.models.default.clone(),
-        generation_presets: wire_from_config(config.generation.presets.clone()),
-        tool_runtime: tool_runtime_from_config(&config.tools),
-        tool_permissions: wire_from_config(config.tools.permissions.clone()),
-        hitl: wire_from_config(config.hitl.clone()),
-        sandbox: wire_from_config(config.sandbox.clone()),
-        context: wire_from_config(config.context.clone()),
-        pricing: wire_from_config(config.pricing.clone()),
-        observability: wire_from_config(config.observability.clone()),
-        communication: wire_from_config(config.communication),
+        generation_presets: config.generation.presets.clone(),
+        tool_runtime: tool_runtime_from_config(&config.tools)?,
+        tool_permissions: try_wire_from_config(config.tools.permissions.clone())?,
+        hitl: try_wire_from_config(config.hitl.clone())?,
+        sandbox: config.sandbox.clone(),
+        context: config.context.clone(),
+        pricing: config.pricing.clone(),
+        observability: config.observability.clone(),
+        communication: try_wire_from_config(config.communication)?,
         restart_required: state.restart_required(),
         can_restart: state.managed_gateway,
-    }
+    })
 }
 
 pub async fn save_settings(
@@ -119,15 +129,14 @@ pub async fn save_settings(
         communication,
     } = request;
 
-    let generation_presets: HashMap<String, swage_config::GenerationPresetConfig> =
-        config_from_wire(generation_presets)?;
+    let generation_presets = generation_presets;
     let tool_permissions: Option<swage_config::ToolPermissionConfig> =
         config_from_wire(tool_permissions)?;
     let hitl: Option<swage_config::HitlConfig> = config_from_wire(hitl)?;
-    let sandbox: Option<swage_config::SandboxConfig> = config_from_wire(sandbox)?;
-    let context: Option<swage_config::ContextConfig> = config_from_wire(context)?;
-    let pricing: Option<swage_config::PricingConfig> = config_from_wire(pricing)?;
-    let observability: Option<swage_config::ObservabilityConfig> = config_from_wire(observability)?;
+    let sandbox = sandbox;
+    let context = context;
+    let pricing = pricing;
+    let observability = observability;
     let communication: Option<swage_config::CommunicationConfig> = config_from_wire(communication)?;
 
     let mut providers = HashMap::new();
@@ -148,8 +157,8 @@ pub async fn save_settings(
 
     let models = requested_models
         .iter()
-        .map(|(id, model)| {
-            (
+        .map(|(id, model)| -> Result<_, ApiError> {
+            Ok((
                 id.clone(),
                 swage_config::ModelEndpointConfig {
                     provider_id: model.provider_id.clone(),
@@ -157,12 +166,11 @@ pub async fn save_settings(
                     aliases: model.aliases.clone(),
                     context_window: model.context_window,
                     generation_preset: model.generation_preset.clone(),
-                    capabilities: config_from_wire(model.capabilities.clone())
-                        .expect("validated model capabilities convert"),
+                    capabilities: model.capabilities.clone(),
                 },
-            )
+            ))
         })
-        .collect();
+        .collect::<Result<_, _>>()?;
 
     let path = global_config_path()?;
     if let Some(parent) = path.parent() {
@@ -197,7 +205,7 @@ pub async fn save_settings(
         pricing.clone(),
         observability.clone(),
         communication.clone(),
-    );
+    )?;
     let body = toml::to_string_pretty(&partial)
         .map_err(|error| ApiError::validation(format!("failed to serialise settings: {error}")))?;
     tokio::fs::write(&path, body)
@@ -215,8 +223,8 @@ pub async fn save_settings(
     runtime_config.models.default = default_model;
     runtime_config.models.entries = requested_models
         .into_iter()
-        .map(|(id, model)| {
-            (
+        .map(|(id, model)| -> Result<_, ApiError> {
+            Ok((
                 id,
                 swage_config::ModelEndpointConfig {
                     provider_id: model.provider_id,
@@ -224,15 +232,14 @@ pub async fn save_settings(
                     aliases: model.aliases,
                     context_window: model.context_window,
                     generation_preset: model.generation_preset,
-                    capabilities: config_from_wire(model.capabilities)
-                        .expect("validated model capabilities convert"),
+                    capabilities: model.capabilities,
                 },
-            )
+            ))
         })
-        .collect();
+        .collect::<Result<_, _>>()?;
     runtime_config.generation.presets = generation_presets;
     if let Some(tool_runtime) = tool_runtime {
-        apply_tool_runtime_settings(&mut runtime_config.tools, tool_runtime);
+        apply_tool_runtime_settings(&mut runtime_config.tools, tool_runtime)?;
     }
     runtime_config.tools.permissions =
         tool_permissions.unwrap_or_else(|| runtime_config.tools.permissions.clone());
@@ -250,7 +257,7 @@ pub async fn save_settings(
         crate::startup::build_tool_dispatcher(&runtime_config, state.storage.clone());
     state.replace_runtime(runtime_config, provider, tool_dispatcher);
 
-    Ok(load_settings(state).await)
+    load_settings(state).await
 }
 
 pub(crate) async fn persist_permanent_tool_approval_for_space(
@@ -512,7 +519,8 @@ fn settings_response_from_saved_config(
         models,
         default_model,
         generation_presets: wire_from_config(generation_presets),
-        tool_runtime: tool_runtime_from_config(&active_config.tools),
+        tool_runtime: tool_runtime_from_config(&active_config.tools)
+            .expect("test runtime settings convert"),
         tool_permissions: wire_from_config(tool_permissions),
         hitl: wire_from_config(hitl),
         sandbox: wire_from_config(sandbox),
@@ -647,7 +655,7 @@ fn apply_runtime_settings_to_partial(
     pricing: Option<swage_config::PricingConfig>,
     observability: Option<swage_config::ObservabilityConfig>,
     communication: Option<swage_config::CommunicationConfig>,
-) {
+) -> Result<(), ApiError> {
     if let Some(tool_runtime) = tool_runtime {
         let tools = partial.tools.get_or_insert_with(Default::default);
         tools.shell_timeout_secs = Some(tool_runtime.shell_timeout_secs);
@@ -658,17 +666,15 @@ fn apply_runtime_settings_to_partial(
             idle_ttl_secs: Some(tool_runtime.python_execute.idle_ttl_secs),
             warm_target: Some(tool_runtime.python_execute.warm_target),
             max_workers: Some(tool_runtime.python_execute.max_workers),
-            runtime_policy: Some(
-                config_from_wire(tool_runtime.python_execute.runtime_policy)
-                    .expect("validated runtime policy converts"),
-            ),
+            runtime_policy: Some(config_from_wire(
+                tool_runtime.python_execute.runtime_policy,
+            )?),
             runtime_path: Some(tool_runtime.python_execute.runtime_path),
             require_sandbox: Some(tool_runtime.python_execute.require_sandbox),
         });
         tools.max_output_bytes = Some(tool_runtime.max_output_bytes);
         tools.plugin_directory = Some(tool_runtime.plugin_directory);
-        tools.search =
-            Some(config_from_wire(tool_runtime.search).expect("validated search settings convert"));
+        tools.search = Some(config_from_wire(tool_runtime.search)?);
     }
     if let Some(tool_permissions) = tool_permissions {
         let tools = partial.tools.get_or_insert_with(Default::default);
@@ -738,18 +744,19 @@ fn apply_runtime_settings_to_partial(
             expiry_interval_secs: Some(communication.expiry_interval_secs),
         });
     }
+    Ok(())
 }
 
 fn apply_tool_runtime_settings(
     config: &mut swage_config::ToolConfig,
     runtime: ToolRuntimeSettings,
-) {
+) -> Result<(), ApiError> {
     config.shell_timeout_secs = runtime.shell_timeout_secs;
-    config.python_execute =
-        config_from_wire(runtime.python_execute).expect("validated Python settings convert");
+    config.python_execute = config_from_wire(runtime.python_execute)?;
     config.max_output_bytes = runtime.max_output_bytes;
     config.plugin_directory = runtime.plugin_directory;
-    config.search = config_from_wire(runtime.search).expect("validated search settings convert");
+    config.search = config_from_wire(runtime.search)?;
+    Ok(())
 }
 
 fn validate_tool_runtime_settings(runtime: &ToolRuntimeSettings) -> Result<(), ApiError> {
@@ -1068,6 +1075,51 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    fn assert_bidirectional_settings_bridge<C, W>(value: serde_json::Value)
+    where
+        C: DeserializeOwned + Serialize,
+        W: DeserializeOwned + Serialize,
+    {
+        let config: C = serde_json::from_value(value.clone()).expect("fully populated config");
+        let wire: W = try_wire_from_config(config).expect("config converts to wire");
+        assert_eq!(serde_json::to_value(&wire).unwrap(), value);
+        let config: C = config_from_wire(wire).expect("wire converts to config");
+        assert_eq!(serde_json::to_value(config).unwrap(), value);
+    }
+
+    #[test]
+    fn duplicated_settings_shapes_round_trip_bidirectionally() {
+        use swage_protocol::client::settings as wire;
+
+        assert_bidirectional_settings_bridge::<
+            swage_config::PythonExecuteToolConfig,
+            wire::PythonExecuteToolConfig,
+        >(
+            json!({"enabled": true, "timeout_secs": 31, "startup_timeout_secs": 11, "idle_ttl_secs": 61, "warm_target": 2, "max_workers": 3, "runtime_policy": "bundled_then_system", "runtime_path": "/opt/python", "require_sandbox": true}),
+        );
+        assert_bidirectional_settings_bridge::<
+            swage_config::SearchProviderConfig,
+            wire::SearchProviderConfig,
+        >(
+            json!({"provider_type": "searxng", "base_url": "https://search.invalid", "api_key": "secret-ref"}),
+        );
+        assert_bidirectional_settings_bridge::<
+            swage_config::ToolPermissionConfig,
+            wire::ToolPermissionConfig,
+        >(
+            json!({"allow": ["file_read"], "deny": ["shell"], "bundles": {"inspect": ["file_read"]}, "require_approval": [{"tool": "python_execute", "timeout": 120, "timeout_policy": "interrupt"}]}),
+        );
+        assert_bidirectional_settings_bridge::<swage_config::HitlConfig, wire::HitlConfig>(
+            json!({"timeout": 600, "timeout_policy": "interrupt"}),
+        );
+        assert_bidirectional_settings_bridge::<
+            swage_config::CommunicationConfig,
+            wire::CommunicationConfig,
+        >(
+            json!({"context_transfer": {"mode": "explicit", "allowed_fields": ["system", "user", "assistant"], "summary_budget": 512, "targets": {"reviewer": {"mode": "summary", "allowed_fields": ["user"], "summary_budget": 256}}}, "message_ttl_secs": 7200, "expiry_interval_secs": 30}),
+        );
+    }
 
     #[test]
     fn openai_compatible_model_urls_accept_v1_and_plain_roots() {
@@ -1602,7 +1654,8 @@ mod tests {
             None,
             None,
             None,
-        );
+        )
+        .expect("runtime settings convert");
 
         let body = toml::to_string(&partial).expect("partial config should serialise");
         assert!(body.contains("[tools]"));

@@ -3562,6 +3562,7 @@ dependencies = [
  "serde",
  "serde_json",
  "swage-core",
+ "swage-protocol",
  "tempfile",
  "thiserror 2.0.19",
  "toml",
