@@ -116,6 +116,8 @@ fn typescript_bindings_are_regenerated() {
     hosting::UpdateAgentDefinitionRequest::export_all(&cfg)
         .expect("export agent definition update");
     hosting::AgentDefinitionListResponse::export_all(&cfg).expect("export agent definition list");
+    hosting::EffectiveAgentDefinitionListResponse::export_all(&cfg)
+        .expect("export effective agent definition list");
     hosting::AgentDefinitionMutationResponse::export_all(&cfg)
         .expect("export agent definition mutation");
     hosting::KnowledgeMirrorRegenerateResponse::export_all(&cfg)
