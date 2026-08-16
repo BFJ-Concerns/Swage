@@ -93,8 +93,10 @@ pub async fn voice_capabilities(State(state): State<AppState>) -> Json<VoiceCapa
     Json(crate::voice::voice_capabilities(&state).await)
 }
 
-pub async fn get_settings(State(state): State<AppState>) -> Json<SettingsResponse> {
-    Json(crate::settings::load_settings(&state).await)
+pub async fn get_settings(
+    State(state): State<AppState>,
+) -> Result<Json<SettingsResponse>, ApiError> {
+    Ok(Json(crate::settings::load_settings(&state).await?))
 }
 
 pub async fn save_settings(

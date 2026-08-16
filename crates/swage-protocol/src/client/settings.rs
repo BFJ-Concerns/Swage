@@ -45,13 +45,19 @@ pub struct SaveProviderSettings {
     pub state_dir: Option<PathBuf>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, TS)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(deny_unknown_fields)]
 pub struct ModelCapabilitiesConfig {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub reasoning_replay: bool,
 }
+impl ModelCapabilitiesConfig {
+    pub fn is_empty(&self) -> bool {
+        !self.reasoning_replay
+    }
+}
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 pub struct ModelSettings {
     pub provider_id: String,
     pub model_id: String,
@@ -62,15 +68,19 @@ pub struct ModelSettings {
     pub capabilities: ModelCapabilitiesConfig,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(deny_unknown_fields)]
 pub struct GenerationPresetConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub max_tokens: Option<u32>,
     #[ts(optional)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f64>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub stop_sequences: Vec<String>,
     #[ts(optional, type = "unknown")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<serde_json::Value>,
 }
 impl GenerationPresetConfig {
@@ -82,13 +92,14 @@ impl GenerationPresetConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "snake_case")]
 pub enum PythonRuntimePolicy {
     BundledThenSystem,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(deny_unknown_fields)]
 pub struct PythonExecuteToolConfig {
     pub enabled: bool,
     #[ts(type = "number")]
@@ -107,6 +118,7 @@ pub struct PythonExecuteToolConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(deny_unknown_fields)]
 pub struct SearchProviderConfig {
     pub provider_type: String,
     pub base_url: String,
@@ -152,6 +164,7 @@ impl RequireApprovalEntry {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(deny_unknown_fields)]
 pub struct ToolPermissionConfig {
     pub allow: Vec<String>,
     pub deny: Vec<String>,
@@ -159,17 +172,28 @@ pub struct ToolPermissionConfig {
     pub require_approval: Vec<RequireApprovalEntry>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(deny_unknown_fields)]
 pub struct HitlConfig {
     #[ts(type = "number")]
     pub timeout: u64,
     pub timeout_policy: ApprovalTimeoutPolicy,
 }
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(deny_unknown_fields)]
 pub struct SandboxConfig {
     pub enabled: bool,
     pub allow_degraded_execution: bool,
 }
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+impl Default for SandboxConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            allow_degraded_execution: false,
+        }
+    }
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(deny_unknown_fields)]
 pub struct ContextConfig {
     pub assembly: String,
     #[ts(type = "number")]
@@ -177,18 +201,38 @@ pub struct ContextConfig {
     #[ts(type = "number | null")]
     pub budget: Option<usize>,
 }
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+impl Default for ContextConfig {
+    fn default() -> Self {
+        Self {
+            assembly: "default".to_string(),
+            timeout: 5,
+            budget: None,
+        }
+    }
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 pub struct ModelPricing {
     #[ts(type = "number")]
     pub input_price_per_mtok: i64,
     #[ts(type = "number")]
     pub output_price_per_mtok: i64,
 }
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(deny_unknown_fields)]
 pub struct PricingConfig {
     pub models: HashMap<String, ModelPricing>,
 }
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+impl PricingConfig {
+    pub fn compute_cost(&self, model: &str, input_tokens: u32, output_tokens: u32) -> Option<i64> {
+        let pricing = self.models.get(model)?;
+        Some(
+            (input_tokens as i64) * pricing.input_price_per_mtok / 1_000_000
+                + (output_tokens as i64) * pricing.output_price_per_mtok / 1_000_000,
+        )
+    }
+}
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(deny_unknown_fields)]
 pub struct ObservabilityConfig {
     pub force_on: bool,
 }
@@ -221,6 +265,7 @@ pub struct ContextTransferConfig {
     pub targets: HashMap<String, ContextTransferTargetConfig>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(deny_unknown_fields)]
 pub struct CommunicationConfig {
     pub context_transfer: ContextTransferConfig,
     #[ts(type = "number")]

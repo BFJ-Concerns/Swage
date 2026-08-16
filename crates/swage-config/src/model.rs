@@ -94,17 +94,7 @@ pub struct ModelEndpointConfig {
     pub capabilities: ModelCapabilitiesConfig,
 }
 
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
-pub struct ModelCapabilitiesConfig {
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub reasoning_replay: bool,
-}
-
-impl ModelCapabilitiesConfig {
-    pub fn is_empty(&self) -> bool {
-        !self.reasoning_replay
-    }
-}
+pub use swage_protocol::client::settings::ModelCapabilitiesConfig;
 
 /// Configured LLM models keyed by app-level model id.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -138,25 +128,7 @@ impl Default for WorkspaceConfig {
 }
 
 /// Sandbox isolation settings.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SandboxConfig {
-    pub enabled: bool,
-    /// Permit execution to continue when namespace isolation is unavailable.
-    ///
-    /// This is deliberately separate from `enabled`: disabling the preferred
-    /// sandbox or accepting a platform fallback both cross the same security
-    /// boundary and therefore require an explicit opt-in.
-    pub allow_degraded_execution: bool,
-}
-
-impl Default for SandboxConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            allow_degraded_execution: false,
-        }
-    }
-}
+pub use swage_protocol::client::settings::SandboxConfig;
 
 /// Log verbosity levels.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -410,61 +382,19 @@ impl Default for PythonExecuteToolConfig {
 
 /// Context assembly settings — controls how the agent's context window is built
 /// before each inference call.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ContextConfig {
-    /// Assembly strategy name to use (must match a registered assembly).
-    pub assembly: String,
-    /// Seconds allowed for assembly before fail-open triggers.
-    /// Clamped to the range 1–60 at validation time.
-    pub timeout: u64,
-    /// Token budget for the assembled context. `None` means the model's
-    /// context window limit is used as the upper bound.
-    pub budget: Option<usize>,
-}
-
-impl Default for ContextConfig {
-    fn default() -> Self {
-        Self {
-            assembly: "default".to_string(),
-            timeout: 5,
-            budget: None,
-        }
-    }
-}
+pub use swage_protocol::client::settings::ContextConfig;
 
 /// Per-model token pricing in microcents per million tokens.
 ///
 /// Prices are stored as integers to avoid floating-point rounding when
 /// computing costs across large token counts.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ModelPricing {
-    /// Input (prompt) token price in microcents per million tokens.
-    pub input_price_per_mtok: i64,
-    /// Output (completion) token price in microcents per million tokens.
-    pub output_price_per_mtok: i64,
-}
+pub use swage_protocol::client::settings::ModelPricing;
 
 /// Model pricing configuration — optional per-model cost data for observability.
 ///
 /// When a model is absent from the map, `compute_cost` returns `None`
 /// rather than zero so callers can distinguish "free/unknown" from "configured zero".
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
-pub struct PricingConfig {
-    /// Map of model identifier → pricing data.
-    pub models: HashMap<String, ModelPricing>,
-}
-
-impl PricingConfig {
-    /// Compute the cost of a call in microcents, given model and token counts.
-    ///
-    /// Returns `None` if no pricing is configured for `model`.
-    pub fn compute_cost(&self, model: &str, input_tokens: u32, output_tokens: u32) -> Option<i64> {
-        let pricing = self.models.get(model)?;
-        let input_cost = (input_tokens as i64) * pricing.input_price_per_mtok / 1_000_000;
-        let output_cost = (output_tokens as i64) * pricing.output_price_per_mtok / 1_000_000;
-        Some(input_cost + output_cost)
-    }
-}
+pub use swage_protocol::client::settings::PricingConfig;
 
 /// Observability settings for the gateway.
 ///
@@ -472,12 +402,7 @@ impl PricingConfig {
 /// subscribed to every observability channel — no explicit subscribe
 /// message is required from the client. Useful for development and
 /// single-user deployments.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct ObservabilityConfig {
-    /// When true, all observability events are delivered to every connected
-    /// client regardless of their subscription state.
-    pub force_on: bool,
-}
+pub use swage_protocol::client::settings::ObservabilityConfig;
 
 // TODO Wire experimentation variant selection into the runtime
 // `is_enabled_for` and `forced_variant_for` have no callers outside this
@@ -781,26 +706,7 @@ impl Default for SchedulingConfig {
 /// Empty presets are invalid at the settings API boundary. The config type is
 /// permissive so older or hand-written files can still be loaded and repaired
 /// through settings rather than making the whole gateway unusable.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct GenerationPresetConfig {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_tokens: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub temperature: Option<f64>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub stop_sequences: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub metadata: Option<serde_json::Value>,
-}
-
-impl GenerationPresetConfig {
-    pub fn is_empty(&self) -> bool {
-        self.max_tokens.is_none()
-            && self.temperature.is_none()
-            && self.stop_sequences.is_empty()
-            && self.metadata.is_none()
-    }
-}
+pub use swage_protocol::client::settings::GenerationPresetConfig;
 
 /// Global generation preset catalogue. `None` is intentionally not represented
 /// here; it is a built-in UI/runtime selection meaning provider defaults.
