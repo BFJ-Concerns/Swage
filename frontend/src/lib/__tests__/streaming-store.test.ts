@@ -246,6 +246,40 @@ describe("turn_complete", () => {
     expect(store.activeToolCalls).toEqual([]);
   });
 
+  it("retains completed tool calls when no assistant text arrived", () => {
+    const conv = createMockConversationStore();
+    const store = createStreamingStore({ conversationStore: conv });
+
+    store.startTurn("read the file");
+    store.handleServerEvent({
+      type: "tool_start",
+      call_id: "call-1",
+      tool: "file_read",
+      arguments: { path: "README.md" },
+    });
+    store.handleServerEvent({
+      type: "tool_end",
+      call_id: "call-1",
+      tool: "file_read",
+      result: "contents",
+      status: "success",
+      duration_ms: 8,
+      truncated: false,
+      total_bytes: 8,
+    });
+    store.handleServerEvent({ type: "turn_complete", turn_id: "t-1" });
+
+    const assistant = conv.getMessages().find((message) => message.role === "assistant");
+    expect(assistant).toEqual(
+      expect.objectContaining({
+        content: "",
+        turn_id: "t-1",
+        tool_calls: [expect.objectContaining({ call_id: "call-1" })],
+      }),
+    );
+    expect(store.activeToolCalls).toEqual([]);
+  });
+
   it("does not push an empty assistant message when no tokens arrived", () => {
     const conv = createMockConversationStore();
     const store = createStreamingStore({ conversationStore: conv });
