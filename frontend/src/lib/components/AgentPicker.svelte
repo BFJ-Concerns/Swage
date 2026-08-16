@@ -12,12 +12,14 @@
     selectedAgentId = $bindable(""),
     disabled = false,
   }: Props = $props();
+
+  const builtin = $derived(definitions.find((definition) => definition.is_builtin));
 </script>
 
 <label class="agent-picker">
   <span>Agent</span>
   <select bind:value={selectedAgentId} aria-label="Agent" {disabled}>
-    <option value="">Swage default</option>
+    <option value="">{builtin?.display_name ?? "Swage default"}</option>
     {#each definitions.filter((definition) => !definition.is_builtin) as definition (definition.id)}
       <option value={definition.id}>{definition.display_name}</option>
     {/each}
