@@ -4504,10 +4504,13 @@ mod tests {
             .list_workflow_journal(run.id)
             .await
             .expect("journal");
-        assert_eq!(journal.len(), 3);
-        assert_eq!(journal[2].status, "failed");
+        let refusal = journal
+            .iter()
+            .find(|entry| entry.seq == 2)
+            .expect("refusal is durable before its reply");
+        assert_eq!(refusal.status, "failed");
         assert_eq!(
-            journal[2].error_message.as_deref(),
+            refusal.error_message.as_deref(),
             Some("BudgetExceededError: token limit reached")
         );
         first_cancellation.cancel();
@@ -4522,6 +4525,11 @@ mod tests {
             .expect_err("cancelled after admission");
         assert!(!first_error.starts_with("BudgetExceededError:"));
         assert!(!second_error.starts_with("BudgetExceededError:"));
+        let settled_journal = storage
+            .list_workflow_journal(run.id)
+            .await
+            .expect("settled journal");
+        assert_eq!(settled_journal.len(), 3);
         drop(tx);
         task.await.expect("host loop");
     }
