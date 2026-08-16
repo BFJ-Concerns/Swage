@@ -2183,14 +2183,14 @@ mod tests {
     async fn wait_for_terminal_message_status(
         client: &swage_client::http::GatewayClient,
         message_id: Uuid,
-    ) -> serde_json::Value {
+    ) -> swage_client::http::MessageResponse {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         while std::time::Instant::now() < deadline {
             let current = client
                 .get_message_status(message_id)
                 .await
                 .expect("query message status");
-            if matches!(current["status"].as_str(), Some("delivered" | "failed")) {
+            if matches!(current.status.as_str(), "delivered" | "failed") {
                 return current;
             }
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -2240,7 +2240,7 @@ mod tests {
             let mut completed = None;
             while std::time::Instant::now() < deadline {
                 let current = client.poll_turn(turn_id).await.expect("poll turn");
-                let state = current["state"].as_str().expect("poll state string");
+                let state = current.state.as_str();
                 if matches!(state, "completed" | "failed" | "interrupted") {
                     completed = Some(current);
                     break;
@@ -2249,9 +2249,9 @@ mod tests {
             }
             completed.expect("turn should reach a terminal state")
         };
-        assert_eq!(poll["turn_id"], turn_id.to_string());
-        assert_eq!(poll["state"], "completed");
-        assert_eq!(poll["assistant_response"], "Hello from the async route");
+        assert_eq!(poll.turn_id, turn_id);
+        assert_eq!(poll.state, "completed");
+        assert_eq!(poll.assistant_response.as_deref(), Some("Hello from the async route"));
 
         let turns = client
             .list_turns(conversation.id, None, None)
@@ -2280,16 +2280,12 @@ mod tests {
             )
             .await
             .expect("send agent message through live gateway");
-        let message_id = sent_message["id"]
-            .as_str()
-            .expect("message id string")
-            .parse::<Uuid>()
-            .expect("message id uuid");
+        let message_id = sent_message.id;
         let message_status = wait_for_terminal_message_status(&client, message_id).await;
         assert!(
             matches!(
-                message_status["status"].as_str(),
-                Some("delivered" | "failed")
+                message_status.status.as_str(),
+                "delivered" | "failed"
             ),
             "delegate execution should transition the message out of pending"
         );
@@ -2405,15 +2401,11 @@ mod tests {
             )
             .await
             .expect("send delegate message through live gateway");
-        let message_id = sent_message["id"]
-            .as_str()
-            .expect("message id string")
-            .parse::<Uuid>()
-            .expect("message id uuid");
+        let message_id = sent_message.id;
 
         let message_status = wait_for_terminal_message_status(&client, message_id).await;
 
-        assert_eq!(message_status["status"], "failed");
+        assert_eq!(message_status.status, "failed");
         let stored = storage
             .get_agent_message(message_id)
             .await

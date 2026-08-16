@@ -46,11 +46,20 @@
     "message_response": {
       "$ref": "#/$defs/MessageResponse"
     },
+    "model_discovery": {
+      "$ref": "#/$defs/ModelDiscoveryResponse"
+    },
     "orientation_find": {
       "$ref": "#/$defs/OrientationFindResponse"
     },
     "provider_sign_in_state": {
       "$ref": "#/$defs/ProviderSignInState"
+    },
+    "restart_status": {
+      "$ref": "#/$defs/RestartStatusResponse"
+    },
+    "save_settings": {
+      "$ref": "#/$defs/SaveSettingsRequest"
     },
     "schedule": {
       "$ref": "#/$defs/Schedule"
@@ -69,6 +78,9 @@
     },
     "server_event": {
       "$ref": "#/$defs/ServerEvent"
+    },
+    "settings": {
+      "$ref": "#/$defs/SettingsResponse"
     },
     "space_list": {
       "$ref": "#/$defs/SpaceListResponse"
@@ -164,6 +176,10 @@
     "turn_poll",
     "send_message",
     "message_response",
+    "settings",
+    "save_settings",
+    "model_discovery",
+    "restart_status",
     "knowledge_search",
     "orientation_find",
     "create_schedule_request",
@@ -196,6 +212,13 @@
         "session",
         "permanent",
         "permanent_global"
+      ]
+    },
+    "ApprovalTimeoutPolicy": {
+      "type": "string",
+      "enum": [
+        "reject",
+        "interrupt"
       ]
     },
     "AssemblyError": {
@@ -461,6 +484,29 @@
         }
       ]
     },
+    "CommunicationConfig": {
+      "type": "object",
+      "properties": {
+        "context_transfer": {
+          "$ref": "#/$defs/ContextTransferConfig"
+        },
+        "expiry_interval_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "message_ttl_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "context_transfer",
+        "message_ttl_secs",
+        "expiry_interval_secs"
+      ]
+    },
     "CompactionRecord": {
       "type": "object",
       "properties": {
@@ -530,6 +576,106 @@
         "messages_removed",
         "tokens_before",
         "tokens_after"
+      ]
+    },
+    "ContextConfig": {
+      "type": "object",
+      "properties": {
+        "assembly": {
+          "type": "string"
+        },
+        "budget": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        },
+        "timeout": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "assembly",
+        "timeout"
+      ]
+    },
+    "ContextTransferConfig": {
+      "type": "object",
+      "properties": {
+        "allowed_fields": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ContextTransferField"
+          }
+        },
+        "mode": {
+          "$ref": "#/$defs/ContextTransferMode"
+        },
+        "summary_budget": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "targets": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/ContextTransferTargetConfig"
+          }
+        }
+      },
+      "required": [
+        "mode",
+        "allowed_fields",
+        "targets"
+      ]
+    },
+    "ContextTransferField": {
+      "type": "string",
+      "enum": [
+        "system",
+        "user",
+        "assistant"
+      ]
+    },
+    "ContextTransferMode": {
+      "type": "string",
+      "enum": [
+        "none",
+        "explicit",
+        "summary"
+      ]
+    },
+    "ContextTransferTargetConfig": {
+      "type": "object",
+      "properties": {
+        "allowed_fields": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ContextTransferField"
+          }
+        },
+        "mode": {
+          "$ref": "#/$defs/ContextTransferMode"
+        },
+        "summary_budget": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "mode",
+        "allowed_fields"
       ]
     },
     "ConversationBranchResponse": {
@@ -996,6 +1142,29 @@
         }
       ]
     },
+    "DiscoveredModel": {
+      "type": "object",
+      "properties": {
+        "context_window": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name"
+      ]
+    },
     "Duration": {
       "type": "object",
       "properties": {
@@ -1112,6 +1281,51 @@
       "enum": [
         "run",
         "skip"
+      ]
+    },
+    "GenerationPresetConfig": {
+      "type": "object",
+      "properties": {
+        "max_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "metadata": true,
+        "stop_sequences": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        }
+      }
+    },
+    "HitlConfig": {
+      "type": "object",
+      "properties": {
+        "timeout": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "timeout_policy": {
+          "$ref": "#/$defs/ApprovalTimeoutPolicy"
+        }
+      },
+      "required": [
+        "timeout",
+        "timeout_policy"
       ]
     },
     "KnowledgeSearchResponse": {
@@ -1238,6 +1452,92 @@
         "tool_calls"
       ]
     },
+    "ModelCapabilitiesConfig": {
+      "type": "object",
+      "properties": {
+        "reasoning_replay": {
+          "type": "boolean",
+          "default": false
+        }
+      }
+    },
+    "ModelDiscoveryResponse": {
+      "type": "object",
+      "properties": {
+        "models": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DiscoveredModel"
+          }
+        },
+        "provider_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "provider_id",
+        "models"
+      ]
+    },
+    "ModelPricing": {
+      "type": "object",
+      "properties": {
+        "input_price_per_mtok": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "output_price_per_mtok": {
+          "type": "integer",
+          "format": "int64"
+        }
+      },
+      "required": [
+        "input_price_per_mtok",
+        "output_price_per_mtok"
+      ]
+    },
+    "ModelSettings": {
+      "type": "object",
+      "properties": {
+        "aliases": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "capabilities": {
+          "$ref": "#/$defs/ModelCapabilitiesConfig",
+          "default": {
+            "reasoning_replay": false
+          }
+        },
+        "context_window": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "generation_preset": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "model_id": {
+          "type": "string"
+        },
+        "provider_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "provider_id",
+        "model_id",
+        "aliases"
+      ]
+    },
     "NamedAssemblyReport": {
       "type": "object",
       "properties": {
@@ -1258,6 +1558,17 @@
         "assembly_name",
         "resolved_level",
         "child_elements"
+      ]
+    },
+    "ObservabilityConfig": {
+      "type": "object",
+      "properties": {
+        "force_on": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "force_on"
       ]
     },
     "OrientationCardResult": {
@@ -1314,6 +1625,20 @@
         "guidance"
       ]
     },
+    "PricingConfig": {
+      "type": "object",
+      "properties": {
+        "models": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/ModelPricing"
+          }
+        }
+      },
+      "required": [
+        "models"
+      ]
+    },
     "ProviderAccount": {
       "type": "object",
       "properties": {
@@ -1330,6 +1655,61 @@
           ]
         }
       }
+    },
+    "ProviderProtocol": {
+      "type": "string",
+      "enum": [
+        "openai",
+        "anthropic",
+        "google",
+        "openrouter",
+        "codex"
+      ]
+    },
+    "ProviderSettings": {
+      "type": "object",
+      "properties": {
+        "api_key_env": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "api_key_secret_ref": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "base_url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "command": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "has_credential": {
+          "type": "boolean"
+        },
+        "protocol": {
+          "$ref": "#/$defs/ProviderProtocol"
+        },
+        "state_dir": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "protocol",
+        "has_credential"
+      ]
     },
     "ProviderSignInState": {
       "type": "object",
@@ -1359,6 +1739,311 @@
         "signing_in",
         "signed_in",
         "expired"
+      ]
+    },
+    "PythonExecuteToolConfig": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "idle_ttl_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "max_workers": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "require_sandbox": {
+          "type": "boolean"
+        },
+        "runtime_path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "runtime_policy": {
+          "$ref": "#/$defs/PythonRuntimePolicy"
+        },
+        "startup_timeout_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "timeout_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "warm_target": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "enabled",
+        "timeout_secs",
+        "startup_timeout_secs",
+        "idle_ttl_secs",
+        "warm_target",
+        "max_workers",
+        "runtime_policy",
+        "require_sandbox"
+      ]
+    },
+    "PythonRuntimePolicy": {
+      "type": "string",
+      "enum": [
+        "bundled_then_system"
+      ]
+    },
+    "RequireApprovalEntry": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "timeout": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0
+            },
+            "timeout_policy": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ApprovalTimeoutPolicy"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "tool": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "tool"
+          ]
+        }
+      ]
+    },
+    "RestartStatusResponse": {
+      "type": "object",
+      "properties": {
+        "can_restart": {
+          "type": "boolean"
+        },
+        "guidance": {
+          "type": "string"
+        },
+        "restart_required": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "restart_required",
+        "can_restart",
+        "guidance"
+      ]
+    },
+    "SandboxConfig": {
+      "type": "object",
+      "properties": {
+        "allow_degraded_execution": {
+          "type": "boolean"
+        },
+        "enabled": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "enabled",
+        "allow_degraded_execution"
+      ]
+    },
+    "SaveProviderSettings": {
+      "type": "object",
+      "properties": {
+        "api_key": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "api_key_env": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "api_key_secret_ref": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "base_url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "command": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "protocol": {
+          "$ref": "#/$defs/ProviderProtocol"
+        },
+        "state_dir": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "protocol"
+      ]
+    },
+    "SaveSettingsRequest": {
+      "type": "object",
+      "properties": {
+        "communication": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CommunicationConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "context": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ContextConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "default_model": {
+          "type": "string"
+        },
+        "default_provider": {
+          "type": "string"
+        },
+        "generation_presets": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/GenerationPresetConfig"
+          },
+          "default": {}
+        },
+        "hitl": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HitlConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "models": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/ModelSettings"
+          }
+        },
+        "observability": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ObservabilityConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "pricing": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PricingConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "providers": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/SaveProviderSettings"
+          }
+        },
+        "sandbox": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SandboxConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "tool_permissions": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ToolPermissionConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "tool_runtime": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ToolRuntimeSettings"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "default_provider",
+        "providers",
+        "default_model",
+        "models"
       ]
     },
     "Schedule": {
@@ -1752,6 +2437,27 @@
       "required": [
         "path",
         "message"
+      ]
+    },
+    "SearchProviderConfig": {
+      "type": "object",
+      "properties": {
+        "api_key": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "base_url": {
+          "type": "string"
+        },
+        "provider_type": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "provider_type",
+        "base_url"
       ]
     },
     "SendMessageRequest": {
@@ -2580,6 +3286,82 @@
         }
       ]
     },
+    "SettingsResponse": {
+      "type": "object",
+      "properties": {
+        "can_restart": {
+          "type": "boolean"
+        },
+        "communication": {
+          "$ref": "#/$defs/CommunicationConfig"
+        },
+        "context": {
+          "$ref": "#/$defs/ContextConfig"
+        },
+        "default_model": {
+          "type": "string"
+        },
+        "default_provider": {
+          "type": "string"
+        },
+        "generation_presets": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/GenerationPresetConfig"
+          }
+        },
+        "hitl": {
+          "$ref": "#/$defs/HitlConfig"
+        },
+        "models": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/ModelSettings"
+          }
+        },
+        "observability": {
+          "$ref": "#/$defs/ObservabilityConfig"
+        },
+        "pricing": {
+          "$ref": "#/$defs/PricingConfig"
+        },
+        "providers": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/ProviderSettings"
+          }
+        },
+        "restart_required": {
+          "type": "boolean"
+        },
+        "sandbox": {
+          "$ref": "#/$defs/SandboxConfig"
+        },
+        "tool_permissions": {
+          "$ref": "#/$defs/ToolPermissionConfig"
+        },
+        "tool_runtime": {
+          "$ref": "#/$defs/ToolRuntimeSettings"
+        }
+      },
+      "required": [
+        "providers",
+        "default_provider",
+        "models",
+        "default_model",
+        "generation_presets",
+        "tool_runtime",
+        "tool_permissions",
+        "hitl",
+        "sandbox",
+        "context",
+        "pricing",
+        "observability",
+        "communication",
+        "restart_required",
+        "can_restart"
+      ]
+    },
     "SignInMethod": {
       "type": "string",
       "enum": [
@@ -2861,6 +3643,83 @@
         "tool",
         "arguments",
         "truncated"
+      ]
+    },
+    "ToolPermissionConfig": {
+      "type": "object",
+      "properties": {
+        "allow": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "bundles": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "deny": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "require_approval": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RequireApprovalEntry"
+          }
+        }
+      },
+      "required": [
+        "allow",
+        "deny",
+        "bundles",
+        "require_approval"
+      ]
+    },
+    "ToolRuntimeSettings": {
+      "type": "object",
+      "properties": {
+        "max_output_bytes": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "plugin_directory": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "python_execute": {
+          "$ref": "#/$defs/PythonExecuteToolConfig"
+        },
+        "search": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SearchProviderConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "shell_timeout_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "shell_timeout_secs",
+        "python_execute",
+        "max_output_bytes"
       ]
     },
     "TranscribeAudioRequest": {

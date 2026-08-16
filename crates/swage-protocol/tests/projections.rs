@@ -53,6 +53,10 @@ fn typescript_bindings_are_regenerated() {
     client::turn::TurnPollResponse::export_all(&cfg).expect("export turn polling");
     client::turn::SendMessageRequest::export_all(&cfg).expect("export send message");
     client::turn::MessageResponse::export_all(&cfg).expect("export message response");
+    client::settings::SettingsResponse::export_all(&cfg).expect("export settings");
+    client::settings::SaveSettingsRequest::export_all(&cfg).expect("export save settings");
+    client::settings::ModelDiscoveryResponse::export_all(&cfg).expect("export model discovery");
+    client::settings::RestartStatusResponse::export_all(&cfg).expect("export restart status");
     client::knowledge::KnowledgeSearchResponse::export_all(&cfg)
         .expect("export knowledge search response");
     client::knowledge::OrientationFindResponse::export_all(&cfg)
