@@ -1,9 +1,12 @@
 # CI on Forgejo Actions (self-hosted runner).
 #
-# This workflow installs what the gate needs, then runs `just verify` — the
-# same command a dev box runs. What the gate checks is defined in xtask, not
-# here, so the two cannot drift apart. Adding a check means editing xtask;
-# this file only changes when the gate needs a new tool or capability.
+# This workflow runs `just verify` — the same command a dev box runs — in the
+# rust-ci image, which bakes in the tools the gate needs (node, jq,
+# xvfb + browser libraries, cargo-nextest, just). The image is built on the
+# runner from a definition kept outside this repository. What the gate checks is defined in xtask, not here, so the two
+# cannot drift apart. Adding a check means editing xtask; this file only
+# changes when the gate needs a new tool or capability — and the image is
+# where such a tool belongs.
 #
 # SWAGE_TEST_RUNNER=nextest swaps the local `cargo test` for cargo-nextest,
 # whose ci profile retries failures so flaky tests (fail, then pass on retry)
@@ -11,8 +14,8 @@
 # green. Doctests then run as their own stage — nextest cannot run them.
 #
 # The desktop (electron) smoke test needs a display and a browser's shared
-# libraries, so the container gets xvfb and the Playwright dependencies and
-# the gate runs under xvfb-run. It used to be skipped here for want of them.
+# libraries — the image carries xvfb and the Playwright dependencies, and
+# the gate runs under xvfb-run.
 name: CI
 
 on:
@@ -31,23 +34,10 @@ jobs:
     if: forgejo.event_name == 'push' || (forgejo.event.pull_request.draft == false && !startsWith(forgejo.event.pull_request.head.ref, 'structural/'))
     runs-on: docker
     container:
-      image: rust:1.95
+      # Built locally on the runner; carries the
+      # toolchain rust-toolchain.toml pins, with rustfmt and clippy.
+      image: rust-ci:latest
     steps:
-      # Node 24 from nodesource, not Debian's package: the frontend toolchain
-      # needs a current node, and Debian's `nodejs` does not carry npm.
-      # xvfb and the browser shared libraries let the desktop (electron)
-      # smoke test run here rather than be skipped. jq is for the labelling
-      # step.
-      - name: Install system deps
-        run: |
-          apt-get update -qq
-          apt-get install -y -qq curl ca-certificates jq xvfb \
-            libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libcups2 \
-            libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 \
-            libxrandr2 libgbm1 libasound2 libpango-1.0-0 libcairo2 libgtk-3-0
-          curl -fsSL https://deb.nodesource.com/setup_24.x | bash -
-          apt-get install -y -qq nodejs
-
       - uses: actions/checkout@v4
 
       - name: Restore cargo cache
@@ -57,21 +47,11 @@ jobs:
           # being stabilised, or every retry rebuilds from cold.
           cache-on-failure: true
 
-      # rust-toolchain.toml makes rustup auto-install the pinned toolchain
-      # with the minimal profile — rustfmt and clippy must be added on top.
+      # A no-op while the image carries the pinned toolchain's components;
+      # keeps a freshly bumped rust-toolchain.toml working (rustup fetches
+      # the new channel with the minimal profile) until the image is rebuilt.
       - name: Install toolchain components
         run: rustup component add rustfmt clippy
-
-      # Pinned rather than `latest`: bump deliberately (supply-chain
-      # cooling-off — pick releases at least a week old).
-      - name: Install cargo-nextest
-        run: curl -LsSf https://get.nexte.st/0.9.138/linux | tar zxf - -C /usr/local/cargo/bin
-
-      # `just` is how the gate is invoked here, exactly as on a dev box.
-      - name: Install just
-        run: |
-          curl -LsSf https://github.com/casey/just/releases/download/1.57.0/just-1.57.0-x86_64-unknown-linux-musl.tar.gz \
-            | tar zxf - -C /usr/local/bin just
 
       # The desktop smoke drives Chromium through Playwright, which ships no
       # browser binary of its own. Installed from the desktop package so the
