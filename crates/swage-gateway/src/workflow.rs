@@ -3785,8 +3785,8 @@ mod tests {
     use super::*;
     use swage_protocol::client::workflow::{WorkflowJournalEntryKind, WorkflowJournalEntryStatus};
     use swage_storage::{
-        NewWorkspaceAttachment, SessionStore, SpaceStore, SqliteStorage, Storage, TurnStore,
-        WorkflowStore, WorkspaceAttachmentStore,
+        NewWorkspaceAttachment, SessionStore, SpaceStore, SqliteStorage, Storage, ToolCallStore,
+        TurnStore, WorkflowStore, WorkspaceAttachmentStore,
     };
     use swage_workflow::AgentSessionRef;
 
@@ -5669,6 +5669,7 @@ mod tests {
         let fixture = tempfile::tempdir_in("/tmp/scratch").expect("scratch fixture");
         let attachment = fixture.path().join("read-only");
         std::fs::create_dir(&attachment).unwrap();
+        std::fs::write(attachment.join("readable.txt"), "readable proof").unwrap();
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
         let space = storage.get_or_create_default().await.expect("space");
         storage
@@ -5681,72 +5682,98 @@ mod tests {
             })
             .await
             .unwrap();
-        let run = storage
-            .create_workflow_run(NewWorkflowRun {
-                space_id: space.id,
-                parent_run_id: None,
-                parent_seq: None,
-                script_version_id: None,
-                source: Some("return null".into()),
-                source_hash: source_hash("return null"),
-                args: Value::Null,
-                budget: serde_json::json!({}),
-                engine_version: "test".into(),
-                dispatch_bound_agent_ids: vec![],
-            })
-            .await
-            .unwrap();
+        let outputs = std::collections::VecDeque::from([
+            vec![
+                swage_core::StreamChunk::ToolUse {
+                    call_id: "read-placement".into(),
+                    name: "file_read".into(),
+                    arguments: serde_json::json!({"path": "readable.txt"}),
+                },
+                swage_core::StreamChunk::Done {
+                    finish_reason: None,
+                },
+            ],
+            vec![
+                swage_core::StreamChunk::ToolUse {
+                    call_id: "write-placement".into(),
+                    name: "file_write".into(),
+                    arguments: serde_json::json!({
+                        "path": "blocked.txt",
+                        "content": "must not be written",
+                    }),
+                },
+                swage_core::StreamChunk::Done {
+                    finish_reason: None,
+                },
+            ],
+            scripted_text_output("read succeeded and write was refused"),
+        ]);
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn SpaceStore>,
             Arc::new(ScriptedRecordingProvider {
-                outputs: std::sync::Mutex::new(Default::default()),
+                outputs: std::sync::Mutex::new(outputs),
                 requests: std::sync::Mutex::new(vec![]),
             }),
             swage_config::ResolvedConfig::default(),
-            crate::tool::ToolDispatcher::allow_all(vec![]),
+            crate::tool::ToolDispatcher::allow_all(vec![
+                Arc::new(crate::turn::tests::SandboxedFileTool::new("file_read"))
+                    as Arc<dyn crate::tool::Tool>,
+                Arc::new(crate::turn::tests::SandboxedFileTool::new("file_write"))
+                    as Arc<dyn crate::tool::Tool>,
+            ]),
             None,
         )
-        .with_worktree_root(fixture.path().join("worker-worktrees"));
-        let (tx, rx) = mpsc::unbounded_channel();
-        let task = tokio::spawn(run_host_commands(
-            state.clone(),
-            run.id,
-            space.id,
-            vec![],
-            None,
-            WorkflowBudget::default(),
-            vec![],
-            Arc::new(AtomicU32::new(0)),
-            Arc::new(AtomicU64::new(0)),
-            Arc::new(Mutex::new(std::collections::HashMap::new())),
-            CancellationToken::new(),
-            PARK_TIMER_THRESHOLD_MS,
-            rx,
-        ));
-        let (reply, receive) = oneshot::channel();
-        tx.send(HostCommand::ResolveWorkerDirectory {
-            cwd: attachment.to_string_lossy().into_owned(),
-            reply,
-        })
-        .unwrap();
-        let placement = receive.await.unwrap().unwrap().unwrap();
-        assert!(!placement.can_write);
-
-        let agent_config = swage_agent::AgentConfig::new("workflow-worker")
-            .with_workspace(&attachment, vec![attachment.clone()]);
-        let mut policy =
-            crate::turn::load_trusted_workspace_policy(&state.storage, space.id, None).await;
-        let metadata = serde_json::json!({
-            "worker_placement_can_write": placement.can_write,
-        });
-        crate::turn::apply_worker_placement_permission(&mut policy, &agent_config, Some(&metadata));
-        let sandbox = crate::turn::build_sandbox_config(&agent_config, Some(&policy)).unwrap();
-        let path = attachment.canonicalize().unwrap();
-        assert!(sandbox.read_only_mounts.contains(&path));
-        assert!(!sandbox.read_write_mounts.contains(&path));
-        drop(tx);
-        task.await.unwrap();
+        .with_worktree_root(fixture.path().join("worker-worktrees"))
+        .with_test_sandbox();
+        let cwd = serde_json::to_string(&attachment.to_string_lossy()).unwrap();
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(space.id),
+            Json(StartInlineWorkflowRunRequest {
+                source: format!(
+                    r#"return await agent("exercise read-only placement", {{ cwd: {cwd}, maxAttempts: 1 }});"#
+                ),
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start read-only placement workflow");
+        wait_for_terminal(&state, started.id).await;
+        let run = storage.get_workflow_run(started.id).await.unwrap().unwrap();
+        assert_eq!(run.state, "completed", "run error: {:?}", run.error_message);
+        let turn_id = storage
+            .list_workflow_journal(started.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.kind == "agent_call")
+            .and_then(|entry| entry.result)
+            .and_then(|result| result["turn_id"].as_str().map(str::to_owned))
+            .and_then(|id| Uuid::parse_str(&id).ok())
+            .expect("workflow agent call turn id");
+        let calls = storage.list_tool_calls_by_turn(turn_id).await.unwrap();
+        assert_eq!(
+            calls.len(),
+            2,
+            "read and write calls should both be audited"
+        );
+        assert_eq!(calls[0].tool, "file_read");
+        assert_eq!(calls[0].status.as_deref(), Some("success"));
+        assert!(
+            calls[0]
+                .result
+                .as_deref()
+                .is_some_and(|result| result.contains("readable proof")),
+            "read should succeed inside the placed attachment: {calls:?}"
+        );
+        assert_eq!(calls[1].tool, "file_write");
+        assert_eq!(calls[1].status.as_deref(), Some("error"));
+        assert!(
+            !attachment.join("blocked.txt").exists(),
+            "read-only placement must reject the sandboxed write"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
