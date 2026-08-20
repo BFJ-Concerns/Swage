@@ -9,7 +9,8 @@ use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    AgentCallRequest, EffectPayload, GateRequest, RunEventPost, WorkflowCallRequest, WorkflowHost,
+    AgentCallRequest, AwaitEventRequest, EffectPayload, GateRequest, RunEventPost,
+    WorkflowCallRequest, WorkflowHost,
 };
 
 fn named_host_error(error: &str, fallback: &str) -> (String, String) {
@@ -477,6 +478,30 @@ impl WorkflowEngine {
                     ).map_err(|error| error.to_string())?;
                     ctx.globals().set("__postEvent", post_event).map_err(|error| error.to_string())?;
 
+                    let await_event_host = Arc::clone(&host);
+                    let await_event_cancellation = host_cancellation.clone();
+                    let await_event = Function::new(
+                        ctx.clone(),
+                        Async(move |request_json: String| {
+                            let host = Arc::clone(&await_event_host);
+                            let cancellation = await_event_cancellation.clone();
+                            async move {
+                                let request: AwaitEventRequest = match serde_json::from_str(&request_json) {
+                                    Ok(request) => request,
+                                    Err(error) => return serde_json::json!({"ok": false, "error": {"name": "RunEventError", "message": error.to_string()}}).to_string(),
+                                };
+                                match host.await_run_event(request, cancellation).await {
+                                    Ok(value) => serde_json::json!({"ok": true, "value": value}).to_string(),
+                                    Err(error) => {
+                                        let (name, message) = named_host_error(&error, "RunEventError");
+                                        serde_json::json!({"ok": false, "error": {"name": name, "message": message}}).to_string()
+                                    }
+                                }
+                            }
+                        }),
+                    ).map_err(|error| error.to_string())?;
+                    ctx.globals().set("__awaitEvent", await_event).map_err(|error| error.to_string())?;
+
                     let gate_host = Arc::clone(&host);
                     let gate_cancellation = host_cancellation.clone();
                     let gate = Function::new(
@@ -755,6 +780,8 @@ impl WorkflowEngine {
                         // events delivered once a wake has carried them.
                         globalThis.postEvent = async (kind, payload = null) =>
                             unwrapHostResponse(await __postEvent(String(kind), JSON.stringify(payload ?? null)));
+                        globalThis.awaitEvent = async ({ kinds }) =>
+                            unwrapHostResponse(await __awaitEvent(JSON.stringify({ kinds })));
                         globalThis.gate = async (options = {}) =>
                             unwrapHostResponse(await __gate(JSON.stringify({
                                 criteria: options.criteria ?? "",
@@ -965,6 +992,7 @@ mod tests {
         timer_settles: bool,
         agent_delay_ms: u64,
         event_posts: Mutex<Vec<RunEventPost>>,
+        awaited_events: Mutex<Vec<AwaitEventRequest>>,
         gate_requests: Mutex<Vec<GateRequest>>,
         gate_verdict: Value,
         deliveries_up_to: Mutex<Vec<u64>>,
@@ -982,6 +1010,7 @@ mod tests {
                 timer_settles: true,
                 agent_delay_ms: 0,
                 event_posts: Mutex::new(Vec::new()),
+                awaited_events: Mutex::new(Vec::new()),
                 gate_requests: Mutex::new(Vec::new()),
                 gate_verdict: Value::Null,
                 deliveries_up_to: Mutex::new(Vec::new()),
@@ -1063,6 +1092,15 @@ mod tests {
             let mut posts = self.event_posts.lock().expect("posts");
             posts.push(event.clone());
             Ok(json!({"seq": posts.len(), "kind": event.kind, "payload": event.payload}))
+        }
+
+        async fn await_run_event(
+            &self,
+            request: AwaitEventRequest,
+            _: CancellationToken,
+        ) -> Result<Value, String> {
+            self.awaited_events.lock().expect("awaits").push(request);
+            Ok(json!({"seq": 4, "kind": "operator.decision", "payload": {"verdict": "accept"}}))
         }
 
         async fn evaluate_wake_gate(
@@ -1267,7 +1305,7 @@ mod tests {
         let output = WorkflowEngine::new(EngineLimits::default())
             .execute_hosted(
                 r#"
-                await postEvent("completion", { worker: "w1" });
+                await postEvent("worker.completion", { worker: "w1" });
                 const verdict = await gate({ criteria: "wake when any pipeline settles" });
                 if (verdict.wake) {
                     // The wake happens here (an agent call in a real run);
@@ -1288,13 +1326,36 @@ mod tests {
         assert_eq!(verdict["read_up_to_seq"], 1);
         let posts = host.event_posts.lock().unwrap();
         assert_eq!(posts.len(), 1);
-        assert_eq!(posts[0].kind, "completion");
+        assert_eq!(posts[0].kind, "worker.completion");
         assert_eq!(posts[0].payload, json!({"worker": "w1"}));
         assert_eq!(
             host.gate_requests.lock().unwrap()[0].criteria,
             "wake when any pipeline settles"
         );
         assert_eq!(host.deliveries_up_to.lock().unwrap().as_slice(), [1]);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn await_event_exposes_typed_kinds_and_returns_the_host_event() {
+        let host = Arc::new(SurfaceHost::new());
+        let output = WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                r#"return await awaitEvent({ kinds: ["operator.decision", "device.reply"] });"#,
+                "null",
+                CancellationToken::new(),
+                Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                ScriptCapabilities::default(),
+            )
+            .await
+            .expect("await event");
+        assert_eq!(
+            serde_json::from_str::<Value>(&output).unwrap()["kind"],
+            "operator.decision"
+        );
+        assert_eq!(
+            host.awaited_events.lock().unwrap()[0].kinds,
+            ["operator.decision", "device.reply"]
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

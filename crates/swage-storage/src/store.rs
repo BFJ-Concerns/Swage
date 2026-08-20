@@ -1015,6 +1015,11 @@ pub trait WorkflowStore: Send + Sync {
         id: Uuid,
         wake_at: chrono::DateTime<chrono::Utc>,
     ) -> Result<(), StorageError>;
+    /// Atomically make a parked run due now. False means cancellation or
+    /// another waker moved it first.
+    async fn make_parked_workflow_run_due(&self, _id: Uuid) -> Result<bool, StorageError> {
+        Ok(false)
+    }
     /// Parked runs whose `wake_at` has arrived, oldest due first.
     async fn list_due_parked_workflow_runs(
         &self,
@@ -2229,6 +2234,9 @@ mod tests {
             _: chrono::DateTime<chrono::Utc>,
         ) -> Result<(), StorageError> {
             unimplemented!()
+        }
+        async fn make_parked_workflow_run_due(&self, _: Uuid) -> Result<bool, StorageError> {
+            Ok(false)
         }
         async fn list_due_parked_workflow_runs(
             &self,

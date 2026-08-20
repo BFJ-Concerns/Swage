@@ -72,6 +72,50 @@ pub struct StartInlineWorkflowRunRequest {
     pub budget: Option<WorkflowBudget>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+pub struct WorkflowRunEvent {
+    #[ts(type = "number")]
+    pub seq: u64,
+    pub kind: String,
+    #[ts(type = "unknown")]
+    pub payload: Value,
+    pub source: WorkflowRunEventSource,
+}
+
+/// Attribution is derived by the gateway, never accepted from a poster.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+pub struct WorkflowRunEventSource {
+    pub surface: String,
+    pub agent_id: Option<String>,
+    pub session_id: Option<Uuid>,
+    pub turn_id: Option<Uuid>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+pub struct PostWorkflowRunEventRequest {
+    pub kind: String,
+    #[ts(type = "unknown")]
+    pub payload: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+pub struct PostWorkflowRunEventResponse {
+    pub event: WorkflowRunEvent,
+    pub wake_provisioned: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+pub struct WorkflowDecisionEventPayload {
+    pub nonce: String,
+    pub verdict: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub note: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "unknown[]")]
+    pub dispositions: Option<Vec<Value>>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkflowRunState {
@@ -117,6 +161,7 @@ pub enum WorkflowJournalEntryKind {
     /// A pending-queue operation: an event posted, or events stamped
     /// delivered by a wake.
     Event,
+    AwaitEvent,
     /// A wake-gate evaluation: a cheap model judged the pending events; its
     /// verdict and reasoning are the entry's result.
     Gate,
