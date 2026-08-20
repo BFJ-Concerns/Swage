@@ -14,11 +14,16 @@
 //!
 //! ## The script contract
 //!
-//! The script body runs with two globals and communicates by calling `add`:
+//! The script body runs with three globals and communicates by calling `add`:
 //!
 //! - `elements` — the turn's elements, read-only:
-//!   `[{ name, priority, source, tokenCount, messages }]` where `messages`
-//!   is `[{ role, text }]`.
+//!   `[{ name, priority, source, tokenCount, messages, render }]` where
+//!   `messages` is `[{ role, text }]`. Calling an element's non-enumerable
+//!   `render()` returns a copy of the element whose messages have every
+//!   `{{name}}` slot replaced from the current session values; absent values
+//!   become `⟦unset:name⟧`.
+//! - `ctx` — read-only assembly context. `ctx.variable(name)` returns the
+//!   current session value or `undefined` when the name is absent.
 //! - `add(element_or_messages)` — appends an element's messages (pass an
 //!   entry from `elements`) or a raw `[{ role, text }]` array to the output,
 //!   in call order.
@@ -28,10 +33,11 @@
 //! ```js
 //! const byName = Object.fromEntries(elements.map(e => [e.name, e]));
 //! add(byName.orientation);
-//! add(byName.prompts);
+//! add(byName.prompts.render());
 //! add(byName.history);
 //! ```
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -78,6 +84,7 @@ pub fn assemble_named(
     elements: &[Box<dyn ContextElement>],
     config: &ContextConfig,
     tokeniser: &dyn Tokeniser,
+    variables: &BTreeMap<String, String>,
 ) -> AssemblyOutput {
     let Some(path) = source_path else {
         return fallback(
@@ -102,7 +109,7 @@ pub fn assemble_named(
     };
 
     let timeout = Duration::from_secs(config.timeout.max(1));
-    match run_script(&source, elements, tokeniser, timeout) {
+    match run_script(&source, elements, tokeniser, variables, timeout) {
         Ok((messages, _)) if messages.is_empty() => fallback(
             name,
             format!("assembly '{name}' produced no messages"),
@@ -194,6 +201,7 @@ fn run_script(
     source: &str,
     elements: &[Box<dyn ContextElement>],
     tokeniser: &dyn Tokeniser,
+    variables: &BTreeMap<String, String>,
     timeout: Duration,
 ) -> Result<(Vec<ChatMessage>, Vec<AddedBlock>), String> {
     let runtime = Runtime::new().map_err(|error| error.to_string())?;
@@ -236,6 +244,7 @@ fn run_script(
             .collect::<Vec<_>>(),
     )
     .map_err(|error| error.to_string())?;
+    let variables_json = serde_json::to_string(variables).map_err(|error| error.to_string())?;
 
     context.with(|ctx| -> Result<(Vec<ChatMessage>, Vec<AddedBlock>), String> {
         // The cage: no eval, no ambient nondeterminism. Assemblies must be
@@ -281,6 +290,34 @@ fn run_script(
                     .map_err(|error| error.to_string())?,
             )
             .map_err(|error| error.to_string())?;
+        globals
+            .set("__variables", ctx.json_parse(variables_json.as_bytes()).map_err(|error| error.to_string())?)
+            .map_err(|error| error.to_string())?;
+        ctx.eval::<(), _>(r#"
+            const slot = /\{\{([a-z0-9-]+)\}\}/g;
+            const variables = globalThis.__variables;
+            const valueFor = name => Object.prototype.hasOwnProperty.call(variables, name)
+                ? variables[name]
+                : undefined;
+            const renderedValueFor = name => valueFor(name) ?? `⟦unset:${name}⟧`;
+            globalThis.ctx = Object.freeze({ variable: valueFor });
+            for (const element of globalThis.elements) {
+                Object.defineProperty(element, "render", {
+                    enumerable: false,
+                    value: () => ({
+                        ...element,
+                        messages: element.messages.map(message => ({
+                            ...message,
+                            text: message.text.replace(slot, (_match, name) => renderedValueFor(name)),
+                        })),
+                    }),
+                });
+                Object.freeze(element.messages);
+                Object.freeze(element);
+            }
+            Object.freeze(globalThis.elements);
+            delete globalThis.__variables;
+        "#).map_err(|error| format!("variable capability setup failed: {error}"))?;
 
         ctx.eval::<(), _>(source.as_bytes())
             .map_err(|error| script_error(&ctx, error))?;
@@ -387,9 +424,46 @@ mod tests {
             source,
             &test_elements(),
             &WordTokeniser,
+            &BTreeMap::new(),
             Duration::from_secs(5),
         )
         .map(|(messages, _)| messages)
+    }
+
+    #[test]
+    fn element_render_substitutes_current_values_and_marks_missing_slots() {
+        let variables = BTreeMap::from([("task".to_string(), "audit storage".to_string())]);
+        let elements: Vec<Box<dyn ContextElement>> =
+            vec![Box::new(PromptsElement::new(vec![PromptRule {
+                priority: 0,
+                content: "Do {{task}} for {{owner}}; direct={{task}}".into(),
+                source_level: HierarchyLevel::Global,
+                file_path: PathBuf::from("test"),
+            }]))];
+        let (messages, added) = run_script(
+            r#"
+            const rendered = elements[0].render();
+            add(rendered);
+            add([{
+                role: 'system',
+                text: `${ctx.variable('task')}|${ctx.variable('owner') === undefined}`,
+            }]);
+            "#,
+            &elements,
+            &WordTokeniser,
+            &variables,
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        assert_eq!(
+            messages[0].text_content(),
+            "Do audit storage for ⟦unset:owner⟧; direct=audit storage"
+        );
+        assert_eq!(messages[1].text_content(), "audit storage|true");
+        assert_eq!(
+            added[0].name, "prompts",
+            "render() preserves element metadata"
+        );
     }
 
     /// The report attributes each add() to what was actually added, so a
@@ -404,6 +478,7 @@ mod tests {
             "#,
             &test_elements(),
             &WordTokeniser,
+            &BTreeMap::new(),
             Duration::from_secs(5),
         )
         .unwrap();
@@ -429,6 +504,7 @@ mod tests {
             "while (true) {}",
             &test_elements(),
             &WordTokeniser,
+            &BTreeMap::new(),
             Duration::from_millis(200),
         )
         .map(|(messages, _)| messages);
@@ -498,6 +574,7 @@ mod tests {
             &elements,
             &ContextConfig::default(),
             &WordTokeniser,
+            &BTreeMap::new(),
         );
 
         assert!(!output.messages.is_empty(), "fallback still assembles");
@@ -519,6 +596,7 @@ mod tests {
             &elements,
             &ContextConfig::default(),
             &WordTokeniser,
+            &BTreeMap::new(),
         );
 
         assert!(!output.messages.is_empty());

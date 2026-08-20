@@ -718,6 +718,7 @@ pub(crate) struct MockStorage {
     fail_append_message_at: AtomicUsize,
     append_message_calls: AtomicUsize,
     fail_message_lists: AtomicBool,
+    fail_session_variable_lists: AtomicBool,
     fail_secret_reads: AtomicBool,
     fail_audit_writes: AtomicBool,
     fail_snapshot_writes: AtomicBool,
@@ -901,6 +902,34 @@ impl swage_storage::WorkflowStore for MockStorage {
     }
 }
 
+#[async_trait]
+impl swage_storage::SessionVariableStore for MockStorage {
+    async fn set_session_variable(
+        &self,
+        _: Uuid,
+        _: &str,
+        _: &str,
+    ) -> Result<swage_storage::SessionVariable, StorageError> {
+        unimplemented!()
+    }
+
+    async fn list_session_variables(
+        &self,
+        _: Uuid,
+    ) -> Result<Vec<swage_storage::SessionVariable>, StorageError> {
+        if self.fail_session_variable_lists.load(Ordering::SeqCst) {
+            return Err(StorageError::QueryFailed(
+                "injected session variable list failure".into(),
+            ));
+        }
+        Ok(Vec::new())
+    }
+
+    async fn delete_session_variable(&self, _: Uuid, _: &str) -> Result<bool, StorageError> {
+        unimplemented!()
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct InMemoryDb {
     pub(crate) spaces: HashMap<Uuid, Space>,
@@ -941,6 +970,7 @@ impl MockStorage {
             fail_append_message_at: AtomicUsize::new(0),
             append_message_calls: AtomicUsize::new(0),
             fail_message_lists: AtomicBool::new(false),
+            fail_session_variable_lists: AtomicBool::new(false),
             fail_secret_reads: AtomicBool::new(false),
             fail_audit_writes: AtomicBool::new(false),
             fail_snapshot_writes: AtomicBool::new(false),
@@ -965,6 +995,11 @@ impl MockStorage {
 
     fn fail_message_lists(&self) {
         self.fail_message_lists.store(true, Ordering::SeqCst);
+    }
+
+    fn fail_session_variable_lists(&self) {
+        self.fail_session_variable_lists
+            .store(true, Ordering::SeqCst);
     }
 
     fn fail_secret_reads(&self) {
@@ -4632,6 +4667,40 @@ async fn history_rebuild_failure_clears_active_turn() {
     assert!(
         !state.active_turns.lock().await.contains_key(&session_id),
         "history rebuild failure must release the turn guard"
+    );
+    let thread = state
+        .storage
+        .list_by_session(session_id)
+        .await
+        .unwrap()
+        .remove(0);
+    let turns = state.storage.list_turns_by_thread(thread.id).await.unwrap();
+    assert_eq!(turns[0].state, TurnState::Failed);
+    assert_subsequent_turn_is_not_blocked(&state, session_id).await;
+}
+
+#[tokio::test]
+async fn session_variable_read_failure_clears_active_turn() {
+    let storage = Arc::new(MockStorage::new());
+    storage.fail_session_variable_lists();
+    let (state, session_id) = make_state_with_storage(vec![], storage).await;
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    process_turn(
+        &state,
+        session_id,
+        None,
+        "message".to_string(),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .expect_err("the injected session variable read must fail");
+
+    assert!(
+        !state.active_turns.lock().await.contains_key(&session_id),
+        "session variable read failure must release the turn guard"
     );
     let thread = state
         .storage
@@ -9482,6 +9551,7 @@ async fn named_assembly_loads_memory_and_can_compose_it() {
         &elements,
         &swage_config::model::ContextConfig::default(),
         &TiktokenTokeniser::new("gpt-5"),
+        &std::collections::BTreeMap::new(),
     );
 
     assert!(
@@ -9491,6 +9561,79 @@ async fn named_assembly_loads_memory_and_can_compose_it() {
         "a named assembly should be able to compose the loaded memory element"
     );
     assert_eq!(output.report.assembly_name, "memory-aware");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn delegated_assembly_reads_current_session_variables() {
+    let swage_home = tempfile::TempDir::new().expect("temp swage home");
+    std::fs::create_dir_all(swage_home.path().join("assemblies"))
+        .expect("create assembly directory");
+    std::fs::write(
+        swage_home.path().join("assemblies/briefing.js"),
+        "add(elements.find(element => element.name === 'prompts').render());",
+    )
+    .expect("write assembly");
+    let _guard = SwageHomeGuard::set_to(swage_home.path());
+
+    let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
+    let space = storage
+        .get_or_create_default()
+        .await
+        .expect("create default space");
+    let session = storage
+        .create_session(NewSession {
+            space_id: space.id,
+            agent_id: "delegate".into(),
+            metadata: None,
+            active_workspace_attachment_id: None,
+        })
+        .await
+        .expect("create delegated session");
+    swage_storage::SessionVariableStore::set_session_variable(
+        storage.as_ref(),
+        session.id,
+        "task",
+        "inspect delegated context",
+    )
+    .await
+    .expect("save delegated session value");
+
+    let mut config = swage_config::ResolvedConfig::default();
+    config.context.assembly = "briefing".into();
+    config.instructions = "Task: {{task}}; owner: {{owner}}".into();
+    let state = AppState::new(
+        Arc::clone(&storage) as Arc<dyn swage_storage::Storage>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::SpaceStore>,
+        Arc::new(MockProvider::new(vec![])) as Arc<dyn LlmProvider>,
+        config.clone(),
+        crate::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+    );
+    let (context_event_tx, _context_event_rx) = mpsc::unbounded_channel();
+    let assembler = crate::turn::delegation::delegated_context_assembler(
+        state,
+        space,
+        config,
+        "delegate".into(),
+        "/workspace".into(),
+        context_event_tx,
+        serde_json::json!({}),
+    );
+
+    let output = assembler
+        .assemble(&session, Uuid::new_v4(), vec![])
+        .await
+        .expect("assemble delegated context");
+    let context = output
+        .messages
+        .iter()
+        .map(ChatMessage::text_content)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        context.contains("Task: inspect delegated context; owner: ⟦unset:owner⟧"),
+        "delegated assembly should consume its session's current values: {context}"
+    );
 }
 
 /// When memory_content is non-empty, the memory element produces a system
