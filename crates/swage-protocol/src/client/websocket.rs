@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 use uuid::Uuid;
 
+use super::context::AssemblyReport;
+
 use super::approval::ApprovalDecisionScope;
 
 // ---------------------------------------------------------------------------
@@ -116,14 +118,9 @@ pub enum ServerEvent {
     /// inspection. Only delivered to connections subscribed to the `"context"`
     /// channel unless the report contains errors, in which case it is always
     /// sent so the client can surface assembly failures to the user.
-    ///
-    /// The report is carried as `serde_json::Value` to decouple the wire
-    /// format from swage-context's internal types — the shape matches
-    /// `swage_context::report::AssemblyReport` when serialised.
     ContextAssembled {
         turn_id: Uuid,
-        #[ts(type = "unknown")]
-        report: serde_json::Value,
+        report: AssemblyReport,
     },
     /// The provider has finished and the turn has been committed.
     ///

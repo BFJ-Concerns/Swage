@@ -11,45 +11,10 @@ export function setBaseUrl(url: string): void {
   baseUrl = url;
 }
 
-// These types transcribe swage-context's AssemblyReport serialisation.
-// The report types are not yet part of swage-protocol's projected wire
-// contract (the one-definition rule says they should be — tracked in the
-// annexe); until they are projected, this file is the single frontend
-// transcription and nothing else may re-declare these shapes.
-export interface ElementReport {
-  name: string;
-  source: string;
-  token_count: number;
-  preview?: string | null;
-  priority: number;
-}
+import type { AssemblyReport } from "../protocol/AssemblyReport";
+import type { TurnContextResponse } from "../protocol/TurnContextResponse";
 
-export interface CompactionRecord {
-  element: string;
-  requested_strategy: string;
-  actual_strategy: string;
-  messages_removed: number;
-  tokens_before: number;
-  tokens_after: number;
-}
-
-export interface AssemblyErrorReport {
-  assembly_name: string;
-  error_kind: string;
-  message: string;
-  fallback_used: string;
-}
-
-export interface TurnContextReport {
-  assembly_name: string;
-  elements: ElementReport[];
-  total_tokens: number;
-  compaction_applied: CompactionRecord[];
-  warnings: string[];
-  errors: AssemblyErrorReport[];
-  // serde's default Duration serialisation.
-  duration: { secs: number; nanos: number };
-}
+export type TurnContextReport = AssemblyReport;
 
 /**
  * Fetch the assembled-context report recorded for a turn.
@@ -70,6 +35,6 @@ export async function fetchTurnContext(
       `failed to load the turn's context report: HTTP ${response.status}`,
     );
   }
-  const body = (await response.json()) as { report: TurnContextReport };
+  const body = (await response.json()) as TurnContextResponse;
   return body.report;
 }

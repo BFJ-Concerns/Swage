@@ -939,6 +939,7 @@ pub(crate) async fn process_turn_with_existing_turn(
     if let Some(max_retries) = max_output_retries_override {
         agent_config.max_output_retries = max_retries;
     }
+    agent_config.approval_prompts_enabled = attendance == TurnAttendance::Attended;
 
     // Step 9: Resolve tool permissions from config cascade and build the
     // ToolDispatcher with the resolved permission set. When sandboxing is
@@ -1252,7 +1253,7 @@ pub(crate) async fn process_turn_with_existing_turn(
                 // Deliver the ContextAssembled event (subscription-gated).
                 let assembled_event = ServerEvent::ContextAssembled {
                     turn_id: started_id,
-                    report: report_json.clone(),
+                    report: assembly_report.clone(),
                 };
                 if subscription.lock().await.should_deliver(&assembled_event) {
                     let _ = ws_tx.send(assembled_event);

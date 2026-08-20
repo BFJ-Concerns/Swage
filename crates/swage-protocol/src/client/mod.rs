@@ -3,12 +3,17 @@
 
 pub mod approval;
 pub mod channel;
+pub mod context;
 pub mod conversation;
 pub mod delivery;
 pub mod knowledge;
+pub mod material;
 pub mod provider_signin;
+pub mod recovery;
 pub mod schedule;
+pub mod settings;
 pub mod space;
+pub mod turn;
 pub mod voice;
 pub mod websocket;
 pub mod workflow;
@@ -28,19 +33,40 @@ pub struct ClientSurface {
     server_event: websocket::ServerEvent,
     voice_capabilities: voice::VoiceCapabilitiesResponse,
     transcribe_audio: voice::TranscribeAudioRequest,
+    transcribe_audio_response: voice::TranscribeAudioResponse,
     synthesise_speech: voice::SynthesiseSpeechRequest,
+    synthesise_speech_response: voice::SynthesiseSpeechResponse,
     create_channel_link_code_request: channel::CreateChannelLinkCodeRequest,
     create_space_request: space::CreateSpaceRequest,
     update_space_request: space::UpdateSpaceRequest,
     space_list: space::SpaceListResponse,
     create_workspace_attachment_request: space::CreateWorkspaceAttachmentRequest,
+    update_workspace_trust_request: space::UpdateWorkspaceTrustRequest,
     workspace_attachment_list: space::WorkspaceAttachmentListResponse,
     channel_link_code_response: channel::ChannelLinkCodeResponse,
     create_conversation_request: conversation::CreateConversationRequest,
+    create_conversation_branch_request: conversation::CreateConversationBranchRequest,
     conversation: conversation::ConversationResponse,
     conversation_list: conversation::ConversationListResponse,
     conversation_detail: conversation::ConversationDetail,
     conversation_thread: conversation::ConversationThreadDetail,
+    turn_context: context::TurnContextResponse,
+    submit_turn: turn::SubmitTurnRequest,
+    submit_turn_response: turn::SubmitTurnResponse,
+    turn_poll: turn::TurnPollResponse,
+    send_message: turn::SendMessageRequest,
+    message_response: turn::MessageResponse,
+    settings: settings::SettingsResponse,
+    save_settings: settings::SaveSettingsRequest,
+    model_discovery: settings::ModelDiscoveryResponse,
+    restart_status: settings::RestartStatusResponse,
+    create_attachment_request: material::CreateAttachmentRequest,
+    queued_attachment: material::QueuedAttachmentResponse,
+    attachment_list: material::AttachmentListResponse,
+    create_material: material::CreateMaterialRequest,
+    promote_material: material::PromoteMaterialRequest,
+    material_list: material::MaterialListResponse,
+    recovery_exports: recovery::RecoveryExportListResponse,
     knowledge_search: knowledge::KnowledgeSearchResponse,
     orientation_find: knowledge::OrientationFindResponse,
     create_schedule_request: schedule::CreateScheduleRequest,

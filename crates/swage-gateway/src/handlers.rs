@@ -18,7 +18,9 @@ use swage_protocol::{
     client::{channel as channel_wire, schedule as schedule_wire},
     hosting::{
         AgentDefinitionListResponse, AgentDefinitionMutationResponse, AgentDefinitionResponse,
-        AgentDefinitionScopeQuery, CreateAgentDefinitionRequest, UpdateAgentDefinitionRequest,
+        AgentDefinitionScopeQuery, CreateAgentDefinitionRequest,
+        EffectiveAgentDefinitionListResponse, EffectiveAgentDefinitionResponse,
+        EffectiveAgentDefinitionSourceScope, UpdateAgentDefinitionRequest,
     },
 };
 
@@ -93,8 +95,10 @@ pub async fn voice_capabilities(State(state): State<AppState>) -> Json<VoiceCapa
     Json(crate::voice::voice_capabilities(&state).await)
 }
 
-pub async fn get_settings(State(state): State<AppState>) -> Json<SettingsResponse> {
-    Json(crate::settings::load_settings(&state).await)
+pub async fn get_settings(
+    State(state): State<AppState>,
+) -> Result<Json<SettingsResponse>, ApiError> {
+    Ok(Json(crate::settings::load_settings(&state).await?))
 }
 
 pub async fn save_settings(
@@ -288,6 +292,44 @@ pub async fn list_agent_definitions(
         .map(agent_definition_response)
         .collect();
     Ok(Json(AgentDefinitionListResponse { definitions }))
+}
+
+pub async fn list_effective_agent_definitions(
+    State(state): State<AppState>,
+    Path(space_id): Path<Uuid>,
+) -> Result<Json<EffectiveAgentDefinitionListResponse>, ApiError> {
+    let definitions = crate::service::effective_agent_definitions(state.storage.as_ref(), space_id)
+        .await?
+        .into_iter()
+        .map(effective_agent_definition_response)
+        .collect();
+    Ok(Json(EffectiveAgentDefinitionListResponse { definitions }))
+}
+
+fn effective_agent_definition_response(
+    effective: crate::service::EffectiveAgentDefinition,
+) -> EffectiveAgentDefinitionResponse {
+    let definition = effective.definition;
+    let source_scope = if effective.is_builtin {
+        EffectiveAgentDefinitionSourceScope::BuiltIn
+    } else if definition.space_id.is_some() {
+        EffectiveAgentDefinitionSourceScope::Space
+    } else {
+        EffectiveAgentDefinitionSourceScope::Global
+    };
+    EffectiveAgentDefinitionResponse {
+        id: definition.id,
+        display_name: definition.display_name,
+        description: definition.description,
+        instructions: definition.instructions,
+        model_id: definition.model_id,
+        tool_permissions: definition.tool_permissions,
+        skills: definition.skills,
+        output_schema: definition.output_schema,
+        output_max_retries: definition.output_max_retries,
+        is_builtin: effective.is_builtin,
+        source_scope,
+    }
 }
 
 fn new_agent_definition(
@@ -1241,15 +1283,13 @@ pub async fn get_turn_context(
         )
             .into_response()),
         Some(report_json) => {
-            // Parse back to Value so the HTTP response is clean JSON, not a
-            // double-encoded string.
-            let report: serde_json::Value = serde_json::from_str(&report_json)
-                .map_err(|e| ApiError(GatewayError::ConfigError(e.to_string())))?;
-            Ok(Json(serde_json::json!({
-                "turn_id": turn_id,
-                "report": report,
-            }))
-            .into_response())
+            let report: swage_protocol::client::context::AssemblyReport =
+                serde_json::from_str(&report_json)
+                    .map_err(|e| ApiError(GatewayError::ConfigError(e.to_string())))?;
+            Ok(
+                Json(swage_protocol::client::context::TurnContextResponse { turn_id, report })
+                    .into_response(),
+            )
         }
     }
 }
@@ -1320,38 +1360,9 @@ pub async fn shutdown(
 // approval decisions, agent messaging, and turn listing.
 // ---------------------------------------------------------------------------
 
-/// Request body for async turn submission.
-#[derive(Debug, Deserialize)]
-pub struct SubmitTurnRequest {
-    /// The conversation (session) to submit the turn in.
-    pub conversation_id: Uuid,
-    /// Optional target thread. When absent, the session's root thread is used.
-    pub thread_id: Option<Uuid>,
-    /// The user message to process.
-    pub message: String,
-    /// Optional output schema that overrides the agent's configured schema
-    /// for this single turn.
-    pub output_schema: Option<serde_json::Value>,
-}
-
-/// Response for async turn submission.
-#[derive(Debug, Serialize)]
-pub struct SubmitTurnResponse {
-    pub turn_id: Uuid,
-    pub status: String,
-}
-
-/// Response for turn polling.
-#[derive(Debug, Serialize)]
-pub struct TurnPollResponse {
-    pub turn_id: Uuid,
-    pub state: String,
-    pub assistant_response: Option<String>,
-    pub structured_output: Option<serde_json::Value>,
-    pub input_tokens: Option<i64>,
-    pub output_tokens: Option<i64>,
-    pub parent_turn_id: Option<Uuid>,
-}
+pub use swage_protocol::client::turn::{
+    MessageResponse, SendMessageRequest, SubmitTurnRequest, SubmitTurnResponse, TurnPollResponse,
+};
 
 /// `POST /api/turns` — submit a turn for async processing.
 ///
@@ -1518,25 +1529,6 @@ pub async fn get_turn(
     }))
 }
 
-/// Request body for sending an inter-agent message.
-#[derive(Debug, Deserialize)]
-pub struct SendMessageRequest {
-    pub sender_agent_id: String,
-    pub recipient_agent_id: String,
-    pub kind: String,
-    pub correlation_id: Option<Uuid>,
-    pub space_id: Option<Uuid>,
-    pub sender_turn_id: Option<Uuid>,
-    pub payload: serde_json::Value,
-}
-
-/// Response for message operations.
-#[derive(Debug, Serialize)]
-pub struct MessageResponse {
-    pub id: Uuid,
-    pub status: String,
-}
-
 /// `POST /api/messages` — send a typed message to an agent.
 ///
 /// Creates a durable message (Delegate, Result, Cancel, Shutdown) or an
@@ -1659,7 +1651,7 @@ async fn execute_external_delegate_message(
         .expect("a delegated session always has at least its sender bound");
     let active_workspace_attachment_id =
         active_workspace_attachment_for_sender_turn(&state, sender_turn_id).await?;
-    let target_agent_config = crate::turn::build_agent_config_for_space_workspace(
+    let mut target_agent_config = crate::turn::build_agent_config_for_space_workspace(
         &state,
         delegate_msg.recipient_agent_id.clone(),
         &target_resolved,
@@ -1669,6 +1661,7 @@ async fn execute_external_delegate_message(
         active_workspace_attachment_id,
     )
     .await;
+    target_agent_config.approval_prompts_enabled = false;
     let target_context_transfer_config = target_resolved.communication.context_transfer.clone();
     let target_instructions = crate::turn::delegated_target_instructions_for_space(
         &target_resolved.instructions,
@@ -2229,17 +2222,55 @@ mod tests {
         serde_json::from_slice(&bytes).unwrap()
     }
 
+    #[test]
+    fn effective_agent_response_maps_each_source_scope() {
+        fn effective(
+            space_id: Option<Uuid>,
+            is_builtin: bool,
+        ) -> crate::service::EffectiveAgentDefinition {
+            crate::service::EffectiveAgentDefinition {
+                definition: swage_storage::NewAgentDefinition {
+                    id: "agent".into(),
+                    space_id,
+                    display_name: "Agent".into(),
+                    description: String::new(),
+                    instructions: String::new(),
+                    model_id: None,
+                    tool_permissions: None,
+                    skills: Vec::new(),
+                    output_schema: None,
+                    output_max_retries: None,
+                },
+                is_builtin,
+            }
+        }
+
+        assert_eq!(
+            effective_agent_definition_response(effective(None, true)).source_scope,
+            EffectiveAgentDefinitionSourceScope::BuiltIn
+        );
+        assert_eq!(
+            effective_agent_definition_response(effective(None, false)).source_scope,
+            EffectiveAgentDefinitionSourceScope::Global
+        );
+        assert_eq!(
+            effective_agent_definition_response(effective(Some(Uuid::new_v4()), false))
+                .source_scope,
+            EffectiveAgentDefinitionSourceScope::Space
+        );
+    }
+
     async fn wait_for_terminal_message_status(
         client: &swage_client::http::GatewayClient,
         message_id: Uuid,
-    ) -> serde_json::Value {
+    ) -> swage_client::http::MessageResponse {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         while std::time::Instant::now() < deadline {
             let current = client
                 .get_message_status(message_id)
                 .await
                 .expect("query message status");
-            if matches!(current["status"].as_str(), Some("delivered" | "failed")) {
+            if matches!(current.status.as_str(), "delivered" | "failed") {
                 return current;
             }
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -2271,6 +2302,54 @@ mod tests {
             spawn_live_server(provider as Arc<dyn LlmProvider>, storage).await;
 
         let client = GatewayClient::new(&base_url);
+        let http = reqwest::Client::new();
+        let settings = http
+            .get(format!("{base_url}/api/settings"))
+            .send()
+            .await
+            .expect("fetch settings through live gateway")
+            .error_for_status()
+            .expect("settings response succeeds")
+            .json::<swage_protocol::client::settings::SettingsResponse>()
+            .await
+            .expect("settings response matches protocol");
+        assert!(!settings.can_restart);
+
+        let discovery = http
+            .post(format!(
+                "{base_url}/api/settings/providers/anthropic/models"
+            ))
+            .json(&swage_protocol::client::settings::SaveProviderSettings {
+                protocol: swage_protocol::client::settings::ProviderProtocol::Anthropic,
+                base_url: None,
+                api_key_secret_ref: None,
+                api_key_env: None,
+                api_key: None,
+                command: None,
+                state_dir: None,
+            })
+            .send()
+            .await
+            .expect("discover models through live gateway")
+            .error_for_status()
+            .expect("model discovery succeeds")
+            .json::<swage_protocol::client::settings::ModelDiscoveryResponse>()
+            .await
+            .expect("model discovery response matches protocol");
+        assert_eq!(discovery.provider_id, "anthropic");
+        assert!(!discovery.models.is_empty());
+
+        let restart = http
+            .get(format!("{base_url}/api/settings/restart-required"))
+            .send()
+            .await
+            .expect("fetch restart status through live gateway")
+            .error_for_status()
+            .expect("restart status succeeds")
+            .json::<swage_protocol::client::settings::RestartStatusResponse>()
+            .await
+            .expect("restart status response matches protocol");
+        assert!(!restart.restart_required);
         let conversation = client
             .create_conversation()
             .await
@@ -2289,7 +2368,7 @@ mod tests {
             let mut completed = None;
             while std::time::Instant::now() < deadline {
                 let current = client.poll_turn(turn_id).await.expect("poll turn");
-                let state = current["state"].as_str().expect("poll state string");
+                let state = current.state.as_str();
                 if matches!(state, "completed" | "failed" | "interrupted") {
                     completed = Some(current);
                     break;
@@ -2298,9 +2377,25 @@ mod tests {
             }
             completed.expect("turn should reach a terminal state")
         };
-        assert_eq!(poll["turn_id"], turn_id.to_string());
-        assert_eq!(poll["state"], "completed");
-        assert_eq!(poll["assistant_response"], "Hello from the async route");
+        assert_eq!(poll.turn_id, turn_id);
+        assert_eq!(poll.state, "completed");
+        assert_eq!(
+            poll.assistant_response.as_deref(),
+            Some("Hello from the async route")
+        );
+
+        let context = http
+            .get(format!("{base_url}/api/turns/{turn_id}/context"))
+            .send()
+            .await
+            .expect("fetch turn context through live gateway")
+            .error_for_status()
+            .expect("turn context succeeds")
+            .json::<swage_protocol::client::context::TurnContextResponse>()
+            .await
+            .expect("turn context response matches protocol");
+        assert_eq!(context.turn_id, turn_id);
+        assert!(!context.report.elements.is_empty());
 
         let turns = client
             .list_turns(conversation.id, None, None)
@@ -2329,17 +2424,10 @@ mod tests {
             )
             .await
             .expect("send agent message through live gateway");
-        let message_id = sent_message["id"]
-            .as_str()
-            .expect("message id string")
-            .parse::<Uuid>()
-            .expect("message id uuid");
+        let message_id = sent_message.id;
         let message_status = wait_for_terminal_message_status(&client, message_id).await;
         assert!(
-            matches!(
-                message_status["status"].as_str(),
-                Some("delivered" | "failed")
-            ),
+            matches!(message_status.status.as_str(), "delivered" | "failed"),
             "delegate execution should transition the message out of pending"
         );
 
@@ -2454,15 +2542,11 @@ mod tests {
             )
             .await
             .expect("send delegate message through live gateway");
-        let message_id = sent_message["id"]
-            .as_str()
-            .expect("message id string")
-            .parse::<Uuid>()
-            .expect("message id uuid");
+        let message_id = sent_message.id;
 
         let message_status = wait_for_terminal_message_status(&client, message_id).await;
 
-        assert_eq!(message_status["status"], "failed");
+        assert_eq!(message_status.status, "failed");
         let stored = storage
             .get_agent_message(message_id)
             .await
@@ -2478,6 +2562,141 @@ mod tests {
         );
 
         server.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn external_delegate_post_executes_granted_approval_gated_tool_without_parking() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use swage_core::{FinishReason, StreamChunk};
+        use swage_storage::store::{AgentMessageStore, ApprovalStore};
+
+        struct CountingEchoTool(Arc<AtomicUsize>);
+
+        #[async_trait::async_trait]
+        impl crate::tool::Tool for CountingEchoTool {
+            fn name(&self) -> &str {
+                "echo"
+            }
+
+            fn description(&self) -> &str {
+                "Echo the input back"
+            }
+
+            fn parameters(&self) -> serde_json::Value {
+                serde_json::json!({
+                    "type": "object",
+                    "properties": { "text": { "type": "string" } },
+                    "required": ["text"]
+                })
+            }
+
+            async fn execute(
+                &self,
+                arguments: serde_json::Value,
+                _ctx: &dyn swage_tool::context::ToolContext,
+            ) -> Result<serde_json::Value, swage_core::ToolError> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(serde_json::json!({ "output": arguments["text"] }))
+            }
+        }
+
+        let (provider, _) = CapturingMultiRoundProvider::new(vec![
+            vec![
+                StreamChunk::ToolUse {
+                    call_id: "external-delegate-echo".into(),
+                    name: "echo".into(),
+                    arguments: serde_json::json!({ "text": "delegated" }),
+                },
+                StreamChunk::Done {
+                    finish_reason: None,
+                },
+            ],
+            vec![
+                StreamChunk::Delta {
+                    content: "External delegated tool completed".into(),
+                },
+                StreamChunk::Done {
+                    finish_reason: Some(FinishReason::Stop),
+                },
+            ],
+        ]);
+        let storage = Arc::new(MockStorage::new());
+        let space = storage
+            .get_or_create_default()
+            .await
+            .expect("create default space");
+        let executions = Arc::new(AtomicUsize::new(0));
+        let mut config = swage_config::ResolvedConfig::default();
+        config.tools.permissions.require_approval =
+            vec![swage_config::RequireApprovalEntry::Simple("echo".into())];
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::new(provider) as Arc<dyn LlmProvider>,
+            config,
+            crate::tool::ToolDispatcher::allow_all(vec![Arc::new(CountingEchoTool(Arc::clone(
+                &executions,
+            )))
+                as Arc<dyn crate::tool::Tool>]),
+            None,
+        );
+        let router = build_router(state);
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/messages")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::json!({
+                            "sender_agent_id": "agent-a",
+                            "recipient_agent_id": "agent-b",
+                            "kind": "delegate",
+                            "space_id": space.id,
+                            "payload": { "task": "Use echo" }
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = body_json(response).await;
+        let message_id = body["id"]
+            .as_str()
+            .expect("message id string")
+            .parse::<Uuid>()
+            .expect("message id uuid");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            let message = storage
+                .get_agent_message(message_id)
+                .await
+                .expect("message lookup")
+                .expect("message exists");
+            if matches!(
+                message.status,
+                swage_core::MessageStatus::Delivered | swage_core::MessageStatus::Failed
+            ) {
+                assert_eq!(message.status, swage_core::MessageStatus::Delivered);
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "external delegate should complete without waiting for approval"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+
+        assert_eq!(executions.load(Ordering::SeqCst), 1);
+        assert!(
+            storage.list_approvals().await.unwrap().is_empty(),
+            "an external unattended delegate must not create approval rows"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -4052,10 +4271,14 @@ mod tests {
 
         let (router, storage) = make_router();
         let turn_id = Uuid::new_v4();
-        let report_json = r#"{"total_tokens":1024,"elements":[]}"#;
+        let report = swage_protocol::client::context::AssemblyReport {
+            total_tokens: 1024,
+            ..Default::default()
+        };
+        let report_json = serde_json::to_string(&report).unwrap();
 
         // Store a snapshot directly — simulates what the context engine writes.
-        storage.store_snapshot(turn_id, report_json).await.unwrap();
+        storage.store_snapshot(turn_id, &report_json).await.unwrap();
 
         let resp = router
             .oneshot(
