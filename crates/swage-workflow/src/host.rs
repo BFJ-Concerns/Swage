@@ -18,7 +18,15 @@ pub struct AgentSessionRef {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AgentCallRequest {
     pub prompt: String,
-    pub agent: String,
+    /// Optional durable definition giving the worker its character. When
+    /// absent, the host creates a definition-less ephemeral worker whose
+    /// authority still comes from the dispatching context.
+    ///
+    /// Both serde attributes are load-bearing: journal argument hashes cover
+    /// this serialised request, so historical named calls must not acquire an
+    /// `agent: null` field when replayed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
     pub model: Option<String>,
     pub schema: Option<Value>,
     pub max_attempts: u32,

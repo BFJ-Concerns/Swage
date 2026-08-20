@@ -721,6 +721,12 @@ async fn run_ephemeral_agent_call(
     request: AgentCallRequest,
     cancellation: CancellationToken,
 ) -> Result<AgentCallResult, String> {
+    // This identity deliberately cannot name an agent definition: definition
+    // ids exclude underscores. Bare workflow workers therefore receive the
+    // ambient session configuration, bounded by their dispatch ancestry,
+    // without inventing or resolving a default definition.
+    const BARE_WORKFLOW_AGENT_ID: &str = "__workflow_ephemeral__";
+
     let (session_id, thread_id) = match request.session.as_ref() {
         // Continuation: the next turn lands on a session this run already
         // created. The token must name one of the run's own journalled
@@ -780,12 +786,16 @@ async fn run_ephemeral_agent_call(
             (session.id, thread.id)
         }
         None => {
+            let agent_id = request
+                .agent
+                .clone()
+                .unwrap_or_else(|| BARE_WORKFLOW_AGENT_ID.to_string());
             let metadata = crate::turn::dispatch_bound_metadata(dispatch_bound_agent_ids);
             let session = state
                 .storage
                 .create_session(NewSession {
                     space_id,
-                    agent_id: request.agent.clone(),
+                    agent_id: agent_id.clone(),
                     metadata,
                     active_workspace_attachment_id: None,
                 })
@@ -802,7 +812,7 @@ async fn run_ephemeral_agent_call(
                 state.storage.as_ref(),
                 NewThread {
                     session_id: session.id,
-                    agent_id: request.agent.clone(),
+                    agent_id,
                 },
             )
             .await
@@ -3673,7 +3683,7 @@ mod tests {
             &[],
             AgentCallRequest {
                 prompt: "Use echo".into(),
-                agent: "gateway".into(),
+                agent: Some("gateway".into()),
                 model: None,
                 schema: None,
                 max_attempts: 1,
@@ -4530,7 +4540,7 @@ mod tests {
         ));
         let request = AgentCallRequest {
             prompt: "hold capacity".into(),
-            agent: "default".into(),
+            agent: Some("default".into()),
             model: None,
             schema: None,
             max_attempts: 1,
@@ -4684,7 +4694,7 @@ mod tests {
         tx.send(HostCommand::Agent {
             request: AgentCallRequest {
                 prompt: "restate the brief".into(),
-                agent: "worker".into(),
+                agent: Some("worker".into()),
                 model: None,
                 schema: None,
                 max_attempts: 1,
@@ -4736,7 +4746,7 @@ mod tests {
         tx.send(HostCommand::Agent {
             request: AgentCallRequest {
                 prompt: "now do the work".into(),
-                agent: "worker".into(),
+                agent: Some("worker".into()),
                 model: None,
                 schema: None,
                 max_attempts: 1,
@@ -4789,6 +4799,112 @@ mod tests {
         assert!(second_request.contains("restate the brief"));
         assert!(second_request.contains("restated: gather the sources"));
 
+        drop(tx);
+        task.await.expect("host loop");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_bare_worker_completes_with_dispatch_bounded_tools_and_an_agentless_journal() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let swage_home = crate::test_support::SwageHomeGuard::new();
+        let lead_dir = swage_home.path().join("spaces/default/agents/lead");
+        std::fs::create_dir_all(&lead_dir).expect("create lead config directory");
+        std::fs::write(
+            lead_dir.join("config.toml"),
+            "[tools]\nallow = [\"knowledge_search\"]\ndeny = []\nbundles = {}\n",
+        )
+        .expect("write bounded lead config");
+        let run = storage
+            .create_workflow_run(NewWorkflowRun {
+                space_id: space.id,
+                parent_run_id: None,
+                parent_seq: None,
+                script_version_id: None,
+                source: Some("return await agent('bounded work');".into()),
+                source_hash: source_hash("return await agent('bounded work');"),
+                args: Value::Null,
+                budget: serde_json::json!({}),
+                engine_version: "test".into(),
+                dispatch_bound_agent_ids: vec!["lead".into()],
+            })
+            .await
+            .expect("run");
+        let provider = Arc::new(ScriptedRecordingProvider {
+            outputs: std::sync::Mutex::new(std::collections::VecDeque::from([
+                scripted_text_output("bounded work completed"),
+            ])),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![
+                Arc::new(WorkflowShellTool) as Arc<dyn crate::tool::Tool>
+            ]),
+            None,
+        );
+        let (tx, rx) = mpsc::unbounded_channel();
+        let task = tokio::spawn(run_host_commands(
+            state,
+            run.id,
+            space.id,
+            vec!["lead".into()],
+            None,
+            WorkflowBudget::default(),
+            vec![],
+            Arc::new(AtomicU32::new(0)),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(Mutex::new(std::collections::HashMap::new())),
+            CancellationToken::new(),
+            PARK_TIMER_THRESHOLD_MS,
+            rx,
+        ));
+        let (reply, receive) = oneshot::channel();
+        tx.send(HostCommand::Agent {
+            request: AgentCallRequest {
+                prompt: "bounded work".into(),
+                agent: None,
+                model: None,
+                schema: None,
+                max_attempts: 1,
+                label: None,
+                session: None,
+            },
+            cancellation: CancellationToken::new(),
+            reply,
+        })
+        .expect("bare call");
+        let result = receive.await.expect("reply").expect("bare worker result");
+        assert_eq!(
+            result.output,
+            Value::String("bounded work completed".into())
+        );
+
+        let session = storage
+            .get_session(result.session_id.expect("session id"))
+            .await
+            .expect("session query")
+            .expect("bare worker session");
+        assert_eq!(session.agent_id, "__workflow_ephemeral__");
+        let requests = provider.requests.lock().expect("requests");
+        assert_eq!(requests.len(), 1);
+        assert!(
+            requests[0].tool_definitions.is_empty(),
+            "shell must be absent because the dispatching lead does not grant it"
+        );
+        drop(requests);
+
+        let journal = storage
+            .list_workflow_journal(run.id)
+            .await
+            .expect("journal");
+        assert_eq!(journal.len(), 1);
+        assert_eq!(journal[0].status, "completed");
+        assert!(journal[0].request.get("agent").is_none());
+        assert_eq!(journal[0].request["prompt"], "bounded work");
         drop(tx);
         task.await.expect("host loop");
     }
@@ -4856,7 +4972,7 @@ mod tests {
         tx.send(HostCommand::Agent {
             request: AgentCallRequest {
                 prompt: "hijack".into(),
-                agent: "worker".into(),
+                agent: Some("worker".into()),
                 model: None,
                 schema: None,
                 max_attempts: 1,
@@ -5767,7 +5883,7 @@ mod tests {
         ));
         let request = AgentCallRequest {
             prompt: "account usage".into(),
-            agent: "default".into(),
+            agent: Some("default".into()),
             model: None,
             schema: None,
             max_attempts: 1,
@@ -5872,7 +5988,7 @@ mod tests {
         ));
         let request = |prompt: &str| AgentCallRequest {
             prompt: prompt.into(),
-            agent: "default".into(),
+            agent: Some("default".into()),
             model: None,
             schema: None,
             max_attempts: 1,
@@ -5958,7 +6074,7 @@ mod tests {
             .expect("run");
         let request = |prompt: &str| AgentCallRequest {
             prompt: prompt.into(),
-            agent: "default".into(),
+            agent: Some("default".into()),
             model: None,
             schema: None,
             max_attempts: 1,
@@ -6127,7 +6243,7 @@ mod tests {
             .expect("run");
         let request = AgentCallRequest {
             prompt: "resume work".into(),
-            agent: "default".into(),
+            agent: Some("default".into()),
             model: None,
             schema: None,
             max_attempts: 1,
@@ -6242,7 +6358,7 @@ mod tests {
             .expect("run");
         let working_request = AgentCallRequest {
             prompt: "resume working call".into(),
-            agent: "default".into(),
+            agent: Some("default".into()),
             model: None,
             schema: None,
             max_attempts: 1,
@@ -6359,7 +6475,7 @@ mod tests {
         );
         let closing_request = AgentCallRequest {
             prompt: "closing call".into(),
-            agent: "default".into(),
+            agent: Some("default".into()),
             model: None,
             schema: None,
             max_attempts: 1,
@@ -6420,7 +6536,7 @@ mod tests {
             .expect("run");
         let request = |prompt: &str| AgentCallRequest {
             prompt: prompt.into(),
-            agent: "default".into(),
+            agent: Some("default".into()),
             model: None,
             schema: None,
             max_attempts: 1,
@@ -6639,7 +6755,7 @@ mod tests {
             .expect("run");
         let request = |prompt: &str| AgentCallRequest {
             prompt: prompt.into(),
-            agent: "default".into(),
+            agent: Some("default".into()),
             model: None,
             schema: None,
             max_attempts: 1,
@@ -6847,7 +6963,7 @@ mod tests {
             .expect("run");
         let request = AgentCallRequest {
             prompt: "must not execute".into(),
-            agent: "default".into(),
+            agent: Some("default".into()),
             model: None,
             schema: None,
             max_attempts: 1,
@@ -7346,7 +7462,7 @@ mod tests {
             .expect("run");
         let request = AgentCallRequest {
             prompt: "known failing call".into(),
-            agent: "default".into(),
+            agent: Some("default".into()),
             model: None,
             schema: None,
             max_attempts: 1,
