@@ -4945,6 +4945,31 @@ mod tests {
             "shell must be absent because the dispatching lead does not grant it"
         );
         drop(requests);
+
+        storage
+            .update_workflow_run_state(run.id, "running", None, None, None)
+            .await
+            .expect("mark replay running");
+        let replay_record = storage
+            .get_workflow_run(run.id)
+            .await
+            .expect("run query")
+            .expect("replay run");
+        launch_existing_run(state.clone(), replay_record, source.into(), None)
+            .await
+            .expect("replay completed workflow run");
+        wait_for_terminal(&state, run.id).await;
+        let replayed = storage
+            .get_workflow_run(run.id)
+            .await
+            .expect("run query")
+            .expect("replayed run");
+        assert_eq!(replayed.state, "completed");
+        assert_eq!(
+            replayed.final_output,
+            Some(Value::String("bounded work completed".into()))
+        );
+        assert_eq!(provider.requests.lock().expect("requests").len(), 1);
     }
 
     #[tokio::test(flavor = "multi_thread")]
