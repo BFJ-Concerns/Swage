@@ -94,7 +94,8 @@ fn default_assembly_inner(
     let mut history_range: Option<std::ops::Range<usize>> = None;
 
     for element in &active {
-        let content = match (variables, element.renders_session_values()) {
+        let renders_session_values = variables.is_some() && element.renders_session_values();
+        let content = match (variables, renders_session_values) {
             (Some(variables), true) => element
                 .content()
                 .into_iter()
@@ -107,7 +108,11 @@ fn default_assembly_inner(
                 .collect::<Vec<_>>(),
             _ => element.content(),
         };
-        let token_count = tokeniser.count_messages(&content);
+        let token_count = if renders_session_values {
+            tokeniser.count_messages(&content)
+        } else {
+            element.token_count(tokeniser)
+        };
         let source = element.source();
 
         if element.name() == "history" {
@@ -455,6 +460,43 @@ mod tests {
         assert!(names.contains(&"prompts"));
         assert!(names.contains(&"history"));
         assert!(!names.contains(&"memory"));
+    }
+
+    #[test]
+    fn report_preserves_element_token_accounting_when_no_values_are_rendered() {
+        struct CustomAccountingElement;
+
+        impl ContextElement for CustomAccountingElement {
+            fn name(&self) -> &str {
+                "custom-accounting"
+            }
+
+            fn priority(&self) -> i32 {
+                100
+            }
+
+            fn content(&self) -> Vec<ChatMessage> {
+                vec![ChatMessage::new(Role::System, "one message")]
+            }
+
+            fn token_count(&self, _tokeniser: &dyn Tokeniser) -> usize {
+                73
+            }
+
+            fn source(&self) -> String {
+                "custom accounting".to_owned()
+            }
+        }
+
+        let elements: Vec<Box<dyn ContextElement>> = vec![Box::new(CustomAccountingElement)];
+        let output = default_assembly_with_variables(
+            &elements,
+            &no_budget_config(),
+            &FixedCostTokeniser { cost: 10 },
+            &std::collections::BTreeMap::from([("task".to_owned(), "ignored".to_owned())]),
+        );
+
+        assert_eq!(output.report.elements[0].token_count, 73);
     }
 
     #[test]
