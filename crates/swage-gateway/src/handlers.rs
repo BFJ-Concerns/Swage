@@ -1714,6 +1714,8 @@ async fn execute_external_delegate_message(
             target_agent_config.working_directory.display().to_string(),
             silent_ws_tx,
             crate::turn::effective_tool_permissions_record(&effective_target_resolved),
+            crate::turn::DispatchContextComposition::from_delegate_payload(&delegate_msg.payload)
+                .map_err(ApiError::validation)?,
         )),
         snapshot_recorder: Some(crate::turn::delegation_snapshot_recorder(
             state.storage.clone(),
