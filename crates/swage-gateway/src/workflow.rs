@@ -3883,10 +3883,6 @@ mod tests {
         requests: std::sync::Mutex<Vec<swage_core::CompletionRequest>>,
     }
 
-    struct PendingRecordingProvider {
-        requests: std::sync::Mutex<Vec<swage_core::CompletionRequest>>,
-    }
-
     struct StaggeredFailingProvider;
 
     fn scripted_text_output(content: &str) -> Vec<swage_core::StreamChunk> {
@@ -3938,43 +3934,10 @@ mod tests {
         ) -> std::pin::Pin<Box<dyn futures::Stream<Item = swage_core::StreamChunk> + Send>>
         {
             self.requests.lock().expect("requests").push(request);
-            let output = self
-                .outputs
-                .lock()
-                .expect("outputs")
-                .pop_front()
-                .expect("scripted output");
-            Box::pin(futures::stream::iter(output))
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl swage_provider::LlmProvider for PendingRecordingProvider {
-        fn model_id(&self) -> &str {
-            "pending-model"
-        }
-
-        async fn complete(
-            &self,
-            _request: swage_core::CompletionRequest,
-        ) -> Result<swage_core::CompletionResponse, swage_core::ProviderError> {
-            unimplemented!("workflow calls use streaming")
-        }
-
-        async fn complete_with_tools(
-            &self,
-            _request: swage_core::ToolCompletionRequest,
-        ) -> Result<swage_core::ToolCompletionResponse, swage_core::ProviderError> {
-            unimplemented!("workflow calls use streaming")
-        }
-
-        fn stream(
-            &self,
-            request: swage_core::CompletionRequest,
-        ) -> std::pin::Pin<Box<dyn futures::Stream<Item = swage_core::StreamChunk> + Send>>
-        {
-            self.requests.lock().expect("requests").push(request);
-            Box::pin(futures::stream::pending())
+            match self.outputs.lock().expect("outputs").pop_front() {
+                Some(output) => Box::pin(futures::stream::iter(output)),
+                None => Box::pin(futures::stream::pending()),
+            }
         }
     }
 
@@ -4994,7 +4957,8 @@ mod tests {
             })
             .await
             .expect("run");
-        let provider = Arc::new(PendingRecordingProvider {
+        let provider = Arc::new(ScriptedRecordingProvider {
+            outputs: std::sync::Mutex::new(std::collections::VecDeque::new()),
             requests: std::sync::Mutex::new(Vec::new()),
         });
         let state = AppState::new(

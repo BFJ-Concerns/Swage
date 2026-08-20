@@ -13,8 +13,9 @@ use crate::{
 };
 
 fn named_host_error(error: &str, fallback: &str) -> (String, String) {
-    const NAMES: [(&str, &str); 11] = [
+    const NAMES: [(&str, &str); 12] = [
         ("AgentCallError", "AgentCallError"),
+        ("AgentCallTimeoutError", "AgentCallTimeoutError"),
         ("BudgetExceededError", "BudgetExceededError"),
         ("BudgetWindDownError", "BudgetWindDownError"),
         ("DeliveryNotGrantedError", "DeliveryNotGrantedError"),
@@ -1265,6 +1266,55 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn shipped_estate_workflow_projects_its_build_timeout_pin() {
+        let host = Arc::new(SurfaceHost::new());
+        host.agent_outputs.lock().unwrap().extend([
+            Ok(json!({
+                "admission": "ok",
+                "restatement": "prove the estate",
+                "journeys": "exercise the real consumer",
+                "disputes": "",
+            })),
+            Ok(json!("estate built")),
+        ]);
+        let source = include_str!("../../../shipped/skills/assembly/workflows/estate-unit.js");
+        let hold_start = source
+            .find("const runHold = async")
+            .expect("shipped hold function");
+        let hold_end = source[hold_start..]
+            .find("\n\n// ---------------------------------------------------------------- restate")
+            .map(|offset| hold_start + offset)
+            .expect("end of shipped hold function");
+        let verify_start = source
+            .find("\n\n// ---------------------------------------------------------------- verify")
+            .expect("shipped verify stage");
+        let source = format!(
+            "{}const runHold = async () => ({{ verdict: 'accept' }});{}\nreturn report;",
+            &source[..hold_start],
+            &source[hold_end..verify_start]
+        );
+        WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                &source,
+                r#"{
+                    "briefPath":"brief.md","worktree":".",
+                    "commissionPath":"commission.md","verificationPath":"VERIFICATION.md",
+                    "unitDir":"unit","mergePolicy":"direct-merge",
+                    "annexeConfigPath":"config.toml","proofMode":"mutation"
+                }"#,
+                CancellationToken::new(),
+                Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                ScriptCapabilities::default(),
+            )
+            .await
+            .expect("shipped workflow through build stage");
+
+        let requests = host.agent_requests.lock().unwrap();
+        assert_eq!(requests[1].label.as_deref(), Some("build"));
+        assert_eq!(requests[1].timeout_ms, Some(14_400_000));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn pipeline_runs_stages_per_item_and_collapses_failures_to_null() {
         let host = Arc::new(SurfaceHost::new());
         // Stage-1 calls are made in item order (the map runs synchronously to
@@ -1799,6 +1849,27 @@ mod tests {
             serde_json::from_str::<Value>(&output).unwrap(),
             json!({"name":"BudgetExceededError","message":"agent call limit reached"})
         );
+
+        let host: Arc<dyn WorkflowHost> = Arc::new(ErrorHost(
+            "AgentCallTimeoutError: agent call exceeded its 75ms deadline",
+        ));
+        let output = WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                "try { await agent('x',{agent:'writer'}); } catch (error) { return {name:error.name,message:error.message}; }",
+                "null",
+                CancellationToken::new(),
+                Some(host),
+                ScriptCapabilities::default(),
+            )
+            .await
+            .expect("timeout error is catchable");
+        assert_eq!(
+            serde_json::from_str::<Value>(&output).unwrap(),
+            json!({
+                "name":"AgentCallTimeoutError",
+                "message":"agent call exceeded its 75ms deadline"
+            })
+        );
     }
 
     #[test]
@@ -1810,6 +1881,16 @@ mod tests {
         assert_eq!(
             named_host_error("WorkflowCancelledError: stopped", "AgentCallError"),
             ("WorkflowCancelledError".into(), "stopped".into())
+        );
+        assert_eq!(
+            named_host_error(
+                "AgentCallTimeoutError: agent call exceeded its 75ms deadline",
+                "AgentCallError"
+            ),
+            (
+                "AgentCallTimeoutError".into(),
+                "agent call exceeded its 75ms deadline".into()
+            )
         );
         assert_eq!(
             named_host_error("NondeterministicReplayError", "AgentCallError"),
