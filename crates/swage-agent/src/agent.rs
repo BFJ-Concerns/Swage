@@ -1551,6 +1551,7 @@ impl Agent {
                         transferred_context,
                         cwd,
                         isolation,
+                        &call.call_id,
                         &self.config.agent_id,
                         execution.turn_id,
                         space_id,

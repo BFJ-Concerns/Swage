@@ -37,6 +37,7 @@ use crate::{
     error::ApiError,
     state::AppState,
     subscription::SubscriptionState,
+    turn::resolve_authorised_worker_directory,
     websocket::ServerEvent,
     workflow_delivery::{DeliveryCapability, capability_from_grant},
 };
@@ -510,6 +511,10 @@ enum HostCommand {
         isolation: swage_protocol::client::workflow::WorkerIsolation,
         reply: oneshot::Sender<Result<Option<String>, String>>,
     },
+    ResolveWorkerDirectory {
+        cwd: String,
+        reply: oneshot::Sender<Result<Option<String>, String>>,
+    },
     ListWorkerPlacements {
         reply: oneshot::Sender<Result<Value, String>>,
     },
@@ -607,16 +612,16 @@ impl WorkflowHost for ChannelWorkflowHost {
             let Some(cwd) = request.cwd.as_deref() else {
                 return Ok(None);
             };
-            let path = tokio::fs::canonicalize(cwd).await.map_err(|error| {
-                format!("WorkerPlacementError: cannot resolve cwd {cwd:?}: {error}")
-            })?;
-            if !path.is_dir() {
-                return Err(format!(
-                    "WorkerPlacementError: cwd is not a directory: {}",
-                    path.display()
-                ));
-            }
-            return Ok(Some(path.to_string_lossy().into_owned()));
+            let (reply, receive) = oneshot::channel();
+            self.tx
+                .send(HostCommand::ResolveWorkerDirectory {
+                    cwd: cwd.to_string(),
+                    reply,
+                })
+                .map_err(|_| "workflow host stopped".to_string())?;
+            return receive
+                .await
+                .map_err(|_| "workflow host dropped placement reply".to_string())?;
         };
         let (reply, receive) = oneshot::channel();
         self.tx
@@ -1146,13 +1151,25 @@ async fn run_host_commands_inner(
                     if entry.kind != "worker_placement" || entry.args_hash != hash {
                         Err("NondeterministicReplayError".into())
                     } else if entry.status == "completed" {
-                        entry
-                            .result
-                            .as_ref()
-                            .and_then(|value| value.get("path"))
-                            .and_then(Value::as_str)
-                            .map(|path| Some(path.to_string()))
-                            .ok_or_else(|| "completed worker placement has no path".to_string())
+                        match cwd.as_deref() {
+                            Some(repo) => resolve_authorised_worker_directory(
+                                &state, space_id, run_id, None, repo,
+                            )
+                            .await
+                            .map_err(|error| format!("WorkerPlacementError: {error}"))
+                            .and_then(|_| {
+                                entry
+                                    .result
+                                    .as_ref()
+                                    .and_then(|value| value.get("path"))
+                                    .and_then(Value::as_str)
+                                    .map(|path| Some(path.to_string()))
+                                    .ok_or_else(|| {
+                                        "completed worker placement has no path".to_string()
+                                    })
+                            }),
+                            None => Err("WorkerPlacementError: isolation=worktree requires cwd to name the git repository".into()),
+                        }
                     } else if entry.status == "failed" {
                         Err(entry
                             .error_message
@@ -1162,6 +1179,7 @@ async fn run_host_commands_inner(
                         complete_worker_placement(
                             &state,
                             run_id,
+                            space_id,
                             current_seq,
                             entry.id,
                             cwd.as_deref(),
@@ -1186,6 +1204,7 @@ async fn run_host_commands_inner(
                             complete_worker_placement(
                                 &state,
                                 run_id,
+                                space_id,
                                 current_seq,
                                 intent.id,
                                 cwd.as_deref(),
@@ -1195,6 +1214,14 @@ async fn run_host_commands_inner(
                         Err(error) => Err(error.to_string()),
                     }
                 };
+                let _ = reply.send(result);
+            }
+            HostCommand::ResolveWorkerDirectory { cwd, reply } => {
+                let result =
+                    resolve_authorised_worker_directory(&state, space_id, run_id, None, &cwd)
+                        .await
+                        .map(|path| Some(path.to_string_lossy().into_owned()))
+                        .map_err(|error| format!("WorkerPlacementError: {error}"));
                 let _ = reply.send(result);
             }
             HostCommand::ListWorkerPlacements { reply } => {
@@ -2290,6 +2317,7 @@ async fn run_host_commands_inner(
 async fn complete_worker_placement(
     state: &AppState,
     run_id: Uuid,
+    space_id: Uuid,
     seq: u64,
     entry_id: Uuid,
     cwd: Option<&str>,
@@ -2298,11 +2326,16 @@ async fn complete_worker_placement(
         "WorkerPlacementError: isolation=worktree requires cwd to name the git repository"
             .to_string()
     })?;
-    match state
-        .worktree_host
-        .provision(run_id, seq, std::path::Path::new(repo))
-        .await
+    let repo = match resolve_authorised_worker_directory(state, space_id, run_id, None, repo).await
     {
+        Ok(repo) => repo,
+        Err(error) => {
+            let error = format!("WorkerPlacementError: {error}");
+            let _ = state.fail_workflow_journal_entry(entry_id, &error).await;
+            return Err(error);
+        }
+    };
+    match state.worktree_host.provision(run_id, seq, &repo).await {
         Ok(path) => {
             let path = path.to_string_lossy().into_owned();
             state
@@ -3267,6 +3300,7 @@ async fn launch_existing_run(
         .map_err(internal)?;
     let storage = Arc::clone(&state.storage);
     let active = Arc::clone(&state.active_workflow_runs);
+    let worktree_host = Arc::clone(&state.worktree_host);
     let run_id = record.id;
     let broadcast = state.broadcast.clone();
     tokio::spawn(async move {
@@ -3335,9 +3369,12 @@ async fn launch_existing_run(
         } else {
             None
         };
-        let _ = storage
+        let state_update = storage
             .update_workflow_run_state(run_id, run_state, output, handover, error.as_deref())
             .await;
+        if state_update.is_ok() && run_state == "completed" {
+            worktree_host.cleanup_run(run_id).await;
+        }
         let _ = storage
             .create_audit_event(NewAuditEvent {
                 id: Uuid::new_v4().to_string(),
@@ -3665,7 +3702,8 @@ mod tests {
     use super::*;
     use swage_protocol::client::workflow::{WorkflowJournalEntryKind, WorkflowJournalEntryStatus};
     use swage_storage::{
-        SessionStore, SpaceStore, SqliteStorage, Storage, TurnStore, WorkflowStore,
+        NewWorkspaceAttachment, SessionStore, SpaceStore, SqliteStorage, Storage, TurnStore,
+        WorkflowStore, WorkspaceAttachmentStore,
     };
     use swage_workflow::AgentSessionRef;
 
@@ -3680,6 +3718,19 @@ mod tests {
             None,
         );
         (state, storage)
+    }
+
+    async fn grant_workspace(storage: &SqliteStorage, space_id: Uuid, path: &std::path::Path) {
+        storage
+            .create_workspace_attachment(NewWorkspaceAttachment {
+                space_id,
+                label: "test workspace".into(),
+                path: path.to_string_lossy().into_owned(),
+                permissions: vec!["read".into(), "write".into()],
+                is_trusted: true,
+            })
+            .await
+            .expect("grant test workspace");
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -4180,7 +4231,10 @@ mod tests {
         }
     }
 
-    struct PlacementWriteTool;
+    #[derive(Default)]
+    struct PlacementWriteTool {
+        writes: std::sync::Mutex<Vec<(String, std::path::PathBuf)>>,
+    }
 
     #[async_trait::async_trait]
     impl crate::tool::Tool for PlacementWriteTool {
@@ -4210,6 +4264,10 @@ mod tests {
                     message: error.to_string(),
                 }
             })?;
+            self.writes
+                .lock()
+                .expect("placement writes")
+                .push((file.to_string(), ctx.working_directory().to_path_buf()));
             Ok(serde_json::json!({"written": file}))
         }
     }
@@ -5317,6 +5375,7 @@ mod tests {
 
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
         let space = storage.get_or_create_default().await.expect("space");
+        grant_workspace(storage.as_ref(), space.id, &repo).await;
         let run = storage
             .create_workflow_run(NewWorkflowRun {
                 space_id: space.id,
@@ -5366,6 +5425,29 @@ mod tests {
             (tx, task)
         };
         let (tx, task) = run_loop(state.clone(), vec![]);
+        let (allowed_reply, allowed_receive) = oneshot::channel();
+        tx.send(HostCommand::ResolveWorkerDirectory {
+            cwd: repo.to_string_lossy().into_owned(),
+            reply: allowed_reply,
+        })
+        .unwrap();
+        assert_eq!(
+            allowed_receive.await.unwrap().unwrap().as_deref(),
+            Some(repo.to_string_lossy().as_ref())
+        );
+        let (denied_reply, denied_receive) = oneshot::channel();
+        tx.send(HostCommand::ResolveWorkerDirectory {
+            cwd: fixture.path().to_string_lossy().into_owned(),
+            reply: denied_reply,
+        })
+        .unwrap();
+        assert!(
+            denied_receive
+                .await
+                .unwrap()
+                .unwrap_err()
+                .contains("outside the dispatching context's permitted workspace roots")
+        );
         let (placement_reply, placement_receive) = oneshot::channel();
         tx.send(HostCommand::ProvisionWorker {
             cwd: Some(repo.to_string_lossy().into_owned()),
@@ -5475,13 +5557,15 @@ mod tests {
         );
         let storage = Arc::new(SqliteStorage::in_memory().unwrap());
         let space = storage.get_or_create_default().await.unwrap();
+        grant_workspace(storage.as_ref(), space.id, &repo).await;
+        let placement_tool = Arc::new(PlacementWriteTool::default());
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn SpaceStore>,
             Arc::new(PlacementWritingProvider::default()),
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![
-                Arc::new(PlacementWriteTool) as Arc<dyn crate::tool::Tool>
+                Arc::clone(&placement_tool) as Arc<dyn crate::tool::Tool>
             ]),
             None,
         );
@@ -5521,16 +5605,168 @@ mod tests {
             .map(std::path::PathBuf::from)
             .collect::<Vec<_>>();
         assert_eq!(paths.len(), 2);
-        assert!(paths[0].join("first-marker").exists() ^ paths[1].join("first-marker").exists());
-        assert!(paths[0].join("second-marker").exists() ^ paths[1].join("second-marker").exists());
-        for path in &paths {
-            assert!(
-                !(path.join("first-marker").exists() && path.join("second-marker").exists()),
-                "workers contaminated one worktree: {path:?}"
-            );
-        }
+        let writes = placement_tool.writes.lock().expect("placement writes");
+        assert_eq!(writes.len(), 2);
+        assert!(
+            writes
+                .iter()
+                .any(|(file, path)| file == "first-marker" && paths.contains(path))
+        );
+        assert!(
+            writes
+                .iter()
+                .any(|(file, path)| file == "second-marker" && paths.contains(path))
+        );
+        assert_ne!(
+            writes[0].1, writes[1].1,
+            "workers must use distinct tool roots"
+        );
+        drop(writes);
         assert!(!repo.join("first-marker").exists() && !repo.join("second-marker").exists());
+        for _ in 0..20 {
+            if paths.iter().all(|path| !path.exists()) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        assert!(
+            paths.iter().all(|path| !path.exists()),
+            "completed-run cleanup must remove every provisioned worktree: {paths:?}"
+        );
+
+        let failed_source = format!(
+            r#"
+            await agent("write retained marker", {{ cwd: {cwd}, isolation: "worktree", maxAttempts: 1 }});
+            throw new Error("retain failed run for inspection");
+        "#
+        );
+        let Json(failed) = start_inline_run(
+            State(state.clone()),
+            Path(space.id),
+            Json(StartInlineWorkflowRunRequest {
+                source: failed_source,
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start failed placement run");
+        wait_for_terminal(&state, failed.id).await;
+        let failed_record = storage.get_workflow_run(failed.id).await.unwrap().unwrap();
+        assert_eq!(failed_record.state, "failed");
+        let retained_path = storage
+            .list_workflow_journal(failed.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find_map(|entry| {
+                (entry.kind == "worker_placement")
+                    .then(|| entry.result?["path"].as_str().map(std::path::PathBuf::from))?
+            })
+            .expect("failed run should retain its worktree path");
+        assert!(
+            retained_path.exists(),
+            "failed-run worktree should remain available for inspection"
+        );
         state.worktree_host.shutdown().await;
+        assert!(!retained_path.exists());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn parallel_cwd_placement_replays_in_dispatch_order() {
+        let fixture = tempfile::tempdir_in("/tmp/scratch").expect("scratch fixture");
+        let workspace = fixture.path().join("workspace");
+        let first_cwd = workspace.join("first");
+        let second_cwd = workspace.join("second");
+        std::fs::create_dir_all(&first_cwd).unwrap();
+        std::fs::create_dir_all(&second_cwd).unwrap();
+        let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+        let space = storage.get_or_create_default().await.unwrap();
+        grant_workspace(storage.as_ref(), space.id, &workspace).await;
+        let provider = Arc::new(ScriptedRecordingProvider {
+            outputs: std::sync::Mutex::new(std::collections::VecDeque::from([
+                scripted_text_output("first result"),
+                scripted_text_output("second result"),
+            ])),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let first_json = serde_json::to_string(&first_cwd.to_string_lossy()).unwrap();
+        let second_json = serde_json::to_string(&second_cwd.to_string_lossy()).unwrap();
+        let source = format!(
+            r#"
+            return await Promise.all([
+                agent("first placed call", {{ cwd: {first_json}, maxAttempts: 1 }}),
+                agent("second placed call", {{ cwd: {second_json}, maxAttempts: 1 }})
+            ]);
+        "#
+        );
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(space.id),
+            Json(StartInlineWorkflowRunRequest {
+                source: source.clone(),
+                args: Value::Null,
+                budget: Some(WorkflowBudget {
+                    max_concurrent_agent_calls: Some(2),
+                    ..WorkflowBudget::default()
+                }),
+            }),
+        )
+        .await
+        .expect("start parallel cwd run");
+        wait_for_terminal(&state, started.id).await;
+        let first_record = storage.get_workflow_run(started.id).await.unwrap().unwrap();
+        assert_eq!(
+            first_record.state, "completed",
+            "{:?}",
+            first_record.error_message
+        );
+        let first_journal = storage.list_workflow_journal(started.id).await.unwrap();
+        assert_eq!(
+            first_journal
+                .iter()
+                .filter(|entry| entry.kind == "agent_call")
+                .map(|entry| entry.request["prompt"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["first placed call", "second placed call"]
+        );
+
+        storage
+            .update_workflow_run_state(started.id, "running", None, None, None)
+            .await
+            .unwrap();
+        let replay_record = storage.get_workflow_run(started.id).await.unwrap().unwrap();
+        launch_existing_run(state.clone(), replay_record, source, None)
+            .await
+            .expect("relaunch placed parallel run");
+        wait_for_terminal(&state, started.id).await;
+        let replayed = storage.get_workflow_run(started.id).await.unwrap().unwrap();
+        assert_eq!(replayed.state, "completed", "{:?}", replayed.error_message);
+        let replay_journal = storage.list_workflow_journal(started.id).await.unwrap();
+        assert_eq!(
+            replay_journal
+                .iter()
+                .map(|entry| (entry.id, entry.seq, entry.kind.clone()))
+                .collect::<Vec<_>>(),
+            first_journal
+                .iter()
+                .map(|entry| (entry.id, entry.seq, entry.kind.clone()))
+                .collect::<Vec<_>>(),
+            "parallel replay must consume the original entries without reordering or appending"
+        );
+        assert_eq!(
+            provider.requests.lock().unwrap().len(),
+            2,
+            "completed replay must not invoke either worker again"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

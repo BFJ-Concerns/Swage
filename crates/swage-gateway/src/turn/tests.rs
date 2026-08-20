@@ -14,7 +14,7 @@ use tokio::sync::{Mutex, Notify, mpsc};
 use swage_core::{
     ChatMessage, CompletionRequest, CompletionResponse, DelegateCompletionMode, MessageStatus,
     ProviderError, SandboxError, StreamChunk, ToolCompletionRequest, ToolCompletionResponse,
-    ToolReplayPart,
+    ToolError, ToolReplayPart,
 };
 use swage_core::{FinishReason, StorageError};
 use swage_hook::{Hook, HookOutcome, HookRegistration, HookRegistry};
@@ -78,6 +78,18 @@ fn provider_response_witness_is_appended_without_content_fields() {
     assert_eq!(response["witness"]["content_blocks"][0]["bytes"], 42);
     assert!(response["witness"].get("content").is_none());
     assert!(response["witness"].get("thinking").is_none());
+}
+
+#[test]
+fn delegate_worktree_identity_is_stable_per_tool_call() {
+    assert_eq!(
+        delegate_worktree_key("delegate-call-17"),
+        delegate_worktree_key("delegate-call-17")
+    );
+    assert_ne!(
+        delegate_worktree_key("delegate-call-17"),
+        delegate_worktree_key("delegate-call-18")
+    );
 }
 
 fn provider_witness_chunks() -> Vec<StreamChunk> {
@@ -434,6 +446,7 @@ struct DetachedGatedProvider {
     child_release: Arc<Notify>,
     child_answer: String,
     initial_parent_request_seen: AtomicUsize,
+    child_round: AtomicUsize,
     captured: Arc<std::sync::Mutex<Vec<String>>>,
 }
 
@@ -450,6 +463,7 @@ impl DetachedGatedProvider {
                 child_release,
                 child_answer,
                 initial_parent_request_seen: AtomicUsize::new(0),
+                child_round: AtomicUsize::new(0),
                 captured: captured.clone(),
             },
             captured,
@@ -490,6 +504,18 @@ impl LlmProvider for DetachedGatedProvider {
         self.captured.lock().unwrap().push(request_text.clone());
 
         if request_text.contains("Delegated Task\n\nSummarise independently") {
+            if self.child_round.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Box::pin(stream::iter(vec![
+                    StreamChunk::ToolUse {
+                        call_id: "delegated-marker-write".into(),
+                        name: "delegated_marker_write".into(),
+                        arguments: serde_json::json!({}),
+                    },
+                    StreamChunk::Done {
+                        finish_reason: None,
+                    },
+                ]));
+            }
             let started = self.child_started.clone();
             let release = self.child_release.clone();
             let child_answer = self.child_answer.clone();
@@ -550,6 +576,37 @@ impl LlmProvider for DetachedGatedProvider {
                 finish_reason: None,
             },
         ]))
+    }
+}
+
+struct DelegatedMarkerWriteTool;
+
+#[async_trait]
+impl Tool for DelegatedMarkerWriteTool {
+    fn name(&self) -> &str {
+        "delegated_marker_write"
+    }
+
+    fn description(&self) -> &str {
+        "Write a marker in the delegated worker's current directory"
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object", "properties": {}})
+    }
+
+    async fn execute(
+        &self,
+        _params: serde_json::Value,
+        ctx: &dyn swage_tool::context::ToolContext,
+    ) -> Result<serde_json::Value, ToolError> {
+        std::fs::write(ctx.working_directory().join("delegated-marker"), "placed").map_err(
+            |error| ToolError::ExecutionFailed {
+                name: self.name().into(),
+                message: error.to_string(),
+            },
+        )?;
+        Ok(serde_json::json!({"written": true}))
     }
 }
 
@@ -7220,6 +7277,7 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
             None,
             None,
             None,
+            "missing-lineage-delegate",
             "gateway",
             root_turn.id,
             space.id,
@@ -7725,11 +7783,23 @@ async fn detached_delegate_can_be_cancelled_through_active_registry() {
         Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
         swage_config::ResolvedConfig::default(),
-        crate::tool::ToolDispatcher::allow_all(vec![]),
+        crate::tool::ToolDispatcher::allow_all(vec![
+            Arc::new(DelegatedMarkerWriteTool) as Arc<dyn Tool>
+        ]),
         None,
     );
     let handler = GatewayDelegationHandler::new(state.clone());
     let delegated_cwd = tempfile::tempdir_in("/tmp/scratch").expect("delegated cwd");
+    storage
+        .create_workspace_attachment(NewWorkspaceAttachment {
+            space_id: space.id,
+            label: "delegated cwd".into(),
+            path: delegated_cwd.path().to_string_lossy().into_owned(),
+            permissions: vec!["read".into(), "write".into()],
+            is_trusted: true,
+        })
+        .await
+        .expect("grant delegated cwd");
 
     let outcome = handler
         .handle_delegation(
@@ -7738,6 +7808,7 @@ async fn detached_delegate_can_be_cancelled_through_active_registry() {
             None,
             Some(delegated_cwd.path().to_string_lossy().into_owned()),
             None,
+            "detached-placement-delegate",
             "gateway",
             parent_turn.id,
             space.id,
@@ -7754,6 +7825,38 @@ async fn detached_delegate_can_be_cancelled_through_active_registry() {
     tokio::time::timeout(std::time::Duration::from_secs(1), child_started.notified())
         .await
         .expect("detached child should enter provider stream");
+    assert_eq!(
+        std::fs::read_to_string(delegated_cwd.path().join("delegated-marker"))
+            .expect("delegated tool should write at the resolved placement"),
+        "placed"
+    );
+
+    let denied_cwd = tempfile::tempdir_in("/tmp/scratch").expect("denied cwd");
+    let denied = match handler
+        .handle_delegation(
+            "agent-b",
+            "This placement must be rejected",
+            None,
+            Some(denied_cwd.path().to_string_lossy().into_owned()),
+            None,
+            "denied-placement-delegate",
+            "gateway",
+            parent_turn.id,
+            space.id,
+            CancellationToken::new(),
+            DelegateCompletionMode::Wait,
+        )
+        .await
+    {
+        Err(error) => error,
+        Ok(_) => panic!("delegation must not expand the sender's filesystem authority"),
+    };
+    assert!(
+        denied
+            .to_string()
+            .contains("outside the dispatching context's permitted workspace roots"),
+        "unexpected placement rejection: {denied}"
+    );
 
     assert!(
         handler

@@ -7,14 +7,21 @@ use super::{
     delegated_target_instructions_for_space, dispatch_bound_agent_ids_for_turn,
     dispatch_bound_metadata, effective_tool_permissions_record, execute_context_assembly,
     load_active_skills_for_agent, load_memory_for_assembly, load_session_config, load_space_memory,
-    load_trusted_workspace_policy, mpsc, operator_guidance_rules, resolve_swage_root,
-    select_context_assembly, shutdown_sandbox_guard,
+    load_trusted_workspace_policy, mpsc, operator_guidance_rules,
+    resolve_authorised_worker_directory, resolve_swage_root, select_context_assembly,
+    shutdown_sandbox_guard,
 };
+use sha2::{Digest, Sha256};
 use swage_agent::{
     DelegatedAssembly, DelegationContextAssembler, DelegationOutcome, DelegationSnapshotRecorder,
 };
 use swage_context::tokeniser::TiktokenTokeniser;
 use swage_core::DelegateCompletionMode;
+
+pub(crate) fn delegate_worktree_key(delegate_call_id: &str) -> u64 {
+    let digest = Sha256::digest(delegate_call_id.as_bytes());
+    u64::from_be_bytes(digest[..8].try_into().expect("SHA-256 prefix"))
+}
 
 struct GatewayDelegatedContextAssembler {
     state: AppState,
@@ -204,6 +211,7 @@ impl DelegationHandler for GatewayDelegationHandler {
         context: Option<serde_json::Value>,
         cwd: Option<String>,
         isolation: Option<swage_protocol::client::workflow::WorkerIsolation>,
+        delegate_call_id: &str,
         sender_agent_id: &str,
         sender_turn_id: Uuid,
         space_id: Uuid,
@@ -272,15 +280,17 @@ impl DelegationHandler for GatewayDelegationHandler {
         let placement = match isolation {
             None => match cwd.as_deref() {
                 Some(cwd) => Some(
-                    tokio::fs::canonicalize(cwd)
-                        .await
-                        .map_err(|error| {
-                            AgentError::InvalidConfig(format!(
-                                "cannot resolve delegated cwd {cwd:?}: {error}"
-                            ))
-                        })?
-                        .to_string_lossy()
-                        .into_owned(),
+                    resolve_authorised_worker_directory(
+                        &self.state,
+                        space_id,
+                        sender_turn_id,
+                        active_workspace_attachment_id,
+                        cwd,
+                    )
+                    .await
+                    .map_err(AgentError::InvalidConfig)?
+                    .to_string_lossy()
+                    .into_owned(),
                 ),
                 None => None,
             },
@@ -291,16 +301,20 @@ impl DelegationHandler for GatewayDelegationHandler {
                             .into(),
                     )
                 })?;
-                let placement_key = Uuid::new_v4();
-                let seq = u64::from_be_bytes(
-                    placement_key.as_bytes()[..8]
-                        .try_into()
-                        .expect("UUID prefix"),
-                );
+                let repo = resolve_authorised_worker_directory(
+                    &self.state,
+                    space_id,
+                    sender_turn_id,
+                    active_workspace_attachment_id,
+                    repo,
+                )
+                .await
+                .map_err(AgentError::InvalidConfig)?;
+                let stable_key = delegate_worktree_key(delegate_call_id);
                 Some(
                     self.state
                         .worktree_host
-                        .provision(sender_turn_id, seq, std::path::Path::new(repo))
+                        .provision(sender_turn_id, stable_key, &repo)
                         .await
                         .map_err(AgentError::InvalidConfig)?
                         .to_string_lossy()
