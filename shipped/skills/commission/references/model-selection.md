@@ -2,10 +2,10 @@
 
 How to choose a model tier for a dispatched worker or agent call. An
 orchestrator applies it when pinning a dispatch's model, a workflow script
-applies it when pinning per-stage engines, and any session applies it when
+applies it when pinning per-stage models, and any session applies it when
 delegating a one-off task.
-Each engine's concrete lineup — which named models sit at its floor, its
-default, and its top — lives with that engine's own documentation; this file is
+The concrete lineup — which named models are available and where each
+sits — is the operator's configured model catalogue; this file is
 the judgement that picks a position on whatever lineup is in front of you,
 and, where the dispatch may choose between families, which family's lineup to
 read (Family Routing below).
@@ -36,8 +36,7 @@ downstream life — so the question is never "could a cheaper tier do this?" but
 ## Family Routing
 
 Tier picks a position on a lineup; family picks whose lineup the position is
-read from. When the dispatch mechanism can name the model family — a workflow
-stage, a shell-dispatched one-shot, a cross-engine review — route by
+read from. Every dispatch names its model, so it names its family — route by
 capability in the work's own dimension, not by standing per-task-type
 assignments:
 
@@ -52,14 +51,11 @@ assignments:
   weakest-reader rule below stands alongside: a below-drafting-tier reader
   stays in the loop besides the cross-family judge.
 
-The concrete lineup — which models are allowed through and how each scores
-per dimension — lives in the `workflow-model-routing` rule, which is
-maintained as models come and go; when that rule is in context, read the
-current table from it rather than from memory. Where it isn't loaded, the
-lineup comes from the dispatching engine's own documentation, as the
-opening section says. The assignments bind only engine-open dispatches: a
-mechanism that runs a single family — a tool's in-session subagent call —
-maps positions onto that family's own lineup as before.
+The concrete lineup — which models are available and how each scores per
+dimension — is the operator's configured model catalogue, which moves as
+models come and go; judge against what it currently offers rather than
+from memory. Where a dispatch mechanism is confined to a single family,
+map positions onto that family's own lineup as before.
 
 ## Leverage Prices the Top Tier
 

@@ -25,8 +25,8 @@ on during an update. An empty list is a fine answer; an unasked question is not.
 ## Beat 2 — Ground (is it actually built?)
 
 Shedding's premise — "the code now documents this, so the README can stop" — is
-a claim about the world, checked before anything is compressed. The check is the
-`grounding` workflow on the cross-engine ensemble
+a claim about the world, checked before anything is compressed. The check is
+the carried cross-family `grounding` workflow
 ([ensemble-workflows.md](ensemble-workflows.md)), not the main session's own
 read: it needs the perspective the main session cannot give — blind to this
 session's recollection of what was built, and, for the verdict that deletes
@@ -35,7 +35,7 @@ observable terms and the location to investigate — the code repo, or the
 orchestrator's run state where that is the better record of what was built. Each
 candidate comes back:
 
-- **built and cross-engine confirmed** → it sheds.
+- **built and cross-family confirmed** → it sheds.
 - **not built, partial, or unconfirmed** → it stays in the README, fully
   elaborated, and is reported.
 
@@ -82,7 +82,7 @@ actually shed something or materially rewrote existing intent — not for a
 one-line addition settled item-by-item through the handshake, which the per-write
 collision read already covered.
 
-The two passes run as the `preservation` workflow on the cross-engine ensemble
+The two passes run as the carried cross-family `preservation` workflow
 ([ensemble-workflows.md](ensemble-workflows.md)); their opposite information
 diets — pass 1 blind to what changed, pass 2 sighted on the record — are the
 whole point and are enforced by what the workflow is fed. Build its brief:

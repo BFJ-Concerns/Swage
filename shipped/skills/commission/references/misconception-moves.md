@@ -2,13 +2,13 @@
 
 The dispatched moves the hunting posture fires, their information diets, the
 reconciliation beat for returned findings, the relay discipline, and the
-hard requirement on the Ensemble runtime. Read this whenever a signal has
+hard requirement on live cross-family runs. Read this whenever a signal has
 fired and a move is about to run, and again when its findings return;
 `SKILL.md` carries the always-on posture and the signals themselves.
 
-**Moves** — selection and grounding for in-context verification in
+**Moves** — selection and grounding for the verification move in
 [dispatched-agents.md](dispatched-agents.md); how to run
-the cross-engine workflows in
+the carried cross-family workflows in
 [ensemble-workflows.md](ensemble-workflows.md):
 
 1. **Verify, don't transcribe.** Checkable claims get checked before they
@@ -22,8 +22,9 @@ the cross-engine workflows in
    anchor is in play, run the `divergent-survey` workflow: a research stage
    surveys the outcome's published theory, proposers blind to the anchor — half
    seeded with disjoint slices of the research, half from the brief alone —
-   generate genuinely different approaches, the opposite engine critiques
-   each, and both engines surface a *ranked* comparison. The ranked
+   generate genuinely different approaches, the opposite model family
+   critiques
+   each, and both families surface a *ranked* comparison. The ranked
    options go to the user with their evidence and the decisive questions, and
    you talk them through together — the main session never silently adopts a
    winner.
@@ -96,26 +97,27 @@ grounded on the way back):
 
 **Hard requirement.** The divergent survey, the blind re-derivation, the draft
 attack, the preservation passes, the shedding run's grounding (Beat 2), and
-the pre-sign-off commitment audit run
-on the cross-engine Ensemble runtime (the ensemble-workflow skill's launcher),
-and the moves need it
-live (see [ensemble-workflows.md](ensemble-workflows.md)).
-When a *triggered* move cannot reach it, **stop and tell the user** — never
-stand up hand-prompted same-model sub-agents in a workflow's place on your own
+the pre-sign-off commitment audit run as this skill's carried workflows, and
+the moves need both model families reachable in the configured catalogue
+(see [ensemble-workflows.md](ensemble-workflows.md)).
+When a *triggered* move cannot reach a family it needs, **stop and tell the
+user** — never
+stand up hand-prompted same-model workers in a workflow's place on your own
 initiative: that forfeits the differently-trained judgement the move exists for,
-and a half-blind survey dressed as cross-engine is worse than none. What runs
-instead is decided with the user, openly: wait for the ensemble; drop the move,
+and a half-blind survey dressed as cross-family is worse than none. What runs
+instead is decided with the user, openly: wait for the missing family; drop
+the move,
 recording it as not performed (the Stop condition then carries that record —
 see Sign-off in `SKILL.md`); or — for the draft attack and the preservation passes only — a
 clearly-labelled **degraded review** under the contract in
 [ensemble-workflows.md](ensemble-workflows.md). The
-survey has no degraded rendering — its value *is* the other engine's
+survey has no degraded rendering — its value *is* the other family's
 divergence — and neither does grounding: a shed happens only on the live
-cross-engine confirm, so would-shed candidates stay fully elaborated until it
+cross-family confirm, so would-shed candidates stay fully elaborated until it
 can run. The re-derivation has none either: its designer must be a fresh,
 isolated context, which the main session — already steeped in the incumbent
 and the conversation — cannot impersonate. A reported degraded review beats both a skipped gate and a fabricated
 pass. (A round that touches no product intent triggers no such move — but any
 round that works the What owes the commitment audit, so capture and feature
-updates now depend on the ensemble being live; its degraded rendering is in
+updates now depend on both families being reachable; its degraded rendering is in
 [ensemble-workflows.md](ensemble-workflows.md).)

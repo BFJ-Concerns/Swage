@@ -35,10 +35,11 @@ bit is the file's address. A cheaper write path into `held/` would be the
 side door the single-writer rule exists to close.
 
 One honest limit: the boundary is a read contract, not a capability wall. A
-build agent *could* open `held/`. Where the tool injects guidance at
-touch-time (on Claude Code, the global annexe-discipline hook), the read
-contract is restated the moment an agent edits annexe files; on tools with no
-such channel, each file's banner is the only in-band defence. If build output
+build agent *could* open `held/`. Where the platform injects workspace
+guidance at touch-time (the annexe's own `AGENTS.md`, loaded from the
+workspace root), the read
+contract is restated the moment an agent edits annexe files; where no
+such channel reaches a session, each file's banner is the only in-band defence. If build output
 is ever found implementing held content, raise it with the user rather than
 absorbing it as a bug to patch: something the contract never authorised
 reached the build, so what else the run took from `held/` is open, and the

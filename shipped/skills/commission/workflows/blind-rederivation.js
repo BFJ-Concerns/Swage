@@ -1,28 +1,28 @@
-export const meta = {
-  name: "blind-rederivation",
-  description:
-    "Blind re-derivation of a design from first principles: one sustained high-tier designer per chunk, isolated by construction from the incumbent design, derives the concerns and the shape from an anchor-audited brief alone — later chunks build on earlier blind output as a fixed contract with explicit licence to propose amendments — then, when the settled design is supplied, both families independently report where the blind result converges with it (validation) and diverges from it (the findings).",
-};
+// blind-rederivation — blind re-derivation of a design from first principles:
+// one sustained high-tier designer per chunk, isolated by construction from
+// the incumbent design, derives the concerns and the shape from an
+// anchor-audited brief alone — later chunks build on earlier blind output as
+// a fixed contract with explicit licence to propose amendments — then, when
+// the settled design is supplied, both families independently report where
+// the blind result converges with it (validation) and diverges from it (the
+// findings).
 
-export const defaults = {
-  // Worker policy — declared once, inherited by every agent() call; call sites
-  // override only where a stage's residue earns more, with a comment naming it.
-  // The resting posture is the comparison stage: judgement over two decided
-  // texts, so codex pins the flagship Sol at the resting level (review work runs
-  // the flagship — references/model-selection.md) and Claude holds its default.
-  // Pin model and effort together: an unpinned call rides the ambient default
-  // silently, and per-model effort defaults are uneven (Sol has shipped
-  // defaulting to low). The Claude fallback steps to the adjacent tier rather
-  // than failing while a model is unavailable. NOTE: the runtime's extractor
-  // reads this block only when it directly follows meta — whitespace or
-  // comments between them, nothing else.
-  codex: { model: "gpt-5.6-sol", effort: "medium" },
-  claude: { model: "opus", effort: "high", fallbackModel: "sonnet" },
+// Worker policy — declared once per family; every agent() call spreads its
+// family's pins, and call sites override only where a stage's residue earns
+// more, with a comment naming it. The resting posture is the comparison
+// stage: judgement over two decided texts, so the GPT side pins the flagship
+// at the resting level (review work runs the flagship —
+// references/model-selection.md). Pin model and effort together on every
+// call: an unpinned call has no model to ride.
+const FAMILY = {
+  gpt: { model: "gpt-5.6-sol", effort: "medium" },
+  claude: { model: "claude-opus-5", effort: "high" },
 };
 
 // THE BLINDNESS IS ISOLATION BY CONSTRUCTION, NOT INSTRUCTION.
-//   * Launch this workflow from an isolated EMPTY directory outside the project (see
-//     references/ensemble-workflows.md) — workers have filesystem access, so an empty cwd
+//   * Every worker is placed in the isolated EMPTY run directory the args
+//     name (see references/ensemble-workflows.md) — workers have filesystem
+//     access, so an empty working directory
 //     means there is no repo, no README, no notes for a designer to find. Contamination is
 //     prevented by what the worker cannot reach.
 //   * The BRIEF is the other half, and it is the main session's job to audit it before
@@ -47,8 +47,9 @@ export const defaults = {
 // directory. A long single-emission output dies in mid-stream stalls. The structured
 // return is deliberately small — the document is the deliverable; the JSON is its index.
 //
-// INPUT (pass with --json-args):
+// INPUT (pass as the run's args):
 //   {
+//     "run_dir": "/abs/path to an isolated EMPTY directory for this run — designers write and read design documents there",
 //     "domain":  "the product domain stated generically — no product name, no incumbent vocabulary",
 //     "premise": "optional: the user's core hypothesis, to be taken as a given design premise",
 //     "chunks": [                    // ordered; one sustained designer each
@@ -60,7 +61,7 @@ export const defaults = {
 //     "existing": "optional: the settled design text to compare against — never shown to designers. Omit it to run derivation only (the greenfield counterpoint case, where the comparison is the conversation itself)."
 //   }
 //
-// OUTPUT (stdout JSON): { designs[], comparisons[] }. Each design entry carries the
+// OUTPUT (the run's result): { designs[], comparisons[] }. Each design entry carries the
 // document's file path (in the run directory), the designer's own load-bearing choices,
 // and any amendments it proposed to earlier chunks. Comparisons (one per family, when
 // `existing` was supplied) report convergences, divergences, and open questions. The main
@@ -68,10 +69,12 @@ export const defaults = {
 // and the amendments are settled explicitly, never silently absorbed.
 
 const cfg = args || {};
+const runDir = (cfg.run_dir || "").trim();
 const domain = (cfg.domain || "").trim();
 const premise = (cfg.premise || "").trim();
 const chunks = Array.isArray(cfg.chunks) ? cfg.chunks : [];
 const existing = (cfg.existing || "").trim();
+if (!runDir) throw new Error("blind-rederivation needs run_dir — an isolated empty directory for the designers");
 if (!domain) throw new Error("blind-rederivation needs a generically-stated domain");
 if (chunks.length === 0) throw new Error("blind-rederivation needs at least one chunk");
 // The chunk id names the output file, so malformed input fails here, not mid-run.
@@ -175,7 +178,8 @@ yourself — build on it rather than debating it:\n${premise}\n`
   : "";
 
 // Prior documents are handed over by file path, not inlined: the script sandbox has
-// no filesystem, but workers share the run cwd — and reading a document is better
+// no filesystem, but every worker shares the run directory as its working
+// directory — and reading a document is better
 // than receiving it pasted, since a whole design does not belong inside a prompt.
 const priorBlock = (priors) =>
   priors.length
@@ -264,10 +268,10 @@ const designs = [];
 for (const chunk of chunks) {
   log(`deriving chunk "${chunk.id}" (${designs.length ? "building on " + designs.map((d) => d.id).join(", ") : "first chunk"})`);
   const result = await agent(designPrompt(chunk, designs), {
-    engine: "claude",
-    model: "fable",
+    // Top Claude tier: leverage prices the top tier for whole-design drafting.
+    model: "claude-fable-5",
     effort: "high",
-    fallbackModel: "opus",
+    cwd: runDir,
     schema: designSchema,
     label: `design:${chunk.id}`,
   });
@@ -286,12 +290,13 @@ if (existing) {
   phase("compare");
   comparisons = (
     await parallel(
-      ["codex", "claude"].map((engine) => () =>
+      ["gpt", "claude"].map((family) => () =>
         agent(comparisonPrompt(designs), {
-          engine,
+          ...FAMILY[family],
+          cwd: runDir,
           schema: comparisonSchema,
-          label: `compare:${engine}`,
-        }).then((c) => (c ? { engine, ...c } : null)),
+          label: `compare:${family}`,
+        }).then((c) => (c ? { family, ...c } : null)),
       ),
     )
   ).filter(Boolean);
@@ -299,7 +304,7 @@ if (existing) {
   // quietly thinner result the main session would read as complete.
   if (comparisons.length < 2) {
     throw new Error(
-      `comparison incomplete: only ${comparisons.map((c) => c.engine).join(", ") || "no"} family returned — re-run before relying on the comparison`,
+      `comparison incomplete: only ${comparisons.map((c) => c.family).join(", ") || "no"} family returned — re-run before relying on the comparison`,
     );
   }
 } else {

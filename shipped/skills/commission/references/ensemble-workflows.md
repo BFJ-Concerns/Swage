@@ -1,12 +1,12 @@
-# Ensemble Workflows
+# The Carried Workflows
 
-Commission ships six workflow scripts in `workflows/`. Each entry below gives what the
+This skill carries six workflow scripts in `workflows/`. Each entry below gives what the
 script is for, when to fire it, the information diet it needs, and how to read what it
-returns. The runtime that runs them — how to launch (*Running a workflow* below), the hooks,
-the schema rules, the live-engine requirement, and run-tuning — is owned by the
-`ensemble-workflow` skill; read it there before running or editing a workflow.
+returns. The engine that runs them — the script surface, the schema rules, and
+budgets — is taught by the
+`workflow-authoring` skill; read it before running or editing a workflow.
 
-The six, all cross-engine so a *different* model family checks the work:
+The six, all cross-family so a *different* model family checks the work:
 
 - `workflows/divergent-survey.js` — generate genuinely different approaches blind
   to the anchor, cross-critique, surface a *ranked* comparison for joint decision.
@@ -16,7 +16,7 @@ The six, all cross-engine so a *different* model family checks the work:
 - `workflows/draft-review.js` — attack the near-final draft sighted on the settled
   Decisions, returning findings grouped for the reconciliation beat.
 - `workflows/grounding.js` — the shedding run's blind build-state check: find which
-  candidate features are actually built, then cross-engine verify the ones that
+  candidate features are actually built, then cross-family verify the ones that
   would shed before they do.
 - `workflows/commitment-audit.js` — the pre-sign-off register audit: both families
   mine the conversation's transcript for voiced wants, a blind diff returns the
@@ -27,32 +27,29 @@ The six, all cross-engine so a *different* model family checks the work:
 
 The survey, re-derivation, draft review, and preservation are *divergent or
 adversarial* moves; grounding and the commitment audit are *verification* — but
-they earn the cross-engine ensemble for the same reason the others do: the
+they earn the cross-family run for the same reason the others do: the
 verdict that sheds a feature deletes intent, and a register audited only by one
 family inherits that family's blind spots — in each case the strongest check is
 a different model family.
 
 Every script declares its worker policy once in an `export const defaults`
-block — per-engine model tier, effort level, and the Claude fallback tier —
+block — model and effort —
 which every `agent()` call inherits; call sites override only where a stage's
-residue earns a different level, with a comment naming it. The policy is not
-clutter: without it a call runs whatever the engine's ambient default model
-and level are that week, so cost and character drift with lineup changes far
-outside the run. `fallbackModel` (Claude engine only — other engines reject
-it) declares the adjacent tier to use while the pinned one is unavailable,
-and the run archive records when it fires; the runtime also warns on any
-Claude call that reaches it unpinned — Codex calls get no such warning, so
-the defaults block is the only guard on that engine. The doctrine behind the
+residue earns a different model or level, with a comment naming it. The
+policy is not
+clutter: without it a call has no model at all — every call must resolve a
+pinned model, so cost and character never drift with catalogue changes
+outside the run. The doctrine behind the
 pins is the shared pair — [model-selection.md](model-selection.md) for the tier,
 [effort-calibration.md](effort-calibration.md) for the level. Keep the policy
 blocks and overrides intact when editing a workflow.
 
-## Hard requirement — both engines, live
+## Hard requirement — both families, live
 
-Every workflow here is cross-engine by design. The live requirement — both model
-families reachable in one run plus `tmux` for the Claude reply valve — and how to
-respond when one is unreachable are owned by the `ensemble-workflow` skill's
-*Live requirement* section; read it before running a move. What may run in a
+Every workflow here is cross-family by design: every model each script pins
+must resolve in the operator's configured catalogue, both families among
+them. Check that before running a move; when a family is unreachable, what
+may run in a
 downed move's place — and what may not — is this skill's own doctrine: the Hard
 requirement block in `SKILL.md` (stop and tell the user; a clearly-labelled
 degraded review only where that block allows one, decided together).
@@ -60,7 +57,7 @@ degraded review only where that block allows one, decided together).
 When the user chooses a degraded review — available for the draft attack,
 the preservation passes, and the commitment audit only — it runs under this contract: use the
 corresponding workflow script's input and output schemas as the checklist,
-producing every field, marking the cross-engine ones as not performed, and
+producing every field, marking the cross-family ones as not performed, and
 reporting any field that could not be produced; label the result plainly as a
 degraded review that shares this model's blind spots; and for preservation,
 run the blind pass in a fresh context that has not seen this session's draft
@@ -70,43 +67,29 @@ legs on the one live family, labels every product one-family (it shares that
 family's blind spots), and is recorded as degraded in the sign-off report and
 the Stop condition — the user's explicit say-so is what lets a sign-off
 proceed on it.
-Re-run the real move once the ensemble is back if the user wants the full
+Re-run the real move once the missing family is back if the user wants the
+full
 gate. The survey and grounding have no degraded rendering: the survey's value
 is the other family's divergence, and a shed happens only on the live
-cross-engine confirm. What is specific to
+cross-family confirm. What is specific to
 commission: a round that touches no product intent triggers none of these
 moves — but any round that works the What owes the commitment audit before
-its sign-off read, so capture and feature updates need both engines live by
+its sign-off read, so capture and feature updates need both families live by
 the time the audit runs, and an update
 that will shed needs them before Beat 2 as well.
 
-<!-- foundry:engine-placeholders ensemble-runtime start -->
-
 ## Running a workflow
 
-The runtime lives in the `ensemble-workflow` skill — a self-contained Node ≥24 launcher,
-nothing to install. Run a workflow with flags **before** the script path; the result is
-one line of JSON on stdout, logs on stderr:
-
-```bash
-node ~/.claude/skills/ensemble-workflow/scripts/ensemble.mjs --json-args '<json>' ~/.claude/skills/<skill>/workflows/<name>.js > <scratch>/<name>.json 2> <scratch>/<name>.log
-```
-
-`<skill>` is the skill this reference ships with — substitute its bundled workflow
-script's installed path (a skill that documents a concrete command already spells it
-out). Both paths are absolute so the command runs from any
-cwd — launch from the directory the move itself calls for (a blind stage from an empty
-scratch directory, a grounded one from the code repo), never from a directory chosen just
-to make a relative path resolve.
-
-The script **cannot touch the filesystem** (sandboxed): pass every input in `--json-args`,
-and **you are the driver** — write the returned stdout to `<scratch>`, read it, and bring
-the result back. Read each workflow script's header for the inputs it names.
-Everything else — the flags (`--budget`, `--concurrency`, `--timeout`), their defaults and
-when to set them, the live-engine requirement, and the fan-in limits — is owned by the
-`ensemble-workflow` skill; read it before running or authoring a workflow.
-
-<!-- foundry:engine-placeholders ensemble-runtime end -->
+These workflows ride this skill: start one by name through the workflow run
+surface, passing its inputs as the run's args. Read each script's header for
+the inputs it names. The script itself cannot touch the filesystem — every
+input arrives through args, and workers reach the world through their own
+tools — so where a move needs workers placed somewhere particular (a blind
+stage in an empty scratch directory, a grounded one in the code repo), the
+placement is in the script's worker calls, steered by the args you pass. The
+run's result is the script's return value, read back from the run record
+along with its journal; budgets and run mechanics are the
+`workflow-authoring` skill's territory.
 
 ## divergent-survey — blind, for joint decision
 
@@ -120,12 +103,15 @@ with disjoint slices of it, half work from the brief alone.
   becomes theatre. Two controls, both required: the **brief** you pass states the
   *outcome* in observable terms and the hard *external* constraints only — never
   the proposed approach, its vocabulary, or anything that betrays the expected
-  answer; and because workers have filesystem access, **launch from an isolated
+  answer; and because workers have filesystem access, **place the workers in an
+  isolated
   empty directory** under `<scratch>` (not the project root, whose code or notes
-  could re-anchor a worker). The anchor-free brief is the real control; the empty
+  could re-anchor a worker) — the run-directory arg carries it. The anchor-free
+  brief is the real control; the empty
   cwd is the backstop that removes the breadcrumbs.
-- **The research stage widens the pool; it does not anchor it.** Two Codex researchers
-  (the Codex backend provides live web search) survey the outcome's published
+- **The research stage widens the pool; it does not anchor it.** Two
+  GPT-family researchers
+  (with web-search tool grants) survey the outcome's published
   theory with complementary questions — established techniques, and documented failure
   modes. Their findings are dealt in disjoint slices to half the proposers; the rest
   propose from the brief alone, so the pool carries both grounded prior art and
@@ -179,7 +165,8 @@ One sustained top-tier designer per chunk derives the concerns and the shape fro
 the brief alone; when a settled design is supplied, both families independently
 compare blind against settled.
 
-- **Isolation is by construction — launch from an isolated empty directory** under
+- **Isolation is by construction — place the designers in an isolated empty
+  directory** under
   `<scratch>`, outside the project: no repo, no README, no notes for the designer
   to find. The workflow shows the settled design only to the comparison stage,
   never to a designer.
@@ -203,7 +190,8 @@ compare blind against settled.
   is the conversation itself: the user's extracted intent on one side, the blind
   derivation on the other, and you walk the convergences and divergences with
   them live.
-- Read the returned `designs` (each entry indexes a document in the run directory
+- Read the returned `designs` (each entry indexes a document written into the
+  run directory the args named
   — read the documents themselves, they are the deliverable) and `comparisons`.
   Relay convergence as independent validation of the settled choice and each
   divergence with its `underlying_assumption` — the question one design asked and
@@ -226,7 +214,8 @@ Run this shortly before the sign-off read, scaled by the size of the change
   genuinely different expert surface to attack — not invented specialists
   rereading the same draft from generic angles.
 - Read the merged `reviews`. Each raw entry in `findings` carries the lens and
-  engine that produced it — that is where to look when judging how a single lens
+  model family that produced it — that is where to look when judging how a
+  single lens
   performed. Apply the **reconciliation beat** (`SKILL.md`): the
   `material_findings` are candidate fixes; the `reopen_prompts` are challenges to
   settled Decisions framed as *questions* — take them to the user, never apply
@@ -242,14 +231,14 @@ whenever the sweep finds candidates the build may now embody.
 
 - **The blindness is the inverse of the survey's.** The survey hides the repo from
   its proposers (empty cwd) so they cannot rediscover the incumbent; grounding's
-  workers *must* read the real code, so **launch it from the code repo** (or hand
-  the brief the path to investigate), not from an empty directory. What stays blind
+  workers *must* read the real code, so **place them in the code repo** (the
+  `repo` arg carries the path), not in an empty directory. What stays blind
   is the *expectation*: each candidate is described in observable terms and the
   worker is asked what the code actually does — never "the README says X is built,
   confirm it", which would buy back the anchor the dispatch exists to escape.
-- **Find is load-balanced; only the deletions are verified cross-engine.** Stage 1
+- **Find is load-balanced; only the deletions are verified cross-family.** Stage 1
   fans the candidates across both families and judges each built / partial /
-  not-built / unknown. Stage 2 spends a cross-engine check only on the ones judged
+  not-built / unknown. Stage 2 spends a cross-family check only on the ones judged
   *built* — the shed direction — where the opposite family independently hunts for
   why the "built" call is wrong. The asymmetry is deliberate: a false "not built"
   merely keeps a feature that could have been compressed (cheap, self-correcting);
@@ -258,7 +247,7 @@ whenever the sweep finds candidates the build may now embody.
 - Pass the `repo` (the location to investigate) and the `candidates` (the Beat 1
   sweep, each with an observable `feature` description) the script header documents.
 - Read the returned `cut_keep_list`. A candidate sheds only when the finder judged
-  it built *and* the cross-engine verifier confirmed; everything else keeps. Shed
+  it built *and* the cross-family verifier confirmed; everything else keeps. Shed
   the confirmed set, keep and report the rest, and surface any finder/verifier
   disagreement to the user rather than resolving it silently. The list is also the
   `cut_keep_list` the preservation workflow takes as input.
@@ -287,7 +276,7 @@ verdicts, so a skipped or failed check is visible.
   whole draft register, which the diff needs for coverage), and `hollow_ids`
   scoping the hollow stage to the lines created or changed this round plus
   any line never yet audited — omit it only when the whole register is new.
-  Launch cwd is unconstrained — workers read the
+  Worker placement is unconstrained — workers read the
   transcript paths directly.
 - **A missing leg is a missing check, never a pass.** The output's
   `mining_gaps` and `diff_gaps` name every (file, family) leg that returned
@@ -299,7 +288,7 @@ verdicts, so a skipped or failed check is visible.
   non-empty the exclusion diff is not the two-family union it claims to be —
   re-run the failed legs, or treat the audit as degraded under the Hard
   requirement above.
-- Read back three products, each acted on before the page publishes. The
+- Read back three products, each acted on before the sign-off read goes out. The
   **exclusion diff** (union of both families, deduplicated by you) carries only
   quoted human wants — a differ's remarks about the matching question itself
   arrive separately in `diff_concerns`, to read but never adjudicate as
@@ -314,7 +303,7 @@ verdicts, so a skipped or failed check is visible.
   siblings, where the register's other lines already answer the complaint
   (its `covered_by_siblings` field, or your own whole-register read, names
   them); or the verdict accepted as a residual, where sharpening would demand
-  over-specification the surprise test forbids, carried onto the sign-off page
+  over-specification the surprise test forbids, carried onto the sign-off read
   with its reason and closed by signature. A line whose text actually changed
   in response to a finding gets one fresh verdict before signature — at most
   one re-run per line per round — and a `null` verdict
@@ -355,5 +344,5 @@ materially rewrote existing intent (see [shedding-workflow.md](shedding-workflow
 - The two adjudicating families report independently; reconcile them
   conservatively. Union their `additional_issues`; a credible `confirmed-loss`
   from either family stays unresolved until reinstated or taken to the user;
-  surface cross-engine disagreements rather than resolving them silently —
+  surface cross-family disagreements rather than resolving them silently —
   `confidence` prioritises work, it never erases a verdict.
