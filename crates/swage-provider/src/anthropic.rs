@@ -1434,6 +1434,24 @@ mod tests {
         assert_eq!(body["output_config"]["effort"], "medium");
     }
 
+    #[test]
+    fn completion_without_effort_omits_anthropic_output_config() {
+        let provider = AnthropicProvider::new("key", "model");
+        let request = CompletionRequest {
+            effort: None,
+            messages: vec![ChatMessage::new(Role::User, "Think carefully")],
+            model: None,
+            max_tokens: None,
+            temperature: None,
+            stop_sequences: None,
+            metadata: None,
+            tool_definitions: vec![],
+        };
+        let body =
+            serde_json::to_value(provider.build_request_for_completion(&request, false)).unwrap();
+        assert!(!body.as_object().unwrap().contains_key("output_config"));
+    }
+
     // --- tool definitions in wire request ---
 
     #[test]
