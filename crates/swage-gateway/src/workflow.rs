@@ -4815,14 +4815,15 @@ mod tests {
             "[tools]\nallow = [\"knowledge_search\"]\ndeny = []\nbundles = {}\n",
         )
         .expect("write bounded lead config");
+        let source = "return await agent('bounded work');";
         let run = storage
             .create_workflow_run(NewWorkflowRun {
                 space_id: space.id,
                 parent_run_id: None,
                 parent_seq: None,
                 script_version_id: None,
-                source: Some("return await agent('bounded work');".into()),
-                source_hash: source_hash("return await agent('bounded work');"),
+                source: Some(source.into()),
+                source_hash: source_hash(source),
                 args: Value::Null,
                 budget: serde_json::json!({}),
                 engine_version: "test".into(),
@@ -4846,45 +4847,34 @@ mod tests {
             ]),
             None,
         );
-        let (tx, rx) = mpsc::unbounded_channel();
-        let task = tokio::spawn(run_host_commands(
-            state,
-            run.id,
-            space.id,
-            vec!["lead".into()],
-            None,
-            WorkflowBudget::default(),
-            vec![],
-            Arc::new(AtomicU32::new(0)),
-            Arc::new(AtomicU64::new(0)),
-            Arc::new(Mutex::new(std::collections::HashMap::new())),
-            CancellationToken::new(),
-            PARK_TIMER_THRESHOLD_MS,
-            rx,
-        ));
-        let (reply, receive) = oneshot::channel();
-        tx.send(HostCommand::Agent {
-            request: AgentCallRequest {
-                prompt: "bounded work".into(),
-                agent: None,
-                model: None,
-                schema: None,
-                max_attempts: 1,
-                label: None,
-                session: None,
-            },
-            cancellation: CancellationToken::new(),
-            reply,
-        })
-        .expect("bare call");
-        let result = receive.await.expect("reply").expect("bare worker result");
+        launch_existing_run(state.clone(), run.clone(), source.into(), None)
+            .await
+            .expect("launch bare workflow run");
+        wait_for_terminal(&state, run.id).await;
+        let completed_run = storage
+            .get_workflow_run(run.id)
+            .await
+            .expect("run query")
+            .expect("completed run");
+        assert_eq!(completed_run.state, "completed");
+        let journal = storage
+            .list_workflow_journal(run.id)
+            .await
+            .expect("journal");
+        assert_eq!(journal.len(), 1);
+        assert_eq!(journal[0].status, "completed");
+        assert!(journal[0].request.get("agent").is_none());
+        assert_eq!(journal[0].request["prompt"], "bounded work");
         assert_eq!(
-            result.output,
-            Value::String("bounded work completed".into())
+            journal[0].result.as_ref().unwrap()["output"],
+            "bounded work completed"
         );
-
+        let session_id = journal[0].result.as_ref().unwrap()["session_id"]
+            .as_str()
+            .and_then(|id| Uuid::parse_str(id).ok())
+            .expect("journalled worker session id");
         let session = storage
-            .get_session(result.session_id.expect("session id"))
+            .get_session(session_id)
             .await
             .expect("session query")
             .expect("bare worker session");
@@ -4896,17 +4886,6 @@ mod tests {
             "shell must be absent because the dispatching lead does not grant it"
         );
         drop(requests);
-
-        let journal = storage
-            .list_workflow_journal(run.id)
-            .await
-            .expect("journal");
-        assert_eq!(journal.len(), 1);
-        assert_eq!(journal[0].status, "completed");
-        assert!(journal[0].request.get("agent").is_none());
-        assert_eq!(journal[0].request["prompt"], "bounded work");
-        drop(tx);
-        task.await.expect("host loop");
     }
 
     #[tokio::test(flavor = "multi_thread")]
