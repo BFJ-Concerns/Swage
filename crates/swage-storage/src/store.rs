@@ -1015,11 +1015,18 @@ pub trait WorkflowStore: Send + Sync {
         id: Uuid,
         wake_at: chrono::DateTime<chrono::Utc>,
     ) -> Result<(), StorageError>;
+    /// Atomically park a running event waiter only if none of the kinds it
+    /// awaits is pending. `false` means a matching event arrived first or the
+    /// run changed state.
+    async fn park_workflow_run_if_no_matching_events(
+        &self,
+        id: Uuid,
+        wake_at: chrono::DateTime<chrono::Utc>,
+        kinds: &[String],
+    ) -> Result<bool, StorageError>;
     /// Atomically make a parked run due now. False means cancellation or
     /// another waker moved it first.
-    async fn make_parked_workflow_run_due(&self, _id: Uuid) -> Result<bool, StorageError> {
-        Ok(false)
-    }
+    async fn make_parked_workflow_run_due(&self, id: Uuid) -> Result<bool, StorageError>;
     /// Parked runs whose `wake_at` has arrived, oldest due first.
     async fn list_due_parked_workflow_runs(
         &self,
@@ -1055,6 +1062,14 @@ pub trait WorkflowStore: Send + Sync {
         up_to_seq: u64,
         delivered_wake_seq: u64,
     ) -> Result<u64, StorageError>;
+    /// Stamp one pending event as returned by an `awaitEvent` call. Other
+    /// pending kinds remain available to later waits.
+    async fn mark_workflow_run_event_delivered(
+        &self,
+        run_id: Uuid,
+        event_seq: u64,
+        delivered_wake_seq: u64,
+    ) -> Result<bool, StorageError>;
     async fn create_workflow_journal_intent(
         &self,
         intent: NewWorkflowJournalIntent,
@@ -2235,6 +2250,14 @@ mod tests {
         ) -> Result<(), StorageError> {
             unimplemented!()
         }
+        async fn park_workflow_run_if_no_matching_events(
+            &self,
+            _: Uuid,
+            _: chrono::DateTime<chrono::Utc>,
+            _: &[String],
+        ) -> Result<bool, StorageError> {
+            unimplemented!()
+        }
         async fn make_parked_workflow_run_due(&self, _: Uuid) -> Result<bool, StorageError> {
             Ok(false)
         }
@@ -2273,6 +2296,14 @@ mod tests {
             _: u64,
             _: u64,
         ) -> Result<u64, StorageError> {
+            unimplemented!()
+        }
+        async fn mark_workflow_run_event_delivered(
+            &self,
+            _: Uuid,
+            _: u64,
+            _: u64,
+        ) -> Result<bool, StorageError> {
             unimplemented!()
         }
         async fn create_workflow_journal_intent(
