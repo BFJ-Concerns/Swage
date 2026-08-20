@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mount, unmount } from "svelte";
 
 import SettingsPage from "../components/SettingsPage.svelte";
+import type { Schedule } from "../protocol/Schedule";
 import type { SettingsPayload, SettingsResponse } from "../types";
 
 import * as agentDefinitionsApi from "../api/agent-definitions";
@@ -143,6 +144,28 @@ function emptySettings(): SettingsResponse {
     },
     restart_required: false,
     can_restart: false,
+  };
+}
+
+function createdSchedule(spaceId: string): Schedule {
+  return {
+    id: "schedule-1",
+    message: "Review the queue.",
+    status: "active",
+    spec: { kind: "interval", every: "every 1 hours" },
+    session: { policy: "fresh", space_id: spaceId, agent_id: "gateway" },
+    creator: { kind: "user" },
+    routing: {
+      deliver_to_origin: false,
+      home_target: null,
+      explicit_targets: [],
+      store_local_output: true,
+    },
+    gate: null,
+    next_run_at: "2026-08-21T10:00:00Z",
+    last_run_at: null,
+    created_at: "2026-08-20T10:00:00Z",
+    updated_at: "2026-08-20T10:00:00Z",
   };
 }
 
@@ -406,10 +429,35 @@ describe("SettingsPage", () => {
     expect(agentDefinitionsApi.listEffectiveAgentDefinitions).toHaveBeenCalledWith("selected-space");
   });
 
-  it("keeps fresh schedule creation gated in global Settings", async () => {
+  it("creates a fresh schedule in the selected space", async () => {
+    vi.mocked(workflowApi.createSchedule).mockResolvedValue(createdSchedule("selected-space"));
     component = mount(SettingsPage, {
       target: document.body,
       props: { tab: "automation", spaceId: "selected-space" },
+    });
+    await flushUi();
+
+    const prompt = document.querySelector<HTMLTextAreaElement>(".schedule-automation textarea");
+    if (!prompt) throw new Error("Schedule prompt was not rendered");
+    prompt.value = "Review the queue.";
+    prompt.dispatchEvent(new Event("input", { bubbles: true }));
+    buttonNamed("Create schedule").click();
+    await flushUi();
+
+    expect(workflowApi.createSchedule).toHaveBeenCalledWith({
+      message: "Review the queue.",
+      spec: { kind: "interval", every: "every 1 hours" },
+      session: { policy: "fresh", space_id: "selected-space", agent_id: "gateway" },
+      routing: null,
+      gate: null,
+    });
+    expect(document.body.textContent).not.toContain("Select a space before scheduling work.");
+  });
+
+  it("blocks fresh schedule creation when no space is selected", async () => {
+    component = mount(SettingsPage, {
+      target: document.body,
+      props: { tab: "automation", spaceId: null },
     });
     await flushUi();
 
