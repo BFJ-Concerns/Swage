@@ -246,6 +246,7 @@ fn journal_wire(
     };
     let kind = match entry.kind.as_str() {
         "agent_call" => WorkflowJournalEntryKind::AgentCall,
+        "worker_placement" => WorkflowJournalEntryKind::WorkerPlacement,
         "effect" => WorkflowJournalEntryKind::Effect,
         "log" => WorkflowJournalEntryKind::Log,
         "phase" => WorkflowJournalEntryKind::Phase,
@@ -500,8 +501,17 @@ enum HostCommand {
     },
     Agent {
         request: AgentCallRequest,
+        resolved_working_directory: Option<String>,
         cancellation: CancellationToken,
         reply: oneshot::Sender<Result<AgentCallResult, String>>,
+    },
+    ProvisionWorker {
+        cwd: Option<String>,
+        isolation: swage_protocol::client::workflow::WorkerIsolation,
+        reply: oneshot::Sender<Result<Option<String>, String>>,
+    },
+    ListWorkerPlacements {
+        reply: oneshot::Sender<Result<Value, String>>,
     },
     Deliver {
         payload: EffectPayload,
@@ -571,12 +581,14 @@ impl WorkflowHost for ChannelWorkflowHost {
     async fn run_agent_call(
         &self,
         request: AgentCallRequest,
+        resolved_working_directory: Option<String>,
         cancellation: CancellationToken,
     ) -> Result<AgentCallResult, String> {
         let (reply, receive) = oneshot::channel();
         self.tx
             .send(HostCommand::Agent {
                 request,
+                resolved_working_directory,
                 cancellation,
                 reply,
             })
@@ -584,6 +596,52 @@ impl WorkflowHost for ChannelWorkflowHost {
         receive
             .await
             .map_err(|_| "workflow host dropped agent reply".to_string())?
+    }
+
+    async fn resolve_worker_placement(
+        &self,
+        request: &AgentCallRequest,
+        _cancellation: CancellationToken,
+    ) -> Result<Option<String>, String> {
+        let Some(isolation) = request.isolation else {
+            let Some(cwd) = request.cwd.as_deref() else {
+                return Ok(None);
+            };
+            let path = tokio::fs::canonicalize(cwd).await.map_err(|error| {
+                format!("WorkerPlacementError: cannot resolve cwd {cwd:?}: {error}")
+            })?;
+            if !path.is_dir() {
+                return Err(format!(
+                    "WorkerPlacementError: cwd is not a directory: {}",
+                    path.display()
+                ));
+            }
+            return Ok(Some(path.to_string_lossy().into_owned()));
+        };
+        let (reply, receive) = oneshot::channel();
+        self.tx
+            .send(HostCommand::ProvisionWorker {
+                cwd: request.cwd.clone(),
+                isolation,
+                reply,
+            })
+            .map_err(|_| "workflow host stopped".to_string())?;
+        receive
+            .await
+            .map_err(|_| "workflow host dropped placement reply".to_string())?
+    }
+
+    async fn list_worker_placements(
+        &self,
+        _cancellation: CancellationToken,
+    ) -> Result<Value, String> {
+        let (reply, receive) = oneshot::channel();
+        self.tx
+            .send(HostCommand::ListWorkerPlacements { reply })
+            .map_err(|_| "workflow host stopped".to_string())?;
+        receive
+            .await
+            .map_err(|_| "workflow host dropped placement-list reply".to_string())?
     }
 
     async fn deliver(
@@ -719,6 +777,7 @@ async fn run_ephemeral_agent_call(
     space_id: Uuid,
     dispatch_bound_agent_ids: &[String],
     request: AgentCallRequest,
+    resolved_working_directory: Option<String>,
     cancellation: CancellationToken,
 ) -> Result<AgentCallResult, String> {
     // This identity deliberately cannot name an agent definition: definition
@@ -790,13 +849,17 @@ async fn run_ephemeral_agent_call(
                 .agent
                 .clone()
                 .unwrap_or_else(|| BARE_WORKFLOW_AGENT_ID.to_string());
-            let metadata = crate::turn::dispatch_bound_metadata(dispatch_bound_agent_ids);
+            let mut metadata = crate::turn::dispatch_bound_metadata(dispatch_bound_agent_ids)
+                .unwrap_or_else(|| serde_json::json!({}));
+            if let Some(path) = resolved_working_directory.as_ref() {
+                metadata["worker_placement_cwd"] = Value::String(path.clone());
+            }
             let session = state
                 .storage
                 .create_session(NewSession {
                     space_id,
                     agent_id: agent_id.clone(),
-                    metadata,
+                    metadata: Some(metadata),
                     active_workspace_attachment_id: None,
                 })
                 .await
@@ -1070,8 +1133,116 @@ async fn run_host_commands_inner(
                         .await;
                 }
             }
+            HostCommand::ProvisionWorker {
+                cwd,
+                isolation,
+                reply,
+            } => {
+                let current_seq = seq.fetch_add(1, Ordering::SeqCst);
+                let request = serde_json::json!({"cwd": cwd, "isolation": isolation});
+                let hash = journal_args_hash(&request);
+                let existing = replay.get(current_seq as usize);
+                let result = if let Some(entry) = existing {
+                    if entry.kind != "worker_placement" || entry.args_hash != hash {
+                        Err("NondeterministicReplayError".into())
+                    } else if entry.status == "completed" {
+                        entry
+                            .result
+                            .as_ref()
+                            .and_then(|value| value.get("path"))
+                            .and_then(Value::as_str)
+                            .map(|path| Some(path.to_string()))
+                            .ok_or_else(|| "completed worker placement has no path".to_string())
+                    } else if entry.status == "failed" {
+                        Err(entry
+                            .error_message
+                            .clone()
+                            .unwrap_or_else(|| "recorded worker placement failure".into()))
+                    } else {
+                        complete_worker_placement(
+                            &state,
+                            run_id,
+                            current_seq,
+                            entry.id,
+                            cwd.as_deref(),
+                        )
+                        .await
+                    }
+                } else {
+                    match state
+                        .create_workflow_journal_intent(NewWorkflowJournalIntent {
+                            run_id,
+                            seq: current_seq,
+                            kind: "worker_placement".into(),
+                            args_hash: hash,
+                            request,
+                            effect_kind: None,
+                            idempotency_key: None,
+                            target_kind: None,
+                        })
+                        .await
+                    {
+                        Ok(intent) => {
+                            complete_worker_placement(
+                                &state,
+                                run_id,
+                                current_seq,
+                                intent.id,
+                                cwd.as_deref(),
+                            )
+                            .await
+                        }
+                        Err(error) => Err(error.to_string()),
+                    }
+                };
+                let _ = reply.send(result);
+            }
+            HostCommand::ListWorkerPlacements { reply } => {
+                let current_seq = seq.fetch_add(1, Ordering::SeqCst);
+                let request = serde_json::json!({"action": "list"});
+                let hash = journal_args_hash(&request);
+                let existing = replay.get(current_seq as usize);
+                let result = if let Some(entry) = existing {
+                    if entry.kind != "worker_placement" || entry.args_hash != hash {
+                        Err("NondeterministicReplayError".into())
+                    } else if entry.status == "completed" {
+                        entry
+                            .result
+                            .clone()
+                            .ok_or_else(|| "completed placement listing has no result".into())
+                    } else if entry.status == "failed" {
+                        Err(entry
+                            .error_message
+                            .clone()
+                            .unwrap_or_else(|| "recorded placement listing failure".into()))
+                    } else {
+                        complete_worker_placement_listing(&state, run_id, entry.id).await
+                    }
+                } else {
+                    match state
+                        .create_workflow_journal_intent(NewWorkflowJournalIntent {
+                            run_id,
+                            seq: current_seq,
+                            kind: "worker_placement".into(),
+                            args_hash: hash,
+                            request,
+                            effect_kind: None,
+                            idempotency_key: None,
+                            target_kind: None,
+                        })
+                        .await
+                    {
+                        Ok(intent) => {
+                            complete_worker_placement_listing(&state, run_id, intent.id).await
+                        }
+                        Err(error) => Err(error.to_string()),
+                    }
+                };
+                let _ = reply.send(result);
+            }
             HostCommand::Agent {
                 request,
+                resolved_working_directory,
                 cancellation,
                 reply,
             } => {
@@ -1352,6 +1523,7 @@ async fn run_host_commands_inner(
                                     &dispatch_bound_agent_ids,
                                     journal_entry_id,
                                     request,
+                                    resolved_working_directory,
                                     cancellation,
                                 )
                                 .await,
@@ -1382,6 +1554,7 @@ async fn run_host_commands_inner(
                                         &dispatch_bound_agent_ids,
                                         journal_entry_id,
                                         request,
+                                        resolved_working_directory,
                                         cancellation,
                                     )
                                     .await,
@@ -2114,6 +2287,66 @@ async fn run_host_commands_inner(
     while agent_tasks.join_next().await.is_some() {}
 }
 
+async fn complete_worker_placement(
+    state: &AppState,
+    run_id: Uuid,
+    seq: u64,
+    entry_id: Uuid,
+    cwd: Option<&str>,
+) -> Result<Option<String>, String> {
+    let repo = cwd.ok_or_else(|| {
+        "WorkerPlacementError: isolation=worktree requires cwd to name the git repository"
+            .to_string()
+    })?;
+    match state
+        .worktree_host
+        .provision(run_id, seq, std::path::Path::new(repo))
+        .await
+    {
+        Ok(path) => {
+            let path = path.to_string_lossy().into_owned();
+            state
+                .complete_workflow_journal_entry(entry_id, serde_json::json!({"path": path}))
+                .await
+                .map_err(|error| error.to_string())?;
+            Ok(Some(path))
+        }
+        Err(error) => {
+            let _ = state.fail_workflow_journal_entry(entry_id, &error).await;
+            Err(error)
+        }
+    }
+}
+
+async fn complete_worker_placement_listing(
+    state: &AppState,
+    run_id: Uuid,
+    entry_id: Uuid,
+) -> Result<Value, String> {
+    let journal = state
+        .storage
+        .list_workflow_journal(run_id)
+        .await
+        .map_err(|error| error.to_string())?;
+    let paths = journal
+        .into_iter()
+        .filter(|entry| entry.kind == "worker_placement" && entry.status == "completed")
+        .filter_map(|entry| entry.result)
+        .filter_map(|result| {
+            result
+                .get("path")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .collect::<Vec<_>>();
+    let result = serde_json::json!({"paths": paths});
+    state
+        .complete_workflow_journal_entry(entry_id, result.clone())
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(result)
+}
+
 async fn await_replay_release(rank: u64, next: &AtomicU64, notify: &Notify) {
     loop {
         if next
@@ -2134,6 +2367,7 @@ async fn complete_agent_entry(
     dispatch_bound_agent_ids: &[String],
     entry_id: Uuid,
     request: AgentCallRequest,
+    resolved_working_directory: Option<String>,
     cancellation: CancellationToken,
 ) -> Result<AgentCallResult, String> {
     match run_ephemeral_agent_call(
@@ -2142,6 +2376,7 @@ async fn complete_agent_entry(
         space_id,
         dispatch_bound_agent_ids,
         request,
+        resolved_working_directory,
         cancellation,
     )
     .await
@@ -3699,6 +3934,8 @@ mod tests {
             space.id,
             &[],
             AgentCallRequest {
+                cwd: None,
+                isolation: None,
                 effort: None,
                 timeout_ms: None,
                 prompt: "Use echo".into(),
@@ -3709,6 +3946,7 @@ mod tests {
                 label: None,
                 session: None,
             },
+            None,
             CancellationToken::new(),
         )
         .await
@@ -4555,6 +4793,8 @@ mod tests {
             rx,
         ));
         let request = AgentCallRequest {
+            cwd: None,
+            isolation: None,
             effort: None,
             timeout_ms: None,
             prompt: "hold capacity".into(),
@@ -4568,6 +4808,7 @@ mod tests {
         let first_cancellation = CancellationToken::new();
         let (first_reply, first_receive) = oneshot::channel();
         tx.send(HostCommand::Agent {
+            resolved_working_directory: None,
             request: request.clone(),
             cancellation: first_cancellation.clone(),
             reply: first_reply,
@@ -4576,6 +4817,7 @@ mod tests {
         let second_cancellation = CancellationToken::new();
         let (second_reply, second_receive) = oneshot::channel();
         tx.send(HostCommand::Agent {
+            resolved_working_directory: None,
             request: request.clone(),
             cancellation: second_cancellation.clone(),
             reply: second_reply,
@@ -4583,6 +4825,7 @@ mod tests {
         .expect("second call");
         let (third_reply, third_receive) = oneshot::channel();
         tx.send(HostCommand::Agent {
+            resolved_working_directory: None,
             request,
             cancellation: CancellationToken::new(),
             reply: third_reply,
@@ -4710,7 +4953,10 @@ mod tests {
 
         let (first_reply, first_receive) = oneshot::channel();
         tx.send(HostCommand::Agent {
+            resolved_working_directory: None,
             request: AgentCallRequest {
+                cwd: None,
+                isolation: None,
                 effort: None,
                 timeout_ms: None,
                 prompt: "restate the brief".into(),
@@ -4764,7 +5010,10 @@ mod tests {
 
         let (second_reply, second_receive) = oneshot::channel();
         tx.send(HostCommand::Agent {
+            resolved_working_directory: None,
             request: AgentCallRequest {
+                cwd: None,
+                isolation: None,
                 effort: None,
                 timeout_ms: None,
                 prompt: "now do the work".into(),
@@ -5094,7 +5343,10 @@ mod tests {
         ));
         let (reply, receive) = oneshot::channel();
         tx.send(HostCommand::Agent {
+            resolved_working_directory: None,
             request: AgentCallRequest {
+                cwd: None,
+                isolation: None,
                 effort: None,
                 timeout_ms: None,
                 prompt: "hijack".into(),
@@ -6008,6 +6260,8 @@ mod tests {
             rx,
         ));
         let request = AgentCallRequest {
+            cwd: None,
+            isolation: None,
             effort: None,
             timeout_ms: None,
             prompt: "account usage".into(),
@@ -6020,6 +6274,7 @@ mod tests {
         };
         let (first_reply, first_receive) = oneshot::channel();
         tx.send(HostCommand::Agent {
+            resolved_working_directory: None,
             request: request.clone(),
             cancellation: CancellationToken::new(),
             reply: first_reply,
@@ -6035,6 +6290,7 @@ mod tests {
         let pending_cancellation = CancellationToken::new();
         let (second_reply, second_receive) = oneshot::channel();
         tx.send(HostCommand::Agent {
+            resolved_working_directory: None,
             request: request.clone(),
             cancellation: pending_cancellation.clone(),
             reply: second_reply,
@@ -6043,6 +6299,7 @@ mod tests {
         pending_call_started.notified().await;
         let (third_reply, third_receive) = oneshot::channel();
         tx.send(HostCommand::Agent {
+            resolved_working_directory: None,
             request,
             cancellation: CancellationToken::new(),
             reply: third_reply,
@@ -6115,6 +6372,8 @@ mod tests {
             rx,
         ));
         let request = |prompt: &str| AgentCallRequest {
+            cwd: None,
+            isolation: None,
             effort: None,
             timeout_ms: None,
             prompt: prompt.into(),
@@ -6128,6 +6387,7 @@ mod tests {
         let first_cancellation = CancellationToken::new();
         let (first_reply, first_receive) = oneshot::channel();
         tx.send(HostCommand::Agent {
+            resolved_working_directory: None,
             request: request("working one"),
             cancellation: first_cancellation.clone(),
             reply: first_reply,
@@ -6137,6 +6397,7 @@ mod tests {
         let second_cancellation = CancellationToken::new();
         let (second_reply, second_receive) = oneshot::channel();
         tx.send(HostCommand::Agent {
+            resolved_working_directory: None,
             request: request("working two"),
             cancellation: second_cancellation.clone(),
             reply: second_reply,
@@ -6146,6 +6407,7 @@ mod tests {
 
         let (transition_reply, transition_receive) = oneshot::channel();
         tx.send(HostCommand::Agent {
+            resolved_working_directory: None,
             request: request("cross working boundary"),
             cancellation: CancellationToken::new(),
             reply: transition_reply,
@@ -6161,6 +6423,7 @@ mod tests {
 
         let (closing_reply, closing_receive) = oneshot::channel();
         tx.send(HostCommand::Agent {
+            resolved_working_directory: None,
             request: request("closing report"),
             cancellation: CancellationToken::new(),
             reply: closing_reply,
@@ -6203,6 +6466,8 @@ mod tests {
             .await
             .expect("run");
         let request = |prompt: &str| AgentCallRequest {
+            cwd: None,
+            isolation: None,
             effort: None,
             timeout_ms: None,
             prompt: prompt.into(),
@@ -6299,6 +6564,7 @@ mod tests {
         let first_cancellation = CancellationToken::new();
         let (first_reply, first_receive) = oneshot::channel();
         tx.send(HostCommand::Agent {
+            resolved_working_directory: None,
             request: request("working one"),
             cancellation: first_cancellation.clone(),
             reply: first_reply,
@@ -6308,6 +6574,7 @@ mod tests {
         let second_cancellation = CancellationToken::new();
         let (second_reply, second_receive) = oneshot::channel();
         tx.send(HostCommand::Agent {
+            resolved_working_directory: None,
             request: request("working two"),
             cancellation: second_cancellation.clone(),
             reply: second_reply,
@@ -6317,6 +6584,7 @@ mod tests {
 
         let (transition_reply, transition_receive) = oneshot::channel();
         tx.send(HostCommand::Agent {
+            resolved_working_directory: None,
             request: transition_request,
             cancellation: CancellationToken::new(),
             reply: transition_reply,
@@ -6332,6 +6600,7 @@ mod tests {
 
         let (closing_reply, closing_receive) = oneshot::channel();
         tx.send(HostCommand::Agent {
+            resolved_working_directory: None,
             request: request("closing report"),
             cancellation: CancellationToken::new(),
             reply: closing_reply,
@@ -6374,6 +6643,8 @@ mod tests {
             .await
             .expect("run");
         let request = AgentCallRequest {
+            cwd: None,
+            isolation: None,
             effort: None,
             timeout_ms: None,
             prompt: "resume work".into(),
@@ -6436,6 +6707,7 @@ mod tests {
         let first_cancellation = CancellationToken::new();
         let (first_reply, first_receive) = oneshot::channel();
         tx.send(HostCommand::Agent {
+            resolved_working_directory: None,
             request: request.clone(),
             cancellation: first_cancellation.clone(),
             reply: first_reply,
@@ -6444,6 +6716,7 @@ mod tests {
         let second_cancellation = CancellationToken::new();
         let (second_reply, second_receive) = oneshot::channel();
         tx.send(HostCommand::Agent {
+            resolved_working_directory: None,
             request: request.clone(),
             cancellation: second_cancellation.clone(),
             reply: second_reply,
@@ -6451,6 +6724,7 @@ mod tests {
         .expect("second replay");
         let (third_reply, third_receive) = oneshot::channel();
         tx.send(HostCommand::Agent {
+            resolved_working_directory: None,
             request,
             cancellation: CancellationToken::new(),
             reply: third_reply,
@@ -6491,6 +6765,8 @@ mod tests {
             .await
             .expect("run");
         let working_request = AgentCallRequest {
+            cwd: None,
+            isolation: None,
             effort: None,
             timeout_ms: None,
             prompt: "resume working call".into(),
@@ -6584,6 +6860,7 @@ mod tests {
         ));
         let (work_reply, work_receive) = oneshot::channel();
         tx.send(HostCommand::Agent {
+            resolved_working_directory: None,
             request: working_request,
             cancellation: CancellationToken::new(),
             reply: work_reply,
@@ -6610,6 +6887,8 @@ mod tests {
             true
         );
         let closing_request = AgentCallRequest {
+            cwd: None,
+            isolation: None,
             effort: None,
             timeout_ms: None,
             prompt: "closing call".into(),
@@ -6622,6 +6901,7 @@ mod tests {
         };
         let (closing_reply, closing_receive) = oneshot::channel();
         tx.send(HostCommand::Agent {
+            resolved_working_directory: None,
             request: closing_request.clone(),
             cancellation: CancellationToken::new(),
             reply: closing_reply,
@@ -6637,6 +6917,7 @@ mod tests {
         );
         let (beyond_reply, beyond_receive) = oneshot::channel();
         tx.send(HostCommand::Agent {
+            resolved_working_directory: None,
             request: closing_request,
             cancellation: CancellationToken::new(),
             reply: beyond_reply,
@@ -6673,6 +6954,8 @@ mod tests {
             .await
             .expect("run");
         let request = |prompt: &str| AgentCallRequest {
+            cwd: None,
+            isolation: None,
             effort: None,
             timeout_ms: None,
             prompt: prompt.into(),
@@ -6788,6 +7071,7 @@ mod tests {
 
         let (work_reply, work_receive) = oneshot::channel();
         tx.send(HostCommand::Agent {
+            resolved_working_directory: None,
             request: work_request,
             cancellation: CancellationToken::new(),
             reply: work_reply,
@@ -6803,6 +7087,7 @@ mod tests {
         );
         let (transition_reply, transition_receive) = oneshot::channel();
         tx.send(HostCommand::Agent {
+            resolved_working_directory: None,
             request: transition_request,
             cancellation: CancellationToken::new(),
             reply: transition_reply,
@@ -6818,6 +7103,7 @@ mod tests {
         let closing_request = request("closing report");
         let (closing_reply, closing_receive) = oneshot::channel();
         tx.send(HostCommand::Agent {
+            resolved_working_directory: None,
             request: closing_request.clone(),
             cancellation: CancellationToken::new(),
             reply: closing_reply,
@@ -6833,6 +7119,7 @@ mod tests {
         );
         let (beyond_reply, beyond_receive) = oneshot::channel();
         tx.send(HostCommand::Agent {
+            resolved_working_directory: None,
             request: closing_request,
             cancellation: CancellationToken::new(),
             reply: beyond_reply,
@@ -6894,6 +7181,8 @@ mod tests {
             .await
             .expect("run");
         let request = |prompt: &str| AgentCallRequest {
+            cwd: None,
+            isolation: None,
             effort: None,
             timeout_ms: None,
             prompt: prompt.into(),
@@ -7017,6 +7306,7 @@ mod tests {
         ));
         let (work_reply, work_receive) = oneshot::channel();
         tx.send(HostCommand::Agent {
+            resolved_working_directory: None,
             request: work_request,
             cancellation: CancellationToken::new(),
             reply: work_reply,
@@ -7041,6 +7331,7 @@ mod tests {
             .expect("snapshot result");
         let (closing_reply, closing_receive) = oneshot::channel();
         tx.send(HostCommand::Agent {
+            resolved_working_directory: None,
             request: closing_request,
             cancellation: CancellationToken::new(),
             reply: closing_reply,
@@ -7056,6 +7347,7 @@ mod tests {
         );
         let (beyond_reply, beyond_receive) = oneshot::channel();
         tx.send(HostCommand::Agent {
+            resolved_working_directory: None,
             request: request("past closing partition"),
             cancellation: CancellationToken::new(),
             reply: beyond_reply,
@@ -7104,6 +7396,8 @@ mod tests {
             .await
             .expect("run");
         let request = AgentCallRequest {
+            cwd: None,
+            isolation: None,
             effort: None,
             timeout_ms: None,
             prompt: "must not execute".into(),
@@ -7605,6 +7899,8 @@ mod tests {
             .await
             .expect("run");
         let request = AgentCallRequest {
+            cwd: None,
+            isolation: None,
             effort: None,
             timeout_ms: None,
             prompt: "known failing call".into(),

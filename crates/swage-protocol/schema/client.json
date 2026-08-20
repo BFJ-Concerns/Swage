@@ -163,6 +163,9 @@
     "voice_capabilities": {
       "$ref": "#/$defs/VoiceCapabilitiesResponse"
     },
+    "worker_isolation": {
+      "$ref": "#/$defs/WorkerIsolation"
+    },
     "workflow_entry_event": {
       "$ref": "#/$defs/WorkflowEntryEvent"
     },
@@ -245,7 +248,8 @@
     "workflow_run_list",
     "workflow_run_started_event",
     "workflow_entry_event",
-    "workflow_run_completed_event"
+    "workflow_run_completed_event",
+    "worker_isolation"
   ],
   "$defs": {
     "ApprovalDecisionScope": {
@@ -4506,6 +4510,13 @@
         "synthesis"
       ]
     },
+    "WorkerIsolation": {
+      "description": "Runtime-managed isolation requested for a dispatched worker.",
+      "type": "string",
+      "enum": [
+        "worktree"
+      ]
+    },
     "WorkflowAgentCallDetail": {
       "type": "object",
       "properties": {
@@ -4721,6 +4732,11 @@
             "workflow_call",
             "timer"
           ]
+        },
+        {
+          "description": "Runtime provisioning of a worker execution location. Its result records\nthe resolved path so replay can reuse the same resource.",
+          "type": "string",
+          "const": "worker_placement"
         },
         {
           "description": "A pending-queue operation: an event posted, or events stamped\ndelivered by a wake.",

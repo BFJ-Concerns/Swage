@@ -60,6 +60,15 @@ impl Tool for DelegateTool {
                     "enum": ["wait", "detach"],
                     "default": "wait",
                     "description": "Choose \"wait\" when this turn needs the delegate's result before continuing. Choose \"detach\" for independent work; the tool returns a durable delegate_message_id and child session/thread references while the delegate continues."
+                },
+                "cwd": {
+                    "type": "string",
+                    "description": "Working directory for the delegated worker."
+                },
+                "isolation": {
+                    "type": "string",
+                    "enum": ["worktree"],
+                    "description": "Ask the runtime to provision an isolated git worktree rooted at cwd."
                 }
             },
             "required": ["target_agent", "task"]
@@ -92,6 +101,20 @@ impl Tool for DelegateTool {
             .to_string();
 
         let context = params.get("context").cloned();
+        let cwd = params
+            .get("cwd")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let isolation = match params.get("isolation").and_then(Value::as_str) {
+            None => None,
+            Some("worktree") => Some(swage_protocol::client::workflow::WorkerIsolation::Worktree),
+            Some(other) => {
+                return Err(ToolError::InvalidParameters {
+                    name: DELEGATE_TOOL_NAME.to_string(),
+                    message: format!("isolation must be \"worktree\", got {other:?}"),
+                });
+            }
+        };
         let completion_mode = parse_completion_mode(params.get("completion_mode"))?;
 
         // Signal the agent turn loop to handle delegation.
@@ -100,6 +123,8 @@ impl Tool for DelegateTool {
             target_agent_id,
             task,
             context,
+            cwd,
+            isolation,
             completion_mode,
         })
     }
@@ -171,6 +196,31 @@ mod tests {
                 completion_mode, ..
             } => {
                 assert_eq!(completion_mode, DelegateCompletionMode::Detach);
+            }
+            other => panic!("expected RequiresDelegation, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn delegate_tool_forwards_cwd_and_worktree_isolation() {
+        let result = DelegateTool
+            .execute(
+                json!({
+                    "target_agent": "reviewer",
+                    "task": "Review independently",
+                    "cwd": "/repo",
+                    "isolation": "worktree"
+                }),
+                &MockToolContext::new("test-agent", "session-1"),
+            )
+            .await;
+        match result.unwrap_err() {
+            ToolError::RequiresDelegation { cwd, isolation, .. } => {
+                assert_eq!(cwd.as_deref(), Some("/repo"));
+                assert_eq!(
+                    isolation,
+                    Some(swage_protocol::client::workflow::WorkerIsolation::Worktree)
+                );
             }
             other => panic!("expected RequiresDelegation, got: {other:?}"),
         }

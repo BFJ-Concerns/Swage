@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use swage_protocol::client::workflow::WorkerIsolation;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -35,6 +36,13 @@ pub struct AgentCallRequest {
     /// Host-enforced deadline for this call in milliseconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
+    /// Caller-selected working directory. This remains unresolved in the
+    /// journalled request so its argument hash is stable across hosts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    /// Optional runtime-managed isolation for the worker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub isolation: Option<WorkerIsolation>,
     pub schema: Option<Value>,
     pub max_attempts: u32,
     pub label: Option<String>,
@@ -121,8 +129,28 @@ pub trait WorkflowHost: Send + Sync {
     async fn run_agent_call(
         &self,
         request: AgentCallRequest,
+        resolved_working_directory: Option<String>,
         cancellation: CancellationToken,
     ) -> Result<AgentCallResult, String>;
+
+    /// Resolve a caller placement without changing the caller's request.
+    /// Hosts journal managed provisioning separately and return its durable
+    /// resolved path; a plain cwd needs no host operation.
+    async fn resolve_worker_placement(
+        &self,
+        request: &AgentCallRequest,
+        _cancellation: CancellationToken,
+    ) -> Result<Option<String>, String> {
+        Ok(request.cwd.clone())
+    }
+
+    /// Return this run's provisioned worktrees through a journalled read.
+    async fn list_worker_placements(
+        &self,
+        _cancellation: CancellationToken,
+    ) -> Result<Value, String> {
+        Err("WorkerPlacementError: this host does not support placement listing".into())
+    }
 
     async fn deliver(
         &self,

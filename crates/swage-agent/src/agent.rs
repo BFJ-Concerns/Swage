@@ -1487,6 +1487,8 @@ impl Agent {
                 target_agent_id,
                 task,
                 context,
+                cwd,
+                isolation,
                 completion_mode,
             }) => {
                 let handler = match &self.delegation_handler {
@@ -1547,6 +1549,8 @@ impl Agent {
                         &target_agent_id,
                         &task,
                         transferred_context,
+                        cwd,
+                        isolation,
                         &self.config.agent_id,
                         execution.turn_id,
                         space_id,

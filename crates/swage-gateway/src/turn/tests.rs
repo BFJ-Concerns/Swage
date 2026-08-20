@@ -7218,6 +7218,8 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
             "agent-b",
             "This must not start",
             None,
+            None,
+            None,
             "gateway",
             root_turn.id,
             space.id,
@@ -7732,6 +7734,8 @@ async fn detached_delegate_can_be_cancelled_through_active_registry() {
         .handle_delegation(
             "agent-b",
             "Summarise independently",
+            None,
+            None,
             None,
             "gateway",
             parent_turn.id,
