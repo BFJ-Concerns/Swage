@@ -639,14 +639,16 @@ impl WorkflowEngine {
                         };
                         const buildAgentRequest = (options) => {
                             const merged = mergeDefaults(options);
-                            if (!merged.agent) {
+                            if (merged.agent !== undefined && merged.agent !== null && !merged.agent) {
                                 const error = new Error("opts.agent is required");
                                 error.name = "AgentRequiredError";
                                 throw error;
                             }
                             return {
                                 prompt: "",
-                                agent: merged.agent,
+                                ...(merged.agent === undefined || merged.agent === null
+                                    ? {}
+                                    : { agent: merged.agent }),
                                 model: merged.model ?? null,
                                 schema: merged.schema ?? null,
                                 max_attempts: merged.maxAttempts ?? 3,
@@ -1159,11 +1161,76 @@ mod tests {
             .await
             .expect("defaults run");
         let requests = host.agent_requests.lock().unwrap();
-        assert_eq!(requests[0].agent, "worker");
+        assert_eq!(requests[0].agent.as_deref(), Some("worker"));
         assert_eq!(requests[0].model.as_deref(), Some("cheap"));
         assert_eq!(requests[1].model.as_deref(), Some("strong"));
         // An explicit `undefined` must fall back, not erase the default.
-        assert_eq!(requests[1].agent, "worker");
+        assert_eq!(requests[1].agent.as_deref(), Some("worker"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn agent_call_without_a_definition_omits_agent_from_the_host_request() {
+        let host = Arc::new(SurfaceHost::new());
+        let output = WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                r#"return await agent("inspect the unit", { model: "cheap" });"#,
+                "null",
+                CancellationToken::new(),
+                Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                ScriptCapabilities::default(),
+            )
+            .await
+            .expect("bare agent call");
+        assert_eq!(serde_json::from_str::<Value>(&output).unwrap(), json!("ok"));
+
+        let requests = host.agent_requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].agent, None);
+        assert_eq!(requests[0].model.as_deref(), Some("cheap"));
+        let serialised = serde_json::to_value(&requests[0]).expect("serialise request");
+        assert!(
+            serialised.get("agent").is_none(),
+            "an unset agent must not perturb journal argument hashes: {serialised}"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn shipped_triage_workflow_runs_its_unchanged_agentless_calls() {
+        let host = Arc::new(SurfaceHost::new());
+        host.agent_outputs.lock().unwrap().extend([
+            Ok(json!({
+                "criteria": "surface",
+                "criteria_why": "clear boundary",
+                "obligations": [],
+                "queue_strikes": [],
+            })),
+            Ok(json!("proposal written")),
+        ]);
+        let output = WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                include_str!("../../../shipped/skills/assembly/workflows/triage-wave.js"),
+                r#"{
+                    "repo":".","commissionPath":"commission.md","spinePath":"spine.md",
+                    "retiredPath":"retired.md","ledgerPath":"ledger.md",
+                    "obligationsDir":"obligations","tasksPath":"TASKS.md",
+                    "outPath":"proposal.md","waves":1
+                }"#,
+                CancellationToken::new(),
+                Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                ScriptCapabilities::default(),
+            )
+            .await
+            .expect("unchanged shipped workflow");
+        assert_eq!(
+            serde_json::from_str::<Value>(&output).expect("workflow output"),
+            json!({"proposals": 1, "summary": "proposal written", "document": "proposal.md"})
+        );
+        let requests = host.agent_requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].agent, None);
+        assert_eq!(requests[0].label.as_deref(), Some("propose:0"));
+        assert_eq!(requests[1].agent, None);
+        assert_eq!(requests[1].label.as_deref(), Some("reduce"));
     }
 
     #[tokio::test(flavor = "current_thread")]
