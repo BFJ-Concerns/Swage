@@ -25,8 +25,8 @@ use swage_storage::{
 };
 use swage_workflow::{
     AgentCallRequest, AgentCallResult, EffectPayload, EffectReceipt, EffectRecoveryHost,
-    EngineLimits, GateRequest, RunEventPost, ScriptCapabilities, WorkflowCallRequest,
-    WorkflowEngine, WorkflowHost, journal_args_hash, recover_started_effect,
+    EngineLimits, GateRequest, ResolvedWorkerPlacement, RunEventPost, ScriptCapabilities,
+    WorkflowCallRequest, WorkflowEngine, WorkflowHost, journal_args_hash, recover_started_effect,
 };
 use tokio::sync::{Mutex, Notify, Semaphore, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -502,18 +502,18 @@ enum HostCommand {
     },
     Agent {
         request: AgentCallRequest,
-        resolved_working_directory: Option<String>,
+        resolved_working_directory: Option<ResolvedWorkerPlacement>,
         cancellation: CancellationToken,
         reply: oneshot::Sender<Result<AgentCallResult, String>>,
     },
     ProvisionWorker {
         cwd: Option<String>,
         isolation: swage_protocol::client::workflow::WorkerIsolation,
-        reply: oneshot::Sender<Result<Option<String>, String>>,
+        reply: oneshot::Sender<Result<Option<ResolvedWorkerPlacement>, String>>,
     },
     ResolveWorkerDirectory {
         cwd: String,
-        reply: oneshot::Sender<Result<Option<String>, String>>,
+        reply: oneshot::Sender<Result<Option<ResolvedWorkerPlacement>, String>>,
     },
     ListWorkerPlacements {
         reply: oneshot::Sender<Result<Value, String>>,
@@ -586,7 +586,7 @@ impl WorkflowHost for ChannelWorkflowHost {
     async fn run_agent_call(
         &self,
         request: AgentCallRequest,
-        resolved_working_directory: Option<String>,
+        resolved_working_directory: Option<ResolvedWorkerPlacement>,
         cancellation: CancellationToken,
     ) -> Result<AgentCallResult, String> {
         let (reply, receive) = oneshot::channel();
@@ -607,7 +607,7 @@ impl WorkflowHost for ChannelWorkflowHost {
         &self,
         request: &AgentCallRequest,
         _cancellation: CancellationToken,
-    ) -> Result<Option<String>, String> {
+    ) -> Result<Option<ResolvedWorkerPlacement>, String> {
         let Some(isolation) = request.isolation else {
             let Some(cwd) = request.cwd.as_deref() else {
                 return Ok(None);
@@ -782,7 +782,7 @@ async fn run_ephemeral_agent_call(
     space_id: Uuid,
     dispatch_bound_agent_ids: &[String],
     request: AgentCallRequest,
-    resolved_working_directory: Option<String>,
+    resolved_working_directory: Option<ResolvedWorkerPlacement>,
     cancellation: CancellationToken,
 ) -> Result<AgentCallResult, String> {
     // This identity deliberately cannot name an agent definition: definition
@@ -856,8 +856,9 @@ async fn run_ephemeral_agent_call(
                 .unwrap_or_else(|| BARE_WORKFLOW_AGENT_ID.to_string());
             let mut metadata = crate::turn::dispatch_bound_metadata(dispatch_bound_agent_ids)
                 .unwrap_or_else(|| serde_json::json!({}));
-            if let Some(path) = resolved_working_directory.as_ref() {
-                metadata["worker_placement_cwd"] = Value::String(path.clone());
+            if let Some(placement) = resolved_working_directory.as_ref() {
+                metadata["worker_placement_cwd"] = Value::String(placement.path.clone());
+                metadata["worker_placement_can_write"] = Value::Bool(placement.can_write);
             }
             let session = state
                 .storage
@@ -1163,7 +1164,10 @@ async fn run_host_commands_inner(
                                     .as_ref()
                                     .and_then(|value| value.get("path"))
                                     .and_then(Value::as_str)
-                                    .map(|path| Some(path.to_string()))
+                                    .map(|path| Some(ResolvedWorkerPlacement {
+                                        path: path.to_string(),
+                                        can_write: true,
+                                    }))
                                     .ok_or_else(|| {
                                         "completed worker placement has no path".to_string()
                                     })
@@ -1217,11 +1221,60 @@ async fn run_host_commands_inner(
                 let _ = reply.send(result);
             }
             HostCommand::ResolveWorkerDirectory { cwd, reply } => {
-                let result =
-                    resolve_authorised_worker_directory(&state, space_id, run_id, None, &cwd)
+                let current_seq = seq.fetch_add(1, Ordering::SeqCst);
+                let request = serde_json::json!({"cwd": cwd, "isolation": null});
+                let hash = journal_args_hash(&request);
+                let existing = replay.get(current_seq as usize);
+                let result = if let Some(entry) = existing {
+                    if entry.kind != "worker_placement" || entry.args_hash != hash {
+                        Err("NondeterministicReplayError".into())
+                    } else if entry.status == "completed" {
+                        entry
+                            .result
+                            .as_ref()
+                            .and_then(|result| {
+                                Some(ResolvedWorkerPlacement {
+                                    path: result.get("path")?.as_str()?.to_string(),
+                                    can_write: result.get("can_write")?.as_bool()?,
+                                })
+                            })
+                            .map(Some)
+                            .ok_or_else(|| {
+                                "completed worker directory resolution has no result".into()
+                            })
+                    } else if entry.status == "failed" {
+                        Err(entry.error_message.clone().unwrap_or_else(|| {
+                            "recorded worker directory resolution failure".into()
+                        }))
+                    } else {
+                        complete_worker_directory_resolution(
+                            &state, space_id, run_id, entry.id, &cwd,
+                        )
                         .await
-                        .map(|path| Some(path.to_string_lossy().into_owned()))
-                        .map_err(|error| format!("WorkerPlacementError: {error}"));
+                    }
+                } else {
+                    match state
+                        .create_workflow_journal_intent(NewWorkflowJournalIntent {
+                            run_id,
+                            seq: current_seq,
+                            kind: "worker_placement".into(),
+                            args_hash: hash,
+                            request,
+                            effect_kind: None,
+                            idempotency_key: None,
+                            target_kind: None,
+                        })
+                        .await
+                    {
+                        Ok(intent) => {
+                            complete_worker_directory_resolution(
+                                &state, space_id, run_id, intent.id, &cwd,
+                            )
+                            .await
+                        }
+                        Err(error) => Err(error.to_string()),
+                    }
+                };
                 let _ = reply.send(result);
             }
             HostCommand::ListWorkerPlacements { reply } => {
@@ -2321,14 +2374,14 @@ async fn complete_worker_placement(
     seq: u64,
     entry_id: Uuid,
     cwd: Option<&str>,
-) -> Result<Option<String>, String> {
+) -> Result<Option<ResolvedWorkerPlacement>, String> {
     let repo = cwd.ok_or_else(|| {
         "WorkerPlacementError: isolation=worktree requires cwd to name the git repository"
             .to_string()
     })?;
     let repo = match resolve_authorised_worker_directory(state, space_id, run_id, None, repo).await
     {
-        Ok(repo) => repo,
+        Ok(repo) => repo.path,
         Err(error) => {
             let error = format!("WorkerPlacementError: {error}");
             let _ = state.fail_workflow_journal_entry(entry_id, &error).await;
@@ -2342,9 +2395,45 @@ async fn complete_worker_placement(
                 .complete_workflow_journal_entry(entry_id, serde_json::json!({"path": path}))
                 .await
                 .map_err(|error| error.to_string())?;
-            Ok(Some(path))
+            Ok(Some(ResolvedWorkerPlacement {
+                path,
+                can_write: true,
+            }))
         }
         Err(error) => {
+            let _ = state.fail_workflow_journal_entry(entry_id, &error).await;
+            Err(error)
+        }
+    }
+}
+
+async fn complete_worker_directory_resolution(
+    state: &AppState,
+    space_id: Uuid,
+    context_id: Uuid,
+    entry_id: Uuid,
+    cwd: &str,
+) -> Result<Option<ResolvedWorkerPlacement>, String> {
+    match resolve_authorised_worker_directory(state, space_id, context_id, None, cwd).await {
+        Ok(directory) => {
+            let placement = ResolvedWorkerPlacement {
+                path: directory.path.to_string_lossy().into_owned(),
+                can_write: directory.can_write,
+            };
+            state
+                .complete_workflow_journal_entry(
+                    entry_id,
+                    serde_json::json!({
+                        "path": placement.path,
+                        "can_write": placement.can_write,
+                    }),
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+            Ok(Some(placement))
+        }
+        Err(error) => {
+            let error = format!("WorkerPlacementError: {error}");
             let _ = state.fail_workflow_journal_entry(entry_id, &error).await;
             Err(error)
         }
@@ -2363,7 +2452,11 @@ async fn complete_worker_placement_listing(
         .map_err(|error| error.to_string())?;
     let paths = journal
         .into_iter()
-        .filter(|entry| entry.kind == "worker_placement" && entry.status == "completed")
+        .filter(|entry| {
+            entry.kind == "worker_placement"
+                && entry.status == "completed"
+                && entry.request.get("isolation").and_then(Value::as_str) == Some("worktree")
+        })
         .filter_map(|entry| entry.result)
         .filter_map(|result| {
             result
@@ -2400,7 +2493,7 @@ async fn complete_agent_entry(
     dispatch_bound_agent_ids: &[String],
     entry_id: Uuid,
     request: AgentCallRequest,
-    resolved_working_directory: Option<String>,
+    resolved_working_directory: Option<ResolvedWorkerPlacement>,
     cancellation: CancellationToken,
 ) -> Result<AgentCallResult, String> {
     match run_ephemeral_agent_call(
@@ -5403,6 +5496,7 @@ mod tests {
                 crate::tool::ToolDispatcher::allow_all(vec![]),
                 None,
             )
+            .with_worktree_root(fixture.path().join("worker-worktrees"))
         };
         let state = make_state();
         let run_loop = |state: AppState, replay: Vec<WorkflowJournalRecord>| {
@@ -5431,10 +5525,9 @@ mod tests {
             reply: allowed_reply,
         })
         .unwrap();
-        assert_eq!(
-            allowed_receive.await.unwrap().unwrap().as_deref(),
-            Some(repo.to_string_lossy().as_ref())
-        );
+        let allowed = allowed_receive.await.unwrap().unwrap().unwrap();
+        assert_eq!(allowed.path, repo.to_string_lossy());
+        assert!(allowed.can_write);
         let (denied_reply, denied_receive) = oneshot::channel();
         tx.send(HostCommand::ResolveWorkerDirectory {
             cwd: fixture.path().to_string_lossy().into_owned(),
@@ -5455,7 +5548,8 @@ mod tests {
             reply: placement_reply,
         })
         .unwrap();
-        let first_path = placement_receive.await.unwrap().unwrap().unwrap();
+        let first_placement = placement_receive.await.unwrap().unwrap().unwrap();
+        let first_path = first_placement.path;
         let (list_reply, list_receive) = oneshot::channel();
         tx.send(HostCommand::ListWorkerPlacements { reply: list_reply })
             .unwrap();
@@ -5472,12 +5566,44 @@ mod tests {
                 .iter()
                 .map(|entry| entry.kind.as_str())
                 .collect::<Vec<_>>(),
-            ["worker_placement", "worker_placement"]
+            [
+                "worker_placement",
+                "worker_placement",
+                "worker_placement",
+                "worker_placement"
+            ]
         );
-        assert_eq!(replay[0].request["cwd"], repo.to_string_lossy().as_ref());
-        assert_eq!(replay[0].result.as_ref().unwrap()["path"], first_path);
+        assert_eq!(replay[2].request["cwd"], repo.to_string_lossy().as_ref());
+        assert_eq!(replay[2].result.as_ref().unwrap()["path"], first_path);
 
+        grant_workspace(storage.as_ref(), space.id, fixture.path()).await;
         let (replay_tx, replay_task) = run_loop(make_state(), replay.clone());
+        let (reply, receive) = oneshot::channel();
+        replay_tx
+            .send(HostCommand::ResolveWorkerDirectory {
+                cwd: repo.to_string_lossy().into_owned(),
+                reply,
+            })
+            .unwrap();
+        assert_eq!(
+            receive.await.unwrap().unwrap().unwrap().path,
+            repo.to_string_lossy()
+        );
+        let (reply, receive) = oneshot::channel();
+        replay_tx
+            .send(HostCommand::ResolveWorkerDirectory {
+                cwd: fixture.path().to_string_lossy().into_owned(),
+                reply,
+            })
+            .unwrap();
+        assert!(
+            receive
+                .await
+                .unwrap()
+                .unwrap_err()
+                .contains("outside the dispatching context's permitted workspace roots"),
+            "replay must return the journalled rejection after live policy changes"
+        );
         let (reply, receive) = oneshot::channel();
         replay_tx
             .send(HostCommand::ProvisionWorker {
@@ -5487,23 +5613,35 @@ mod tests {
             })
             .unwrap();
         assert_eq!(
-            receive.await.unwrap().unwrap().as_deref(),
+            receive
+                .await
+                .unwrap()
+                .unwrap()
+                .as_ref()
+                .map(|placement| placement.path.as_str()),
             Some(first_path.as_str())
+        );
+        let (reply, receive) = oneshot::channel();
+        replay_tx
+            .send(HostCommand::ListWorkerPlacements { reply })
+            .unwrap();
+        assert_eq!(
+            receive.await.unwrap().unwrap()["paths"],
+            serde_json::json!([first_path])
         );
         drop(replay_tx);
         replay_task.await.unwrap();
         assert_eq!(
             storage.list_workflow_journal(run.id).await.unwrap().len(),
-            2,
+            4,
             "replay must not add a worktree journal entry"
         );
 
         let (changed_tx, changed_task) = run_loop(make_state(), replay);
         let (reply, receive) = oneshot::channel();
         changed_tx
-            .send(HostCommand::ProvisionWorker {
-                cwd: Some(fixture.path().to_string_lossy().into_owned()),
-                isolation: swage_protocol::client::workflow::WorkerIsolation::Worktree,
+            .send(HostCommand::ResolveWorkerDirectory {
+                cwd: fixture.path().to_string_lossy().into_owned(),
                 reply,
             })
             .unwrap();
@@ -5514,6 +5652,98 @@ mod tests {
         drop(changed_tx);
         changed_task.await.unwrap();
         state.worktree_host.shutdown().await;
+        assert!(
+            !fixture
+                .path()
+                .join("worker-worktrees")
+                .join(run.id.to_string())
+                .exists()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn workflow_read_only_attachment_placement_stays_read_only() {
+        let fixture = tempfile::tempdir_in("/tmp/scratch").expect("scratch fixture");
+        let attachment = fixture.path().join("read-only");
+        std::fs::create_dir(&attachment).unwrap();
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        storage
+            .create_workspace_attachment(NewWorkspaceAttachment {
+                space_id: space.id,
+                label: "read-only placement".into(),
+                path: attachment.to_string_lossy().into_owned(),
+                permissions: vec!["read".into()],
+                is_trusted: true,
+            })
+            .await
+            .unwrap();
+        let run = storage
+            .create_workflow_run(NewWorkflowRun {
+                space_id: space.id,
+                parent_run_id: None,
+                parent_seq: None,
+                script_version_id: None,
+                source: Some("return null".into()),
+                source_hash: source_hash("return null"),
+                args: Value::Null,
+                budget: serde_json::json!({}),
+                engine_version: "test".into(),
+                dispatch_bound_agent_ids: vec![],
+            })
+            .await
+            .unwrap();
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::new(ScriptedRecordingProvider {
+                outputs: std::sync::Mutex::new(Default::default()),
+                requests: std::sync::Mutex::new(vec![]),
+            }),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        )
+        .with_worktree_root(fixture.path().join("worker-worktrees"));
+        let (tx, rx) = mpsc::unbounded_channel();
+        let task = tokio::spawn(run_host_commands(
+            state.clone(),
+            run.id,
+            space.id,
+            vec![],
+            None,
+            WorkflowBudget::default(),
+            vec![],
+            Arc::new(AtomicU32::new(0)),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(Mutex::new(std::collections::HashMap::new())),
+            CancellationToken::new(),
+            PARK_TIMER_THRESHOLD_MS,
+            rx,
+        ));
+        let (reply, receive) = oneshot::channel();
+        tx.send(HostCommand::ResolveWorkerDirectory {
+            cwd: attachment.to_string_lossy().into_owned(),
+            reply,
+        })
+        .unwrap();
+        let placement = receive.await.unwrap().unwrap().unwrap();
+        assert!(!placement.can_write);
+
+        let agent_config = swage_agent::AgentConfig::new("workflow-worker")
+            .with_workspace(&attachment, vec![attachment.clone()]);
+        let mut policy =
+            crate::turn::load_trusted_workspace_policy(&state.storage, space.id, None).await;
+        let metadata = serde_json::json!({
+            "worker_placement_can_write": placement.can_write,
+        });
+        crate::turn::apply_worker_placement_permission(&mut policy, &agent_config, Some(&metadata));
+        let sandbox = crate::turn::build_sandbox_config(&agent_config, Some(&policy)).unwrap();
+        let path = attachment.canonicalize().unwrap();
+        assert!(sandbox.read_only_mounts.contains(&path));
+        assert!(!sandbox.read_write_mounts.contains(&path));
+        drop(tx);
+        task.await.unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -5568,7 +5798,8 @@ mod tests {
                 Arc::clone(&placement_tool) as Arc<dyn crate::tool::Tool>
             ]),
             None,
-        );
+        )
+        .with_worktree_root(fixture.path().join("worker-worktrees"));
         let cwd = serde_json::to_string(&repo.to_string_lossy()).unwrap();
         let source = format!(
             r#"
@@ -5633,6 +5864,14 @@ mod tests {
             paths.iter().all(|path| !path.exists()),
             "completed-run cleanup must remove every provisioned worktree: {paths:?}"
         );
+        assert!(
+            !fixture
+                .path()
+                .join("worker-worktrees")
+                .join(started.id.to_string())
+                .exists(),
+            "completed-run cleanup must remove the empty per-run directory"
+        );
 
         let failed_source = format!(
             r#"
@@ -5670,6 +5909,14 @@ mod tests {
         );
         state.worktree_host.shutdown().await;
         assert!(!retained_path.exists());
+        assert!(
+            !fixture
+                .path()
+                .join("worker-worktrees")
+                .join(failed.id.to_string())
+                .exists(),
+            "shutdown cleanup must remove the empty per-run directory"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -5697,7 +5944,8 @@ mod tests {
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
             None,
-        );
+        )
+        .with_worktree_root(fixture.path().join("worker-worktrees"));
         let first_json = serde_json::to_string(&first_cwd.to_string_lossy()).unwrap();
         let second_json = serde_json::to_string(&second_cwd.to_string_lossy()).unwrap();
         let source = format!(

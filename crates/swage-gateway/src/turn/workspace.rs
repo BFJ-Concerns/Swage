@@ -2,7 +2,7 @@ use super::{
     AgentConfig, Arc, GatewayToolAdvertisementFilter, Path, PathBuf, PermissionConfig, Tool,
     ToolRequireApprovalEntry, Uuid,
 };
-use crate::turn::{agent_workspace_from_policy, append_approved_location_paths};
+use crate::turn::{append_approved_location_paths, managed_scratch_workspace};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct WorkspacePermissionSummary {
@@ -23,6 +23,12 @@ pub(crate) struct TrustedWorkspacePolicy {
     pub(crate) permissions: WorkspacePermissionSummary,
     pub(crate) active_workspace: Option<TrustedWorkspacePath>,
     pub(crate) attachments: Vec<TrustedWorkspacePath>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ResolvedWorkerDirectory {
+    pub(crate) path: PathBuf,
+    pub(crate) can_write: bool,
 }
 
 /// Inspect the space's workspace attachments and derive which permission
@@ -118,7 +124,7 @@ pub(crate) async fn resolve_authorised_worker_directory(
     context_id: Uuid,
     active_workspace_attachment_id: Option<Uuid>,
     requested: &str,
-) -> Result<PathBuf, String> {
+) -> Result<ResolvedWorkerDirectory, String> {
     let candidate = tokio::fs::canonicalize(requested)
         .await
         .map_err(|error| format!("cannot resolve worker cwd {requested:?}: {error}"))?;
@@ -132,25 +138,52 @@ pub(crate) async fn resolve_authorised_worker_directory(
     let policy =
         load_trusted_workspace_policy(&state.storage, space_id, active_workspace_attachment_id)
             .await;
-    let (_, mut permitted_roots) = agent_workspace_from_policy(&policy, space_id, context_id);
+    let workspace_root = policy
+        .active_workspace
+        .as_ref()
+        .map(|grant| grant.path.clone())
+        .unwrap_or_else(|| managed_scratch_workspace(space_id, context_id));
     let approval_grants = state
         .session_approval_grants
         .lock()
         .unwrap_or_else(|error| error.into_inner())
         .clone();
-    append_approved_location_paths(&mut permitted_roots, &approval_grants, space_id);
+    let within = |root: &Path| {
+        let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+        path_within_device_workspace(&candidate, &[canonical_root])
+    };
 
-    let authorised = permitted_roots.iter().any(|root| {
-        root.canonicalize()
-            .is_ok_and(|canonical_root| candidate.starts_with(canonical_root))
-    });
-    if !authorised {
-        return Err(format!(
-            "worker cwd {} is outside the dispatching context's permitted workspace roots and location grants",
-            candidate.display()
-        ));
+    if let Some(grant) = policy
+        .active_workspace
+        .iter()
+        .chain(policy.attachments.iter())
+        .find(|grant| within(&grant.path))
+    {
+        return Ok(ResolvedWorkerDirectory {
+            path: candidate,
+            can_write: grant.can_write,
+        });
     }
-    Ok(candidate)
+    if policy.active_workspace.is_none() && within(&workspace_root) {
+        return Ok(ResolvedWorkerDirectory {
+            path: candidate,
+            can_write: true,
+        });
+    }
+
+    let mut approved_paths = Vec::new();
+    append_approved_location_paths(&mut approved_paths, &approval_grants, space_id);
+    if approved_paths.iter().any(|root| within(root)) {
+        return Ok(ResolvedWorkerDirectory {
+            path: candidate,
+            can_write: true,
+        });
+    }
+
+    Err(format!(
+        "worker cwd {} is outside the dispatching context's permitted workspace roots and location grants",
+        candidate.display()
+    ))
 }
 
 pub(super) fn build_permission_config(

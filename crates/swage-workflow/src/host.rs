@@ -5,6 +5,12 @@ use swage_protocol::client::workflow::WorkerIsolation;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedWorkerPlacement {
+    pub path: String,
+    pub can_write: bool,
+}
+
 /// An opaque continuation token naming a worker session a run already
 /// created. Scripts receive it on an `agentStart` handle after the call
 /// completes and pass it back whole via the `session` option; its fields are
@@ -129,7 +135,7 @@ pub trait WorkflowHost: Send + Sync {
     async fn run_agent_call(
         &self,
         request: AgentCallRequest,
-        resolved_working_directory: Option<String>,
+        resolved_placement: Option<ResolvedWorkerPlacement>,
         cancellation: CancellationToken,
     ) -> Result<AgentCallResult, String>;
 
@@ -140,8 +146,11 @@ pub trait WorkflowHost: Send + Sync {
         &self,
         request: &AgentCallRequest,
         _cancellation: CancellationToken,
-    ) -> Result<Option<String>, String> {
-        Ok(request.cwd.clone())
+    ) -> Result<Option<ResolvedWorkerPlacement>, String> {
+        Ok(request.cwd.clone().map(|path| ResolvedWorkerPlacement {
+            path,
+            can_write: true,
+        }))
     }
 
     /// Return this run's provisioned worktrees through a journalled read.
