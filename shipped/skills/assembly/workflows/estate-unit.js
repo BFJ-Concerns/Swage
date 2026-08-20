@@ -61,7 +61,7 @@ const runHold = async (stage, content, verdicts) => {
   // Raise the decision on the run's event queue and park until answered —
   // by a lead segment clearing its batch of decisions at a wake, or by the
   // operator through the run surface. Blocking is accepted: no timeout.
-  postEvent("decision-needed", { stage, nonce, content, options: verdicts });
+  await postEvent("decision-needed", { stage, nonce, content, options: verdicts });
   while (true) {
     const decision = await awaitEvent({ kinds: ["decision"] });
     const payload = decision && decision.payload;
@@ -103,7 +103,7 @@ let hold = null;
 const rulings = [];
 for (let attempt = 0; attempt < 3; attempt++) {
   plan = await agent(restatePrompt(hold && hold.note), {
-    schema: restatementSchema, cwd: worktree, label: `restate:${attempt}`, phase: "restate",
+    schema: restatementSchema, cwd: worktree, label: `restate:${attempt}`,
   });
   if (!plan) throw new Error("restatement stage returned nothing usable");
   hold = await runHold("restate", plan, ["accept", "correct", "kill"]);
@@ -132,7 +132,7 @@ The estate property is the acceptance bar, and its mechanics matter. ${proofMode
   ? `To show a test FAILS against the baseline, create a separate checkout of ${baselineRef} (git worktree add <tmp> ${baselineRef}), copy the NEW test files into it, and run them there — never check the baseline out in your own worktree, which would delete the tests you are proving. Each new journey test must fail in that baseline checkout and pass in ${worktree}.`
   : `No reachable tree lacks this behaviour, so fail-before is proved by MUTATION: in a scratch checkout of the current tree (git worktree add <tmp> HEAD), deliberately break the behaviour under proof (name the exact break in the report), run the new tests there and watch them fail, then discard the scratch checkout. Each new journey test must fail under the mutation and pass in ${worktree}.`
 } Record the exact commands and their output for both directions in ${unitDir}/report.md, alongside what you did not cover and your confidence. Remove the temporary checkout when done. Reply with a two-sentence summary and the head commit.`,
-  { cwd: worktree, label: "build", phase: "build", timeoutMs: 14400000 }
+  { cwd: worktree, label: "build", timeoutMs: 14400000 }
 );
 
 // ---------------------------------------------------------------- verify
@@ -179,10 +179,10 @@ Demonstrate the estate property yourself — ${proofMode === "baseline"
 
 Every command your verdict leans on is evidenced by the command line as executed plus enough of its actual output to support the claim — or an explicit "could not run: <reason>"; a run cited with neither is an unevidenced claim, not a completed check. Report to the findings contract (examined / findings with severity+confidence+evidence, each carrying unresolved_prior — true only when it restates a finding from the earlier verdict that its fix round failed to resolve, false otherwise, and always false on a first verification / rejected_concerns / confidence + why), and write it to ${unitDir}/${refixRound !== null ? `verdict-refix-${refixRound}.md` : "verdict.md"}.
 
-Reply with a single JSON value conforming to the schema. Reason first if you need to, but the JSON value comes last: the final non-whitespace characters of your message must be the JSON value itself — no prose, no code fence, no example after it. Never restate the schema or show a sample answer; the only JSON value in your reply is your actual answer.`;
+Reply with a single JSON value conforming to the schema. Reason first if you need to, then give the JSON inside a single ```json fenced code block — the FIRST fenced block in your reply is the one that is read, so use exactly one and put nothing schema-shaped in any other fence. A reply that is the bare JSON value alone, with no prose at all, also works. Never restate the schema or show a sample answer; the only JSON value in your reply is your actual answer.`;
 
 let verdict = await agent(verifyPrompt(null, null), {
-  model: "claude-opus-5", effort: "medium", schema: findingsSchema, cwd: worktree, label: "verify", phase: "verify",
+  model: "claude-opus-5", effort: "medium", schema: findingsSchema, cwd: worktree, label: "verify",
 });
 if (!verdict) throw new Error("verifier stage returned nothing usable — re-run, never read as clean");
 if (!verdict.examined || !verdict.examined.trim())
@@ -219,7 +219,7 @@ const autoFixSchema = {
 
 const autoFixPrompt = (round) => `The verifier raised findings (${unitDir}/${round === 0 ? "verdict.md" : `verdict-refix-${round - 1}.md`}), at least one of them severe. No orchestrator triage has happened yet: every finding in that verdict is yours to fix. Your brief's standing constraints remain in force: work only in ${worktree}; never push, open PRs, or merge; tests exercise the ladder's rung, never a stand-in. A finding you cannot fix honestly as written — it would need manufactured state or an untrue assertion, or it disputes the brief or a ruling rather than the work — goes to blocked in your reply and in ${unitDir}/report.md, with why; fix the rest. Re-demonstrate the estate property both directions (the same proof-mode mechanics as before — baseline checkout, or mutation), then make the whole of ${unitDir}/report.md true about the current tree — not just the lines a finding quoted.
 
-Reply with JSON: summary (what you fixed, in two or three sentences), head_commit (the new head), blocked (the findings deliberately left unfixed, each by its 0-based index in the verdict, with why; empty array when none). Reason first if you need to, but the JSON value comes last: the final non-whitespace characters of your message must be the JSON value itself.`;
+Reply with JSON: summary (what you fixed, in two or three sentences), head_commit (the new head), blocked (the findings deliberately left unfixed, each by its 0-based index in the verdict, with why; empty array when none). Reason first if you need to, then give the JSON inside a single ```json fenced code block — the FIRST fenced block in your reply is the one that is read, so use exactly one. A reply that is the bare JSON value alone also works.`;
 
 let fixReport = null;
 let rounds = 0;
@@ -233,12 +233,12 @@ while (severesIn(verdict).length) {
   }
   const autoFix = await agent(autoFixPrompt(rounds), {
     effort: "medium", schema: autoFixSchema,
-    cwd: worktree, label: `fix:${rounds}`, phase: "triage", timeoutMs: 7200000,
+    cwd: worktree, label: `fix:${rounds}`, timeoutMs: 7200000,
   });
   if (!autoFix) throw new Error("autonomous fix round returned nothing usable — re-run, never read as applied");
   fixReport = autoFix.summary;
   verdict = await agent(verifyPrompt(rounds, "autonomous"), {
-    model: "claude-opus-5", effort: "medium", schema: findingsSchema, cwd: worktree, label: `verify:refix:${rounds}`, phase: "triage",
+    model: "claude-opus-5", effort: "medium", schema: findingsSchema, cwd: worktree, label: `verify:refix:${rounds}`,
   });
   if (!verdict) throw new Error("re-verification returned nothing usable");
   if (!verdict.examined || !verdict.examined.trim())
@@ -336,10 +336,10 @@ while (true) {
       rulings.push(`on ${rounds === 0 ? "verdict.md" : `verdict-refix-${rounds - 1}.md`} finding index ${d.finding} (${d.disposition}): ${d.note.trim()}`);
   fixReport = await agent(
     `The verifier raised findings (${unitDir}/${rounds === 0 ? "verdict.md" : `verdict-refix-${rounds - 1}.md`}); the orchestrator's fix dispositions by index: ${JSON.stringify(fixList)}, note: "${triage.note || ""}". Your brief's standing constraints remain in force: work only in ${worktree}; never push, open PRs, or merge; tests exercise the ladder's rung, never a stand-in. Apply exactly those dispositions — no more. A disposition you cannot apply honestly as written — it would need manufactured state or an untrue assertion — stays unapplied: report it as blocked in your reply and in ${unitDir}/report.md, with why. Re-demonstrate the estate property both directions (the same proof-mode mechanics as before — baseline checkout, or mutation), then make the whole of ${unitDir}/report.md true about the current tree — not just the lines a finding quoted. Reply with a summary and the new head commit.`,
-    { effort: "medium", cwd: worktree, label: `fix:${rounds}`, phase: "triage", timeoutMs: 7200000 }
+    { effort: "medium", cwd: worktree, label: `fix:${rounds}`, timeoutMs: 7200000 }
   );
   verdict = await agent(verifyPrompt(rounds, "directed"), {
-    model: "claude-opus-5", effort: "medium", schema: findingsSchema, cwd: worktree, label: `verify:refix:${rounds}`, phase: "triage",
+    model: "claude-opus-5", effort: "medium", schema: findingsSchema, cwd: worktree, label: `verify:refix:${rounds}`,
   });
   if (!verdict) throw new Error("re-verification returned nothing usable");
   if (!verdict.examined || !verdict.examined.trim())
@@ -366,9 +366,9 @@ const landingSchema = {
 
 const landing = await agent(
   mergePolicy === "direct-merge"
-    ? `Land the finished estate unit. Read ${annexeConfigPath} for push_policy first. From ${worktree}, merge the unit branch into main — conflicts are {landed:false, blocked_on:"conflict"}. Push main only under push_policy "push-on-land". Reply {landed, detail, merge_commit}, landed true only if the merge commit exists on main (verify with git log). JSON last.`
-    : `Publish the finished estate unit as a blocked PR. Read ${annexeConfigPath} for push_policy first: under "hold-for-user" do NOT push — reply {landed:false, blocked_on:"push_policy hold-for-user"}. Otherwise write ${unitDir}/pr.md whole from the report (What changed / Why / What must be true / Known gaps), push the branch, open the PR "WIP:"-prefixed via the forge API, base ${integrationBranch} (the unit's integration lane — the structural branch for lane units, whose promotion PR carries them to main later, or main itself for a Lane: main unit) (tokens under ~/.config/forgejo/; refs/for/* AGit pushes forbidden; auth failure → {landed:false, blocked_on:"forge auth"}). Confirm by API read that the PR exists with a non-empty body; landed true only on that confirmation. Reply {landed, detail, pr_number, pr_url}. JSON last.`,
-  { schema: landingSchema, cwd: worktree, label: "land", phase: "land", timeoutMs: 1800000 }
+    ? `Land the finished estate unit. Read ${annexeConfigPath} for push_policy first. From ${worktree}, merge the unit branch into main. A conflicted merge is yours to resolve: keep both sides' behaviour, then run the project's full gate on the resolved tree; the resolution stands only when it is green. Report as blocked ({landed:false, blocked_on:"conflict", detail: what contradicts what}) only a genuine semantic contradiction the sides cannot both keep, or a resolution whose gate stays red; abort the merge before reporting. Push main only under push_policy "push-on-land". Reply {landed, detail, merge_commit}, landed true only if the merge commit exists on main (verify with git log). JSON last.`
+    : `Publish the finished estate unit as a blocked PR. Read ${annexeConfigPath} for push_policy first: under "hold-for-user" do NOT push — reply {landed:false, blocked_on:"push_policy hold-for-user", detail: why the push is held}. Otherwise write ${unitDir}/pr.md whole from the report (What changed / Why / What must be true / Known gaps), push the branch, open the PR "WIP:"-prefixed via the forge API, base ${integrationBranch} (the unit's integration lane — the structural branch for lane units, whose promotion PR carries them to main later, or main itself for a Lane: main unit) (tokens under ~/.config/forgejo/; refs/for/* AGit pushes forbidden; auth failure → {landed:false, blocked_on:"forge auth", detail: what failed}). Confirm by API read that the PR exists with a non-empty body; landed true only on that confirmation. Reply {landed, detail, pr_number, pr_url}. JSON last.`,
+  { schema: landingSchema, cwd: worktree, label: "land", timeoutMs: 1800000 }
 );
 
 // issues_findings — sub-severe findings accepted by default at the land —

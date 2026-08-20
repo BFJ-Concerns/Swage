@@ -194,9 +194,7 @@ Rules that make your attack useful rather than noise:
 Return findings, each tagged with category, ledger_relation, severity, evidence (quoted),
 and a concrete suggested_action.
 
-Reply with a single JSON value conforming to the schema. Reason first if you need to, but the
-JSON value comes last: the final non-whitespace characters of your message must be the JSON
-value itself — no prose, no code fence, no example after it. Never restate the schema or show
+Reply with a single JSON value conforming to the schema. Reason first if you need to, then give the JSON inside a single ```json fenced code block — the FIRST fenced block in your reply is the one that is read, so use exactly one and put nothing schema-shaped in any other fence. A reply that is the bare JSON value alone, with no prose at all, also works. Never restate the schema or show
 a sample answer; the only JSON value in your reply is your actual answer.`;
 
 // Fan-in guard: a reduce worker's prompt is the SUM of the upstream outputs, and one
@@ -239,9 +237,7 @@ Produce a clean, de-duplicated set the main session can metabolise:
 
 Do not invent severity to promote a weak finding. Confident noise is still noise.
 
-Reply with a single JSON value conforming to the schema. Reason first if you need to, but the
-JSON value comes last: the final non-whitespace characters of your message must be the JSON
-value itself — no prose, no code fence, no example after it. Never restate the schema or show
+Reply with a single JSON value conforming to the schema. Reason first if you need to, then give the JSON inside a single ```json fenced code block — the FIRST fenced block in your reply is the one that is read, so use exactly one and put nothing schema-shaped in any other fence. A reply that is the bare JSON value alone, with no prose at all, also works. Never restate the schema or show
 a sample answer; the only JSON value in your reply is your actual answer.`;
 
 // Every lens attacked by BOTH families, so no lens is seen by only one kind. No barrier
@@ -286,9 +282,7 @@ consolidate what is here.
 The partial consolidations:
 ${JSON.stringify(partials, null, 2)}
 
-Reply with a single JSON value conforming to the schema. Reason first if you need to, but the
-JSON value comes last: the final non-whitespace characters of your message must be the JSON
-value itself — no prose, no code fence, no example after it. Never restate the schema or show
+Reply with a single JSON value conforming to the schema. Reason first if you need to, then give the JSON inside a single ```json fenced code block — the FIRST fenced block in your reply is the one that is read, so use exactly one and put nothing schema-shaped in any other fence. A reply that is the bare JSON value alone, with no prose at all, also works. Never restate the schema or show
 a sample answer; the only JSON value in your reply is your actual answer.`;
 
 // Cross-family merge: both families consolidate, so neither curates only its own findings.

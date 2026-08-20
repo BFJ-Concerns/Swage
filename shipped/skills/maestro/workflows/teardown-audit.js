@@ -91,7 +91,7 @@ You are sweep ${slice} of ${total}: order the changed paths alphabetically and f
 
 For each capability: what it was (one line, concrete), evidence (the file/symbol at ${baseCommit} that provided it), confidence it is genuinely gone rather than relocated.
 
-Reply with a single JSON value conforming to the schema. Reason first if you need to, but the JSON value comes last: the final non-whitespace characters of your message must be the JSON value itself — no prose, no code fence, no example after it. Never restate the schema or show a sample answer; the only JSON value in your reply is your actual answer.`;
+Reply with a single JSON value conforming to the schema. Reason first if you need to, then give the JSON inside a single ```json fenced code block — the FIRST fenced block in your reply is the one that is read, so use exactly one and put nothing schema-shaped in any other fence. A reply that is the bare JSON value alone, with no prose at all, also works. Never restate the schema or show a sample answer; the only JSON value in your reply is your actual answer.`;
 
 const sweepsOut = (
   await parallel(
@@ -120,7 +120,7 @@ if (sweepsOut.every((s) => s.capabilities.length === 0)) {
     `Run: git -C ${repo} diff --stat ${baseCommit}..${headCommit} | tail -1 — reply with that summary line only.`,
     { ...SWEEP_OPTS, label: "empty-probe" }
   );
-  if (!/^\s*$|0 files? changed/.test(probe || ""))
+  if (!/^\s*$|\b0 files? changed/.test(probe || ""))
     throw new Error(
       `teardown-audit: every sweep returned an empty capability account but the window's diff is non-trivial (${(probe || "").trim()}) — silent sweeps, not a clean window; rerun`
     );
@@ -200,7 +200,7 @@ Report:
 
 Then write the full report as markdown to ${reportPath}: a header naming the audit window (${baseCommit}..${headCommit}, both literal hashes) and date, then the four sections above with their content, then the summary.
 
-Reply with a single JSON value conforming to the schema. Reason first if you need to, but the JSON value comes last: the final non-whitespace characters of your message must be the JSON value itself — no prose, no code fence, no example after it. Never restate the schema or show a sample answer; the only JSON value in your reply is your actual answer.`,
+Reply with a single JSON value conforming to the schema. Reason first if you need to, then give the JSON inside a single ```json fenced code block — the FIRST fenced block in your reply is the one that is read, so use exactly one and put nothing schema-shaped in any other fence. A reply that is the bare JSON value alone, with no prose at all, also works. Never restate the schema or show a sample answer; the only JSON value in your reply is your actual answer.`,
   {
     ...ADJ_OPTS,
     schema: adjudicationSchema,

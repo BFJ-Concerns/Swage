@@ -190,7 +190,7 @@ A pin is only as good as the model actually serving the worker: the run
 record names the model each call resolved to, so confirm a suspect
 worker's serving model there before trusting its output. When a pinned
 GPT tier is genuinely unavailable, the sanctioned fallback is
-`gpt-5.6-terra` at max effort, never the floor tier — a standing
+`gpt-5.6-terra` at high effort, never the floor tier — a standing
 operator decision (2026-07-10), and a deliberate exception to the effort
 doctrine's `max` exclusion: this is not escalation on the ordinary
 ladder but compensation for a forced tier drop — and the step-down is

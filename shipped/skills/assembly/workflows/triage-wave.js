@@ -70,7 +70,6 @@ const proposals = (
         schema: proposalSchema,
         cwd: repo,
         label: `propose:${i}`,
-        phase: "propose",
       })
     )
   )
@@ -96,7 +95,6 @@ Do not write to ${ledgerPath} — the proposal is judged and landed by the orche
     effort: "medium",
     cwd: repo,
     label: "reduce",
-    phase: "reduce",
   }
 );
 
