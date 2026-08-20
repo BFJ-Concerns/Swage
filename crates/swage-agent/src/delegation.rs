@@ -584,6 +584,8 @@ pub trait DelegationHandler: Send + Sync {
         target_agent_id: &str,
         task: &str,
         context: Option<serde_json::Value>,
+        cwd: Option<String>,
+        isolation: Option<swage_protocol::client::workflow::WorkerIsolation>,
         sender_agent_id: &str,
         sender_turn_id: Uuid,
         space_id: Uuid,

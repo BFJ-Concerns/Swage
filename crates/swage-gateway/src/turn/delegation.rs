@@ -202,6 +202,8 @@ impl DelegationHandler for GatewayDelegationHandler {
         target_agent_id: &str,
         task: &str,
         context: Option<serde_json::Value>,
+        cwd: Option<String>,
+        isolation: Option<swage_protocol::client::workflow::WorkerIsolation>,
         sender_agent_id: &str,
         sender_turn_id: Uuid,
         space_id: Uuid,
@@ -267,6 +269,49 @@ impl DelegationHandler for GatewayDelegationHandler {
             active_workspace_attachment_id,
         )
         .await;
+        let placement = match isolation {
+            None => match cwd.as_deref() {
+                Some(cwd) => Some(
+                    tokio::fs::canonicalize(cwd)
+                        .await
+                        .map_err(|error| {
+                            AgentError::InvalidConfig(format!(
+                                "cannot resolve delegated cwd {cwd:?}: {error}"
+                            ))
+                        })?
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+                None => None,
+            },
+            Some(swage_protocol::client::workflow::WorkerIsolation::Worktree) => {
+                let repo = cwd.as_deref().ok_or_else(|| {
+                    AgentError::InvalidConfig(
+                        "delegate isolation=worktree requires cwd to name the git repository"
+                            .into(),
+                    )
+                })?;
+                let placement_key = Uuid::new_v4();
+                let seq = u64::from_be_bytes(
+                    placement_key.as_bytes()[..8]
+                        .try_into()
+                        .expect("UUID prefix"),
+                );
+                Some(
+                    self.state
+                        .worktree_host
+                        .provision(sender_turn_id, seq, std::path::Path::new(repo))
+                        .await
+                        .map_err(AgentError::InvalidConfig)?
+                        .to_string_lossy()
+                        .into_owned(),
+                )
+            }
+        };
+        if let Some(path) = placement.as_ref() {
+            let path = std::path::PathBuf::from(path);
+            target_agent_config = target_agent_config.with_workspace(path.clone(), vec![path]);
+        }
         target_agent_config.approval_prompts_enabled = false;
         let target_instructions = delegated_target_instructions_for_space(
             &target_resolved.instructions,
@@ -328,6 +373,11 @@ impl DelegationHandler for GatewayDelegationHandler {
 
         let mut payload = serde_json::json!({
             "task": task,
+            "placement": {
+                "cwd": placement,
+                "requested_cwd": cwd,
+                "isolation": isolation,
+            },
         });
         if let Some(context) = context {
             payload["context"] = context;

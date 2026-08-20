@@ -875,8 +875,17 @@ pub(crate) async fn process_turn_with_existing_turn(
         session.active_workspace_attachment_id,
     )
     .await;
-    let (workspace_root, mut allowed_paths) =
-        agent_workspace_from_policy(&workspace_policy, space_id, session.id);
+    let (workspace_root, mut allowed_paths) = if let Some(path) = session
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("worker_placement_cwd"))
+        .and_then(serde_json::Value::as_str)
+    {
+        let path = std::path::PathBuf::from(path);
+        (path.clone(), vec![path])
+    } else {
+        agent_workspace_from_policy(&workspace_policy, space_id, session.id)
+    };
 
     let environment =
         build_session_environment(&space, Some(workspace_root.display().to_string()), &session);

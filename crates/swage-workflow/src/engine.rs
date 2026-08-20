@@ -310,7 +310,17 @@ impl WorkflowEngine {
                                 };
                                 let mut request = request;
                                 request.prompt = prompt;
-                                match host.run_agent_call(request.clone(), cancellation).await {
+                                let resolved_working_directory = match host
+                                    .resolve_worker_placement(&request, cancellation.clone())
+                                    .await
+                                {
+                                    Ok(path) => path,
+                                    Err(error) => return serde_json::json!({
+                                        "ok": false,
+                                        "error": {"name": "WorkerPlacementError", "message": error}
+                                    }).to_string(),
+                                };
+                                match host.run_agent_call(request.clone(), resolved_working_directory, cancellation).await {
                                     Ok(result) => {
                                         if request.schema.is_none()
                                             && result.output.as_str().is_some_and(|value| value.trim().is_empty())
@@ -350,6 +360,23 @@ impl WorkflowEngine {
                         }),
                     ).map_err(|error| error.to_string())?;
                     ctx.globals().set("__agent", agent).map_err(|error| error.to_string())?;
+
+                    let placement_host = Arc::clone(&host);
+                    let placement_cancellation = host_cancellation.clone();
+                    let placements = Function::new(
+                        ctx.clone(),
+                        Async(move || {
+                            let host = Arc::clone(&placement_host);
+                            let cancellation = placement_cancellation.clone();
+                            async move {
+                                match host.list_worker_placements(cancellation).await {
+                                    Ok(value) => serde_json::json!({"ok": true, "value": value}).to_string(),
+                                    Err(error) => serde_json::json!({"ok": false, "error": error}).to_string(),
+                                }
+                            }
+                        }),
+                    ).map_err(|error| error.to_string())?;
+                    ctx.globals().set("__workerPlacements", placements).map_err(|error| error.to_string())?;
 
                     let log_host = Arc::clone(&host);
                     let log = Function::new(ctx.clone(), move |message: String| log_host.record("log", message)).map_err(|error| error.to_string())?;
@@ -657,6 +684,12 @@ impl WorkflowEngine {
                                 ...(merged.timeoutMs === undefined || merged.timeoutMs === null
                                     ? {}
                                     : { timeout_ms: merged.timeoutMs }),
+                                ...(merged.cwd === undefined || merged.cwd === null
+                                    ? {}
+                                    : { cwd: String(merged.cwd) }),
+                                ...(merged.isolation === undefined || merged.isolation === null
+                                    ? {}
+                                    : { isolation: String(merged.isolation) }),
                                 schema: merged.schema ?? null,
                                 max_attempts: merged.maxAttempts ?? 3,
                                 label: merged.label ?? null,
@@ -666,6 +699,15 @@ impl WorkflowEngine {
                         globalThis.agent = async (prompt, options = {}) => {
                             const request = buildAgentRequest(options);
                             const response = unwrapAgentResponse(await __agent(String(prompt), JSON.stringify(request)));
+                            return response.value;
+                        };
+                        globalThis.workerPlacements = async () => {
+                            const response = JSON.parse(await __workerPlacements());
+                            if (!response.ok) {
+                                const error = new Error(response.error);
+                                error.name = "WorkerPlacementError";
+                                throw error;
+                            }
                             return response.value;
                         };
                         // Dispatch without awaiting: the returned handle
@@ -887,6 +929,7 @@ mod tests {
         async fn run_agent_call(
             &self,
             _: AgentCallRequest,
+            _: Option<String>,
             _: CancellationToken,
         ) -> Result<AgentCallResult, String> {
             let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
@@ -931,6 +974,7 @@ mod tests {
         async fn run_agent_call(
             &self,
             _: AgentCallRequest,
+            _: Option<String>,
             _: CancellationToken,
         ) -> Result<AgentCallResult, String> {
             Ok(AgentCallResult {
@@ -967,6 +1011,13 @@ mod tests {
     /// composition) is observable from the host side.
     struct SurfaceHost {
         agent_requests: Mutex<Vec<AgentCallRequest>>,
+        resolved_working_directories: Mutex<Vec<Option<String>>>,
+        placement_requests: Mutex<
+            Vec<(
+                Option<String>,
+                Option<swage_protocol::client::workflow::WorkerIsolation>,
+            )>,
+        >,
         agent_outputs: Mutex<VecDeque<Result<Value, String>>>,
         workflow_calls: Mutex<Vec<WorkflowCallRequest>>,
         workflow_output: Value,
@@ -984,6 +1035,8 @@ mod tests {
         fn new() -> Self {
             Self {
                 agent_requests: Mutex::new(Vec::new()),
+                resolved_working_directories: Mutex::new(Vec::new()),
+                placement_requests: Mutex::new(Vec::new()),
                 agent_outputs: Mutex::new(VecDeque::new()),
                 workflow_calls: Mutex::new(Vec::new()),
                 workflow_output: Value::Null,
@@ -1010,9 +1063,14 @@ mod tests {
         async fn run_agent_call(
             &self,
             request: AgentCallRequest,
+            resolved_working_directory: Option<String>,
             _: CancellationToken,
         ) -> Result<AgentCallResult, String> {
             self.agent_requests.lock().expect("requests").push(request);
+            self.resolved_working_directories
+                .lock()
+                .expect("resolved paths")
+                .push(resolved_working_directory);
             if self.agent_delay_ms > 0 {
                 tokio::time::sleep(std::time::Duration::from_millis(self.agent_delay_ms)).await;
             }
@@ -1029,6 +1087,21 @@ mod tests {
                 session_id: Some(uuid::Uuid::from_u128(0xA)),
                 thread_id: Some(uuid::Uuid::from_u128(0xB)),
                 turn_id: None,
+            })
+        }
+
+        async fn resolve_worker_placement(
+            &self,
+            request: &AgentCallRequest,
+            _: CancellationToken,
+        ) -> Result<Option<String>, String> {
+            self.placement_requests
+                .lock()
+                .expect("placements")
+                .push((request.cwd.clone(), request.isolation));
+            Ok(match request.isolation {
+                Some(_) => Some("/runtime/worktrees/worker-0".into()),
+                None => request.cwd.clone(),
             })
         }
 
@@ -1200,8 +1273,39 @@ mod tests {
             "an unset agent must not perturb journal argument hashes: {serialised}"
         );
         assert!(
-            serialised.get("effort").is_none() && serialised.get("timeout_ms").is_none(),
+            serialised.get("effort").is_none()
+                && serialised.get("timeout_ms").is_none()
+                && serialised.get("cwd").is_none()
+                && serialised.get("isolation").is_none(),
             "unset call options must not perturb journal argument hashes: {serialised}"
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_call_keeps_requested_placement_and_passes_the_resolved_path_separately() {
+        let host = Arc::new(SurfaceHost::new());
+        WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                r#"await agent("isolated", { cwd: "/repo", isolation: "worktree" }); return null;"#,
+                "null",
+                CancellationToken::new(),
+                Some(host.clone()),
+                ScriptCapabilities::default(),
+            )
+            .await
+            .expect("placement call");
+        let requests = host.agent_requests.lock().unwrap();
+        assert_eq!(requests[0].cwd.as_deref(), Some("/repo"));
+        assert_eq!(
+            requests[0].isolation,
+            Some(swage_protocol::client::workflow::WorkerIsolation::Worktree)
+        );
+        let serialised = serde_json::to_value(&requests[0]).unwrap();
+        assert_eq!(serialised["cwd"], "/repo");
+        assert_eq!(serialised["isolation"], "worktree");
+        assert_eq!(
+            host.resolved_working_directories.lock().unwrap()[0].as_deref(),
+            Some("/runtime/worktrees/worker-0")
         );
     }
 
@@ -1817,6 +1921,7 @@ mod tests {
         async fn run_agent_call(
             &self,
             _: AgentCallRequest,
+            _: Option<String>,
             _: CancellationToken,
         ) -> Result<AgentCallResult, String> {
             Err(self.0.to_string())

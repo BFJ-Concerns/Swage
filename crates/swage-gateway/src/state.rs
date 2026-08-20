@@ -134,6 +134,8 @@ pub struct AppState {
     /// One long-lived Codex App Server, started lazily by sign-in, discovery,
     /// or the first Codex-backed turn.
     pub codex_supervisor: Arc<AppServerSupervisor>,
+    /// Runtime-owned git worktrees used by placed workflow and delegated workers.
+    pub worktree_host: Arc<crate::worktree::WorktreeHost>,
     /// Reschedulable inter-agent message expiry task.
     agent_message_expiry: Arc<Mutex<Option<AgentMessageExpiryRuntime>>>,
     #[cfg(test)]
@@ -191,6 +193,9 @@ impl AppState {
             codex_config.command = command;
         }
         let codex_supervisor = AppServerSupervisor::new(codex_config);
+        let worktree_root = swage_config::resolve_root()
+            .unwrap_or_else(|_| std::path::PathBuf::from(".swage"))
+            .join("worker-worktrees");
         let mut codex_runtime_events = codex_supervisor.subscribe_runtime();
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             let audit_storage = storage.clone();
@@ -237,6 +242,11 @@ impl AppState {
             runtime_provider: Arc::new(RwLock::new(provider)),
             runtime_tool_dispatcher: Arc::new(RwLock::new(tool_dispatcher)),
             codex_supervisor,
+            worktree_host: Arc::new(crate::worktree::WorktreeHost::new(
+                crate::worktree::WorktreeConfig {
+                    root: worktree_root,
+                },
+            )),
             agent_message_expiry: Arc::new(Mutex::new(None)),
             #[cfg(test)]
             dispatcher_build_failures_remaining: Arc::new(AtomicUsize::new(0)),

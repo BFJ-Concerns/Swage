@@ -6,6 +6,7 @@ All notable changes to Swage are documented in this file.
 
 ### Added
 
+- Workflow and delegation authors can place individual workers in a chosen working directory or a runtime-provisioned isolated git worktree.
 - Workflow agent calls now honour per-call reasoning effort and host-enforced timeout options.
 - Workflow scripts can now dispatch ephemeral workers by prompt and model options without naming an agent definition.
 - Fresh installations now include front-loaded orchestration, research sweep, and segment orchestration workflows as immutable built-ins.

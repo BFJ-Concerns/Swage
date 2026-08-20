@@ -332,6 +332,7 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
     if let Some(browser_host) = browser_host {
         browser_host.shutdown().await;
     }
+    state.worktree_host.shutdown().await;
 
     // Step 12c: Remove runtime metadata now that the gateway has stopped.
     if let Err(e) = RuntimeMetadata::remove() {
