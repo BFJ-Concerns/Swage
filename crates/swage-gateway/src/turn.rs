@@ -69,42 +69,7 @@ use history::rebuild_thread_history_messages;
 pub(crate) use operator_guidance::*;
 pub(crate) use workspace::*;
 
-#[derive(Clone, Debug, Default)]
-pub(crate) struct DispatchContextComposition {
-    pub elements: Option<Vec<String>>,
-    pub variables: BTreeMap<String, String>,
-    pub assembly: Option<String>,
-}
-
-impl DispatchContextComposition {
-    pub(crate) fn from_delegate_payload(payload: &serde_json::Value) -> Result<Self, String> {
-        let elements = payload
-            .get("elements")
-            .map(|value| serde_json::from_value(value.clone()))
-            .transpose()
-            .map_err(|error| format!("delegate elements must be an array of strings: {error}"))?;
-        let variables = payload
-            .get("variables")
-            .map(|value| serde_json::from_value(value.clone()))
-            .transpose()
-            .map_err(|error| format!("delegate variables must map names to strings: {error}"))?
-            .unwrap_or_default();
-        let assembly = payload
-            .get("assembly")
-            .map(|value| {
-                value
-                    .as_str()
-                    .map(str::to_owned)
-                    .ok_or_else(|| "delegate assembly must be a string".to_string())
-            })
-            .transpose()?;
-        Ok(Self {
-            elements,
-            variables,
-            assembly,
-        })
-    }
-}
+pub(crate) use swage_core::DispatchContextComposition;
 
 // Gateway messaging spans three surfaces: REST endpoints for durable messages
 // and turn submission, session-scoped WebSocket events for live approval and
@@ -1762,20 +1727,14 @@ async fn select_context_assembly(
         .trim()
         .to_owned();
     let assembly_variants: Vec<&str> = vec![];
-    let decision = match call_override {
-        Some(_) => crate::experimentation::VariantDecision {
-            variant: configured_assembly.clone(),
-            reason: crate::experimentation::SelectionReason::DefaultOnly,
-        },
-        None => crate::experimentation::select_variant(
-            &config.experimentation,
-            crate::experimentation::LOCATION_CONTEXT_ASSEMBLY,
-            &assembly_variants,
-            &configured_assembly,
-            turn_id,
-        )
-        .map_err(|error| GatewayError::ConfigError(error.to_string()))?,
-    };
+    let decision = crate::experimentation::select_variant(
+        &config.experimentation,
+        crate::experimentation::LOCATION_CONTEXT_ASSEMBLY,
+        &assembly_variants,
+        &configured_assembly,
+        turn_id,
+    )
+    .map_err(|error| GatewayError::ConfigError(error.to_string()))?;
     let decision = match crate::experimentation::record_selection(
         state,
         crate::experimentation::LOCATION_CONTEXT_ASSEMBLY,
