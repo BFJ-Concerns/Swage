@@ -1,5 +1,5 @@
 ---
-name: project-docs
+name: Project Docs
 description: Write or refresh a project's repository Markdown documentation — README.md, a docs/ tree scaled to the project (how-to guides, reference tables, runbooks), and the parallel agent-facing set (agent-docs/) with generated llms.txt indexes — grounded in the implementation as it actually is, coordinating the agent-guidance hand-off. The docs cover using the product — installing, configuring, operating, building from source — not the project's own development process; such material found in existing docs is stripped on refresh. Use when asked to document a project or repo, write or update the README or docs, create or refresh agent-facing docs or an llms.txt index, bring stale documentation up to scratch, or sync docs after a feature lands. Not for code comments or docstrings, CHANGELOG generation, LICENSE or CONTRIBUTING files, doc-site tooling such as mkdocs or docusaurus, or work solely on the agent-guidance file (AGENTS.md / CLAUDE.md) — a dedicated skill owns it.
 ---
 
@@ -121,9 +121,9 @@ conflict in their fixes; fix a document's register by its primary reader
 before drafting:
 
 - **Agent-facing** — the agent-guidance file, and any reference whose reader is
-  an executing agent. This is instruction text: apply the prompt-engineering
-  skill's craft to it — explicit scope, mechanism-grounded reasons, one term
-  per concept, no decorative prose.
+  an executing agent. This is instruction text: write it with prompt craft —
+  explicit scope, mechanism-grounded reasons, one term per concept, no
+  decorative prose.
 - **Human-facing** — README narrative, guides, rationale, and the runbooks.
   Draft it to read as written
   rather than generated: read `references/human-register.md` before drafting
@@ -133,13 +133,9 @@ before drafting:
 Both registers take a meaning-preserving clarity pass — simpler, more precise
 wording that changes no claim — after drafting and before the accuracy review.
 
-<!-- foundry:variant clarity-pass start -->
-
-Run the pass through the **writing-clarity** skill — content and structure
-settled first, the clarity edit second. Where the skill is unavailable in the
-session, apply the same discipline yourself.
-
-<!-- foundry:variant clarity-pass end -->
+Run the pass yourself as a separate edit — content and structure settled
+first, the clarity edit second: simpler and more precise wording only,
+changing no claim.
 
 Past the README-only floor the registers become parallel documentation trees —
 a `docs/` human set and a sibling `agent-docs/` agent set, the agent set
@@ -202,28 +198,18 @@ strong agent, so the docs speak with one voice and components are described once
 consistently. Workers return structured evidence — claim, citation, uncertainty —
 never prose to paste; their stable instructions live in `prompts/`.
 
-Prefer an ensemble workflow for that delegation: invoke the `ensemble-workflow`
-skill and have it run cheap-tier workers for the survey fan-out and a
-cross-engine accuracy review, so a differently-trained model family checks the
-claims rather than the writer's own. When that skill is unavailable, or the
-engines it documents are not live, fall back to the session's own delegation:
-
-<!-- foundry:variant subagent-fallback start -->
-
-On this target, fall back to clean-context subagents dispatched with the `Agent`
-tool: the read-only `Explore` agent type for the survey fan-out, and a fresh
-general-purpose agent for the accuracy review, prompted from
-`prompts/accuracy-review.md` with the claim list. A subagent shares this model's
-weights but not this session's context, so the review is still de-anchored from
-the writer's reasoning — the anchor lives in the session's context, not in the
-model. Note in the report that the review was same-family.
-
-<!-- foundry:variant subagent-fallback end -->
+Prefer a workflow for that delegation (the workflow-authoring skill documents
+the surface): cheap-tier workers for the survey fan-out, and the accuracy
+review on the opposite model family from the writer, so a differently-trained
+family checks the claims rather than the writer's own. When the catalogue
+offers only one family, fall back to delegated clean-context workers for the
+fan-out and a fresh delegated worker for the accuracy review, prompted from
+`prompts/accuracy-review.md` with the claim list — a delegated worker shares no
+session context, so the review is still de-anchored from the writer's
+reasoning; note in the report that the review was same-family.
 
 With no delegation mechanism at all, run the same workflow sequentially and note
 in the report that the accuracy review was a same-context self-review.
-
-<!-- foundry:variant agents-file-delegation start -->
 
 ## Agent-Facing Guidance
 
@@ -238,8 +224,6 @@ the skill is unavailable in the session, list the compiled facts in the final
 report as a pending hand-off rather than editing the file directly — a second
 freestyle writer to that file recreates exactly the drift this skill exists to
 remove.
-
-<!-- foundry:variant agents-file-delegation end -->
 
 ## Verification
 
@@ -281,21 +265,3 @@ report is conversation or PR-description material — do not commit it to the re
   and the chained accuracy review; read whenever the project keeps or earns
   a `docs/` tree.
 
-## Probation
-
-**Temporary — sunset 2026-09-16:** this skill was substantially revised on
-2026-08-16 (usage-only scope: documentation covers using the product — the
-maintainer audience, architecture docs, and development-doc shapes are
-removed, and development-process material found in existing docs is stripped
-on refresh; earlier 2026-08-13: the two-register split — prompt-craft for
-agent-facing text, the human-register reference, the clarity pass — and
-parallel documentation sets with the sibling `agent-docs/` tree and generated
-indexes), so treat friction with it as signal rather than noise. A defect in
-the skill itself — an instruction that is wrong or ambiguous, a bundled script,
-prompt, or binary that is broken, anything it tells you to do that you end up
-working around — is a report this window exists to collect: file it with the
-foundry-request skill once the task allows, or carry it in your session report
-where that skill is not available. A failure of the environment, the task, or
-other tooling is not this skill's defect; handle those as you normally would.
-If today is after 2026-09-16, this note has outstayed its window: tell the user
-to remove it.
