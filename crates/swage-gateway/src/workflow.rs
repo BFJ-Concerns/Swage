@@ -4123,6 +4123,97 @@ mod tests {
 
     struct StaggeredFailingProvider;
 
+    #[derive(Default)]
+    struct PlacementWritingProvider {
+        calls: std::sync::Mutex<std::collections::HashMap<&'static str, u32>>,
+    }
+
+    #[async_trait::async_trait]
+    impl swage_provider::LlmProvider for PlacementWritingProvider {
+        fn model_id(&self) -> &str {
+            "placement-writer"
+        }
+        async fn complete(
+            &self,
+            _: swage_core::CompletionRequest,
+        ) -> Result<swage_core::CompletionResponse, swage_core::ProviderError> {
+            unimplemented!()
+        }
+        async fn complete_with_tools(
+            &self,
+            _: swage_core::ToolCompletionRequest,
+        ) -> Result<swage_core::ToolCompletionResponse, swage_core::ProviderError> {
+            unimplemented!()
+        }
+        fn stream(
+            &self,
+            request: swage_core::CompletionRequest,
+        ) -> std::pin::Pin<Box<dyn futures::Stream<Item = swage_core::StreamChunk> + Send>>
+        {
+            let text = request
+                .messages
+                .iter()
+                .map(swage_core::ChatMessage::text_content)
+                .collect::<Vec<_>>()
+                .join("\n");
+            let file = if text.contains("first-marker") {
+                "first-marker"
+            } else {
+                "second-marker"
+            };
+            let mut calls = self.calls.lock().expect("placement calls");
+            let count = calls.entry(file).or_default();
+            *count += 1;
+            if *count > 1 {
+                return Box::pin(futures::stream::iter(scripted_text_output("written")));
+            }
+            Box::pin(futures::stream::iter(vec![
+                swage_core::StreamChunk::ToolUse {
+                    call_id: format!("write-{file}"),
+                    name: "placement_write".into(),
+                    arguments: serde_json::json!({"file": file}),
+                },
+                swage_core::StreamChunk::Done {
+                    finish_reason: None,
+                },
+            ]))
+        }
+    }
+
+    struct PlacementWriteTool;
+
+    #[async_trait::async_trait]
+    impl crate::tool::Tool for PlacementWriteTool {
+        fn name(&self) -> &str {
+            "placement_write"
+        }
+        fn description(&self) -> &str {
+            "Write a marker in the worker's working directory"
+        }
+        fn parameters(&self) -> Value {
+            serde_json::json!({"type":"object","properties":{"file":{"type":"string"}},"required":["file"]})
+        }
+        async fn execute(
+            &self,
+            arguments: Value,
+            ctx: &dyn swage_tool::context::ToolContext,
+        ) -> Result<Value, swage_core::ToolError> {
+            let file = arguments["file"].as_str().ok_or_else(|| {
+                swage_core::ToolError::InvalidParameters {
+                    name: self.name().into(),
+                    message: "file is required".into(),
+                }
+            })?;
+            std::fs::write(ctx.working_directory().join(file), file).map_err(|error| {
+                swage_core::ToolError::ExecutionFailed {
+                    name: self.name().into(),
+                    message: error.to_string(),
+                }
+            })?;
+            Ok(serde_json::json!({"written": file}))
+        }
+    }
+
     fn scripted_text_output(content: &str) -> Vec<swage_core::StreamChunk> {
         scripted_text_output_with_usage(content, 1, 1)
     }
@@ -5340,6 +5431,105 @@ mod tests {
         );
         drop(changed_tx);
         changed_task.await.unwrap();
+        state.worktree_host.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn live_workflow_workers_write_only_inside_their_own_worktrees() {
+        let fixture = tempfile::tempdir_in("/tmp/scratch").expect("scratch fixture");
+        let repo = fixture.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        for args in [
+            &["init"][..],
+            &["config", "user.email", "test@example.invalid"][..],
+            &["config", "user.name", "Test"][..],
+        ] {
+            assert!(
+                std::process::Command::new("git")
+                    .arg("-C")
+                    .arg(&repo)
+                    .args(args)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        std::fs::write(repo.join("seed"), "seed").unwrap();
+        assert!(
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(["add", "seed"])
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(["commit", "-m", "seed"])
+                .status()
+                .unwrap()
+                .success()
+        );
+        let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+        let space = storage.get_or_create_default().await.unwrap();
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::new(PlacementWritingProvider::default()),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![
+                Arc::new(PlacementWriteTool) as Arc<dyn crate::tool::Tool>
+            ]),
+            None,
+        );
+        let cwd = serde_json::to_string(&repo.to_string_lossy()).unwrap();
+        let source = format!(
+            r#"
+            const calls = [
+                agent("write first-marker", {{ cwd: {cwd}, isolation: "worktree", maxAttempts: 1 }}),
+                agent("write second-marker", {{ cwd: {cwd}, isolation: "worktree", maxAttempts: 1 }})
+            ];
+            await Promise.all(calls);
+            return await workerPlacements();
+        "#
+        );
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(space.id),
+            Json(StartInlineWorkflowRunRequest {
+                source,
+                args: Value::Null,
+                budget: Some(WorkflowBudget {
+                    max_concurrent_agent_calls: Some(2),
+                    ..WorkflowBudget::default()
+                }),
+            }),
+        )
+        .await
+        .expect("start live placement run");
+        wait_for_terminal(&state, started.id).await;
+        let run = storage.get_workflow_run(started.id).await.unwrap().unwrap();
+        assert_eq!(run.state, "completed", "run error: {:?}", run.error_message);
+        let journal = storage.list_workflow_journal(started.id).await.unwrap();
+        let paths = journal
+            .iter()
+            .filter(|entry| entry.kind == "worker_placement")
+            .filter_map(|entry| entry.result.as_ref()?.get("path")?.as_str())
+            .map(std::path::PathBuf::from)
+            .collect::<Vec<_>>();
+        assert_eq!(paths.len(), 2);
+        assert!(paths[0].join("first-marker").exists() ^ paths[1].join("first-marker").exists());
+        assert!(paths[0].join("second-marker").exists() ^ paths[1].join("second-marker").exists());
+        for path in &paths {
+            assert!(
+                !(path.join("first-marker").exists() && path.join("second-marker").exists()),
+                "workers contaminated one worktree: {path:?}"
+            );
+        }
+        assert!(!repo.join("first-marker").exists() && !repo.join("second-marker").exists());
         state.worktree_host.shutdown().await;
     }
 
