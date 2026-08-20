@@ -10051,6 +10051,8 @@ async fn existing_placeholder_turn_receives_provider_visible_snapshot() {
         Arc::new(Mutex::new(SubscriptionState::new(true))),
         None,
         None,
+        None,
+        None,
         Some(placeholder.id),
         TurnAttendance::Attended,
     )

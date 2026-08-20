@@ -212,6 +212,9 @@ pub struct CompletionRequest {
     /// default model is used.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Provider reasoning effort. Providers without a native mapping omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
     /// Maximum number of tokens to generate.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
@@ -462,6 +465,7 @@ mod tests {
     #[test]
     fn completion_request_roundtrips_through_json() {
         let request = CompletionRequest {
+            effort: None,
             messages: vec![ChatMessage::new_parts(
                 Role::User,
                 vec![ContentPart::Text {
@@ -487,6 +491,7 @@ mod tests {
     #[test]
     fn completion_request_with_all_none_fields() {
         let request = CompletionRequest {
+            effort: None,
             messages: vec![],
             model: None,
             max_tokens: None,

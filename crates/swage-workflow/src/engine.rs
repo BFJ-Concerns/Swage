@@ -650,6 +650,12 @@ impl WorkflowEngine {
                                     ? {}
                                     : { agent: merged.agent }),
                                 model: merged.model ?? null,
+                                ...(merged.effort === undefined || merged.effort === null
+                                    ? {}
+                                    : { effort: String(merged.effort) }),
+                                ...(merged.timeoutMs === undefined || merged.timeoutMs === null
+                                    ? {}
+                                    : { timeout_ms: merged.timeoutMs }),
                                 schema: merged.schema ?? null,
                                 max_attempts: merged.maxAttempts ?? 3,
                                 label: merged.label ?? null,
@@ -1192,6 +1198,28 @@ mod tests {
             serialised.get("agent").is_none(),
             "an unset agent must not perturb journal argument hashes: {serialised}"
         );
+        assert!(
+            serialised.get("effort").is_none() && serialised.get("timeout_ms").is_none(),
+            "unset call options must not perturb journal argument hashes: {serialised}"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn agent_call_projects_effort_and_timeout_options_to_the_host() {
+        let host = Arc::new(SurfaceHost::new());
+        WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                r#"await agent("bounded work", { effort: "high", timeoutMs: 75 }); return null;"#,
+                "null",
+                CancellationToken::new(),
+                Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                ScriptCapabilities::default(),
+            )
+            .await
+            .expect("agent call");
+        let requests = host.agent_requests.lock().unwrap();
+        assert_eq!(requests[0].effort.as_deref(), Some("high"));
+        assert_eq!(requests[0].timeout_ms, Some(75));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1229,8 +1257,10 @@ mod tests {
         assert_eq!(requests.len(), 2);
         assert_eq!(requests[0].agent, None);
         assert_eq!(requests[0].label.as_deref(), Some("propose:0"));
+        assert_eq!(requests[0].effort.as_deref(), Some("low"));
         assert_eq!(requests[1].agent, None);
         assert_eq!(requests[1].label.as_deref(), Some("reduce"));
+        assert_eq!(requests[1].effort.as_deref(), Some("medium"));
     }
 
     #[tokio::test(flavor = "current_thread")]

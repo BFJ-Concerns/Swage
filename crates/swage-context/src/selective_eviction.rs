@@ -122,6 +122,7 @@ impl SelectiveEvictionCompactor {
         let prompt = build_eviction_prompt(messages);
 
         let request = CompletionRequest {
+            effort: None,
             messages: vec![ChatMessage::new(Role::System, &prompt)],
             model: None,
             // A modest budget — we only want a JSON list of indices, not prose.
