@@ -862,6 +862,21 @@ pub(crate) async fn process_turn_with_existing_turn(
         }
     })
     .await;
+    let session_variables: std::collections::BTreeMap<String, String> =
+        record_failed_turn_and_release_on_error(
+            state,
+            session_id,
+            prepared_turn_id,
+            state
+                .storage
+                .list_session_variables(session_id)
+                .await
+                .map_err(GatewayError::from),
+        )
+        .await?
+        .into_iter()
+        .map(|variable| (variable.name, variable.value))
+        .collect();
 
     // The workspace root doubles as the session's working directory in the
     // orientation baseline, so it is resolved before elements are built.
@@ -905,6 +920,7 @@ pub(crate) async fn process_turn_with_existing_turn(
         swage_root_opt.as_deref(),
         &space_slug,
         &session.agent_id,
+        &session_variables,
     );
     let (assembled_messages, assembly_report) = (output.messages, output.report);
 
@@ -1739,6 +1755,7 @@ fn execute_context_assembly(
     swage_root: Option<&Path>,
     space_slug: &str,
     agent_id: &str,
+    variables: &std::collections::BTreeMap<String, String>,
 ) -> swage_context::report::AssemblyOutput {
     let assembly_name = assembly_name.trim();
     if is_default_context_assembly(assembly_name) {
@@ -1770,6 +1787,7 @@ fn execute_context_assembly(
         elements,
         &config.context,
         tokeniser,
+        variables,
     )
 }
 

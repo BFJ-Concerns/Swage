@@ -15,10 +15,10 @@ use crate::model::{
     NewSecretRecord, NewSession, NewSourceObservation, NewSpace, NewThread, NewToolCall, NewTurn,
     NewWorkflowJournalIntent, NewWorkflowRun, NewWorkflowRunEvent, NewWorkflowScript,
     NewWorkspaceAttachment, OrientationCard, OrientationCardLifecycle, PendingChannelOrigin,
-    Schedule, ScheduleRun, ScheduleRunUpdate, SecretRecord, Session, SourceObservation, Space,
-    SpaceSlug, Thread, ThreadBranch, ThreadState, ToolCallRecord, Turn, TurnState, UpdateSchedule,
-    WorkflowJournalRecord, WorkflowRunEventRecord, WorkflowRunRecord, WorkflowScriptRecord,
-    WorkflowScriptVersion, WorkspaceAttachment,
+    Schedule, ScheduleRun, ScheduleRunUpdate, SecretRecord, Session, SessionVariable,
+    SourceObservation, Space, SpaceSlug, Thread, ThreadBranch, ThreadState, ToolCallRecord, Turn,
+    TurnState, UpdateSchedule, WorkflowJournalRecord, WorkflowRunEventRecord, WorkflowRunRecord,
+    WorkflowScriptRecord, WorkflowScriptVersion, WorkspaceAttachment,
 };
 
 // ---------------------------------------------------------------------------
@@ -221,6 +221,25 @@ pub trait AgentDefinitionStore: Send + Sync {
         &self,
         agent_id: &str,
         space_id: Option<Uuid>,
+    ) -> Result<bool, StorageError>;
+}
+
+#[async_trait]
+pub trait SessionVariableStore: Send + Sync {
+    async fn set_session_variable(
+        &self,
+        session_id: Uuid,
+        name: &str,
+        value: &str,
+    ) -> Result<SessionVariable, StorageError>;
+    async fn list_session_variables(
+        &self,
+        session_id: Uuid,
+    ) -> Result<Vec<SessionVariable>, StorageError>;
+    async fn delete_session_variable(
+        &self,
+        session_id: Uuid,
+        name: &str,
     ) -> Result<bool, StorageError>;
 }
 
@@ -1120,6 +1139,7 @@ pub trait Storage:
     + AuditStore
     + AgentMemoryStore
     + AgentDefinitionStore
+    + SessionVariableStore
     + ObservationStore
     + CurationAssertionStore
     + CitationStore
@@ -1154,6 +1174,7 @@ impl<T> Storage for T where
         + AuditStore
         + AgentMemoryStore
         + AgentDefinitionStore
+        + SessionVariableStore
         + ObservationStore
         + CurationAssertionStore
         + CitationStore
@@ -1462,6 +1483,27 @@ mod tests {
             _: &str,
             _: Option<Uuid>,
         ) -> Result<bool, StorageError> {
+            unimplemented!()
+        }
+    }
+
+    #[async_trait]
+    impl SessionVariableStore for StubStorage {
+        async fn set_session_variable(
+            &self,
+            _: Uuid,
+            _: &str,
+            _: &str,
+        ) -> Result<SessionVariable, StorageError> {
+            unimplemented!()
+        }
+        async fn list_session_variables(
+            &self,
+            _: Uuid,
+        ) -> Result<Vec<SessionVariable>, StorageError> {
+            unimplemented!()
+        }
+        async fn delete_session_variable(&self, _: Uuid, _: &str) -> Result<bool, StorageError> {
             unimplemented!()
         }
     }
