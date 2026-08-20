@@ -6,6 +6,7 @@ All notable changes to Swage are documented in this file.
 
 ### Added
 
+- Session leads can save named values for their session and use them to fill parameterised context elements at composition time.
 - Fresh installations now include front-loaded orchestration, research sweep, and segment orchestration workflows as immutable built-ins.
 - Settings now lists the effective agent definitions for the selected space, with read-only source and configuration details for each winner.
 - New conversations can now choose from the effective agent definitions available to their space, including the shipped default.
