@@ -14,11 +14,15 @@
 //!
 //! ## The script contract
 //!
-//! The script body runs with two globals and communicates by calling `add`:
+//! The script body runs with three globals and communicates by calling `add`:
 //!
 //! - `elements` — the turn's elements, read-only:
-//!   `[{ name, priority, source, tokenCount, messages }]` where `messages`
-//!   is `[{ role, text }]`.
+//!   `[{ name, priority, source, tokenCount, messages, render }]` where
+//!   `messages` is `[{ role, text }]`. Calling an element's non-enumerable
+//!   `render()` returns a message array with every `{{name}}` slot replaced
+//!   from the current session values; absent values become `⟦unset:name⟧`.
+//! - `ctx` — read-only assembly context. `ctx.variable(name)` returns the
+//!   current session value or `undefined` when the name is absent.
 //! - `add(element_or_messages)` — appends an element's messages (pass an
 //!   entry from `elements`) or a raw `[{ role, text }]` array to the output,
 //!   in call order.
@@ -28,7 +32,7 @@
 //! ```js
 //! const byName = Object.fromEntries(elements.map(e => [e.name, e]));
 //! add(byName.orientation);
-//! add(byName.prompts);
+//! add(byName.prompts.render());
 //! add(byName.history);
 //! ```
 
