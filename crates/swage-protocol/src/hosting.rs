@@ -84,22 +84,6 @@ pub struct ApprovalDecisionRequest {
     pub reason: Option<String>,
 }
 
-/// Ask the operator control plane to undo a recorded configuration case.
-#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
-pub struct UndoConfigurationCaseRequest {
-    pub case_id: Uuid,
-}
-
-/// The new change-case record produced by undoing a configuration case.
-#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
-pub struct ConfigurationChangeResponse {
-    pub version_id: Uuid,
-    pub entity_kind: String,
-    pub entity_id: String,
-    pub summary: String,
-    pub risk_band: String,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
 pub struct OperatorGatewaySummary {
     pub status: String,
@@ -169,7 +153,7 @@ pub struct CreateAgentDefinitionRequest {
     pub skills: Vec<String>,
     #[ts(type = "unknown")]
     pub output_schema: Option<serde_json::Value>,
-    #[ts(type = "number")]
+    #[ts(type = "number | null")]
     pub output_max_retries: Option<u32>,
 }
 
@@ -187,7 +171,7 @@ pub struct UpdateAgentDefinitionRequest {
     pub skills: Vec<String>,
     #[ts(type = "unknown")]
     pub output_schema: Option<serde_json::Value>,
-    #[ts(type = "number")]
+    #[ts(type = "number | null")]
     pub output_max_retries: Option<u32>,
 }
 
@@ -204,7 +188,7 @@ pub struct AgentDefinitionResponse {
     pub skills: Vec<String>,
     #[ts(type = "unknown")]
     pub output_schema: Option<serde_json::Value>,
-    #[ts(type = "number")]
+    #[ts(type = "number | null")]
     pub output_max_retries: Option<u32>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -215,10 +199,47 @@ pub struct AgentDefinitionListResponse {
     pub definitions: Vec<AgentDefinitionResponse>,
 }
 
+/// Where an effective agent definition comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum EffectiveAgentDefinitionSourceScope {
+    BuiltIn,
+    Global,
+    Space,
+}
+
+/// An agent definition available when creating a session in one space.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+pub struct EffectiveAgentDefinitionResponse {
+    pub id: String,
+    pub display_name: String,
+    pub description: String,
+    pub instructions: String,
+    pub model_id: Option<String>,
+    #[ts(type = "unknown")]
+    pub tool_permissions: Option<serde_json::Value>,
+    pub skills: Vec<String>,
+    #[ts(type = "unknown")]
+    pub output_schema: Option<serde_json::Value>,
+    #[ts(type = "number | null")]
+    pub output_max_retries: Option<u32>,
+    pub is_builtin: bool,
+    pub source_scope: EffectiveAgentDefinitionSourceScope,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+pub struct EffectiveAgentDefinitionListResponse {
+    pub definitions: Vec<EffectiveAgentDefinitionResponse>,
+}
+
+/// The outcome of an agent-definition mutation. The full account of the
+/// change — prior and new state under a named action — lives in the audit
+/// trail.
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
 pub struct AgentDefinitionMutationResponse {
-    pub version_id: Uuid,
-    pub entity_id: String,
+    pub agent_id: String,
+    pub space_id: Option<Uuid>,
     pub summary: String,
 }
 
@@ -242,10 +263,10 @@ pub struct HostingSurface {
     heartbeat: MachineHeartbeatRequest,
     approvals: ApprovalListResponse,
     approval_decision: ApprovalDecisionRequest,
-    undo_configuration_case: UndoConfigurationCaseRequest,
-    configuration_change: ConfigurationChangeResponse,
     operator_overview: OperatorOverviewResponse,
+    agent_definition_scope: AgentDefinitionScopeQuery,
     agent_definition_list: AgentDefinitionListResponse,
+    effective_agent_definition_list: EffectiveAgentDefinitionListResponse,
     agent_definition_create: CreateAgentDefinitionRequest,
     agent_definition_update: UpdateAgentDefinitionRequest,
     agent_definition_mutation: AgentDefinitionMutationResponse,

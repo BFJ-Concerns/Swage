@@ -1,8 +1,53 @@
 ---
-description: The web UI's context inspector, wire-contract architecture, verification gate, and route handling
+description: Network binding, the web UI's context inspector, wire-contract architecture, verification gate, and route handling
 ---
 
 # Interfaces and tooling
+
+## Network binding
+
+The gateway listens on a single TCP address configured through `ServerConfig`
+(`crates/swage-config/src/model.rs`). The two knobs are **host** (default
+`127.0.0.1`) and **port** (default `3000`).
+
+### Configuration
+
+Set the address in `config.toml`:
+
+```toml
+[server]
+host = "192.0.2.30"
+port = 3000
+```
+
+Or override per invocation with CLI flags:
+
+```bash
+swage gateway start --host 192.0.2.30 --port 3000
+```
+
+CLI flags take precedence over `config.toml`. Both `--host` and `--port` are
+accepted by `gateway start`, `gateway restart`, and `gateway install`.
+
+### Bind address resolution
+
+At startup the gateway parses `host:port` into a `SocketAddr` and binds a TCP
+listener to it (`startup.rs`). If `host` is not a valid IP address or the port
+is already in use, the gateway exits with a diagnostic. The runtime-metadata
+file written for CLI discovery records the actual bound address, which may
+differ from the configured one when port `0` (OS-assigned) is used.
+
+### Security boundary
+
+The gateway has no authentication layer. Binding to any address other than
+loopback exposes the full API — including every configured provider key — to
+every host that can reach the port. The intended use is trusted
+private-network addresses (a LAN segment, a tailnet, or similar).
+Public-internet binding is not supported until authentication exists.
+
+The host machine's own firewall must also permit inbound connections on the
+chosen port — a correctly bound gateway is unreachable from the LAN if the
+firewall drops the traffic.
 
 ## Turn context inspector
 
@@ -46,18 +91,17 @@ frontend's TypeScript is generated from it via ts-rs, and the canonical
 published artefact is the JSON Schema generated via schemars and committed
 under `crates/swage-protocol/schema/`.
 
-One known exception remains: the `AssemblyReport` type used by the context
-inspector lives in `swage-context`, not `swage-protocol`. It is persisted as
-opaque JSON and the frontend defines its own TypeScript transcription rather
-than importing a generated projection. Migrating the report shapes into the
-protocol crate's wire contract is queued but not yet done.
+The assembly report used by the context inspector is part of the client
+surface. Both the stored-context response and the `context_assembled`
+WebSocket event use that protocol type, and the frontend imports its generated
+TypeScript projection.
 
 The crate is organised into four surfaces, each emitting its own schema
 document:
 
 - **Client** — conversations, streaming, approvals, schedules, knowledge,
-  voice, workflows, channels, delivery, spaces, and provider sign-in. This is
-  the largest surface, split across eleven submodules.
+  voice, workflows, channels, delivery, spaces, settings, materials, recovery,
+  context reports, and provider sign-in.
 - **Hosting** — presence, operator overview, agent definitions, approvals,
   and configuration. The contract between the gateway and its hosting
   operator.

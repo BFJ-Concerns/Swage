@@ -47,6 +47,29 @@ fn typescript_bindings_are_regenerated() {
     client::conversation::ConversationDetail::export_all(&cfg).expect("export conversation detail");
     client::conversation::ConversationThreadDetail::export_all(&cfg)
         .expect("export conversation thread");
+    client::context::TurnContextResponse::export_all(&cfg).expect("export turn context");
+    client::turn::SubmitTurnRequest::export_all(&cfg).expect("export submit turn");
+    client::turn::SubmitTurnResponse::export_all(&cfg).expect("export submit turn response");
+    client::turn::TurnPollResponse::export_all(&cfg).expect("export turn polling");
+    client::turn::SendMessageRequest::export_all(&cfg).expect("export send message");
+    client::turn::MessageResponse::export_all(&cfg).expect("export message response");
+    client::settings::SettingsResponse::export_all(&cfg).expect("export settings");
+    client::settings::SaveSettingsRequest::export_all(&cfg).expect("export save settings");
+    client::settings::ModelDiscoveryResponse::export_all(&cfg).expect("export model discovery");
+    client::settings::RestartStatusResponse::export_all(&cfg).expect("export restart status");
+    client::material::CreateAttachmentRequest::export_all(&cfg).expect("export attachment request");
+    client::material::QueuedAttachmentResponse::export_all(&cfg).expect("export queued attachment");
+    client::material::AttachmentListResponse::export_all(&cfg).expect("export attachments");
+    client::material::CreateMaterialRequest::export_all(&cfg).expect("export material request");
+    client::material::PromoteMaterialRequest::export_all(&cfg).expect("export material promotion");
+    client::material::MaterialListResponse::export_all(&cfg).expect("export materials");
+    client::recovery::RecoveryExportListResponse::export_all(&cfg).expect("export recovery list");
+    client::space::UpdateWorkspaceTrustRequest::export_all(&cfg).expect("export workspace trust");
+    client::conversation::CreateConversationBranchRequest::export_all(&cfg)
+        .expect("export conversation branch request");
+    client::voice::TranscribeAudioResponse::export_all(&cfg)
+        .expect("export transcription response");
+    client::voice::SynthesiseSpeechResponse::export_all(&cfg).expect("export speech response");
     client::knowledge::KnowledgeSearchResponse::export_all(&cfg)
         .expect("export knowledge search response");
     client::knowledge::OrientationFindResponse::export_all(&cfg)
@@ -86,10 +109,6 @@ fn typescript_bindings_are_regenerated() {
     hosting::MachineHeartbeatRequest::export_all(&cfg).expect("export hosting heartbeat");
     hosting::ApprovalListResponse::export_all(&cfg).expect("export hosting approvals");
     hosting::ApprovalDecisionRequest::export_all(&cfg).expect("export hosting approval decision");
-    hosting::UndoConfigurationCaseRequest::export_all(&cfg)
-        .expect("export configuration undo request");
-    hosting::ConfigurationChangeResponse::export_all(&cfg)
-        .expect("export configuration change response");
     hosting::OperatorOverviewResponse::export_all(&cfg).expect("export operator overview");
     hosting::AgentDefinitionScopeQuery::export_all(&cfg).expect("export agent definition query");
     hosting::CreateAgentDefinitionRequest::export_all(&cfg)
@@ -97,6 +116,8 @@ fn typescript_bindings_are_regenerated() {
     hosting::UpdateAgentDefinitionRequest::export_all(&cfg)
         .expect("export agent definition update");
     hosting::AgentDefinitionListResponse::export_all(&cfg).expect("export agent definition list");
+    hosting::EffectiveAgentDefinitionListResponse::export_all(&cfg)
+        .expect("export effective agent definition list");
     hosting::AgentDefinitionMutationResponse::export_all(&cfg)
         .expect("export agent definition mutation");
     hosting::KnowledgeMirrorRegenerateResponse::export_all(&cfg)

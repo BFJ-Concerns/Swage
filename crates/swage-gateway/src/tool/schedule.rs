@@ -307,7 +307,7 @@ impl ScheduleTool {
         let creator = ScheduleCreator::Agent {
             agent_id: agent_id.to_owned(),
         };
-        let (schedule, case) = crate::schedule::create_schedule_change(
+        let schedule = crate::schedule::create_schedule_change(
             state,
             request,
             creator,
@@ -316,7 +316,7 @@ impl ScheduleTool {
         )
         .await
         .map_err(|error| map_service_error(SCHEDULE_TOOL, error))?;
-        Ok(json!({ "schedule": schedule, "change_case": case }))
+        Ok(json!({ "schedule": schedule }))
     }
 
     async fn list(&self, state: &AppState) -> Result<Value, ToolError> {
@@ -356,7 +356,7 @@ impl ScheduleTool {
             routing: None,
             gate,
         };
-        let (schedule, case) = crate::schedule::update_schedule_change(
+        let schedule = crate::schedule::update_schedule_change(
             state,
             schedule_id,
             request,
@@ -365,7 +365,7 @@ impl ScheduleTool {
         )
         .await
         .map_err(|error| map_service_error(SCHEDULE_TOOL, error))?;
-        Ok(json!({ "schedule": schedule, "change_case": case }))
+        Ok(json!({ "schedule": schedule }))
     }
 
     async fn remove(
@@ -375,16 +375,21 @@ impl ScheduleTool {
         session_id: Uuid,
     ) -> Result<Value, ToolError> {
         let schedule_id = schedule_id(params)?;
-        let case = crate::schedule::delete_schedule_change(
+        let removed = crate::schedule::delete_schedule_change(
             state,
             schedule_id,
             SCHEDULE_TOOL,
             Some(session_id),
         )
         .await
-        .map_err(|error| map_service_error(SCHEDULE_TOOL, error))?
-        .ok_or_else(|| invalid(SCHEDULE_TOOL, format!("no schedule with id {schedule_id}")))?;
-        Ok(json!({ "removed": true, "schedule_id": schedule_id, "change_case": case }))
+        .map_err(|error| map_service_error(SCHEDULE_TOOL, error))?;
+        if !removed {
+            return Err(invalid(
+                SCHEDULE_TOOL,
+                format!("no schedule with id {schedule_id}"),
+            ));
+        }
+        Ok(json!({ "removed": true, "schedule_id": schedule_id }))
     }
 
     async fn pause(
@@ -394,7 +399,7 @@ impl ScheduleTool {
         session_id: Uuid,
     ) -> Result<Value, ToolError> {
         let schedule_id = schedule_id(params)?;
-        let (schedule, case) = crate::schedule::pause_schedule_change(
+        let schedule = crate::schedule::pause_schedule_change(
             state,
             schedule_id,
             SCHEDULE_TOOL,
@@ -402,7 +407,7 @@ impl ScheduleTool {
         )
         .await
         .map_err(|error| map_service_error(SCHEDULE_TOOL, error))?;
-        Ok(json!({ "schedule": schedule, "change_case": case }))
+        Ok(json!({ "schedule": schedule }))
     }
 
     async fn resume(
@@ -412,7 +417,7 @@ impl ScheduleTool {
         session_id: Uuid,
     ) -> Result<Value, ToolError> {
         let schedule_id = schedule_id(params)?;
-        let (schedule, case) = crate::schedule::resume_schedule_change(
+        let schedule = crate::schedule::resume_schedule_change(
             state,
             schedule_id,
             SCHEDULE_TOOL,
@@ -420,7 +425,7 @@ impl ScheduleTool {
         )
         .await
         .map_err(|error| map_service_error(SCHEDULE_TOOL, error))?;
-        Ok(json!({ "schedule": schedule, "change_case": case }))
+        Ok(json!({ "schedule": schedule }))
     }
 }
 
@@ -632,7 +637,7 @@ impl Tool for WakeMeLaterTool {
         let creator = ScheduleCreator::Agent {
             agent_id: ctx.agent_id().to_owned(),
         };
-        let (schedule, case) = crate::schedule::create_schedule_change(
+        let schedule = crate::schedule::create_schedule_change(
             state,
             request,
             creator,
@@ -644,7 +649,6 @@ impl Tool for WakeMeLaterTool {
         Ok(json!({
             "schedule_id": schedule.id,
             "wake_at": wake_at.to_rfc3339(),
-            "change_case": case,
         }))
     }
 }

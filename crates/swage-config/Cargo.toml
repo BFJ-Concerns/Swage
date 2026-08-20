@@ -11,6 +11,7 @@ workspace = true
 serde = { workspace = true }
 serde_json = { workspace = true }
 swage-core = { path = "../swage-core" }
+swage-protocol = { path = "../swage-protocol" }
 thiserror = { workspace = true }
 toml = { workspace = true }
 

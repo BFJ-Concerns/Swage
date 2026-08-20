@@ -6,10 +6,20 @@ All notable changes to Swage are documented in this file.
 
 ### Added
 
+- Fresh installations now include front-loaded orchestration, research sweep, and segment orchestration workflows as immutable built-ins.
+- Settings now lists the effective agent definitions for the selected space, with read-only source and configuration details for each winner.
+- New conversations can now choose from the effective agent definitions available to their space, including the shipped default.
 - Sessions now receive operator guidance from standard `AGENTS.md` files: a global file in the Swage config root and one at the root of each trusted, readable attached workspace, layered after the baseline instructions (global before workspace) and visible in the turn context inspector. Untrusted workspaces contribute nothing.
+
+### Changed
+
+- Client-facing settings, asynchronous turns, context assembly reports, materials, attachments, and recovery listings now use the shared Rust wire contract and its generated TypeScript and JSON Schema projections.
+- Unknown keys under `[generation.presets.*]` and `[models.entries.*.capabilities]` now fail configuration loading instead of being ignored. Most other sections already rejected unknown keys through validation and still do; per-model pricing entries remain lenient.
+- Tool approval prompting now defaults to disabled and remains available through explicit operator configuration.
 
 ### Fixed
 
+- Fresh-session schedules created from Settings now use the currently selected space.
 - Streamed tool calls now remain attached to their assistant turn after completion and appear before the response both immediately and after reloading conversation history.
 
 ## 0.2.0 — 2026-08-13

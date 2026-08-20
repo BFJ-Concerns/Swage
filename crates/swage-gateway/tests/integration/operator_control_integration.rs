@@ -173,7 +173,7 @@ async fn agent_definition_http_crud_records_every_mutation() {
 
     let (status, created) = post_json(&router, "/api/operator/agent-definitions", create).await;
     assert_eq!(status, StatusCode::OK, "{created}");
-    assert!(created["version_id"].as_str().is_some());
+    assert_eq!(created["agent_id"], "researcher");
 
     let (status, listed) = get_json(&router, "/api/operator/agent-definitions").await;
     assert_eq!(status, StatusCode::OK);
@@ -201,23 +201,32 @@ async fn agent_definition_http_crud_records_every_mutation() {
     .await;
     assert_eq!(status, StatusCode::OK, "{updated}");
 
-    let versions = state
-        .storage
-        .list_configuration_versions_for_entity("agent_definition", "researcher@global")
-        .await
-        .unwrap();
-    assert_eq!(versions.len(), 2);
-    assert_eq!(versions[0].version_number, 2);
-    assert_eq!(versions[0].snapshot["display_name"], "Research Lead");
-    assert!(versions[0].diff.get("instructions").is_some());
+    // Every mutation leaves a configuration_change audit event naming what
+    // changed and what it replaced — the whole prior and new state.
     let audits = state.storage.list_audit_events().await.unwrap();
+    let changes: Vec<_> = audits
+        .iter()
+        .filter(|event| {
+            event.event_kind == "configuration_change" && event.entity_id == "researcher@global"
+        })
+        .collect();
+    assert_eq!(changes.len(), 2, "create and update each leave a record");
+    let update_event = changes
+        .iter()
+        .find(|event| {
+            event.metadata["action"] == "upsert_agent_definition"
+                && !event.metadata["prior_state"].is_null()
+        })
+        .expect("the update's record carries the state it replaced");
     assert_eq!(
-        audits
-            .iter()
-            .filter(|event| event.entity_id == "researcher@global")
-            .count(),
-        2
+        update_event.metadata["prior_state"]["display_name"],
+        "Researcher"
     );
+    assert_eq!(
+        update_event.metadata["new_state"]["display_name"],
+        "Research Lead"
+    );
+    assert_eq!(update_event.metadata["source"], "operator_http");
 
     let (status, deleted) = request_json(
         &router,
@@ -231,13 +240,19 @@ async fn agent_definition_http_crud_records_every_mutation() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(listed["definitions"], json!([]));
 
-    let versions = state
-        .storage
-        .list_configuration_versions_for_entity("agent_definition", "researcher@global")
-        .await
-        .unwrap();
-    assert_eq!(versions.len(), 3);
-    assert!(versions[0].snapshot.is_null());
+    let audits = state.storage.list_audit_events().await.unwrap();
+    let delete_event = audits
+        .iter()
+        .find(|event| {
+            event.event_kind == "configuration_change"
+                && event.metadata["action"] == "delete_agent_definition"
+        })
+        .expect("the delete leaves a record");
+    assert_eq!(
+        delete_event.metadata["prior_state"]["display_name"],
+        "Research Lead"
+    );
+    assert!(delete_event.metadata["new_state"].is_null());
 }
 
 #[tokio::test(flavor = "multi_thread")]

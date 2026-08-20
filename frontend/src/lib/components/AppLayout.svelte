@@ -18,6 +18,7 @@
   import type { ConversationStore } from "../stores/conversations";
   import type { SpaceStore } from "../stores/spaces";
   import type { StreamingStore } from "../stores/streaming";
+  import type { EffectiveAgentDefinitionResponse } from "../protocol/EffectiveAgentDefinitionResponse";
 
   type Surface = "conversation" | "operator";
 
@@ -40,6 +41,7 @@
     route?: Route;
     onNavigate?: (path: string) => void;
     onSettingsSaved?: () => void | Promise<void>;
+    agentDefinitions?: EffectiveAgentDefinitionResponse[];
   }
 
   let {
@@ -61,10 +63,12 @@
     route,
     onNavigate,
     onSettingsSaved,
+    agentDefinitions = [],
   }: Props = $props();
 
   const currentSpace = $derived(spaceStore?.currentSpace ?? null);
   const activeConversation = $derived(conversationStore.activeConversation);
+  let selectedAgentId = $state("");
   const settingsTab = $derived(route?.settingsTab ?? null);
   const settingsSpaceSlug = $derived(route?.settingsSpaceSlug ?? null);
   const settingsSpaceTab = $derived(route?.settingsSpaceTab ?? null);
@@ -98,12 +102,17 @@
   <div class="settings-window">
     <header class="settings-chrome">
       <h2>Settings</h2>
+      <nav aria-label="Settings sections">
+        <button class:active={settingsTab === "providers"} onclick={() => onNavigate?.("/settings/providers")}>Providers</button>
+        <button class:active={settingsTab === "agents"} onclick={() => onNavigate?.("/settings/agents")}>Agents</button>
+        <button class:active={settingsTab === "automation"} onclick={() => onNavigate?.("/settings/automation")}>Automation</button>
+      </nav>
       <button class="close" onclick={closeSettings} aria-label="Close settings">×</button>
     </header>
     {#if settingsSpace}
       <SpaceSettingsPage space={settingsSpace} tab={settingsSpaceTab ?? undefined} />
     {:else}
-      <SettingsPage tab={settingsTab ?? undefined} {onSettingsSaved} />
+      <SettingsPage tab={settingsTab ?? undefined} spaceId={currentSpace?.id ?? null} {onSettingsSaved} />
     {/if}
   </div>
 {:else if !currentSpace}
@@ -113,14 +122,14 @@
   <main class="operator"><OperatorDashboard /></main>
 {:else}
   <main class="conversation">
-    <aside><ConversationList store={conversationStore} /></aside>
+    <aside><ConversationList store={conversationStore} {selectedAgentId} /></aside>
     <section aria-label="Conversation">
       {#if activeConversation}<ConnectionIndicator store={connectionStore} {onRetry} />{/if}
       <MessageDisplay store={conversationStore} {streamingStore} {displayPreferences} />
       {#if streamingStore.pendingApproval}
         <ApprovalCard approval={streamingStore.pendingApproval} />
       {:else}
-        <MessageInput store={streamingStore} {modelOptions} {modelCatalogueReady} selectedModelId={activeConversation?.selected_model_id ?? defaultModelId} {onNavigate} />
+        <MessageInput store={streamingStore} {modelOptions} {modelCatalogueReady} selectedModelId={activeConversation?.selected_model_id ?? defaultModelId} {agentDefinitions} canSelectAgent={!activeConversation} bind:selectedAgentId {onNavigate} />
       {/if}
     </section>
   </main>

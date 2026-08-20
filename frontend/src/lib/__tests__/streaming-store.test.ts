@@ -799,6 +799,18 @@ describe("output_schema_failed events", () => {
 // ---------------------------------------------------------------------------
 
 describe("context_assembled events", () => {
+  const report = {
+    assembly_name: "default",
+    elements: [],
+    total_tokens: 0,
+    budget: null,
+    budget_remaining: null,
+    compaction_applied: [],
+    warnings: [],
+    errors: [],
+    duration: { secs: 0, nanos: 0 },
+  };
+
   it("does not throw or crash the streaming store", () => {
     const store = createStreamingStore();
     store.startTurn("question");
@@ -807,7 +819,7 @@ describe("context_assembled events", () => {
       store.handleServerEvent({
         type: "context_assembled",
         turn_id: "t-1",
-        report: { elements: [], errors: [] },
+        report,
       }),
     ).not.toThrow();
   });
@@ -819,7 +831,7 @@ describe("context_assembled events", () => {
     store.handleServerEvent({
       type: "context_assembled",
       turn_id: "t-1",
-      report: { errors: [] },
+      report,
     });
 
     // Assembly reporting does not affect the streaming lifecycle.
@@ -950,10 +962,10 @@ describe("withConversationAutoCreate", () => {
     const { store, connection, createConversation, settleCreate } =
       createWrappedStore(() => false);
 
-    store.startTurn("first message", "model-a");
+    store.startTurn("first message", "model-a", "researcher");
 
     // Dispatch must wait for the conversation to exist.
-    expect(createConversation).toHaveBeenCalledWith("model-a");
+    expect(createConversation).toHaveBeenCalledWith("model-a", "researcher");
     expect(connection.sendMessage).not.toHaveBeenCalled();
 
     settleCreate("conv-9");
