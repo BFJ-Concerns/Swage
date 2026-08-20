@@ -103,6 +103,7 @@ async fn llm_proxy_completion_through_ipc() {
         let provider = IpcCompletionProvider::new(agent_conn);
         provider
             .complete(CompletionRequest {
+                effort: None,
                 messages: vec![ChatMessage::new(Role::User, "What is the meaning of life?")],
                 model: None,
                 max_tokens: Some(100),

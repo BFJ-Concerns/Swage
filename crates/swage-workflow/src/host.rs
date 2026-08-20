@@ -28,6 +28,13 @@ pub struct AgentCallRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
     pub model: Option<String>,
+    /// Provider reasoning effort for this call. Absent preserves the ambient
+    /// provider or model default and the historical journal request shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    /// Host-enforced deadline for this call in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
     pub schema: Option<Value>,
     pub max_attempts: u32,
     pub label: Option<String>,

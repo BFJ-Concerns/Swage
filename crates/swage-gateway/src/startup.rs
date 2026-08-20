@@ -1300,6 +1300,7 @@ mod tests {
         let provider = create_provider_with_retry(&config, &secret_manager, retry).await;
         let response = provider
             .complete(swage_core::CompletionRequest {
+                effort: None,
                 messages: vec![],
                 model: None,
                 max_tokens: None,
@@ -1364,6 +1365,7 @@ mod tests {
                         let provider_model = provider.model_id().to_string();
                         let completion_error = provider
                             .complete(swage_core::CompletionRequest {
+                                effort: None,
                                 messages: vec![],
                                 model: None,
                                 max_tokens: None,
@@ -1675,6 +1677,7 @@ mod tests {
         let provider = create_provider(&config, &secret_manager).await;
         let result = provider
             .complete(swage_core::CompletionRequest {
+                effort: None,
                 messages: vec![],
                 model: None,
                 max_tokens: None,

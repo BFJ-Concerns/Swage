@@ -494,6 +494,7 @@ mod tests {
     async fn unsupported_provider_fails_closed() {
         let provider = UnsupportedLlmProvider::new("provider/model configuration is invalid");
         let request = CompletionRequest {
+            effort: None,
             messages: vec![],
             model: None,
             max_tokens: None,
@@ -529,6 +530,7 @@ mod tests {
 
         let provider = MockProvider;
         let request = CompletionRequest {
+            effort: None,
             messages: vec![ChatMessage::new(Role::User, "hello")],
             model: None,
             max_tokens: Some(100),
@@ -573,6 +575,7 @@ mod tests {
 
         let provider = MockProvider;
         let request = CompletionRequest {
+            effort: None,
             messages: vec![],
             model: None,
             max_tokens: None,
@@ -610,6 +613,7 @@ mod tests {
         assert_eq!(provider.model_id(), "mock-model");
 
         let request = CompletionRequest {
+            effort: None,
             messages: vec![],
             model: None,
             max_tokens: None,

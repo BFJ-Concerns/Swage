@@ -380,6 +380,7 @@ impl DelegationExecutor {
         let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
 
         let turn_request = TurnRequest {
+            effort: None,
             execution: TurnExecutionContext {
                 session_id: session.id,
                 thread_id: thread.id,
