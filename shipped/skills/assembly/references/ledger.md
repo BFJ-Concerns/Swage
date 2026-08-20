@@ -132,7 +132,8 @@ previous session's. Before dispatching anything:
    record's State line is only as good as its Evidence — and
    verify every status against the
    world: an `in-flight` unit's worktree and branch exist and match; a
-   `parked` record's Wrack form is still open (a response is a decision to
+   `parked` record's question to the user is still unanswered (an answer
+   is a decision to
    act on); `proven` records' evidence pointers resolve (a preview proof's
    recorded lane sha included); a `waived` record's Evidence names the
    user's recorded say-so; a

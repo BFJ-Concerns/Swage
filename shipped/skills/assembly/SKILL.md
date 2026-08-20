@@ -1,8 +1,6 @@
 ---
-name: assembly
+name: Assembly
 description: Run the mass-build phase of a commissioned project — deliver the implementation volume over the structural spine the maestro phase landed, dispatching builders and their verification through templated cross-family pipelines and tracking completion as proof obligations rather than prose status. Use when the user wants to start, resume, or check on a build run for a project whose spine and ledger exist, to build out the remaining commission work at volume, to operate a run already in flight (dispatch, steer, or replace units, verify and land their output, discharge proof obligations), to drain the annexe task queue's journey items through a run, or to close a run out and settle its ledger. Not for structural or spine work (that is maestro, and units without a covering exemplar route back to it), not for capturing or changing a commission (the commission skill), and not for a single self-contained task an agent could just do.
-argument-hint: '[project or run instruction]'
-disable-model-invocation: true
 ---
 
 # Assembly
@@ -95,10 +93,16 @@ the volume tier an artefact class it must not author.
 
 ## Pipelines Carry the Ceremony
 
-Every code-bearing dispatch runs as a templated pipeline on the ensemble
-runtime (`workflows/` in this skill), never as a bare worker — the
+Every code-bearing dispatch runs as a templated pipeline — one of the
+workflows this skill carries (`build-verify`, `estate-unit`,
+`docs-update`, `triage-wave`), started by name — never as a bare
+worker: the
 templates make verification a stage the script reaches rather than a
 decision anyone makes, and landing waits for verdicts by construction.
+A pipeline's holds arrive as `decision-needed` events on its run's
+queue; you answer by posting the decision event back into the run, and
+an unanswered decision blocks that unit while the rest of the fleet
+moves.
 (A direct fix dispatches nothing and is the sized exception —
 references/landing.md, *Direct Fixes*.) Your
 job at the seams is judgement on the outputs: read
@@ -130,11 +134,11 @@ brief.
   `issues_findings` — file them when recording the landing); every
   explicit disposition is journalled.
 - **Waivers are the user's alone**, asynchronously: park the unit and
-  raise a Wrack form (published and read back through the `wrack-pages`
-  skill, assigned to the user) stating what cannot be proven and why;
-  build other work while it waits. Parks have a return path — sweep parked
-  records on every resume and wake; an answered form or a resolved gap
-  rewrites the record to `open`, journalled.
+  put the question to the user — a delivered message stating what cannot
+  be proven and why; build other work while it waits. Parks have a
+  return path — sweep parked records on every resume and wake; the
+  user's answer or a resolved gap rewrites the record to `open`,
+  journalled.
 - **UI-bearing units get fresh first-encounter eyes**: the brief carries
   the concrete proof obligations (drive the UI, screenshot key states,
   leave scripted tests where regression value exists) and names where
@@ -279,17 +283,6 @@ open is not complete
 until every journey item has been judged — reading the queue is not
 judging it.
 
-**Temporary — remove after 2026-10-20:** an item may carry the retired
-`(deferred since <date>; last <date>: <reason>)` marker from before
-capacity deferral was withdrawn. Read it as open, and strip the marker —
-carrying its first date over as the item's `(added <date>)` stamp where
-one is missing —
-or replace it with `(blocked on <blocker> since <date>)` where a named
-dependency genuinely stops the item — at this open; stamp any other item
-missing `(added <date>)` with today's date. If today is after
-2026-10-20, this note has outstayed its window: tell the user to remove
-it.
-
 From
 `ISSUES.md` (unverified claims), take a find only when its meaning is
 plain, clearly journey not destination, self-evidently worth doing, small,
@@ -408,12 +401,12 @@ within that unit alone; it never paces unrelated dispatches.
 ## Quota Is Observed, Never Assumed
 
 Every routing decision reads allowance state as a fact with provenance — a
-refusal event, a limit response, the statusline cache, the user's word —
+refusal event, a provider limit response, the user's word —
 and its reset time; a stale exhaustion is re-read once its reset passes.
 Near a ceiling, step down inside the same family or park; never silently
 drop a pipeline's verification legs to save quota. When a whole family is
 out, the cross-family property is unavailable: park what needs it and tell
-the user, with the Wrack form carrying the decision if they are away.
+the user, the question riding a delivered message if they are away.
 
 ## State and Resilience
 
@@ -433,20 +426,6 @@ carries the discipline; references/build-ledger.md applies it to the
 ledger). Journal events before the
 next sleep, not at wrap-up; commit annexe files as they change, staged by
 path. The run resumes from artefacts alone.
-
-**Temporary — remove after 2026-10-07:** an annexe carrying a `maestro/`
-directory holds the predecessor phase's records under the pre-split
-layout. It is never current state: on first encountering one, migrate
-what is still live into `build/` — `gaps.md` entries into
-`build/gaps.md`; obligations or unfinished work into
-`build/obligations/` records or `TASKS.md`; everything else is
-superseded narrative — then delete the directory in the same commit
-(git keeps it) and journal the migration. Run the migration as an
-ensemble workflow on lower-tier GPT workers — triage and relocation are
-mechanical, not seat work; review the moved records before the commit.
-If today
-is after 2026-10-07, this note has outstayed its window: tell the user to
-remove it.
 
 Run events land in the record first; chat is a digest derived from it,
 never carrying anything the record does not. A chat message is triggered
@@ -468,9 +447,8 @@ triggers.
   templates: stages, tier pins, the hold protocol and decision schemas,
   estate proof modes, and watching a run. Read before the first dispatch.
 - [references/build-ledger.md](references/build-ledger.md) — the shared
-  ledger contract: header, the per-obligation record format, status
-  vocabulary, and the old single-file migration. Read at run start,
-  before references/ledger.md.
+  ledger contract: header, the per-obligation record format, and status
+  vocabulary. Read at run start, before references/ledger.md.
 - [references/ledger.md](references/ledger.md) — this run's ledger use:
   reconciliation at every open (the handover gate), the shared build
   cache, the triage wave, and closing the run (the walkthrough contract).
@@ -483,20 +461,5 @@ triggers.
   ledger discipline, forge wiring, and the run-level guards. Read at the
   first landing.
 - `workflows/` — the pipeline templates (`build-verify.js`,
-  `estate-unit.js`, `docs-update.js`, `triage-wave.js`).
-
-## Probation
-
-**Temporary — sunset 2026-09-22:** this skill's verification, duplication,
-briefs, and stacked-branch discipline were substantially revised, and the
-queue discipline (no capacity deferral, the queue seat, the fixes batch)
-landed 2026-08-20, so treat
-friction with any of it as signal rather than noise. A defect in the skill
-itself — an instruction that is wrong or ambiguous, a bundled pipeline
-script that is broken, anything it tells you to do that you end up working
-around — is a report this window exists to collect: file it with the
-foundry-request skill once the task allows, or carry it in your session
-report where that skill is not available. A failure of the environment,
-the task, or other tooling is not this skill's defect; handle those as you
-normally would. If today is after 2026-09-22, this note has outstayed its
-window: tell the user to remove it.
+  `estate-unit.js`, `docs-update.js`, `triage-wave.js`), carried by this
+  skill and started by name.

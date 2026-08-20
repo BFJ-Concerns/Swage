@@ -1,21 +1,23 @@
-export const meta = {
-  name: "estate-unit",
-  description:
-    "The assembly skill's estate pipeline: a builder delivers end-to-end tests for a ledger obligation, and a cross-family verifier independently demonstrates the estate property — every new test fails against the baseline behaviour and passes against the current tree — with severe findings converged by autonomous fix rounds before the triage hold. Acceptance is inverted: the tests are the deliverable.",
-};
+// estate-unit — the assembly skill's estate pipeline: a builder delivers
+// end-to-end tests for a ledger obligation, and a cross-family verifier
+// independently demonstrates the estate property — every new test fails
+// against the baseline behaviour and passes against the current tree —
+// with severe findings converged by autonomous fix rounds before the
+// triage hold. Acceptance is inverted: the tests are the deliverable.
 
 export const defaults = {
-  // Fix rounds override the builder's effort to medium — a verdict that
-  // sent the unit back falsifies the low pin's decided-path ground.
-  codex: { model: "gpt-5.6-sol", effort: "low" },
-  claude: { model: "opus", effort: "medium", fallbackModel: "sonnet" },
+  // Builders ride the flagship GPT tier at low effort; fix rounds override
+  // the builder's effort to medium — a verdict that sent the unit back
+  // falsifies the low pin's decided-path ground. Claude legs are the
+  // cross-family verifiers, pinned per call.
+  model: "gpt-5.6-sol",
+  effort: "low",
 };
 
-// INPUT (--json-args @file): briefPath, worktree, commissionPath,
+// INPUT (workflow args): briefPath, worktree, commissionPath,
 // verificationPath, unitDir, mergePolicy, integrationBranch (PR mode: the
 // structural branch unit PRs target; required when mergePolicy is "pr"),
-// annexeConfigPath,
-// holdTimeoutMinutes (default 120), plus:
+// annexeConfigPath, plus:
 //   proofMode: "baseline" (default) | "mutation".
 //   baselineRef: required in baseline mode — the ref WITHOUT the behaviour
 //     under proof. The fail-before check runs the NEW tests (from the unit
@@ -26,10 +28,10 @@ export const defaults = {
 //     deliberately breaking the behaviour in a scratch checkout of the
 //     CURRENT tree, watching the tests fail, and restoring.
 //
-// Hold protocol: identical to build-verify.js (hold content emitted
-// byte-for-byte as a [hold-content] stderr line, worker-written sentinel
-// file, nonce-correlated decision file, script-owned wait legs; timeout
-// returns a structured salvage envelope).
+// Hold protocol: identical to build-verify.js — a "decision-needed" event
+// carrying the hold's exact content, answered by a nonce-echoing
+// "decision" event posted from outside the script (lead segment or
+// operator). No hold timeout: an unanswered decision blocks.
 
 const {
   briefPath, worktree, commissionPath, verificationPath,
@@ -43,73 +45,36 @@ if (mergePolicy === "pr" && !integrationBranch)
 const proofMode = args.proofMode === "mutation" ? "mutation" : "baseline";
 if (proofMode === "baseline" && !baselineRef)
   throw new Error("estate-unit: baseline proof mode needs baselineRef; pass proofMode:'mutation' when no reachable tree lacks the behaviour");
-const holdTimeoutMinutes = Number(args.holdTimeoutMinutes) || 120;
-const mintNonce = () => `${Date.now().toString(36)}${Math.floor(Math.random() * 1e6).toString(36)}`;
-
-const holdSchemaFor = (verdicts) => ({
-  type: "object",
-  additionalProperties: false,
-  required: ["verdict", "nonce"],
-  properties: {
-    verdict: { type: "string", enum: [...verdicts, "timeout"] },
-    nonce: { type: "string" },
-    note: { type: "string" },
-    dispositions: {
-      type: "array",
-      items: {
-        type: "object",
-        additionalProperties: false,
-        required: ["finding", "disposition"],
-        properties: {
-          finding: { type: "integer" },
-          disposition: { type: "string", enum: ["fix", "contract-question", "accept-with-note"] },
-          note: { type: "string" },
-        },
-      },
-    },
-  },
-});
-
-// Each hold's wait is script-owned: short worker legs against the script's
-// own clock, so a worker that gives up early or wedges costs one leg, never
-// the hold. The hold's content never passes through a worker: only the
-// sentinel below (fixed, worker-safe fields) and the decision's contents
-// (schema-validated on return) do.
-const holdLegMinutes = 10;
+// One nonce per hold from a deterministic counter (the sealed context has
+// no clock or randomness): a stale decision from an earlier attempt names
+// a different nonce and is ignored. The decision event's payload contract,
+// validated by the script itself:
+//   { nonce, verdict: one of the offered options,
+//     note?: string,
+//     dispositions?: [{ finding: int, disposition: "fix" |
+//       "contract-question" | "accept-with-note", note?: string }] }
+let holdCount = 0;
+const mintNonce = (stage) => `${stage}-${++holdCount}`;
 
 const runHold = async (stage, content, verdicts) => {
-  const nonce = mintNonce();
-  const holdPath = `${unitDir}/${stage}.${nonce}.hold.json`;
-  const decisionPath = `${unitDir}/${stage}.${nonce}.decision.json`;
-  // The deterministic channel: the hold's exact JSON on the run's stderr.
-  log(`[hold-content] ${JSON.stringify({ stage, nonce, content, decisionPath })}`);
-  const legSchema = holdSchemaFor([...verdicts, "pending"]);
-  const deadline = Date.now() + holdTimeoutMinutes * 60000;
-  const maxLegs = Math.ceil(holdTimeoutMinutes / holdLegMinutes) + 3;
-  for (let leg = 0; leg < maxLegs && Date.now() < deadline; leg++) {
-    const decision = await agent(
-      `Ensure the file ${holdPath} exists containing exactly this one line (create ${unitDir} if needed; if it already exists, leave it untouched):
-{"stage":"${stage}","nonce":"${nonce}"}
-
-Then check whether the file ${decisionPath} exists — every 30 seconds, for up to ${holdLegMinutes} minutes. When it exists, read it and reply with its exact contents. If your time is up and it still does not exist, reply with {"verdict":"pending","nonce":"${nonce}"}. Write or modify nothing other than the signal file above. Reply with the JSON last.`,
-      {
-        engine: "codex", model: "gpt-5.6-luna", effort: "low", schema: legSchema,
-        cwd: worktree, label: `${stage}:hold:${leg}`, phase: stage,
-        timeoutMs: (holdLegMinutes + 5) * 60000,
-      }
-    );
-    // "timeout" from a worker is treated as pending: only the script's own
-    // clock, below, may declare the hold timed out.
-    if (!decision || decision.verdict === "pending" || decision.verdict === "timeout") continue;
-    if (decision.nonce !== nonce) {
-      log(`[hold] ${stage}: stale decision (nonce ${decision.nonce}) ignored; still waiting for ${nonce}`);
+  const nonce = mintNonce(stage);
+  // Raise the decision on the run's event queue and park until answered —
+  // by a lead segment clearing its batch of decisions at a wake, or by the
+  // operator through the run surface. Blocking is accepted: no timeout.
+  postEvent("decision-needed", { stage, nonce, content, options: verdicts });
+  while (true) {
+    const decision = await awaitEvent({ kinds: ["decision"] });
+    const payload = decision && decision.payload;
+    if (!payload || payload.nonce !== nonce) {
+      log(`[hold] ${stage}: stale or unaddressed decision ignored; still waiting for ${nonce}`);
       continue;
     }
-    return decision;
+    if (!verdicts.includes(payload.verdict)) {
+      log(`[hold] ${stage}: unknown verdict ${JSON.stringify(payload.verdict)} ignored (offered: ${verdicts.join(", ")}); still waiting for ${nonce}`);
+      continue;
+    }
+    return payload;
   }
-  // Timeout is synthesised here, from the script's own clock — never a
-  // worker's report of one.
-  return { verdict: "timeout", nonce };
 };
 
 // ---------------------------------------------------------------- restate
@@ -138,18 +103,16 @@ let hold = null;
 const rulings = [];
 for (let attempt = 0; attempt < 3; attempt++) {
   plan = await agent(restatePrompt(hold && hold.note), {
-    engine: "codex", schema: restatementSchema, cwd: worktree, label: `restate:${attempt}`, phase: "restate",
+    schema: restatementSchema, cwd: worktree, label: `restate:${attempt}`, phase: "restate",
   });
   if (!plan) throw new Error("restatement stage returned nothing usable");
   hold = await runHold("restate", plan, ["accept", "correct", "kill"]);
-  if (!hold || hold.verdict === "timeout")
-    return { outcome: "timed-out", at: "restate-hold", salvage: { plan } };
   if (hold.verdict === "kill") return { outcome: "killed-at-restatement", plan };
   if (hold.note && hold.note.trim()) rulings.push(hold.note.trim());
   if (hold.verdict === "accept") break;
 }
 if (hold.verdict !== "accept")
-  return { outcome: "timed-out", at: "restate-corrections-exhausted", salvage: { plan } };
+  return { outcome: "corrections-exhausted", at: "restate", salvage: { plan } };
 if (plan.admission === "refused")
   return { outcome: "admission-refused", plan, note: "orchestrator accepted a refused admission — fix the brief's Obligation line" };
 
@@ -169,7 +132,7 @@ The estate property is the acceptance bar, and its mechanics matter. ${proofMode
   ? `To show a test FAILS against the baseline, create a separate checkout of ${baselineRef} (git worktree add <tmp> ${baselineRef}), copy the NEW test files into it, and run them there — never check the baseline out in your own worktree, which would delete the tests you are proving. Each new journey test must fail in that baseline checkout and pass in ${worktree}.`
   : `No reachable tree lacks this behaviour, so fail-before is proved by MUTATION: in a scratch checkout of the current tree (git worktree add <tmp> HEAD), deliberately break the behaviour under proof (name the exact break in the report), run the new tests there and watch them fail, then discard the scratch checkout. Each new journey test must fail under the mutation and pass in ${worktree}.`
 } Record the exact commands and their output for both directions in ${unitDir}/report.md, alongside what you did not cover and your confidence. Remove the temporary checkout when done. Reply with a two-sentence summary and the head commit.`,
-  { engine: "codex", cwd: worktree, label: "build", phase: "build", timeoutMs: 14400000 }
+  { cwd: worktree, label: "build", phase: "build", timeoutMs: 14400000 }
 );
 
 // ---------------------------------------------------------------- verify
@@ -219,7 +182,7 @@ Every command your verdict leans on is evidenced by the command line as executed
 Reply with a single JSON value conforming to the schema. Reason first if you need to, but the JSON value comes last: the final non-whitespace characters of your message must be the JSON value itself — no prose, no code fence, no example after it. Never restate the schema or show a sample answer; the only JSON value in your reply is your actual answer.`;
 
 let verdict = await agent(verifyPrompt(null, null), {
-  engine: "claude", schema: findingsSchema, cwd: worktree, label: "verify", phase: "verify",
+  model: "claude-opus-5", effort: "medium", schema: findingsSchema, cwd: worktree, label: "verify", phase: "verify",
 });
 if (!verdict) throw new Error("verifier stage returned nothing usable — re-run, never read as clean");
 if (!verdict.examined || !verdict.examined.trim())
@@ -269,13 +232,13 @@ while (severesIn(verdict).length) {
     break;
   }
   const autoFix = await agent(autoFixPrompt(rounds), {
-    engine: "codex", effort: "medium", schema: autoFixSchema,
+    effort: "medium", schema: autoFixSchema,
     cwd: worktree, label: `fix:${rounds}`, phase: "triage", timeoutMs: 7200000,
   });
   if (!autoFix) throw new Error("autonomous fix round returned nothing usable — re-run, never read as applied");
   fixReport = autoFix.summary;
   verdict = await agent(verifyPrompt(rounds, "autonomous"), {
-    engine: "claude", schema: findingsSchema, cwd: worktree, label: `verify:refix:${rounds}`, phase: "triage",
+    model: "claude-opus-5", effort: "medium", schema: findingsSchema, cwd: worktree, label: `verify:refix:${rounds}`, phase: "triage",
   });
   if (!verdict) throw new Error("re-verification returned nothing usable");
   if (!verdict.examined || !verdict.examined.trim())
@@ -311,8 +274,6 @@ while (true) {
     autonomous_rounds: autonomousRounds,
     autonomous_note: handover || "no severe findings remain; a land may leave sub-severe findings undispositioned — they return in the envelope as issues_findings for the annexe issue log",
   }, ["land", "fix", "park"]);
-  if (!triage || triage.verdict === "timeout")
-    return { outcome: "timed-out", at: "triage-hold", salvage: { plan, report, verdict, fixReport, autonomous_rounds: autonomousRounds } };
   if (triage.verdict === "park") return { outcome: "parked", plan, report, verdict, fixReport, autonomous_rounds: autonomousRounds };
 
   if (triage.verdict === "land") {
@@ -375,10 +336,10 @@ while (true) {
       rulings.push(`on ${rounds === 0 ? "verdict.md" : `verdict-refix-${rounds - 1}.md`} finding index ${d.finding} (${d.disposition}): ${d.note.trim()}`);
   fixReport = await agent(
     `The verifier raised findings (${unitDir}/${rounds === 0 ? "verdict.md" : `verdict-refix-${rounds - 1}.md`}); the orchestrator's fix dispositions by index: ${JSON.stringify(fixList)}, note: "${triage.note || ""}". Your brief's standing constraints remain in force: work only in ${worktree}; never push, open PRs, or merge; tests exercise the ladder's rung, never a stand-in. Apply exactly those dispositions — no more. A disposition you cannot apply honestly as written — it would need manufactured state or an untrue assertion — stays unapplied: report it as blocked in your reply and in ${unitDir}/report.md, with why. Re-demonstrate the estate property both directions (the same proof-mode mechanics as before — baseline checkout, or mutation), then make the whole of ${unitDir}/report.md true about the current tree — not just the lines a finding quoted. Reply with a summary and the new head commit.`,
-    { engine: "codex", effort: "medium", cwd: worktree, label: `fix:${rounds}`, phase: "triage", timeoutMs: 7200000 }
+    { effort: "medium", cwd: worktree, label: `fix:${rounds}`, phase: "triage", timeoutMs: 7200000 }
   );
   verdict = await agent(verifyPrompt(rounds, "directed"), {
-    engine: "claude", schema: findingsSchema, cwd: worktree, label: `verify:refix:${rounds}`, phase: "triage",
+    model: "claude-opus-5", effort: "medium", schema: findingsSchema, cwd: worktree, label: `verify:refix:${rounds}`, phase: "triage",
   });
   if (!verdict) throw new Error("re-verification returned nothing usable");
   if (!verdict.examined || !verdict.examined.trim())
@@ -407,7 +368,7 @@ const landing = await agent(
   mergePolicy === "direct-merge"
     ? `Land the finished estate unit. Read ${annexeConfigPath} for push_policy first. From ${worktree}, merge the unit branch into main — conflicts are {landed:false, blocked_on:"conflict"}. Push main only under push_policy "push-on-land". Reply {landed, detail, merge_commit}, landed true only if the merge commit exists on main (verify with git log). JSON last.`
     : `Publish the finished estate unit as a blocked PR. Read ${annexeConfigPath} for push_policy first: under "hold-for-user" do NOT push — reply {landed:false, blocked_on:"push_policy hold-for-user"}. Otherwise write ${unitDir}/pr.md whole from the report (What changed / Why / What must be true / Known gaps), push the branch, open the PR "WIP:"-prefixed via the forge API, base ${integrationBranch} (the unit's integration lane — the structural branch for lane units, whose promotion PR carries them to main later, or main itself for a Lane: main unit) (tokens under ~/.config/forgejo/; refs/for/* AGit pushes forbidden; auth failure → {landed:false, blocked_on:"forge auth"}). Confirm by API read that the PR exists with a non-empty body; landed true only on that confirmation. Reply {landed, detail, pr_number, pr_url}. JSON last.`,
-  { engine: "codex", schema: landingSchema, cwd: worktree, label: "land", phase: "land", timeoutMs: 1800000 }
+  { schema: landingSchema, cwd: worktree, label: "land", phase: "land", timeoutMs: 1800000 }
 );
 
 // issues_findings — sub-severe findings accepted by default at the land —

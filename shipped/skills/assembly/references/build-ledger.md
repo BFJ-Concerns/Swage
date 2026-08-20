@@ -112,16 +112,17 @@ truth; nothing below corrects it.
   Evidence reads as `open`. The assembly run discharges it with
   proof-only work — run the record's named rung, rewrite to `proven` on
   the evidence — never a build unit.
-- `parked: <what>` — where `<what>` is either `form <wrack-form-id>`
-  (waiting on the user — forms are published and read back through the
-  `wrack-pages` skill; a response is a decision to act on) or
+- `parked: <what>` — where `<what>` is either `decision <question>`
+  (waiting on the user — the question was delivered to them, and their
+  answer is a decision to act on) or
   `blocked-on <mechanism>` (waiting on a named mechanism; its recovery is
   not a decision).
 - `proven` — requires Evidence in the same edit: pointers to the proof run
   (the command and its recorded output, the estate result, the verdict
   file). `proven` with empty Evidence reads as `open`.
 - `waived <by> <date>` — requires Evidence pointing at the user's recorded
-  say-so (the Wrack form response, or their words quoted from chat). There
+  say-so (their answer to the delivered question, or their words quoted
+  from the conversation). There
   is no self-waiver; `waived` citing anything but the user reads as `open`.
 
 ## Rules
@@ -155,25 +156,3 @@ truth; nothing below corrects it.
   completion is itself a derived status rather than a journal claim. It
   is also the home for estate-level proofs no single unit can run (the
   assembly skill's landing discipline).
-
-## Migrating the Old Single-File Ledger
-
-**Temporary — remove after 2026-10-07:** ledgers written before 2026-08-11
-hold every obligation as a section of `build/ledger.md`, often with
-chronologically layered Evidence prose and a header carrying superseded-ref
-chains. On first opening such a ledger, migrate before dispatching: split
-each obligation into `build/obligations/<slug>.md`, rewriting it to current
-state only — corrections were appended *beneath* the text they correct, so
-the newest truth sits at each section's bottom: take that newest layer,
-verified against the tree wherever layers disagree — and delete the
-superseded layers and the header's
-transcribed chains (git keeps them); trim `build/ledger.md` to the header.
-One commit, journalled as the migration. The queues migrate in the same
-sweep: delete any struck-through or completed `TASKS.md` items — the
-strike already recorded their disposition — and any `ISSUES.md` entries
-carrying an appended resolution, whose disposition moves to the deleting
-commit's message. Run the migration as an ensemble workflow (the
-`ensemble-workflow` skill) fanned out over lower-tier GPT workers — the
-splitting and the queue sweep are mechanical, not seat work; review the
-resulting records before the commit. If today is after 2026-10-07,
-this note has outstayed its window: tell the user to remove it.

@@ -152,38 +152,30 @@ Stages, with the holds where the pipeline waits on you:
    obligation is proven and no dependent can force a change (SKILL.md,
    Landing).
 
-**Holds are nonce-correlated; the content rides the run's stderr.** Each
-hold emits a `[hold-content]` line on the pipeline's stderr log carrying
-the hold's exact JSON (`{stage, nonce, content, decisionPath}`) — that
-line is the authoritative content, written byte-for-byte by the script
-itself (a worker once shell-escaped quoted template-literal code into
-invalid JSON, so no worker transcribes it). A worker additionally drops a
-fixed-content signal file `<unitDir>/<stage>.<nonce>.hold.json`
-(`{stage, nonce}` only) so directory watches still fire; read the content
-from the stderr line, not the signal file. Answer by writing the decision
-file at the hold content's own `decisionPath`, echoing that exact nonce —
-take the path from the `[hold-content]` line, never construct it from the
-stage name: a stage that repeats runs as numbered instances (`triage1`,
-`triage2`, …), so a name built from the bare stage is silently ignored
-even when its nonce is right. The schemas
-are: restate holds take `{verdict: accept|correct|kill, nonce, note?}`;
+**Holds are nonce-correlated events on the run's queue.** Each hold posts
+a `decision-needed` event carrying the hold's exact content
+(`{stage, nonce, content, options}`) and pauses the pipeline until the
+answering `decision` event arrives — posted into the run from outside the
+script: by you (the lead) clearing your batch of pending decisions at a
+wake, or by the operator through the run surface. The decision's payload
+echoes the hold's exact nonce — take it from the `decision-needed` event,
+never construct it from the stage name: a stage that repeats runs as
+numbered instances (`triage1`, `triage2`, …), and a decision naming an
+earlier attempt's nonce is silently ignored; the script checks the nonce
+itself. The payload shapes are: restate holds take
+`{verdict: accept|correct|kill, nonce, note?}`;
 triage holds take `{verdict: land|fix|park, nonce, note?, dispositions?:
 [{finding: <index>, disposition: fix|contract-question|accept-with-note,
 note?}]}` — `finding` is the 0-based position in the hold content's
-findings array. After writing a decision, read the run's stderr log
-before acting on what happens next: a declined decision (a `land` the
+findings array. After posting a decision, read the run's journal before
+acting on what happens next: a declined decision (a `land` the
 disposition check refuses) re-holds at a fresh nonce with identical hold
-content, and the reason (`land refused: …`) appears only in that log — a
-directory watch alone cannot tell a rejected decision from the verifier
-re-raising the same findings. A decision with the wrong nonce is ignored
-(it belonged
-to an earlier attempt); the script checks the nonce itself. Waiting is
-script-owned — short worker poll legs against the script's own clock —
-so a poll worker that wedges or gives up early costs one leg, never the
-hold; only the script's clock declares a timeout. A hold that times out
-ends the run with a structured salvage envelope — completed stage outputs
-survive; resume by re-dispatching with the salvage in the brief's
-situational slice.
+content, and the reason (`land refused: …`) appears only in the run's
+log entries — the next `decision-needed` event alone cannot tell a
+rejected decision from the verifier re-raising the same findings. There
+is no hold timeout: an unanswered decision parks that unit's run —
+blocking is accepted — and every completed stage survives in the
+journal, so answering late loses nothing.
 
 Tier pins ride the template's `defaults`: builders on the build family's
 flagship tier at low effort (the brief and exemplar have decided the path —
@@ -194,19 +186,15 @@ verdict that sent the unit back falsifies the decided-path ground the low
 pin rests on. Override per dispatch only with a nameable reason,
 journalled.
 
-A pin is only as good as the model actually serving the worker, and Codex
-undermines it from two directions. Under load Codex offers a "switch to a
-faster model" dialog — accepting it silently downgrades the worker to the
-floor tier (Luna), so never blind-accept it: when a pinned tier is
-genuinely unavailable, the sanctioned fallback is Terra at max effort,
-never Luna — a standing operator decision (2026-07-10), and a deliberate
-exception to the effort doctrine's `max` exclusion: this is not escalation
-on the ordinary ladder but compensation for a forced tier drop — and the
-step-down is journalled like any other declared degradation. Steering can also silently
-re-resolve the model, so after any steer, check which model the worker's
-next reply reports serving it — the model line Codex appends to a turn, or
-the session's own metadata where that footer is absent — and confirm it
-still names the pinned model before trusting further output.
+A pin is only as good as the model actually serving the worker: the run
+record names the model each call resolved to, so confirm a suspect
+worker's serving model there before trusting its output. When a pinned
+GPT tier is genuinely unavailable, the sanctioned fallback is
+`gpt-5.6-terra` at max effort, never the floor tier — a standing
+operator decision (2026-07-10), and a deliberate exception to the effort
+doctrine's `max` exclusion: this is not escalation on the ordinary
+ladder but compensation for a forced tier drop — and the step-down is
+journalled like any other declared degradation.
 
 ## estate-unit.js — end-to-end estate work
 
@@ -249,10 +237,11 @@ stage is a single worker, so brief a writer-sized slice of the landed
 work; an obligation grown past that splits into several units discharged
 through the run (SKILL.md, *Documentation Rides the Run*). The same
 hold protocol as build-verify, with the writer and
-verifier families swapped: the writer runs on the Claude engine, pinned to
+verifier families swapped: the writer runs on the Claude family, pinned
+to
 `claude-opus-4-6` — an operator-settled prose pick (standing decision
 2026-08-13); change it only on the user's word, never as a modernisation
-sweep — and verification crosses to Codex, below its family's top tier as
+sweep — and verification crosses to the GPT family, below its top tier as
 verifiers always are. Landing differs from build-verify: the unit lands by
 direct merge under either merge policy — into main under direct-merge,
 into the integration branch under PR mode — never as a PR
@@ -284,62 +273,25 @@ stage — proposals are checked by you at landing, against the commission.
 
 ## Running and Watching
 
-Templates run on the ensemble runtime — the `ensemble-workflow` skill owns
-the launcher, the watch mechanics, and salvage of interrupted runs.
+The templates ride this skill: start one by name through the workflow-run
+surface, passing the inputs its header names as the run's args (the
+workflow-authoring skill teaches the surface). Each pipeline is its own
+run with its own journal, event queue, and budgets; an interrupted run
+resumes by replay, so nothing completed is re-executed and no salvage
+ceremony is needed — the journal is the salvage.
 
-<!-- foundry:engine-placeholders ensemble-runtime start -->
-
-## Running a workflow
-
-The runtime lives in the `ensemble-workflow` skill — a self-contained Node ≥24 launcher,
-nothing to install. Run a workflow with flags **before** the script path; the result is
-one line of JSON on stdout, logs on stderr:
-
-```bash
-node ~/.claude/skills/ensemble-workflow/scripts/ensemble.mjs --json-args '<json>' ~/.claude/skills/<skill>/workflows/<name>.js > <scratch>/<name>.json 2> <scratch>/<name>.log
-```
-
-`<skill>` is the skill this reference ships with — substitute its bundled workflow
-script's installed path (a skill that documents a concrete command already spells it
-out). Both paths are absolute so the command runs from any
-cwd — launch from the directory the move itself calls for (a blind stage from an empty
-scratch directory, a grounded one from the code repo), never from a directory chosen just
-to make a relative path resolve.
-
-The script **cannot touch the filesystem** (sandboxed): pass every input in `--json-args`,
-and **you are the driver** — write the returned stdout to `<scratch>`, read it, and bring
-the result back. Read each workflow script's header for the inputs it names.
-Everything else — the flags (`--budget`, `--concurrency`, `--timeout`), their defaults and
-when to set them, the live-engine requirement, and the fan-in limits — is owned by the
-`ensemble-workflow` skill; read it before running or authoring a workflow.
-
-<!-- foundry:engine-placeholders ensemble-runtime end -->
-
-Launch pipelines in the background, watch their status snapshots and their
-holds (the signal files `<unitDir>/<stage>.<nonce>.hold.json` — the nonce
-is in the filename, so watch the unit directory for `*.hold.json` rather
-than a fixed name; the hold's content is the matching `[hold-content]`
-line in the run's stderr log, and each is answered at the `decisionPath`
-that line names), and hold a scheduled wake armed for every
-unattended stretch regardless of watchers: a wedged pipeline emits no
-event, so the timer bounds the silence and a silent stretch past the bound
-is sampled, never slept through. For "has this run finished?", the
-launcher's completion sentinel is the end-of-run signal (the
-ensemble-workflow skill's *The completion sentinel says a run has ended*
-carries the mechanics and its uncatchable-kill caveat).
-
-<!-- foundry:variant supervision-heartbeat start -->
-
-Hold the run open with a self-paced loop — `/loop` with no interval, so you
-set each next wake yourself off the run's state: minutes while a restatement
-or triage hold is likely pending, far longer once pipelines are cruising.
-Monitor watches on the run logs and hold-file paths, and background-task
-notifications, are accelerators that may wake you sooner; the scheduled loop
-wake stays armed behind them. Schedule the wake before ending every turn —
-never leave only a watch or a pending notification between you and the
-pipelines.
-
-<!-- foundry:variant supervision-heartbeat end -->
+Watch a pipeline through its run record and events: a `decision-needed`
+event is a hold awaiting your answer (post the `decision` event back into
+the run — the hold protocol above); a run parked on an unanswered
+decision stays parked until you answer, and answering wakes it. Batch
+your attention: clear the pending decisions across every live pipeline at
+one sitting, then leave them to cruise — the queue holds what accumulates
+between your wakes. Set a self-wake (your own scheduling tools) for every
+unattended stretch regardless of event delivery: a wedged worker emits no
+event, so the timer bounds the silence and a silent stretch past the
+bound is sampled, never slept through. For "has this run finished?", the
+run's own terminal state is the signal, carried in its record and its
+completion event.
 
 Multiple units run as multiple concurrent pipeline invocations, one per
 unit — admission control (disk, quota, seam collisions) happens
