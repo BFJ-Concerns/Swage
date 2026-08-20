@@ -1152,28 +1152,18 @@ async fn run_host_commands_inner(
                     if entry.kind != "worker_placement" || entry.args_hash != hash {
                         Err("NondeterministicReplayError".into())
                     } else if entry.status == "completed" {
-                        match cwd.as_deref() {
-                            Some(repo) => resolve_authorised_worker_directory(
-                                &state, space_id, run_id, None, repo,
-                            )
-                            .await
-                            .map_err(|error| format!("WorkerPlacementError: {error}"))
-                            .and_then(|_| {
-                                entry
-                                    .result
-                                    .as_ref()
-                                    .and_then(|value| value.get("path"))
-                                    .and_then(Value::as_str)
-                                    .map(|path| Some(ResolvedWorkerPlacement {
-                                        path: path.to_string(),
-                                        can_write: true,
-                                    }))
-                                    .ok_or_else(|| {
-                                        "completed worker placement has no path".to_string()
-                                    })
-                            }),
-                            None => Err("WorkerPlacementError: isolation=worktree requires cwd to name the git repository".into()),
-                        }
+                        entry
+                            .result
+                            .as_ref()
+                            .and_then(|value| value.get("path"))
+                            .and_then(Value::as_str)
+                            .map(|path| {
+                                Some(ResolvedWorkerPlacement {
+                                    path: path.to_string(),
+                                    can_write: true,
+                                })
+                            })
+                            .ok_or_else(|| "completed worker placement has no path".to_string())
                     } else if entry.status == "failed" {
                         Err(entry
                             .error_message
@@ -3813,7 +3803,11 @@ mod tests {
         (state, storage)
     }
 
-    async fn grant_workspace(storage: &SqliteStorage, space_id: Uuid, path: &std::path::Path) {
+    async fn grant_workspace(
+        storage: &SqliteStorage,
+        space_id: Uuid,
+        path: &std::path::Path,
+    ) -> Uuid {
         storage
             .create_workspace_attachment(NewWorkspaceAttachment {
                 space_id,
@@ -3823,7 +3817,8 @@ mod tests {
                 is_trusted: true,
             })
             .await
-            .expect("grant test workspace");
+            .expect("grant test workspace")
+            .id
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -5468,7 +5463,9 @@ mod tests {
 
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
         let space = storage.get_or_create_default().await.expect("space");
-        grant_workspace(storage.as_ref(), space.id, &repo).await;
+        let repo_grant = grant_workspace(storage.as_ref(), space.id, &repo).await;
+        let newly_allowed = fixture.path().join("newly-allowed");
+        std::fs::create_dir(&newly_allowed).expect("newly allowed fixture");
         let run = storage
             .create_workflow_run(NewWorkflowRun {
                 space_id: space.id,
@@ -5530,7 +5527,7 @@ mod tests {
         assert!(allowed.can_write);
         let (denied_reply, denied_receive) = oneshot::channel();
         tx.send(HostCommand::ResolveWorkerDirectory {
-            cwd: fixture.path().to_string_lossy().into_owned(),
+            cwd: newly_allowed.to_string_lossy().into_owned(),
             reply: denied_reply,
         })
         .unwrap();
@@ -5576,7 +5573,13 @@ mod tests {
         assert_eq!(replay[2].request["cwd"], repo.to_string_lossy().as_ref());
         assert_eq!(replay[2].result.as_ref().unwrap()["path"], first_path);
 
-        grant_workspace(storage.as_ref(), space.id, fixture.path()).await;
+        assert!(
+            storage
+                .delete_workspace_attachment(repo_grant)
+                .await
+                .expect("revoke repository grant")
+        );
+        grant_workspace(storage.as_ref(), space.id, &newly_allowed).await;
         let (replay_tx, replay_task) = run_loop(make_state(), replay.clone());
         let (reply, receive) = oneshot::channel();
         replay_tx
@@ -5592,7 +5595,7 @@ mod tests {
         let (reply, receive) = oneshot::channel();
         replay_tx
             .send(HostCommand::ResolveWorkerDirectory {
-                cwd: fixture.path().to_string_lossy().into_owned(),
+                cwd: newly_allowed.to_string_lossy().into_owned(),
                 reply,
             })
             .unwrap();
@@ -5641,7 +5644,7 @@ mod tests {
         let (reply, receive) = oneshot::channel();
         changed_tx
             .send(HostCommand::ResolveWorkerDirectory {
-                cwd: fixture.path().to_string_lossy().into_owned(),
+                cwd: newly_allowed.to_string_lossy().into_owned(),
                 reply,
             })
             .unwrap();
