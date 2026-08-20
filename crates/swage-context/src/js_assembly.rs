@@ -19,8 +19,9 @@
 //! - `elements` — the turn's elements, read-only:
 //!   `[{ name, priority, source, tokenCount, messages, render }]` where
 //!   `messages` is `[{ role, text }]`. Calling an element's non-enumerable
-//!   `render()` returns a message array with every `{{name}}` slot replaced
-//!   from the current session values; absent values become `⟦unset:name⟧`.
+//!   `render()` returns a copy of the element whose messages have every
+//!   `{{name}}` slot replaced from the current session values; absent values
+//!   become `⟦unset:name⟧`.
 //! - `ctx` — read-only assembly context. `ctx.variable(name)` returns the
 //!   current session value or `undefined` when the name is absent.
 //! - `add(element_or_messages)` — appends an element's messages (pass an
@@ -297,7 +298,8 @@ fn run_script(
             const variables = globalThis.__variables;
             const valueFor = name => Object.prototype.hasOwnProperty.call(variables, name)
                 ? variables[name]
-                : `⟦unset:${name}⟧`;
+                : undefined;
+            const renderedValueFor = name => valueFor(name) ?? `⟦unset:${name}⟧`;
             globalThis.ctx = Object.freeze({ variable: valueFor });
             for (const element of globalThis.elements) {
                 Object.defineProperty(element, "render", {
@@ -306,7 +308,7 @@ fn run_script(
                         ...element,
                         messages: element.messages.map(message => ({
                             ...message,
-                            text: message.text.replace(slot, (_match, name) => valueFor(name)),
+                            text: message.text.replace(slot, (_match, name) => renderedValueFor(name)),
                         })),
                     }),
                 });
@@ -438,8 +440,15 @@ mod tests {
                 source_level: HierarchyLevel::Global,
                 file_path: PathBuf::from("test"),
             }]))];
-        let (messages, _) = run_script(
-            "add(elements[0].render()); add([{ role: 'system', text: ctx.variable('task') }]);",
+        let (messages, added) = run_script(
+            r#"
+            const rendered = elements[0].render();
+            add(rendered);
+            add([{
+                role: 'system',
+                text: `${ctx.variable('task')}|${ctx.variable('owner') === undefined}`,
+            }]);
+            "#,
             &elements,
             &WordTokeniser,
             &variables,
@@ -450,7 +459,11 @@ mod tests {
             messages[0].text_content(),
             "Do audit storage for ⟦unset:owner⟧; direct=audit storage"
         );
-        assert_eq!(messages[1].text_content(), "audit storage");
+        assert_eq!(messages[1].text_content(), "audit storage|true");
+        assert_eq!(
+            added[0].name, "prompts",
+            "render() preserves element metadata"
+        );
     }
 
     /// The report attributes each add() to what was actually added, so a
