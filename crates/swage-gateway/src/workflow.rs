@@ -5185,6 +5185,165 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn worktree_provisioning_journal_replays_lists_and_rejects_changed_arguments() {
+        let fixture = tempfile::tempdir_in("/tmp/scratch").expect("scratch fixture");
+        let repo = fixture.path().join("repo");
+        std::fs::create_dir(&repo).expect("repo");
+        for args in [
+            &["init"][..],
+            &["config", "user.email", "test@example.invalid"][..],
+            &["config", "user.name", "Test"][..],
+        ] {
+            assert!(
+                std::process::Command::new("git")
+                    .arg("-C")
+                    .arg(&repo)
+                    .args(args)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        std::fs::write(repo.join("seed"), "seed").expect("seed");
+        assert!(
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(["add", "seed"])
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(["commit", "-m", "seed"])
+                .status()
+                .unwrap()
+                .success()
+        );
+
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let run = storage
+            .create_workflow_run(NewWorkflowRun {
+                space_id: space.id,
+                parent_run_id: None,
+                parent_seq: None,
+                script_version_id: None,
+                source: Some("return null".into()),
+                source_hash: source_hash("return null"),
+                args: Value::Null,
+                budget: serde_json::json!({}),
+                engine_version: "test".into(),
+                dispatch_bound_agent_ids: vec![],
+            })
+            .await
+            .expect("run");
+        let make_state = || {
+            AppState::new(
+                Arc::clone(&storage) as Arc<dyn Storage>,
+                Arc::clone(&storage) as Arc<dyn SpaceStore>,
+                Arc::new(ScriptedRecordingProvider {
+                    outputs: std::sync::Mutex::new(Default::default()),
+                    requests: std::sync::Mutex::new(vec![]),
+                }),
+                swage_config::ResolvedConfig::default(),
+                crate::tool::ToolDispatcher::allow_all(vec![]),
+                None,
+            )
+        };
+        let state = make_state();
+        let run_loop = |state: AppState, replay: Vec<WorkflowJournalRecord>| {
+            let (tx, rx) = mpsc::unbounded_channel();
+            let task = tokio::spawn(run_host_commands(
+                state,
+                run.id,
+                space.id,
+                vec![],
+                None,
+                WorkflowBudget::default(),
+                replay,
+                Arc::new(AtomicU32::new(0)),
+                Arc::new(AtomicU64::new(0)),
+                Arc::new(Mutex::new(std::collections::HashMap::new())),
+                CancellationToken::new(),
+                PARK_TIMER_THRESHOLD_MS,
+                rx,
+            ));
+            (tx, task)
+        };
+        let (tx, task) = run_loop(state.clone(), vec![]);
+        let (placement_reply, placement_receive) = oneshot::channel();
+        tx.send(HostCommand::ProvisionWorker {
+            cwd: Some(repo.to_string_lossy().into_owned()),
+            isolation: swage_protocol::client::workflow::WorkerIsolation::Worktree,
+            reply: placement_reply,
+        })
+        .unwrap();
+        let first_path = placement_receive.await.unwrap().unwrap().unwrap();
+        let (list_reply, list_receive) = oneshot::channel();
+        tx.send(HostCommand::ListWorkerPlacements { reply: list_reply })
+            .unwrap();
+        assert_eq!(
+            list_receive.await.unwrap().unwrap()["paths"],
+            serde_json::json!([first_path])
+        );
+        drop(tx);
+        task.await.unwrap();
+
+        let replay = storage.list_workflow_journal(run.id).await.unwrap();
+        assert_eq!(
+            replay
+                .iter()
+                .map(|entry| entry.kind.as_str())
+                .collect::<Vec<_>>(),
+            ["worker_placement", "worker_placement"]
+        );
+        assert_eq!(replay[0].request["cwd"], repo.to_string_lossy().as_ref());
+        assert_eq!(replay[0].result.as_ref().unwrap()["path"], first_path);
+
+        let (replay_tx, replay_task) = run_loop(make_state(), replay.clone());
+        let (reply, receive) = oneshot::channel();
+        replay_tx
+            .send(HostCommand::ProvisionWorker {
+                cwd: Some(repo.to_string_lossy().into_owned()),
+                isolation: swage_protocol::client::workflow::WorkerIsolation::Worktree,
+                reply,
+            })
+            .unwrap();
+        assert_eq!(
+            receive.await.unwrap().unwrap().as_deref(),
+            Some(first_path.as_str())
+        );
+        drop(replay_tx);
+        replay_task.await.unwrap();
+        assert_eq!(
+            storage.list_workflow_journal(run.id).await.unwrap().len(),
+            2,
+            "replay must not add a worktree journal entry"
+        );
+
+        let (changed_tx, changed_task) = run_loop(make_state(), replay);
+        let (reply, receive) = oneshot::channel();
+        changed_tx
+            .send(HostCommand::ProvisionWorker {
+                cwd: Some(fixture.path().to_string_lossy().into_owned()),
+                isolation: swage_protocol::client::workflow::WorkerIsolation::Worktree,
+                reply,
+            })
+            .unwrap();
+        assert_eq!(
+            receive.await.unwrap().unwrap_err(),
+            "NondeterministicReplayError"
+        );
+        drop(changed_tx);
+        changed_task.await.unwrap();
+        state.worktree_host.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn timed_out_agent_call_is_cancelled_journalled_and_replayed_without_reinvocation() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
         let space = storage.get_or_create_default().await.expect("space");
