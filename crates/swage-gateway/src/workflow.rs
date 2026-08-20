@@ -3725,7 +3725,7 @@ mod tests {
             .expect("create elements directory");
         std::fs::write(
             swage_home.path().join("assemblies/focused.js"),
-            "add(elements.find(element => element.name === 'current-work').render());",
+            "for (const element of elements) add(element.render());",
         )
         .expect("write named assembly");
         std::fs::write(
@@ -3807,22 +3807,40 @@ mod tests {
             )])),
             assembly: Some("focused".into()),
         };
-        let mut results = Vec::new();
-        for _ in 0..2 {
-            let (reply, receive) = oneshot::channel();
-            tx.send(HostCommand::Agent {
-                request: request.clone(),
-                cancellation: CancellationToken::new(),
-                reply,
-            })
-            .expect("send agent call");
-            results.push(
-                receive
-                    .await
-                    .expect("receive agent result")
-                    .expect("agent call"),
-            );
-        }
+        let (reply, receive) = oneshot::channel();
+        tx.send(HostCommand::Agent {
+            request: request.clone(),
+            cancellation: CancellationToken::new(),
+            reply,
+        })
+        .expect("send initial agent call");
+        let first_result = receive
+            .await
+            .expect("receive initial agent result")
+            .expect("initial agent call");
+
+        let initial_journal = storage
+            .list_workflow_journal(run.id)
+            .await
+            .expect("read initial journal");
+        assert_eq!(initial_journal.len(), 1);
+        let expected = serde_json::to_value(&request).expect("serialise expected request");
+        assert_eq!(initial_journal[0].request, expected);
+        let replayed_request: AgentCallRequest =
+            serde_json::from_value(initial_journal[0].request.clone())
+                .expect("reconstruct agent request from journal");
+
+        let (reply, receive) = oneshot::channel();
+        tx.send(HostCommand::Agent {
+            request: replayed_request,
+            cancellation: CancellationToken::new(),
+            reply,
+        })
+        .expect("send replayed agent call");
+        let replayed_result = receive
+            .await
+            .expect("receive replayed agent result")
+            .expect("replayed agent call");
         drop(tx);
         task.await.expect("host loop");
 
@@ -3830,12 +3848,11 @@ mod tests {
             .list_workflow_journal(run.id)
             .await
             .expect("read journal");
-        let expected = serde_json::to_value(&request).expect("serialise expected request");
         assert_eq!(journal.len(), 2);
         assert!(journal.iter().all(|entry| entry.request == expected));
 
         let mut reports = Vec::new();
-        for result in &results {
+        for result in [&first_result, &replayed_result] {
             let report = storage
                 .get_snapshot(result.turn_id.expect("turn id"))
                 .await
@@ -3859,6 +3876,14 @@ mod tests {
             );
             report.as_object_mut().unwrap().remove("duration");
             report.as_object_mut().unwrap().remove("provider_visible");
+            report.as_object_mut().unwrap().remove("total_tokens");
+            if let Some(orientation) = report["elements"].as_array_mut().and_then(|elements| {
+                elements
+                    .iter_mut()
+                    .find(|element| element["name"] == "orientation")
+            }) {
+                orientation.as_object_mut().unwrap().remove("token_count");
+            }
             reports.push(report);
         }
         assert_eq!(reports[0], reports[1]);
