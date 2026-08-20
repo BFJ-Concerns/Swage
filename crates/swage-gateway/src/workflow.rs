@@ -156,7 +156,9 @@ async fn resolve_workflow_by_id(
             .iter()
             .find(|workflow| builtin_workflows::id(space.id, workflow.name) == id)
         {
-            return resolve_workflow_by_name(state, space.id, workflow.name).await;
+            return Ok(resolve_workflow_by_name(state, space.id, workflow.name)
+                .await?
+                .filter(|effective| effective.id == id));
         }
     }
     Ok(None)
@@ -2415,6 +2417,7 @@ async fn complete_workflow_call_entry(
             _ => child,
         },
         None => {
+            let inline_identity = script.inline_identity();
             let parent = state
                 .storage
                 .get_workflow_run(parent_run_id)
@@ -2431,9 +2434,11 @@ async fn complete_workflow_call_entry(
                     parent_run_id: Some(parent_run_id),
                     parent_seq: Some(parent_seq),
                     script_version_id: script.script_version_id,
-                    inline_workflow_id: script.built_in.then_some(script.id),
-                    inline_workflow_name: script.built_in.then(|| script.name.clone()),
-                    inline_workflow_version: script.built_in.then_some(script.head_version),
+                    inline_workflow_id: inline_identity.as_ref().map(|identity| identity.id),
+                    inline_workflow_name: inline_identity
+                        .as_ref()
+                        .map(|identity| identity.name.clone()),
+                    inline_workflow_version: inline_identity.map(|identity| identity.version),
                     source: script
                         .script_version_id
                         .is_none()
@@ -3476,64 +3481,139 @@ mod tests {
     async fn authored_workflow_shadows_the_same_named_builtin() {
         let (state, storage) = workflow_test_state();
         let space = storage.get_or_create_default().await.expect("space");
-        let builtin_id = builtin_workflows::id(space.id, "research-sweep");
-        let (authored, _) = storage
-            .create_workflow_script(NewWorkflowScript {
-                space_id: space.id,
-                name: "research-sweep".into(),
-                description: "Operator variant".into(),
-                source: "return 'operator';".into(),
-                delivery_grant: None,
-            })
+        let router = crate::server::build_router(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
-            .expect("authored script");
+            .expect("bind test gateway");
+        let address = listener.local_addr().expect("test gateway address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router)
+                .await
+                .expect("serve test gateway");
+        });
+        let client = reqwest::Client::new();
+        let base_url = format!("http://{address}");
 
-        let effective = resolve_workflow_by_name(&state, space.id, "research-sweep")
+        let initial_list = client
+            .get(format!(
+                "{base_url}/api/spaces/{}/workflow-scripts",
+                space.id
+            ))
+            .send()
             .await
-            .expect("resolve")
-            .expect("effective script");
-        assert_eq!(effective.id, authored.id);
-        assert_eq!(effective.source, "return 'operator';");
-        assert!(!effective.built_in);
-
-        let Json(list) = list_scripts(State(state.clone()), Path(space.id))
+            .expect("list built-ins over HTTP")
+            .error_for_status()
+            .expect("built-in listing response")
+            .json::<Value>()
             .await
-            .expect("workflow list");
-        assert_eq!(list.scripts.len(), 1);
-        let listed = list
-            .scripts
+            .expect("serialise built-in listing");
+        let builtin = initial_list["scripts"]
+            .as_array()
+            .expect("script array")
             .iter()
-            .find(|script| script.name == "research-sweep")
-            .expect("listed operator variant");
-        assert_eq!(listed.id, authored.id);
-        assert!(!listed.built_in);
+            .find(|script| script["name"] == "research-sweep")
+            .expect("research-sweep built-in");
+        let builtin_id = builtin["id"].as_str().expect("built-in id").to_string();
+        assert_eq!(builtin["built_in"], true);
 
-        let Json(read) = get_script(State(state.clone()), Path(builtin_id))
+        let authored = client
+            .post(format!(
+                "{base_url}/api/spaces/{}/workflow-scripts",
+                space.id
+            ))
+            .json(&serde_json::json!({
+                "name": "research-sweep",
+                "description": "Operator variant",
+                "source": "return 'operator';",
+                "delivery_grant": null
+            }))
+            .send()
             .await
-            .expect("retained built-in id follows the effective winner");
-        assert_eq!(read.id, authored.id);
-        assert!(!read.built_in);
+            .expect("create authored shadow over HTTP")
+            .error_for_status()
+            .expect("authored shadow response")
+            .json::<Value>()
+            .await
+            .expect("serialise authored shadow");
+        let authored_id = authored["id"].as_str().expect("authored id");
+        assert_ne!(authored_id, builtin_id);
+        assert_eq!(authored["built_in"], false);
 
-        let Json(started) = start_saved_run(
-            State(state.clone()),
-            Path(builtin_id),
-            Json(StartWorkflowRunRequest {
-                args: Value::Null,
-                budget: None,
-            }),
-        )
-        .await
-        .expect("retained built-in id starts the effective winner");
-        wait_for_terminal(&state, started.id).await;
+        let hidden_read = client
+            .get(format!("{base_url}/api/workflow-scripts/{builtin_id}"))
+            .send()
+            .await
+            .expect("read hidden built-in over HTTP");
+        assert_eq!(hidden_read.status(), reqwest::StatusCode::NOT_FOUND);
+        assert_eq!(
+            hidden_read
+                .json::<Value>()
+                .await
+                .expect("serialise hidden read rejection")["code"],
+            "not_found"
+        );
+
+        let hidden_start = client
+            .post(format!("{base_url}/api/workflow-scripts/{builtin_id}/runs"))
+            .json(&serde_json::json!({ "args": null, "budget": null }))
+            .send()
+            .await
+            .expect("start hidden built-in over HTTP");
+        assert_eq!(hidden_start.status(), reqwest::StatusCode::NOT_FOUND);
+        assert_eq!(
+            hidden_start
+                .json::<Value>()
+                .await
+                .expect("serialise hidden start rejection")["code"],
+            "not_found"
+        );
+
+        let read = client
+            .get(format!("{base_url}/api/workflow-scripts/{authored_id}"))
+            .send()
+            .await
+            .expect("read authored winner over HTTP")
+            .error_for_status()
+            .expect("authored winner response")
+            .json::<Value>()
+            .await
+            .expect("serialise authored winner");
+        assert_eq!(read["id"], authored_id);
+        assert_eq!(read["name"], "research-sweep");
+        assert_eq!(read["built_in"], false);
+
+        let started = client
+            .post(format!(
+                "{base_url}/api/workflow-scripts/{authored_id}/runs"
+            ))
+            .json(&serde_json::json!({ "args": null, "budget": null }))
+            .send()
+            .await
+            .expect("start authored winner over HTTP")
+            .error_for_status()
+            .expect("authored winner launch response")
+            .json::<Value>()
+            .await
+            .expect("serialise authored winner launch");
+        assert_eq!(started["script_id"], authored_id);
+        assert_eq!(started["script_name"], "research-sweep");
+        assert_eq!(started["script_version"], 1);
+        let started_id = Uuid::parse_str(started["id"].as_str().expect("started run id"))
+            .expect("valid started run id");
+        wait_for_terminal(&state, started_id).await;
         let run = storage
-            .get_workflow_run(started.id)
+            .get_workflow_run(started_id)
             .await
             .expect("run query")
             .expect("run");
-        assert_eq!(run.script_id, Some(authored.id));
+        assert_eq!(
+            run.script_id.map(|id| id.to_string()).as_deref(),
+            Some(authored_id)
+        );
         assert_eq!(run.script_name.as_deref(), Some("research-sweep"));
         assert_eq!(run.script_version, Some(1));
         assert_eq!(run.source, None);
+        server.abort();
     }
 
     #[tokio::test(flavor = "multi_thread")]

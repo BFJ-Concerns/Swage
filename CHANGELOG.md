@@ -19,6 +19,7 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- Retained built-in workflow IDs now return not found after a same-named authored workflow shadows them, while the authored workflow remains readable and launchable by its own ID.
 - Fresh-session schedules created from Settings now use the currently selected space.
 - Streamed tool calls now remain attached to their assistant turn after completion and appear before the response both immediately and after reloading conversation history.
 
