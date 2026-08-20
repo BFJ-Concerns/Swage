@@ -22,8 +22,8 @@ use swage_protocol::client::workflow::{
 use swage_storage::WorkflowJournalRecord;
 use swage_storage::{
     NewAuditEvent, NewSession, NewThread, NewWorkflowJournalIntent, NewWorkflowRun,
-    NewWorkflowRunEvent, NewWorkflowScript, Storage, ThreadStore, WorkflowRunRecord,
-    WorkflowScriptRecord,
+    NewWorkflowRunEvent, NewWorkflowScript, Storage, ThreadStore, WorkflowRunEventRecord,
+    WorkflowRunRecord, WorkflowScriptRecord,
 };
 use swage_workflow::{
     AgentCallRequest, AgentCallResult, AwaitEventRequest, EffectPayload, EffectReceipt,
@@ -2436,6 +2436,26 @@ async fn complete_await_event(
     delivery_seq: u64,
     kinds: &[String],
 ) -> Result<Option<Value>, String> {
+    // Delivery and journal settlement are separate writes. If the process
+    // stopped between them, the delivery stamp identifies the event this
+    // started await already claimed; settle it before considering newer
+    // pending rows.
+    let events = state
+        .storage
+        .list_workflow_run_events(run_id)
+        .await
+        .map_err(|error| error.to_string())?;
+    if let Some(claimed) = events
+        .iter()
+        .find(|event| event.delivered_wake_seq == Some(delivery_seq))
+    {
+        let result = await_event_result(claimed);
+        state
+            .complete_workflow_journal_entry(entry_id, result.clone())
+            .await
+            .map_err(|error| error.to_string())?;
+        return Ok(Some(result));
+    }
     let pending = state
         .storage
         .list_pending_workflow_run_events(run_id)
@@ -2455,18 +2475,22 @@ async fn complete_await_event(
             matched.seq
         ));
     }
-    let result = serde_json::json!({
-        "seq": matched.seq,
-        "kind": matched.kind,
-        "payload": matched.payload,
-        "source": {"surface": matched.source_surface, "agent_id": matched.source_agent_id,
-            "session_id": matched.source_session_id, "turn_id": matched.source_turn_id},
-    });
+    let result = await_event_result(matched);
     state
         .complete_workflow_journal_entry(entry_id, result.clone())
         .await
         .map_err(|error| error.to_string())?;
     Ok(Some(result))
+}
+
+fn await_event_result(event: &WorkflowRunEventRecord) -> Value {
+    serde_json::json!({
+        "seq": event.seq,
+        "kind": event.kind,
+        "payload": event.payload,
+        "source": {"surface": event.source_surface, "agent_id": event.source_agent_id,
+            "session_id": event.source_session_id, "turn_id": event.source_turn_id},
+    })
 }
 
 async fn complete_events_delivery(
@@ -5579,10 +5603,28 @@ mod tests {
         .expect("start awaiting run");
         wait_for_run_state(&storage, started.id, "parked").await;
 
+        let invalid = client
+            .post(events_url(started.id))
+            .json(&PostWorkflowRunEventRequest {
+                kind: "not namespaced".into(),
+                payload: Value::Null,
+            })
+            .send()
+            .await
+            .expect("send invalid operator post");
+        assert_eq!(invalid.status().as_u16(), 422);
+        assert_eq!(
+            invalid
+                .json::<Value>()
+                .await
+                .expect("decode invalid operator response")["code"],
+            "validation_error"
+        );
+
         let unrelated = client
             .post(events_url(started.id))
             .json(&PostWorkflowRunEventRequest {
-                kind: "device.heartbeat".into(),
+                kind: "extension.future-kind".into(),
                 payload: serde_json::json!({"online": true}),
             })
             .send()
@@ -5623,7 +5665,7 @@ mod tests {
             .await
             .expect("events");
         assert_eq!(events.len(), 2);
-        assert_eq!(events[0].kind, "device.heartbeat");
+        assert_eq!(events[0].kind, "extension.future-kind");
         assert_eq!(events[1].kind, "operator.decision");
         assert!(
             events
@@ -5665,7 +5707,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn sequential_awaits_each_receive_their_matching_queued_event() {
+    async fn sequential_same_kind_awaits_each_receive_one_queued_event() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
         let space = storage.get_or_create_default().await.expect("space");
         let state = AppState::new(
@@ -5681,9 +5723,13 @@ mod tests {
             Path(space.id),
             Json(StartInlineWorkflowRunRequest {
                 source: r#"
-                    const decision = await awaitEvent({ kinds: ["operator.decision"] });
-                    const reply = await awaitEvent({ kinds: ["device.reply"] });
-                    return { decision: decision.payload.verdict, reply: reply.payload.value };
+                    await awaitEvent({ kinds: ["control.start"] });
+                    const first = await awaitEvent({ kinds: ["operator.decision"] });
+                    const second = await awaitEvent({ kinds: ["operator.decision"] });
+                    return {
+                        seqs: [first.seq, second.seq],
+                        verdicts: [first.payload.verdict, second.payload.verdict],
+                    };
                 "#
                 .into(),
                 args: Value::Null,
@@ -5698,36 +5744,203 @@ mod tests {
             State(state.clone()),
             Path(started.id),
             Json(PostWorkflowRunEventRequest {
-                kind: "device.reply".into(),
-                payload: serde_json::json!({"value": 42}),
+                kind: "operator.decision".into(),
+                payload: serde_json::json!({"verdict": "first"}),
             }),
         )
         .await
-        .expect("queue later await answer");
+        .expect("queue first same-kind answer");
+        wait_for_run_state(&storage, started.id, "parked").await;
+        let Json(_) = post_operator_run_event(
+            State(state.clone()),
+            Path(started.id),
+            Json(PostWorkflowRunEventRequest {
+                kind: "operator.decision".into(),
+                payload: serde_json::json!({"verdict": "second"}),
+            }),
+        )
+        .await
+        .expect("queue second same-kind answer");
         wait_for_run_state(&storage, started.id, "parked").await;
         let Json(_) = post_operator_run_event(
             State(state),
             Path(started.id),
             Json(PostWorkflowRunEventRequest {
-                kind: "operator.decision".into(),
-                payload: serde_json::json!({"verdict": "accept"}),
+                kind: "control.start".into(),
+                payload: Value::Null,
             }),
         )
         .await
-        .expect("queue first await answer");
+        .expect("release queued awaits");
 
         let completed = wait_for_run_state(&storage, started.id, "completed").await;
         assert_eq!(
             completed.final_output,
-            Some(serde_json::json!({"decision": "accept", "reply": 42}))
+            Some(serde_json::json!({
+                "seqs": [1, 2],
+                "verdicts": ["first", "second"],
+            }))
         );
         let events = storage
             .list_workflow_run_events(started.id)
             .await
             .expect("events");
-        assert_eq!(events.len(), 2);
+        assert_eq!(events.len(), 3);
         assert!(events.iter().all(|event| event.delivered_at.is_some()));
         assert_ne!(events[0].delivered_wake_seq, events[1].delivered_wake_seq);
+        assert_eq!(events[0].delivered_wake_seq, Some(1));
+        assert_eq!(events[1].delivered_wake_seq, Some(2));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn replay_recovers_event_claimed_before_await_journal_completion() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(space.id),
+            Json(StartInlineWorkflowRunRequest {
+                source: r#"
+                    const answer = await awaitEvent({ kinds: ["operator.decision"] });
+                    return { seq: answer.seq, verdict: answer.payload.verdict };
+                "#
+                .into(),
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start awaiting run");
+        wait_for_run_state(&storage, started.id, "parked").await;
+
+        let journal = storage
+            .list_workflow_journal(started.id)
+            .await
+            .expect("started await journal");
+        assert_eq!(journal.len(), 1);
+        assert_eq!(journal[0].status, "started");
+        let event = storage
+            .create_workflow_run_event(NewWorkflowRunEvent {
+                run_id: started.id,
+                journal_entry_id: Uuid::new_v4(),
+                kind: "operator.decision".into(),
+                payload: serde_json::json!({"verdict": "accept"}),
+                source_surface: "operator".into(),
+                source_agent_id: None,
+                source_session_id: None,
+                source_turn_id: None,
+            })
+            .await
+            .expect("persist event");
+        assert!(
+            storage
+                .mark_workflow_run_event_delivered(started.id, event.seq, journal[0].seq)
+                .await
+                .expect("simulate delivery before crash")
+        );
+        storage
+            .update_workflow_run_state(started.id, "interrupted", None, None, None)
+            .await
+            .expect("simulate process interruption");
+
+        let replayed = resume_workflow_run_record(
+            state,
+            storage
+                .get_workflow_run(started.id)
+                .await
+                .expect("get interrupted run")
+                .expect("interrupted run"),
+        )
+        .await
+        .expect("resume interrupted run");
+        assert_eq!(replayed.state, WorkflowRunState::Running);
+        let completed = wait_for_run_state(&storage, started.id, "completed").await;
+        assert_eq!(
+            completed.final_output,
+            Some(serde_json::json!({"seq": event.seq, "verdict": "accept"}))
+        );
+        let journal = storage
+            .list_workflow_journal(started.id)
+            .await
+            .expect("recovered await journal");
+        assert_eq!(journal[0].status, "completed");
+        assert_eq!(journal[0].result.as_ref().unwrap()["seq"], event.seq);
+        assert!(
+            storage
+                .list_pending_workflow_run_events(started.id)
+                .await
+                .expect("pending events")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn script_event_operations_reject_invalid_kinds_without_journalling_them() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let Json(started) = start_inline_run(
+            State(state),
+            Path(space.id),
+            Json(StartInlineWorkflowRunRequest {
+                source: r#"
+                    let postError;
+                    let awaitError;
+                    try { await postEvent("", null); }
+                    catch (error) { postError = error.message; }
+                    try { await awaitEvent({ kinds: ["operator..decision"] }); }
+                    catch (error) { awaitError = error.message; }
+                    return { postError, awaitError };
+                "#
+                .into(),
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start invalid-kind run");
+
+        let completed = wait_for_run_state(&storage, started.id, "completed").await;
+        let output = completed.final_output.expect("invalid-kind output");
+        assert!(
+            output["postError"]
+                .as_str()
+                .is_some_and(|error| error.contains("non-empty namespaced name"))
+        );
+        assert!(
+            output["awaitError"]
+                .as_str()
+                .is_some_and(|error| error.contains("non-empty namespaced name"))
+        );
+        assert!(
+            storage
+                .list_workflow_journal(started.id)
+                .await
+                .expect("invalid-kind journal")
+                .is_empty()
+        );
+        assert!(
+            storage
+                .list_workflow_run_events(started.id)
+                .await
+                .expect("invalid-kind events")
+                .is_empty()
+        );
     }
 
     async fn wait_for_workflow_thread_exit(run_id: Uuid) {
