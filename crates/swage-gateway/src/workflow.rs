@@ -5773,6 +5773,58 @@ mod tests {
         (tx, task)
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn await_event_consumes_match_that_arrives_during_park_cas() {
+        let provider = Arc::new(ScriptedGateProvider {
+            replies: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            calls: AtomicUsize::new(0),
+        });
+        let (storage, state, run) = event_gate_fixture(provider).await;
+        storage
+            .with_conn(|conn| {
+                conn.execute_batch(&format!(
+                    "CREATE TEMP TRIGGER insert_event_before_await_park \
+                     BEFORE UPDATE OF state ON workflow_runs \
+                     WHEN OLD.id = '{}' AND OLD.state = 'running' AND NEW.state = 'parked' \
+                     BEGIN \
+                       INSERT INTO workflow_run_events (id, run_id, journal_entry_id, seq, kind, payload_json, source_surface, posted_at) \
+                       VALUES (lower(hex(randomblob(16))), OLD.id, lower(hex(randomblob(16))), \
+                         (SELECT COALESCE(MAX(seq), 0) + 1 FROM workflow_run_events WHERE run_id = OLD.id), \
+                         'operator.decision', '{{\"verdict\":\"accept\"}}', 'operator', '2026-08-20T00:00:00Z'); \
+                       SELECT RAISE(IGNORE); \
+                     END;",
+                    run.id
+                ))
+            })
+            .await
+            .expect("install read-to-park race trigger");
+        let (tx, task) = spawn_event_loop(state, run.id, run.space_id, vec![]);
+
+        let (reply, receive) = oneshot::channel();
+        tx.send(HostCommand::AwaitEvent {
+            request: AwaitEventRequest {
+                kinds: vec!["operator.decision".into()],
+            },
+            reply,
+        })
+        .expect("await event");
+        let answer = receive
+            .await
+            .expect("await reply")
+            .expect("race winner is consumed");
+
+        assert_eq!(answer["payload"]["verdict"], "accept");
+        assert_eq!(answer["source"]["surface"], "operator");
+        let events = storage
+            .list_workflow_run_events(run.id)
+            .await
+            .expect("events");
+        assert_eq!(events.len(), 1);
+        assert!(events[0].delivered_at.is_some());
+        drop(tx);
+        task.await.expect("host loop");
+    }
+
     async fn send_post_event(
         tx: &mpsc::UnboundedSender<HostCommand>,
         kind: &str,
