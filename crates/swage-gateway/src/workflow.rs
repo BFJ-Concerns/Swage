@@ -822,6 +822,7 @@ async fn run_ephemeral_agent_call(
     };
     let (events, _events_rx) = mpsc::unbounded_channel::<ServerEvent>();
     let request_schema = request.schema.clone();
+    let call_cancellation = cancellation.child_token();
     let processing = crate::turn::process_turn_with_existing_turn(
         state,
         session_id,
@@ -831,15 +832,30 @@ async fn run_ephemeral_agent_call(
         Arc::new(Mutex::new(SubscriptionState::new(false))),
         request.schema,
         Some(request.max_attempts.saturating_sub(1)),
+        request.effort.clone(),
+        Some(call_cancellation.clone()),
         None,
         crate::turn::TurnAttendance::Unattended,
     );
     tokio::pin!(processing);
+    let timeout = request.timeout_ms.map(std::time::Duration::from_millis);
     tokio::select! {
         result = &mut processing => result.map_err(|error| error.to_string())?,
         () = cancellation.cancelled() => {
-            crate::turn::cancel_turn(state, session_id).await.map_err(|error| error.to_string())?;
+            call_cancellation.cancel();
             return Err("WorkflowCancelledError".into());
+        }
+        () = async {
+            match timeout {
+                Some(duration) => tokio::time::sleep(duration).await,
+                None => std::future::pending().await,
+            }
+        } => {
+            call_cancellation.cancel();
+            return Err(format!(
+                "AgentCallTimeoutError: agent call exceeded its {}ms deadline",
+                request.timeout_ms.expect("timeout branch requires a deadline")
+            ));
         }
     }
     let turn = state
@@ -2278,6 +2294,7 @@ async fn evaluate_run_gate(
     let prompt = build_run_gate_prompt(&request.criteria, &events);
     let provider = state.active_provider();
     let completion = provider.complete(CompletionRequest {
+        effort: None,
         messages: vec![ChatMessage::new(Role::User, prompt)],
         model: Some(model_id),
         max_tokens: Some(RUN_GATE_MAX_TOKENS),
@@ -3682,6 +3699,8 @@ mod tests {
             space.id,
             &[],
             AgentCallRequest {
+                effort: None,
+                timeout_ms: None,
                 prompt: "Use echo".into(),
                 agent: Some("gateway".into()),
                 model: None,
@@ -3864,6 +3883,10 @@ mod tests {
         requests: std::sync::Mutex<Vec<swage_core::CompletionRequest>>,
     }
 
+    struct PendingRecordingProvider {
+        requests: std::sync::Mutex<Vec<swage_core::CompletionRequest>>,
+    }
+
     struct StaggeredFailingProvider;
 
     fn scripted_text_output(content: &str) -> Vec<swage_core::StreamChunk> {
@@ -3922,6 +3945,36 @@ mod tests {
                 .pop_front()
                 .expect("scripted output");
             Box::pin(futures::stream::iter(output))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl swage_provider::LlmProvider for PendingRecordingProvider {
+        fn model_id(&self) -> &str {
+            "pending-model"
+        }
+
+        async fn complete(
+            &self,
+            _request: swage_core::CompletionRequest,
+        ) -> Result<swage_core::CompletionResponse, swage_core::ProviderError> {
+            unimplemented!("workflow calls use streaming")
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _request: swage_core::ToolCompletionRequest,
+        ) -> Result<swage_core::ToolCompletionResponse, swage_core::ProviderError> {
+            unimplemented!("workflow calls use streaming")
+        }
+
+        fn stream(
+            &self,
+            request: swage_core::CompletionRequest,
+        ) -> std::pin::Pin<Box<dyn futures::Stream<Item = swage_core::StreamChunk> + Send>>
+        {
+            self.requests.lock().expect("requests").push(request);
+            Box::pin(futures::stream::pending())
         }
     }
 
@@ -4539,6 +4592,8 @@ mod tests {
             rx,
         ));
         let request = AgentCallRequest {
+            effort: None,
+            timeout_ms: None,
             prompt: "hold capacity".into(),
             agent: Some("default".into()),
             model: None,
@@ -4693,6 +4748,8 @@ mod tests {
         let (first_reply, first_receive) = oneshot::channel();
         tx.send(HostCommand::Agent {
             request: AgentCallRequest {
+                effort: None,
+                timeout_ms: None,
                 prompt: "restate the brief".into(),
                 agent: Some("worker".into()),
                 model: None,
@@ -4745,6 +4802,8 @@ mod tests {
         let (second_reply, second_receive) = oneshot::channel();
         tx.send(HostCommand::Agent {
             request: AgentCallRequest {
+                effort: None,
+                timeout_ms: None,
                 prompt: "now do the work".into(),
                 agent: Some("worker".into()),
                 model: None,
@@ -4889,6 +4948,103 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn timed_out_agent_call_is_cancelled_journalled_and_replayed_without_reinvocation() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let source = r#"return await agent("slow work", {
+            effort: "high", timeoutMs: 2000, maxAttempts: 1
+        });"#;
+        let run = storage
+            .create_workflow_run(NewWorkflowRun {
+                space_id: space.id,
+                parent_run_id: None,
+                parent_seq: None,
+                script_version_id: None,
+                source: Some(source.into()),
+                source_hash: source_hash(source),
+                args: Value::Null,
+                budget: serde_json::json!({}),
+                engine_version: "test".into(),
+                dispatch_bound_agent_ids: vec![],
+            })
+            .await
+            .expect("run");
+        let provider = Arc::new(PendingRecordingProvider {
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+
+        launch_existing_run(state.clone(), run.clone(), source.into(), None)
+            .await
+            .expect("launch timed workflow run");
+        wait_for_terminal(&state, run.id).await;
+
+        let failed_run = storage
+            .get_workflow_run(run.id)
+            .await
+            .expect("run query")
+            .expect("failed run");
+        let journal = storage
+            .list_workflow_journal(run.id)
+            .await
+            .expect("journal read-back");
+        assert_eq!(failed_run.state, "failed");
+        assert_eq!(journal.len(), 1);
+        assert_eq!(journal[0].status, "failed");
+        assert_eq!(journal[0].request["effort"], "high");
+        assert_eq!(journal[0].request["timeout_ms"], 2000);
+        assert!(
+            journal[0]
+                .error_message
+                .as_deref()
+                .is_some_and(|error| error.starts_with("AgentCallTimeoutError:"))
+        );
+        {
+            let requests = provider.requests.lock().expect("requests");
+            assert_eq!(requests.len(), 1);
+            assert_eq!(requests[0].effort.as_deref(), Some("high"));
+        }
+
+        storage
+            .update_workflow_run_state(run.id, "interrupted", None, None, None)
+            .await
+            .expect("simulate restart");
+        let replay_record = storage
+            .get_workflow_run(run.id)
+            .await
+            .expect("run query")
+            .expect("replay run");
+        storage
+            .update_workflow_run_state(run.id, "running", None, None, None)
+            .await
+            .expect("mark replay running");
+        launch_existing_run(state.clone(), replay_record, source.into(), None)
+            .await
+            .expect("replay timed workflow run");
+        wait_for_terminal(&state, run.id).await;
+        let replayed = storage
+            .get_workflow_run(run.id)
+            .await
+            .expect("run query")
+            .expect("replayed run");
+        assert_eq!(replayed.state, "failed");
+        assert!(
+            replayed
+                .error_message
+                .as_deref()
+                .is_some_and(|error| error.contains("AgentCallTimeoutError:"))
+        );
+        assert_eq!(provider.requests.lock().expect("requests").len(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn a_continuation_token_the_run_does_not_own_is_refused() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
         let space = storage.get_or_create_default().await.expect("space");
@@ -4950,6 +5106,8 @@ mod tests {
         let (reply, receive) = oneshot::channel();
         tx.send(HostCommand::Agent {
             request: AgentCallRequest {
+                effort: None,
+                timeout_ms: None,
                 prompt: "hijack".into(),
                 agent: Some("worker".into()),
                 model: None,
@@ -5861,6 +6019,8 @@ mod tests {
             rx,
         ));
         let request = AgentCallRequest {
+            effort: None,
+            timeout_ms: None,
             prompt: "account usage".into(),
             agent: Some("default".into()),
             model: None,
@@ -5966,6 +6126,8 @@ mod tests {
             rx,
         ));
         let request = |prompt: &str| AgentCallRequest {
+            effort: None,
+            timeout_ms: None,
             prompt: prompt.into(),
             agent: Some("default".into()),
             model: None,
@@ -6052,6 +6214,8 @@ mod tests {
             .await
             .expect("run");
         let request = |prompt: &str| AgentCallRequest {
+            effort: None,
+            timeout_ms: None,
             prompt: prompt.into(),
             agent: Some("default".into()),
             model: None,
@@ -6221,6 +6385,8 @@ mod tests {
             .await
             .expect("run");
         let request = AgentCallRequest {
+            effort: None,
+            timeout_ms: None,
             prompt: "resume work".into(),
             agent: Some("default".into()),
             model: None,
@@ -6336,6 +6502,8 @@ mod tests {
             .await
             .expect("run");
         let working_request = AgentCallRequest {
+            effort: None,
+            timeout_ms: None,
             prompt: "resume working call".into(),
             agent: Some("default".into()),
             model: None,
@@ -6453,6 +6621,8 @@ mod tests {
             true
         );
         let closing_request = AgentCallRequest {
+            effort: None,
+            timeout_ms: None,
             prompt: "closing call".into(),
             agent: Some("default".into()),
             model: None,
@@ -6514,6 +6684,8 @@ mod tests {
             .await
             .expect("run");
         let request = |prompt: &str| AgentCallRequest {
+            effort: None,
+            timeout_ms: None,
             prompt: prompt.into(),
             agent: Some("default".into()),
             model: None,
@@ -6733,6 +6905,8 @@ mod tests {
             .await
             .expect("run");
         let request = |prompt: &str| AgentCallRequest {
+            effort: None,
+            timeout_ms: None,
             prompt: prompt.into(),
             agent: Some("default".into()),
             model: None,
@@ -6941,6 +7115,8 @@ mod tests {
             .await
             .expect("run");
         let request = AgentCallRequest {
+            effort: None,
+            timeout_ms: None,
             prompt: "must not execute".into(),
             agent: Some("default".into()),
             model: None,
@@ -7440,6 +7616,8 @@ mod tests {
             .await
             .expect("run");
         let request = AgentCallRequest {
+            effort: None,
+            timeout_ms: None,
             prompt: "known failing call".into(),
             agent: Some("default".into()),
             model: None,

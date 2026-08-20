@@ -567,6 +567,8 @@ pub async fn process_turn(
         output_schema_override,
         None,
         None,
+        None,
+        None,
         TurnAttendance::Attended,
     )
     .await
@@ -587,6 +589,8 @@ pub(crate) async fn process_turn_with_existing_turn(
     subscription: Arc<Mutex<SubscriptionState>>,
     output_schema_override: Option<serde_json::Value>,
     max_output_retries_override: Option<u32>,
+    effort_override: Option<String>,
+    cancellation_override: Option<CancellationToken>,
     existing_turn_id: Option<Uuid>,
     attendance: TurnAttendance,
 ) -> Result<(), GatewayError> {
@@ -724,7 +728,7 @@ pub(crate) async fn process_turn_with_existing_turn(
     };
 
     // Step 5: Set up the cancellation token before any turn processing begins.
-    let cancel_token = CancellationToken::new();
+    let cancel_token = cancellation_override.unwrap_or_default();
     {
         let mut turns = state.active_turns.lock().await;
         turns.insert(session_id, cancel_token.clone());
@@ -1197,6 +1201,7 @@ pub(crate) async fn process_turn_with_existing_turn(
             assembled_context: assembled_messages,
             parent_turn_id: None,
             existing_turn_id: Some(prepared_turn_id),
+            effort: effort_override,
             cancellation_token: cancel_token,
         };
         tokio::spawn(async move { agent.process_turn_streaming(turn_request, event_tx).await })

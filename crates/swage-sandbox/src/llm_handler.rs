@@ -67,6 +67,7 @@ impl HostLlmHandler {
         // This IPC request type does not currently carry tool definitions, so
         // the basic completion path remains text-only from the sandbox side.
         let completion_req = CompletionRequest {
+            effort: None,
             messages: request.messages,
             model: request.model,
             max_tokens: request.max_tokens,

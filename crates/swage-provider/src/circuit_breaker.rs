@@ -521,6 +521,7 @@ mod tests {
 
     fn test_request() -> CompletionRequest {
         CompletionRequest {
+            effort: None,
             messages: vec![],
             model: None,
             max_tokens: None,

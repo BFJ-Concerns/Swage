@@ -309,6 +309,7 @@ fn test_request(
     existing_turn_id: Option<Uuid>,
 ) -> TurnRequest {
     TurnRequest {
+        effort: None,
         execution: TurnExecutionContext {
             session_id,
             thread_id,

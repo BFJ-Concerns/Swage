@@ -515,6 +515,8 @@ async fn run_channel_turn(
         None,
         None,
         None,
+        None,
+        None,
         crate::turn::TurnAttendance::Unattended,
     ))
     .await?;
