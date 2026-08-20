@@ -76,6 +76,15 @@ impl DelegationContextAssembler for GatewayDelegatedContextAssembler {
             }
         })
         .await;
+        let session_variables = self
+            .state
+            .storage
+            .list_session_variables(session.id)
+            .await
+            .map_err(AgentError::StorageFailed)?
+            .into_iter()
+            .map(|variable| (variable.name, variable.value))
+            .collect();
         let environment =
             build_session_environment(&self.space, Some(self.working_directory.clone()), session);
         let available_skills = available_skills_for_agent(
@@ -113,6 +122,7 @@ impl DelegationContextAssembler for GatewayDelegatedContextAssembler {
             self.swage_root.as_deref(),
             &self.space.slug,
             &self.agent_id,
+            &session_variables,
         );
         let mut assembly_report = output.report;
         assembly_report.effective_tool_permissions = Some(self.effective_tool_permissions.clone());

@@ -18,6 +18,7 @@ pub mod plugin;
 pub mod python_execute;
 pub mod run_event;
 pub mod schedule;
+pub mod session_variable;
 pub mod shell;
 pub mod tool_result_read;
 pub mod url_fetch;
