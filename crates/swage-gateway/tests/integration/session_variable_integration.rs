@@ -512,7 +512,7 @@ async fn live_listener_turns_set_and_update_the_values_used_by_composition() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn live_http_delegations_re_read_named_elements_and_report_their_identity() {
+async fn live_http_delegations_apply_call_scoped_context_composition() {
     let (provider, captured_requests) = ToolCallingProvider::new(vec![
         vec![
             StreamChunk::Delta {
@@ -536,7 +536,19 @@ async fn live_http_delegations_re_read_named_elements_and_report_their_identity(
         .path()
         .join("spaces/default/elements/current-work.md");
     std::fs::create_dir_all(element_path.parent().unwrap()).unwrap();
-    std::fs::write(&element_path, "First authored briefing").unwrap();
+    std::fs::write(&element_path, "Briefing for {{owner}}: first version").unwrap();
+    std::fs::write(
+        element_path.parent().unwrap().join("unrequested.md"),
+        "This must not reach the child",
+    )
+    .unwrap();
+    let assembly_path = swage_home.path().join("assemblies/all-selected.js");
+    std::fs::create_dir_all(assembly_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        assembly_path,
+        "for (const element of elements) add(element.render());",
+    )
+    .unwrap();
     let mut environment = crate::support::ProcessEnvGuard::new();
     environment.set_swage_home(swage_home.path());
 
@@ -569,7 +581,12 @@ async fn live_http_delegations_re_read_named_elements_and_report_their_identity(
                     "correlation_id": null,
                     "space_id": space.id,
                     "sender_turn_id": null,
-                    "payload": {"task": task}
+                    "payload": {
+                        "task": task,
+                        "elements": ["current-work"],
+                        "variables": {"owner": "HTTP owner"},
+                        "assembly": "all-selected"
+                    }
                 }))
                 .send()
                 .await
@@ -609,8 +626,21 @@ async fn live_http_delegations_re_read_named_elements_and_report_their_identity(
             .any(|element| element["name"] == "current-work"),
         "the live child report should name the authored element: {first_report}"
     );
+    assert_eq!(first_report["report"]["assembly_name"], "all-selected");
+    assert!(
+        first_report["report"]["elements"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|element| element["name"] != "unrequested"),
+        "the all-elements assembly must not see an unrequested briefing: {first_report}"
+    );
 
-    std::fs::write(&element_path, "Edited briefing for the next dispatch").unwrap();
+    std::fs::write(
+        &element_path,
+        "Briefing for {{owner}}: edited for the next dispatch",
+    )
+    .unwrap();
     let second_message = dispatch("second dispatch").await;
     wait_for_message_delivery(&client, address, second_message).await;
     let second_session = storage
@@ -647,6 +677,26 @@ async fn live_http_delegations_re_read_named_elements_and_report_their_identity(
             .any(|element| element["name"] == "current-work"),
         "the second live child report should retain the element identity: {second_report}"
     );
+    assert_eq!(second_report["report"]["assembly_name"], "all-selected");
+    assert!(
+        second_report["report"]["elements"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|element| element["name"] != "unrequested"),
+        "the second all-elements assembly must not see an unrequested briefing: {second_report}"
+    );
+
+    for session in storage.list_sessions_by_agent_id("agent-b").await.unwrap() {
+        assert!(
+            storage
+                .list_session_variables(session.id)
+                .await
+                .unwrap()
+                .is_empty(),
+            "call-scoped bindings must not persist to the child session"
+        );
+    }
 
     let requests = captured_requests.lock().unwrap();
     assert_eq!(requests.len(), 2);
@@ -663,15 +713,20 @@ async fn live_http_delegations_re_read_named_elements_and_report_their_identity(
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
-        first_context.contains("First authored briefing"),
+        first_context.contains("Briefing for HTTP owner: first version"),
         "{first_context}"
     );
     assert!(
-        second_context.contains("Edited briefing for the next dispatch"),
+        second_context.contains("Briefing for HTTP owner: edited for the next dispatch"),
         "{second_context}"
     );
     assert!(
-        !second_context.contains("First authored briefing"),
+        !second_context.contains("first version"),
+        "{second_context}"
+    );
+    assert!(
+        !first_context.contains("This must not reach the child")
+            && !second_context.contains("This must not reach the child"),
         "{second_context}"
     );
 }

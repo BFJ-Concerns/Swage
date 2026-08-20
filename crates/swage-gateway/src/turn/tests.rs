@@ -8238,7 +8238,7 @@ async fn process_turn_uses_hot_swapped_runtime_config_for_next_turn() {
 }
 
 #[tokio::test]
-async fn unknown_forced_context_assembly_fails_before_provider_and_audit() {
+async fn unknown_forced_context_assembly_rejects_call_scoped_override() {
     let _guard = SwageHomeGuard::isolate();
     let (provider, captured_request) = CapturingProvider::new(vec![]);
     let (storage, session_id) = make_storage_with_session().await;
@@ -8260,7 +8260,7 @@ async fn unknown_forced_context_assembly_fails_before_provider_and_audit() {
     );
 
     let (tx, _rx) = mpsc::unbounded_channel();
-    let error = process_turn(
+    let error = process_turn_with_composition(
         &state,
         session_id,
         None,
@@ -8268,6 +8268,13 @@ async fn unknown_forced_context_assembly_fails_before_provider_and_audit() {
         tx,
         Arc::new(Mutex::new(SubscriptionState::new(true))),
         None,
+        None,
+        None,
+        TurnAttendance::Attended,
+        DispatchContextComposition {
+            assembly: Some("default".into()),
+            ..Default::default()
+        },
     )
     .await
     .expect_err("unknown forced assembly must fail the turn");
