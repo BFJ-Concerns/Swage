@@ -150,13 +150,11 @@ pub(crate) fn build_assembly_elements(
             Vec::new()
         }),
     };
-    {
-        elements.extend(
-            named_elements.into_iter().map(|resolved| {
-                Box::new(BriefingElement::new(resolved)) as Box<dyn ContextElement>
-            }),
-        )
-    }
+    elements.extend(
+        named_elements
+            .into_iter()
+            .map(|resolved| Box::new(BriefingElement::new(resolved)) as Box<dyn ContextElement>),
+    );
     if let Some((content, space_name)) = memory {
         elements.push(Box::new(MemoryElement::new(content, space_name)));
     }

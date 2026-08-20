@@ -106,34 +106,16 @@ impl Tool for DelegateTool {
             .to_string();
 
         let context = params.get("context").cloned();
-        let elements = params
-            .get("elements")
-            .map(|value| serde_json::from_value(value.clone()))
-            .transpose()
-            .map_err(|error| ToolError::InvalidParameters {
-                name: DELEGATE_TOOL_NAME.to_string(),
-                message: format!("elements must be an array of strings: {error}"),
+        let composition =
+            swage_core::DispatchContextComposition::from_payload(&params).map_err(|error| {
+                ToolError::InvalidParameters {
+                    name: DELEGATE_TOOL_NAME.to_string(),
+                    message: format!("invalid context composition: {error}"),
+                }
             })?;
-        let variables = params
-            .get("variables")
-            .map(|value| serde_json::from_value(value.clone()))
-            .transpose()
-            .map_err(|error| ToolError::InvalidParameters {
-                name: DELEGATE_TOOL_NAME.to_string(),
-                message: format!("variables must map names to string values: {error}"),
-            })?;
-        let assembly = params
-            .get("assembly")
-            .map(|value| {
-                value
-                    .as_str()
-                    .map(str::to_owned)
-                    .ok_or_else(|| ToolError::InvalidParameters {
-                        name: DELEGATE_TOOL_NAME.to_string(),
-                        message: "assembly must be a string".to_string(),
-                    })
-            })
-            .transpose()?;
+        let elements = composition.elements;
+        let variables = params.get("variables").map(|_| composition.variables);
+        let assembly = composition.assembly;
         let completion_mode = parse_completion_mode(params.get("completion_mode"))?;
 
         // Signal the agent turn loop to handle delegation.
