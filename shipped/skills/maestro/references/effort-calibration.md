@@ -104,16 +104,13 @@ when a lineup changes):
 
 - **Claude Fable and Opus** float at `low`, rest at `medium`; `high` is the named-residue step,
   and for code-writing work it is also the ceiling — above it these tiers
-  re-derive decided things and widen the diff. Anthropic's own Opus 5
-  guidance opens `xhigh` for demanding coding on eval evidence; capping
-  dispatch code work at `high` is this estate's deliberate choice, not a
-  disagreement about capability — dispatched workers arrive well-briefed,
-  so the vendor's un-briefed headroom is already spent (see the resting-level
-  note above). The design-only door opens by
-  tier: an Opus design-only dispatch runs at `xhigh` per the ceiling above,
-  while a Fable one tops out at `high` — the effort-shadows-tier rule in
-  action: Fable, the stronger tier, sits a rung below Opus on the same
-  design-only work. `max` stays out of ordinary escalation either way.
+  re-derive decided things and widen the diff. The platform's per-call
+  effort option runs `low`/`medium`/`high`, so `high` is also the hard
+  top of the dispatch surface; the vendors' higher rungs are not
+  reachable here, and capping dispatch work at `high` costs nothing —
+  dispatched workers arrive well-briefed, so un-briefed headroom is
+  already spent (see the resting-level note above). Design-only
+  dispatches top out at `high` on either tier for the same reason.
 - **Claude Sonnet** floats at `low`, rests at `medium`.
 - **GPT-5.5 and 5.6** float at `low`, rest at `medium`; step to `high`
   only for a named residue, with evidence preferred over instinct — higher

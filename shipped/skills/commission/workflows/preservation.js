@@ -298,9 +298,7 @@ determine" is a valid finding. State your coverage (which parts of the baseline 
 you checked) even if you find nothing — a clean scan that covers both files and shows its
 inventory and reasoning is a valid result; bare empty lists are not.
 
-Reply with a single JSON value conforming to the schema. Reason first if you need to, but the
-JSON value comes last: the final non-whitespace characters of your message must be the JSON
-value itself — no prose, no code fence, no example after it. Never restate the schema or show
+Reply with a single JSON value conforming to the schema. Reason first if you need to, then give the JSON inside a single ```json fenced code block — the FIRST fenced block in your reply is the one that is read, so use exactly one and put nothing schema-shaped in any other fence. A reply that is the bare JSON value alone, with no prose at all, also works. Never restate the schema or show
 a sample answer; the only JSON value in your reply is your actual answer.`;
 
 // Fan-in guard: the blind-concern union grows with what the reviewers found, and one
@@ -379,9 +377,7 @@ If something is wrong with the deliberate-changes RECORD itself — it contradic
 contradicts itself, or is wrong in a way the per-concern verdicts cannot express — say so in
 \`record_concerns\`; use an empty string when you have nothing, and never pad it.
 
-Reply with a single JSON value conforming to the schema. Reason first if you need to, but the
-JSON value comes last: the final non-whitespace characters of your message must be the JSON
-value itself — no prose, no code fence, no example after it. Never restate the schema or show
+Reply with a single JSON value conforming to the schema. Reason first if you need to, then give the JSON inside a single ```json fenced code block — the FIRST fenced block in your reply is the one that is read, so use exactly one and put nothing schema-shaped in any other fence. A reply that is the bare JSON value alone, with no prose at all, also works. Never restate the schema or show
 a sample answer; the only JSON value in your reply is your actual answer.`;
 
 // The gains direction's sighted half: every extracted claim, judged against what the
@@ -431,9 +427,7 @@ unsettled addition or collision (empty for verdicts needing none). Return
 \`adjudications\` and \`additional_issues\` as empty arrays, and \`record_concerns\` as
 usual — an empty string unless the record itself is contradictory or mismatched.
 
-Reply with a single JSON value conforming to the schema. Reason first if you need to, but the
-JSON value comes last: the final non-whitespace characters of your message must be the JSON
-value itself — no prose, no code fence, no example after it. Never restate the schema or show
+Reply with a single JSON value conforming to the schema. Reason first if you need to, then give the JSON inside a single ```json fenced code block — the FIRST fenced block in your reply is the one that is read, so use exactly one and put nothing schema-shaped in any other fence. A reply that is the bare JSON value alone, with no prose at all, also works. Never restate the schema or show
 a sample answer; the only JSON value in your reply is your actual answer.`;
 
 // The batched path's sweep: sees every blind concern (projected to compact fields so
@@ -473,9 +467,7 @@ If something is wrong with the deliberate-changes RECORD itself — it contradic
 contradicts itself, or is wrong in a way the verdicts cannot express — say so in
 \`record_concerns\`; use an empty string when you have nothing, and never pad it.
 
-Reply with a single JSON value conforming to the schema. Reason first if you need to, but the
-JSON value comes last: the final non-whitespace characters of your message must be the JSON
-value itself — no prose, no code fence, no example after it. Never restate the schema or show
+Reply with a single JSON value conforming to the schema. Reason first if you need to, then give the JSON inside a single ```json fenced code block — the FIRST fenced block in your reply is the one that is read, so use exactly one and put nothing schema-shaped in any other fence. A reply that is the bare JSON value alone, with no prose at all, also works. Never restate the schema or show
 a sample answer; the only JSON value in your reply is your actual answer.`;
 
 // Pass 1: both families scan blind, in parallel. Barrier before adjudication — pass 2

@@ -67,7 +67,7 @@ const runHold = async (stage, content, verdicts) => {
   // by a lead segment clearing its batch of decisions at a wake, or by the
   // operator through the run surface. Blocking is accepted: there is no
   // hold timeout, and the journal carries every completed stage meanwhile.
-  postEvent("decision-needed", { stage, nonce, content, options: verdicts });
+  await postEvent("decision-needed", { stage, nonce, content, options: verdicts });
   while (true) {
     const decision = await awaitEvent({ kinds: ["decision"] });
     const payload = decision && decision.payload;
@@ -114,7 +114,6 @@ for (let attempt = 0; attempt < 3; attempt++) {
     schema: restatementSchema,
     cwd: worktree,
     label: `restate:${attempt}`,
-    phase: "restate",
   });
   if (!sketch) throw new Error("restatement stage returned nothing usable");
   // Admission refusal and disputes go to the orchestrator like any sketch —
@@ -146,7 +145,7 @@ ${JSON.stringify(sketch)}
 Work only in this worktree (${worktree}); commit as you go with plain descriptive messages. Publication is the landing stage's, never yours: never push, never open PRs, never merge this unit's work outward — but merging ${mergePolicy === "pr" ? integrationBranch : "the repository's main branch"} into your own branch is ordinary maintenance, permitted when the unit's work needs it. Extend the named spine exemplar's pattern; its imitation boundary and envelope (its entry in ${spinePath}) are hard constraints — incidental wiring the extension requires (registration, imports, config, tests beside the code) is part of extending; modifying non-spine files beyond that wiring is not yours, report it as blocked instead. Verify your work within the unit's scope as the brief's proof expectation describes, then run the project's check gate and the tests covering the surfaces you touched, on the tree your build finishes on, and get them green — fix what they find and re-run as many times as that takes. The full test-suite gate is not yours: it runs later, batched over landed units. Every new test must discriminate — test something genuine that a broken product would fail, with a real failure the assertion can register, never a check the change's mere presence satisfies: write each test of behaviour this unit builds so it would fail without your change, and never let a fixture, seed, or mock itself supply the state the assertion checks; a test of behaviour that predates the unit proves its teeth by mutation instead — break the behaviour deliberately in a scratch copy, watch the test fail, restore. Demonstrating the failure is the preferred evidence because it is usually cheap; where the demonstration itself would need machinery out of proportion to the change — a separately triggered build estate, a reconstructed historical tree, a live external dependency, a bespoke process harness — do not build that machinery: state in your report why demonstration is disproportionate — covering both routes, the scratch-tree fail-before run and the mutation fallback (break the behaviour deliberately in a scratch copy, watch the test fail); mutation is usually cheap, so most would-be declarations fall to it — and what instead shows the test discriminates (the real state it runs over, the behaviour's own output its assertion reads, the specific failure a broken product would produce); its disposition is the orchestrator's. Where you cannot meet the brief's proof expectation honestly at its named rung — the surface never shows the state, or the product cannot produce it — do not manufacture the state: report the impossibility as a failure finding (what the rung cannot show, and the strongest honest proof you produced instead); its disposition is the orchestrator's. If you cannot get it green, say so in your report as a failure finding — what failed, what you tried — never as a quietly recorded red result. Later stages audit your final recorded run rather than repeat it.
 
 Write ${unitDir}/report.md: what was built at one level above the diff; what was tried and abandoned, and why; what fought back; how you verified and what you did NOT exercise; the check gate's run and the touched-surface test runs — the exact commands, the tree sha they ran on, and the results; your overall confidence (high/medium/low) with a one-line why. Reply with a two-sentence summary and the head commit hash.`,
-  { cwd: worktree, label: "build", phase: "build", timeoutMs: 14400000 }
+  { cwd: worktree, label: "build", timeoutMs: 14400000 }
 );
 
 // ---------------------------------------------------------------- verify
@@ -195,10 +194,10 @@ Judge semantically: does the built thing fit the brief; does it fit the commissi
 
 Every command your verdict leans on is evidenced by the command line as executed plus enough of its actual output to support the claim — or an explicit "could not run: <reason>"; a run cited with neither is an unevidenced claim, not a completed check. Report to the findings contract: examined (what you read, ran, and exercised — and what you could not), findings (each with severity, confidence, a verbatim evidence quote or command output, and unresolved_prior — true only when it restates a finding from the earlier verdict that its fix round failed to resolve, false otherwise, and always false on a first verification), rejected_concerns, confidence in your own read (bounded by the unseen list) and its one-line why. Write the same content to ${unitDir}/${refixRound !== null ? `verdict-refix-${refixRound}.md` : "verdict.md"}.
 
-Reply with a single JSON value conforming to the schema. Reason first if you need to, but the JSON value comes last: the final non-whitespace characters of your message must be the JSON value itself — no prose, no code fence, no example after it. Never restate the schema or show a sample answer; the only JSON value in your reply is your actual answer.`;
+Reply with a single JSON value conforming to the schema. Reason first if you need to, then give the JSON inside a single ```json fenced code block — the FIRST fenced block in your reply is the one that is read, so use exactly one and put nothing schema-shaped in any other fence. A reply that is the bare JSON value alone, with no prose at all, also works. Never restate the schema or show a sample answer; the only JSON value in your reply is your actual answer.`;
 
 let verdict = await agent(verifyPrompt(null, null), {
-  model: "claude-opus-5", effort: "medium", schema: findingsSchema, cwd: worktree, label: "verify", phase: "verify",
+  model: "claude-opus-5", effort: "medium", schema: findingsSchema, cwd: worktree, label: "verify",
 });
 if (!verdict) throw new Error("verifier stage returned nothing usable — re-run, never read as clean");
 if (!verdict.examined || !verdict.examined.trim())
@@ -235,7 +234,7 @@ const autoFixSchema = {
 
 const autoFixPrompt = (round) => `The verifier raised findings against your unit (${unitDir}/${round === 0 ? "verdict.md" : `verdict-refix-${round - 1}.md`}), at least one of them severe. No orchestrator triage has happened yet: every finding in that verdict is yours to fix.${rulings.length ? `\n\nThe orchestrator's rulings below hold the brief's standing, and a conflicting ruling supersedes it — delivering what a ruling withheld is a defect, not a fix. Where two conflict, the later governs.\n<orchestrator-rulings>\n${rulings.map((r, i) => `${i + 1}. ${r}`).join("\n")}\n</orchestrator-rulings>\n` : ""} Your brief's standing constraints remain in force: work only in ${worktree}; never push, open PRs, or merge the unit's work outward — publication is the landing stage's, though merging the integration lane into the unit branch stays permitted where the work needs it; the spine exemplar's imitation boundary still binds. A finding you cannot fix honestly as written — the demanded proof or change cannot be produced without manufacturing state or asserting something untrue, or the finding disputes the brief or a ruling rather than the work — goes to blocked in your reply and in ${unitDir}/report.md, with why. A duplication finding whose verdict routes it to filing (adoption needs a cross-unit extraction) is not yours either — leave it as it stands rather than growing the unit's diff. Fix the rest. Commit as you go. Verify each fix with the checks covering the surfaces it touched — no project gate re-runs per fix round; the lane gate covers the composed result. Then make the whole of ${unitDir}/report.md true about the current tree — re-derive what changed from git log over the unit's commits and correct every section the fixes dated (built, tried-and-abandoned, verification, confidence, any commit inventory), not just the sections a finding quoted.
 
-Reply with JSON: summary (what you fixed, in two or three sentences), head_commit (the new head), blocked (the findings deliberately left unfixed, each by its 0-based index in the verdict, with why; empty array when none). Reason first if you need to, but the JSON value comes last: the final non-whitespace characters of your message must be the JSON value itself.`;
+Reply with JSON: summary (what you fixed, in two or three sentences), head_commit (the new head), blocked (the findings deliberately left unfixed, each by its 0-based index in the verdict, with why; empty array when none). Reason first if you need to, then give the JSON inside a single ```json fenced code block — the FIRST fenced block in your reply is the one that is read, so use exactly one. A reply that is the bare JSON value alone also works.`;
 
 let fixReport = null;
 let rounds = 0;
@@ -249,12 +248,12 @@ while (severesIn(verdict).length) {
   }
   const autoFix = await agent(autoFixPrompt(rounds), {
     effort: "medium", schema: autoFixSchema,
-    cwd: worktree, label: `fix:${rounds}`, phase: "triage", timeoutMs: 7200000,
+    cwd: worktree, label: `fix:${rounds}`, timeoutMs: 7200000,
   });
   if (!autoFix) throw new Error("autonomous fix round returned nothing usable — re-run, never read as applied");
   fixReport = autoFix.summary;
   verdict = await agent(verifyPrompt(rounds, "autonomous"), {
-    model: "claude-opus-5", effort: "medium", schema: findingsSchema, cwd: worktree, label: `verify:refix:${rounds}`, phase: "triage",
+    model: "claude-opus-5", effort: "medium", schema: findingsSchema, cwd: worktree, label: `verify:refix:${rounds}`,
   });
   if (!verdict) throw new Error("re-verification returned nothing usable — re-run, never read as clean");
   if (!verdict.examined || !verdict.examined.trim())
@@ -360,10 +359,10 @@ while (true) {
       rulings.push(`on ${rounds === 0 ? "verdict.md" : `verdict-refix-${rounds - 1}.md`} finding index ${d.finding} (${d.disposition}): ${d.note.trim()}`);
   fixReport = await agent(
     `The verifier raised findings against your unit (${unitDir}/${rounds === 0 ? "verdict.md" : `verdict-refix-${rounds - 1}.md`}). The orchestrator's dispositions, by finding index: ${JSON.stringify(fixList)} — with this note: "${triage.note || ""}".${rulings.length ? `\n\nThe orchestrator's rulings below hold the brief's standing, and a conflicting ruling supersedes it — delivering what a ruling withheld is a defect, not a fix. Where two conflict, the later governs.\n<orchestrator-rulings>\n${rulings.map((r, i) => `${i + 1}. ${r}`).join("\n")}\n</orchestrator-rulings>\n` : ""} Your brief's standing constraints remain in force: work only in ${worktree}; never push, open PRs, or merge the unit's work outward — publication is the landing stage's, though merging the integration lane into the unit branch stays permitted where the work needs it; the spine exemplar's imitation boundary still binds. Apply exactly the dispositions marked fix — no more (an accepted-with-note finding is not yours to fix). A disposition you cannot apply honestly as written — the demanded proof or change cannot be produced without manufacturing state or asserting something untrue — stays unapplied: report it as blocked in your reply and in ${unitDir}/report.md, with why. A duplication finding whose verdict routes it to filing (adoption needs a cross-unit extraction) is not yours to perform either — leave it as it stands rather than growing the unit's diff. Commit as you go. Verify each fix with the checks covering the surfaces it touched — no project gate re-runs per fix round; the lane gate covers the composed result. Then make the whole of ${unitDir}/report.md true about the current tree — re-derive what changed from git log over the unit's commits and correct every section the fixes dated (built, tried-and-abandoned, verification, confidence, any commit inventory), not just the sections a finding quoted. Reply with a summary and the new head commit.`,
-    { effort: "medium", cwd: worktree, label: `fix:${rounds}`, phase: "triage", timeoutMs: 7200000 }
+    { effort: "medium", cwd: worktree, label: `fix:${rounds}`, timeoutMs: 7200000 }
   );
   verdict = await agent(verifyPrompt(rounds, "directed"), {
-    model: "claude-opus-5", effort: "medium", schema: findingsSchema, cwd: worktree, label: `verify:refix:${rounds}`, phase: "triage",
+    model: "claude-opus-5", effort: "medium", schema: findingsSchema, cwd: worktree, label: `verify:refix:${rounds}`,
   });
   if (!verdict) throw new Error("re-verification returned nothing usable — re-run, never read as clean");
   if (!verdict.examined || !verdict.examined.trim())
@@ -392,7 +391,7 @@ const landing = await agent(
   mergePolicy === "direct-merge"
     ? `Land the finished unit. First read ${annexeConfigPath} for push_policy. From ${worktree}, merge the unit branch into the repository's main branch. A conflicted merge is yours to resolve: keep both sides' behaviour (the brief's known sibling overlaps say where the sides meet), then run the project's full gate — the whole-tree suite — on the resolved tree; the resolution stands only when it is green. Report as blocked ({landed:false, blocked_on:"conflict", detail: what contradicts what}) only a genuine semantic contradiction — the same knob given different semantics, intent the sides cannot both keep — or a resolution whose gate stays red; abort the merge before reporting. Push main only if push_policy is "push-on-land"; under "hold-for-user" the merge stays local and detail says so. Reply with {landed, detail, merge_commit} — landed true only if the merge commit exists on main (verify with git log). Reply with the JSON last.`
     : `Publish the finished unit as a blocked PR. First read ${annexeConfigPath} for push_policy: under "hold-for-user", do NOT push — reply {landed:false, blocked_on:"push_policy hold-for-user", detail:...} and stop. Otherwise: write ${unitDir}/pr.md whole from ${unitDir}/report.md (What changed / Why / What must be true / Known gaps), push the branch (git push -u origin <branch>), open the PR via the forge API — POST /api/v1/repos/<owner>/<repo>/pulls, title "WIP: <unit title>", body from pr.md, head the branch, base ${integrationBranch} (the unit's integration lane — the structural branch for lane units, whose promotion PR carries them to main later; the parent branch for a stacked unit whose work builds on a sibling's unmerged branch; or main itself for a Lane: main unit); tokens under ~/.config/forgejo/ (instances.toml maps the origin host to url and token). Never push refs/for/* (AGit is forbidden — no tracked branch, no multiline body); on auth failure reply {landed:false, blocked_on:"forge auth", detail:...}. Confirm by API read that the PR exists with a non-empty body; landed is true only on that confirmation. Reply with {landed, detail, pr_number, pr_url} — the JSON last.`,
-  { schema: landingSchema, cwd: worktree, label: "land", phase: "land", timeoutMs: 1800000 }
+  { schema: landingSchema, cwd: worktree, label: "land", timeoutMs: 1800000 }
 );
 
 // The pipeline never writes the ledger: the orchestrator records the

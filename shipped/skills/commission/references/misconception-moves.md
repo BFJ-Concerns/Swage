@@ -108,7 +108,7 @@ and a half-blind survey dressed as cross-family is worse than none. What runs
 instead is decided with the user, openly: wait for the missing family; drop
 the move,
 recording it as not performed (the Stop condition then carries that record —
-see Sign-off in `SKILL.md`); or — for the draft attack and the preservation passes only — a
+see Sign-off in `SKILL.md`); or — for the draft attack, the preservation passes, and the commitment audit — a
 clearly-labelled **degraded review** under the contract in
 [ensemble-workflows.md](ensemble-workflows.md). The
 survey has no degraded rendering — its value *is* the other family's

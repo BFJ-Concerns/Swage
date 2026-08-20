@@ -14,9 +14,15 @@
 // here researches, critiques, or synthesises — judgement work, not the
 // collection floor. Pin model and effort together on every call: an unpinned
 // call has no model to ride.
+const run_dir = args.run_dir;
+if (typeof run_dir !== "string" || !run_dir.startsWith("/"))
+  throw new Error(
+    "divergent-survey: run_dir is required — an isolated empty directory outside the project where every worker is placed, so no proposer finds an incumbent to anchor on"
+  );
+
 const FAMILY = {
-  gpt: { model: "gpt-5.6-sol", effort: "medium" },
-  claude: { model: "claude-opus-5", effort: "high" },
+  gpt: { model: "gpt-5.6-sol", effort: "medium", cwd: run_dir },
+  claude: { model: "claude-opus-5", effort: "high", cwd: run_dir },
 };
 
 // Run this when an important part's option space has not been walked, or when the
@@ -33,8 +39,9 @@ const FAMILY = {
 //      and the hard EXTERNAL constraints only. It must NOT name the proposed approach,
 //      its vocabulary, or anything that betrays the expected answer. Building that
 //      anchor-free brief is the main session's job (see references/dispatched-agents.md).
-//   2. Workers have filesystem access, so place them in an isolated empty
-//      directory outside the project so a proposer has no incumbent to find.
+//   2. Workers have filesystem access, so the required run_dir arg names an
+//      isolated empty directory outside the project and every worker is
+//      placed there (cwd), so a proposer has no incumbent to find.
 //      (See references/ensemble-workflows.md.)
 // The research stage does not weaken the blindness: researchers get the same
 // anchor-free brief and survey what is established for outcomes of this kind — a
@@ -43,6 +50,7 @@ const FAMILY = {
 //
 // INPUT (pass as the run's args):
 //   {
+//     "run_dir": "absolute path to an isolated empty directory outside the project — every worker is placed there",
 //     "brief": {
 //       "outcome":     "what the finished thing must let someone do, in observable terms — anchor-free, naming NO tool/approach",
 //       "constraints": "hard external facts that bound any approach (integrations, environments, limits)",
@@ -307,9 +315,7 @@ applies, treat "couldn't determine" as a valid answer rather than guessing, and 
 what you observe from what you infer. Be specific to THIS outcome; avoid generic
 architecture advice.
 
-Reply with a single JSON value conforming to the schema. Reason first if you need to, but the
-JSON value comes last: the final non-whitespace characters of your message must be the JSON
-value itself — no prose, no code fence, no example after it. Never restate the schema or show
+Reply with a single JSON value conforming to the schema. Reason first if you need to, then give the JSON inside a single ```json fenced code block — the FIRST fenced block in your reply is the one that is read, so use exactly one and put nothing schema-shaped in any other fence. A reply that is the bare JSON value alone, with no prose at all, also works. Never restate the schema or show
 a sample answer; the only JSON value in your reply is your actual answer.`;
 
 const critiqueFindingsBlock = (findings) =>
@@ -342,9 +348,7 @@ If something is wrong with what you were GIVEN rather than the approach — the 
 is itself contradictory or wrong, or a research finding looks fabricated — say so in
 \`out_of_scope_concerns\`; use an empty string when you have nothing, and never pad it.
 
-Reply with a single JSON value conforming to the schema. Reason first if you need to, but the
-JSON value comes last: the final non-whitespace characters of your message must be the JSON
-value itself — no prose, no code fence, no example after it. Never restate the schema or show
+Reply with a single JSON value conforming to the schema. Reason first if you need to, then give the JSON inside a single ```json fenced code block — the FIRST fenced block in your reply is the one that is read, so use exactly one and put nothing schema-shaped in any other fence. A reply that is the bare JSON value alone, with no prose at all, also works. Never restate the schema or show
 a sample answer; the only JSON value in your reply is your actual answer.`;
 
 // Fan-in guard: the synthesis prompt is the SUM of every approach/critique pair plus
@@ -405,9 +409,7 @@ approach.
 
 ${JSON.stringify(pair, null, 2)}
 
-Reply with a single JSON value conforming to the schema. Reason first if you need to, but the
-JSON value comes last: the final non-whitespace characters of your message must be the JSON
-value itself — no prose, no code fence, no example after it. Never restate the schema or show
+Reply with a single JSON value conforming to the schema. Reason first if you need to, then give the JSON inside a single ```json fenced code block — the FIRST fenced block in your reply is the one that is read, so use exactly one and put nothing schema-shaped in any other fence. A reply that is the bare JSON value alone, with no prose at all, also works. Never restate the schema or show
 a sample answer; the only JSON value in your reply is your actual answer.`;
 
 const synthesisPrompt = (pairs) =>
@@ -434,9 +436,7 @@ ${JSON.stringify(research, null, 2)}
 Alternatives and their critiques:
 ${JSON.stringify(pairs, null, 2)}
 
-Reply with a single JSON value conforming to the schema. Reason first if you need to, but the
-JSON value comes last: the final non-whitespace characters of your message must be the JSON
-value itself — no prose, no code fence, no example after it. Never restate the schema or show
+Reply with a single JSON value conforming to the schema. Reason first if you need to, then give the JSON inside a single ```json fenced code block — the FIRST fenced block in your reply is the one that is read, so use exactly one and put nothing schema-shaped in any other fence. A reply that is the bare JSON value alone, with no prose at all, also works. Never restate the schema or show
 a sample answer; the only JSON value in your reply is your actual answer.`;
 
 // Stage 0: survey the theory before any approach exists. A researcher that

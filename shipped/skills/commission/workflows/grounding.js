@@ -143,7 +143,7 @@ Grounding rules — these make the finding usable rather than noise:
   up to "built" — a wrong "built" is the expensive error here.
 - Keep what you OBSERVE in the code separate from what you INFER (\`observed_vs_inferred\`).
 
-Reply with a single JSON value conforming to the schema. Reason first if you need to, but the JSON value comes last: the final non-whitespace characters of your message must be the JSON value itself — no prose, no code fence, no example after it. Never restate the schema or show a sample answer; the only JSON value in your reply is your actual answer.`;
+Reply with a single JSON value conforming to the schema. Reason first if you need to, then give the JSON inside a single ```json fenced code block — the FIRST fenced block in your reply is the one that is read, so use exactly one and put nothing schema-shaped in any other fence. A reply that is the bare JSON value alone, with no prose at all, also works. Never restate the schema or show a sample answer; the only JSON value in your reply is your actual answer.`;
 
 const verifyPrompt = (candidate, finding) =>
   `You are independently verifying a claim that a codebase capability is FULLY implemented. A
@@ -173,9 +173,7 @@ names the wrong thing, or a true/false verdict would mislead whichever way it we
 in \`out_of_scope_concerns\`. That field is for what this task did not ask you about; use an
 empty string when you have nothing, and never pad it.
 
-Reply with a single JSON value conforming to the schema. Reason first if you need to, but the
-JSON value comes last: the final non-whitespace characters of your message must be the JSON
-value itself — no prose, no code fence, no example after it. Never restate the schema or show
+Reply with a single JSON value conforming to the schema. Reason first if you need to, then give the JSON inside a single ```json fenced code block — the FIRST fenced block in your reply is the one that is read, so use exactly one and put nothing schema-shaped in any other fence. A reply that is the bare JSON value alone, with no prose at all, also works. Never restate the schema or show
 a sample answer; the only JSON value in your reply is your actual answer.`;
 
 // One pipeline per candidate: find → (conditionally) cross-family verify. pipeline keeps a
@@ -247,10 +245,10 @@ const results = await pipeline(
 );
 
 // pipeline() aligns its result array to the input items positionally, so a null
-// slot — the whole pipeline threw for that candidate, rare since a spawned
-// schema agent collapses to null rather than throwing (a pre-spawn rejection,
-// such as a bad option key, propagates and fails the whole run instead of
-// nulling one slot) — is recovered by index. A cut/keep list
+// slot — the whole pipeline stage failed for that candidate, rare since a
+// schema agent inside a pipeline slot collapses to null rather than
+// rejecting (note: an unknown option key is silently dropped, not
+// rejected — pin options carefully) — is recovered by index. A cut/keep list
 // exists to be complete: never let a candidate vanish from it. A failed one keeps,
 // flagged, so the main session knows it went unevaluated rather than silently gone.
 const cut_keep_list = results.map((r, i) => {

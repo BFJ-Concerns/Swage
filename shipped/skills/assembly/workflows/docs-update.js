@@ -57,7 +57,7 @@ const runHold = async (stage, content, verdicts) => {
   // Raise the decision on the run's event queue and park until answered —
   // by a lead segment clearing its batch of decisions at a wake, or by the
   // operator through the run surface. Blocking is accepted: no timeout.
-  postEvent("decision-needed", { stage, nonce, content, options: verdicts });
+  await postEvent("decision-needed", { stage, nonce, content, options: verdicts });
   while (true) {
     const decision = await awaitEvent({ kinds: ["decision"] });
     const payload = decision && decision.payload;
@@ -99,7 +99,6 @@ for (let attempt = 0; attempt < 3; attempt++) {
     schema: restatementSchema,
     cwd: worktree,
     label: `restate:${attempt}`,
-    phase: "restate",
   });
   if (!sketch) throw new Error("restatement stage returned nothing usable");
   holdDecision = await runHold("restate", sketch, ["accept", "correct", "kill"]);
@@ -125,7 +124,7 @@ Invoke the project-docs skill and run it scoped to the landed changes the brief'
 Work only in this worktree (${worktree}); commit as you go with plain descriptive messages; never push, never open PRs, never merge — publication is the landing stage's, not yours. Modify documentation files only — never product code, and never the agent-guidance file (AGENTS.md / CLAUDE.md): guidance-file changes are the user's to make, so compile any agent-facing guidance facts the landed changes produce into your report as a pending hand-off instead.
 
 Write ${unitDir}/report.md: the drift found (claim by claim, with what made each wrong); what was patched, written, or deliberately left; how you verified the changed claims and what you did NOT check; your overall confidence (high/medium/low) with a one-line why. Reply with a two-sentence summary and the head commit hash.`,
-  { cwd: worktree, label: "write", phase: "write", timeoutMs: 7200000 }
+  { cwd: worktree, label: "write", timeoutMs: 7200000 }
 );
 
 // ---------------------------------------------------------------- verify
@@ -170,10 +169,10 @@ A claim the code contradicts is a finding, whatever the prose quality; a documen
 
 Every command your verdict leans on is evidenced by the command line as executed plus enough of its actual output to support the claim — or an explicit "could not run: <reason>"; a run cited with neither is an unevidenced claim, not a completed check. Report to the findings contract: examined (what you read, ran, and checked — and what you could not), findings (each with severity, confidence, a verbatim evidence quote or command output, and unresolved_prior — true only when it restates a finding from the earlier verdict that its fix round failed to resolve, false otherwise, and always false on a first verification), rejected_concerns, confidence in your own read (bounded by the unseen list) and its one-line why. Write the same content to ${unitDir}/${refixRound !== null ? `verdict-refix-${refixRound}.md` : "verdict.md"}.
 
-Reply with a single JSON value conforming to the schema. Reason first if you need to, but the JSON value comes last: the final non-whitespace characters of your message must be the JSON value itself — no prose, no code fence, no example after it. Never restate the schema or show a sample answer; the only JSON value in your reply is your actual answer.`;
+Reply with a single JSON value conforming to the schema. Reason first if you need to, then give the JSON inside a single ```json fenced code block — the FIRST fenced block in your reply is the one that is read, so use exactly one and put nothing schema-shaped in any other fence. A reply that is the bare JSON value alone, with no prose at all, also works. Never restate the schema or show a sample answer; the only JSON value in your reply is your actual answer.`;
 
 let verdict = await agent(verifyPrompt(null, null), {
-  model: "gpt-5.6-terra", schema: findingsSchema, cwd: worktree, label: "verify", phase: "verify",
+  model: "gpt-5.6-terra", schema: findingsSchema, cwd: worktree, label: "verify",
 });
 if (!verdict) throw new Error("verifier stage returned nothing usable — re-run, never read as clean");
 if (!verdict.examined || !verdict.examined.trim())
@@ -210,7 +209,7 @@ const autoFixSchema = {
 
 const autoFixPrompt = (round) => `The verifier raised findings against your documentation unit (${unitDir}/${round === 0 ? "verdict.md" : `verdict-refix-${round - 1}.md`}), at least one of them severe. No orchestrator triage has happened yet: every finding in that verdict is yours to fix. Your brief's standing constraints remain in force: work only in ${worktree}; never push, open PRs, or merge; documentation files only — never product code, never the agent-guidance file; the changelog stays untouched. A finding you cannot fix honestly as written — the demanded correction would write a claim the code contradicts, or the finding disputes the brief or a ruling rather than the docs — goes to blocked in your reply and in ${unitDir}/report.md, with why; fix the rest. Commit as you go. Then make the whole of ${unitDir}/report.md true about the current tree — correct every section the fixes dated, not just the sections a finding quoted.
 
-Reply with JSON: summary (what you fixed, in two or three sentences), head_commit (the new head), blocked (the findings deliberately left unfixed, each by its 0-based index in the verdict, with why; empty array when none). Reason first if you need to, but the JSON value comes last: the final non-whitespace characters of your message must be the JSON value itself.`;
+Reply with JSON: summary (what you fixed, in two or three sentences), head_commit (the new head), blocked (the findings deliberately left unfixed, each by its 0-based index in the verdict, with why; empty array when none). Reason first if you need to, then give the JSON inside a single ```json fenced code block — the FIRST fenced block in your reply is the one that is read, so use exactly one. A reply that is the bare JSON value alone also works.`;
 
 let fixReport = null;
 let rounds = 0;
@@ -224,12 +223,12 @@ while (severesIn(verdict).length) {
   }
   const autoFix = await agent(autoFixPrompt(rounds), {
     effort: "medium", schema: autoFixSchema,
-    cwd: worktree, label: `fix:${rounds}`, phase: "triage", timeoutMs: 3600000,
+    cwd: worktree, label: `fix:${rounds}`, timeoutMs: 3600000,
   });
   if (!autoFix) throw new Error("autonomous fix round returned nothing usable — re-run, never read as applied");
   fixReport = autoFix.summary;
   verdict = await agent(verifyPrompt(rounds, "autonomous"), {
-    model: "gpt-5.6-terra", schema: findingsSchema, cwd: worktree, label: `verify:refix:${rounds}`, phase: "triage",
+    model: "gpt-5.6-terra", schema: findingsSchema, cwd: worktree, label: `verify:refix:${rounds}`,
   });
   if (!verdict) throw new Error("re-verification returned nothing usable — re-run, never read as clean");
   if (!verdict.examined || !verdict.examined.trim())
@@ -328,10 +327,10 @@ while (true) {
       rulings.push(`on ${rounds === 0 ? "verdict.md" : `verdict-refix-${rounds - 1}.md`} finding index ${d.finding} (${d.disposition}): ${d.note.trim()}`);
   fixReport = await agent(
     `The verifier raised findings against your documentation unit (${unitDir}/${rounds === 0 ? "verdict.md" : `verdict-refix-${rounds - 1}.md`}). The orchestrator's dispositions, by finding index: ${JSON.stringify(fixList)} — with this note: "${triage.note || ""}". Your brief's standing constraints remain in force: work only in ${worktree}; never push, open PRs, or merge; documentation files only — never product code, never the agent-guidance file; the changelog stays untouched. Apply exactly the dispositions marked fix — no more (an accepted-with-note finding is not yours to fix). A disposition you cannot apply honestly as written — the demanded correction would write a claim the code contradicts — stays unapplied: report it as blocked in your reply and in ${unitDir}/report.md, with why. Commit as you go. Then make the whole of ${unitDir}/report.md true about the current tree — correct every section the fixes dated, not just the sections a finding quoted. Reply with a summary and the new head commit.`,
-    { effort: "medium", cwd: worktree, label: `fix:${rounds}`, phase: "triage", timeoutMs: 3600000 }
+    { effort: "medium", cwd: worktree, label: `fix:${rounds}`, timeoutMs: 3600000 }
   );
   verdict = await agent(verifyPrompt(rounds, "directed"), {
-    model: "gpt-5.6-terra", schema: findingsSchema, cwd: worktree, label: `verify:refix:${rounds}`, phase: "triage",
+    model: "gpt-5.6-terra", schema: findingsSchema, cwd: worktree, label: `verify:refix:${rounds}`,
   });
   if (!verdict) throw new Error("re-verification returned nothing usable — re-run, never read as clean");
   if (!verdict.examined || !verdict.examined.trim())
@@ -363,7 +362,7 @@ const landTarget =
 
 const landing = await agent(
   `Land the finished documentation unit by direct merge — open no PR. First read ${annexeConfigPath} for push_policy. The unit branch is checked out in ${worktree}; note its head sha, then merge that head into ${landTarget}. Perform the merge in a checkout of the target branch: the repository worktree where it is already checked out, or a temporary worktree you create (git worktree add) and remove afterwards — never rewrite the target ref without a checkout. A conflicted merge is yours to resolve: keep both sides' content, then run the project's full gate on the resolved tree; the resolution stands only when it is green. Report as blocked ({landed:false, blocked_on:"conflict", detail: what contradicts what}) only a genuine contradiction the sides cannot both keep, or a resolution whose gate stays red; abort the merge before reporting. A fast-forward is a normal success. Push the target branch only if push_policy is "push-on-land"; under "hold-for-user" the merge stays local and detail says so. Reply with {landed, detail, target_head} — landed true only if the unit head is an ancestor of the target branch head (verify with git merge-base --is-ancestor). Reply with the JSON last.`,
-  { model: "gpt-5.6-terra", schema: landingSchema, cwd: worktree, label: "land", phase: "land", timeoutMs: 1800000 }
+  { model: "gpt-5.6-terra", schema: landingSchema, cwd: worktree, label: "land", timeoutMs: 1800000 }
 );
 
 // issues_findings — sub-severe findings accepted by default at the land —
