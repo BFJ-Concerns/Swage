@@ -1218,8 +1218,9 @@ mod tests {
             .await
             .expect("agent call");
         let requests = host.agent_requests.lock().unwrap();
-        assert_eq!(requests[0].effort.as_deref(), Some("high"));
-        assert_eq!(requests[0].timeout_ms, Some(75));
+        let serialised = serde_json::to_value(&requests[0]).expect("serialise request");
+        assert_eq!(serialised["effort"], "high");
+        assert_eq!(serialised["timeout_ms"], 75);
     }
 
     #[tokio::test(flavor = "current_thread")]
