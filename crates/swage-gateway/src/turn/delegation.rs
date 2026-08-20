@@ -4,11 +4,11 @@ use super::{
     apply_dispatch_bounds, available_skills_for_agent, build_agent_config_for_space_workspace,
     build_approval_registrar, build_assembly_elements,
     build_gateway_dispatcher_for_unattended_execution, build_session_environment,
-    delegated_target_instructions_for_space, dispatch_bound_agent_ids_for_turn,
-    dispatch_bound_metadata, effective_tool_permissions_record, execute_context_assembly,
-    load_active_skills_for_agent, load_memory_for_assembly, load_session_config, load_space_memory,
-    load_trusted_workspace_policy, mpsc, operator_guidance_rules, resolve_swage_root,
-    select_context_assembly, shutdown_sandbox_guard,
+    configuration_hierarchy, delegated_target_instructions_for_space,
+    dispatch_bound_agent_ids_for_turn, dispatch_bound_metadata, effective_tool_permissions_record,
+    execute_context_assembly, load_active_skills_for_agent, load_memory_for_assembly,
+    load_session_config, load_space_memory, load_trusted_workspace_policy, mpsc,
+    operator_guidance_rules, resolve_swage_root, select_context_assembly, shutdown_sandbox_guard,
 };
 use swage_agent::{
     DelegatedAssembly, DelegationContextAssembler, DelegationOutcome, DelegationSnapshotRecorder,
@@ -103,6 +103,11 @@ impl DelegationContextAssembler for GatewayDelegatedContextAssembler {
         .await;
         let operator_guidance =
             operator_guidance_rules(self.swage_root.as_deref(), &workspace_policy);
+        let hierarchy = self
+            .swage_root
+            .as_deref()
+            .map(|root| configuration_hierarchy(root, &self.space.slug, &self.agent_id))
+            .unwrap_or_default();
         let elements = build_assembly_elements(
             &self.config.instructions,
             operator_guidance,
@@ -112,6 +117,8 @@ impl DelegationContextAssembler for GatewayDelegatedContextAssembler {
             environment,
             available_skills,
             self.config.default_model_id(),
+            &hierarchy,
+            &session_variables,
         );
         let tokeniser = TiktokenTokeniser::new(self.config.default_model_id());
         let output = execute_context_assembly(

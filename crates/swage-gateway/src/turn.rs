@@ -888,6 +888,10 @@ pub(crate) async fn process_turn_with_existing_turn(
         available_skills_for_agent(&space_slug, &session.agent_id, swage_root_opt.as_deref());
 
     let operator_guidance = operator_guidance_rules(swage_root_opt.as_deref(), &workspace_policy);
+    let hierarchy = swage_root_opt
+        .as_deref()
+        .map(|root| configuration_hierarchy(root, &space_slug, &session.agent_id))
+        .unwrap_or_default();
 
     let elements = build_assembly_elements(
         &config.instructions,
@@ -898,6 +902,8 @@ pub(crate) async fn process_turn_with_existing_turn(
         environment,
         available_skills,
         config.default_model_id(),
+        &hierarchy,
+        &session_variables,
     );
     let tokeniser = TiktokenTokeniser::new(config.default_model_id());
 
@@ -1755,19 +1761,8 @@ fn execute_context_assembly(
         return swage_context::assembly::assemble(elements, &config.context, tokeniser);
     }
 
-    let search_levels: Vec<(swage_config::HierarchyLevel, PathBuf)> = swage_root
-        .map(|root| {
-            let space_dir = root.join("spaces").join(space_slug);
-            let agent_dir = space_dir.join("agents").join(agent_id);
-            let mut levels = vec![
-                (swage_config::HierarchyLevel::Global, root.to_path_buf()),
-                (swage_config::HierarchyLevel::Space, space_dir),
-            ];
-            if agent_dir.is_dir() {
-                levels.push((swage_config::HierarchyLevel::Agent, agent_dir));
-            }
-            levels
-        })
+    let search_levels = swage_root
+        .map(|root| configuration_hierarchy(root, space_slug, agent_id))
         .unwrap_or_default();
     let level_refs: Vec<(swage_config::HierarchyLevel, &Path)> = search_levels
         .iter()
