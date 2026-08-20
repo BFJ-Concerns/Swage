@@ -67,6 +67,12 @@
     "orientation_find": {
       "$ref": "#/$defs/OrientationFindResponse"
     },
+    "post_workflow_run_event_request": {
+      "$ref": "#/$defs/PostWorkflowRunEventRequest"
+    },
+    "post_workflow_run_event_response": {
+      "$ref": "#/$defs/PostWorkflowRunEventResponse"
+    },
     "promote_material": {
       "$ref": "#/$defs/PromoteMaterialRequest"
     },
@@ -163,6 +169,9 @@
     "voice_capabilities": {
       "$ref": "#/$defs/VoiceCapabilitiesResponse"
     },
+    "workflow_decision_event_payload": {
+      "$ref": "#/$defs/WorkflowDecisionEventPayload"
+    },
     "workflow_entry_event": {
       "$ref": "#/$defs/WorkflowEntryEvent"
     },
@@ -241,6 +250,9 @@
     "workflow_script_list",
     "start_workflow_run_request",
     "start_inline_workflow_run_request",
+    "post_workflow_run_event_request",
+    "post_workflow_run_event_response",
+    "workflow_decision_event_payload",
     "workflow_run_detail",
     "workflow_run_list",
     "workflow_run_started_event",
@@ -2012,6 +2024,34 @@
       "required": [
         "cards",
         "guidance"
+      ]
+    },
+    "PostWorkflowRunEventRequest": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string"
+        },
+        "payload": true
+      },
+      "required": [
+        "kind",
+        "payload"
+      ]
+    },
+    "PostWorkflowRunEventResponse": {
+      "type": "object",
+      "properties": {
+        "event": {
+          "$ref": "#/$defs/WorkflowRunEvent"
+        },
+        "wake_provisioned": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "event",
+        "wake_provisioned"
       ]
     },
     "PricingConfig": {
@@ -4592,6 +4632,34 @@
         }
       }
     },
+    "WorkflowDecisionEventPayload": {
+      "type": "object",
+      "properties": {
+        "dispositions": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": true
+        },
+        "nonce": {
+          "type": "string"
+        },
+        "note": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "verdict": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "nonce",
+        "verdict"
+      ]
+    },
     "WorkflowEffectDetail": {
       "type": "object",
       "properties": {
@@ -4719,7 +4787,8 @@
             "log",
             "phase",
             "workflow_call",
-            "timer"
+            "timer",
+            "await_event"
           ]
         },
         {
@@ -4852,6 +4921,61 @@
         "run",
         "journal",
         "wake_metrics"
+      ]
+    },
+    "WorkflowRunEvent": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string"
+        },
+        "payload": true,
+        "seq": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "source": {
+          "$ref": "#/$defs/WorkflowRunEventSource"
+        }
+      },
+      "required": [
+        "seq",
+        "kind",
+        "payload",
+        "source"
+      ]
+    },
+    "WorkflowRunEventSource": {
+      "description": "Attribution is derived by the gateway, never accepted from a poster.",
+      "type": "object",
+      "properties": {
+        "agent_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "session_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "surface": {
+          "type": "string"
+        },
+        "turn_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        }
+      },
+      "required": [
+        "surface"
       ]
     },
     "WorkflowRunListResponse": {
