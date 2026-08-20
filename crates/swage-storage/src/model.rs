@@ -5,6 +5,16 @@ use serde::{Deserialize, Serialize};
 use swage_core::{Role, StorageError};
 use uuid::Uuid;
 
+/// One durable string value scoped to a session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionVariable {
+    pub session_id: Uuid,
+    pub name: String,
+    pub value: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
 /// Persisted context snapshot metadata for space-scoped listing.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ContextSnapshotRecord {

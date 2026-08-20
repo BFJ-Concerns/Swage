@@ -9482,6 +9482,7 @@ async fn named_assembly_loads_memory_and_can_compose_it() {
         &elements,
         &swage_config::model::ContextConfig::default(),
         &TiktokenTokeniser::new("gpt-5"),
+        &std::collections::BTreeMap::new(),
     );
 
     assert!(

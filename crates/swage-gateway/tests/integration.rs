@@ -46,6 +46,8 @@ mod schedule_integration;
 
 #[path = "integration/schedule_tools_integration.rs"]
 mod schedule_tools_integration;
+#[path = "integration/session_variable_integration.rs"]
+mod session_variable_integration;
 #[path = "integration/skills_endpoint_integration.rs"]
 mod skills_endpoint_integration;
 #[path = "integration/skills_integration.rs"]
