@@ -840,9 +840,16 @@ async fn run_ephemeral_agent_call(
     tokio::pin!(processing);
     let timeout = request.timeout_ms.map(std::time::Duration::from_millis);
     tokio::select! {
+        biased;
         result = &mut processing => result.map_err(|error| error.to_string())?,
         () = cancellation.cancelled() => {
             call_cancellation.cancel();
+            // The turn path owns the sandbox and active-turn registration.
+            // Let it observe cancellation and run that cleanup before the
+            // workflow cancellation is surfaced.
+            if let Err(error) = processing.await {
+                tracing::warn!(%error, "cancelled agent turn failed while settling cancellation");
+            }
             return Err("WorkflowCancelledError".into());
         }
         () = async {
@@ -5104,6 +5111,10 @@ mod tests {
         assert_eq!(journal[0].error_message, None);
         assert_eq!(provider.requests.lock().expect("requests").len(), 1);
         wait_for_worker_turn_interrupted(&storage).await;
+        assert!(
+            state.active_turns.lock().await.is_empty(),
+            "cancelled worker must release its active-turn registration"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
