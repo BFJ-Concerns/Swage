@@ -239,6 +239,15 @@
         <span class="role-label" class:user-label={message.role === "user"}>
           {message.role === "user" ? "You" : "Assistant"}
         </span>
+        <!-- The assistant invokes tools before producing its response. Keep
+             persisted calls inside that turn and ahead of its content. -->
+        {#if message.role === "assistant" && message.tool_calls && message.tool_calls.length > 0}
+          <div class="tool-calls-history">
+            {#each buildToolCallTree(message.tool_calls) as toolCall (toolCall.call_id)}
+              <ToolCallDisplay {toolCall} isLive={false} />
+            {/each}
+          </div>
+        {/if}
         {#if message.role === "user"}
           <!-- User messages render as plain text (no markdown injection). -->
           <div class="message-content user-content">
@@ -283,17 +292,6 @@
           </button>
         {/if}
       </div>
-
-      <!-- ---- Persisted tool calls for this message (history) ---- -->
-      <!-- The API returns a flat list; buildToolCallTree groups sub-calls under
-           their parent so ToolCallDisplay can render nesting recursively. -->
-      {#if message.role === "assistant" && message.tool_calls && message.tool_calls.length > 0}
-        <div class="tool-calls-history">
-          {#each buildToolCallTree(message.tool_calls) as toolCall (toolCall.call_id)}
-            <ToolCallDisplay {toolCall} isLive={false} />
-          {/each}
-        </div>
-      {/if}
     {/each}
 
     <!-- ---- Live streaming content: grows as tokens arrive ---- -->
