@@ -11,26 +11,12 @@ pub(crate) struct BuiltinWorkflow {
     pub(crate) released_at: &'static str,
 }
 
-pub(crate) const BUILTIN_WORKFLOWS: &[BuiltinWorkflow] = &[
-    BuiltinWorkflow {
-        name: "front-loaded-run",
-        description: "Coordinate a long unattended run through fresh lead segments, worker-verifier pipelines, wake gates, and a closing handover.",
-        source: include_str!("../../../examples/workflows/front-loaded-run.js"),
-        released_at: "2026-08-12T00:51:42+01:00",
-    },
-    BuiltinWorkflow {
-        name: "research-sweep",
-        description: "Gather, organise, and synthesise live web research into the space knowledge base.",
-        source: include_str!("../../../examples/workflows/research-sweep.js"),
-        released_at: "2026-08-11T17:56:09+01:00",
-    },
-    BuiltinWorkflow {
-        name: "segment-orchestration",
-        description: "Run long work as fresh-context lead segments separated by durable completion or timer wakes.",
-        source: include_str!("../../../examples/workflows/segment-orchestration.js"),
-        released_at: "2026-08-10T17:54:28+01:00",
-    },
-];
+pub(crate) const BUILTIN_WORKFLOWS: &[BuiltinWorkflow] = &[BuiltinWorkflow {
+    name: "research-sweep",
+    description: "Gather, organise, and synthesise live web research into the space knowledge base.",
+    source: include_str!("../../../examples/workflows/research-sweep.js"),
+    released_at: "2026-08-11T17:56:09+01:00",
+}];
 
 pub(crate) fn find_by_name(name: &str) -> Option<&'static BuiltinWorkflow> {
     BUILTIN_WORKFLOWS
@@ -65,20 +51,10 @@ mod tests {
 
     #[test]
     fn catalogue_embeds_the_authored_scripts_byte_for_byte() {
-        let expected = [
-            (
-                "front-loaded-run",
-                include_str!("../../../examples/workflows/front-loaded-run.js"),
-            ),
-            (
-                "research-sweep",
-                include_str!("../../../examples/workflows/research-sweep.js"),
-            ),
-            (
-                "segment-orchestration",
-                include_str!("../../../examples/workflows/segment-orchestration.js"),
-            ),
-        ];
+        let expected = [(
+            "research-sweep",
+            include_str!("../../../examples/workflows/research-sweep.js"),
+        )];
 
         assert_eq!(BUILTIN_WORKFLOWS.len(), expected.len());
         for (name, source) in expected {
