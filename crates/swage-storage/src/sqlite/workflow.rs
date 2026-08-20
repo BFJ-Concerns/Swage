@@ -137,9 +137,9 @@ const SCRIPT_COLUMNS: &str =
     "id, space_id, name, description, delivery_grant_json, created_at, updated_at";
 const VERSION_COLUMNS: &str = "id, script_id, version, source, created_at";
 const RUN_COLUMNS: &str = "id, space_id, parent_run_id, parent_seq, script_version_id, \
-    (SELECT script_id FROM workflow_script_versions WHERE id = workflow_runs.script_version_id), \
-    (SELECT name FROM workflow_scripts WHERE id = (SELECT script_id FROM workflow_script_versions WHERE id = workflow_runs.script_version_id)), \
-    (SELECT version FROM workflow_script_versions WHERE id = workflow_runs.script_version_id), \
+    COALESCE((SELECT script_id FROM workflow_script_versions WHERE id = workflow_runs.script_version_id), inline_workflow_id), \
+    COALESCE((SELECT name FROM workflow_scripts WHERE id = (SELECT script_id FROM workflow_script_versions WHERE id = workflow_runs.script_version_id)), inline_workflow_name), \
+    COALESCE((SELECT version FROM workflow_script_versions WHERE id = workflow_runs.script_version_id), inline_workflow_version), \
     source, source_hash, args_json, budget_json, state, final_output_json, handover_json, error_message, engine_version, created_at, completed_at, dispatch_bound_agent_ids_json, wake_at";
 const JOURNAL_COLUMNS: &str = "id, run_id, seq, completed_order, kind, status, args_hash, request_json, result_json, error_message, effect_kind, idempotency_key, target_kind, started_at, completed_at";
 const RUN_EVENT_COLUMNS: &str = "id, run_id, journal_entry_id, seq, kind, payload_json, posted_at, delivered_wake_seq, delivered_at";
@@ -328,7 +328,7 @@ impl WorkflowStore for SqliteStorage {
             .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
         let dispatch_bound_agent_ids = serde_json::to_string(&run.dispatch_bound_agent_ids)
             .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
-        self.with_conn(move |conn| { conn.execute("INSERT INTO workflow_runs (id, space_id, parent_run_id, parent_seq, script_version_id, source, source_hash, args_json, budget_json, state, engine_version, dispatch_bound_agent_ids_json, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'running', ?10, ?11, ?12)", params![id.to_string(), run.space_id.to_string(), run.parent_run_id.map(|v| v.to_string()), run.parent_seq.map(|v| v as i64), run.script_version_id.map(|v| v.to_string()), run.source, run.source_hash, args, budget, run.engine_version, dispatch_bound_agent_ids, now.to_rfc3339()])?; conn.query_row(&format!("SELECT {RUN_COLUMNS} FROM workflow_runs WHERE id = ?1"), [id.to_string()], run_row) }).await
+        self.with_conn(move |conn| { conn.execute("INSERT INTO workflow_runs (id, space_id, parent_run_id, parent_seq, script_version_id, inline_workflow_id, inline_workflow_name, inline_workflow_version, source, source_hash, args_json, budget_json, state, engine_version, dispatch_bound_agent_ids_json, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 'running', ?13, ?14, ?15)", params![id.to_string(), run.space_id.to_string(), run.parent_run_id.map(|v| v.to_string()), run.parent_seq.map(|v| v as i64), run.script_version_id.map(|v| v.to_string()), run.inline_workflow_id.map(|v| v.to_string()), run.inline_workflow_name, run.inline_workflow_version, run.source, run.source_hash, args, budget, run.engine_version, dispatch_bound_agent_ids, now.to_rfc3339()])?; conn.query_row(&format!("SELECT {RUN_COLUMNS} FROM workflow_runs WHERE id = ?1"), [id.to_string()], run_row) }).await
     }
 
     async fn get_workflow_run(&self, id: Uuid) -> Result<Option<WorkflowRunRecord>, StorageError> {
@@ -635,6 +635,9 @@ mod tests {
                 parent_run_id: None,
                 parent_seq: None,
                 script_version_id: Some(second.id),
+                inline_workflow_id: None,
+                inline_workflow_name: None,
+                inline_workflow_version: None,
                 source: None,
                 source_hash: "hash".into(),
                 args: serde_json::json!({}),
@@ -647,6 +650,37 @@ mod tests {
         assert_eq!(run.script_id, Some(script.id));
         assert_eq!(run.script_name.as_deref(), Some("publish"));
         assert_eq!(run.script_version, Some(2));
+
+        let inline_id = Uuid::new_v4();
+        let inline = storage
+            .create_workflow_run(NewWorkflowRun {
+                space_id: space.id,
+                parent_run_id: None,
+                parent_seq: None,
+                script_version_id: None,
+                inline_workflow_id: Some(inline_id),
+                inline_workflow_name: Some("compiled-workflow".into()),
+                inline_workflow_version: Some(3),
+                source: Some("return 3".into()),
+                source_hash: "inline-hash".into(),
+                args: serde_json::json!({}),
+                budget: serde_json::json!({}),
+                engine_version: "rquickjs-0.12.0".into(),
+                dispatch_bound_agent_ids: vec![],
+            })
+            .await
+            .expect("inline workflow run");
+        let inline = storage
+            .get_workflow_run(inline.id)
+            .await
+            .expect("inline run query")
+            .expect("inline run");
+        assert_eq!(inline.script_version_id, None);
+        assert_eq!(inline.script_id, Some(inline_id));
+        assert_eq!(inline.script_name.as_deref(), Some("compiled-workflow"));
+        assert_eq!(inline.script_version, Some(3));
+        assert_eq!(inline.source.as_deref(), Some("return 3"));
+        assert_eq!(inline.source_hash, "inline-hash");
         storage
             .interrupt_running_workflow_runs()
             .await
@@ -739,6 +773,9 @@ mod tests {
                 parent_run_id: None,
                 parent_seq: None,
                 script_version_id: None,
+                inline_workflow_id: None,
+                inline_workflow_name: None,
+                inline_workflow_version: None,
                 source: Some("return null".into()),
                 source_hash: "hash".into(),
                 args: serde_json::json!({}),
