@@ -1477,6 +1477,8 @@ pub async fn submit_turn(
             subscription,
             output_schema,
             None,
+            None,
+            None,
             Some(turn_id),
             crate::turn::TurnAttendance::Unattended,
         )

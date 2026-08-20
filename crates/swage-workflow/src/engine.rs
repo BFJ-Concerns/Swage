@@ -13,8 +13,9 @@ use crate::{
 };
 
 fn named_host_error(error: &str, fallback: &str) -> (String, String) {
-    const NAMES: [(&str, &str); 11] = [
+    const NAMES: [(&str, &str); 12] = [
         ("AgentCallError", "AgentCallError"),
+        ("AgentCallTimeoutError", "AgentCallTimeoutError"),
         ("BudgetExceededError", "BudgetExceededError"),
         ("BudgetWindDownError", "BudgetWindDownError"),
         ("DeliveryNotGrantedError", "DeliveryNotGrantedError"),
@@ -650,6 +651,12 @@ impl WorkflowEngine {
                                     ? {}
                                     : { agent: merged.agent }),
                                 model: merged.model ?? null,
+                                ...(merged.effort === undefined || merged.effort === null
+                                    ? {}
+                                    : { effort: String(merged.effort) }),
+                                ...(merged.timeoutMs === undefined || merged.timeoutMs === null
+                                    ? {}
+                                    : { timeout_ms: merged.timeoutMs }),
                                 schema: merged.schema ?? null,
                                 max_attempts: merged.maxAttempts ?? 3,
                                 label: merged.label ?? null,
@@ -1192,6 +1199,29 @@ mod tests {
             serialised.get("agent").is_none(),
             "an unset agent must not perturb journal argument hashes: {serialised}"
         );
+        assert!(
+            serialised.get("effort").is_none() && serialised.get("timeout_ms").is_none(),
+            "unset call options must not perturb journal argument hashes: {serialised}"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn agent_call_projects_effort_and_timeout_options_to_the_host() {
+        let host = Arc::new(SurfaceHost::new());
+        WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                r#"await agent("bounded work", { effort: "high", timeoutMs: 75 }); return null;"#,
+                "null",
+                CancellationToken::new(),
+                Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                ScriptCapabilities::default(),
+            )
+            .await
+            .expect("agent call");
+        let requests = host.agent_requests.lock().unwrap();
+        let serialised = serde_json::to_value(&requests[0]).expect("serialise request");
+        assert_eq!(serialised["effort"], "high");
+        assert_eq!(serialised["timeout_ms"], 75);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1229,8 +1259,59 @@ mod tests {
         assert_eq!(requests.len(), 2);
         assert_eq!(requests[0].agent, None);
         assert_eq!(requests[0].label.as_deref(), Some("propose:0"));
+        assert_eq!(requests[0].effort.as_deref(), Some("low"));
         assert_eq!(requests[1].agent, None);
         assert_eq!(requests[1].label.as_deref(), Some("reduce"));
+        assert_eq!(requests[1].effort.as_deref(), Some("medium"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn shipped_estate_workflow_projects_its_build_timeout_pin() {
+        let host = Arc::new(SurfaceHost::new());
+        host.agent_outputs.lock().unwrap().extend([
+            Ok(json!({
+                "admission": "ok",
+                "restatement": "prove the estate",
+                "journeys": "exercise the real consumer",
+                "disputes": "",
+            })),
+            Ok(json!("estate built")),
+        ]);
+        let source = include_str!("../../../shipped/skills/assembly/workflows/estate-unit.js");
+        let hold_start = source
+            .find("const runHold = async")
+            .expect("shipped hold function");
+        let hold_end = source[hold_start..]
+            .find("\n\n// ---------------------------------------------------------------- restate")
+            .map(|offset| hold_start + offset)
+            .expect("end of shipped hold function");
+        let verify_start = source
+            .find("\n\n// ---------------------------------------------------------------- verify")
+            .expect("shipped verify stage");
+        let source = format!(
+            "{}const runHold = async () => ({{ verdict: 'accept' }});{}\nreturn report;",
+            &source[..hold_start],
+            &source[hold_end..verify_start]
+        );
+        WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                &source,
+                r#"{
+                    "briefPath":"brief.md","worktree":".",
+                    "commissionPath":"commission.md","verificationPath":"VERIFICATION.md",
+                    "unitDir":"unit","mergePolicy":"direct-merge",
+                    "annexeConfigPath":"config.toml","proofMode":"mutation"
+                }"#,
+                CancellationToken::new(),
+                Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                ScriptCapabilities::default(),
+            )
+            .await
+            .expect("shipped workflow through build stage");
+
+        let requests = host.agent_requests.lock().unwrap();
+        assert_eq!(requests[1].label.as_deref(), Some("build"));
+        assert_eq!(requests[1].timeout_ms, Some(14_400_000));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1768,6 +1849,27 @@ mod tests {
             serde_json::from_str::<Value>(&output).unwrap(),
             json!({"name":"BudgetExceededError","message":"agent call limit reached"})
         );
+
+        let host: Arc<dyn WorkflowHost> = Arc::new(ErrorHost(
+            "AgentCallTimeoutError: agent call exceeded its 75ms deadline",
+        ));
+        let output = WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                "try { await agent('x',{agent:'writer'}); } catch (error) { return {name:error.name,message:error.message}; }",
+                "null",
+                CancellationToken::new(),
+                Some(host),
+                ScriptCapabilities::default(),
+            )
+            .await
+            .expect("timeout error is catchable");
+        assert_eq!(
+            serde_json::from_str::<Value>(&output).unwrap(),
+            json!({
+                "name":"AgentCallTimeoutError",
+                "message":"agent call exceeded its 75ms deadline"
+            })
+        );
     }
 
     #[test]
@@ -1779,6 +1881,16 @@ mod tests {
         assert_eq!(
             named_host_error("WorkflowCancelledError: stopped", "AgentCallError"),
             ("WorkflowCancelledError".into(), "stopped".into())
+        );
+        assert_eq!(
+            named_host_error(
+                "AgentCallTimeoutError: agent call exceeded its 75ms deadline",
+                "AgentCallError"
+            ),
+            (
+                "AgentCallTimeoutError".into(),
+                "agent call exceeded its 75ms deadline".into()
+            )
         );
         assert_eq!(
             named_host_error("NondeterministicReplayError", "AgentCallError"),

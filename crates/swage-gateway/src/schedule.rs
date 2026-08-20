@@ -1353,6 +1353,7 @@ async fn run_gate_check(
     let response = state
         .active_provider()
         .complete(CompletionRequest {
+            effort: None,
             messages: vec![ChatMessage::new(Role::User, prompt)],
             model: Some(model_id),
             max_tokens: Some(GATE_MAX_TOKENS),
