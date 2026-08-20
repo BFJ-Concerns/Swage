@@ -3421,7 +3421,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn empty_space_lists_the_three_built_in_workflows() {
+    async fn empty_space_lists_the_built_in_workflows() {
         let (state, storage) = workflow_test_state();
         let space = storage.get_or_create_default().await.expect("space");
 
@@ -3429,17 +3429,13 @@ mod tests {
             .await
             .expect("workflow list");
 
-        assert_eq!(list.scripts.len(), 3);
+        assert_eq!(list.scripts.len(), 1);
         assert_eq!(
             list.scripts
                 .iter()
                 .map(|script| script.name.as_str())
                 .collect::<Vec<_>>(),
-            [
-                "front-loaded-run",
-                "research-sweep",
-                "segment-orchestration"
-            ]
+            ["research-sweep"]
         );
         assert!(list.scripts.iter().all(|script| script.built_in));
         assert!(
