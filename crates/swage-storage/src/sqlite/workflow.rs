@@ -142,10 +142,10 @@ const RUN_COLUMNS: &str = "id, space_id, parent_run_id, parent_seq, script_versi
     (SELECT version FROM workflow_script_versions WHERE id = workflow_runs.script_version_id), \
     source, source_hash, args_json, budget_json, state, final_output_json, handover_json, error_message, engine_version, created_at, completed_at, dispatch_bound_agent_ids_json, wake_at";
 const JOURNAL_COLUMNS: &str = "id, run_id, seq, completed_order, kind, status, args_hash, request_json, result_json, error_message, effect_kind, idempotency_key, target_kind, started_at, completed_at";
-const RUN_EVENT_COLUMNS: &str = "id, run_id, journal_entry_id, seq, kind, payload_json, posted_at, delivered_wake_seq, delivered_at";
+const RUN_EVENT_COLUMNS: &str = "id, run_id, journal_entry_id, seq, kind, payload_json, source_surface, source_agent_id, source_session_id, source_turn_id, posted_at, delivered_wake_seq, delivered_at";
 
 fn run_event_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkflowRunEventRecord> {
-    let delivered_at: Option<String> = row.get(8)?;
+    let delivered_at: Option<String> = row.get(12)?;
     Ok(WorkflowRunEventRecord {
         id: uuid(row.get(0)?)?,
         run_id: uuid(row.get(1)?)?,
@@ -159,8 +159,12 @@ fn run_event_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkflowRunEventRe
                 Box::new(error),
             )
         })?,
-        posted_at: time(row.get(6)?)?,
-        delivered_wake_seq: row.get::<_, Option<i64>>(7)?.map(|value| value as u64),
+        source_surface: row.get(6)?,
+        source_agent_id: row.get(7)?,
+        source_session_id: row.get::<_, Option<String>>(8)?.map(uuid).transpose()?,
+        source_turn_id: row.get::<_, Option<String>>(9)?.map(uuid).transpose()?,
+        posted_at: time(row.get(10)?)?,
+        delivered_wake_seq: row.get::<_, Option<i64>>(11)?.map(|value| value as u64),
         delivered_at: delivered_at.map(time).transpose()?,
     })
 }
@@ -400,6 +404,18 @@ impl WorkflowStore for SqliteStorage {
         .await
     }
 
+    async fn make_parked_workflow_run_due(&self, id: Uuid) -> Result<bool, StorageError> {
+        let now = Utc::now().to_rfc3339();
+        self.with_conn(move |conn| {
+            let changed = conn.execute(
+                "UPDATE workflow_runs SET wake_at=?2 WHERE id=?1 AND state='parked'",
+                params![id.to_string(), now],
+            )?;
+            Ok(changed == 1)
+        })
+        .await
+    }
+
     async fn list_due_parked_workflow_runs(
         &self,
         now: DateTime<Utc>,
@@ -463,8 +479,8 @@ impl WorkflowStore for SqliteStorage {
             // a replayed post (same journal entry) inserts nothing and reads
             // back the row the original run created.
             conn.execute(
-                "INSERT INTO workflow_run_events (id, run_id, journal_entry_id, seq, kind, payload_json, posted_at) \
-                 VALUES (?1, ?2, ?3, (SELECT COALESCE(MAX(seq), 0) + 1 FROM workflow_run_events WHERE run_id = ?2), ?4, ?5, ?6) \
+                "INSERT INTO workflow_run_events (id, run_id, journal_entry_id, seq, kind, payload_json, source_surface, source_agent_id, source_session_id, source_turn_id, posted_at) \
+                 VALUES (?1, ?2, ?3, (SELECT COALESCE(MAX(seq), 0) + 1 FROM workflow_run_events WHERE run_id = ?2), ?4, ?5, ?6, ?7, ?8, ?9, ?10) \
                  ON CONFLICT(journal_entry_id) DO NOTHING",
                 params![
                     id.to_string(),
@@ -472,6 +488,10 @@ impl WorkflowStore for SqliteStorage {
                     event.journal_entry_id.to_string(),
                     event.kind,
                     payload,
+                    event.source_surface,
+                    event.source_agent_id,
+                    event.source_session_id.map(|id| id.to_string()),
+                    event.source_turn_id.map(|id| id.to_string()),
                     now.to_rfc3339()
                 ],
             )?;
@@ -755,8 +775,12 @@ mod tests {
                 .create_workflow_run_event(NewWorkflowRunEvent {
                     run_id: run.id,
                     journal_entry_id: *journal_entry_id,
-                    kind: "completion".into(),
+                    kind: format!("worker.{index}.completion"),
                     payload: serde_json::json!({"worker": index}),
+                    source_surface: "script".into(),
+                    source_agent_id: None,
+                    source_session_id: None,
+                    source_turn_id: None,
                 })
                 .await
                 .expect("event");
@@ -769,8 +793,12 @@ mod tests {
             .create_workflow_run_event(NewWorkflowRunEvent {
                 run_id: run.id,
                 journal_entry_id: journal_ids[1],
-                kind: "completion".into(),
+                kind: "worker.1.completion".into(),
                 payload: serde_json::json!({"worker": 1}),
+                source_surface: "script".into(),
+                source_agent_id: None,
+                source_session_id: None,
+                source_turn_id: None,
             })
             .await
             .expect("replayed post");
