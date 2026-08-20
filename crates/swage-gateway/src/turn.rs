@@ -862,11 +862,18 @@ pub(crate) async fn process_turn_with_existing_turn(
         }
     })
     .await;
-    let session_variables: std::collections::BTreeMap<String, String> = state
-        .storage
-        .list_session_variables(session_id)
-        .await
-        .map_err(GatewayError::from)?
+    let session_variables: std::collections::BTreeMap<String, String> =
+        record_failed_turn_and_release_on_error(
+            state,
+            session_id,
+            prepared_turn_id,
+            state
+                .storage
+                .list_session_variables(session_id)
+                .await
+                .map_err(GatewayError::from),
+        )
+        .await?
         .into_iter()
         .map(|variable| (variable.name, variable.value))
         .collect();

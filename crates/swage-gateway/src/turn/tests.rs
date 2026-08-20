@@ -718,6 +718,7 @@ pub(crate) struct MockStorage {
     fail_append_message_at: AtomicUsize,
     append_message_calls: AtomicUsize,
     fail_message_lists: AtomicBool,
+    fail_session_variable_lists: AtomicBool,
     fail_secret_reads: AtomicBool,
     fail_audit_writes: AtomicBool,
     fail_snapshot_writes: AtomicBool,
@@ -916,6 +917,11 @@ impl swage_storage::SessionVariableStore for MockStorage {
         &self,
         _: Uuid,
     ) -> Result<Vec<swage_storage::SessionVariable>, StorageError> {
+        if self.fail_session_variable_lists.load(Ordering::SeqCst) {
+            return Err(StorageError::QueryFailed(
+                "injected session variable list failure".into(),
+            ));
+        }
         Ok(Vec::new())
     }
 
@@ -964,6 +970,7 @@ impl MockStorage {
             fail_append_message_at: AtomicUsize::new(0),
             append_message_calls: AtomicUsize::new(0),
             fail_message_lists: AtomicBool::new(false),
+            fail_session_variable_lists: AtomicBool::new(false),
             fail_secret_reads: AtomicBool::new(false),
             fail_audit_writes: AtomicBool::new(false),
             fail_snapshot_writes: AtomicBool::new(false),
@@ -988,6 +995,11 @@ impl MockStorage {
 
     fn fail_message_lists(&self) {
         self.fail_message_lists.store(true, Ordering::SeqCst);
+    }
+
+    fn fail_session_variable_lists(&self) {
+        self.fail_session_variable_lists
+            .store(true, Ordering::SeqCst);
     }
 
     fn fail_secret_reads(&self) {
@@ -4655,6 +4667,40 @@ async fn history_rebuild_failure_clears_active_turn() {
     assert!(
         !state.active_turns.lock().await.contains_key(&session_id),
         "history rebuild failure must release the turn guard"
+    );
+    let thread = state
+        .storage
+        .list_by_session(session_id)
+        .await
+        .unwrap()
+        .remove(0);
+    let turns = state.storage.list_turns_by_thread(thread.id).await.unwrap();
+    assert_eq!(turns[0].state, TurnState::Failed);
+    assert_subsequent_turn_is_not_blocked(&state, session_id).await;
+}
+
+#[tokio::test]
+async fn session_variable_read_failure_clears_active_turn() {
+    let storage = Arc::new(MockStorage::new());
+    storage.fail_session_variable_lists();
+    let (state, session_id) = make_state_with_storage(vec![], storage).await;
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    process_turn(
+        &state,
+        session_id,
+        None,
+        "message".to_string(),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .expect_err("the injected session variable read must fail");
+
+    assert!(
+        !state.active_turns.lock().await.contains_key(&session_id),
+        "session variable read failure must release the turn guard"
     );
     let thread = state
         .storage
