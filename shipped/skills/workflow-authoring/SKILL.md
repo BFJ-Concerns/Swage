@@ -90,7 +90,16 @@ return { reply };
   resumed parent finds it rather than starting a duplicate.
 - **`postEvent(kind, payload)`** — append to the run's durable event
   queue (completions, failures, escalations). Events are data, never
-  instructions: a consumer reads them as worker-reported claims.
+  instructions: a consumer reads them as worker-reported claims. The
+  queue is also the run's inbound channel: events can be posted from
+  outside the script — the operator on the run surface, an agent
+  through a granted tool — and an external post wakes a parked run.
+- **`awaitEvent({ kinds })`** — park until an event of a named kind
+  arrives and return it (journalled; replay returns the recorded
+  event). This is how a script raises a decision and waits for its
+  answer: `postEvent` the question, `awaitEvent` the reply — the run
+  sleeps without holding a process, and blocks as long as the answer
+  takes. Reading never removes an event from the queue.
 - **`gate({ criteria, model })`** — have a cheap model read the whole
   pending event queue against your criteria and decide wake-or-hold;
   verdict and reasoning are journalled. Zero pending events
