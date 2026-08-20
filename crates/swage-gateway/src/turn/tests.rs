@@ -7778,6 +7778,8 @@ async fn detached_delegate_can_be_cancelled_through_active_registry() {
         child_release,
         "Detached child answer".to_string(),
     );
+    let placement_fixture =
+        tempfile::tempdir_in("/tmp/scratch").expect("placement fixture");
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
@@ -7787,7 +7789,8 @@ async fn detached_delegate_can_be_cancelled_through_active_registry() {
             Arc::new(DelegatedMarkerWriteTool) as Arc<dyn Tool>
         ]),
         None,
-    );
+    )
+    .with_worktree_root(placement_fixture.path().join("worker-worktrees"));
     let handler = GatewayDelegationHandler::new(state.clone());
     let delegated_cwd = tempfile::tempdir_in("/tmp/scratch").expect("delegated cwd");
     storage
@@ -7800,6 +7803,49 @@ async fn detached_delegate_can_be_cancelled_through_active_registry() {
         })
         .await
         .expect("grant delegated cwd");
+
+    let read_only_cwd = placement_fixture.path().join("read-only");
+    std::fs::create_dir(&read_only_cwd).unwrap();
+    storage
+        .create_workspace_attachment(NewWorkspaceAttachment {
+            space_id: space.id,
+            label: "delegated read-only cwd".into(),
+            path: read_only_cwd.to_string_lossy().into_owned(),
+            permissions: vec!["read".into()],
+            is_trusted: true,
+        })
+        .await
+        .expect("grant delegated read-only cwd");
+    let read_only_placement = resolve_authorised_worker_directory(
+        &state,
+        space.id,
+        parent_turn.id,
+        None,
+        &read_only_cwd.to_string_lossy(),
+    )
+    .await
+    .expect("read-only delegate placement should be admitted");
+    assert!(!read_only_placement.can_write);
+    let read_only_agent =
+        AgentConfig::new("agent-b").with_workspace(&read_only_cwd, vec![read_only_cwd.clone()]);
+    let mut read_only_policy = load_trusted_workspace_policy(&state.storage, space.id, None).await;
+    let read_only_metadata = serde_json::json!({
+        "worker_placement_can_write": read_only_placement.can_write,
+    });
+    apply_worker_placement_permission(
+        &mut read_only_policy,
+        &read_only_agent,
+        Some(&read_only_metadata),
+    );
+    let read_only_sandbox =
+        build_sandbox_config(&read_only_agent, Some(&read_only_policy)).unwrap();
+    let read_only_path = sandbox_path(&read_only_cwd);
+    assert!(read_only_sandbox.read_only_mounts.contains(&read_only_path));
+    assert!(
+        !read_only_sandbox
+            .read_write_mounts
+            .contains(&read_only_path)
+    );
 
     let outcome = handler
         .handle_delegation(

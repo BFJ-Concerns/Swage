@@ -11,6 +11,7 @@ use super::{
     resolve_authorised_worker_directory, resolve_swage_root, select_context_assembly,
     shutdown_sandbox_guard,
 };
+use crate::turn::workspace::ResolvedWorkerDirectory;
 use sha2::{Digest, Sha256};
 use swage_agent::{
     DelegatedAssembly, DelegationContextAssembler, DelegationOutcome, DelegationSnapshotRecorder,
@@ -288,9 +289,7 @@ impl DelegationHandler for GatewayDelegationHandler {
                         cwd,
                     )
                     .await
-                    .map_err(AgentError::InvalidConfig)?
-                    .to_string_lossy()
-                    .into_owned(),
+                    .map_err(AgentError::InvalidConfig)?,
                 ),
                 None => None,
             },
@@ -311,20 +310,20 @@ impl DelegationHandler for GatewayDelegationHandler {
                 .await
                 .map_err(AgentError::InvalidConfig)?;
                 let stable_key = delegate_worktree_key(delegate_call_id);
-                Some(
-                    self.state
+                Some(ResolvedWorkerDirectory {
+                    path: self
+                        .state
                         .worktree_host
-                        .provision(sender_turn_id, stable_key, &repo)
+                        .provision(sender_turn_id, stable_key, &repo.path)
                         .await
-                        .map_err(AgentError::InvalidConfig)?
-                        .to_string_lossy()
-                        .into_owned(),
-                )
+                        .map_err(AgentError::InvalidConfig)?,
+                    can_write: true,
+                })
             }
         };
-        if let Some(path) = placement.as_ref() {
-            let path = std::path::PathBuf::from(path);
-            target_agent_config = target_agent_config.with_workspace(path.clone(), vec![path]);
+        if let Some(placement) = placement.as_ref() {
+            target_agent_config = target_agent_config
+                .with_workspace(placement.path.clone(), vec![placement.path.clone()]);
         }
         target_agent_config.approval_prompts_enabled = false;
         let target_instructions = delegated_target_instructions_for_space(
@@ -340,12 +339,17 @@ impl DelegationHandler for GatewayDelegationHandler {
         // this silent channel; the stored child-turn snapshot is the delegated
         // assembly's audit record.
         let (silent_ws_tx, _silent_ws_rx) = mpsc::unbounded_channel();
+        let placement_metadata = placement.as_ref().map(|placement| {
+            serde_json::json!({
+                "worker_placement_can_write": placement.can_write,
+            })
+        });
         let target_dispatcher_build = build_gateway_dispatcher_for_unattended_execution(
             &self.state,
             GatewayDispatcherRequest {
                 config: &effective_target_resolved,
                 agent_config: &target_agent_config,
-                session_metadata: None,
+                session_metadata: placement_metadata.as_ref(),
                 space_id: Some(space_id),
                 active_workspace_attachment_id,
                 ws_tx: silent_ws_tx.clone(),
@@ -388,7 +392,7 @@ impl DelegationHandler for GatewayDelegationHandler {
         let mut payload = serde_json::json!({
             "task": task,
             "placement": {
-                "cwd": placement,
+                "cwd": placement.as_ref().map(|placement| &placement.path),
                 "requested_cwd": cwd,
                 "isolation": isolation,
             },

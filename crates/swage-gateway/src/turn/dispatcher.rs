@@ -1,8 +1,9 @@
 use super::{
     AgentConfig, AppState, Arc, GatewayExecutionStrategy, HostLlmHandler, LeakDetector, Mutex,
     Path, PathBuf, RateLimitConfig, RateLimiter, Sandbox, SandboxedExecutor, ServerEvent, Tool,
-    ToolDispatcher, TrustedWorkspacePolicy, Uuid, build_gateway_advertisement_filter,
-    build_permission_config, load_trusted_workspace_policy, mpsc,
+    ToolDispatcher, TrustedWorkspacePath, TrustedWorkspacePolicy, Uuid,
+    build_gateway_advertisement_filter, build_permission_config, load_trusted_workspace_policy,
+    mpsc,
 };
 
 pub(super) type GatewayToolAdvertisementFilter = dyn Fn(&dyn Tool) -> bool + Send + Sync;
@@ -117,7 +118,7 @@ pub(super) fn sandbox_path(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
-pub(super) fn build_sandbox_config(
+pub(crate) fn build_sandbox_config(
     agent_config: &AgentConfig,
     workspace_policy: Option<&TrustedWorkspacePolicy>,
 ) -> Result<swage_sandbox::SandboxConfig, swage_sandbox::SandboxConfigError> {
@@ -168,6 +169,25 @@ pub(super) fn build_sandbox_config(
     }
 
     builder.build()
+}
+
+pub(crate) fn apply_worker_placement_permission(
+    policy: &mut TrustedWorkspacePolicy,
+    agent_config: &AgentConfig,
+    session_metadata: Option<&serde_json::Value>,
+) {
+    let Some(can_write) = session_metadata
+        .and_then(|metadata| metadata.get("worker_placement_can_write"))
+        .and_then(serde_json::Value::as_bool)
+    else {
+        return;
+    };
+    policy.active_workspace = Some(TrustedWorkspacePath {
+        path: agent_config.working_directory.clone(),
+        is_trusted: true,
+        can_read: true,
+        can_write,
+    });
 }
 
 pub(super) async fn build_turn_sandbox(
@@ -313,12 +333,15 @@ pub(crate) async fn build_gateway_dispatcher(
         });
     }
 
-    let workspace_policy = match space_id {
+    let mut workspace_policy = match space_id {
         Some(id) => Some(
             load_trusted_workspace_policy(&state.storage, id, active_workspace_attachment_id).await,
         ),
         None => None,
     };
+    if let Some(policy) = workspace_policy.as_mut() {
+        apply_worker_placement_permission(policy, agent_config, session_metadata);
+    }
     let session_approval_grants = state
         .session_approval_grants
         .lock()

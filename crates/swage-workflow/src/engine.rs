@@ -310,7 +310,7 @@ impl WorkflowEngine {
                                 };
                                 let mut request = request;
                                 request.prompt = prompt;
-                                let resolved_working_directory = match host
+                                let resolved_placement = match host
                                     .resolve_worker_placement(&request, cancellation.clone())
                                     .await
                                 {
@@ -320,7 +320,7 @@ impl WorkflowEngine {
                                         "error": {"name": "WorkerPlacementError", "message": error}
                                     }).to_string(),
                                 };
-                                match host.run_agent_call(request.clone(), resolved_working_directory, cancellation).await {
+                                match host.run_agent_call(request.clone(), resolved_placement, cancellation).await {
                                     Ok(result) => {
                                         if request.schema.is_none()
                                             && result.output.as_str().is_some_and(|value| value.trim().is_empty())
@@ -929,7 +929,7 @@ mod tests {
         async fn run_agent_call(
             &self,
             _: AgentCallRequest,
-            _: Option<String>,
+            _: Option<crate::host::ResolvedWorkerPlacement>,
             _: CancellationToken,
         ) -> Result<AgentCallResult, String> {
             let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
@@ -974,7 +974,7 @@ mod tests {
         async fn run_agent_call(
             &self,
             _: AgentCallRequest,
-            _: Option<String>,
+            _: Option<crate::host::ResolvedWorkerPlacement>,
             _: CancellationToken,
         ) -> Result<AgentCallResult, String> {
             Ok(AgentCallResult {
@@ -1063,14 +1063,14 @@ mod tests {
         async fn run_agent_call(
             &self,
             request: AgentCallRequest,
-            resolved_working_directory: Option<String>,
+            resolved_placement: Option<crate::host::ResolvedWorkerPlacement>,
             _: CancellationToken,
         ) -> Result<AgentCallResult, String> {
             self.agent_requests.lock().expect("requests").push(request);
             self.resolved_working_directories
                 .lock()
                 .expect("resolved paths")
-                .push(resolved_working_directory);
+                .push(resolved_placement.map(|placement| placement.path));
             if self.agent_delay_ms > 0 {
                 tokio::time::sleep(std::time::Duration::from_millis(self.agent_delay_ms)).await;
             }
@@ -1094,14 +1094,23 @@ mod tests {
             &self,
             request: &AgentCallRequest,
             _: CancellationToken,
-        ) -> Result<Option<String>, String> {
+        ) -> Result<Option<crate::host::ResolvedWorkerPlacement>, String> {
             self.placement_requests
                 .lock()
                 .expect("placements")
                 .push((request.cwd.clone(), request.isolation));
             Ok(match request.isolation {
-                Some(_) => Some("/runtime/worktrees/worker-0".into()),
-                None => request.cwd.clone(),
+                Some(_) => Some(crate::host::ResolvedWorkerPlacement {
+                    path: "/runtime/worktrees/worker-0".into(),
+                    can_write: true,
+                }),
+                None => request
+                    .cwd
+                    .clone()
+                    .map(|path| crate::host::ResolvedWorkerPlacement {
+                        path,
+                        can_write: true,
+                    }),
             })
         }
 
@@ -1921,7 +1930,7 @@ mod tests {
         async fn run_agent_call(
             &self,
             _: AgentCallRequest,
-            _: Option<String>,
+            _: Option<crate::host::ResolvedWorkerPlacement>,
             _: CancellationToken,
         ) -> Result<AgentCallResult, String> {
             Err(self.0.to_string())

@@ -134,6 +134,7 @@ impl WorktreeHost {
                 .output()
                 .await;
         }
+        let _ = tokio::fs::remove_dir(self.config.root.join(run_id.to_string())).await;
     }
 
     pub async fn shutdown(&self) {
@@ -241,5 +242,12 @@ mod tests {
         resumed_host.shutdown().await;
         host.cleanup_run(run_id).await;
         assert!(!first.exists() && !second.exists());
+        assert!(
+            !temp
+                .path()
+                .join("worktrees")
+                .join(run_id.to_string())
+                .exists()
+        );
     }
 }

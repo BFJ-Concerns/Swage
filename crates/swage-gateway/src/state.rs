@@ -254,6 +254,14 @@ impl AppState {
     }
 
     #[cfg(test)]
+    pub(crate) fn with_worktree_root(mut self, root: impl Into<std::path::PathBuf>) -> Self {
+        self.worktree_host = Arc::new(crate::worktree::WorktreeHost::new(
+            crate::worktree::WorktreeConfig { root: root.into() },
+        ));
+        self
+    }
+
+    #[cfg(test)]
     pub(crate) fn fail_next_dispatcher_builds(&self, count: usize) {
         self.dispatcher_build_failures_remaining
             .store(count, Ordering::SeqCst);
