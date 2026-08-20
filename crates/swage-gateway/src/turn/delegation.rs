@@ -118,7 +118,6 @@ impl DelegationContextAssembler for GatewayDelegatedContextAssembler {
             available_skills,
             self.config.default_model_id(),
             &hierarchy,
-            &session_variables,
         );
         let tokeniser = TiktokenTokeniser::new(self.config.default_model_id());
         let output = execute_context_assembly(

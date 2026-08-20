@@ -45,7 +45,7 @@ pub struct BriefingElement {
 }
 
 impl BriefingElement {
-    pub fn new(resolved: ResolvedNamedElement, variables: &BTreeMap<String, String>) -> Self {
+    pub fn new(resolved: ResolvedNamedElement) -> Self {
         Self {
             source: format!(
                 "briefing '{}' ({}, {})",
@@ -54,7 +54,7 @@ impl BriefingElement {
                 resolved.path.display()
             ),
             name: resolved.name,
-            content: substitute_variables(&resolved.content, variables),
+            content: resolved.content,
         }
     }
 }
@@ -72,6 +72,10 @@ impl ContextElement for BriefingElement {
         vec![ChatMessage::new(Role::System, &self.content)]
     }
 
+    fn renders_session_values(&self) -> bool {
+        true
+    }
+
     fn token_count(&self, tokeniser: &dyn Tokeniser) -> usize {
         tokeniser.count_messages(&self.content())
     }
@@ -84,27 +88,70 @@ impl ContextElement for BriefingElement {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::assembly::default_assembly_with_variables;
+    use crate::js_assembly::assemble_named;
     use crate::tokeniser::TiktokenTokeniser;
     use swage_config::HierarchyLevel;
 
     #[test]
     fn identity_priority_source_and_live_substitution_are_visible() {
-        let element = BriefingElement::new(
-            ResolvedNamedElement {
-                name: "current-work".into(),
-                level: HierarchyLevel::Space,
-                path: "elements/current-work.md".into(),
-                content: "Task: {{task}}; owner: {{owner}}".into(),
-            },
-            &BTreeMap::from([("task".to_owned(), "audit storage".to_owned())]),
-        );
+        let element = BriefingElement::new(ResolvedNamedElement {
+            name: "current-work".into(),
+            level: HierarchyLevel::Space,
+            path: "elements/current-work.md".into(),
+            content: "Task: {{task}}; owner: {{owner}}".into(),
+        });
         assert_eq!(element.name(), "current-work");
         assert_eq!(element.priority(), 100);
         assert!(element.source().contains("briefing 'current-work' (Space"));
         assert_eq!(
             element.content()[0].text_content(),
+            "Task: {{task}}; owner: {{owner}}"
+        );
+        assert_eq!(
+            substitute_variables(
+                &element.content()[0].text_content(),
+                &BTreeMap::from([("task".to_owned(), "audit storage".to_owned())]),
+            ),
             "Task: audit storage; owner: ⟦unset:owner⟧"
         );
         assert!(element.token_count(&TiktokenTokeniser::new("gpt-4o")) > 0);
+    }
+
+    #[test]
+    fn stored_slot_shaped_values_render_once_on_both_composition_paths() {
+        let resolved = ResolvedNamedElement {
+            name: "current-work".into(),
+            level: HierarchyLevel::Space,
+            path: "elements/current-work.md".into(),
+            content: "Task: {{task}}".into(),
+        };
+        let variables = BTreeMap::from([
+            ("task".to_owned(), "{{other}}".to_owned()),
+            ("other".to_owned(), "must not expand".to_owned()),
+        ]);
+        let elements: Vec<Box<dyn ContextElement>> = vec![Box::new(BriefingElement::new(resolved))];
+        let tokeniser = TiktokenTokeniser::new("gpt-4o");
+
+        let default = default_assembly_with_variables(
+            &elements,
+            &swage_config::model::ContextConfig::default(),
+            &tokeniser,
+            &variables,
+        );
+        let directory = tempfile::tempdir().unwrap();
+        let script = directory.path().join("briefing.js");
+        std::fs::write(&script, "add(elements[0].render());").unwrap();
+        let scripted = assemble_named(
+            "briefing",
+            Some(&script),
+            &elements,
+            &swage_config::model::ContextConfig::default(),
+            &tokeniser,
+            &variables,
+        );
+
+        assert_eq!(default.messages[0].text_content(), "Task: {{other}}");
+        assert_eq!(scripted.messages[0].text_content(), "Task: {{other}}");
     }
 }

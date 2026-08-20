@@ -56,7 +56,7 @@ pub(crate) fn delegated_target_instructions_for_space(
             let space_dir = &hierarchy[1].1;
             let agent_dir_opt = hierarchy[2].1.is_dir().then_some(hierarchy[2].1.as_path());
             let (available, _warnings) =
-                SkillManager::discover_available(&root, &space_dir, agent_dir_opt);
+                SkillManager::discover_available(&root, space_dir, agent_dir_opt);
             delegated_target_instructions(target_instructions, &available)
         })
         .unwrap_or_else(|| target_instructions.to_string())
@@ -93,7 +93,6 @@ pub(crate) fn build_assembly_elements(
     available_skills: Vec<AvailableSkill>,
     model_id: &str,
     hierarchy: &[(HierarchyLevel, PathBuf)],
-    variables: &std::collections::BTreeMap<String, String>,
 ) -> Vec<Box<dyn ContextElement>> {
     // Construct a single PromptRule from the resolved instructions string.
     // The config resolver has already merged hierarchy levels and assembled
@@ -128,9 +127,11 @@ pub(crate) fn build_assembly_elements(
         .map(|(level, path)| (level.clone(), path.as_path()))
         .collect::<Vec<_>>();
     match discover_named_elements(&hierarchy_refs) {
-        Ok(named) => elements.extend(named.into_iter().map(|resolved| {
-            Box::new(BriefingElement::new(resolved, variables)) as Box<dyn ContextElement>
-        })),
+        Ok(named) => {
+            elements.extend(named.into_iter().map(|resolved| {
+                Box::new(BriefingElement::new(resolved)) as Box<dyn ContextElement>
+            }))
+        }
         Err(error) => tracing::warn!(%error, "named context elements could not be loaded"),
     }
     if let Some((content, space_name)) = memory {
@@ -224,7 +225,7 @@ pub(crate) fn available_skills_for_agent(
     let hierarchy = configuration_hierarchy(root, space_slug, agent_id);
     let space_dir = &hierarchy[1].1;
     let agent_dir_opt = hierarchy[2].1.is_dir().then_some(hierarchy[2].1.as_path());
-    let (available, _warnings) = SkillManager::discover_available(root, &space_dir, agent_dir_opt);
+    let (available, _warnings) = SkillManager::discover_available(root, space_dir, agent_dir_opt);
     available
         .into_iter()
         .map(|skill| AvailableSkill {
@@ -359,7 +360,7 @@ pub(crate) async fn load_active_skills_for_agent(
     let hierarchy = configuration_hierarchy(root, space_slug, agent_id);
     let space_dir = &hierarchy[1].1;
     let agent_dir_opt = hierarchy[2].1.is_dir().then_some(hierarchy[2].1.as_path());
-    let (available, _warnings) = SkillManager::discover_available(root, &space_dir, agent_dir_opt);
+    let (available, _warnings) = SkillManager::discover_available(root, space_dir, agent_dir_opt);
 
     // Agent-level skills are automatic for the current agent context. Store
     // them idempotently so the normal activation ordering and filtering path is

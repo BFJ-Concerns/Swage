@@ -12,6 +12,7 @@ use std::time::Instant;
 use swage_config::model::ContextConfig;
 use swage_core::ChatMessage;
 
+use crate::briefing::substitute_variables;
 use crate::compaction::TruncationCompactor;
 use crate::element::ContextElement;
 use crate::report::{AssemblyOutput, AssemblyReport, CompactionRecord, ElementReport};
@@ -52,6 +53,25 @@ pub fn default_assembly(
     config: &ContextConfig,
     tokeniser: &dyn Tokeniser,
 ) -> AssemblyOutput {
+    default_assembly_inner(elements, config, tokeniser, None)
+}
+
+/// Produce the built-in assembly while rendering session-value slots once.
+pub fn default_assembly_with_variables(
+    elements: &[Box<dyn ContextElement>],
+    config: &ContextConfig,
+    tokeniser: &dyn Tokeniser,
+    variables: &std::collections::BTreeMap<String, String>,
+) -> AssemblyOutput {
+    default_assembly_inner(elements, config, tokeniser, Some(variables))
+}
+
+fn default_assembly_inner(
+    elements: &[Box<dyn ContextElement>],
+    config: &ContextConfig,
+    tokeniser: &dyn Tokeniser,
+    variables: Option<&std::collections::BTreeMap<String, String>>,
+) -> AssemblyOutput {
     let start = Instant::now();
 
     // Sort elements by priority (highest first) for deterministic ordering.
@@ -74,8 +94,20 @@ pub fn default_assembly(
     let mut history_range: Option<std::ops::Range<usize>> = None;
 
     for element in &active {
-        let content = element.content();
-        let token_count = element.token_count(tokeniser);
+        let content = match (variables, element.renders_session_values()) {
+            (Some(variables), true) => element
+                .content()
+                .into_iter()
+                .map(|message| {
+                    ChatMessage::new(
+                        message.role(),
+                        substitute_variables(&message.text_content(), variables),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            _ => element.content(),
+        };
+        let token_count = tokeniser.count_messages(&content);
         let source = element.source();
 
         if element.name() == "history" {

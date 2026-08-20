@@ -9405,7 +9405,6 @@ fn named_assembly_elements_include_prompts_skills_memory_and_history() {
         vec![],
         "claude-test-model",
         &[],
-        &BTreeMap::new(),
     );
 
     // Should produce six elements: orientation, working norms, prompts,
@@ -9439,7 +9438,6 @@ fn default_assembly_elements_exclude_memory() {
         vec![],
         "claude-test-model",
         &[],
-        &BTreeMap::new(),
     );
 
     assert_eq!(elements.len(), 5);
@@ -9492,7 +9490,6 @@ async fn named_assembly_loads_memory_and_can_compose_it() {
         vec![],
         "claude-test-model",
         &[],
-        &BTreeMap::new(),
     );
 
     let dir = tempfile::tempdir().unwrap();
@@ -9577,6 +9574,19 @@ async fn delegated_assembly_reads_current_session_variables() {
         crate::tool::ToolDispatcher::allow_all(vec![]),
         None,
     );
+    let host_context =
+        swage_tool::context::MockToolContext::new("delegate", session.id.to_string());
+    let (tool_event_tx, _tool_event_rx) = mpsc::unbounded_channel();
+    let tool_context = crate::tool_executor::GatewayToolContext::new(
+        &host_context,
+        tool_event_tx,
+        state.storage.clone(),
+    )
+    .with_app_state(Some(state.clone()));
+    let session_value_dispatcher = crate::tool::ToolDispatcher::allow_all(vec![Arc::new(
+        crate::tool::session_variable::SessionVariableTool,
+    )
+        as Arc<dyn crate::tool::Tool>]);
     let (context_event_tx, _context_event_rx) = mpsc::unbounded_channel();
     let assembler = crate::turn::delegation::delegated_context_assembler(
         state,
@@ -9613,14 +9623,19 @@ async fn delegated_assembly_reads_current_session_variables() {
 
     std::fs::write(&element_path, "Updated task: {{task}}; owner: {{owner}}")
         .expect("edit space briefing");
-    swage_storage::SessionVariableStore::set_session_variable(
-        storage.as_ref(),
-        session.id,
-        "task",
-        "verify current state",
-    )
-    .await
-    .expect("update delegated session value");
+    session_value_dispatcher
+        .dispatch(
+            "session_values",
+            serde_json::json!({
+                "action": "set",
+                "name": "task",
+                "value": "verify current state"
+            }),
+            &tool_context,
+            "delegate",
+        )
+        .await
+        .expect("update delegated session value through the session_values tool");
     let recomposed = assembler
         .assemble(&session, Uuid::new_v4(), vec![])
         .await
@@ -9655,7 +9670,6 @@ fn build_assembly_elements_memory_element_contains_provided_content() {
         vec![],
         "claude-test-model",
         &[],
-        &BTreeMap::new(),
     );
 
     let memory = elements.iter().find(|e| e.name() == "memory").unwrap();
@@ -9835,7 +9849,6 @@ fn assembly_elements_layer_operator_guidance_after_instructions() {
         vec![],
         "claude-test-model",
         &[],
-        &BTreeMap::new(),
     );
 
     let prompts = elements.iter().find(|e| e.name() == "prompts").unwrap();
