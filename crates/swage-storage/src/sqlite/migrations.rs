@@ -80,8 +80,20 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
         ),
         ("050_workflow_run_events", CREATE_WORKFLOW_RUN_EVENTS),
         ("051_workflow_run_parking", ADD_WORKFLOW_RUN_PARKING),
+        ("052_session_variables", CREATE_SESSION_VARIABLES),
     ]
 }
+
+const CREATE_SESSION_VARIABLES: &str = "
+    CREATE TABLE session_variables (
+        session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        name TEXT NOT NULL,
+        value TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (session_id, name)
+    );
+";
 
 /// Durable waits: a run sleeping on a long timer parks — no engine, no
 /// per-run OS thread — recording when it is due (`wake_at`); a background
