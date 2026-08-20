@@ -198,7 +198,8 @@ mod tests {
 
     #[test]
     fn create_is_independent_of_long_tmpdir() {
-        let root = tempfile::tempdir().expect("temporary test root should be created");
+        let root = tempfile::tempdir_in(FALLBACK_SOCKET_ROOT)
+            .expect("short temporary test root should be created");
         let long_tmp = root.path().join("t".repeat(120));
         std::fs::create_dir(&long_tmp).expect("long TMPDIR should be created");
         let xdg_runtime_dir = root.path().join("runtime");
