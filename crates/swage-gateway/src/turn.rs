@@ -903,7 +903,6 @@ pub(crate) async fn process_turn_with_existing_turn(
         available_skills,
         config.default_model_id(),
         &hierarchy,
-        &session_variables,
     );
     let tokeniser = TiktokenTokeniser::new(config.default_model_id());
 
@@ -1758,7 +1757,12 @@ fn execute_context_assembly(
 ) -> swage_context::report::AssemblyOutput {
     let assembly_name = assembly_name.trim();
     if is_default_context_assembly(assembly_name) {
-        return swage_context::assembly::assemble(elements, &config.context, tokeniser);
+        return swage_context::assembly::default_assembly_with_variables(
+            elements,
+            &config.context,
+            tokeniser,
+            variables,
+        );
     }
 
     let search_levels = swage_root
