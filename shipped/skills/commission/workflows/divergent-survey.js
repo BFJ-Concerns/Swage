@@ -1,24 +1,22 @@
-export const meta = {
-  name: "divergent-survey",
-  description:
-    "Blind divergent survey of approaches to one design problem: survey the published theory of the outcome, then propose several genuinely different approaches split across both engines — half seeded with disjoint slices of the research, half blank-slate — each abandoning a named assumption of the conventional route, cross-critique with the opposite family, then surface a RANKED comparison (never a single winner) for the human and main agent to decide together.",
-};
+// divergent-survey — blind divergent survey of approaches to one design
+// problem: survey the published theory of the outcome, then propose several
+// genuinely different approaches split across both model families — half
+// seeded with disjoint slices of the research, half blank-slate — each
+// abandoning a named assumption of the conventional route, cross-critique
+// with the opposite family, then surface a RANKED comparison (never a single
+// winner) for the human and main agent to decide together.
 
-export const defaults = {
-  // Worker policy — declared once, inherited by every agent() call. Critique and
-  // synthesis work over a decided table, so they hold the resting level, with
-  // Claude's adversarial critique leg priced at high (references/
-  // effort-calibration.md). Codex pins the flagship Sol tier: every codex leg
-  // here researches, critiques, or synthesises — judgement work, not the Luna
-  // collection floor. Pin model and
-  // effort together: an unpinned call rides the ambient default silently, and
-  // per-model effort defaults are uneven (Sol has shipped defaulting to low).
-  // The Claude fallback steps to the adjacent tier rather than failing while a
-  // model is unavailable. NOTE: the runtime's extractor reads this block only
-  // when it directly follows meta — whitespace or comments between them,
-  // nothing else.
-  codex: { model: "gpt-5.6-sol", effort: "medium" },
-  claude: { model: "opus", effort: "high", fallbackModel: "sonnet" },
+// Worker policy — declared once per family; every agent() call spreads its
+// family's pins. Critique and
+// synthesis work over a decided table, so they hold the resting level, with
+// Claude's adversarial critique leg priced at high (references/
+// effort-calibration.md). The GPT side pins the flagship: every GPT leg
+// here researches, critiques, or synthesises — judgement work, not the
+// collection floor. Pin model and effort together on every call: an unpinned
+// call has no model to ride.
+const FAMILY = {
+  gpt: { model: "gpt-5.6-sol", effort: "medium" },
+  claude: { model: "claude-opus-5", effort: "high" },
 };
 
 // Run this when an important part's option space has not been walked, or when the
@@ -35,26 +33,26 @@ export const defaults = {
 //      and the hard EXTERNAL constraints only. It must NOT name the proposed approach,
 //      its vocabulary, or anything that betrays the expected answer. Building that
 //      anchor-free brief is the main session's job (see references/dispatched-agents.md).
-//   2. Workers have filesystem access, so launch ensemble from an isolated empty cwd
-//      outside the project so a proposer has no incumbent to find. (See
-//      references/ensemble-workflows.md.)
+//   2. Workers have filesystem access, so place them in an isolated empty
+//      directory outside the project so a proposer has no incumbent to find.
+//      (See references/ensemble-workflows.md.)
 // The research stage does not weaken the blindness: researchers get the same
 // anchor-free brief and survey what is established for outcomes of this kind — a
 // researcher independently surfacing the same public tool the human named is
 // convergence signal, not an anchor leak.
 //
-// INPUT (pass with --json-args):
+// INPUT (pass as the run's args):
 //   {
 //     "brief": {
 //       "outcome":     "what the finished thing must let someone do, in observable terms — anchor-free, naming NO tool/approach",
 //       "constraints": "hard external facts that bound any approach (integrations, environments, limits)",
 //       "importance":  "why this part is load-bearing (optional; scales how hard critics push)"
 //     },
-//     "count":  4,            // how many divergent approaches (default 4; even keeps the engine split balanced)
+//     "count":  4,            // how many divergent approaches (default 4; even keeps the family split balanced)
 //     "angles": ["...", ...]  // optional divergence stances; sensible defaults below
 //   }
 //
-// OUTPUT (stdout JSON): { brief, angles, research[], approaches[], syntheses[] }.
+// OUTPUT (the run's result): { brief, angles, research[], approaches[], syntheses[] }.
 // The main session reads this, relays the ranked options + decisive questions to the
 // human, and they choose. The research digest is worth carrying into that discussion.
 // Nothing is written to disk here.
@@ -76,29 +74,30 @@ const angles =
     ? args.angles
     : DEFAULT_ANGLES;
 
-// 50/50 engine split for proposers: even indices propose on Codex, odd on Claude, so
+// 50/50 family split for proposers: even indices propose on the GPT side, odd
+// on Claude, so
 // neither family dominates the idea pool. The critic is always the OTHER family, so no
 // approach is ever judged only by its own kind.
-const proposerEngine = (i) => (i % 2 === 0 ? "codex" : "claude");
-const opposite = (engine) => (engine === "codex" ? "claude" : "codex");
+const proposerFamily = (i) => (i % 2 === 0 ? "gpt" : "claude");
+const opposite = (family) => (family === "gpt" ? "claude" : "gpt");
 
 // Proposing explores a deliberately open option space — the named residue that steps
-// codex above its declared default. The Claude proposers also step UP a tier: the
+// the GPT side above its declared default. The Claude proposers also step UP a tier: the
 // surviving proposals feed a commission — intent text that steers an entire build —
 // so the drafting leg runs the top Claude tier (references/model-selection.md —
 // leverage prices the top tier). Critique and synthesis stay on the declared
 // defaults deliberately, not as an economy: a reviewer below the drafting tier
 // previews the weakest reader who will execute the finished text.
 const PROPOSE_OPTS = {
-  codex: { effort: "high" },
-  claude: { model: "fable", effort: "high", fallbackModel: "opus" },
+  gpt: { effort: "high" },
+  claude: { model: "claude-fable-5", effort: "high" },
 };
 
 // Stage 0 surveys the published theory of the OUTCOME — how outcomes of this kind
 // are achieved well, and where common approaches fail — before any approach exists.
 // Two complementary questions, so the digest carries both the attractors and the
-// repellers of the design space. Research runs on Codex, whose backend provides
-// live web search without any option, and on the declared default level: the
+// repellers of the design space. Research runs on the GPT side with
+// web-search tool grants, and on the declared default level: the
 // survey is bounded retrieval whose digest informs proposing without itself being
 // the proposal.
 const RESEARCH_QUESTIONS = [
@@ -114,12 +113,10 @@ const RESEARCH_QUESTIONS = [
   },
 ];
 
-// Codex's accepted outputSchema is a strict subset (object, additionalProperties:false,
-// required ⊆ properties); these shapes validate on both engines. Optional properties
-// are allowed too — Ensemble promotes them into the Codex-bound copy and validates the
-// full schema client-side — but a Codex worker is then compelled to emit every declared
-// property, so an optional field needs an explicit "empty when none" convention rather
-// than being read as signal by its presence.
+// Keep reply schemas an object with additionalProperties:false and every
+// property required, with explicit "empty when none" conventions — a worker
+// compelled to emit every declared property must have an honest blank
+// available, and a null result can then only mean worker collapse.
 const researchSchema = {
   type: "object",
   additionalProperties: false,
@@ -189,8 +186,9 @@ const critiqueSchema = {
     fixes: { type: "array", items: { type: "string" } },
     // Somewhere to object to the QUESTION rather than the approach — an outcome
     // brief that is itself wrong or contradictory, or research findings that look
-    // fabricated. Required with an explicit empty-string convention: a Codex
-    // worker is compelled to emit every declared property, so an optional field
+    // fabricated. Required with an explicit empty-string convention: a
+    // schema-bound worker is compelled to emit every declared property, so an
+    // optional field
     // would invite invented content over an honest blank.
     out_of_scope_concerns: { type: "string" },
   },
@@ -449,7 +447,7 @@ const research = (
   await parallel(
     RESEARCH_QUESTIONS.map(({ kind, question }) => () =>
       agent(researchPrompt(question), {
-        engine: "codex",
+        ...FAMILY.gpt,
         schema: researchSchema,
         label: `research:${kind}`,
       }).then((r) => (r ? r.findings.map((f) => ({ kind, ...f })) : [])),
@@ -462,7 +460,7 @@ log(`${research.length} research findings gathered`);
 // brief alone — grounded prior art and unanchored invention in one pool, with the
 // cross-critique arbitrating between them. Dealing the findings round-robin keeps
 // the informed proposers from converging on one discovered pattern. At the default
-// even count >= 4 the informed half spans both engines (even/odd indices alternate
+// even count >= 4 the informed half spans both families (even/odd indices alternate
 // family); a smaller or odd count collapses that to one family, so it is logged
 // rather than silently assumed. An empty slice (digest smaller than the informed
 // half) degrades that slot to blank-slate rather than shipping an empty block.
@@ -477,13 +475,13 @@ if (informedCount === 0) {
   log("informed half is a single proposer — research-seeded proposing is one family only this run");
 }
 
-// Stage 1+2 as a pipeline: each proposal flows straight into its cross-engine critique,
+// Stage 1+2 as a pipeline: each proposal flows straight into its cross-family critique,
 // so a fast proposer is critiqued while a slow proposer is still thinking.
 phase("propose+critique");
 const items = Array.from({ length: count }, (_, i) => ({
   i,
   angle: angles[i % angles.length],
-  engine: proposerEngine(i),
+  family: proposerFamily(i),
   findings: i < informedCount ? researchSlice(i) : null,
 }));
 
@@ -491,23 +489,23 @@ const pairs = await pipeline(
   items,
   (item) =>
     agent(proposePrompt(item.angle, item.findings), {
-      engine: item.engine,
+      ...FAMILY[item.family],
+      ...PROPOSE_OPTS[item.family],
       schema: approachSchema,
-      label: `propose:${item.engine}:${item.i}`,
-      ...PROPOSE_OPTS[item.engine],
+      label: `propose:${item.family}:${item.i}`,
     }),
   (approach, item) => {
     if (!approach) return null; // proposer collapsed after retries; drop this slot
-    const critic = opposite(item.engine);
+    const critic = opposite(item.family);
     // The critic sees the same findings slice the proposer had, so research-backed
     // evidence is checkable rather than waved through on the citation's say-so.
     return agent(critiquePrompt(approach, item.findings), {
-      engine: critic,
+      ...FAMILY[critic],
       schema: critiqueSchema,
       label: `critique:${critic}:${item.i}`,
     }).then((critique) => ({
       angle: item.angle,
-      proposer: item.engine,
+      proposer: item.family,
       critic,
       researched: item.findings !== null,
       approach,
@@ -543,7 +541,7 @@ if (JSON.stringify(valid).length > SYNTHESIS_INPUT_BOUND) {
         // Distillation is compression of a single decided pair, not judgement over
         // the table — but alternate the family per pair so neither family's
         // compression is the only view the rankers ever see.
-        engine: k % 2 === 0 ? "codex" : "claude",
+        ...FAMILY[k % 2 === 0 ? "gpt" : "claude"],
         schema: synopsisSchema,
         label: `distil:${k}`,
       }),
@@ -575,12 +573,12 @@ if (JSON.stringify(valid).length > SYNTHESIS_INPUT_BOUND) {
 
 const syntheses = (
   await parallel(
-    ["codex", "claude"].map((engine) => () =>
+    ["gpt", "claude"].map((family) => () =>
       agent(synthesisPrompt(table), {
-        engine,
+        ...FAMILY[family],
         schema: synthesisSchema,
-        label: `synthesise:${engine}`,
-      }).then((s) => (s ? { engine, ...s } : null)),
+        label: `synthesise:${family}`,
+      }).then((s) => (s ? { family, ...s } : null)),
     ),
   )
 ).filter(Boolean);

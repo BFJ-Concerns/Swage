@@ -1,25 +1,27 @@
-export const meta = {
-  name: "preservation",
-  description:
-    "Two-pass cross-engine preservation review for a shed or materially-rewritten contract, in both directions: pass 1 reviewers (both families) BLIND to what changed scan baseline vs candidate for lost intent AND extract the candidate's new normative claims; pass 2 adjudicators, now given the deliberate-changes record, sort each blind loss finding into confirmed loss, accounted-for relocation, justified removal, rejected, or insufficient evidence, sort each new claim into settled or unsettled addition, and check each claim against the standing contract for collisions — and run even on a clean scan, sweeping for losses the blind pass missed.",
-};
+// preservation — two-pass cross-family preservation review for a shed or
+// materially-rewritten contract, in both directions: pass 1 reviewers (both
+// families) BLIND to what changed scan baseline vs candidate for lost intent
+// AND extract the candidate's new normative claims; pass 2 adjudicators, now
+// given the deliberate-changes record, sort each blind loss finding into
+// confirmed loss, accounted-for relocation, justified removal, rejected, or
+// insufficient evidence, sort each new claim into settled or unsettled
+// addition, and check each claim against the standing contract for
+// collisions — and run even on a clean scan, sweeping for losses the blind
+// pass missed.
 
-export const defaults = {
-  // Worker policy — declared once, inherited by every agent() call. Both passes
-  // compare given texts (scan for loss, adjudicate against the record): decided
-  // paths that want care rather than search, so codex holds the resting level;
-  // Claude's blind scan hunts for what a rewrite silently dropped — adversarial
-  // reading, priced at high (references/effort-calibration.md). Codex pins the
-  // flagship Sol tier: both passes are review work, which runs the flagship
-  // (references/model-selection.md).
-  // Pin model and effort together: an unpinned call rides the ambient default
-  // silently, and per-model effort defaults are uneven (Sol has shipped
-  // defaulting to low). The Claude fallback steps to the adjacent tier rather
-  // than failing while a model is unavailable. NOTE: the runtime's extractor
-  // reads this block only when it directly follows meta — whitespace or
-  // comments between them, nothing else.
-  codex: { model: "gpt-5.6-sol", effort: "medium" },
-  claude: { model: "opus", effort: "high", fallbackModel: "sonnet" },
+// Worker policy — declared once per family; every agent() call spreads its
+// family's pins. Both passes
+// compare given texts (scan for loss, adjudicate against the record): decided
+// paths that want care rather than search, so the GPT side holds the resting
+// level; Claude's blind scan hunts for what a rewrite silently dropped —
+// adversarial
+// reading, priced at high (references/effort-calibration.md). The GPT side
+// pins the flagship: both passes are review work, which runs the flagship
+// (references/model-selection.md). Pin model and effort together on every
+// call: an unpinned call has no model to ride.
+const FAMILY = {
+  gpt: { model: "gpt-5.6-sol", effort: "medium" },
+  claude: { model: "claude-opus-5", effort: "high" },
 };
 
 // Run this before the sign-off read whenever a run shed something or materially rewrote
@@ -39,7 +41,7 @@ export const defaults = {
 // additions and collisions back through the handshake (settle or remove — never sign
 // them through), all before the sign-off read. See references/shedding-workflow.md.
 //
-// INPUT (pass with --json-args):
+// INPUT (pass as the run's args):
 //   {
 //     "baseline":  "the contract at HEAD (last published) — full text",
 //     "candidate": "the working-tree draft — full text",
@@ -53,7 +55,7 @@ export const defaults = {
 //     }
 //   }
 //
-// OUTPUT (stdout JSON): { blind_findings[], adjudications: [ { engine, adjudications[],
+// OUTPUT (the run's result): { blind_findings[], adjudications: [ { family, adjudications[],
 // claim_adjudications[], additional_issues[] } ] } — one entry per adjudicating family.
 // The main session reads both entries, reinstates confirmed losses and additional issues,
 // and takes unsettled additions and collisions back through the handshake (sign-off
@@ -243,9 +245,9 @@ const adjudicationSchema = {
     // Somewhere to object to the PREMISE rather than the concerns — a
     // deliberate-changes record that is internally contradictory, mismatched
     // to the packages, or wrong in a way the per-concern verdicts cannot
-    // express. Required with an explicit empty-string convention: a Codex
-    // worker is compelled to emit every declared property, so an optional
-    // field would invite invented content over an honest blank.
+    // express. Required with an explicit empty-string convention: a
+    // schema-bound worker is compelled to emit every declared property, so an
+    // optional field would invite invented content over an honest blank.
     record_concerns: { type: "string" },
   },
 };
@@ -481,21 +483,21 @@ a sample answer; the only JSON value in your reply is your actual answer.`;
 phase("blind-scan");
 const blind = (
   await parallel(
-    ["codex", "claude"].map((engine) => () =>
+    ["gpt", "claude"].map((family) => () =>
       agent(blindPrompt(), {
-        engine,
+        ...FAMILY[family],
         schema: blindSchema,
-        label: `blind:${engine}`,
-      }).then((b) => (b ? { engine, ...b } : null)),
+        label: `blind:${family}`,
+      }).then((b) => (b ? { family, ...b } : null)),
     ),
   )
 ).filter(Boolean);
 
 const concerns = blind.flatMap((b) =>
-  (b.concerns || []).map((c) => ({ ...c, by: b.engine })),
+  (b.concerns || []).map((c) => ({ ...c, by: b.family })),
 );
 const newClaims = blind.flatMap((b) =>
-  (b.new_claims || []).map((c) => ({ ...c, by: b.engine })),
+  (b.new_claims || []).map((c) => ({ ...c, by: b.family })),
 );
 log(
   `${concerns.length} blind concerns, ${newClaims.length} extracted claims from ${blind.length}/2 reviewers`,
@@ -525,20 +527,20 @@ const sweepView = concerns.map(({ lost_intent, kind, where, by }) => ({
   where,
   by,
 }));
-const adjudicate = async (engine) => {
+const adjudicate = async (family) => {
   const runs = concernBatches.map((batch, k) => () =>
     agent(adjudicationPrompt(batch, singleBatch), {
-      engine,
+      ...FAMILY[family],
       schema: adjudicationSchema,
-      label: `adjudicate:${engine}:${k}`,
+      label: `adjudicate:${family}:${k}`,
     }),
   );
   if (!singleBatch) {
     runs.push(() =>
       agent(sweepPrompt(sweepView), {
-        engine,
+        ...FAMILY[family],
         schema: adjudicationSchema,
-        label: `sweep:${engine}`,
+        label: `sweep:${family}`,
       }),
     );
   }
@@ -548,16 +550,16 @@ const adjudicate = async (engine) => {
   if (newClaims.length) {
     runs.push(() =>
       agent(claimsPrompt(newClaims), {
-        engine,
+        ...FAMILY[family],
         schema: adjudicationSchema,
-        label: `claims:${engine}`,
+        label: `claims:${family}`,
       }),
     );
   }
   const parts = (await parallel(runs)).filter(Boolean);
   if (parts.length === 0) return null;
   return {
-    engine,
+    family,
     adjudications: parts.flatMap((p) => p.adjudications || []),
     claim_adjudications: parts.flatMap((p) => p.claim_adjudications || []),
     additional_issues: parts.flatMap((p) => p.additional_issues || []),
@@ -569,14 +571,14 @@ const adjudicate = async (engine) => {
 };
 
 const adjudications = (
-  await parallel(["codex", "claude"].map((engine) => () => adjudicate(engine)))
+  await parallel(["gpt", "claude"].map((family) => () => adjudicate(family)))
 ).filter(Boolean);
 
 // An adjudicator's objection to the record is exactly what a clean-looking
 // verdict set would otherwise bury — surface it before the verdicts are trusted.
 for (const a of adjudications) {
   if (a.record_concerns) {
-    log(`adjudicate:${a.engine} raised a concern about the deliberate-changes record itself — read it before acting on the verdicts`);
+    log(`adjudicate:${a.family} raised a concern about the deliberate-changes record itself — read it before acting on the verdicts`);
   }
 }
 

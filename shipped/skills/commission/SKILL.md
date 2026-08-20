@@ -1,8 +1,6 @@
 ---
-name: commission
+name: Commission
 description: Run a deliberate, heavyweight commissioning conversation that builds joint understanding of what a project or feature should be, and record the settled intent as the project's commission. Use when the user wants to commission, plan, scope, or capture intent for a project or feature; change what an existing project should be; migrate or sharpen a prose contract into falsifier-bearing commitments; settle how the project is proven (the consumer-proof ladder); retire or revisit a recorded Decision; blind-re-derive a design from first principles; hold a fully planned feature from building, revise, release, or withdraw a held feature; triage IDEAS.md or ISSUES.md into the contract or task queue; re-triage the task queue; or resolve an orchestrator's contract gap. Not for implementing or orchestrating the build, nor planning how to build work already scoped, and not for changing the spec of something the project produces (a skill or library it ships) — ordinary work, not project intent.
-argument-hint: '[project or feature being commissioned]'
-disable-model-invocation: true
 ---
 
 # Commission
@@ -25,7 +23,7 @@ subcontracted: dispatched work exists for one purpose only, perspective
 unpolluted by this session's context or this model's biases (see Misconception
 Hunting). The jobs stay in the room; only perspective is outsourced — and the
 strongest way to escape this model's biases is to ask a *different* model
-family, which is what the cross-engine ensemble does.
+family, which is what the cross-family workflows do.
 
 The posture across all four is adversarial-collaborative. Hold your own view
 of the problem alongside the user's: where you would have done it
@@ -266,7 +264,7 @@ subdirectory (`build/`, or a legacy `maestro/`) = scratch.
 | `TASKS.md` | The decided-journey queue: already-triaged work that belongs to the build but not the contract, written by the user, the build phases, and this skill, and drained by the build phases by kind — `(journey)` items by assembly runs, `(structural)` items by maestro at its phase boundaries, each tag assigned by this skill's triage (untagged means awaiting it). A find downgraded from `ISSUES.md`, or a gap that proves a small fix, lands here action-phrased — never in the README. Items are single checkbox lines progressed by trailing markers, dates `YYYY-MM-DD` — `(added <date>)` written once when the item enters the queue and never restamped (the age that "oldest" resolves to; a stamp missing from a user-written item is added at the next triage or run that reads it), `(blocked on <blocker> since <date>)` when a named dependency (an obligation, a user decision, an external fact) stops the item, `(→ <slug>)` once converted into the build ledger — a run's fixes-batch obligation included. There is no capacity marker: an item a run cannot take yet simply stays open, and runs name the open remainder to the user at their boundaries. The header's `Last triage:` line records the pass that last re-judged every item. A converted item is deleted at its obligation's `proven` flip by the seat that flips it; a completed item whose work landed without conversion is struck by whoever lands it — either way the commit message carries the disposition, so the queue holds only work still owed. |
 | `held/` | Held intent: features planned to full contract rigour but withheld from building — one file per feature, single-writer like the README, entered, revised, tended, released, or withdrawn only through this skill ([references/held-intent.md](references/held-intent.md)). Each file opens with a not-authorised banner and pins the README text (its git blob hash) it was last checked against. Build intent comes from the README alone; a held file reaches the build only by release — a commission conversation that splices it into the README. |
 | `shed/` | Append-only archive of detail shed from the README — one dated file per shed feature (`YYYY-MM-DD-<feature>.md`), written only by this skill, never edited or deleted after. Each opens with a mandatory header: the shed date, and that it is historical record, not current intent — the README wins. Live Decisions stay in the README; retired ones move to `shed/decisions.md` (see the retirement rule). |
-| `AGENTS.md` (committed) | Orientation for cold-landing agents: what the repo is, contract versus scratch, the commit discipline. It is the cross-tool source of truth that AGENTS.md-reading tools read directly; a sibling `CLAUDE.md` imports it with `@AGENTS.md` so Claude Code loads the same file. |
+| `AGENTS.md` (committed) | Orientation for cold-landing agents: what the repo is, contract versus scratch, the commit discipline. It is the cross-tool source of truth that AGENTS.md-reading tools read directly; a sibling `CLAUDE.md` imports it with `@AGENTS.md` for tools that read that file instead. |
 | `config.toml` | Runtime knobs — `merge_policy` and `push_policy` first, more as needed. Plain config, editable without a commission conversation; read by the orchestrator and any agent or script. Not the contract, not single-writer. |
 | `VERIFICATION.md` | The consumer-proof ladder: what "prove it at the real consumer" concretely means for this project — one rung per kind of thing it ships (a CLI's binary invoked, a service hit with a live request, a UI driven, a library linked from a separate caller), with what to do when a rung's consumer is unreachable. It does not compete with the README's contract claim: the What's commitment register already defines what the thing is, and each line's falsifier is the acceptance shape — the ladder only operationalises how each commitment is exercised at its named consumer's boundary, and where a rung would add a new claim about what the project must be, that claim belongs in the What first. Single-writer like the README, and settled through the same machinery: rungs pass the handshake, the file rides the working-tree draft, and the sign-off read covers its diff alongside the README's. Settle it during capture for any commission that will be built — the elicitation probe is "how would you check this actually works, per kind of thing?" — keeping rungs journey-shaped, not tool-prescriptive. Probe the proof shapes a two-rung template misses, and settle each while the ladder is first drafted: behaviour that by construction exits before the product's surface is reachable (what discharges a live rung when the thing under proof is a refusal to start), in-process engine journeys (whether they stand as proof in their own right or as supporting instruments below the ladder), and invariants proven at storage level against promises proven at the consumer (which level governs which change) — each of these otherwise resurfaces as a build-run gap, one parked obligation at a time. Settle the dark-capability question alongside the rungs: whether a capability may ever land before a consumer. The default is no — capability and its thinnest real consumer build and prove as one unit (the build skills enforce this) — so a pre-consumer proof rung exists only where this commission explicitly allows one. The build skills read it for every proof and never write it; a build session missing it files a gap and parks the affected proofs. A rung reading settled after capture — a drained gap, a user ruling from a build run — lands in the ladder file itself through the ordinary handshake, never only in the gaps entry that raised it: briefs are written from the ladder, so a reading left outside it is re-litigated by the next brief. |
 | Build subdirectory (`build/`) | The build phases' shared state — spine inventory, obligation ledger, teardown records, unit folders — not this skill's business, save `gaps.md`, the deferred-gap queue every update conversation drains (see Reading the Situation). Older annexes may carry the predecessor's `maestro/` subdirectory as well as or instead of `build/`; every `gaps.md` present is drained. |
@@ -283,14 +281,11 @@ command is the drift this prevents, the command moving upstream while the copy
 silently does not. A managed file that has grown such a procedure is cut back to
 the knob and its gloss, not refreshed.
 
-The code repo gets an uncommitted `CLAUDE.local.md` pointer at the sibling
-annexe — a discovery pointer only: intent lives there. It is Claude-side only.
-Claude Code reads `CLAUDE.local.md` and the `*.local` gitignore convention keeps
-it unstaged; there is no cross-tool equivalent, because Codex has no uncommitted
-per-project file (a root `AGENTS.override.md` would shadow the repo's committed
-`AGENTS.md` rather than add a local layer to it). The working rules
-(commit-as-you-change, README single-writer, IDEAS.md capture) are injected at
-touch-time by the global annexe-discipline hook, so the pointer stays a single
+The code repo gets an uncommitted local pointer file at its root naming the
+sibling annexe — a discovery pointer only: intent lives there. The `*.local`
+gitignore convention keeps it unstaged. The working rules
+(commit-as-you-change, README single-writer, IDEAS.md capture) are carried by
+this skill and the annexe's own `AGENTS.md`, so the pointer stays a single
 line and code-repo sessions never carry a second set of commit rules. A
 greenfield project may have no code repo yet — the code repo and its pointer are
 build-time business.
@@ -306,27 +301,29 @@ Once the name is settled, run the bundled scaffolder rather than hand-typing
 the ritual:
 
 ```bash
-scripts/create-annexe.sh --annexe-dir ../foo-Annexe --remote forge:my-account
+scripts/create-annexe.sh --annexe-dir ../foo-Annexe --remote <host-alias>:<account>
 ```
 
-It is idempotent — it creates only what is missing, so the same command is the
+(The script lives in this skill's directory; run it from there through the
+shell tool.) It is idempotent — it creates only what is missing, so the same
+command is the
 existence check, the first-time scaffold, and the repair for a half-built
-annexe. It probes the Forgejo instance and clones an annexe that already exists
+annexe. It probes the forge and clones an annexe that already exists
 there rather than clobbering it (the update-missing-its-clone case); on a true
 green field it initialises the sibling repo, lays down the orientation
-`AGENTS.md` (with a sibling `CLAUDE.md` that imports it via `@AGENTS.md`, so
-Claude Code loads the same file) plus a `config.toml` stub and
+`AGENTS.md` (with a sibling `CLAUDE.md` that imports it via `@AGENTS.md`, for
+tools that read that file) plus a `config.toml` stub and
 empty `IDEAS.md`, `ISSUES.md`, `TASKS.md`, `FRICTION.md`, `held/`, and
-`shed/`, writes the code repo's
-`CLAUDE.local.md` pointer when a code repo exists, commits, and pushes — the
-instance has push-to-create enabled, so that first push makes the private repo.
+`shed/`, writes the code repo's uncommitted
+`ANNEXE.local.md` pointer when a code repo exists, commits, and pushes — the
+forge has push-to-create enabled, so that first push makes the private repo.
 Pass `--merge-policy` and `--push-policy` once they are settled, or write
 `merge_policy` / `push_policy` into `config.toml` when the conversation lands
 them.
 
-Pick `--remote` from the same Forgejo account as the code repo — the
-same SSH host alias and account. Greenfield with no code repo: the git identity that
-`.gitconfig` resolves for the project's directory decides.
+Pick `--remote` as the same forge account the code repo uses (its SSH host
+alias and account). Greenfield with no code repo: ask the operator which
+account the project belongs to.
 
 **The repo exists from setup; the commission lands signed.** That first push
 bootstraps the remote repo with its orientation and working files but no
@@ -548,41 +545,8 @@ annexe files don't shard the contract because none competes with its claim:
 verified-but-not-authorised (pinned to the commit it was checked against),
 and `TASKS.md` and `IDEAS.md` sit below the contract entirely.
 
-**Temporary — remove after 2026-10-14:** commissions captured before
-2026-08-14 carry their What as prose without a commitment register, sometimes
-with committed material under destination-horizon headings whose scope no
-reader owns. On the first update conversation that *materially works the
-What* of such a commission — a feature delta, a shedding run, a release —
-migrate as part of the update: derive commitment lines from the standing
-prose (the commitment audit's hollow verdicts help sharpen the falsifiers),
-preserving every dependency edge the prose declares as `stands on` entries
-(the edge-preservation rule in
-[references/commitment-register.md](references/commitment-register.md)),
-settle them through the handshake like any material rewrite — the
-preservation passes apply — and land the register with its reader-protocol
-block in the same sign-off. A narrow round — a one-line orchestrator gap, a
-queue triage, a hold tend — surfaces the pending migration to the user and
-proceeds without it. If today is after 2026-10-14, this note has
-outstayed its window: tell the user to remove it.
 
-**Temporary — remove after 2026-10-20:** registers captured before
-2026-08-20 carry no goal lines. On the first update conversation that
-materially works such a register's What, derive its goal lines from the
-milestones the user has voiced on record — run aims, readiness horizons —
-through the ordinary handshake, landing them in the same sign-off; and
-bring the reader-protocol block up to the current wording as part of the
-same edit. If today is after 2026-10-20, this note has outstayed its
-window: tell the user to remove it.
 
-**Temporary — remove after 2026-10-20:** `TASKS.md` items may carry the
-retired `(deferred since <date>; last <date>: <reason>)` marker from before
-capacity deferral was withdrawn. Read such an item as open; at this triage,
-strip the marker — carrying its first date over as the item's `(added
-<date>)` stamp where one is missing — or replace it with `(blocked on
-<blocker> since <date>)`
-only where a named dependency genuinely stops the item; stamp any other
-item missing `(added <date>)` with today's date. If today is after
-2026-10-20, this note has outstayed its window: tell the user to remove it.
 
 ## The Alignment Handshake
 
@@ -638,9 +602,9 @@ The moves themselves — verify-don't-transcribe, the divergent survey, the
 blind re-derivation, the draft attack — with their information diets, the
 reconciliation beat that triages returned findings against examined and
 provisional Decisions, the relay discipline, and the hard requirement that
-triggered moves run on the live cross-engine Ensemble runtime (stop and
-decide with the user when one cannot reach it — never a hand-prompted
-same-model substitute) are in
+triggered moves run as real cross-family workflows (stop and decide with the
+user when a required model family is unreachable in the configured
+catalogue — never a hand-prompted same-model substitute) are in
 [references/misconception-moves.md](references/misconception-moves.md).
 Read it when a signal fires, before dispatching the move, and again when
 findings return.
@@ -654,20 +618,20 @@ findings return.
   `config.toml` is settled through the same handshake but sits outside this
   signed-off object — plain config, not contract, like `IDEAS.md` and
   orchestrator scratch.
-- **The read is delivered as a sign-off page.** Every sign-off publishes the
-  object as a Wrack page with a comments box and sign-off / request-changes
-  buttons, then waits in the foreground for the verdict. Read
+- **The read is delivered as a sign-off read in the conversation.** Every
+  sign-off presents the object — the file on first capture, the diff on
+  updates — together with its decision cards, then waits for the verdict
+  before anything is committed. Read
   [references/signoff-page.md](references/signoff-page.md) at every sign-off —
-  it carries the procedure, the verdict handling, and the bundled script.
-  When pages are unavailable, deliver the same read in chat and say so; a
-  verdict the user gives in chat counts exactly as a click.
+  it carries the read's structure, the decision cards, and the verdict
+  handling. The user's explicit reply is the verdict.
 - **The commitment audit clears before the read** on any round that worked
   product intent — capture, a feature delta, a hold or release, elaboration
   edits — whether or not a commitment line changed: the exclusion diff exists
   to catch wants voiced but never written, which is precisely a round that
   changed no line. Only a round that discussed no product intent at all (a
-  pure queue triage, a config knob) skips it. Run
-  `workflows/commitment-audit.js`
+  pure queue triage, a config knob) skips it. Run the carried
+  `commitment-audit` workflow
   ([references/ensemble-workflows.md](references/ensemble-workflows.md)) late,
   once the register has settled, over this conversation's transcript (located
   per Session Transcripts, below) and the whole draft register, with the
@@ -680,7 +644,7 @@ findings return.
   `covered_by_siblings` field, or your own whole-register read, names them —
   record the naming lines in the sign-off report); or accepted as a
   **residual**, where sharpening would demand over-specification the surprise
-  test forbids — carried onto the sign-off page as a decision card with its
+  test forbids — carried onto the sign-off read as a decision card with its
   reason, and closed by the signature over it. The **exclusion diff** —
   wants voiced in conversation that match no commitment — is settled with the
   user (a new line, a hold, a non-binding tail mention or `IDEAS.md` entry, or
@@ -710,7 +674,7 @@ findings return.
   gains direction surfaces is settled through the handshake or removed, and a
   collision is reconciled, before the read — a rule no exchange settled never
   rides into sign-off as prose. Each claim the gains direction surfaced and the
-  round then settled is a mandatory decision card on the sign-off page — never
+  round then settled is a mandatory decision card on the sign-off read — never
   judged minor and left off. Mechanics in
   [references/shedding-workflow.md](references/shedding-workflow.md).
 - **Sweep `ISSUES.md` before the read.** A commission conversation parks its own
@@ -730,8 +694,8 @@ findings return.
   is not the batched-verification anti-pattern: nothing is being verified for
   the first time at the end.
 - **Approval is an explicit yes — the one ask, covering commit and push —
-  recorded in the closing commit message.** The page's sign-off click is that
-  yes, unless its comments override it (the verdict handling in
+  recorded in the closing commit message.** The user's sign-off reply is that
+  yes, unless its accompanying comments override it (the verdict handling in
   [references/signoff-page.md](references/signoff-page.md)). No status fields
   in the file; git is the audit trail. No machine-readable sign-off state:
   the user commissioning a run *is* the assertion that the contract stands.
@@ -745,7 +709,7 @@ findings return.
   cleared — every in-scope line carries a hollow verdict (a null or missing
   verdict is a check still owed, never a pass), every hollow verdict closed by
   a sharpening, a covered-by-siblings record, or an accepted residual on the
-  sign-off page, lines whose text its findings changed re-audited once, every
+  sign-off read, lines whose text its findings changed re-audited once, every
   exclusion-diff want dispositioned — every
   `stands on` entry resolves to another commitment or a verifiable existing
   capability, the preservation passes (where a shed or
@@ -766,38 +730,27 @@ findings return.
 The commitment audit's miners read this conversation's own transcript from
 disk — the falsifier against selective memory is the verbatim record, so the
 audit takes file paths, never a summary of what was said. The transcript goes
-verbatim to workers on both engine families: everything pasted or read into
+verbatim to workers on both model families: everything pasted or read into
 this conversation rides along, so flag anything sensitive to the user before
-dispatching, and use a target's sanitised-export option where one exists.
+dispatching (registered secrets are already redacted from the record by the
+platform).
 
-<!-- foundry:variant session-transcript start -->
-
-On this target, Claude Code persists each session as JSONL under
-`~/.claude/projects/<project-dir>/`, where `<project-dir>` is a mangled form
-of the launch directory's absolute path. Do not construct the name — the
-mangling is not one-to-one (slashes become `-`; a `.` in the path is
-preserved in some directories and replaced with `-` in others, and both forms
-can coexist for one launch path). Discover instead: list
-`~/.claude/projects/`, keep every directory whose name plausibly encodes the
-launch path under either dot treatment, then identify the current session's
-file(s) by recency and content — newest `*.jsonl` first, confirmed by
-grepping for a distinctive phrase from early in this conversation. A
-conversation that has been resumed or compacted spans several files — pass
-every file the content check matches, not just the newest.
-
-<!-- foundry:variant session-transcript end -->
+The platform keeps every turn of this conversation in its local record.
+Before dispatching the audit, export this session's transcript to files
+under `<scratch>` and pass those file paths as the workflow's transcript
+arguments. A conversation that has been resumed or compacted spans its
+whole session history — export everything the session holds, not just the
+recent turns.
 
 ## Workspace
 
-Dispatched-work output, staged options, and the run directories the ensemble
-writes to live under `<scratch>`. The contract and everything meant to persist
-live in the annexe repo.
+Dispatched-work output, staged options, and the directories carried
+workflows write to live under `<scratch>`. The contract and everything
+meant to persist live in the annexe repo.
 
-<!-- foundry:variant scratch-workspace start -->
-
-On this target, `<scratch>` is `/tmp/claude/`.
-
-<!-- foundry:variant scratch-workspace end -->
+`<scratch>` is the space's scratch area — the session working directory
+the runtime provisions when no workspace is attached; name a directory
+under it per dispatch via the placement option (`cwd`).
 
 ## References
 
@@ -827,9 +780,8 @@ On this target, `<scratch>` is `/tmp/claude/`.
   tend, release, and withdrawal moves. Read whenever a hold, release, or
   withdrawal is asked for, or an update conversation finds `held/` non-empty.
 - [references/signoff-page.md](references/signoff-page.md) —
-  delivering the sign-off read as a Wrack page: publishing the diff, watching
-  for the verdict, revision rounds, and the in-chat fallback. Read at every
-  sign-off.
+  delivering the sign-off read: presenting the diff and its decision cards,
+  waiting for the verdict, and revision rounds. Read at every sign-off.
 - [references/dispatched-agents.md](references/dispatched-agents.md) —
   the dispatch doctrine: when to dispatch, grounding rules, the in-context
   verification move, and how findings come back grounded.
@@ -841,26 +793,12 @@ On this target, `<scratch>` is `/tmp/claude/`.
   pricing a dispatched worker's effort by its undecided residue; the
   calibration behind the workflow scripts' pinned levels.
 - [references/ensemble-workflows.md](references/ensemble-workflows.md) —
-  running the six cross-engine workflows (divergent survey, blind
-  re-derivation, draft review, grounding, commitment audit, preservation):
-  invocation, the blindness discipline, the hard requirement, and the
-  per-workflow brief each one needs.
+  running this skill's six carried cross-family workflows (divergent survey,
+  blind re-derivation, draft review, grounding, commitment audit,
+  preservation): invocation, the blindness discipline, the hard requirement,
+  and the per-workflow brief each one needs.
 - [references/shedding-workflow.md](references/shedding-workflow.md) —
   the shedding run on the update path: sweep, ground against the code, shed,
   then the blind and adjudication preservation passes, with triage and sign-off
   wiring.
 
-## Probation
-
-**Temporary — sunset 2026-09-22:** this skill's commitment-audit
-discipline was substantially repaired, and goal lines and the withdrawal
-of capacity deferral landed 2026-08-20, so treat friction with any of
-them as signal rather than noise. A defect in the skill itself — an instruction that is
-wrong or ambiguous, a bundled script, prompt, or binary that is broken,
-anything it tells you to do that you end up working around — is a report
-this window exists to collect: file it with the foundry-request skill once
-the task allows, or carry it in your session report where that skill is
-not available. A failure of the environment, the task, or other tooling is
-not this skill's defect; handle those as you normally would. If today is
-after 2026-09-22, this note has outstayed its window: tell the user to
-remove it.

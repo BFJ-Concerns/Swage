@@ -1,28 +1,29 @@
-export const meta = {
-  name: "commitment-audit",
-  description:
-    "Pre-sign-off audit of a draft commitment register: cheap cross-family miners extract every want the human voiced from the conversation's own transcript files (with read receipts), a blind cross-family diff returns the wants no commitment covers (the exclusion diff the human signs over), and both families record the cheapest implementation that survives the whole register, judged per in-scope line (hollow verdicts, to disposition before signature). Recorded, fail-visible gates: a missing leg is reported as a gap, never absorbed into a clean-looking result.",
-};
+// commitment-audit — pre-sign-off audit of a draft commitment register:
+// cheap cross-family miners extract every want the human voiced from the
+// conversation's own transcript files (with read receipts), a blind
+// cross-family diff returns the wants no commitment covers (the exclusion
+// diff the human signs over), and both families record the cheapest
+// implementation that survives the whole register, judged per in-scope line
+// (hollow verdicts, to disposition before signature). Recorded, fail-visible
+// gates: a missing leg is reported as a gap, never absorbed into a
+// clean-looking result.
 
-export const defaults = {
-  // Worker policy — declared once, inherited by every agent() call; call sites
-  // override only where a stage's residue earns more, with a comment naming it.
-  // The default posture is the mining stage: high-volume verbatim extraction
-  // where judgement is not the bottleneck, so Codex pins the Luna volume tier
-  // and Claude the cheap tier, both at the floor — the brief decides the path.
-  // Pin model and effort together: an unpinned call rides the ambient default
-  // silently, and per-model effort defaults are uneven (Sol has shipped
-  // defaulting to low). The Claude fallback steps to the adjacent tier rather
-  // than failing while a model is unavailable. NOTE: the runtime's extractor
-  // reads this block only when it directly follows meta — whitespace or
-  // comments between them, nothing else.
-  codex: { model: "gpt-5.6-luna", effort: "low" },
-  claude: { model: "sonnet", effort: "low", fallbackModel: "opus" },
+// Worker policy — declared once per family; every agent() call spreads its
+// family's pins, and stages override only where their residue earns more,
+// with a comment naming it. The default posture is the mining stage:
+// high-volume verbatim extraction where judgement is not the bottleneck, so
+// the GPT side pins the volume tier and Claude the cheap tier, both at the
+// floor — the brief decides the path. Pin model and effort together on every
+// call: an unpinned call has no model to ride.
+const FAMILY = {
+  gpt: { model: "gpt-5.6-luna", effort: "low" },
+  claude: { model: "claude-sonnet-5", effort: "low" },
 };
 
 // Run this before the sign-off read of any round that worked product intent
 // (see SKILL.md, Sign-off — the trigger is the conversation's intent, not
-// whether a line's bytes changed). Both engines must be live — the point of
+// whether a line's bytes changed). Both families must be reachable — the
+// point of
 // mining and judging cross-family is that correlated blind spots in one
 // family do not silently agree with themselves; the degraded single-family
 // rendering is governed by references/ensemble-workflows.md (Hard
@@ -33,7 +34,7 @@ export const defaults = {
 // a summary can only be checked against itself, and the want it dropped is
 // exactly the want this audit exists to find.
 //
-// INPUT (pass with --json-args):
+// INPUT (pass as the run's args):
 //   {
 //     "transcripts": ["/abs/path/to/transcript-1.jsonl", ...],  // REQUIRED; every file of THIS conversation
 //     "commitments": [                                          // REQUIRED; the WHOLE draft register, bare
@@ -44,7 +45,7 @@ export const defaults = {
 //                                  // any never audited). Omitted = every line.
 //   }
 //
-// OUTPUT (stdout JSON):
+// OUTPUT (the run's result):
 //   { mined_wants[], mining_gaps[], exclusion_diff[], diff_concerns[], diff_gaps[], hollow_verdicts[] }.
 //   - mined_wants: every want either family extracted, with its verbatim quote.
 //   - mining_gaps: legs that failed, could not fully read their transcript, or
@@ -58,7 +59,7 @@ export const defaults = {
 //     every entry a want a human voiced, carrying its verbatim quote — each
 //     settled with the human (a new line, a hold, a non-binding tail
 //     mention or IDEAS.md entry, or a deliberate exclusion carried onto the
-//     sign-off page); the union of both families' unmatched sets, deduplicated
+//     sign-off read); the union of both families' unmatched sets, deduplicated
 //     by the adjudicating session, not here.
 //   - diff_concerns: per-family remarks about the matching question itself (a
 //     want that is not capability-shaped, lists mis-framed) — read them, but
@@ -90,18 +91,18 @@ const hollowScope = hollowIds
 // adversarial judgement whose miss signs a vacuous contract — the named
 // residue that earns the flagship/opus step.
 const DIFF_OPTS = {
-  codex: { model: "gpt-5.6-terra", effort: "medium" },
-  claude: { model: "sonnet", effort: "medium", fallbackModel: "opus" },
+  gpt: { model: "gpt-5.6-terra", effort: "medium" },
+  claude: { model: "claude-sonnet-5", effort: "medium" },
 };
 const HOLLOW_OPTS = {
-  codex: { model: "gpt-5.6-sol", effort: "medium" },
-  claude: { model: "opus", effort: "medium", fallbackModel: "sonnet" },
+  gpt: { model: "gpt-5.6-sol", effort: "medium" },
+  claude: { model: "claude-opus-5", effort: "medium" },
 };
 
-// Codex's accepted outputSchema is a strict subset (object,
-// additionalProperties:false, required ⊆ properties); these shapes validate on
-// both engines. Every declared property is required with an explicit
-// empty-value convention, because a Codex worker is compelled to emit each one.
+// Keep reply schemas an object with additionalProperties:false and every
+// declared property required, each with an explicit empty-value convention —
+// a schema-bound worker is compelled to emit each one, so an honest blank
+// must exist.
 const mineSchema = {
   type: "object",
   additionalProperties: false,
@@ -195,8 +196,8 @@ Extract every want the HUMAN voiced about the finished product: capabilities ask
 expectations stated, behaviours assumed aloud, reactions that imply a requirement ("it must
 not lose the run", "I'd expect to search by phrase"). The human's words live in TWO places
 in these logs: messages with a user role, and the human's answers to the assistant's
-structured questions, which the log embeds inside tool results (an AskUserQuestion-style
-question tool) as answer values — often long free text. Mine both: a question-driven
+structured questions, where the log embeds them inside tool results as answer
+values — often long free text. Mine both: a question-driven
 conversation carries most of its decisions in the second place, so a transcript with few
 user-role messages is not a transcript with few wants. Work from the human's words; the
 assistant's proposals count only where the human took them up. A want the human voiced
@@ -300,17 +301,17 @@ phase("mine");
 log(`mining ${transcripts.length} transcript file(s) with both families`);
 const mineLegs = [];
 for (const path of transcripts) {
-  for (const engine of ["codex", "claude"]) {
-    mineLegs.push({ path, engine });
+  for (const family of ["gpt", "claude"]) {
+    mineLegs.push({ path, family });
   }
 }
 const runMineLegs = (legs) =>
   parallel(
     legs.map((leg) => () =>
       agent(minePrompt(leg.path), {
-        engine: leg.engine,
+        ...FAMILY[leg.family],
         schema: mineSchema,
-        label: `mine:${leg.engine}`,
+        label: `mine:${leg.family}`,
       }).then((r) => ({ ...leg, result: r })),
     ),
   );
@@ -322,40 +323,40 @@ mined.forEach((m, i) => {
   const leg = m || mineLegs[i];
   const r = m && m.result;
   if (!r) {
-    mining_gaps.push({ path: leg.path, engine: leg.engine, gap: "worker collapsed; leg produced nothing" });
+    mining_gaps.push({ path: leg.path, family: leg.family, gap: "worker collapsed; leg produced nothing" });
     return;
   }
   if (r.read_complete !== true) {
-    mining_gaps.push({ path: leg.path, engine: leg.engine, gap: `incomplete read: ${r.read_note || "no detail given"}` });
+    mining_gaps.push({ path: leg.path, family: leg.family, gap: `incomplete read: ${r.read_note || "no detail given"}` });
   }
   if (r.wants.length === 0) {
-    zeroWantLegs.push({ path: leg.path, engine: leg.engine });
+    zeroWantLegs.push({ path: leg.path, family: leg.family });
     return;
   }
-  for (const w of r.wants) minedWants.push({ ...w, engine: leg.engine });
+  for (const w of r.wants) minedWants.push({ ...w, family: leg.family });
 });
 if (zeroWantLegs.length) {
   log(`${zeroWantLegs.length} zero-want leg(s) — retrying once before recording a gap`);
   const retried = await runMineLegs(zeroWantLegs);
   retried.forEach((m, i) => {
-    const leg = (m && { path: m.path, engine: m.engine }) || zeroWantLegs[i];
+    const leg = (m && { path: m.path, family: m.family }) || zeroWantLegs[i];
     const r = m && m.result;
     if (!r) {
-      mining_gaps.push({ path: leg.path, engine: leg.engine, gap: "worker collapsed on the zero-want retry; leg produced nothing" });
+      mining_gaps.push({ path: leg.path, family: leg.family, gap: "worker collapsed on the zero-want retry; leg produced nothing" });
       return;
     }
     if (r.read_complete !== true) {
-      mining_gaps.push({ path: leg.path, engine: leg.engine, gap: `incomplete read on retry: ${r.read_note || "no detail given"}` });
+      mining_gaps.push({ path: leg.path, family: leg.family, gap: `incomplete read on retry: ${r.read_note || "no detail given"}` });
     }
     if (r.wants.length === 0) {
       mining_gaps.push({
         path: leg.path,
-        engine: leg.engine,
+        family: leg.family,
         gap: "zero wants twice from this transcript — confirm the conversation genuinely voices none before treating the exclusion diff as complete",
       });
       return;
     }
-    for (const w of r.wants) minedWants.push({ ...w, engine: leg.engine });
+    for (const w of r.wants) minedWants.push({ ...w, family: leg.family });
   });
 }
 log(
@@ -377,33 +378,33 @@ if (minedWants.length === 0) {
   // A diff over an empty pool can only return a clean-looking nothing; record
   // the vacuity instead of dispatching it.
   diff_gaps.push({
-    engine: "both",
+    family: "both",
     gap: "no mined wants reached the diff — the exclusion diff is vacuous until the mining gaps above are resolved or a wantless conversation is confirmed",
   });
   log("diff skipped: no mined wants — recorded as a gap, not a clean diff");
 } else {
   const diffResults = await parallel(
-    ["codex", "claude"].map((engine) => () =>
+    ["gpt", "claude"].map((family) => () =>
       agent(diffPrompt(minedWants, commitments), {
-        engine,
+        ...FAMILY[family],
+        ...DIFF_OPTS[family],
         schema: diffSchema,
-        label: `diff:${engine}`,
-        ...DIFF_OPTS[engine],
-      }).then((r) => ({ engine, result: r })),
+        label: `diff:${family}`,
+      }).then((r) => ({ family, result: r })),
     ),
   );
   diffResults.forEach((d, i) => {
-    const engine = d ? d.engine : ["codex", "claude"][i];
+    const family = d ? d.family : ["gpt", "claude"][i];
     const r = d && d.result;
     if (!r) {
-      diff_gaps.push({ engine, gap: "differ collapsed; this family's diff is missing" });
+      diff_gaps.push({ family, gap: "differ collapsed; this family's diff is missing" });
       return;
     }
     // Commentary about the question itself stays out of the want list: the
     // exclusion diff carries only quoted human wants.
-    for (const u of r.unmatched) exclusion_diff.push({ ...u, engine });
+    for (const u of r.unmatched) exclusion_diff.push({ ...u, family });
     if ((r.out_of_scope_concerns || "").trim()) {
-      diff_concerns.push({ engine, concern: r.out_of_scope_concerns.trim() });
+      diff_concerns.push({ family, concern: r.out_of_scope_concerns.trim() });
     }
   });
   log(
@@ -425,17 +426,17 @@ phase("hollow");
 log(`hollow-testing ${hollowScope.length}/${commitments.length} line(s), both families each`);
 const hollowLegs = [];
 for (const line of hollowScope) {
-  for (const engine of ["codex", "claude"]) {
-    hollowLegs.push({ line, engine });
+  for (const family of ["gpt", "claude"]) {
+    hollowLegs.push({ line, family });
   }
 }
 const hollowResults = await parallel(
   hollowLegs.map((leg) => () =>
     agent(hollowPrompt(leg.line, commitments), {
-      engine: leg.engine,
+      ...FAMILY[leg.family],
+      ...HOLLOW_OPTS[leg.family],
       schema: hollowSchema,
-      label: `hollow:${leg.engine}:${leg.line.id}`,
-      ...HOLLOW_OPTS[leg.engine],
+      label: `hollow:${leg.family}:${leg.line.id}`,
     }).then((r) => ({ ...leg, verdict: r })),
   ),
 );
@@ -448,7 +449,7 @@ const hollow_verdicts = hollowLegs.map((leg, i) => {
   return v
     ? {
         id: leg.line.id,
-        engine: leg.engine,
+        family: leg.family,
         cheapest_implementation: v.cheapest_implementation,
         hollow: v.hollow,
         covered_by_siblings: (v.covered_by_siblings || "").trim() || null,
@@ -457,7 +458,7 @@ const hollow_verdicts = hollowLegs.map((leg, i) => {
       }
     : {
         id: leg.line.id,
-        engine: leg.engine,
+        family: leg.family,
         cheapest_implementation: null,
         hollow: null,
         covered_by_siblings: null,

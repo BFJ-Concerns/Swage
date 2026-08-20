@@ -1,34 +1,30 @@
-export const meta = {
-  name: "grounding",
-  description:
-    "Blind cross-engine codebase grounding for the shedding run's beat 2: per candidate feature, one engine investigates the code repo to judge whether it is actually BUILT (blind to what anyone expects or remembers), then — only for the candidates judged built, the shed direction that deletes intent — the OTHER family independently verifies the claim before it is allowed to shed. Returns a cut/keep list; a feature sheds only on a positive find AND a cross-engine confirm.",
-};
+// grounding — blind cross-family codebase grounding for the shedding run's
+// beat 2: per candidate feature, one model family investigates the code repo
+// to judge whether it is actually BUILT (blind to what anyone expects or
+// remembers), then — only for the candidates judged built, the shed direction
+// that deletes intent — the OTHER family independently verifies the claim
+// before it is allowed to shed. Returns a cut/keep list; a feature sheds only
+// on a positive find AND a cross-family confirm.
 
-export const defaults = {
-  // Worker policy — declared once, inherited by every agent() call; call sites
-  // override only where a stage's residue earns more, with a comment naming it.
-  // The default posture is the find stage: retrieval-shaped code-reading at the
-  // resting level, on the cheap Claude tier. The Luna floor doesn't judge
-  // built-ness, so Codex pins the flagship Sol and keeps effort as the cost
-  // lever. Pin model and effort together: an unpinned call rides the ambient
-  // default silently, and per-model effort defaults are uneven (Sol has
-  // shipped defaulting to low). The Claude fallback steps to the adjacent tier
-  // rather than failing while a model is unavailable; the run archive records
-  // when it fires. NOTE: the runtime's extractor reads this block only when it
-  // directly follows meta — whitespace or comments between them, nothing else.
-  codex: { model: "gpt-5.6-sol", effort: "medium" },
-  claude: { model: "sonnet", effort: "medium", fallbackModel: "opus" },
+// Worker policy — declared once per family; every agent() call spreads its
+// family's pins, and call sites override only where a stage's residue earns
+// more, with a comment naming it. The default posture is the find stage:
+// retrieval-shaped code-reading at the resting level. Pin model and effort
+// together on every call: an unpinned call has no model to ride.
+const FAMILY = {
+  gpt: { model: "gpt-5.6-sol", effort: "medium" },
+  claude: { model: "claude-sonnet-5", effort: "medium" },
 };
 
 // This is shedding's beat 2 (see references/shedding-workflow.md).
-// Workers must read the real code, so launch this workflow from the repo or hand it the
-// repo path (see references/ensemble-workflows.md). Keep the expected result blind: describe
+// Workers must read the real code: the repo path arrives as an arg and every
+// worker is placed there (cwd). Keep the expected result blind: describe
 // the capability in observable terms, never as a claim to confirm.
 //
 // A feature sheds only when the finder says "built" AND the
 // opposite family independently confirms it. Anything else — not-built, partial, unknown, a
 // finder that produced nothing, a verifier that could not confirm — KEEPS the feature. The
-// cross-engine verify runs only for the "built" set.
+// cross-family verify runs only for the "built" set.
 //
 // Do not relax that two-positive rule: nothing downstream re-checks it. A false "built"
 // sheds a feature that was never built — compressed to a sentence, detail demoted to
@@ -36,7 +32,7 @@ export const defaults = {
 // loss. A false "not-built" only leaves a feature uncompressed, and self-corrects on the
 // next run.
 //
-// INPUT (pass with --json-args):
+// INPUT (pass as the run's args):
 //   {
 //     "repo": "/abs/path/to/code/repo",          // workers read this; REQUIRED
 //     "candidates": [                             // the beat-1 sweep list
@@ -48,9 +44,9 @@ export const defaults = {
 //     ]
 //   }
 //
-// OUTPUT (stdout JSON): { repo, cut_keep_list[] }. Each entry carries the verdict
+// OUTPUT (the run's result): { repo, cut_keep_list[] }. Each entry carries the verdict
 // (shed|keep), the finder's build judgement and evidence, and — for the built set — the
-// cross-engine verifier's confirmation and evidence. The main session sheds the "shed"
+// cross-family verifier's confirmation and evidence. The main session sheds the "shed"
 // entries, keeps and reports the rest, and surfaces any finder/verifier disagreement to the
 // human rather than resolving it silently. The cut_keep_list is also the
 // `deliberate_changes.cut_keep_list` input the preservation workflow expects.
@@ -72,24 +68,21 @@ if (candidates.length === 0) {
 
 // Load-balance the finders 50/50 so neither family dominates the fact pool; the verifier is
 // always the OTHER family, so a "built" call is never confirmed only by its own kind.
-const finderEngine = (i) => (i % 2 === 0 ? "codex" : "claude");
-const opposite = (engine) => (engine === "codex" ? "claude" : "codex");
+const finderFamily = (i) => (i % 2 === 0 ? "gpt" : "claude");
+const opposite = (family) => (family === "gpt" ? "claude" : "gpt");
 
 // Verify is an adversarial re-derivation whose "yes" deletes intent from the
-// contract — the named residue that earns the step up from the declared defaults.
-// Its Claude fallback steps DOWN (opus → sonnet): the workflow is conservative by
-// construction, so a weaker stand-in can only fail toward "keep".
+// contract — the named residue that earns the step up from the declared
+// family pins.
 const VERIFY_OPTS = {
-  codex: { effort: "high" },
-  claude: { model: "opus", effort: "high", fallbackModel: "sonnet" },
+  gpt: { effort: "high" },
+  claude: { model: "claude-opus-5", effort: "high" },
 };
 
-// Codex's accepted outputSchema is a strict subset (object, additionalProperties:false,
-// required ⊆ properties); these shapes validate on both engines. Optional properties
-// are allowed too — Ensemble promotes them into the Codex-bound copy and validates the
-// full schema client-side — but a Codex worker is then compelled to emit every declared
-// property, so an optional field needs an explicit "empty when none" convention rather
-// than being read as signal by its presence.
+// Keep reply schemas an object with additionalProperties:false and every
+// property required, with explicit "empty when none" conventions — a worker
+// compelled to emit every declared property must have an honest blank
+// available, and a null result can then only mean worker collapse.
 const findingSchema = {
   type: "object",
   additionalProperties: false,
@@ -118,8 +111,9 @@ const verifySchema = {
     // both mislead — has no way to report that through confirmed_built, and without
     // this field the objection gets folded into hedging about the assigned question
     // and lost. Required with an explicit empty-string convention rather than
-    // optional: a Codex worker is compelled to emit every declared property, so an
-    // optional field would invite invented content instead of an honest blank.
+    // optional: a schema-bound worker is compelled to emit every declared
+    // property, so an optional field would invite invented content instead of
+    // an honest blank.
     out_of_scope_concerns: { type: "string" },
   },
 };
@@ -184,7 +178,7 @@ JSON value comes last: the final non-whitespace characters of your message must 
 value itself — no prose, no code fence, no example after it. Never restate the schema or show
 a sample answer; the only JSON value in your reply is your actual answer.`;
 
-// One pipeline per candidate: find → (conditionally) cross-engine verify. pipeline keeps a
+// One pipeline per candidate: find → (conditionally) cross-family verify. pipeline keeps a
 // fast candidate moving to verification while a slow one is still being investigated, and
 // items are independent — there is no cross-candidate barrier to wait on.
 phase("ground");
@@ -195,15 +189,16 @@ const results = await pipeline(
   items,
   // Stage 1 — FIND. Load-balanced across both families; each candidate found by one.
   (item) => {
-    const finder = finderEngine(item.i);
+    const finder = finderFamily(item.i);
     return agent(findPrompt(item), {
-      engine: finder,
+      ...FAMILY[finder],
+      cwd: repo,
       schema: findingSchema,
       label: `find:${finder}:${item.i}`,
     }).then((finding) => ({ item, finder, finding }));
   },
   // Stage 2 — VERIFY, but only the shed direction. Not-built/partial/unknown keep without
-  // spending a cross-engine check; "built" is confirmed by the OTHER family before it sheds.
+  // spending a cross-family check; "built" is confirmed by the OTHER family before it sheds.
   (prev, item) => {
     if (!prev || !prev.finding) {
       // Finder collapsed after retries — keep conservatively; never shed on no evidence.
@@ -219,7 +214,7 @@ const results = await pipeline(
     }
     const finding = prev.finding;
     if (finding.built !== "built") {
-      // The safe verdicts: keep the feature fully elaborated, no cross-engine spend needed.
+      // The safe verdicts: keep the feature fully elaborated, no cross-family spend needed.
       return {
         ...prev,
         verifier: null,
@@ -230,22 +225,23 @@ const results = await pipeline(
     }
     const verifier = opposite(prev.finder);
     return agent(verifyPrompt(item, finding), {
-      engine: verifier,
+      ...FAMILY[verifier],
+      ...VERIFY_OPTS[verifier],
+      cwd: repo,
       schema: verifySchema,
       label: `verify:${verifier}:${item.i}`,
-      ...VERIFY_OPTS[verifier],
     }).then((verification) => ({
       ...prev,
       verifier,
       verification,
-      // Shed ONLY on a positive find AND a cross-engine confirm. Anything else keeps.
+      // Shed ONLY on a positive find AND a cross-family confirm. Anything else keeps.
       verdict: verification && verification.confirmed_built === true ? "shed" : "keep",
       reason:
         verification == null
-          ? "cross-engine verification inconclusive; kept (built unconfirmed)"
+          ? "cross-family verification inconclusive; kept (built unconfirmed)"
           : verification.confirmed_built
-            ? "built (finder) and confirmed built (cross-engine verifier)"
-            : `finder said built, but cross-engine verifier did not confirm: ${verification.reason}`,
+            ? "built (finder) and confirmed built (cross-family verifier)"
+            : `finder said built, but cross-family verifier did not confirm: ${verification.reason}`,
     }));
   },
 );
@@ -300,7 +296,7 @@ const cut_keep_list = results.map((r, i) => {
 });
 
 const shedCount = cut_keep_list.filter((c) => c.verdict === "shed").length;
-log(`${shedCount}/${cut_keep_list.length} candidate(s) cleared to shed (built + cross-engine confirmed)`);
+log(`${shedCount}/${cut_keep_list.length} candidate(s) cleared to shed (built + cross-family confirmed)`);
 // Surfaced separately from the verdicts: an objection to the question is exactly
 // what a clean-looking shed list would otherwise bury.
 const flagged = cut_keep_list.filter((c) => c.verifier_out_of_scope_concerns);

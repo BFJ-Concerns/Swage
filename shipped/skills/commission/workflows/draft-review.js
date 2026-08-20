@@ -1,25 +1,22 @@
-export const meta = {
-  name: "draft-review",
-  description:
-    "Adversarial review of a near-final contract draft, run across both engines and SIGHTED on the settled decisions so it attacks faithful encoding, internal consistency and genuine gaps rather than relitigating decided trade-offs. Returns findings grouped for the main session's reconciliation beat: material findings, reopen-prompts for challenged decisions, traceability gaps, and a held-findings count.",
-};
+// draft-review — adversarial review of a near-final contract draft, run
+// across both model families and SIGHTED on the settled decisions so it
+// attacks faithful encoding, internal consistency and genuine gaps rather
+// than relitigating decided trade-offs. Returns findings grouped for the main
+// session's reconciliation beat: material findings, reopen-prompts for
+// challenged decisions, traceability gaps, and a held-findings count.
 
-export const defaults = {
-  // Worker policy — declared once, inherited by every agent() call. The lens,
-  // the draft, and the settled decisions decide most of the attack's path, and
-  // the merge consolidates a given finding set — so every stage holds the
-  // resting level, with Claude's adversarial attack legs priced at high
-  // (references/effort-calibration.md). Codex pins the flagship Sol tier:
-  // every codex leg here attacks or adjudicates — review work, which runs the
-  // flagship (references/model-selection.md). Pin model and effort together:
-  // an unpinned call rides the
-  // ambient default silently, and per-model effort defaults are uneven (Sol
-  // has shipped defaulting to low). The Claude fallback steps to the adjacent
-  // tier rather than failing while a model is unavailable. NOTE: the runtime's
-  // extractor reads this block only when it directly follows meta — whitespace
-  // or comments between them, nothing else.
-  codex: { model: "gpt-5.6-sol", effort: "medium" },
-  claude: { model: "opus", effort: "high", fallbackModel: "sonnet" },
+// Worker policy — declared once per family; every agent() call spreads its
+// family's pins. The lens,
+// the draft, and the settled decisions decide most of the attack's path, and
+// the merge consolidates a given finding set — so every stage holds the
+// resting level, with Claude's adversarial attack legs priced at high
+// (references/effort-calibration.md). The GPT side pins the flagship:
+// every GPT leg here attacks or adjudicates — review work, which runs the
+// flagship (references/model-selection.md). Pin model and effort together on
+// every call: an unpinned call has no model to ride.
+const FAMILY = {
+  gpt: { model: "gpt-5.6-sol", effort: "medium" },
+  claude: { model: "claude-opus-5", effort: "high" },
 };
 
 // Run this shortly before the sign-off read, scaled by the size of the change.
@@ -37,7 +34,7 @@ export const defaults = {
 // `SKILL.md`): a finding that challenges a settled examined decision
 // is surfaced to the human as a reopen question, never applied as a silent reversal.
 //
-// INPUT (pass with --json-args):
+// INPUT (pass as the run's args):
 //   {
 //     "draft": "the full draft contract (README) text",
 //     "settled_decisions": [
@@ -47,8 +44,8 @@ export const defaults = {
 //     "lenses": ["...", ...]   // optional attack lenses; sensible defaults below
 //   }
 //
-// OUTPUT (stdout JSON): { lenses, findings[], reviews[] }. Each raw finding carries the
-// lens and engine (`by`) that produced it, so per-lens performance is readable after the
+// OUTPUT (the run's result): { lenses, findings[], reviews[] }. Each raw finding carries the
+// lens and model family (`by`) that produced it, so per-lens performance is readable after the
 // run. The main session reads the merged reviews, applies the reconciliation beat, and
 // relays material items to the human.
 
@@ -253,29 +250,29 @@ a sample answer; the only JSON value in your reply is your actual answer.`;
 phase("attack");
 const lensRuns = [];
 for (let i = 0; i < lenses.length; i++) {
-  for (const engine of ["codex", "claude"]) {
-    lensRuns.push({ lens: lenses[i], engine, i });
+  for (const family of ["gpt", "claude"]) {
+    lensRuns.push({ lens: lenses[i], family, i });
   }
 }
-log(`${lensRuns.length} attacks: ${lenses.length} lens(es) x 2 engines`);
+log(`${lensRuns.length} attacks: ${lenses.length} lens(es) x 2 families`);
 
 const raw = (
   await parallel(
     lensRuns.map((r) => () =>
       agent(attackPrompt(r.lens), {
-        engine: r.engine,
+        ...FAMILY[r.family],
         schema: findingSchema,
-        label: `attack:${r.engine}:${r.i}`,
-      }).then((res) => (res ? { engine: r.engine, lens: r.lens, ...res } : null)),
+        label: `attack:${r.family}:${r.i}`,
+      }).then((res) => (res ? { family: r.family, lens: r.lens, ...res } : null)),
     ),
   )
 ).filter(Boolean);
 
-// Keep lens attribution alongside engine attribution: the reconciliation beat
+// Keep lens attribution alongside family attribution: the reconciliation beat
 // reads per-lens performance (material vs noise), which is impossible to
 // reconstruct once findings are flattened.
 const allFindings = raw.flatMap((r) =>
-  (r.findings || []).map((f) => ({ ...f, lens: r.lens, by: r.engine })),
+  (r.findings || []).map((f) => ({ ...f, lens: r.lens, by: r.family })),
 );
 log(`${allFindings.length} raw findings from ${raw.length}/${lensRuns.length} attackers`);
 
@@ -294,21 +291,21 @@ JSON value comes last: the final non-whitespace characters of your message must 
 value itself — no prose, no code fence, no example after it. Never restate the schema or show
 a sample answer; the only JSON value in your reply is your actual answer.`;
 
-// Cross-engine merge: both families consolidate, so neither curates only its own findings.
+// Cross-family merge: both families consolidate, so neither curates only its own findings.
 // Each family's merge is a tree-reduce: size-bounded batches of raw findings first, then —
 // only when there was more than one batch — a re-merge of the partials, which are far
 // smaller than the raw union (deduped, material-only) and safely fit one worker.
 phase("merge");
-const treeMerge = async (engine) => {
+const treeMerge = async (family) => {
   const batches = batchBySize(allFindings, MERGE_INPUT_BOUND);
-  if (batches.length > 1) log(`merge:${engine} tree-reducing in ${batches.length} batches`);
+  if (batches.length > 1) log(`merge:${family} tree-reducing in ${batches.length} batches`);
   let level = (
     await parallel(
       batches.map((batch, k) => () =>
         agent(mergePrompt(batch), {
-          engine,
+          ...FAMILY[family],
           schema: mergeSchema,
-          label: `merge:${engine}:${k}`,
+          label: `merge:${family}:${k}`,
         }),
       ),
     )
@@ -326,9 +323,9 @@ const treeMerge = async (engine) => {
           group.length === 1
             ? Promise.resolve(group[0])
             : agent(remergePrompt(group), {
-                engine,
+                ...FAMILY[family],
                 schema: mergeSchema,
-                label: `remerge:${engine}:${round}:${k}`,
+                label: `remerge:${family}:${round}:${k}`,
               }),
         ),
       )
@@ -336,7 +333,7 @@ const treeMerge = async (engine) => {
     if (level.length === groups.length && groups.length > 1 && groups.every((g) => g.length === 1)) {
       // No group could shrink further (every partial alone exceeds the bound);
       // stop rather than loop — the last level still unions below.
-      log(`merge:${engine} tree-reduce stalled at ${level.length} irreducible partials — falling back to mechanical union`);
+      log(`merge:${family} tree-reduce stalled at ${level.length} irreducible partials — falling back to mechanical union`);
       break;
     }
   }
@@ -353,8 +350,8 @@ const treeMerge = async (engine) => {
 
 const reviews = (
   await parallel(
-    ["codex", "claude"].map((engine) => () =>
-      treeMerge(engine).then((m) => (m ? { engine, ...m } : null)),
+    ["gpt", "claude"].map((family) => () =>
+      treeMerge(family).then((m) => (m ? { family, ...m } : null)),
     ),
   )
 ).filter(Boolean);

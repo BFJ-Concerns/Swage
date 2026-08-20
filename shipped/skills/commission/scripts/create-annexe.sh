@@ -33,10 +33,10 @@
 #       [--push-policy push-on-land|hold-for-user]
 #
 #   --annexe-dir   Where the annexe lives (e.g. ../foo-Annexe). Required.
-#   --remote       Forgejo account spec, e.g. forge:my-account (an SSH host
-#                  alias and the account that owns the code repo). The
-#                  push URL is "<remote>/<annexe-name>.git". Required.
-#   --code-dir     The code repo whose CLAUDE.local.md pointer to write. If
+#   --remote       Forge account spec, "<host-alias>:<account>" — the SSH host
+#                  alias and account the code repo uses. The push URL is
+#                  "<remote>/<annexe-name>.git". Required.
+#   --code-dir     The code repo whose local annexe pointer to write. If
 #                  omitted, derived as the sibling without the -Annexe suffix; the
 #                  pointer is written only when that directory is a git repo
 #                  (greenfield may have no code repo yet).
@@ -70,7 +70,7 @@ while [ $# -gt 0 ]; do
 done
 
 [ -n "$annexe_dir" ] || die "--annexe-dir is required"
-[ -n "$remote" ]     || die "--remote is required (e.g. forge:my-account)"
+[ -n "$remote" ]     || die "--remote is required (e.g. <host-alias>:<account>)"
 
 case "$merge_policy" in
   ""|direct-merge|pr) ;;
@@ -289,12 +289,10 @@ done
 # An uncommitted discovery pointer in the code repo: a single line saying intent
 # lives in the sibling annexe. Written only when a code repo exists (greenfield
 # may have none yet — then the pointer is build-time business). It goes in
-# CLAUDE.local.md, which Claude reads and the *.local gitignore convention keeps
-# unstaged. Codex has no equivalent uncommitted per-project file — a project-root
-# AGENTS.override.md would shadow the repo's committed AGENTS.md rather than add to
-# it — so the pointer is Claude-side only.
+# ANNEXE.local.md — any agent listing the repo root sees it, and the *.local
+# gitignore convention keeps it unstaged.
 if [ -n "$code_dir" ] && [ -d "$code_dir/.git" ]; then
-  pf="CLAUDE.local.md"
+  pf="ANNEXE.local.md"
   if [ ! -e "$code_dir/$pf" ]; then
     printf 'Planning, intent, and issues for this project live in the sibling annexe repo: `../%s` (its `README.md` is the commission — this project'\''s contract).\n' \
       "$name" > "$code_dir/$pf"
