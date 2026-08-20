@@ -7729,13 +7729,14 @@ async fn detached_delegate_can_be_cancelled_through_active_registry() {
         None,
     );
     let handler = GatewayDelegationHandler::new(state.clone());
+    let delegated_cwd = tempfile::tempdir_in("/tmp/scratch").expect("delegated cwd");
 
     let outcome = handler
         .handle_delegation(
             "agent-b",
             "Summarise independently",
             None,
-            None,
+            Some(delegated_cwd.path().to_string_lossy().into_owned()),
             None,
             "gateway",
             parent_turn.id,
@@ -7807,6 +7808,15 @@ async fn detached_delegate_can_be_cancelled_through_active_registry() {
         .expect("get delegate message")
         .expect("delegate message should exist");
     assert_eq!(delegate.status, MessageStatus::Delivered);
+    assert_eq!(
+        delegate.payload["placement"]["cwd"],
+        delegated_cwd.path().to_string_lossy().as_ref(),
+        "the child's durable delegate record must carry the resolved placement"
+    );
+    assert_eq!(
+        delegate.payload["placement"]["requested_cwd"],
+        delegated_cwd.path().to_string_lossy().as_ref()
+    );
 
     let mut result_messages = Vec::new();
     for _ in 0..20 {
