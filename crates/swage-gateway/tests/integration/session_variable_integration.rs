@@ -54,7 +54,23 @@ impl LlmProvider for UnusedProvider {
     }
 }
 
-struct ToolCallingProvider(std::sync::Mutex<Vec<Vec<StreamChunk>>>);
+struct ToolCallingProvider {
+    rounds: std::sync::Mutex<Vec<Vec<StreamChunk>>>,
+    requests: Arc<std::sync::Mutex<Vec<CompletionRequest>>>,
+}
+
+impl ToolCallingProvider {
+    fn new(rounds: Vec<Vec<StreamChunk>>) -> (Self, Arc<std::sync::Mutex<Vec<CompletionRequest>>>) {
+        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        (
+            Self {
+                rounds: std::sync::Mutex::new(rounds),
+                requests: Arc::clone(&requests),
+            },
+            requests,
+        )
+    }
+}
 #[async_trait]
 impl LlmProvider for ToolCallingProvider {
     fn model_id(&self) -> &str {
@@ -71,9 +87,10 @@ impl LlmProvider for ToolCallingProvider {
     }
     fn stream(
         &self,
-        _: CompletionRequest,
+        request: CompletionRequest,
     ) -> Pin<Box<dyn futures::Stream<Item = StreamChunk> + Send>> {
-        Box::pin(futures::stream::iter(self.0.lock().unwrap().remove(0)))
+        self.requests.lock().unwrap().push(request);
+        Box::pin(futures::stream::iter(self.rounds.lock().unwrap().remove(0)))
     }
 }
 
@@ -236,11 +253,63 @@ async fn real_tool_audits_whole_state_and_updated_values_recompose() {
         events[0].metadata["new_state"],
         json!({"task":"verify audit"})
     );
+
+    dispatcher
+        .dispatch(
+            "session_values",
+            json!({"action":"remove","name":"task"}),
+            &context,
+            "gateway",
+        )
+        .await
+        .unwrap();
+    assert!(
+        state
+            .storage
+            .list_session_variables(session.id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let events = storage
+        .list_audit_events_by_session(session.id)
+        .await
+        .unwrap();
+    assert_eq!(events.len(), 3);
+    assert_eq!(events[0].metadata["action"], "remove_session_value");
+    assert_eq!(
+        events[0].metadata["prior_state"],
+        json!({"task":"verify audit"})
+    );
+    assert_eq!(events[0].metadata["new_state"], json!({}));
+
+    let missing = dispatcher
+        .dispatch(
+            "session_values",
+            json!({"action":"remove","name":"task"}),
+            &context,
+            "gateway",
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{missing:?}").contains("no session value 'task' exists"),
+        "missing removal should preserve the validation error: {missing:?}"
+    );
+    assert_eq!(
+        storage
+            .list_audit_events_by_session(session.id)
+            .await
+            .unwrap()
+            .len(),
+        3,
+        "a rejected removal must not create an audit event"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn live_listener_turns_set_and_update_the_values_used_by_composition() {
-    let provider = ToolCallingProvider(std::sync::Mutex::new(vec![
+    let (provider, captured_requests) = ToolCallingProvider::new(vec![
         vec![
             StreamChunk::ToolUse {
                 call_id: "set-1".into(),
@@ -277,13 +346,25 @@ async fn live_listener_turns_set_and_update_the_values_used_by_composition() {
                 finish_reason: None,
             },
         ],
-    ]));
+    ]);
+    let swage_home = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(swage_home.path().join("assemblies")).unwrap();
+    std::fs::write(
+        swage_home.path().join("assemblies/briefing.js"),
+        "add(elements.find(element => element.name === 'prompts').render());",
+    )
+    .unwrap();
+    let mut environment = crate::support::ProcessEnvGuard::new();
+    environment.set_swage_home(swage_home.path());
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+    let mut config = swage_config::ResolvedConfig::default();
+    config.context.assembly = "briefing".into();
+    config.instructions = "Task: {{task}}; owner: {{owner}}".into();
     let state = AppState::new(
         storage.clone() as Arc<dyn Storage>,
         storage.clone(),
         Arc::new(provider),
-        swage_config::ResolvedConfig::default(),
+        config,
         ToolDispatcher::allow_all(vec![Arc::new(SessionVariableTool) as Arc<dyn Tool>]),
         None,
     );
@@ -360,5 +441,28 @@ async fn live_listener_turns_set_and_update_the_values_used_by_composition() {
     assert_eq!(
         events[0].metadata["new_state"],
         json!({"task":"verify audit"})
+    );
+
+    let requests = captured_requests.lock().unwrap();
+    assert_eq!(requests.len(), 4);
+    let first_context = requests[0]
+        .messages
+        .iter()
+        .map(ChatMessage::text_content)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        first_context.contains("Task: ⟦unset:task⟧; owner: ⟦unset:owner⟧"),
+        "the first foreground assembly should expose explicit missing values: {first_context}"
+    );
+    let second_turn_context = requests[2]
+        .messages
+        .iter()
+        .map(ChatMessage::text_content)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        second_turn_context.contains("Task: inspect storage; owner: ⟦unset:owner⟧"),
+        "the next foreground turn should assemble directly from saved session values: {second_turn_context}"
     );
 }

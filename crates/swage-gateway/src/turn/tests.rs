@@ -901,6 +901,29 @@ impl swage_storage::WorkflowStore for MockStorage {
     }
 }
 
+#[async_trait]
+impl swage_storage::SessionVariableStore for MockStorage {
+    async fn set_session_variable(
+        &self,
+        _: Uuid,
+        _: &str,
+        _: &str,
+    ) -> Result<swage_storage::SessionVariable, StorageError> {
+        unimplemented!()
+    }
+
+    async fn list_session_variables(
+        &self,
+        _: Uuid,
+    ) -> Result<Vec<swage_storage::SessionVariable>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    async fn delete_session_variable(&self, _: Uuid, _: &str) -> Result<bool, StorageError> {
+        unimplemented!()
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct InMemoryDb {
     pub(crate) spaces: HashMap<Uuid, Space>,
@@ -9492,6 +9515,79 @@ async fn named_assembly_loads_memory_and_can_compose_it() {
         "a named assembly should be able to compose the loaded memory element"
     );
     assert_eq!(output.report.assembly_name, "memory-aware");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn delegated_assembly_reads_current_session_variables() {
+    let swage_home = tempfile::TempDir::new().expect("temp swage home");
+    std::fs::create_dir_all(swage_home.path().join("assemblies"))
+        .expect("create assembly directory");
+    std::fs::write(
+        swage_home.path().join("assemblies/briefing.js"),
+        "add(elements.find(element => element.name === 'prompts').render());",
+    )
+    .expect("write assembly");
+    let _guard = SwageHomeGuard::set_to(swage_home.path());
+
+    let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
+    let space = storage
+        .get_or_create_default()
+        .await
+        .expect("create default space");
+    let session = storage
+        .create_session(NewSession {
+            space_id: space.id,
+            agent_id: "delegate".into(),
+            metadata: None,
+            active_workspace_attachment_id: None,
+        })
+        .await
+        .expect("create delegated session");
+    swage_storage::SessionVariableStore::set_session_variable(
+        storage.as_ref(),
+        session.id,
+        "task",
+        "inspect delegated context",
+    )
+    .await
+    .expect("save delegated session value");
+
+    let mut config = swage_config::ResolvedConfig::default();
+    config.context.assembly = "briefing".into();
+    config.instructions = "Task: {{task}}; owner: {{owner}}".into();
+    let state = AppState::new(
+        Arc::clone(&storage) as Arc<dyn swage_storage::Storage>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::SpaceStore>,
+        Arc::new(MockProvider::new(vec![])) as Arc<dyn LlmProvider>,
+        config.clone(),
+        crate::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+    );
+    let (context_event_tx, _context_event_rx) = mpsc::unbounded_channel();
+    let assembler = crate::turn::delegation::delegated_context_assembler(
+        state,
+        space,
+        config,
+        "delegate".into(),
+        "/workspace".into(),
+        context_event_tx,
+        serde_json::json!({}),
+    );
+
+    let output = assembler
+        .assemble(&session, Uuid::new_v4(), vec![])
+        .await
+        .expect("assemble delegated context");
+    let context = output
+        .messages
+        .iter()
+        .map(ChatMessage::text_content)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        context.contains("Task: inspect delegated context; owner: ⟦unset:owner⟧"),
+        "delegated assembly should consume its session's current values: {context}"
+    );
 }
 
 /// When memory_content is non-empty, the memory element produces a system
