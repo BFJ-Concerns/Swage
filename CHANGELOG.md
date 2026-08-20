@@ -20,6 +20,7 @@ All notable changes to Swage are documented in this file.
 ### Fixed
 
 - Fresh-session schedules created from Settings now use the currently selected space.
+- Streamed tool calls now remain attached to their assistant turn after completion and appear before the response both immediately and after reloading conversation history.
 
 ## 0.2.0 — 2026-08-13
 

@@ -74,6 +74,7 @@ export interface StreamingStoreOptions {
         "completed" | "failed" | "interrupted"
       >;
       turn_id?: string;
+      tool_calls?: ToolCallView[];
     }): void;
   };
   /** Sends WebSocket events for outgoing user messages and cancellation. */
@@ -117,12 +118,14 @@ export function createStreamingStore(
       "completed" | "failed" | "interrupted"
     >,
     turn_id?: string,
+    tool_calls?: ToolCallView[],
   ): void {
     options?.conversationStore?.appendAssistantMessage({
       content,
       timestamp: new Date().toISOString(),
       turn_state,
       ...(turn_id === undefined ? {} : { turn_id }),
+      ...(tool_calls === undefined ? {} : { tool_calls }),
     });
   }
 
@@ -258,8 +261,14 @@ export function createStreamingStore(
           // assistant message and return to idle state.
           {
             const streamedContent = get(streamedContentStore);
-            if (streamedContent) {
-              pushAssistantMessage(streamedContent, "completed", event.turn_id);
+            const activeToolCalls = get(activeToolCallsStore);
+            if (streamedContent || activeToolCalls.length > 0) {
+              pushAssistantMessage(
+                streamedContent,
+                "completed",
+                event.turn_id,
+                activeToolCalls,
+              );
             }
           }
           streamedContentStore.set("");

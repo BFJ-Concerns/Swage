@@ -366,6 +366,41 @@ describe("durable local updates", () => {
     expect(store.conversations[0].message_preview).toBe("Reply");
   });
 
+  it("preserves the existing preview for a tool-only assistant message", async () => {
+    const store = createConversationStore();
+    vi.mocked(api.listConversations).mockResolvedValueOnce([
+      { ...makeSummary("conv-1"), message_preview: "Read README.md" },
+    ]);
+    await store.loadConversations("proj-1");
+    vi.mocked(api.getConversation).mockResolvedValueOnce(makeDetail("conv-1"));
+    await store.selectConversation("conv-1");
+
+    store.appendAssistantMessage({
+      content: "",
+      timestamp: "2026-01-01T00:01:00Z",
+      turn_state: "completed",
+      turn_id: "turn-1",
+      tool_calls: [
+        {
+          call_id: "call-1",
+          tool: "file_read",
+          arguments: {},
+          result: "contents",
+          status: "success",
+          duration_ms: 8,
+          truncated: false,
+          total_bytes: 8,
+        },
+      ],
+    });
+
+    expect(store.activeConversation!.messages.at(-1)).toMatchObject({
+      content: "",
+      tool_calls: [expect.objectContaining({ call_id: "call-1" })],
+    });
+    expect(store.conversations[0].message_preview).toBe("Read README.md");
+  });
+
   it("marks the summary as interrupted when an interrupted assistant message is appended", async () => {
     const store = createConversationStore();
     vi.mocked(api.listConversations).mockResolvedValueOnce([
