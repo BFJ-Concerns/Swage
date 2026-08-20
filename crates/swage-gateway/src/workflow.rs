@@ -3642,6 +3642,74 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn workflow_agent_call_executes_granted_approval_gated_tool_without_parking() {
+        let rounds = vec![
+            vec![
+                swage_core::StreamChunk::ToolUse {
+                    call_id: "workflow-echo".into(),
+                    name: "echo".into(),
+                    arguments: serde_json::json!({ "text": "workflow" }),
+                },
+                swage_core::StreamChunk::Done {
+                    finish_reason: None,
+                },
+            ],
+            vec![
+                swage_core::StreamChunk::Delta {
+                    content: "Workflow tool completed".into(),
+                },
+                swage_core::StreamChunk::Done {
+                    finish_reason: None,
+                },
+            ],
+        ];
+        let (state, _) = crate::turn::tests::make_state_with_approval_gated_echo(rounds).await;
+        let space = state
+            .space_store
+            .get_or_create_default()
+            .await
+            .expect("default space");
+        let result = run_ephemeral_agent_call(
+            &state,
+            Uuid::new_v4(),
+            space.id,
+            &[],
+            AgentCallRequest {
+                prompt: "Use echo".into(),
+                agent: "gateway".into(),
+                model: None,
+                schema: None,
+                max_attempts: 1,
+                label: None,
+                session: None,
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .expect("workflow agent call should execute without an approval answer");
+
+        assert_eq!(
+            result.output,
+            Value::String("Workflow tool completed".into())
+        );
+        assert!(
+            state.storage.list_approvals().await.unwrap().is_empty(),
+            "an unattended workflow turn must not create approval rows"
+        );
+        let calls = state
+            .storage
+            .list_tool_calls_by_turn(result.turn_id.expect("turn id"))
+            .await
+            .unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].status.as_deref(), Some("success"));
+        assert_eq!(
+            calls[0].result.as_deref(),
+            Some("{\"output\":\"workflow\"}")
+        );
+    }
+
     #[test]
     fn budget_reserve_requires_a_total_token_ceiling() {
         let error = validate_budget(&WorkflowBudget {

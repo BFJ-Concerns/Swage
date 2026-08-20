@@ -4,6 +4,9 @@
   "description": "Anchor type for the client surface's schema document.\n\nEvery wire type on the surface is reachable from here, so a single\n`schema_for!` call produces one document with the full type graph in\n`$defs`. The struct itself never crosses the wire — it exists only so\nthe schema generator has a root to walk from.",
   "type": "object",
   "properties": {
+    "attachment_list": {
+      "$ref": "#/$defs/AttachmentListResponse"
+    },
     "channel_link_code_response": {
       "$ref": "#/$defs/ChannelLinkCodeResponse"
     },
@@ -22,11 +25,20 @@
     "conversation_thread": {
       "$ref": "#/$defs/ConversationThreadDetail"
     },
+    "create_attachment_request": {
+      "$ref": "#/$defs/CreateAttachmentRequest"
+    },
     "create_channel_link_code_request": {
       "$ref": "#/$defs/CreateChannelLinkCodeRequest"
     },
+    "create_conversation_branch_request": {
+      "$ref": "#/$defs/CreateConversationBranchRequest"
+    },
     "create_conversation_request": {
       "$ref": "#/$defs/CreateConversationRequest"
+    },
+    "create_material": {
+      "$ref": "#/$defs/CreateMaterialRequest"
     },
     "create_schedule_request": {
       "$ref": "#/$defs/CreateScheduleRequest"
@@ -43,11 +55,35 @@
     "knowledge_search": {
       "$ref": "#/$defs/KnowledgeSearchResponse"
     },
+    "material_list": {
+      "$ref": "#/$defs/MaterialListResponse"
+    },
+    "message_response": {
+      "$ref": "#/$defs/MessageResponse"
+    },
+    "model_discovery": {
+      "$ref": "#/$defs/ModelDiscoveryResponse"
+    },
     "orientation_find": {
       "$ref": "#/$defs/OrientationFindResponse"
     },
+    "promote_material": {
+      "$ref": "#/$defs/PromoteMaterialRequest"
+    },
     "provider_sign_in_state": {
       "$ref": "#/$defs/ProviderSignInState"
+    },
+    "queued_attachment": {
+      "$ref": "#/$defs/QueuedAttachmentResponse"
+    },
+    "recovery_exports": {
+      "$ref": "#/$defs/RecoveryExportListResponse"
+    },
+    "restart_status": {
+      "$ref": "#/$defs/RestartStatusResponse"
+    },
+    "save_settings": {
+      "$ref": "#/$defs/SaveSettingsRequest"
     },
     "schedule": {
       "$ref": "#/$defs/Schedule"
@@ -61,8 +97,14 @@
     "schedule_run_list": {
       "$ref": "#/$defs/ScheduleRunListResponse"
     },
+    "send_message": {
+      "$ref": "#/$defs/SendMessageRequest"
+    },
     "server_event": {
       "$ref": "#/$defs/ServerEvent"
+    },
+    "settings": {
+      "$ref": "#/$defs/SettingsResponse"
     },
     "space_list": {
       "$ref": "#/$defs/SpaceListResponse"
@@ -79,14 +121,32 @@
     "start_workflow_run_request": {
       "$ref": "#/$defs/StartWorkflowRunRequest"
     },
+    "submit_turn": {
+      "$ref": "#/$defs/SubmitTurnRequest"
+    },
+    "submit_turn_response": {
+      "$ref": "#/$defs/SubmitTurnResponse"
+    },
     "synthesise_speech": {
       "$ref": "#/$defs/SynthesiseSpeechRequest"
+    },
+    "synthesise_speech_response": {
+      "$ref": "#/$defs/SynthesiseSpeechResponse"
     },
     "transcribe_audio": {
       "$ref": "#/$defs/TranscribeAudioRequest"
     },
+    "transcribe_audio_response": {
+      "$ref": "#/$defs/TranscribeAudioResponse"
+    },
     "trigger_schedule_response": {
       "$ref": "#/$defs/TriggerScheduleResponse"
+    },
+    "turn_context": {
+      "$ref": "#/$defs/TurnContextResponse"
+    },
+    "turn_poll": {
+      "$ref": "#/$defs/TurnPollResponse"
     },
     "update_schedule_request": {
       "$ref": "#/$defs/UpdateScheduleRequest"
@@ -96,6 +156,9 @@
     },
     "update_workflow_script_request": {
       "$ref": "#/$defs/UpdateWorkflowScriptRequest"
+    },
+    "update_workspace_trust_request": {
+      "$ref": "#/$defs/UpdateWorkspaceTrustRequest"
     },
     "voice_capabilities": {
       "$ref": "#/$defs/VoiceCapabilitiesResponse"
@@ -127,19 +190,40 @@
     "server_event",
     "voice_capabilities",
     "transcribe_audio",
+    "transcribe_audio_response",
     "synthesise_speech",
+    "synthesise_speech_response",
     "create_channel_link_code_request",
     "create_space_request",
     "update_space_request",
     "space_list",
     "create_workspace_attachment_request",
+    "update_workspace_trust_request",
     "workspace_attachment_list",
     "channel_link_code_response",
     "create_conversation_request",
+    "create_conversation_branch_request",
     "conversation",
     "conversation_list",
     "conversation_detail",
     "conversation_thread",
+    "turn_context",
+    "submit_turn",
+    "submit_turn_response",
+    "turn_poll",
+    "send_message",
+    "message_response",
+    "settings",
+    "save_settings",
+    "model_discovery",
+    "restart_status",
+    "create_attachment_request",
+    "queued_attachment",
+    "attachment_list",
+    "create_material",
+    "promote_material",
+    "material_list",
+    "recovery_exports",
     "knowledge_search",
     "orientation_find",
     "create_schedule_request",
@@ -172,6 +256,246 @@
         "session",
         "permanent",
         "permanent_global"
+      ]
+    },
+    "ApprovalTimeoutPolicy": {
+      "type": "string",
+      "enum": [
+        "reject",
+        "interrupt"
+      ]
+    },
+    "AssemblyError": {
+      "type": "object",
+      "properties": {
+        "assembly_name": {
+          "type": "string"
+        },
+        "error_kind": {
+          "type": "string"
+        },
+        "fallback_used": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "assembly_name",
+        "error_kind",
+        "message",
+        "fallback_used"
+      ]
+    },
+    "AssemblyReport": {
+      "type": "object",
+      "properties": {
+        "assembly_name": {
+          "type": "string"
+        },
+        "budget": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        },
+        "budget_remaining": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int"
+        },
+        "compaction_applied": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CompactionRecord"
+          }
+        },
+        "duration": {
+          "$ref": "#/$defs/Duration"
+        },
+        "effective_tool_permissions": true,
+        "elements": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ElementReport"
+          }
+        },
+        "errors": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AssemblyError"
+          }
+        },
+        "provider_visible": true,
+        "total_tokens": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "assembly_name",
+        "elements",
+        "total_tokens",
+        "compaction_applied",
+        "warnings",
+        "errors",
+        "duration"
+      ]
+    },
+    "AttachmentListResponse": {
+      "type": "object",
+      "properties": {
+        "attachments": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AttachmentResponse"
+          }
+        }
+      },
+      "required": [
+        "attachments"
+      ]
+    },
+    "AttachmentResponse": {
+      "type": "object",
+      "properties": {
+        "byte_count": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "filename": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "ingested_markdown": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "type": "string"
+        },
+        "mime_type": {
+          "type": "string"
+        },
+        "scope_kind": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "space_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "status": {
+          "type": "string"
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "scope_kind",
+        "kind",
+        "status",
+        "filename",
+        "mime_type",
+        "byte_count",
+        "created_at",
+        "updated_at"
+      ]
+    },
+    "BackgroundJobResponse": {
+      "type": "object",
+      "properties": {
+        "attachment_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "attempt_count": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "completed_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "error_message": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "result": true,
+        "started_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "state": {
+          "type": "string"
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "state",
+        "attempt_count",
+        "created_at",
+        "updated_at"
       ]
     },
     "ChannelLinkCodeResponse": {
@@ -346,6 +670,204 @@
             "name"
           ]
         }
+      ]
+    },
+    "CommunicationConfig": {
+      "type": "object",
+      "properties": {
+        "context_transfer": {
+          "$ref": "#/$defs/ContextTransferConfig"
+        },
+        "expiry_interval_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "message_ttl_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "context_transfer",
+        "message_ttl_secs",
+        "expiry_interval_secs"
+      ]
+    },
+    "CompactionRecord": {
+      "type": "object",
+      "properties": {
+        "actual_strategy": {
+          "type": "string"
+        },
+        "budget": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        },
+        "element": {
+          "type": "string"
+        },
+        "failure_reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "messages_removed": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "requested_strategy": {
+          "type": "string"
+        },
+        "source_message_range": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "maxItems": 2,
+          "minItems": 2,
+          "prefixItems": [
+            {
+              "type": "integer",
+              "format": "uint",
+              "minimum": 0
+            },
+            {
+              "type": "integer",
+              "format": "uint",
+              "minimum": 0
+            }
+          ]
+        },
+        "tokens_after": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "tokens_before": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "element",
+        "requested_strategy",
+        "actual_strategy",
+        "messages_removed",
+        "tokens_before",
+        "tokens_after"
+      ]
+    },
+    "ContextConfig": {
+      "type": "object",
+      "properties": {
+        "assembly": {
+          "type": "string"
+        },
+        "budget": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        },
+        "timeout": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "assembly",
+        "timeout"
+      ]
+    },
+    "ContextTransferConfig": {
+      "type": "object",
+      "properties": {
+        "allowed_fields": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ContextTransferField"
+          }
+        },
+        "mode": {
+          "$ref": "#/$defs/ContextTransferMode"
+        },
+        "summary_budget": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "targets": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/ContextTransferTargetConfig"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "mode",
+        "allowed_fields",
+        "targets"
+      ]
+    },
+    "ContextTransferField": {
+      "type": "string",
+      "enum": [
+        "system",
+        "user",
+        "assistant"
+      ]
+    },
+    "ContextTransferMode": {
+      "type": "string",
+      "enum": [
+        "none",
+        "explicit",
+        "summary"
+      ]
+    },
+    "ContextTransferTargetConfig": {
+      "type": "object",
+      "properties": {
+        "allowed_fields": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ContextTransferField"
+          }
+        },
+        "mode": {
+          "$ref": "#/$defs/ContextTransferMode"
+        },
+        "summary_budget": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "mode",
+        "allowed_fields"
       ]
     },
     "ConversationBranchResponse": {
@@ -542,6 +1064,43 @@
         "messages"
       ]
     },
+    "CreateAttachmentRequest": {
+      "type": "object",
+      "properties": {
+        "content_base64": {
+          "type": "string"
+        },
+        "filename": {
+          "type": "string"
+        },
+        "mime_type": {
+          "type": "string"
+        },
+        "scope_kind": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "space_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        }
+      },
+      "required": [
+        "scope_kind",
+        "filename",
+        "mime_type",
+        "content_base64"
+      ]
+    },
     "CreateChannelLinkCodeRequest": {
       "description": "Request a short-lived code that links a channel conversation to a space.",
       "type": "object",
@@ -580,6 +1139,23 @@
         "integration"
       ]
     },
+    "CreateConversationBranchRequest": {
+      "type": "object",
+      "properties": {
+        "from_message_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "thread_id": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "required": [
+        "thread_id",
+        "from_message_id"
+      ]
+    },
     "CreateConversationRequest": {
       "description": "Request body for the conversation and space-session creation endpoints.\n\nEvery field is optional and the body itself may be omitted: an absent\n`agent_id` selects the default `\"gateway\"` agent, and an absent\n`selected_model_id` leaves the session's model unselected. A named\n`agent_id` must be `\"gateway\"` or an agent definition visible to the\ntarget space; the gateway rejects anything else with a validation error.",
       "type": "object",
@@ -598,6 +1174,49 @@
         }
       },
       "additionalProperties": false
+    },
+    "CreateMaterialRequest": {
+      "type": "object",
+      "properties": {
+        "content_text": {
+          "type": "string"
+        },
+        "mime_type": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "relative_path": {
+          "type": "string"
+        },
+        "scope_kind": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "space_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "scope_kind",
+        "title",
+        "relative_path",
+        "content_text"
+      ]
     },
     "CreateScheduleRequest": {
       "description": "Create a schedule.",
@@ -812,6 +1431,90 @@
         }
       ]
     },
+    "DiscoveredModel": {
+      "type": "object",
+      "properties": {
+        "context_window": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name"
+      ]
+    },
+    "Duration": {
+      "type": "object",
+      "properties": {
+        "nanos": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "secs": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "secs",
+        "nanos"
+      ]
+    },
+    "ElementReport": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "named_assembly": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NamedAssemblyReport"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "preview": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "priority": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "source": {
+          "type": "string"
+        },
+        "token_count": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "name",
+        "source",
+        "token_count",
+        "priority"
+      ]
+    },
     "ExternalChannelIntegration": {
       "description": "An external channel integration that can receive delivered output.",
       "type": "string",
@@ -867,6 +1570,53 @@
       "enum": [
         "run",
         "skip"
+      ]
+    },
+    "GenerationPresetConfig": {
+      "type": "object",
+      "properties": {
+        "max_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "metadata": true,
+        "stop_sequences": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        }
+      },
+      "additionalProperties": false
+    },
+    "HitlConfig": {
+      "type": "object",
+      "properties": {
+        "timeout": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "timeout_policy": {
+          "$ref": "#/$defs/ApprovalTimeoutPolicy"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "timeout",
+        "timeout_policy"
       ]
     },
     "KnowledgeSearchResponse": {
@@ -928,6 +1678,118 @@
         "passage"
       ]
     },
+    "MaterialListResponse": {
+      "type": "object",
+      "properties": {
+        "materials": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MaterialResponse"
+          }
+        }
+      },
+      "required": [
+        "materials"
+      ]
+    },
+    "MaterialResponse": {
+      "type": "object",
+      "properties": {
+        "absolute_path": {
+          "type": "string"
+        },
+        "archived_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "content_text": {
+          "type": "string"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "mime_type": {
+          "type": "string"
+        },
+        "relative_path": {
+          "type": "string"
+        },
+        "scope_kind": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "source_attachment_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "source_kind": {
+          "type": "string"
+        },
+        "space_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "status": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "scope_kind",
+        "source_kind",
+        "status",
+        "title",
+        "relative_path",
+        "absolute_path",
+        "mime_type",
+        "content_text",
+        "created_at",
+        "updated_at"
+      ]
+    },
+    "MessageResponse": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "status": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "status"
+      ]
+    },
     "MessageView": {
       "type": "object",
       "properties": {
@@ -975,6 +1837,127 @@
         "content",
         "timestamp",
         "tool_calls"
+      ]
+    },
+    "ModelCapabilitiesConfig": {
+      "type": "object",
+      "properties": {
+        "reasoning_replay": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "ModelDiscoveryResponse": {
+      "type": "object",
+      "properties": {
+        "models": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DiscoveredModel"
+          }
+        },
+        "provider_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "provider_id",
+        "models"
+      ]
+    },
+    "ModelPricing": {
+      "type": "object",
+      "properties": {
+        "input_price_per_mtok": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "output_price_per_mtok": {
+          "type": "integer",
+          "format": "int64"
+        }
+      },
+      "required": [
+        "input_price_per_mtok",
+        "output_price_per_mtok"
+      ]
+    },
+    "ModelSettings": {
+      "type": "object",
+      "properties": {
+        "aliases": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "capabilities": {
+          "$ref": "#/$defs/ModelCapabilitiesConfig",
+          "default": {
+            "reasoning_replay": false
+          }
+        },
+        "context_window": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "generation_preset": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "model_id": {
+          "type": "string"
+        },
+        "provider_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "provider_id",
+        "model_id",
+        "aliases"
+      ]
+    },
+    "NamedAssemblyReport": {
+      "type": "object",
+      "properties": {
+        "assembly_name": {
+          "type": "string"
+        },
+        "child_elements": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ElementReport"
+          }
+        },
+        "resolved_level": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "assembly_name",
+        "resolved_level",
+        "child_elements"
+      ]
+    },
+    "ObservabilityConfig": {
+      "type": "object",
+      "properties": {
+        "force_on": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "force_on"
       ]
     },
     "OrientationCardResult": {
@@ -1031,6 +2014,50 @@
         "guidance"
       ]
     },
+    "PricingConfig": {
+      "type": "object",
+      "properties": {
+        "models": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/ModelPricing"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "models"
+      ]
+    },
+    "PromoteMaterialRequest": {
+      "type": "object",
+      "properties": {
+        "relative_path": {
+          "type": "string"
+        },
+        "scope_kind": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "space_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        }
+      },
+      "required": [
+        "scope_kind",
+        "relative_path"
+      ]
+    },
     "ProviderAccount": {
       "type": "object",
       "properties": {
@@ -1047,6 +2074,61 @@
           ]
         }
       }
+    },
+    "ProviderProtocol": {
+      "type": "string",
+      "enum": [
+        "openai",
+        "anthropic",
+        "google",
+        "openrouter",
+        "codex"
+      ]
+    },
+    "ProviderSettings": {
+      "type": "object",
+      "properties": {
+        "api_key_env": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "api_key_secret_ref": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "base_url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "command": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "has_credential": {
+          "type": "boolean"
+        },
+        "protocol": {
+          "$ref": "#/$defs/ProviderProtocol"
+        },
+        "state_dir": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "protocol",
+        "has_credential"
+      ]
     },
     "ProviderSignInState": {
       "type": "object",
@@ -1076,6 +2158,411 @@
         "signing_in",
         "signed_in",
         "expired"
+      ]
+    },
+    "PythonExecuteToolConfig": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "idle_ttl_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "max_workers": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "require_sandbox": {
+          "type": "boolean"
+        },
+        "runtime_path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "runtime_policy": {
+          "$ref": "#/$defs/PythonRuntimePolicy"
+        },
+        "startup_timeout_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "timeout_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "warm_target": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "enabled",
+        "timeout_secs",
+        "startup_timeout_secs",
+        "idle_ttl_secs",
+        "warm_target",
+        "max_workers",
+        "runtime_policy",
+        "require_sandbox"
+      ]
+    },
+    "PythonRuntimePolicy": {
+      "type": "string",
+      "enum": [
+        "bundled_then_system"
+      ]
+    },
+    "QueuedAttachmentResponse": {
+      "type": "object",
+      "properties": {
+        "attachment": {
+          "$ref": "#/$defs/AttachmentResponse"
+        },
+        "job": {
+          "$ref": "#/$defs/BackgroundJobResponse"
+        }
+      },
+      "required": [
+        "attachment",
+        "job"
+      ]
+    },
+    "RecoveryExportListResponse": {
+      "type": "object",
+      "properties": {
+        "exports": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RecoveryExportSummary"
+          }
+        }
+      },
+      "required": [
+        "exports"
+      ]
+    },
+    "RecoveryExportSummary": {
+      "type": "object",
+      "properties": {
+        "channel_links": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "devices": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "schedules": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "secrets": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "sessions": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "size_bytes": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "spaces": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "workspaces": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "id",
+        "created_at",
+        "size_bytes",
+        "spaces",
+        "workspaces",
+        "sessions",
+        "secrets",
+        "channel_links",
+        "devices",
+        "schedules"
+      ]
+    },
+    "RequireApprovalEntry": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "$ref": "#/$defs/RequireApprovalOptions"
+        }
+      ]
+    },
+    "RequireApprovalOptions": {
+      "type": "object",
+      "properties": {
+        "timeout": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "timeout_policy": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ApprovalTimeoutPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tool": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "tool"
+      ]
+    },
+    "RestartStatusResponse": {
+      "type": "object",
+      "properties": {
+        "can_restart": {
+          "type": "boolean"
+        },
+        "guidance": {
+          "type": "string"
+        },
+        "restart_required": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "restart_required",
+        "can_restart",
+        "guidance"
+      ]
+    },
+    "SandboxConfig": {
+      "type": "object",
+      "properties": {
+        "allow_degraded_execution": {
+          "type": "boolean"
+        },
+        "enabled": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "enabled",
+        "allow_degraded_execution"
+      ]
+    },
+    "SaveProviderSettings": {
+      "type": "object",
+      "properties": {
+        "api_key": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "api_key_env": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "api_key_secret_ref": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "base_url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "command": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "protocol": {
+          "$ref": "#/$defs/ProviderProtocol"
+        },
+        "state_dir": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "protocol"
+      ]
+    },
+    "SaveSettingsRequest": {
+      "type": "object",
+      "properties": {
+        "communication": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CommunicationConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "context": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ContextConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "default_model": {
+          "type": "string"
+        },
+        "default_provider": {
+          "type": "string"
+        },
+        "generation_presets": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/GenerationPresetConfig"
+          },
+          "default": {}
+        },
+        "hitl": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HitlConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "models": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/ModelSettings"
+          }
+        },
+        "observability": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ObservabilityConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "pricing": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PricingConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "providers": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/SaveProviderSettings"
+          }
+        },
+        "sandbox": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SandboxConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "tool_permissions": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ToolPermissionConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "tool_runtime": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ToolRuntimeSettings"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "default_provider",
+        "providers",
+        "default_model",
+        "models"
       ]
     },
     "Schedule": {
@@ -1471,6 +2958,70 @@
         "message"
       ]
     },
+    "SearchProviderConfig": {
+      "type": "object",
+      "properties": {
+        "api_key": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "base_url": {
+          "type": "string"
+        },
+        "provider_type": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "provider_type",
+        "base_url"
+      ]
+    },
+    "SendMessageRequest": {
+      "type": "object",
+      "properties": {
+        "correlation_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "payload": true,
+        "recipient_agent_id": {
+          "type": "string"
+        },
+        "sender_agent_id": {
+          "type": "string"
+        },
+        "sender_turn_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "space_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        }
+      },
+      "required": [
+        "sender_agent_id",
+        "recipient_agent_id",
+        "kind",
+        "payload"
+      ]
+    },
     "ServerEvent": {
       "description": "Events sent by the server to the client over the WebSocket connection.",
       "oneOf": [
@@ -1575,10 +3126,12 @@
           ]
         },
         {
-          "description": "Context assembly completed for a turn.\n\nContains the full assembly report for diagnostics and token budget\ninspection. Only delivered to connections subscribed to the `\"context\"`\nchannel unless the report contains errors, in which case it is always\nsent so the client can surface assembly failures to the user.\n\nThe report is carried as `serde_json::Value` to decouple the wire\nformat from swage-context's internal types — the shape matches\n`swage_context::report::AssemblyReport` when serialised.",
+          "description": "Context assembly completed for a turn.\n\nContains the full assembly report for diagnostics and token budget\ninspection. Only delivered to connections subscribed to the `\"context\"`\nchannel unless the report contains errors, in which case it is always\nsent so the client can surface assembly failures to the user.",
           "type": "object",
           "properties": {
-            "report": true,
+            "report": {
+              "$ref": "#/$defs/AssemblyReport"
+            },
             "turn_id": {
               "type": "string",
               "format": "uuid"
@@ -2253,6 +3806,82 @@
         }
       ]
     },
+    "SettingsResponse": {
+      "type": "object",
+      "properties": {
+        "can_restart": {
+          "type": "boolean"
+        },
+        "communication": {
+          "$ref": "#/$defs/CommunicationConfig"
+        },
+        "context": {
+          "$ref": "#/$defs/ContextConfig"
+        },
+        "default_model": {
+          "type": "string"
+        },
+        "default_provider": {
+          "type": "string"
+        },
+        "generation_presets": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/GenerationPresetConfig"
+          }
+        },
+        "hitl": {
+          "$ref": "#/$defs/HitlConfig"
+        },
+        "models": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/ModelSettings"
+          }
+        },
+        "observability": {
+          "$ref": "#/$defs/ObservabilityConfig"
+        },
+        "pricing": {
+          "$ref": "#/$defs/PricingConfig"
+        },
+        "providers": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/ProviderSettings"
+          }
+        },
+        "restart_required": {
+          "type": "boolean"
+        },
+        "sandbox": {
+          "$ref": "#/$defs/SandboxConfig"
+        },
+        "tool_permissions": {
+          "$ref": "#/$defs/ToolPermissionConfig"
+        },
+        "tool_runtime": {
+          "$ref": "#/$defs/ToolRuntimeSettings"
+        }
+      },
+      "required": [
+        "providers",
+        "default_provider",
+        "models",
+        "default_model",
+        "generation_presets",
+        "tool_runtime",
+        "tool_permissions",
+        "hitl",
+        "sandbox",
+        "context",
+        "pricing",
+        "observability",
+        "communication",
+        "restart_required",
+        "can_restart"
+      ]
+    },
     "SignInMethod": {
       "type": "string",
       "enum": [
@@ -2421,6 +4050,46 @@
         "args"
       ]
     },
+    "SubmitTurnRequest": {
+      "type": "object",
+      "properties": {
+        "conversation_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "message": {
+          "type": "string"
+        },
+        "output_schema": true,
+        "thread_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        }
+      },
+      "required": [
+        "conversation_id",
+        "message"
+      ]
+    },
+    "SubmitTurnResponse": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string"
+        },
+        "turn_id": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "required": [
+        "turn_id",
+        "status"
+      ]
+    },
     "SynthesiseSpeechRequest": {
       "type": "object",
       "properties": {
@@ -2444,6 +4113,31 @@
       },
       "required": [
         "text"
+      ]
+    },
+    "SynthesiseSpeechResponse": {
+      "type": "object",
+      "properties": {
+        "audio_bytes": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint8",
+            "maximum": 255,
+            "minimum": 0
+          }
+        },
+        "mime_type": {
+          "type": "string"
+        },
+        "voice": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "audio_bytes",
+        "mime_type",
+        "voice"
       ]
     },
     "ToolCallView": {
@@ -2496,6 +4190,84 @@
         "truncated"
       ]
     },
+    "ToolPermissionConfig": {
+      "type": "object",
+      "properties": {
+        "allow": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "bundles": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "deny": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "require_approval": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RequireApprovalEntry"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "allow",
+        "deny",
+        "bundles",
+        "require_approval"
+      ]
+    },
+    "ToolRuntimeSettings": {
+      "type": "object",
+      "properties": {
+        "max_output_bytes": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "plugin_directory": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "python_execute": {
+          "$ref": "#/$defs/PythonExecuteToolConfig"
+        },
+        "search": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SearchProviderConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "shell_timeout_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "shell_timeout_secs",
+        "python_execute",
+        "max_output_bytes"
+      ]
+    },
     "TranscribeAudioRequest": {
       "type": "object",
       "properties": {
@@ -2517,6 +4289,17 @@
         "mime_type"
       ]
     },
+    "TranscribeAudioResponse": {
+      "type": "object",
+      "properties": {
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "text"
+      ]
+    },
     "TriggerScheduleResponse": {
       "type": "object",
       "properties": {
@@ -2526,6 +4309,66 @@
       },
       "required": [
         "run"
+      ]
+    },
+    "TurnContextResponse": {
+      "type": "object",
+      "properties": {
+        "report": {
+          "$ref": "#/$defs/AssemblyReport"
+        },
+        "turn_id": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "required": [
+        "turn_id",
+        "report"
+      ]
+    },
+    "TurnPollResponse": {
+      "type": "object",
+      "properties": {
+        "assistant_response": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "input_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "output_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "parent_turn_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "state": {
+          "type": "string"
+        },
+        "structured_output": true,
+        "turn_id": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "required": [
+        "turn_id",
+        "state"
       ]
     },
     "TurnState": {
@@ -2623,6 +4466,17 @@
           ]
         }
       }
+    },
+    "UpdateWorkspaceTrustRequest": {
+      "type": "object",
+      "properties": {
+        "is_trusted": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "is_trusted"
+      ]
     },
     "VoiceCapabilitiesResponse": {
       "type": "object",

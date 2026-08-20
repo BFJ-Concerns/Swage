@@ -165,6 +165,8 @@ pub fn default_assembly(
         compaction_applied,
         warnings: Vec::new(),
         errors: Vec::new(),
+        effective_tool_permissions: None,
+        provider_visible: None,
         duration,
     };
 

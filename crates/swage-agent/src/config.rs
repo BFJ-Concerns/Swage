@@ -48,6 +48,15 @@ pub struct AgentConfig {
     /// have explicitly opted out of the approval system.
     #[serde(default)]
     pub skip_permissions: bool,
+    /// Whether this turn may pause for an operator approval decision.
+    /// Unattended callers disable this while retaining normal tool grant
+    /// evaluation and call auditing.
+    #[serde(default = "approval_prompts_enabled_by_default")]
+    pub approval_prompts_enabled: bool,
+}
+
+const fn approval_prompts_enabled_by_default() -> bool {
+    true
 }
 
 impl AgentConfig {
@@ -72,6 +81,7 @@ impl AgentConfig {
             replay_reasoning: false,
             model_id: None,
             skip_permissions: false,
+            approval_prompts_enabled: true,
         }
     }
 

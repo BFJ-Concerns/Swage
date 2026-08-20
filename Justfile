@@ -25,28 +25,28 @@ fmt-check:
     cargo run -p xtask -- fmt-check
 
 check:
-    ./scripts/run-in-build-slot cargo run -p xtask -- check
+    cargo run -p xtask -- check
 
 clippy:
-    ./scripts/run-in-build-slot cargo run -p xtask -- clippy
+    cargo run -p xtask -- clippy
 
 test:
-    ./scripts/run-in-build-slot cargo run -p xtask -- test
+    cargo run -p xtask -- test
 
 test-lib package *filter:
-    ./scripts/run-in-build-slot cargo run -p xtask -- test-lib {{ package }} {{ filter }}
+    cargo run -p xtask -- test-lib {{ package }} {{ filter }}
 
 test-integration package target *filter:
-    ./scripts/run-in-build-slot cargo run -p xtask -- test-integration {{ package }} {{ target }} {{ filter }}
+    cargo run -p xtask -- test-integration {{ package }} {{ target }} {{ filter }}
 
 # CI runs this same recipe, so the local gate and CI cannot drift apart.
 # The gate: local-state and format checks, clippy, tests, desktop smoke.
 verify:
-    ./scripts/run-in-build-slot cargo run -p xtask -- verify
+    cargo run -p xtask -- verify
 
 # Alias for `verify`, kept for muscle memory.
 ci:
-    ./scripts/run-in-build-slot cargo run -p xtask -- verify
+    cargo run -p xtask -- verify
 
 sweep:
     cargo run -p xtask -- sweep

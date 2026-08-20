@@ -1022,7 +1022,7 @@ mod tests {
     ) {
         let code = issue_link_code(state).await;
         telegram.push_update(update_id, chat_id, &format!("/link {code}"));
-        poll_once(state, client).await.unwrap();
+        Box::pin(poll_once(state, client)).await.unwrap();
     }
 
     async fn startup_recover_channel_queue(state: &AppState) {
@@ -1049,7 +1049,7 @@ mod tests {
 
         Box::pin(link_chat(&state, &client, &telegram_state, 1, 777)).await;
         telegram_state.push_update(2, 777, "hello");
-        poll_once(&state, &client).await.unwrap();
+        Box::pin(poll_once(&state, &client)).await.unwrap();
 
         let sent = telegram_state.sent.lock().unwrap().clone();
         assert_eq!(sent.len(), 2);
@@ -1077,9 +1077,9 @@ mod tests {
         let code = issue_link_code(&state).await;
 
         telegram.push_update(1, 777, &format!("/link {code}"));
-        poll_once(&state, &client).await.unwrap();
+        Box::pin(poll_once(&state, &client)).await.unwrap();
         telegram.push_update(2, 888, &format!("/link {code}"));
-        poll_once(&state, &client).await.unwrap();
+        Box::pin(poll_once(&state, &client)).await.unwrap();
 
         let links = storage.list_channel_links().await.unwrap();
         assert_eq!(links.len(), 1);
@@ -1108,7 +1108,7 @@ mod tests {
         }
 
         telegram.push_update(1, 777, &format!("/link {code}"));
-        poll_once(&state, &client).await.unwrap();
+        Box::pin(poll_once(&state, &client)).await.unwrap();
 
         assert!(storage.list_channel_links().await.unwrap().is_empty());
         let sent = telegram.sent.lock().unwrap().clone();
@@ -1189,7 +1189,7 @@ mod tests {
         );
         Box::pin(link_chat(&state, &client, &telegram, 1, 777)).await;
         telegram.push_update(2, 777, "before");
-        poll_once(&state, &client).await.unwrap();
+        Box::pin(poll_once(&state, &client)).await.unwrap();
         let first_session = storage
             .find_session_by_channel_origin("telegram", client.bot_id().unwrap(), "777")
             .await
@@ -1203,7 +1203,7 @@ mod tests {
             client.clone(),
         );
         telegram.push_update(3, 777, "after");
-        poll_once(&restarted, &client).await.unwrap();
+        Box::pin(poll_once(&restarted, &client)).await.unwrap();
 
         assert!(
             telegram.offsets.lock().unwrap().contains(&Some(3)),
@@ -1254,13 +1254,15 @@ mod tests {
         let first_state = state.clone();
         let first_client = client.clone();
         let first_poll = tokio::spawn(async move {
-            poll_once(&first_state, &first_client).await.unwrap();
+            Box::pin(poll_once(&first_state, &first_client))
+                .await
+                .unwrap();
         });
         first_started_rx.await.unwrap();
 
         telegram.push_update(3, 777, "B");
         telegram.push_update(4, 777, "C");
-        poll_once(&state, &client).await.unwrap();
+        Box::pin(poll_once(&state, &client)).await.unwrap();
         assert_eq!(
             storage.list_pending_channel_origins().await.unwrap().len(),
             1
@@ -1319,7 +1321,7 @@ mod tests {
 
         telegram.push_update(2, 777, "B");
         telegram.push_update(3, 777, "C");
-        poll_once(&state, &client).await.unwrap();
+        Box::pin(poll_once(&state, &client)).await.unwrap();
         assert!(
             !storage
                 .list_pending_channel_origins()
@@ -1389,7 +1391,7 @@ mod tests {
 
         telegram.push_update(7, 999, "stranger");
         telegram.push_non_text_update(8, 999);
-        poll_once(&state, &client).await.unwrap();
+        Box::pin(poll_once(&state, &client)).await.unwrap();
 
         assert!(
             storage
@@ -1428,7 +1430,7 @@ mod tests {
         let code = issue_link_code(&state).await;
 
         telegram.push_non_private_update(9, 444, &format!("/link {code}"));
-        poll_once(&state, &client).await.unwrap();
+        Box::pin(poll_once(&state, &client)).await.unwrap();
 
         assert!(storage.list_channel_links().await.unwrap().is_empty());
         assert!(
@@ -1473,7 +1475,7 @@ mod tests {
         Box::pin(link_chat(&state, &client, &telegram, 1, 777)).await;
         telegram.fail_send.store(true, Ordering::SeqCst);
         telegram.push_update(2, 777, "fail send");
-        let _ = poll_once(&state, &client).await;
+        let _ = Box::pin(poll_once(&state, &client)).await;
 
         let bad_client = Arc::new(TelegramClient {
             http: reqwest::Client::builder()

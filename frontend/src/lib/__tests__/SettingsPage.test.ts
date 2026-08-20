@@ -5,8 +5,10 @@ import { mount, unmount } from "svelte";
 import SettingsPage from "../components/SettingsPage.svelte";
 import type { SettingsPayload, SettingsResponse } from "../types";
 
+import * as agentDefinitionsApi from "../api/agent-definitions";
 import * as settingsApi from "../api/settings";
 import * as workflowApi from "../api/workflows";
+import * as operatorApi from "../api/operator";
 
 vi.mock("../api/settings", () => ({
   discoverModels: vi.fn(),
@@ -15,10 +17,23 @@ vi.mock("../api/settings", () => ({
   saveSettings: vi.fn(),
 }));
 
+vi.mock("../api/agent-definitions", () => ({
+  listEffectiveAgentDefinitions: vi.fn(),
+}));
+
 vi.mock("../api/workflows", () => ({
+  createSchedule: vi.fn(),
   downloadRecoveryExport: vi.fn(),
   exportRecoveryBundle: vi.fn(),
   listRecoveryExports: vi.fn(),
+}));
+
+vi.mock("../api/operator", () => ({
+  listSchedules: vi.fn(),
+  fetchScheduleRuns: vi.fn(),
+  triggerSchedule: vi.fn(),
+  pauseSchedule: vi.fn(),
+  resumeSchedule: vi.fn(),
 }));
 
 type MountedComponent = ReturnType<typeof mount>;
@@ -103,6 +118,7 @@ function emptySettings(): SettingsResponse {
     },
     sandbox: {
       enabled: true,
+      allow_degraded_execution: false,
     },
     context: {
       assembly: "default",
@@ -143,10 +159,10 @@ describe("SettingsPage", () => {
       default_model: payload.default_model,
       generation_presets: payload.generation_presets,
       tool_runtime: payload.tool_runtime ?? emptySettings().tool_runtime,
-      tool_permissions: payload.tool_permissions,
-      hitl: payload.hitl,
+      tool_permissions: payload.tool_permissions ?? emptySettings().tool_permissions,
+      hitl: payload.hitl ?? emptySettings().hitl,
       sandbox: payload.sandbox,
-      context: payload.context,
+      context: payload.context ?? emptySettings().context,
       pricing: payload.pricing ?? emptySettings().pricing,
       observability: payload.observability ?? emptySettings().observability,
       communication: payload.communication ?? emptySettings().communication,
@@ -157,9 +173,11 @@ describe("SettingsPage", () => {
       provider_id: "openai",
       models: [{ id: "gpt-4.1-mini", name: "gpt-4.1-mini", context_window: null }],
     });
+    vi.mocked(agentDefinitionsApi.listEffectiveAgentDefinitions).mockResolvedValue([]);
     vi.mocked(workflowApi.listRecoveryExports).mockResolvedValue({ exports: [] });
     vi.mocked(workflowApi.exportRecoveryBundle).mockResolvedValue({});
     vi.mocked(workflowApi.downloadRecoveryExport).mockResolvedValue({});
+    vi.mocked(operatorApi.listSchedules).mockResolvedValue({ schedules: [] });
   });
 
   afterEach(() => {
@@ -376,5 +394,33 @@ describe("SettingsPage", () => {
     expect(document.body.textContent).toContain("Display preferences saved.");
     expect(preferenceEvents).toHaveLength(2);
     window.removeEventListener("swage:display-preferences-changed", onPreferenceChange);
+  });
+
+  it("lists effective agent definitions for the selected space", async () => {
+    component = mount(SettingsPage, {
+      target: document.body,
+      props: { tab: "agents", spaceId: "selected-space" },
+    });
+    await flushUi();
+
+    expect(agentDefinitionsApi.listEffectiveAgentDefinitions).toHaveBeenCalledWith("selected-space");
+  });
+
+  it("keeps fresh schedule creation gated in global Settings", async () => {
+    component = mount(SettingsPage, {
+      target: document.body,
+      props: { tab: "automation", spaceId: "selected-space" },
+    });
+    await flushUi();
+
+    const prompt = document.querySelector<HTMLTextAreaElement>(".schedule-automation textarea");
+    if (!prompt) throw new Error("Schedule prompt was not rendered");
+    prompt.value = "Review the queue.";
+    prompt.dispatchEvent(new Event("input", { bubbles: true }));
+    buttonNamed("Create schedule").click();
+    await flushUi();
+
+    expect(document.body.textContent).toContain("Select a space before scheduling work.");
+    expect(workflowApi.createSchedule).not.toHaveBeenCalled();
   });
 });

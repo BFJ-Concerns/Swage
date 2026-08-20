@@ -3,12 +3,12 @@
 // Manages browser history and maps URLs to active conversation state.
 // This is a minimal SPA router — no framework dependency needed.
 
-// Settings sub-pages reachable from the overlay nav. The first three are wired
-// to real backends (providers, generation presets, automation). The remainder
-// are rendered as non-functional shells until backends exist — see the
-// SettingsPage motes for the gap on each page.
+// Settings sub-pages reachable from the overlay nav. Providers, agents,
+// generation presets, automation, recovery, and display are wired; the
+// remainder are rendered as non-functional shells until backends exist.
 export type SettingsTab =
   | "providers"
+  | "agents"
   | "generation"
   | "automation"
   | "plugins"
@@ -91,7 +91,7 @@ export function parseRoute(pathname: string): Route {
     };
   }
   const settingsMatch = pathname.match(
-    /^\/settings(?:\/(providers|generation|automation|plugins|channels|devices|voice|recovery|display|account))?$/,
+    /^\/settings(?:\/(providers|agents|generation|automation|plugins|channels|devices|voice|recovery|display|account))?$/,
   );
   if (settingsMatch) {
     return {
