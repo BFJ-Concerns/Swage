@@ -14,6 +14,7 @@ pub struct WorkflowScript {
     pub name: String,
     pub description: String,
     pub head_version: u32,
+    pub built_in: bool,
     pub has_delivery_grant: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,

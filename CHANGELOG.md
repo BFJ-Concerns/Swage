@@ -6,6 +6,7 @@ All notable changes to Swage are documented in this file.
 
 ### Added
 
+- Fresh installations now include front-loaded orchestration, research sweep, and segment orchestration workflows as immutable built-ins.
 - Settings now lists the effective agent definitions for the selected space, with read-only source and configuration details for each winner.
 - New conversations can now choose from the effective agent definitions available to their space, including the shipped default.
 - Sessions now receive operator guidance from standard `AGENTS.md` files: a global file in the Swage config root and one at the root of each trusted, readable attached workspace, layered after the baseline instructions (global before workspace) and visible in the turn context inspector. Untrusted workspaces contribute nothing.
