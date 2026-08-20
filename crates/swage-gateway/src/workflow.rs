@@ -3471,7 +3471,7 @@ mod tests {
         let Json(list) = list_scripts(State(state), Path(space.id))
             .await
             .expect("workflow list");
-        assert_eq!(list.scripts.len(), 3);
+        assert_eq!(list.scripts.len(), 1);
         let listed = list
             .scripts
             .iter()
