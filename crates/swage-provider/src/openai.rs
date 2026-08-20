@@ -928,10 +928,7 @@ mod tests {
             tool_definitions: vec![],
         };
         let body = serde_json::to_value(provider.build_request(&request, false)).unwrap();
-        assert!(!body
-            .as_object()
-            .unwrap()
-            .contains_key("reasoning_effort"));
+        assert!(!body.as_object().unwrap().contains_key("reasoning_effort"));
     }
 
     #[test]
