@@ -768,6 +768,11 @@ async fn start_browser_tool_server(
 ) -> (Router, SocketAddr) {
     let mut config = swage_config::ResolvedConfig::default();
     config.workspace.path = workspace_root.to_string_lossy().to_string();
+    // Approval prompting defaults off; this attended-session journey asserts
+    // the approval flow, so opt the typed-secret tool in explicitly.
+    config.tools.permissions.require_approval = vec![
+        swage_config::model::RequireApprovalEntry::Simple("browser_type".to_string()),
+    ];
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn SpaceStore>,
