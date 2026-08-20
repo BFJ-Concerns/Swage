@@ -836,6 +836,17 @@ impl swage_storage::WorkflowStore for MockStorage {
     ) -> Result<(), StorageError> {
         unimplemented!()
     }
+    async fn park_workflow_run_if_no_matching_events(
+        &self,
+        _: Uuid,
+        _: chrono::DateTime<chrono::Utc>,
+        _: &[String],
+    ) -> Result<bool, StorageError> {
+        unimplemented!()
+    }
+    async fn make_parked_workflow_run_due(&self, _: Uuid) -> Result<bool, StorageError> {
+        unimplemented!()
+    }
     async fn list_due_parked_workflow_runs(
         &self,
         _: chrono::DateTime<chrono::Utc>,
@@ -871,6 +882,14 @@ impl swage_storage::WorkflowStore for MockStorage {
         _: u64,
         _: u64,
     ) -> Result<u64, StorageError> {
+        unimplemented!()
+    }
+    async fn mark_workflow_run_event_delivered(
+        &self,
+        _: Uuid,
+        _: u64,
+        _: u64,
+    ) -> Result<bool, StorageError> {
         unimplemented!()
     }
     async fn create_workflow_journal_intent(

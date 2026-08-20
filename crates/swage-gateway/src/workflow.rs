@@ -1674,13 +1674,16 @@ async fn run_host_commands_inner(
                 };
                 let _ = reply.send(result);
             }
-            HostCommand::PostEvent { event, reply } => {
+            HostCommand::PostEvent { mut event, reply } => {
                 // Kind validation consumes no journal seq, so it is
                 // deterministic across live runs and replays alike.
-                if let Err(error) = validate_run_event_kind(&event.kind) {
-                    let _ = reply.send(Err(error));
-                    continue;
-                }
+                event.kind = match normalise_run_event_kind(&event.kind) {
+                    Ok(kind) => kind,
+                    Err(error) => {
+                        let _ = reply.send(Err(error));
+                        continue;
+                    }
+                };
                 let current_seq = seq.fetch_add(1, Ordering::SeqCst);
                 let request_json = serde_json::json!({
                     "action": "post", "kind": event.kind, "payload": event.payload,
@@ -1733,16 +1736,20 @@ async fn run_host_commands_inner(
                     ));
                     continue;
                 }
-                if let Some(error) = request
+                let kinds = match request
                     .kinds
                     .iter()
-                    .find_map(|kind| validate_run_event_kind(kind).err())
+                    .map(|kind| normalise_run_event_kind(kind))
+                    .collect::<Result<Vec<_>, _>>()
                 {
-                    let _ = reply.send(Err(error));
-                    continue;
-                }
+                    Ok(kinds) => kinds,
+                    Err(error) => {
+                        let _ = reply.send(Err(error));
+                        continue;
+                    }
+                };
                 let current_seq = seq.fetch_add(1, Ordering::SeqCst);
-                let request_json = serde_json::json!({"action": "await", "kinds": request.kinds});
+                let request_json = serde_json::json!({"action": "await", "kinds": kinds});
                 let hash = journal_args_hash(&request_json);
                 let existing = replay.get(current_seq as usize).cloned();
                 if existing
@@ -1795,19 +1802,49 @@ async fn run_host_commands_inner(
                         }
                     },
                 };
-                match complete_await_event(&state, run_id, entry_id, current_seq, &request.kinds)
-                    .await
-                {
+                match complete_await_event(&state, run_id, entry_id, current_seq, &kinds).await {
                     Ok(Some(result)) => {
                         let _ = reply.send(Ok(result));
                     }
                     Ok(None) => {
                         let distant = chrono::Utc::now() + chrono::Duration::days(36500);
-                        match state.storage.set_workflow_run_parked(run_id, distant).await {
-                            Ok(()) => {
+                        match state
+                            .storage
+                            .park_workflow_run_if_no_matching_events(run_id, distant, &kinds)
+                            .await
+                        {
+                            Ok(true) => {
                                 parked_due = Some(distant);
                                 park.cancel();
                                 parked_replies.push(reply);
+                            }
+                            Ok(false) => {
+                                // The pending read and park are deliberately
+                                // separated by script work. The storage CAS
+                                // closes that window: if a matching post won,
+                                // consume it now instead of sleeping past it.
+                                match complete_await_event(
+                                    &state,
+                                    run_id,
+                                    entry_id,
+                                    current_seq,
+                                    &kinds,
+                                )
+                                .await
+                                {
+                                    Ok(Some(result)) => {
+                                        let _ = reply.send(Ok(result));
+                                    }
+                                    Ok(None) => {
+                                        let _ = reply.send(Err(
+                                            "WorkflowCancelledError: run changed state before event wait could park"
+                                                .into(),
+                                        ));
+                                    }
+                                    Err(error) => {
+                                        let _ = reply.send(Err(error));
+                                    }
+                                }
                             }
                             Err(error) => {
                                 let _ = reply.send(Err(error.to_string()));
@@ -2305,7 +2342,7 @@ pub(crate) async fn post_external_run_event(
     request: PostWorkflowRunEventRequest,
     source: RunEventSource,
 ) -> Result<PostWorkflowRunEventResponse, ApiError> {
-    validate_run_event_kind(&request.kind).map_err(ApiError::validation)?;
+    let kind = normalise_run_event_kind(&request.kind).map_err(ApiError::validation)?;
     let run = state
         .storage
         .get_workflow_run(run_id)
@@ -2323,7 +2360,7 @@ pub(crate) async fn post_external_run_event(
         .create_workflow_run_event(NewWorkflowRunEvent {
             run_id,
             journal_entry_id: Uuid::new_v4(),
-            kind: request.kind,
+            kind,
             payload: request.payload,
             source_surface: source.surface.into(),
             source_agent_id: source.agent_id,
@@ -2377,7 +2414,7 @@ pub async fn post_operator_run_event(
     ))
 }
 
-fn validate_run_event_kind(kind: &str) -> Result<(), String> {
+fn normalise_run_event_kind(kind: &str) -> Result<String, String> {
     let kind = kind.trim();
     let segments = kind.split(['.', ':', '/']).collect::<Vec<_>>();
     let namespaced = segments.len() >= 2 && segments.iter().all(|segment| !segment.is_empty());
@@ -2389,7 +2426,7 @@ fn validate_run_event_kind(kind: &str) -> Result<(), String> {
             "RunEventError: event kind {kind:?} must be a non-empty namespaced name using letters, numbers, '.', ':', '/', '_' or '-'"
         ));
     }
-    Ok(())
+    Ok(kind.to_string())
 }
 
 async fn complete_await_event(
@@ -2407,12 +2444,17 @@ async fn complete_await_event(
     let Some(matched) = pending.iter().find(|event| kinds.contains(&event.kind)) else {
         return Ok(None);
     };
-    let up_to_seq = pending.last().map(|event| event.seq).unwrap_or(matched.seq);
-    state
+    let delivered = state
         .storage
-        .mark_workflow_run_events_delivered(run_id, up_to_seq, delivery_seq)
+        .mark_workflow_run_event_delivered(run_id, matched.seq, delivery_seq)
         .await
         .map_err(|error| error.to_string())?;
+    if !delivered {
+        return Err(format!(
+            "RunEventError: event {} was delivered concurrently",
+            matched.seq
+        ));
+    }
     let result = serde_json::json!({
         "seq": matched.seq,
         "kind": matched.kind,
@@ -5506,6 +5548,20 @@ mod tests {
             crate::tool::ToolDispatcher::allow_all(vec![]),
             None,
         );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind gateway listener");
+        let address = listener.local_addr().expect("gateway address");
+        let server = tokio::spawn({
+            let state = state.clone();
+            async move {
+                axum::serve(listener, crate::server::build_router(state))
+                    .await
+                    .expect("serve gateway router");
+            }
+        });
+        let events_url = |run_id| format!("http://{address}/api/workflow-runs/{run_id}/events");
+        let client = reqwest::Client::new();
         let source = r#"
             const answer = await awaitEvent({ kinds: ["operator.decision"] });
             return { verdict: answer.payload.verdict, source: answer.source.surface };
@@ -5523,30 +5579,39 @@ mod tests {
         .expect("start awaiting run");
         wait_for_run_state(&storage, started.id, "parked").await;
 
-        let Json(unrelated) = post_operator_run_event(
-            State(state.clone()),
-            Path(started.id),
-            Json(PostWorkflowRunEventRequest {
+        let unrelated = client
+            .post(events_url(started.id))
+            .json(&PostWorkflowRunEventRequest {
                 kind: "device.heartbeat".into(),
                 payload: serde_json::json!({"online": true}),
-            }),
-        )
-        .await
-        .expect("unrelated operator post");
+            })
+            .send()
+            .await
+            .expect("send unrelated operator post")
+            .error_for_status()
+            .expect("unrelated operator post status")
+            .json::<PostWorkflowRunEventResponse>()
+            .await
+            .expect("decode unrelated operator response");
         assert!(unrelated.wake_provisioned);
         wait_for_run_state(&storage, started.id, "parked").await;
 
-        let Json(response) = post_operator_run_event(
-            State(state.clone()),
-            Path(started.id),
-            Json(PostWorkflowRunEventRequest {
-                kind: "operator.decision".into(),
+        let response = client
+            .post(events_url(started.id))
+            .json(&PostWorkflowRunEventRequest {
+                kind: " operator.decision ".into(),
                 payload: serde_json::json!({"nonce": "n-1", "verdict": "accept"}),
-            }),
-        )
-        .await
-        .expect("operator post");
+            })
+            .send()
+            .await
+            .expect("send operator post")
+            .error_for_status()
+            .expect("operator post status")
+            .json::<PostWorkflowRunEventResponse>()
+            .await
+            .expect("decode operator response");
         assert!(response.wake_provisioned);
+        assert_eq!(response.event.kind, "operator.decision");
         let completed = wait_for_run_state(&storage, started.id, "completed").await;
         assert_eq!(
             completed.final_output,
@@ -5565,10 +5630,8 @@ mod tests {
                 .iter()
                 .all(|event| event.source_surface == "operator")
         );
-        assert!(
-            events.iter().all(|event| event.delivered_at.is_some()),
-            "the matching wake stamps the whole pending queue"
-        );
+        assert!(events[0].delivered_at.is_none());
+        assert!(events[1].delivered_at.is_some());
         let journal = storage
             .list_workflow_journal(started.id)
             .await
@@ -5598,6 +5661,73 @@ mod tests {
                 .len(),
             2
         );
+        server.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sequential_awaits_each_receive_their_matching_queued_event() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(space.id),
+            Json(StartInlineWorkflowRunRequest {
+                source: r#"
+                    const decision = await awaitEvent({ kinds: ["operator.decision"] });
+                    const reply = await awaitEvent({ kinds: ["device.reply"] });
+                    return { decision: decision.payload.verdict, reply: reply.payload.value };
+                "#
+                .into(),
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start awaiting run");
+        wait_for_run_state(&storage, started.id, "parked").await;
+
+        let Json(_) = post_operator_run_event(
+            State(state.clone()),
+            Path(started.id),
+            Json(PostWorkflowRunEventRequest {
+                kind: "device.reply".into(),
+                payload: serde_json::json!({"value": 42}),
+            }),
+        )
+        .await
+        .expect("queue later await answer");
+        wait_for_run_state(&storage, started.id, "parked").await;
+        let Json(_) = post_operator_run_event(
+            State(state),
+            Path(started.id),
+            Json(PostWorkflowRunEventRequest {
+                kind: "operator.decision".into(),
+                payload: serde_json::json!({"verdict": "accept"}),
+            }),
+        )
+        .await
+        .expect("queue first await answer");
+
+        let completed = wait_for_run_state(&storage, started.id, "completed").await;
+        assert_eq!(
+            completed.final_output,
+            Some(serde_json::json!({"decision": "accept", "reply": 42}))
+        );
+        let events = storage
+            .list_workflow_run_events(started.id)
+            .await
+            .expect("events");
+        assert_eq!(events.len(), 2);
+        assert!(events.iter().all(|event| event.delivered_at.is_some()));
+        assert_ne!(events[0].delivered_wake_seq, events[1].delivered_wake_seq);
     }
 
     async fn wait_for_workflow_thread_exit(run_id: Uuid) {
@@ -5744,6 +5874,35 @@ mod tests {
             .map(|entry| entry.kind)
             .collect();
         assert_eq!(kinds, ["event", "gate", "event", "gate", "event"]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn gate_treats_an_unfamiliar_event_kind_as_wakeable_data() {
+        let provider = Arc::new(ScriptedGateProvider {
+            replies: std::sync::Mutex::new(std::collections::VecDeque::from([
+                r#"{"wake": true, "reasoning": "the custom signal requires attention"}"#,
+            ])),
+            calls: AtomicUsize::new(0),
+        });
+        let (_storage, state, run) = event_gate_fixture(Arc::clone(&provider)).await;
+        let (tx, task) = spawn_event_loop(state, run.id, run.space_id, vec![]);
+
+        send_post_event(
+            &tx,
+            " experiment.signal-v2 ",
+            serde_json::json!({"outcome": "unexpected"}),
+        )
+        .await
+        .expect("post unfamiliar kind");
+        let verdict = send_gate(&tx, "wake for novel experimental outcomes")
+            .await
+            .expect("gate unfamiliar kind");
+
+        assert_eq!(verdict["wake"], true);
+        assert_eq!(verdict["events"][0]["kind"], "experiment.signal-v2");
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+        drop(tx);
+        task.await.expect("host loop");
     }
 
     #[tokio::test(flavor = "multi_thread")]

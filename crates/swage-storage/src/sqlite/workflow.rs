@@ -404,6 +404,29 @@ impl WorkflowStore for SqliteStorage {
         .await
     }
 
+    async fn park_workflow_run_if_no_matching_events(
+        &self,
+        id: Uuid,
+        wake_at: DateTime<Utc>,
+        kinds: &[String],
+    ) -> Result<bool, StorageError> {
+        let kinds = serde_json::to_string(kinds)
+            .map_err(|error| StorageError::QueryFailed(error.to_string()))?;
+        self.with_conn(move |conn| {
+            let changed = conn.execute(
+                "UPDATE workflow_runs SET state='parked', wake_at=?2, completed_at=NULL \
+                 WHERE id=?1 AND state='running' AND NOT EXISTS (\
+                     SELECT 1 FROM workflow_run_events \
+                     WHERE run_id=?1 AND delivered_at IS NULL \
+                       AND kind IN (SELECT value FROM json_each(?3))\
+                 )",
+                params![id.to_string(), wake_at.to_rfc3339(), kinds],
+            )?;
+            Ok(changed == 1)
+        })
+        .await
+    }
+
     async fn make_parked_workflow_run_due(&self, id: Uuid) -> Result<bool, StorageError> {
         let now = Utc::now().to_rfc3339();
         self.with_conn(move |conn| {
@@ -555,6 +578,29 @@ impl WorkflowStore for SqliteStorage {
                 ],
             )?;
             Ok(count as u64)
+        })
+        .await
+    }
+
+    async fn mark_workflow_run_event_delivered(
+        &self,
+        run_id: Uuid,
+        event_seq: u64,
+        delivered_wake_seq: u64,
+    ) -> Result<bool, StorageError> {
+        let now = Utc::now();
+        self.with_conn(move |conn| {
+            let changed = conn.execute(
+                "UPDATE workflow_run_events SET delivered_wake_seq = ?3, delivered_at = ?4 \
+                 WHERE run_id = ?1 AND seq = ?2 AND delivered_at IS NULL",
+                params![
+                    run_id.to_string(),
+                    event_seq as i64,
+                    delivered_wake_seq as i64,
+                    now.to_rfc3339()
+                ],
+            )?;
+            Ok(changed == 1)
         })
         .await
     }
@@ -812,13 +858,30 @@ mod tests {
             3
         );
 
-        // Delivery stamps up to the read seq; already-delivered rows are
-        // untouched, so a re-run stamps nothing.
+        // An await stamps only the event it returned, preserving earlier
+        // pending events of other kinds for their own later awaits.
+        assert!(
+            storage
+                .mark_workflow_run_event_delivered(run.id, 2, 6)
+                .await
+                .expect("deliver one")
+        );
+        let pending = storage
+            .list_pending_workflow_run_events(run.id)
+            .await
+            .expect("pending after one");
+        assert_eq!(
+            pending.iter().map(|event| event.seq).collect::<Vec<_>>(),
+            [1, 3]
+        );
+
+        // Explicit batch delivery still stamps through the read seq;
+        // already-delivered rows are untouched, so a re-run stamps nothing.
         let stamped = storage
             .mark_workflow_run_events_delivered(run.id, 2, 7)
             .await
             .expect("deliver");
-        assert_eq!(stamped, 2);
+        assert_eq!(stamped, 1);
         let pending = storage
             .list_pending_workflow_run_events(run.id)
             .await
@@ -838,6 +901,40 @@ mod tests {
             .expect("all events");
         assert_eq!(all.len(), 3);
         assert_eq!(all[0].delivered_wake_seq, Some(7));
+        assert_eq!(all[1].delivered_wake_seq, Some(6));
         assert!(all[2].delivered_at.is_none());
+
+        // The event-wait park is a compare-and-swap over run state and the
+        // matching queue predicate. A post that wins this ordering prevents
+        // the distant park; an unrelated pending kind does not.
+        assert!(
+            !storage
+                .park_workflow_run_if_no_matching_events(
+                    run.id,
+                    Utc::now() + chrono::Duration::days(36500),
+                    &["worker.2.completion".into()],
+                )
+                .await
+                .expect("matching event blocks park")
+        );
+        assert_eq!(
+            storage
+                .get_workflow_run(run.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            "running"
+        );
+        assert!(
+            storage
+                .park_workflow_run_if_no_matching_events(
+                    run.id,
+                    Utc::now() + chrono::Duration::days(36500),
+                    &["operator.decision".into()],
+                )
+                .await
+                .expect("unrelated event permits park")
+        );
     }
 }
