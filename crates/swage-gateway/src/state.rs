@@ -140,6 +140,8 @@ pub struct AppState {
     agent_message_expiry: Arc<Mutex<Option<AgentMessageExpiryRuntime>>>,
     #[cfg(test)]
     dispatcher_build_failures_remaining: Arc<AtomicUsize>,
+    #[cfg(test)]
+    test_sandbox_enabled: bool,
 }
 
 struct AgentMessageExpiryRuntime {
@@ -250,6 +252,8 @@ impl AppState {
             agent_message_expiry: Arc::new(Mutex::new(None)),
             #[cfg(test)]
             dispatcher_build_failures_remaining: Arc::new(AtomicUsize::new(0)),
+            #[cfg(test)]
+            test_sandbox_enabled: false,
         }
     }
 
@@ -259,6 +263,17 @@ impl AppState {
             crate::worktree::WorktreeConfig { root: root.into() },
         ));
         self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_test_sandbox(mut self) -> Self {
+        self.test_sandbox_enabled = true;
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_sandbox_enabled(&self) -> bool {
+        self.test_sandbox_enabled
     }
 
     #[cfg(test)]

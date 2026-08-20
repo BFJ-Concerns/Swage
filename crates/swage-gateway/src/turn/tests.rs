@@ -300,6 +300,39 @@ impl MultiRoundMockProvider {
     }
 }
 
+pub(crate) struct SandboxedFileTool {
+    name: &'static str,
+}
+
+impl SandboxedFileTool {
+    pub(crate) fn new(name: &'static str) -> Self {
+        Self { name }
+    }
+}
+
+#[async_trait]
+impl Tool for SandboxedFileTool {
+    fn name(&self) -> &str {
+        self.name
+    }
+
+    fn description(&self) -> &str {
+        "Exercise a file operation inside the turn sandbox"
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object"})
+    }
+
+    async fn execute(
+        &self,
+        _params: serde_json::Value,
+        _ctx: &dyn swage_tool::context::ToolContext,
+    ) -> Result<serde_json::Value, ToolError> {
+        panic!("sandboxed file tools execute in the sandbox child")
+    }
+}
+
 /// A multi-round provider whose final configured round remains open after its chunks.
 struct PendingFinalRoundProvider {
     rounds: std::sync::Mutex<std::collections::VecDeque<Vec<StreamChunk>>>,
@@ -7736,6 +7769,168 @@ async fn completed_detached_result_reaches_parent_next_turn() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn delegated_read_only_attachment_allows_read_and_refuses_write() {
+    let fixture = tempfile::tempdir_in("/tmp/scratch").expect("placement fixture");
+    let attachment = fixture.path().join("read-only");
+    std::fs::create_dir(&attachment).expect("read-only attachment");
+    std::fs::write(attachment.join("readable.txt"), "delegated readable proof")
+        .expect("readable fixture");
+    let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
+    let space = storage
+        .get_or_create_default()
+        .await
+        .expect("default space");
+    storage
+        .create_workspace_attachment(NewWorkspaceAttachment {
+            space_id: space.id,
+            label: "delegated read-only cwd".into(),
+            path: attachment.to_string_lossy().into_owned(),
+            permissions: vec!["read".into()],
+            is_trusted: true,
+        })
+        .await
+        .expect("grant delegated read-only cwd");
+    let session = storage
+        .create_session(NewSession {
+            space_id: space.id,
+            agent_id: "gateway".to_string(),
+            metadata: None,
+            active_workspace_attachment_id: None,
+        })
+        .await
+        .expect("create session");
+    let root_thread = ThreadStore::create(
+        &*storage,
+        NewThread {
+            session_id: session.id,
+            agent_id: "gateway".to_string(),
+        },
+    )
+    .await
+    .expect("create root thread");
+    let parent_turn = storage
+        .create_turn(NewTurn {
+            thread_id: root_thread.id,
+            agent_id: "gateway".to_string(),
+            state: TurnState::Processing,
+            user_input: Some("start delegated read-only work".to_string()),
+            parent_turn_id: None,
+        })
+        .await
+        .expect("create parent turn");
+    let provider = MultiRoundMockProvider::new(vec![
+        vec![
+            StreamChunk::ToolUse {
+                call_id: "delegated-read".into(),
+                name: "file_read".into(),
+                arguments: serde_json::json!({"path": "readable.txt"}),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ],
+        vec![
+            StreamChunk::ToolUse {
+                call_id: "delegated-write".into(),
+                name: "file_write".into(),
+                arguments: serde_json::json!({
+                    "path": "blocked.txt",
+                    "content": "must not be written",
+                }),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ],
+        vec![
+            StreamChunk::Delta {
+                content: "read succeeded and write was refused".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ],
+    ]);
+    let state = AppState::new(
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
+        Arc::new(provider) as Arc<dyn LlmProvider>,
+        swage_config::ResolvedConfig::default(),
+        crate::tool::ToolDispatcher::allow_all(vec![
+            Arc::new(SandboxedFileTool::new("file_read")) as Arc<dyn Tool>,
+            Arc::new(SandboxedFileTool::new("file_write")) as Arc<dyn Tool>,
+        ]),
+        None,
+    )
+    .with_worktree_root(fixture.path().join("worker-worktrees"))
+    .with_test_sandbox();
+
+    let outcome = GatewayDelegationHandler::new(state.clone())
+        .handle_delegation(
+            "agent-b",
+            "Exercise read-only placement",
+            None,
+            Some(attachment.to_string_lossy().into_owned()),
+            None,
+            "read-only-placement-delegate",
+            "gateway",
+            parent_turn.id,
+            space.id,
+            CancellationToken::new(),
+            DelegateCompletionMode::Wait,
+        )
+        .await
+        .expect("read-only delegation should complete");
+    assert!(matches!(outcome, DelegationOutcome::Completed(_)));
+
+    let child_session = storage
+        .list_sessions_by_agent_id("agent-b")
+        .await
+        .expect("list child sessions")
+        .into_iter()
+        .next()
+        .expect("delegated child session");
+    let child_thread = storage
+        .list_by_session(child_session.id)
+        .await
+        .expect("list child threads")
+        .into_iter()
+        .next()
+        .expect("delegated child thread");
+    let child_turn = storage
+        .list_turns_by_thread(child_thread.id)
+        .await
+        .expect("list child turns")
+        .into_iter()
+        .next()
+        .expect("delegated child turn");
+    let calls = storage
+        .list_tool_calls_by_turn(child_turn.id)
+        .await
+        .expect("list delegated tool calls");
+    assert_eq!(
+        calls.len(),
+        2,
+        "read and write calls should both be audited"
+    );
+    assert_eq!(calls[0].tool, "file_read");
+    assert_eq!(calls[0].status.as_deref(), Some("success"));
+    assert!(
+        calls[0]
+            .result
+            .as_deref()
+            .is_some_and(|result| result.contains("delegated readable proof")),
+        "read should succeed inside the delegated attachment: {calls:?}"
+    );
+    assert_eq!(calls[1].tool, "file_write");
+    assert_eq!(calls[1].status.as_deref(), Some("error"));
+    assert!(
+        !attachment.join("blocked.txt").exists(),
+        "delegated read-only placement must reject the sandboxed write"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn detached_delegate_can_be_cancelled_through_active_registry() {
     let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
     let space = storage
@@ -7803,49 +7998,6 @@ async fn detached_delegate_can_be_cancelled_through_active_registry() {
         })
         .await
         .expect("grant delegated cwd");
-
-    let read_only_cwd = placement_fixture.path().join("read-only");
-    std::fs::create_dir(&read_only_cwd).unwrap();
-    storage
-        .create_workspace_attachment(NewWorkspaceAttachment {
-            space_id: space.id,
-            label: "delegated read-only cwd".into(),
-            path: read_only_cwd.to_string_lossy().into_owned(),
-            permissions: vec!["read".into()],
-            is_trusted: true,
-        })
-        .await
-        .expect("grant delegated read-only cwd");
-    let read_only_placement = resolve_authorised_worker_directory(
-        &state,
-        space.id,
-        parent_turn.id,
-        None,
-        &read_only_cwd.to_string_lossy(),
-    )
-    .await
-    .expect("read-only delegate placement should be admitted");
-    assert!(!read_only_placement.can_write);
-    let read_only_agent =
-        AgentConfig::new("agent-b").with_workspace(&read_only_cwd, vec![read_only_cwd.clone()]);
-    let mut read_only_policy = load_trusted_workspace_policy(&state.storage, space.id, None).await;
-    let read_only_metadata = serde_json::json!({
-        "worker_placement_can_write": read_only_placement.can_write,
-    });
-    apply_worker_placement_permission(
-        &mut read_only_policy,
-        &read_only_agent,
-        Some(&read_only_metadata),
-    );
-    let read_only_sandbox =
-        build_sandbox_config(&read_only_agent, Some(&read_only_policy)).unwrap();
-    let read_only_path = sandbox_path(&read_only_cwd);
-    assert!(read_only_sandbox.read_only_mounts.contains(&read_only_path));
-    assert!(
-        !read_only_sandbox
-            .read_write_mounts
-            .contains(&read_only_path)
-    );
 
     let outcome = handler
         .handle_delegation(

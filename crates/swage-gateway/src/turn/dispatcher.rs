@@ -206,6 +206,19 @@ pub(super) async fn build_turn_sandbox(
             backend: SandboxBackend::None,
         });
     }
+    #[cfg(test)]
+    if state.test_sandbox_enabled() {
+        let config = build_sandbox_config(agent_config, workspace_policy).map_err(|error| {
+            swage_core::SandboxError::SpawnFailed {
+                message: format!("failed to build test sandbox config: {error}"),
+            }
+        })?;
+        return Ok(TurnSandboxBuild {
+            sandbox: Some(Arc::new(PolicyEnforcingTestSandbox { config })),
+            isolation: ExecutionIsolation::Isolated,
+            backend: SandboxBackend::TestHarness,
+        });
+    }
     if std::env::current_exe().ok().is_some_and(|path| {
         path.parent()
             .and_then(Path::file_name)
@@ -236,6 +249,69 @@ pub(super) async fn build_turn_sandbox(
         true,
     )
     .await
+}
+
+#[cfg(test)]
+struct PolicyEnforcingTestSandbox {
+    config: swage_sandbox::SandboxConfig,
+}
+
+#[cfg(test)]
+#[async_trait::async_trait]
+impl Sandbox for PolicyEnforcingTestSandbox {
+    async fn spawn_agent(&mut self) -> Result<(), swage_core::SandboxError> {
+        Ok(())
+    }
+
+    async fn execute_tool(
+        &self,
+        tool_name: &str,
+        params: serde_json::Value,
+    ) -> Result<swage_sandbox::ToolCallResult, swage_core::SandboxError> {
+        let path = params
+            .get("path")
+            .and_then(serde_json::Value::as_str)
+            .map(|path| self.config.working_directory.join(path));
+        let result = match (tool_name, path) {
+            ("file_read", Some(path)) => std::fs::read_to_string(path)
+                .map(|content| serde_json::json!({"output": content}))
+                .map_err(|error| error.to_string()),
+            ("file_write", Some(path)) => {
+                if !self
+                    .config
+                    .read_write_mounts
+                    .contains(&self.config.working_directory)
+                {
+                    Err("write refused by read-only sandbox mount".into())
+                } else {
+                    let content = params
+                        .get("content")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default();
+                    std::fs::write(path, content)
+                        .map(|()| serde_json::json!({"output": "write completed"}))
+                        .map_err(|error| error.to_string())
+                }
+            }
+            _ => Err(format!("unsupported test sandbox tool {tool_name}")),
+        };
+        Ok(match result {
+            Ok(output) => swage_sandbox::ToolCallResult {
+                output,
+                duration_ms: 0,
+                error: None,
+            },
+            Err(error) => swage_sandbox::ToolCallResult {
+                output: serde_json::Value::Null,
+                duration_ms: 0,
+                error: Some(error),
+            },
+        })
+    }
+
+    async fn shutdown(&self) -> Result<(), swage_core::SandboxError> {
+        Ok(())
+    }
 }
 
 async fn build_turn_sandbox_for_backend_selection(
