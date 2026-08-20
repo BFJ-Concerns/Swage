@@ -1,104 +1,76 @@
-export const meta = {
-  name: "docs-update",
-  description:
-    "The assembly skill's documentation pipeline: restatement (hold), a docs refresh written through the project-docs skill, cross-family accuracy verification against the tree, autonomous fix rounds that converge severe findings before the per-finding triage hold, then a landing stage that merges the unit directly — no PR under either merge policy. The build-verify shape with the writer and verifier families swapped.",
-};
+// docs-update — the assembly skill's documentation pipeline: restatement
+// (hold), a docs refresh written through the project-docs skill,
+// cross-family accuracy verification against the tree, autonomous fix
+// rounds that converge severe findings before the per-finding triage hold,
+// then a landing stage that merges the unit directly — no PR under either
+// merge policy. The build-verify shape with the writer and verifier
+// families swapped.
 
 export const defaults = {
-  // Families swap relative to build-verify: the writer is a Claude leg and
-  // verification crosses to Codex, below its family's top tier as verifiers
-  // always are. The writer pin is operator-settled: change it only on the
-  // user's word, never as a modernisation sweep. Writer effort is medium:
-  // the brief names the covered units, but what the drift actually is and
-  // where each fact's canonical home lies are the writer's own calls.
-  claude: { model: "claude-opus-4-6", effort: "medium" },
-  codex: { model: "gpt-5.6-terra", effort: "medium" },
+  // Families swap relative to build-verify: the writer is a Claude leg
+  // (the default below) and verification crosses to a GPT model pinned per
+  // call, below its family's top tier as verifiers always are. The writer
+  // pin is operator-settled: change it only on the user's word, never as a
+  // modernisation sweep. Writer effort is medium: the brief names the
+  // covered units, but what the drift actually is and where each fact's
+  // canonical home lies are the writer's own calls.
+  model: "claude-opus-4-6",
+  effort: "medium",
 };
 
-// INPUT (--json-args @file):
+// INPUT (workflow args):
 //   briefPath, worktree, unitDir, mergePolicy ("direct-merge"|"pr"),
 //   integrationBranch (PR mode: required — the branch the unit merges into:
 //   the structural branch, or main for a `Lane: main` unit), annexeConfigPath
-//   (config.toml, for push_policy), holdTimeoutMinutes (default 120)
+//   (config.toml, for push_policy)
 //
 // The brief names the docs obligation served and the landed units covered
 // (SKILL.md, Documentation Rides the Run); docs units carry no spine
 // exemplar, so the restatement holds no admission check.
 //
-// HOLD PROTOCOL: identical to build-verify.js — the hold's exact JSON rides
-// the run's stderr as a [hold-content] line; a worker drops only the
-// fixed-content sentinel <unitDir>/<stage>.<nonce>.hold.json and polls for
-// <stage>.<nonce>.decision.json echoing the nonce; timeouts come from the
-// script's own clock and return a structured salvage envelope.
+// HOLD PROTOCOL: identical to build-verify.js — the hold posts a
+// "decision-needed" event carrying its exact content and pauses on the
+// run's event queue until the answering "decision" event (lead segment or
+// operator, via the external post surface) echoes the hold's nonce. No
+// hold timeout: an unanswered decision blocks, and the journal carries
+// every completed stage.
 
 const { briefPath, worktree, unitDir, mergePolicy, annexeConfigPath, integrationBranch } = args;
-const holdTimeoutMinutes = Number(args.holdTimeoutMinutes) || 120;
 if (mergePolicy !== "direct-merge" && mergePolicy !== "pr")
   throw new Error(`unknown mergePolicy: ${JSON.stringify(mergePolicy)} (expected "direct-merge" or "pr")`);
 if (mergePolicy === "pr" && !integrationBranch)
   throw new Error('mergePolicy "pr" requires integrationBranch (the structural branch unit PRs target)');
 
-const mintNonce = () => `${Date.now().toString(36)}${Math.floor(Math.random() * 1e6).toString(36)}`;
-
-const holdSchemaFor = (verdicts) => ({
-  type: "object",
-  additionalProperties: false,
-  required: ["verdict", "nonce"],
-  properties: {
-    verdict: { type: "string", enum: [...verdicts, "timeout"] },
-    nonce: { type: "string" },
-    note: { type: "string" },
-    dispositions: {
-      type: "array",
-      items: {
-        type: "object",
-        additionalProperties: false,
-        required: ["finding", "disposition"],
-        properties: {
-          finding: { type: "integer" },
-          disposition: { type: "string", enum: ["fix", "contract-question", "accept-with-note"] },
-          note: { type: "string" },
-        },
-      },
-    },
-  },
-});
-
-const holdLegMinutes = 10;
+// One nonce per hold from a deterministic counter (the sealed context has
+// no clock or randomness): a stale decision from an earlier attempt names
+// a different nonce and is ignored. The decision event's payload contract,
+// validated by the script itself:
+//   { nonce, verdict: one of the offered options,
+//     note?: string,
+//     dispositions?: [{ finding: int, disposition: "fix" |
+//       "contract-question" | "accept-with-note", note?: string }] }
+let holdCount = 0;
+const mintNonce = (stage) => `${stage}-${++holdCount}`;
 
 const runHold = async (stage, content, verdicts) => {
-  const nonce = mintNonce();
-  const holdPath = `${unitDir}/${stage}.${nonce}.hold.json`;
-  const decisionPath = `${unitDir}/${stage}.${nonce}.decision.json`;
-  log(`[hold-content] ${JSON.stringify({ stage, nonce, content, decisionPath })}`);
-  const legSchema = holdSchemaFor([...verdicts, "pending"]);
-  const deadline = Date.now() + holdTimeoutMinutes * 60000;
-  const maxLegs = Math.ceil(holdTimeoutMinutes / holdLegMinutes) + 3;
-  for (let leg = 0; leg < maxLegs && Date.now() < deadline; leg++) {
-    const decision = await agent(
-      `Ensure the file ${holdPath} exists containing exactly this one line (create ${unitDir} if needed; if it already exists, leave it untouched):
-{"stage":"${stage}","nonce":"${nonce}"}
-
-Then check whether the file ${decisionPath} exists — every 30 seconds, for up to ${holdLegMinutes} minutes. When it exists, read it and reply with its exact contents. If your time is up and it still does not exist, reply with {"verdict":"pending","nonce":"${nonce}"}. Write or modify nothing other than the signal file above. Reply with the JSON last.`,
-      {
-        engine: "codex",
-        model: "gpt-5.6-luna",
-        effort: "low",
-        schema: legSchema,
-        cwd: worktree,
-        label: `${stage}:hold:${leg}`,
-        phase: stage,
-        timeoutMs: (holdLegMinutes + 5) * 60000,
-      }
-    );
-    if (!decision || decision.verdict === "pending" || decision.verdict === "timeout") continue;
-    if (decision.nonce !== nonce) {
-      log(`[hold] ${stage}: stale decision (nonce ${decision.nonce}) ignored; still waiting for ${nonce}`);
+  const nonce = mintNonce(stage);
+  // Raise the decision on the run's event queue and park until answered —
+  // by a lead segment clearing its batch of decisions at a wake, or by the
+  // operator through the run surface. Blocking is accepted: no timeout.
+  postEvent("decision-needed", { stage, nonce, content, options: verdicts });
+  while (true) {
+    const decision = await awaitEvent({ kinds: ["decision"] });
+    const payload = decision && decision.payload;
+    if (!payload || payload.nonce !== nonce) {
+      log(`[hold] ${stage}: stale or unaddressed decision ignored; still waiting for ${nonce}`);
       continue;
     }
-    return decision;
+    if (!verdicts.includes(payload.verdict)) {
+      log(`[hold] ${stage}: unknown verdict ${JSON.stringify(payload.verdict)} ignored (offered: ${verdicts.join(", ")}); still waiting for ${nonce}`);
+      continue;
+    }
+    return payload;
   }
-  return { verdict: "timeout", nonce };
 };
 
 // ---------------------------------------------------------------- restate
@@ -124,7 +96,6 @@ let holdDecision = null;
 const rulings = [];
 for (let attempt = 0; attempt < 3; attempt++) {
   sketch = await agent(restatePrompt(holdDecision && holdDecision.note), {
-    engine: "claude",
     schema: restatementSchema,
     cwd: worktree,
     label: `restate:${attempt}`,
@@ -132,14 +103,12 @@ for (let attempt = 0; attempt < 3; attempt++) {
   });
   if (!sketch) throw new Error("restatement stage returned nothing usable");
   holdDecision = await runHold("restate", sketch, ["accept", "correct", "kill"]);
-  if (!holdDecision || holdDecision.verdict === "timeout")
-    return { outcome: "timed-out", at: "restate-hold", salvage: { sketch } };
   if (holdDecision.verdict === "kill") return { outcome: "killed-at-restatement", sketch };
   if (holdDecision.note && holdDecision.note.trim()) rulings.push(holdDecision.note.trim());
   if (holdDecision.verdict === "accept") break;
 }
 if (holdDecision.verdict !== "accept")
-  return { outcome: "timed-out", at: "restate-corrections-exhausted", salvage: { sketch } };
+  return { outcome: "corrections-exhausted", at: "restate", salvage: { sketch } };
 
 // ---------------------------------------------------------------- write
 phase("write");
@@ -156,7 +125,7 @@ Invoke the project-docs skill and run it scoped to the landed changes the brief'
 Work only in this worktree (${worktree}); commit as you go with plain descriptive messages; never push, never open PRs, never merge — publication is the landing stage's, not yours. Modify documentation files only — never product code, and never the agent-guidance file (AGENTS.md / CLAUDE.md): guidance-file changes are the user's to make, so compile any agent-facing guidance facts the landed changes produce into your report as a pending hand-off instead.
 
 Write ${unitDir}/report.md: the drift found (claim by claim, with what made each wrong); what was patched, written, or deliberately left; how you verified the changed claims and what you did NOT check; your overall confidence (high/medium/low) with a one-line why. Reply with a two-sentence summary and the head commit hash.`,
-  { engine: "claude", cwd: worktree, label: "write", phase: "write", timeoutMs: 7200000 }
+  { cwd: worktree, label: "write", phase: "write", timeoutMs: 7200000 }
 );
 
 // ---------------------------------------------------------------- verify
@@ -204,7 +173,7 @@ Every command your verdict leans on is evidenced by the command line as executed
 Reply with a single JSON value conforming to the schema. Reason first if you need to, but the JSON value comes last: the final non-whitespace characters of your message must be the JSON value itself — no prose, no code fence, no example after it. Never restate the schema or show a sample answer; the only JSON value in your reply is your actual answer.`;
 
 let verdict = await agent(verifyPrompt(null, null), {
-  engine: "codex", schema: findingsSchema, cwd: worktree, label: "verify", phase: "verify",
+  model: "gpt-5.6-terra", schema: findingsSchema, cwd: worktree, label: "verify", phase: "verify",
 });
 if (!verdict) throw new Error("verifier stage returned nothing usable — re-run, never read as clean");
 if (!verdict.examined || !verdict.examined.trim())
@@ -254,13 +223,13 @@ while (severesIn(verdict).length) {
     break;
   }
   const autoFix = await agent(autoFixPrompt(rounds), {
-    engine: "claude", effort: "medium", schema: autoFixSchema,
+    effort: "medium", schema: autoFixSchema,
     cwd: worktree, label: `fix:${rounds}`, phase: "triage", timeoutMs: 3600000,
   });
   if (!autoFix) throw new Error("autonomous fix round returned nothing usable — re-run, never read as applied");
   fixReport = autoFix.summary;
   verdict = await agent(verifyPrompt(rounds, "autonomous"), {
-    engine: "codex", schema: findingsSchema, cwd: worktree, label: `verify:refix:${rounds}`, phase: "triage",
+    model: "gpt-5.6-terra", schema: findingsSchema, cwd: worktree, label: `verify:refix:${rounds}`, phase: "triage",
   });
   if (!verdict) throw new Error("re-verification returned nothing usable — re-run, never read as clean");
   if (!verdict.examined || !verdict.examined.trim())
@@ -300,8 +269,6 @@ while (true) {
     },
     ["land", "fix", "park"]
   );
-  if (!triage || triage.verdict === "timeout")
-    return { outcome: "timed-out", at: "triage-hold", salvage: { sketch, writeReport, verdict, fixReport, autonomous_rounds: autonomousRounds } };
   if (triage.verdict === "park") return { outcome: "parked", sketch, writeReport, verdict, fixReport, autonomous_rounds: autonomousRounds };
 
   if (triage.verdict === "land") {
@@ -361,10 +328,10 @@ while (true) {
       rulings.push(`on ${rounds === 0 ? "verdict.md" : `verdict-refix-${rounds - 1}.md`} finding index ${d.finding} (${d.disposition}): ${d.note.trim()}`);
   fixReport = await agent(
     `The verifier raised findings against your documentation unit (${unitDir}/${rounds === 0 ? "verdict.md" : `verdict-refix-${rounds - 1}.md`}). The orchestrator's dispositions, by finding index: ${JSON.stringify(fixList)} — with this note: "${triage.note || ""}". Your brief's standing constraints remain in force: work only in ${worktree}; never push, open PRs, or merge; documentation files only — never product code, never the agent-guidance file; the changelog stays untouched. Apply exactly the dispositions marked fix — no more (an accepted-with-note finding is not yours to fix). A disposition you cannot apply honestly as written — the demanded correction would write a claim the code contradicts — stays unapplied: report it as blocked in your reply and in ${unitDir}/report.md, with why. Commit as you go. Then make the whole of ${unitDir}/report.md true about the current tree — correct every section the fixes dated, not just the sections a finding quoted. Reply with a summary and the new head commit.`,
-    { engine: "claude", effort: "medium", cwd: worktree, label: `fix:${rounds}`, phase: "triage", timeoutMs: 3600000 }
+    { effort: "medium", cwd: worktree, label: `fix:${rounds}`, phase: "triage", timeoutMs: 3600000 }
   );
   verdict = await agent(verifyPrompt(rounds, "directed"), {
-    engine: "codex", schema: findingsSchema, cwd: worktree, label: `verify:refix:${rounds}`, phase: "triage",
+    model: "gpt-5.6-terra", schema: findingsSchema, cwd: worktree, label: `verify:refix:${rounds}`, phase: "triage",
   });
   if (!verdict) throw new Error("re-verification returned nothing usable — re-run, never read as clean");
   if (!verdict.examined || !verdict.examined.trim())
@@ -396,7 +363,7 @@ const landTarget =
 
 const landing = await agent(
   `Land the finished documentation unit by direct merge — open no PR. First read ${annexeConfigPath} for push_policy. The unit branch is checked out in ${worktree}; note its head sha, then merge that head into ${landTarget}. Perform the merge in a checkout of the target branch: the repository worktree where it is already checked out, or a temporary worktree you create (git worktree add) and remove afterwards — never rewrite the target ref without a checkout. A conflicted merge is yours to resolve: keep both sides' content, then run the project's full gate on the resolved tree; the resolution stands only when it is green. Report as blocked ({landed:false, blocked_on:"conflict", detail: what contradicts what}) only a genuine contradiction the sides cannot both keep, or a resolution whose gate stays red; abort the merge before reporting. A fast-forward is a normal success. Push the target branch only if push_policy is "push-on-land"; under "hold-for-user" the merge stays local and detail says so. Reply with {landed, detail, target_head} — landed true only if the unit head is an ancestor of the target branch head (verify with git merge-base --is-ancestor). Reply with the JSON last.`,
-  { engine: "codex", schema: landingSchema, cwd: worktree, label: "land", phase: "land", timeoutMs: 1800000 }
+  { model: "gpt-5.6-terra", schema: landingSchema, cwd: worktree, label: "land", phase: "land", timeoutMs: 1800000 }
 );
 
 // issues_findings — sub-severe findings accepted by default at the land —

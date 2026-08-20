@@ -1,129 +1,86 @@
-export const meta = {
-  name: "build-verify",
-  description:
-    "The assembly skill's standard unit pipeline: admission-checked restatement (hold), build, cross-family semantic verification, autonomous fix rounds that converge severe findings before the orchestrator holds, per-finding triage of the residue (hold), then a landing stage that reports a derived result. Verification is a stage, not a decision.",
-};
+// build-verify — the assembly skill's standard unit pipeline:
+// admission-checked restatement (hold), build, cross-family semantic
+// verification, autonomous fix rounds that converge severe findings before
+// the orchestrator holds, per-finding triage of the residue (hold), then a
+// landing stage that reports a derived result. Verification is a stage,
+// not a decision.
 
 export const defaults = {
-  // Builders ride the flagship Codex tier at low effort: the brief plus the
+  // Builders ride the flagship GPT tier at low effort: the brief plus the
   // named exemplar have already decided the path, so the tier carries the
   // capability and effort stays the cost lever. Fix rounds override effort
   // to medium — a verdict that sent the unit back falsifies the pin's
   // ground that the path is decided. Claude legs are the
   // cross-family verifiers, deliberately below the top tier (the top tier
-  // appears nowhere in assembly pipelines). Pinned because per-model effort
-  // defaults are uneven.
-  codex: { model: "gpt-5.6-sol", effort: "low" },
-  claude: { model: "opus", effort: "medium", fallbackModel: "sonnet" },
+  // appears nowhere in assembly pipelines), pinned per call. Pinned because
+  // per-model effort defaults are uneven.
+  model: "gpt-5.6-sol",
+  effort: "low",
 };
 
-// INPUT (--json-args @file):
+// INPUT (workflow args):
 //   briefPath, worktree, commissionPath, spinePath, verificationPath,
 //   unitDir, mergePolicy ("direct-merge"|"pr"), integrationBranch (PR mode:
 //   the branch this unit's PR targets — the structural branch, or the parent
 //   unit's branch for a stacked unit; required when mergePolicy is "pr"),
 //   annexeConfigPath
-//   (config.toml, for push_policy), holdTimeoutMinutes (default 120)
+//   (config.toml, for push_policy)
 //
 // HOLD PROTOCOL (documented for the orchestrator in references/pipelines.md):
-// at each hold the pipeline emits the hold's exact JSON as a [hold-content]
-// line on its own stderr — byte-for-byte, no worker transcription (a worker
-// once shell-escaped quoted template-literal code into invalid JSON) — and a
-// worker writes only a fixed-content sentinel <unitDir>/<stage>.<nonce>.hold.json
-// before polling for <unitDir>/<stage>.<nonce>.decision.json, whose JSON must
-// echo the nonce. The nonce makes decisions attempt-correlated: a stale
-// decision file from an earlier attempt names a different nonce and is
-// ignored — the script checks the echoed nonce itself. Waiting is script-owned:
-// short poll legs against the script's own clock, so a worker that gives up
-// early or wedges costs one leg, never the hold. On hold timeout the pipeline
-// RETURNS a structured {outcome:"timed-out", at, salvage} envelope rather than
-// throwing, so completed stage outputs survive and the orchestrator resumes by
-// re-dispatching with the salvage in the brief's situational slice.
+// at each hold the pipeline posts a "decision-needed" event carrying the
+// hold's exact content and pauses on the run's event queue until the
+// answering "decision" event arrives — posted from outside the script by a
+// lead segment clearing its batch of decisions at a wake, or by the
+// operator through the run surface. The decision's payload echoes the
+// hold's nonce and carries {verdict, note?, dispositions?}; a stale
+// decision from an earlier attempt names a different nonce and is
+// ignored — the script checks the echoed nonce itself. There is no hold
+// timeout: an unanswered decision blocks, and the parked run's journal
+// carries every completed stage.
 
 const {
   briefPath, worktree, commissionPath, spinePath, verificationPath,
   unitDir, mergePolicy, annexeConfigPath, integrationBranch,
 } = args;
-const holdTimeoutMinutes = Number(args.holdTimeoutMinutes) || 120;
 if (mergePolicy !== "direct-merge" && mergePolicy !== "pr")
   throw new Error(`unknown mergePolicy: ${JSON.stringify(mergePolicy)} (expected "direct-merge" or "pr")`);
 if (mergePolicy === "pr" && !integrationBranch)
   throw new Error('mergePolicy "pr" requires integrationBranch (the structural branch unit PRs target)');
 
-// One nonce PER HOLD, minted inside runHold: reusing a nonce across a
-// correction loop would let the previous attempt's stale decision file
-// satisfy the fresh hold the loop exists to require.
-const mintNonce = () => `${Date.now().toString(36)}${Math.floor(Math.random() * 1e6).toString(36)}`;
+// One nonce PER HOLD, minted inside runHold from a deterministic counter
+// (the sealed context has no clock or randomness, and determinism is what
+// replay needs): reusing a nonce across a correction loop would let a
+// previous attempt's stale decision satisfy the fresh hold the loop exists
+// to require.
+let holdCount = 0;
+const mintNonce = (stage) => `${stage}-${++holdCount}`;
 
-const holdSchemaFor = (verdicts) => ({
-  type: "object",
-  additionalProperties: false,
-  required: ["verdict", "nonce"],
-  properties: {
-    verdict: { type: "string", enum: [...verdicts, "timeout"] },
-    nonce: { type: "string" },
-    note: { type: "string" },
-    dispositions: {
-      type: "array",
-      items: {
-        type: "object",
-        additionalProperties: false,
-        required: ["finding", "disposition"],
-        properties: {
-          finding: { type: "integer" },
-          disposition: { type: "string", enum: ["fix", "contract-question", "accept-with-note"] },
-          note: { type: "string" },
-        },
-      },
-    },
-  },
-});
-
-// Each hold's wait is script-owned: short worker legs against the script's
-// own clock, so a worker that gives up early or wedges costs one leg, never
-// the hold. The hold's content never passes through a worker: only the
-// sentinel below (fixed, worker-safe fields) and the decision's contents
-// (schema-validated on return) do.
-const holdLegMinutes = 10;
+// The decision event's payload contract, validated by the script itself:
+//   { nonce, verdict: one of the offered options,
+//     note?: string,
+//     dispositions?: [{ finding: int, disposition: "fix" |
+//       "contract-question" | "accept-with-note", note?: string }] }
 
 const runHold = async (stage, content, verdicts) => {
-  const nonce = mintNonce();
-  const holdPath = `${unitDir}/${stage}.${nonce}.hold.json`;
-  const decisionPath = `${unitDir}/${stage}.${nonce}.decision.json`;
-  // The deterministic channel: the hold's exact JSON on the run's stderr.
-  log(`[hold-content] ${JSON.stringify({ stage, nonce, content, decisionPath })}`);
-  const legSchema = holdSchemaFor([...verdicts, "pending"]);
-  const deadline = Date.now() + holdTimeoutMinutes * 60000;
-  const maxLegs = Math.ceil(holdTimeoutMinutes / holdLegMinutes) + 3;
-  for (let leg = 0; leg < maxLegs && Date.now() < deadline; leg++) {
-    const decision = await agent(
-      `Ensure the file ${holdPath} exists containing exactly this one line (create ${unitDir} if needed; if it already exists, leave it untouched):
-{"stage":"${stage}","nonce":"${nonce}"}
-
-Then check whether the file ${decisionPath} exists — every 30 seconds, for up to ${holdLegMinutes} minutes. When it exists, read it and reply with its exact contents. If your time is up and it still does not exist, reply with {"verdict":"pending","nonce":"${nonce}"}. Write or modify nothing other than the signal file above. Reply with the JSON last.`,
-      {
-        engine: "codex",
-        model: "gpt-5.6-luna",
-        effort: "low",
-        schema: legSchema,
-        cwd: worktree,
-        label: `${stage}:hold:${leg}`,
-        phase: stage,
-        timeoutMs: (holdLegMinutes + 5) * 60000,
-      }
-    );
-    // "timeout" from a worker is treated as pending: only the script's own
-    // clock, below, may declare the hold timed out.
-    if (!decision || decision.verdict === "pending" || decision.verdict === "timeout") continue;
-    if (decision.nonce !== nonce) {
-      log(`[hold] ${stage}: stale decision (nonce ${decision.nonce}) ignored; still waiting for ${nonce}`);
+  const nonce = mintNonce(stage);
+  // Raise the decision on the run's event queue and park until answered —
+  // by a lead segment clearing its batch of decisions at a wake, or by the
+  // operator through the run surface. Blocking is accepted: there is no
+  // hold timeout, and the journal carries every completed stage meanwhile.
+  postEvent("decision-needed", { stage, nonce, content, options: verdicts });
+  while (true) {
+    const decision = await awaitEvent({ kinds: ["decision"] });
+    const payload = decision && decision.payload;
+    if (!payload || payload.nonce !== nonce) {
+      log(`[hold] ${stage}: stale or unaddressed decision ignored; still waiting for ${nonce}`);
       continue;
     }
-    return decision;
+    if (!verdicts.includes(payload.verdict)) {
+      log(`[hold] ${stage}: unknown verdict ${JSON.stringify(payload.verdict)} ignored (offered: ${verdicts.join(", ")}); still waiting for ${nonce}`);
+      continue;
+    }
+    return payload;
   }
-  // Timeout is synthesised here, from the script's own clock — never a
-  // worker's report of one.
-  return { verdict: "timeout", nonce };
 };
 
 // ---------------------------------------------------------------- restate
@@ -154,7 +111,6 @@ let holdDecision = null;
 const rulings = [];
 for (let attempt = 0; attempt < 3; attempt++) {
   sketch = await agent(restatePrompt(holdDecision && holdDecision.note), {
-    engine: "codex",
     schema: restatementSchema,
     cwd: worktree,
     label: `restate:${attempt}`,
@@ -162,10 +118,8 @@ for (let attempt = 0; attempt < 3; attempt++) {
   });
   if (!sketch) throw new Error("restatement stage returned nothing usable");
   // Admission refusal and disputes go to the orchestrator like any sketch —
-  // the hold is where the human-side judgement enters, corrected or not.
+  // the hold is where the adjudicating judgement enters, corrected or not.
   holdDecision = await runHold("restate", sketch, ["accept", "correct", "kill"]);
-  if (!holdDecision || holdDecision.verdict === "timeout")
-    return { outcome: "timed-out", at: "restate-hold", salvage: { sketch } };
   if (holdDecision.verdict === "kill") return { outcome: "killed-at-restatement", sketch };
   if (holdDecision.note && holdDecision.note.trim()) rulings.push(holdDecision.note.trim());
   if (holdDecision.verdict === "accept") break;
@@ -173,7 +127,7 @@ for (let attempt = 0; attempt < 3; attempt++) {
   // a correction the orchestrator never re-reads is a correction unverified.
 }
 if (holdDecision.verdict !== "accept")
-  return { outcome: "timed-out", at: "restate-corrections-exhausted", salvage: { sketch } };
+  return { outcome: "corrections-exhausted", at: "restate", salvage: { sketch } };
 if (sketch.admission === "refused")
   return { outcome: "admission-refused", sketch, note: "orchestrator accepted a refused admission — route the obligation needs-spine or fix the brief" };
 
@@ -192,7 +146,7 @@ ${JSON.stringify(sketch)}
 Work only in this worktree (${worktree}); commit as you go with plain descriptive messages. Publication is the landing stage's, never yours: never push, never open PRs, never merge this unit's work outward — but merging ${mergePolicy === "pr" ? integrationBranch : "the repository's main branch"} into your own branch is ordinary maintenance, permitted when the unit's work needs it. Extend the named spine exemplar's pattern; its imitation boundary and envelope (its entry in ${spinePath}) are hard constraints — incidental wiring the extension requires (registration, imports, config, tests beside the code) is part of extending; modifying non-spine files beyond that wiring is not yours, report it as blocked instead. Verify your work within the unit's scope as the brief's proof expectation describes, then run the project's check gate and the tests covering the surfaces you touched, on the tree your build finishes on, and get them green — fix what they find and re-run as many times as that takes. The full test-suite gate is not yours: it runs later, batched over landed units. Every new test must discriminate — test something genuine that a broken product would fail, with a real failure the assertion can register, never a check the change's mere presence satisfies: write each test of behaviour this unit builds so it would fail without your change, and never let a fixture, seed, or mock itself supply the state the assertion checks; a test of behaviour that predates the unit proves its teeth by mutation instead — break the behaviour deliberately in a scratch copy, watch the test fail, restore. Demonstrating the failure is the preferred evidence because it is usually cheap; where the demonstration itself would need machinery out of proportion to the change — a separately triggered build estate, a reconstructed historical tree, a live external dependency, a bespoke process harness — do not build that machinery: state in your report why demonstration is disproportionate — covering both routes, the scratch-tree fail-before run and the mutation fallback (break the behaviour deliberately in a scratch copy, watch the test fail); mutation is usually cheap, so most would-be declarations fall to it — and what instead shows the test discriminates (the real state it runs over, the behaviour's own output its assertion reads, the specific failure a broken product would produce); its disposition is the orchestrator's. Where you cannot meet the brief's proof expectation honestly at its named rung — the surface never shows the state, or the product cannot produce it — do not manufacture the state: report the impossibility as a failure finding (what the rung cannot show, and the strongest honest proof you produced instead); its disposition is the orchestrator's. If you cannot get it green, say so in your report as a failure finding — what failed, what you tried — never as a quietly recorded red result. Later stages audit your final recorded run rather than repeat it.
 
 Write ${unitDir}/report.md: what was built at one level above the diff; what was tried and abandoned, and why; what fought back; how you verified and what you did NOT exercise; the check gate's run and the touched-surface test runs — the exact commands, the tree sha they ran on, and the results; your overall confidence (high/medium/low) with a one-line why. Reply with a two-sentence summary and the head commit hash.`,
-  { engine: "codex", cwd: worktree, label: "build", phase: "build", timeoutMs: 14400000 }
+  { cwd: worktree, label: "build", phase: "build", timeoutMs: 14400000 }
 );
 
 // ---------------------------------------------------------------- verify
@@ -244,7 +198,7 @@ Every command your verdict leans on is evidenced by the command line as executed
 Reply with a single JSON value conforming to the schema. Reason first if you need to, but the JSON value comes last: the final non-whitespace characters of your message must be the JSON value itself — no prose, no code fence, no example after it. Never restate the schema or show a sample answer; the only JSON value in your reply is your actual answer.`;
 
 let verdict = await agent(verifyPrompt(null, null), {
-  engine: "claude", schema: findingsSchema, cwd: worktree, label: "verify", phase: "verify",
+  model: "claude-opus-5", effort: "medium", schema: findingsSchema, cwd: worktree, label: "verify", phase: "verify",
 });
 if (!verdict) throw new Error("verifier stage returned nothing usable — re-run, never read as clean");
 if (!verdict.examined || !verdict.examined.trim())
@@ -294,13 +248,13 @@ while (severesIn(verdict).length) {
     break;
   }
   const autoFix = await agent(autoFixPrompt(rounds), {
-    engine: "codex", effort: "medium", schema: autoFixSchema,
+    effort: "medium", schema: autoFixSchema,
     cwd: worktree, label: `fix:${rounds}`, phase: "triage", timeoutMs: 7200000,
   });
   if (!autoFix) throw new Error("autonomous fix round returned nothing usable — re-run, never read as applied");
   fixReport = autoFix.summary;
   verdict = await agent(verifyPrompt(rounds, "autonomous"), {
-    engine: "claude", schema: findingsSchema, cwd: worktree, label: `verify:refix:${rounds}`, phase: "triage",
+    model: "claude-opus-5", effort: "medium", schema: findingsSchema, cwd: worktree, label: `verify:refix:${rounds}`, phase: "triage",
   });
   if (!verdict) throw new Error("re-verification returned nothing usable — re-run, never read as clean");
   if (!verdict.examined || !verdict.examined.trim())
@@ -340,8 +294,6 @@ while (true) {
     },
     ["land", "fix", "park"]
   );
-  if (!triage || triage.verdict === "timeout")
-    return { outcome: "timed-out", at: "triage-hold", salvage: { sketch, buildReport, verdict, fixReport, autonomous_rounds: autonomousRounds } };
   if (triage.verdict === "park") return { outcome: "parked", sketch, buildReport, verdict, fixReport, autonomous_rounds: autonomousRounds };
 
   if (triage.verdict === "land") {
@@ -408,10 +360,10 @@ while (true) {
       rulings.push(`on ${rounds === 0 ? "verdict.md" : `verdict-refix-${rounds - 1}.md`} finding index ${d.finding} (${d.disposition}): ${d.note.trim()}`);
   fixReport = await agent(
     `The verifier raised findings against your unit (${unitDir}/${rounds === 0 ? "verdict.md" : `verdict-refix-${rounds - 1}.md`}). The orchestrator's dispositions, by finding index: ${JSON.stringify(fixList)} — with this note: "${triage.note || ""}".${rulings.length ? `\n\nThe orchestrator's rulings below hold the brief's standing, and a conflicting ruling supersedes it — delivering what a ruling withheld is a defect, not a fix. Where two conflict, the later governs.\n<orchestrator-rulings>\n${rulings.map((r, i) => `${i + 1}. ${r}`).join("\n")}\n</orchestrator-rulings>\n` : ""} Your brief's standing constraints remain in force: work only in ${worktree}; never push, open PRs, or merge the unit's work outward — publication is the landing stage's, though merging the integration lane into the unit branch stays permitted where the work needs it; the spine exemplar's imitation boundary still binds. Apply exactly the dispositions marked fix — no more (an accepted-with-note finding is not yours to fix). A disposition you cannot apply honestly as written — the demanded proof or change cannot be produced without manufacturing state or asserting something untrue — stays unapplied: report it as blocked in your reply and in ${unitDir}/report.md, with why. A duplication finding whose verdict routes it to filing (adoption needs a cross-unit extraction) is not yours to perform either — leave it as it stands rather than growing the unit's diff. Commit as you go. Verify each fix with the checks covering the surfaces it touched — no project gate re-runs per fix round; the lane gate covers the composed result. Then make the whole of ${unitDir}/report.md true about the current tree — re-derive what changed from git log over the unit's commits and correct every section the fixes dated (built, tried-and-abandoned, verification, confidence, any commit inventory), not just the sections a finding quoted. Reply with a summary and the new head commit.`,
-    { engine: "codex", effort: "medium", cwd: worktree, label: `fix:${rounds}`, phase: "triage", timeoutMs: 7200000 }
+    { effort: "medium", cwd: worktree, label: `fix:${rounds}`, phase: "triage", timeoutMs: 7200000 }
   );
   verdict = await agent(verifyPrompt(rounds, "directed"), {
-    engine: "claude", schema: findingsSchema, cwd: worktree, label: `verify:refix:${rounds}`, phase: "triage",
+    model: "claude-opus-5", effort: "medium", schema: findingsSchema, cwd: worktree, label: `verify:refix:${rounds}`, phase: "triage",
   });
   if (!verdict) throw new Error("re-verification returned nothing usable — re-run, never read as clean");
   if (!verdict.examined || !verdict.examined.trim())
@@ -440,7 +392,7 @@ const landing = await agent(
   mergePolicy === "direct-merge"
     ? `Land the finished unit. First read ${annexeConfigPath} for push_policy. From ${worktree}, merge the unit branch into the repository's main branch. A conflicted merge is yours to resolve: keep both sides' behaviour (the brief's known sibling overlaps say where the sides meet), then run the project's full gate — the whole-tree suite — on the resolved tree; the resolution stands only when it is green. Report as blocked ({landed:false, blocked_on:"conflict", detail: what contradicts what}) only a genuine semantic contradiction — the same knob given different semantics, intent the sides cannot both keep — or a resolution whose gate stays red; abort the merge before reporting. Push main only if push_policy is "push-on-land"; under "hold-for-user" the merge stays local and detail says so. Reply with {landed, detail, merge_commit} — landed true only if the merge commit exists on main (verify with git log). Reply with the JSON last.`
     : `Publish the finished unit as a blocked PR. First read ${annexeConfigPath} for push_policy: under "hold-for-user", do NOT push — reply {landed:false, blocked_on:"push_policy hold-for-user", detail:...} and stop. Otherwise: write ${unitDir}/pr.md whole from ${unitDir}/report.md (What changed / Why / What must be true / Known gaps), push the branch (git push -u origin <branch>), open the PR via the forge API — POST /api/v1/repos/<owner>/<repo>/pulls, title "WIP: <unit title>", body from pr.md, head the branch, base ${integrationBranch} (the unit's integration lane — the structural branch for lane units, whose promotion PR carries them to main later; the parent branch for a stacked unit whose work builds on a sibling's unmerged branch; or main itself for a Lane: main unit); tokens under ~/.config/forgejo/ (instances.toml maps the origin host to url and token). Never push refs/for/* (AGit is forbidden — no tracked branch, no multiline body); on auth failure reply {landed:false, blocked_on:"forge auth", detail:...}. Confirm by API read that the PR exists with a non-empty body; landed is true only on that confirmation. Reply with {landed, detail, pr_number, pr_url} — the JSON last.`,
-  { engine: "codex", schema: landingSchema, cwd: worktree, label: "land", phase: "land", timeoutMs: 1800000 }
+  { schema: landingSchema, cwd: worktree, label: "land", phase: "land", timeoutMs: 1800000 }
 );
 
 // The pipeline never writes the ledger: the orchestrator records the

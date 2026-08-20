@@ -1,14 +1,15 @@
-export const meta = {
-  name: "triage-wave",
-  description:
-    "Open a fresh assembly run: cheap workers sweep the commission-versus-codebase delta, propose decomposition criteria and obligation entries under them, and a reducer merges the proposals into one document for the orchestrator's judgement. Proposes only — never writes the ledger header or the obligation records.",
-};
+// triage-wave — open a fresh assembly run: cheap workers sweep the
+// commission-versus-codebase delta, propose decomposition criteria and
+// obligation entries under them, and a reducer merges the proposals into
+// one document for the orchestrator's judgement. Proposes only — never
+// writes the ledger header or the obligation records.
 
 export const defaults = {
-  codex: { model: "gpt-5.6-luna", effort: "low" },
+  model: "gpt-5.6-luna",
+  effort: "low",
 };
 
-// INPUT (--json-args @file):
+// INPUT (workflow args):
 //   repo:            absolute path to the code repository
 //   commissionPath:  absolute path to the annexe README
 //   spinePath:       absolute path to build/spine.md
@@ -66,7 +67,6 @@ const proposals = (
   await parallel(
     Array.from({ length: waves }, (_, i) => () =>
       agent(proposePrompt(i), {
-        engine: "codex",
         schema: proposalSchema,
         cwd: repo,
         label: `propose:${i}`,
@@ -92,7 +92,6 @@ Write the merged document to ${outPath} as markdown:
 
 Do not write to ${ledgerPath} — the proposal is judged and landed by the orchestrator, never by this workflow. Reply with a three-line summary of the document you wrote.`,
   {
-    engine: "codex",
     model: "gpt-5.6-terra",
     effort: "medium",
     cwd: repo,
