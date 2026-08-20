@@ -1,17 +1,19 @@
-export const meta = {
-  name: "teardown-audit",
-  description:
-    "Close a structural phase's teardown accounting: cheap workers blind-sweep the audit window's diff for removed capabilities, then an adjudicator checks them against the phase's restoration obligation records, retired file, and per-teardown sweep records, and writes a durable report. Fails closed when the blind sweep produces nothing usable.",
-};
+// teardown-audit — close a structural phase's teardown accounting: cheap
+// workers blind-sweep the audit window's diff for removed capabilities,
+// then an adjudicator checks them against the phase's restoration
+// obligation records, retired file, and per-teardown sweep records, and
+// writes a durable report. Fails closed when the blind sweep produces
+// nothing usable.
 
 export const defaults = {
   // Cheap volume for the blind sweep; adjudication compares finished lists
   // against records, so it rides a mid tier. Pinned because per-model effort
   // defaults are uneven.
-  codex: { model: "gpt-5.6-luna", effort: "low" },
+  model: "gpt-5.6-luna",
+  effort: "low",
 };
 
-// INPUT (--json-args @file):
+// INPUT (workflow args):
 //   repo:         absolute path to the code repository
 //   baseCommit:   the audit window's base — the ledger header's phase base on
 //                 a first audit, or the previous audit report's recorded head
@@ -26,7 +28,7 @@ export const defaults = {
 //   teardownsDir: absolute path to build/teardowns/ (per-teardown sweep records)
 //   reportPath:   absolute path the adjudicator writes the report to
 //   sweeps:       optional blind-sweep worker count (default 3)
-//   auditEngine:  "codex" | "claude" — the family OPPOSITE the session
+//   auditFamily:  "gpt" | "claude" — the model family OPPOSITE the session
 //                 running the structural phase (the audit's independence is
 //                 relative to the seat, not absolute); required
 //
@@ -35,7 +37,7 @@ export const defaults = {
 // records rediscovers them instead of checking them. They are told not to
 // consult commit messages or the annexe for the same reason.
 
-const { repo, baseCommit, headCommit, obligationsDir, retiredPath, teardownsDir, reportPath, auditEngine } = args;
+const { repo, baseCommit, headCommit, obligationsDir, retiredPath, teardownsDir, reportPath, auditFamily } = args;
 if (typeof repo !== "string" || !repo.startsWith("/"))
   throw new Error("teardown-audit: repo is required and must be an absolute path to the code repository");
 if (typeof baseCommit !== "string" || !/^[0-9a-f]{7,64}$/i.test(baseCommit))
@@ -48,14 +50,14 @@ if (typeof teardownsDir !== "string" || !teardownsDir.startsWith("/"))
   throw new Error("teardown-audit: teardownsDir is required and must be an absolute path to build/teardowns/");
 if (typeof reportPath !== "string" || !reportPath.startsWith("/"))
   throw new Error("teardown-audit: reportPath is required and must be an absolute path for the audit report");
-if (auditEngine !== "codex" && auditEngine !== "claude")
-  throw new Error("teardown-audit: auditEngine is required ('codex' or 'claude') — pass the family OPPOSITE the seat running the structural phase");
-const SWEEP_OPTS = auditEngine === "codex"
-  ? { engine: "codex" }                                    // rides defaults: luna/low
-  : { engine: "claude", model: "haiku", effort: "low", fallbackModel: "sonnet" };
-const ADJ_OPTS = auditEngine === "codex"
-  ? { engine: "codex", model: "gpt-5.6-terra", effort: "medium" }
-  : { engine: "claude", model: "opus", effort: "medium", fallbackModel: "sonnet" };
+if (auditFamily !== "gpt" && auditFamily !== "claude")
+  throw new Error("teardown-audit: auditFamily is required ('gpt' or 'claude') — pass the model family OPPOSITE the seat running the structural phase");
+const SWEEP_OPTS = auditFamily === "gpt"
+  ? {}                                                     // rides defaults: luna/low
+  : { model: "claude-haiku-4-5", effort: "low" };
+const ADJ_OPTS = auditFamily === "gpt"
+  ? { model: "gpt-5.6-terra", effort: "medium" }
+  : { model: "claude-opus-5", effort: "medium" };
 const sweeps = Number(args.sweeps) || 3;
 
 phase("blind-sweep");
@@ -99,7 +101,6 @@ const sweepsOut = (
         schema: capabilitySchema,
         cwd: repo,
         label: `sweep:${i + 1}`,
-        phase: "blind-sweep",
       })
     )
   )
@@ -117,7 +118,7 @@ if (sweepsOut.length === 0)
 if (sweepsOut.every((s) => s.capabilities.length === 0)) {
   const probe = await agent(
     `Run: git -C ${repo} diff --stat ${baseCommit}..${headCommit} | tail -1 — reply with that summary line only.`,
-    { ...SWEEP_OPTS, label: "empty-probe", phase: "blind-sweep" }
+    { ...SWEEP_OPTS, label: "empty-probe" }
   );
   if (!/^\s*$|0 files? changed/.test(probe || ""))
     throw new Error(
@@ -205,7 +206,6 @@ Reply with a single JSON value conforming to the schema. Reason first if you nee
     schema: adjudicationSchema,
     cwd: repo,
     label: "adjudicate",
-    phase: "adjudicate",
   }
 );
 
@@ -216,7 +216,7 @@ if (!adjudication)
 // JSON with no file behind it would leave the handover citing nothing.
 const reportCheck = await agent(
   `If the file ${reportPath} exists and contains the exact string "${baseCommit}..${headCommit}", reply with the single word OK. Otherwise reply MISSING.`,
-  { ...SWEEP_OPTS, label: "report-check", phase: "adjudicate" }
+  { ...SWEEP_OPTS, label: "report-check" }
 );
 if (!/\bOK\b/.test(reportCheck || ""))
   throw new Error(`teardown-audit: adjudication returned but ${reportPath} is missing or does not name the window — rerun the adjudication stage`);

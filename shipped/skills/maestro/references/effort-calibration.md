@@ -3,8 +3,8 @@
 How to choose a reasoning-effort level for a dispatched worker or agent call.
 An orchestrator applies it when dispatching worker
 sessions, a workflow script applies it when pinning per-stage effort, and any
-session applies it to a one-off dispatch. Each engine's concrete ladder,
-default level, and flag live with that engine's own documentation; this file is
+session applies it to a one-off dispatch. The concrete ladder is the
+per-call `effort` option (`low` / `medium` / `high`); this file is
 the judgement that picks a position on whatever ladder is in front of you, and
 the standing calibration of where the current lineups rest.
 
@@ -17,7 +17,7 @@ the **residue**: what genuinely remains to be figured out between the dispatch
 and done. When the brief, the surrounding code's own patterns, and the task's
 fixed scope have already decided most of the path, there is little left to
 search, and extra effort is spent re-deriving what was already decided — or,
-on some engines, over-persisting down open-ended tool paths. Higher is not
+on some model families, over-persisting down open-ended tool paths. Higher is not
 safer.
 
 Price the residue, and only the residue. Three things that feel like reasons
@@ -43,9 +43,9 @@ to raise effort are not:
 
 ## Level Anchors
 
-Positions on an engine's ladder, from its floor to its ceiling. The concrete
-level names and defaults differ per engine — read them from the engine's own
-guidance and map these positions onto them.
+Positions on the effort ladder, from its floor to its ceiling. How the
+levels land differs per model family — map these positions onto the model
+in front of you.
 
 | Residue on the path | Position | Looks like |
 |---|---|---|
@@ -54,7 +54,7 @@ guidance and map these positions onto them.
 | The approach is genuinely unsettled | one step up | debugging with an unknown cause, multi-file design inside one task, integrating with an unfamiliar surface |
 | The option space is open, or the work is adversarial | near the ceiling | investigations and design surveys, hunting for why a confident claim is wrong |
 
-The very top of an engine's ladder is not one of these anchors: reserve it for
+The very top of the ladder is not one of these anchors: reserve it for
 the rare task with both frontier difficulty and measured headroom over the
 level below.
 
