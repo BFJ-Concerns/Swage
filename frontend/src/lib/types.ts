@@ -19,187 +19,83 @@ export type CreateWorkspaceAttachmentRequest = Omit<
   permissions?: string[];
   is_trusted?: boolean;
 };
-export interface UpdateWorkspaceTrustRequest { is_trusted: boolean }
+export type { UpdateWorkspaceTrustRequest } from "./protocol/UpdateWorkspaceTrustRequest";
 
 export type Space = SpaceResponse & {
   /** Client-side recency marker until the gateway persists last_opened_at. */
   last_opened_at?: string | null;
 };
 export type WorkspaceAttachment = WorkspaceAttachmentResponse;
-export type ProviderProtocol = "openai" | "anthropic" | "google" | "openrouter" | "codex";
+export type { ProviderProtocol } from "./protocol/ProviderProtocol";
+export type { ToolRuntimeSettings } from "./protocol/ToolRuntimeSettings";
+export type { PythonExecuteToolConfig } from "./protocol/PythonExecuteToolConfig";
+export type { SearchProviderConfig } from "./protocol/SearchProviderConfig";
+export type { PricingConfig } from "./protocol/PricingConfig";
+export type { ModelPricing } from "./protocol/ModelPricing";
+export type { ObservabilityConfig } from "./protocol/ObservabilityConfig";
+export type { CommunicationConfig } from "./protocol/CommunicationConfig";
+export type { ContextTransferConfig } from "./protocol/ContextTransferConfig";
+export type { ContextTransferTargetConfig } from "./protocol/ContextTransferTargetConfig";
+export type { ContextTransferMode } from "./protocol/ContextTransferMode";
+export type { ContextTransferField } from "./protocol/ContextTransferField";
+export type { ToolPermissionConfig } from "./protocol/ToolPermissionConfig";
+export type { ApprovalTimeoutPolicy } from "./protocol/ApprovalTimeoutPolicy";
+export type { RequireApprovalEntry } from "./protocol/RequireApprovalEntry";
+export type { HitlConfig } from "./protocol/HitlConfig";
+export type { ContextConfig } from "./protocol/ContextConfig";
+export type { DiscoveredModel } from "./protocol/DiscoveredModel";
+export type { ModelDiscoveryResponse } from "./protocol/ModelDiscoveryResponse";
+export type { RestartStatusResponse } from "./protocol/RestartStatusResponse";
 
-export interface ProviderSettings {
-  protocol: ProviderProtocol;
-  base_url?: string | null;
+import type { ProviderSettings as WireProviderSettings } from "./protocol/ProviderSettings";
+import type { ModelSettings as WireModelSettings } from "./protocol/ModelSettings";
+import type { GenerationPresetConfig as WireGenerationPresetConfig } from "./protocol/GenerationPresetConfig";
+import type { SandboxConfig as WireSandboxConfig } from "./protocol/SandboxConfig";
+import type { SettingsResponse as WireSettingsResponse } from "./protocol/SettingsResponse";
+import type { SaveSettingsRequest as WireSaveSettingsRequest } from "./protocol/SaveSettingsRequest";
+
+export type ProviderSettings = Omit<
+  WireProviderSettings,
+  "api_key_secret_ref" | "api_key_env" | "command" | "state_dir"
+> & {
   api_key_secret_ref?: string | null;
   api_key_env?: string | null;
-  has_credential: boolean;
   api_key?: string;
   command?: string | null;
   state_dir?: string | null;
-}
-
-export interface ModelSettings {
-  provider_id: string;
-  model_id: string;
-  aliases: string[];
+};
+export type ModelSettings = Omit<WireModelSettings, "context_window" | "capabilities"> & {
   context_window?: number | null;
-  generation_preset?: string | null;
-}
-
-export interface GenerationPresetConfig {
+  capabilities?: WireModelSettings["capabilities"];
+};
+export type GenerationPresetConfig = Omit<
+  WireGenerationPresetConfig,
+  "max_tokens" | "temperature" | "metadata"
+> & {
   max_tokens?: number | null;
   temperature?: number | null;
-  stop_sequences: string[];
   metadata?: unknown | null;
-}
-
-export interface ToolRuntimeSettings {
-  shell_timeout_secs: number;
-  python_execute: PythonExecuteToolConfig;
-  max_output_bytes: number;
-  plugin_directory?: string | null;
-  search?: SearchProviderConfig | null;
-}
-
-export interface PythonExecuteToolConfig {
-  enabled: boolean;
-  timeout_secs: number;
-  startup_timeout_secs: number;
-  idle_ttl_secs: number;
-  warm_target: number;
-  max_workers: number;
-  runtime_policy: "bundled_then_system";
-  runtime_path?: string | null;
-  require_sandbox: boolean;
-}
-
-export interface SearchProviderConfig {
-  provider_type: string;
-  base_url: string;
-  api_key?: string | null;
-}
-
-export interface PricingConfig {
-  models: Record<string, ModelPricing>;
-}
-
-export interface ModelPricing {
-  input_price_per_mtok: number;
-  output_price_per_mtok: number;
-}
-
-export interface ObservabilityConfig {
-  force_on: boolean;
-}
-
-export interface CommunicationConfig {
-  context_transfer: ContextTransferConfig;
-  message_ttl_secs: number;
-  expiry_interval_secs: number;
-}
-
-export interface ContextTransferConfig {
-  mode: ContextTransferMode;
-  allowed_fields: ContextTransferField[];
-  summary_budget?: number | null;
-  targets: Record<string, ContextTransferTargetConfig>;
-}
-
-export interface ContextTransferTargetConfig {
-  mode: ContextTransferMode;
-  allowed_fields: ContextTransferField[];
-  summary_budget?: number | null;
-}
-
-export type ContextTransferMode = "none" | "explicit" | "summary";
-
-export type ContextTransferField = "system" | "user" | "assistant";
-
-export interface SettingsResponse {
+};
+export type SandboxConfig = WireSandboxConfig;
+export type SettingsResponse = Omit<
+  WireSettingsResponse,
+  "providers" | "models" | "generation_presets" | "sandbox"
+> & {
   providers: Record<string, ProviderSettings>;
-  default_provider: string;
   models: Record<string, ModelSettings>;
-  default_model: string;
   generation_presets: Record<string, GenerationPresetConfig>;
-  tool_runtime: ToolRuntimeSettings;
-  tool_permissions: ToolPermissionConfig;
-  hitl: HitlConfig;
   sandbox: SandboxConfig;
-  context: ContextConfig;
-  pricing: PricingConfig;
-  observability: ObservabilityConfig;
-  communication: CommunicationConfig;
-  restart_required: boolean;
-  can_restart: boolean;
-}
-
-export interface SettingsPayload {
+};
+export type SettingsPayload = Omit<
+  WireSaveSettingsRequest,
+  "providers" | "models" | "generation_presets" | "sandbox"
+> & {
   providers: Record<string, ProviderSettings>;
-  default_provider: string;
   models: Record<string, ModelSettings>;
-  default_model: string;
   generation_presets: Record<string, GenerationPresetConfig>;
-  tool_runtime?: ToolRuntimeSettings;
-  tool_permissions: ToolPermissionConfig;
-  hitl: HitlConfig;
   sandbox: SandboxConfig;
-  context: ContextConfig;
-  pricing?: PricingConfig;
-  observability?: ObservabilityConfig;
-  communication?: CommunicationConfig;
-}
-
-export interface ToolPermissionConfig {
-  allow: string[];
-  deny: string[];
-  bundles: Record<string, string[]>;
-  require_approval: RequireApprovalEntry[];
-}
-
-export type ApprovalTimeoutPolicy = "reject" | "interrupt";
-
-export type RequireApprovalEntry =
-  | string
-  | {
-      tool: string;
-      timeout?: number | null;
-      timeout_policy?: ApprovalTimeoutPolicy | null;
-    };
-
-export interface HitlConfig {
-  timeout: number;
-  timeout_policy: ApprovalTimeoutPolicy;
-}
-
-export interface SandboxConfig {
-  enabled: boolean;
-}
-
-export interface ContextConfig {
-  assembly: string;
-  timeout: number;
-  budget?: number | null;
-}
-
-export interface DiscoveredModel {
-  id: string;
-  name: string;
-  context_window?: number | null;
-}
-
-export interface ModelDiscoveryResponse {
-  provider_id: string;
-  models: DiscoveredModel[];
-}
-
+};
 export type ProviderDiscoveryDraft = Omit<ProviderSettings, "has_credential" | "api_key">;
-
-export interface RestartStatusResponse {
-  restart_required: boolean;
-  can_restart: boolean;
-  guidance: string;
-}
 
 import type { ConversationSummary as WireConversationSummary } from "./protocol/ConversationSummary";
 import type { ConversationDetail as WireConversationDetail } from "./protocol/ConversationDetail";
@@ -245,77 +141,24 @@ export type MessageView = Omit<WireMessageView, "role" | "tool_calls" | "thread_
 // -------------------------------------------------------------------------
 
 export type MaterialScopeKind = "session" | "space";
+export type { MaterialResponse as MaterialRecord } from "./protocol/MaterialResponse";
+export type { AttachmentResponse as AttachmentRecord } from "./protocol/AttachmentResponse";
+export type { BackgroundJobResponse as BackgroundJobRecord } from "./protocol/BackgroundJobResponse";
+export type { QueuedAttachmentResponse as AttachmentQueuedResponse } from "./protocol/QueuedAttachmentResponse";
 
-export interface MaterialRecord {
-  id: string;
-  scope_kind: MaterialScopeKind;
-  session_id: string | null;
-  space_id: string | null;
-  source_kind: string;
-  source_attachment_id: string | null;
-  status: string;
-  title: string;
-  relative_path: string;
-  absolute_path: string;
-  mime_type: string;
-  content_text: string;
-  created_at: string;
-  updated_at: string;
-  archived_at: string | null;
-}
-
-export interface AttachmentRecord {
-  id: string;
-  scope_kind: MaterialScopeKind;
-  session_id: string | null;
-  space_id: string | null;
-  kind: string;
-  status: string;
-  filename: string;
-  mime_type: string;
-  byte_count: number;
-  ingested_markdown: string | null;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface BackgroundJobRecord {
-  id: string;
-  kind: string;
-  state: string;
-  attachment_id: string | null;
-  result: Record<string, unknown> | null;
-  error_message: string | null;
-  attempt_count: number;
-  created_at: string;
-  updated_at: string;
-  started_at: string | null;
-  completed_at: string | null;
-}
-
-export interface CreateAttachmentRequest {
+import type { CreateAttachmentRequest as WireCreateAttachmentRequest } from "./protocol/CreateAttachmentRequest";
+import type { CreateMaterialRequest as WireCreateMaterialRequest } from "./protocol/CreateMaterialRequest";
+export type CreateAttachmentRequest = Omit<WireCreateAttachmentRequest, "scope_kind" | "session_id" | "space_id"> & {
   scope_kind: MaterialScopeKind;
   session_id?: string;
   space_id?: string;
-  filename: string;
-  mime_type: string;
-  content_base64: string;
-}
-
-export interface AttachmentQueuedResponse {
-  attachment: AttachmentRecord;
-  job: BackgroundJobRecord;
-}
-
-export interface CreateMaterialRequest {
+};
+export type CreateMaterialRequest = Omit<WireCreateMaterialRequest, "scope_kind" | "session_id" | "space_id" | "mime_type"> & {
   scope_kind: MaterialScopeKind;
   session_id?: string;
   space_id?: string;
-  title: string;
-  relative_path: string;
   mime_type?: string;
-  content_text: string;
-}
+};
 
 // -------------------------------------------------------------------------
 // Operator surface types
@@ -328,22 +171,8 @@ export type { ChannelStatusResponse as ChannelStatusSummary } from "./protocol/C
 export type { ApprovalSummary as OperatorApprovalSummary } from "./protocol/ApprovalSummary";
 export type { OperatorOverviewResponse as OperatorOverview } from "./protocol/OperatorOverviewResponse";
 
-export interface RecoveryExportSummary {
-  id: string;
-  created_at: string;
-  size_bytes: number;
-  spaces: number;
-  workspaces: number;
-  sessions: number;
-  secrets: number;
-  channel_links: number;
-  devices: number;
-  schedules: number;
-}
-
-export interface RecoveryExportListResponse {
-  exports: RecoveryExportSummary[];
-}
+export type { RecoveryExportSummary } from "./protocol/RecoveryExportSummary";
+export type { RecoveryExportListResponse } from "./protocol/RecoveryExportListResponse";
 
 // -------------------------------------------------------------------------
 // WebSocket event types

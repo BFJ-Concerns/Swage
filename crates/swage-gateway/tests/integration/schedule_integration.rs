@@ -360,38 +360,8 @@ async fn schedule_lifecycle_create_edit_pause_resume_trigger_delete() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(listed["schedules"].as_array().unwrap().len(), 0);
 
-    // Every operator mutation travels through the same recorded change-case
-    // seam as an agent tool, with operator provenance and a usable undo
-    // target for the deletion.
-    let versions = state
-        .storage
-        .list_configuration_versions_for_entity("schedule", &schedule_id)
-        .await
-        .unwrap();
-    assert_eq!(versions.len(), 5);
-    assert!(
-        versions
-            .iter()
-            .all(|version| version.source == "operator_http")
-    );
-    assert_eq!(
-        versions
-            .iter()
-            .rev()
-            .map(|version| version.operation_kind.as_str())
-            .collect::<Vec<_>>(),
-        vec![
-            "create_schedule",
-            "update_schedule",
-            "pause_schedule",
-            "resume_schedule",
-            "delete_schedule",
-        ]
-    );
-    let delete_case = versions
-        .iter()
-        .find(|version| version.operation_kind == "delete_schedule")
-        .unwrap();
+    // Every operator mutation leaves a configuration_change audit event
+    // with operator provenance, each carrying the prior and new state.
     let configuration_events = state
         .storage
         .list_audit_events()
@@ -405,23 +375,34 @@ async fn schedule_lifecycle_create_edit_pause_resume_trigger_delete() {
         })
         .collect::<Vec<_>>();
     assert_eq!(configuration_events.len(), 5);
+    let mut actions = configuration_events
+        .iter()
+        .map(|event| event.metadata["action"].as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    actions.sort();
+    assert_eq!(
+        actions,
+        vec![
+            "create_schedule",
+            "delete_schedule",
+            "pause_schedule",
+            "resume_schedule",
+            "update_schedule",
+        ]
+    );
     assert!(configuration_events.iter().all(|event| {
-        event.metadata["source"] == "operator_http" && event.metadata["version_id"].is_string()
+        event.metadata["source"] == "operator_http"
+            && (!event.metadata["prior_state"].is_null() || !event.metadata["new_state"].is_null())
     }));
-
-    let (status, undo) = request_json(
-        &router,
-        "POST",
-        "/api/operator/configuration/undo",
-        Some(json!({"case_id": delete_case.id})),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(undo["entity_kind"], "schedule");
-    assert_eq!(undo["entity_id"], schedule_id);
-    let (status, listed) = request_json(&router, "GET", "/api/schedules", None).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(listed["schedules"].as_array().unwrap().len(), 1);
+    let delete_event = configuration_events
+        .iter()
+        .find(|event| event.metadata["action"] == "delete_schedule")
+        .unwrap();
+    assert!(
+        !delete_event.metadata["prior_state"].is_null()
+            && delete_event.metadata["new_state"].is_null(),
+        "the deletion records the state it removed"
+    );
 }
 
 // ---------------------------------------------------------------------------

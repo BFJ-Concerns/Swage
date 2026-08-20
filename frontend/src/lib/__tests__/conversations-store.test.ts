@@ -170,6 +170,11 @@ describe("createConversation", () => {
 
     await store.createConversation("proj-1");
 
+    expect(api.createConversation).toHaveBeenCalledWith(
+      "proj-1",
+      undefined,
+      undefined,
+    );
     expect(store.conversations).toHaveLength(1);
     expect(store.conversations[0].id).toBe("new-conv");
     expect(store.activeConversation?.id).toBe("new-conv");
@@ -193,6 +198,24 @@ describe("createConversation", () => {
 
     expect(store.conversations[0].id).toBe("new-conv");
     expect(store.conversations[1].id).toBe("existing-conv");
+  });
+
+  it("threads the selected agent to the creation API", async () => {
+    const store = createConversationStore();
+    vi.mocked(api.createConversation).mockResolvedValueOnce({
+      id: "new-conv",
+      space_id: "default",
+      created_at: "2026-01-05T00:00:00Z",
+      last_activity: "2026-01-05T00:00:00Z",
+    });
+
+    await store.createConversation("proj-1", "small-model", "researcher");
+
+    expect(api.createConversation).toHaveBeenCalledWith(
+      "proj-1",
+      "small-model",
+      "researcher",
+    );
   });
 });
 
@@ -475,6 +498,10 @@ describe("createConversation (space-scoped)", () => {
 
     await store.createConversation("proj-1");
 
-    expect(api.createConversation).toHaveBeenCalledWith("proj-1", undefined);
+    expect(api.createConversation).toHaveBeenCalledWith(
+      "proj-1",
+      undefined,
+      undefined,
+    );
   });
 });

@@ -90,24 +90,7 @@ pub struct RecoveryExportSnapshot {
     pub bundle: GatewayRecoveryBundle,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RecoveryExportSummary {
-    pub id: Uuid,
-    pub created_at: DateTime<Utc>,
-    pub size_bytes: usize,
-    pub spaces: usize,
-    pub workspaces: usize,
-    pub sessions: usize,
-    pub secrets: usize,
-    pub channel_links: usize,
-    pub devices: usize,
-    pub schedules: usize,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct RecoveryExportListResponse {
-    pub exports: Vec<RecoveryExportSummary>,
-}
+pub use swage_protocol::client::recovery::{RecoveryExportListResponse, RecoveryExportSummary};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ImportGatewayRecoveryRequest {
@@ -710,22 +693,46 @@ pub async fn import_gateway_recovery_bundle(
                 })?,
             },
         };
-        state
-            .storage
-            .create_schedule(NewSchedule {
-                id: Uuid::new_v4(),
-                message: schedule.message,
-                status: parse_recovery_value::<ScheduleStatus>(&schedule.status)?,
-                kind: parse_recovery_value::<ScheduleKind>(&schedule.kind)?,
-                expression: schedule.expression,
-                session_policy,
-                creator: schedule.creator,
-                delivery_routing: schedule.delivery_routing,
-                gate: schedule.gate,
-                next_run_at: schedule.next_run_at,
-                last_run_at: schedule.last_run_at,
-            })
-            .await?;
+        let imported = NewSchedule {
+            id: Uuid::new_v4(),
+            message: schedule.message,
+            status: parse_recovery_value::<ScheduleStatus>(&schedule.status)?,
+            kind: parse_recovery_value::<ScheduleKind>(&schedule.kind)?,
+            expression: schedule.expression,
+            session_policy,
+            creator: schedule.creator,
+            delivery_routing: schedule.delivery_routing,
+            gate: schedule.gate,
+            next_run_at: schedule.next_run_at,
+            last_run_at: schedule.last_run_at,
+        };
+        let schedule_id = imported.id;
+        let summary = format!(
+            "imported schedule '{}' from a recovery bundle",
+            imported.message
+        );
+        // Restores write the exported row verbatim (validated by its origin
+        // gateway, ids remapped above) — the service create path would
+        // re-resolve and re-arm it, changing what was exported. The record
+        // still reads the stored state back like every other mutation.
+        state.storage.create_schedule(imported).await?;
+        let new_state = crate::schedule::schedule_snapshot(state, schedule_id).await?;
+        // An import is a configuration change like any other: recorded, or
+        // the whole import fails rather than leaving silent rows.
+        crate::config_change::record_config_change(
+            state,
+            crate::config_change::ConfigChange {
+                entity_kind: "schedule",
+                entity_id: &schedule_id.to_string(),
+                action: "import_schedule",
+                source: "recovery_bundle_import",
+                session_id: None,
+                summary: &summary,
+                prior_state: None,
+                new_state,
+            },
+        )
+        .await?;
     }
 
     Ok(())

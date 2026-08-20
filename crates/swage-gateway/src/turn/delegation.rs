@@ -114,16 +114,17 @@ impl DelegationContextAssembler for GatewayDelegatedContextAssembler {
             &self.space.slug,
             &self.agent_id,
         );
-        let mut report = serde_json::to_value(output.report).unwrap_or_else(|error| {
+        let mut assembly_report = output.report;
+        assembly_report.effective_tool_permissions = Some(self.effective_tool_permissions.clone());
+        let report = serde_json::to_value(&assembly_report).unwrap_or_else(|error| {
             tracing::warn!(%error, "failed to serialise delegated assembly report");
             serde_json::json!({ "error": "serialisation failed" })
         });
-        report["effective_tool_permissions"] = self.effective_tool_permissions.clone();
         let _ = self
             .context_event_tx
             .send(crate::websocket::ServerEvent::ContextAssembled {
                 turn_id,
-                report: report.clone(),
+                report: assembly_report,
             });
         Ok(DelegatedAssembly {
             messages: output.messages,
@@ -256,7 +257,7 @@ impl DelegationHandler for GatewayDelegationHandler {
         let active_workspace_attachment_id = self
             .active_workspace_attachment_for_turn(sender_turn_id)
             .await?;
-        let target_agent_config = build_agent_config_for_space_workspace(
+        let mut target_agent_config = build_agent_config_for_space_workspace(
             &self.state,
             target_agent_id.to_string(),
             &target_resolved,
@@ -266,6 +267,7 @@ impl DelegationHandler for GatewayDelegationHandler {
             active_workspace_attachment_id,
         )
         .await;
+        target_agent_config.approval_prompts_enabled = false;
         let target_instructions = delegated_target_instructions_for_space(
             &target_resolved.instructions,
             &space.slug,

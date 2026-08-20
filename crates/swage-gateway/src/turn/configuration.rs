@@ -901,6 +901,10 @@ mod tests {
     fn dispatch_bound_removes_approval_for_a_tool_outside_the_intersection() {
         let mut worker = swage_config::ResolvedConfig::default();
         worker.tools.permissions.allow = vec!["shell".into()];
+        worker.tools.permissions.require_approval =
+            vec![swage_config::model::RequireApprovalEntry::Simple(
+                "shell".into(),
+            )];
         assert!(
             worker
                 .tools

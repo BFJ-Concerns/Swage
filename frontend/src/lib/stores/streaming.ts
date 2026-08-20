@@ -46,7 +46,7 @@ export interface StreamingStore {
   // matching the approval UI.
   readonly pendingApproval: PendingApproval | null;
   handleServerEvent(event: ServerEvent): void;
-  startTurn(content: string, selectedModelId?: string | null): void;
+  startTurn(content: string, selectedModelId?: string | null, agentId?: string | null): void;
   cancelTurn(): void;
 }
 
@@ -445,7 +445,7 @@ export interface ConversationAutoCreateOptions {
    * queues frames during the handshake, so the turn can be dispatched as soon
    * as this resolves without racing the connection.
    */
-  createConversation(selectedModelId?: string | null): Promise<string | null>;
+  createConversation(selectedModelId?: string | null, agentId?: string | null): Promise<string | null>;
 }
 
 // Wraps a streaming store so the composer works in a space with no
@@ -486,7 +486,7 @@ export function withConversationAutoCreate(
     handleServerEvent: (event) => base.handleServerEvent(event),
     cancelTurn: () => base.cancelTurn(),
 
-    startTurn(content: string, selectedModelId?: string | null): void {
+    startTurn(content: string, selectedModelId?: string | null, agentId?: string | null): void {
       if (options.hasActiveConversation()) {
         base.startTurn(content, selectedModelId);
         return;
@@ -498,7 +498,7 @@ export function withConversationAutoCreate(
         try {
           // A rejection counts as a failed creation, same as a null id.
           const id = await options
-            .createConversation(selectedModelId)
+            .createConversation(selectedModelId, agentId)
             .catch(() => null);
           if (id) {
             base.startTurn(content, selectedModelId);
