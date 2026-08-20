@@ -852,6 +852,12 @@ async fn run_ephemeral_agent_call(
             }
         } => {
             call_cancellation.cancel();
+            // The turn path owns the sandbox and active-turn registration.
+            // Let it observe cancellation and run that cleanup before the
+            // timeout is surfaced to the workflow journal.
+            if let Err(error) = processing.await {
+                tracing::warn!(%error, "timed-out agent turn failed while settling cancellation");
+            }
             return Err(format!(
                 "AgentCallTimeoutError: agent call exceeded its {}ms deadline",
                 request.timeout_ms.expect("timeout branch requires a deadline")
@@ -4940,7 +4946,7 @@ mod tests {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
         let space = storage.get_or_create_default().await.expect("space");
         let source = r#"return await agent("slow work", {
-            effort: "high", timeoutMs: 2000, maxAttempts: 1
+            effort: "high", timeoutMs: 10000, maxAttempts: 1
         });"#;
         let run = storage
             .create_workflow_run(NewWorkflowRun {
@@ -4988,7 +4994,7 @@ mod tests {
         assert_eq!(journal.len(), 1);
         assert_eq!(journal[0].status, "failed");
         assert_eq!(journal[0].request["effort"], "high");
-        assert_eq!(journal[0].request["timeout_ms"], 2000);
+        assert_eq!(journal[0].request["timeout_ms"], 10000);
         assert!(
             journal[0]
                 .error_message
@@ -5001,6 +5007,10 @@ mod tests {
             assert_eq!(requests[0].effort.as_deref(), Some("high"));
         }
         wait_for_worker_turn_interrupted(&storage).await;
+        assert!(
+            state.active_turns.lock().await.is_empty(),
+            "timed-out worker must release its active-turn registration"
+        );
 
         storage
             .update_workflow_run_state(run.id, "interrupted", None, None, None)
