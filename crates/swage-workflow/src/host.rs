@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeMap;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -35,6 +36,17 @@ pub struct AgentCallRequest {
     /// must serialise to nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session: Option<AgentSessionRef>,
+    /// Named briefing elements to compose for this child call. When omitted,
+    /// the configured element set remains unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elements: Option<Vec<String>>,
+    /// Values visible only while composing this child call. These shadow
+    /// durable session values without changing the session-variable store.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub variables: Option<BTreeMap<String, String>>,
+    /// Named context assembly to use for this child call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assembly: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -197,5 +209,31 @@ pub trait WorkflowHost: Send + Sync {
     /// journal near the ceiling.
     async fn budget_snapshot(&self, _cancellation: CancellationToken) -> Result<Value, String> {
         Err("BudgetSnapshotError: this host does not support budget snapshots".into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn absent_composition_options_are_omitted_from_journal_shape() {
+        let request = AgentCallRequest {
+            prompt: "work".into(),
+            agent: "worker".into(),
+            model: None,
+            schema: None,
+            max_attempts: 3,
+            label: None,
+            session: None,
+            elements: None,
+            variables: None,
+            assembly: None,
+        };
+
+        let value = serde_json::to_value(request).expect("serialise agent request");
+        assert!(!value.as_object().unwrap().contains_key("elements"));
+        assert!(!value.as_object().unwrap().contains_key("variables"));
+        assert!(!value.as_object().unwrap().contains_key("assembly"));
     }
 }

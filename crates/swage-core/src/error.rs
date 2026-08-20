@@ -343,6 +343,12 @@ pub enum ToolError {
         task: String,
         /// Optional context to transfer to the delegate agent.
         context: Option<serde_json::Value>,
+        /// Named briefing elements to compose for the child.
+        elements: Option<Vec<String>>,
+        /// Call-scoped values that shadow the child session's durable values.
+        variables: Option<std::collections::BTreeMap<String, String>>,
+        /// Named context assembly to use for the child.
+        assembly: Option<String>,
         /// Whether the parent turn should wait for the child result.
         completion_mode: DelegateCompletionMode,
     },

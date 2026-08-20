@@ -69,6 +69,43 @@ use history::rebuild_thread_history_messages;
 pub(crate) use operator_guidance::*;
 pub(crate) use workspace::*;
 
+#[derive(Clone, Debug, Default)]
+pub(crate) struct DispatchContextComposition {
+    pub elements: Option<Vec<String>>,
+    pub variables: BTreeMap<String, String>,
+    pub assembly: Option<String>,
+}
+
+impl DispatchContextComposition {
+    pub(crate) fn from_delegate_payload(payload: &serde_json::Value) -> Result<Self, String> {
+        let elements = payload
+            .get("elements")
+            .map(|value| serde_json::from_value(value.clone()))
+            .transpose()
+            .map_err(|error| format!("delegate elements must be an array of strings: {error}"))?;
+        let variables = payload
+            .get("variables")
+            .map(|value| serde_json::from_value(value.clone()))
+            .transpose()
+            .map_err(|error| format!("delegate variables must map names to strings: {error}"))?
+            .unwrap_or_default();
+        let assembly = payload
+            .get("assembly")
+            .map(|value| {
+                value
+                    .as_str()
+                    .map(str::to_owned)
+                    .ok_or_else(|| "delegate assembly must be a string".to_string())
+            })
+            .transpose()?;
+        Ok(Self {
+            elements,
+            variables,
+            assembly,
+        })
+    }
+}
+
 // Gateway messaging spans three surfaces: REST endpoints for durable messages
 // and turn submission, session-scoped WebSocket events for live approval and
 // delegation updates, and in-process routing between running agents.
@@ -572,11 +609,6 @@ pub async fn process_turn(
     .await
 }
 
-#[tracing::instrument(
-    name = "turn",
-    skip(state, content, ws_tx, subscription),
-    fields(turn_id = tracing::field::Empty),
-)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn process_turn_with_existing_turn(
     state: &AppState,
@@ -589,6 +621,41 @@ pub(crate) async fn process_turn_with_existing_turn(
     max_output_retries_override: Option<u32>,
     existing_turn_id: Option<Uuid>,
     attendance: TurnAttendance,
+) -> Result<(), GatewayError> {
+    process_turn_with_composition(
+        state,
+        session_id,
+        target_thread_id,
+        content,
+        ws_tx,
+        subscription,
+        output_schema_override,
+        max_output_retries_override,
+        existing_turn_id,
+        attendance,
+        DispatchContextComposition::default(),
+    )
+    .await
+}
+
+#[tracing::instrument(
+    name = "turn",
+    skip(state, content, ws_tx, subscription, composition),
+    fields(turn_id = tracing::field::Empty),
+)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn process_turn_with_composition(
+    state: &AppState,
+    session_id: Uuid,
+    target_thread_id: Option<Uuid>,
+    content: String,
+    ws_tx: mpsc::UnboundedSender<ServerEvent>,
+    subscription: Arc<Mutex<SubscriptionState>>,
+    output_schema_override: Option<serde_json::Value>,
+    max_output_retries_override: Option<u32>,
+    existing_turn_id: Option<Uuid>,
+    attendance: TurnAttendance,
+    composition: DispatchContextComposition,
 ) -> Result<(), GatewayError> {
     // Step 1: Resolve the space and target thread for this session.
     let session = state
@@ -841,20 +908,27 @@ pub(crate) async fn process_turn_with_existing_turn(
     )
     .await?;
 
-    let assembly_name =
-        match select_context_assembly(state, &config, session_id, prepared_turn_id).await {
-            Ok(assembly_name) => assembly_name,
-            Err(error) => {
-                record_terminal_state_and_release(
-                    state,
-                    session_id,
-                    prepared_turn_id,
-                    TurnState::Failed,
-                )
-                .await?;
-                return Err(error);
-            }
-        };
+    let assembly_name = match select_context_assembly(
+        state,
+        &config,
+        session_id,
+        prepared_turn_id,
+        composition.assembly.as_deref(),
+    )
+    .await
+    {
+        Ok(assembly_name) => assembly_name,
+        Err(error) => {
+            record_terminal_state_and_release(
+                state,
+                session_id,
+                prepared_turn_id,
+                TurnState::Failed,
+            )
+            .await?;
+            return Err(error);
+        }
+    };
     let memory_content = load_memory_for_assembly(&assembly_name, || async {
         match swage_root_opt.as_deref() {
             Some(root) => load_space_memory(root, &space_slug).await,
@@ -862,7 +936,7 @@ pub(crate) async fn process_turn_with_existing_turn(
         }
     })
     .await;
-    let session_variables: std::collections::BTreeMap<String, String> = state
+    let mut session_variables: std::collections::BTreeMap<String, String> = state
         .storage
         .list_session_variables(session_id)
         .await
@@ -870,6 +944,7 @@ pub(crate) async fn process_turn_with_existing_turn(
         .into_iter()
         .map(|variable| (variable.name, variable.value))
         .collect();
+    session_variables.extend(composition.variables.clone());
 
     // The workspace root doubles as the session's working directory in the
     // orientation baseline, so it is resolved before elements are built.
@@ -903,6 +978,7 @@ pub(crate) async fn process_turn_with_existing_turn(
         available_skills,
         config.default_model_id(),
         &hierarchy,
+        composition.elements.as_deref(),
     );
     let tokeniser = TiktokenTokeniser::new(config.default_model_id());
 
@@ -1673,6 +1749,7 @@ async fn select_context_assembly(
     config: &swage_config::ResolvedConfig,
     session_id: Uuid,
     turn_id: Uuid,
+    call_override: Option<&str>,
 ) -> Result<String, GatewayError> {
     // The assembly name is an experiment location: when variants are
     // registered for it, the selection loop chooses which serves this turn
@@ -1680,16 +1757,25 @@ async fn select_context_assembly(
     // including "experimentation is off" — lands in the audit trail. The
     // report and every model-facing surface stay function-named; the audit
     // record is the only place the variant id appears.
-    let configured_assembly = config.context.assembly.trim().to_owned();
+    let configured_assembly = call_override
+        .unwrap_or(&config.context.assembly)
+        .trim()
+        .to_owned();
     let assembly_variants: Vec<&str> = vec![];
-    let decision = crate::experimentation::select_variant(
-        &config.experimentation,
-        crate::experimentation::LOCATION_CONTEXT_ASSEMBLY,
-        &assembly_variants,
-        &configured_assembly,
-        turn_id,
-    )
-    .map_err(|error| GatewayError::ConfigError(error.to_string()))?;
+    let decision = match call_override {
+        Some(_) => crate::experimentation::VariantDecision {
+            variant: configured_assembly.clone(),
+            reason: crate::experimentation::SelectionReason::DefaultOnly,
+        },
+        None => crate::experimentation::select_variant(
+            &config.experimentation,
+            crate::experimentation::LOCATION_CONTEXT_ASSEMBLY,
+            &assembly_variants,
+            &configured_assembly,
+            turn_id,
+        )
+        .map_err(|error| GatewayError::ConfigError(error.to_string()))?,
+    };
     let decision = match crate::experimentation::record_selection(
         state,
         crate::experimentation::LOCATION_CONTEXT_ASSEMBLY,

@@ -6813,6 +6813,9 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
             arguments: serde_json::json!({
                 "target_agent": "agent-b",
                 "task": "Summarise this request",
+                "elements": ["delegated-brief"],
+                "variables": {"owner": "delegating parent"},
+                "assembly": "delegated-focus",
             }),
         },
         StreamChunk::Done {
@@ -6874,6 +6877,19 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
     ]);
 
     let swage_home = tempfile::TempDir::new().expect("temp swage home");
+    std::fs::create_dir_all(swage_home.path().join("assemblies"))
+        .expect("create assembly directory");
+    std::fs::write(
+        swage_home.path().join("assemblies/delegated-focus.js"),
+        "for (const element of elements) add(element.name === 'delegated-brief' ? element.render() : element);",
+    )
+    .expect("write delegated assembly");
+    std::fs::create_dir_all(swage_home.path().join("elements")).expect("create element directory");
+    std::fs::write(
+        swage_home.path().join("elements/delegated-brief.md"),
+        "Delegated owner: {{owner}}",
+    )
+    .expect("write delegated briefing");
     let space_skill_dir = swage_home
         .path()
         .join("spaces/default/skills/foreground-only");
@@ -7027,6 +7043,14 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
         child_snapshot["elements"].is_array(),
         "delegated assembly report should contain its element decisions"
     );
+    assert_eq!(child_snapshot["assembly_name"], "delegated-focus");
+    assert!(
+        child_snapshot["elements"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|element| element["name"] == "delegated-brief")
+    );
     assert_eq!(
         child_snapshot["effective_tool_permissions"],
         serde_json::json!({
@@ -7132,6 +7156,10 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
         .map(ChatMessage::text_content)
         .collect::<Vec<_>>()
         .join("\n\n");
+    assert!(
+        child_request_text.contains("Delegated owner: delegating parent"),
+        "delegated provider request should render call-scoped variables: {child_request_text}"
+    );
     assert!(
         captured_requests[1]
             .tool_definitions
@@ -7240,6 +7268,9 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
         .handle_delegation(
             "agent-b",
             "This must not start",
+            None,
+            None,
+            None,
             None,
             "gateway",
             root_turn.id,
@@ -7755,6 +7786,9 @@ async fn detached_delegate_can_be_cancelled_through_active_registry() {
         .handle_delegation(
             "agent-b",
             "Summarise independently",
+            None,
+            None,
+            None,
             None,
             "gateway",
             parent_turn.id,
@@ -9405,6 +9439,7 @@ fn named_assembly_elements_include_prompts_skills_memory_and_history() {
         vec![],
         "claude-test-model",
         &[],
+        None,
     );
 
     // Should produce six elements: orientation, working norms, prompts,
@@ -9438,6 +9473,7 @@ fn default_assembly_elements_exclude_memory() {
         vec![],
         "claude-test-model",
         &[],
+        None,
     );
 
     assert_eq!(elements.len(), 5);
@@ -9490,6 +9526,7 @@ async fn named_assembly_loads_memory_and_can_compose_it() {
         vec![],
         "claude-test-model",
         &[],
+        None,
     );
 
     let dir = tempfile::tempdir().unwrap();
@@ -9521,7 +9558,7 @@ async fn named_assembly_loads_memory_and_can_compose_it() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn delegated_assembly_reads_current_session_variables() {
+async fn delegated_assembly_applies_call_scoped_composition_over_live_state() {
     let swage_home = tempfile::TempDir::new().expect("temp swage home");
     std::fs::create_dir_all(swage_home.path().join("assemblies"))
         .expect("create assembly directory");
@@ -9545,6 +9582,11 @@ async fn delegated_assembly_reads_current_session_variables() {
     std::fs::create_dir_all(element_path.parent().unwrap()).expect("create element directory");
     std::fs::write(&element_path, "Task: {{task}}; owner: {{owner}}")
         .expect("write space briefing");
+    std::fs::write(
+        element_path.parent().unwrap().join("unrequested.md"),
+        "This briefing must not be composed",
+    )
+    .expect("write unrequested briefing");
     let session = storage
         .create_session(NewSession {
             space_id: space.id,
@@ -9564,7 +9606,7 @@ async fn delegated_assembly_reads_current_session_variables() {
     .expect("save delegated session value");
 
     let mut config = swage_config::ResolvedConfig::default();
-    config.context.assembly = "briefing".into();
+    config.context.assembly = "default".into();
     config.instructions = "Task: {{task}}; owner: {{owner}}".into();
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::Storage>,
@@ -9596,6 +9638,14 @@ async fn delegated_assembly_reads_current_session_variables() {
         "/workspace".into(),
         context_event_tx,
         serde_json::json!({}),
+        DispatchContextComposition {
+            elements: Some(vec!["current-work".into()]),
+            variables: std::collections::BTreeMap::from([(
+                "owner".into(),
+                "dispatch owner".into(),
+            )]),
+            assembly: Some("briefing".into()),
+        },
     );
 
     let output = assembler
@@ -9609,8 +9659,8 @@ async fn delegated_assembly_reads_current_session_variables() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
-        context.contains("Task: inspect delegated context; owner: ⟦unset:owner⟧"),
-        "delegated assembly should consume its session's current values: {context}"
+        context.contains("Task: inspect delegated context; owner: dispatch owner"),
+        "delegated assembly should combine session and call-scoped values: {context}"
     );
     assert!(
         output.report["elements"]
@@ -9619,6 +9669,15 @@ async fn delegated_assembly_reads_current_session_variables() {
             .iter()
             .any(|element| element["name"] == "current-work"),
         "the delegated assembly report should identify the named briefing"
+    );
+    assert_eq!(output.report["assembly_name"], "briefing");
+    assert!(
+        output.report["elements"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|element| element["name"] != "unrequested"),
+        "only requested named briefings should reach the child assembly report"
     );
 
     std::fs::write(&element_path, "Updated task: {{task}}; owner: {{owner}}")
@@ -9647,7 +9706,7 @@ async fn delegated_assembly_reads_current_session_variables() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
-        recomposed_context.contains("Updated task: verify current state; owner: ⟦unset:owner⟧"),
+        recomposed_context.contains("Updated task: verify current state; owner: dispatch owner"),
         "a later dispatch should re-read the file and current values: {recomposed_context}"
     );
     assert!(!recomposed_context.contains("inspect delegated context"));
@@ -9670,6 +9729,7 @@ fn build_assembly_elements_memory_element_contains_provided_content() {
         vec![],
         "claude-test-model",
         &[],
+        None,
     );
 
     let memory = elements.iter().find(|e| e.name() == "memory").unwrap();
@@ -9849,6 +9909,7 @@ fn assembly_elements_layer_operator_guidance_after_instructions() {
         vec![],
         "claude-test-model",
         &[],
+        None,
     );
 
     let prompts = elements.iter().find(|e| e.name() == "prompts").unwrap();

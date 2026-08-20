@@ -60,6 +60,20 @@ impl Tool for DelegateTool {
                     "enum": ["wait", "detach"],
                     "default": "wait",
                     "description": "Choose \"wait\" when this turn needs the delegate's result before continuing. Choose \"detach\" for independent work; the tool returns a durable delegate_message_id and child session/thread references while the delegate continues."
+                },
+                "elements": {
+                    "type": "array",
+                    "description": "Named briefing elements to compose for the delegated child.",
+                    "items": { "type": "string" }
+                },
+                "variables": {
+                    "type": "object",
+                    "description": "Call-scoped string values for the delegated child's context composition.",
+                    "additionalProperties": { "type": "string" }
+                },
+                "assembly": {
+                    "type": "string",
+                    "description": "Named context assembly to use for the delegated child."
                 }
             },
             "required": ["target_agent", "task"]
@@ -92,6 +106,34 @@ impl Tool for DelegateTool {
             .to_string();
 
         let context = params.get("context").cloned();
+        let elements = params
+            .get("elements")
+            .map(|value| serde_json::from_value(value.clone()))
+            .transpose()
+            .map_err(|error| ToolError::InvalidParameters {
+                name: DELEGATE_TOOL_NAME.to_string(),
+                message: format!("elements must be an array of strings: {error}"),
+            })?;
+        let variables = params
+            .get("variables")
+            .map(|value| serde_json::from_value(value.clone()))
+            .transpose()
+            .map_err(|error| ToolError::InvalidParameters {
+                name: DELEGATE_TOOL_NAME.to_string(),
+                message: format!("variables must map names to string values: {error}"),
+            })?;
+        let assembly = params
+            .get("assembly")
+            .map(|value| {
+                value
+                    .as_str()
+                    .map(str::to_owned)
+                    .ok_or_else(|| ToolError::InvalidParameters {
+                        name: DELEGATE_TOOL_NAME.to_string(),
+                        message: "assembly must be a string".to_string(),
+                    })
+            })
+            .transpose()?;
         let completion_mode = parse_completion_mode(params.get("completion_mode"))?;
 
         // Signal the agent turn loop to handle delegation.
@@ -100,6 +142,9 @@ impl Tool for DelegateTool {
             target_agent_id,
             task,
             context,
+            elements,
+            variables,
+            assembly,
             completion_mode,
         })
     }
@@ -171,6 +216,41 @@ mod tests {
                 completion_mode, ..
             } => {
                 assert_eq!(completion_mode, DelegateCompletionMode::Detach);
+            }
+            other => panic!("expected RequiresDelegation, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn delegate_tool_carries_context_composition_options() {
+        let tool = DelegateTool;
+        let ctx = MockToolContext::new("test-agent", "session-1");
+        let result = tool
+            .execute(
+                json!({
+                    "target_agent": "reviewer",
+                    "task": "Review independently",
+                    "elements": ["current-work"],
+                    "variables": {"owner": "delegate-owner"},
+                    "assembly": "focused"
+                }),
+                &ctx,
+            )
+            .await;
+
+        match result.unwrap_err() {
+            ToolError::RequiresDelegation {
+                elements,
+                variables,
+                assembly,
+                ..
+            } => {
+                assert_eq!(elements, Some(vec!["current-work".into()]));
+                assert_eq!(
+                    variables.as_ref().and_then(|values| values.get("owner")),
+                    Some(&"delegate-owner".to_string())
+                );
+                assert_eq!(assembly.as_deref(), Some("focused"));
             }
             other => panic!("expected RequiresDelegation, got: {other:?}"),
         }
