@@ -9404,6 +9404,8 @@ fn named_assembly_elements_include_prompts_skills_memory_and_history() {
         test_environment(),
         vec![],
         "claude-test-model",
+        &[],
+        &BTreeMap::new(),
     );
 
     // Should produce six elements: orientation, working norms, prompts,
@@ -9436,6 +9438,8 @@ fn default_assembly_elements_exclude_memory() {
         test_environment(),
         vec![],
         "claude-test-model",
+        &[],
+        &BTreeMap::new(),
     );
 
     assert_eq!(elements.len(), 5);
@@ -9487,6 +9491,8 @@ async fn named_assembly_loads_memory_and_can_compose_it() {
         test_environment(),
         vec![],
         "claude-test-model",
+        &[],
+        &BTreeMap::new(),
     );
 
     let dir = tempfile::tempdir().unwrap();
@@ -9524,7 +9530,7 @@ async fn delegated_assembly_reads_current_session_variables() {
         .expect("create assembly directory");
     std::fs::write(
         swage_home.path().join("assemblies/briefing.js"),
-        "add(elements.find(element => element.name === 'prompts').render());",
+        "add(elements.find(element => element.name === 'current-work').render());",
     )
     .expect("write assembly");
     let _guard = SwageHomeGuard::set_to(swage_home.path());
@@ -9534,6 +9540,14 @@ async fn delegated_assembly_reads_current_session_variables() {
         .get_or_create_default()
         .await
         .expect("create default space");
+    let element_path = swage_home
+        .path()
+        .join("spaces")
+        .join(&space.slug)
+        .join("elements/current-work.md");
+    std::fs::create_dir_all(element_path.parent().unwrap()).expect("create element directory");
+    std::fs::write(&element_path, "Task: {{task}}; owner: {{owner}}")
+        .expect("write space briefing");
     let session = storage
         .create_session(NewSession {
             space_id: space.id,
@@ -9588,6 +9602,40 @@ async fn delegated_assembly_reads_current_session_variables() {
         context.contains("Task: inspect delegated context; owner: ⟦unset:owner⟧"),
         "delegated assembly should consume its session's current values: {context}"
     );
+    assert!(
+        output.report["elements"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|element| element["name"] == "current-work"),
+        "the delegated assembly report should identify the named briefing"
+    );
+
+    std::fs::write(&element_path, "Updated task: {{task}}; owner: {{owner}}")
+        .expect("edit space briefing");
+    swage_storage::SessionVariableStore::set_session_variable(
+        storage.as_ref(),
+        session.id,
+        "task",
+        "verify current state",
+    )
+    .await
+    .expect("update delegated session value");
+    let recomposed = assembler
+        .assemble(&session, Uuid::new_v4(), vec![])
+        .await
+        .expect("reassemble delegated context");
+    let recomposed_context = recomposed
+        .messages
+        .iter()
+        .map(ChatMessage::text_content)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        recomposed_context.contains("Updated task: verify current state; owner: ⟦unset:owner⟧"),
+        "a later dispatch should re-read the file and current values: {recomposed_context}"
+    );
+    assert!(!recomposed_context.contains("inspect delegated context"));
 }
 
 /// When memory_content is non-empty, the memory element produces a system
@@ -9606,6 +9654,8 @@ fn build_assembly_elements_memory_element_contains_provided_content() {
         test_environment(),
         vec![],
         "claude-test-model",
+        &[],
+        &BTreeMap::new(),
     );
 
     let memory = elements.iter().find(|e| e.name() == "memory").unwrap();
@@ -9784,6 +9834,8 @@ fn assembly_elements_layer_operator_guidance_after_instructions() {
         test_environment(),
         vec![],
         "claude-test-model",
+        &[],
+        &BTreeMap::new(),
     );
 
     let prompts = elements.iter().find(|e| e.name() == "prompts").unwrap();
