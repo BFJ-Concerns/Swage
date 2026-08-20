@@ -1,8 +1,6 @@
 ---
 name: maestro
 description: Run the structural phase of a commissioned build — bring the codebase to a build-ready state by establishing or replacing its architectural spine as landed exemplar code, with licence to tear out and rebuild what falls short. Use when the user wants to start, resume, or check on structural work for a commissioned project, prepare a repo for a mass build, author the instruction-text deliverables a commission names (agent prompts, model-steering documents — these are structural-phase work, never build volume), when a build run routes work back because no exemplar covers it, or when the annexe task queue holds structural-tagged items awaiting a phase. Not for the mass build itself (the assembly skill), not for capturing or changing a commission (the commission skill), and not for a single self-contained fix an agent could just do.
-argument-hint: '[project or phase instruction]'
-disable-model-invocation: true
 ---
 
 # Maestro
@@ -30,20 +28,14 @@ No modes or flags — read the world:
 - **No annexe or no commission** → stop and say so; capture is the
   commission skill's job.
 - **Commission exists, no `build/` directory in the annexe** → fresh
-  phase — unless a legacy `maestro/` directory stands in `build/`'s
-  place, which is a predecessor phase's records, not a green field:
-  migrate it first (State and Resilience, below), then re-read the
-  situation. A true fresh phase surveys the codebase against the
-  commission through dispatched
-  recon (Grunt Work, below), judges the spine the remaining work needs,
-  and begins.
+  phase: survey the codebase against the commission through dispatched
+  recon (Grunt Work, below), judge the spine the remaining work needs,
+  and begin.
 - **`build/` exists** → resume or re-entry: read `build/spine.md`, the
   ledger header `build/ledger.md`, and the status board
   (`grep -H '^\*\*State' build/obligations/*.md`) first — the board
   locates records; it is not a read, so open the work list only after
-  reading each `needs-spine` record whole. (A `build/ledger.md` still
-  holding `##` obligation sections is the pre-split format — migrate it
-  first: references/build-ledger.md, *Migrating*.) Re-entry from the
+  reading each `needs-spine` record whole. Re-entry from the
   assembly skill is the ordinary
   case — records marked `needs-spine` open the work list. A
   `needs-spine` record's `Must be true` and `Proof` fields are the
@@ -101,17 +93,6 @@ commission pass has yet re-judged the queue). An item this seat
 judges mis-tagged or unplaceable is surfaced to the user. `(journey)`
 items are the assembly's and untagged items are commission triage's —
 leave both.
-
-**Temporary — remove after 2026-10-20:** an item may carry the retired
-`(deferred since <date>; last <date>: <reason>)` marker from before
-capacity deferral was withdrawn. Read it as open, and strip the marker —
-carrying its first date over as the item's `(added <date>)` stamp where
-one is missing —
-or replace it with `(blocked on <blocker> since <date>)` where a named
-dependency genuinely stops the item — at this read; stamp any other item
-missing `(added <date>)` with today's date. If today is after
-2026-10-20, this note has outstayed its window: tell the user to remove
-it.
 
 Read records whole, and check the tree before concluding: a bounded read —
 a windowed slice of a record, a heading grep over a document — returns
@@ -230,9 +211,9 @@ Accounting is the non-negotiable half of the licence: at tear-out time —
 never recalled later — every displaced capability becomes a restoration
 record in `build/obligations/` or an authorised retirement in
 `build/retired.md`, and before handover the applicable audit window closes
-through `workflows/teardown-audit.js` (blind opposite-family re-derivation,
-adjudicated against your records; fails closed), with every discrepancy
-resolved.
+through the carried `teardown-audit` workflow (blind opposite-family
+re-derivation, adjudicated against your records; fails closed), with
+every discrepancy resolved.
 
 ## The Ledger and the Handover
 
@@ -304,11 +285,12 @@ open.
 Reserve this seat for the architecture calls, the teardown judgements,
 and writing the exemplars (The Spine, above). Dispatch everything
 mechanical — codebase surveys, capability sweeps, renames and moves that
-follow a decision already made, and digests — through the ensemble
-runtime (the `ensemble-workflow` skill), explicitly pinned to cheap
-opposite-family workers. The spine reviews are dispatched too, but not
-cheap — route them per references/spine-authoring.md (Verification Is
-Reading). A decided design does not make exemplar implementation
+follow a decision already made, and digests — as workflow runs (an
+impromptu inline script, or a carried workflow where one fits; the
+workflow-authoring skill documents the surface), explicitly pinned to
+cheap opposite-family models. The spine reviews are dispatched too, but
+not cheap — route them per references/spine-authoring.md (Verification
+Is Reading). A decided design does not make exemplar implementation
 dispatchable.
 
 ## State and Resilience
@@ -328,28 +310,11 @@ exemplar landed, a discrepancy resolved — before the next stretch of work,
 and commit annexe files as they change, staged by path. The phase is
 resumable from the artefacts alone.
 
-**Temporary — remove after 2026-10-07:** an annexe carrying a `maestro/`
-directory holds the predecessor phase's records under the pre-split
-layout. It is never current state: on first encountering one, migrate
-what is still live into `build/` — `gaps.md` entries into
-`build/gaps.md`; obligations or unfinished work into
-`build/obligations/` records or `TASKS.md`; everything else is
-superseded narrative — then delete the directory in the same commit
-(git keeps it), repoint any surviving `build/` record that cites a
-`maestro/` path (`build/spine.md` Where lines above all) at a live
-instance or at git history, and journal the migration. Run the migration as an
-ensemble workflow on lower-tier GPT workers — triage and relocation are
-mechanical, not seat work; review the moved records before the commit.
-If today
-is after 2026-10-07, this note has outstayed its window: tell the user to
-remove it.
-
 ## References
 
 - [references/build-ledger.md](references/build-ledger.md) — the shared
-  ledger contract: header, the per-obligation record format, status
-  vocabulary, and the old single-file migration. Read before the first
-  ledger write.
+  ledger contract: header, the per-obligation record format, and the
+  status vocabulary. Read before the first ledger write.
 - [references/spine-authoring.md](references/spine-authoring.md) — judging
   spine sufficiency, the exemplar record format, and the reading-based
   verification (the blind spine reviews). Read before the first exemplar
@@ -358,7 +323,7 @@ remove it.
   procedure: capability sweeps and their durable records, displacement
   dispositions, and running the closing audit. Read when first judging
   whether an area falls short, before any condemnation call.
-- `workflows/teardown-audit.js` — the closing audit workflow (blind
+- `teardown-audit` (carried workflow) — the closing audit (blind
   re-derivation over the audit window, adjudication against the ledger,
   retired list, and sweep records).
 - [references/model-selection.md](references/model-selection.md) — tier
@@ -368,19 +333,3 @@ remove it.
 - [references/effort-calibration.md](references/effort-calibration.md) —
   effort levels for dispatched workers. Read alongside model-selection
   when pinning a dispatch.
-
-## Probation
-
-**Temporary — sunset 2026-09-22:** this skill's sibling recon, envelope
-stamping, and handover gate were substantially revised, and the queue
-discipline (no capacity deferral; open and blocked items named to the
-user) landed 2026-08-20, so treat friction
-with any of it as signal rather than noise. A defect in the skill itself —
-an instruction that is wrong or ambiguous, a bundled script or workflow
-that is broken, anything it tells you to do that you end up working
-around — is a report this window exists to collect: file it with the
-foundry-request skill once the task allows, or carry it in your session
-report where that skill is not available. A failure of the environment,
-the task, or other tooling is not this skill's defect; handle those as you
-normally would. If today is after 2026-09-22, this note has outstayed its
-window: tell the user to remove it.

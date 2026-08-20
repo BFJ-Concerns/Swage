@@ -46,38 +46,12 @@ warm.
 ## The Closing Audit
 
 Self-authored accounts drift flattering, so the phase does not close on
-your ledger alone. Run the bundled `workflows/teardown-audit.js` before
-handover, on the ensemble runtime:
+your ledger alone. Run the carried `teardown-audit` workflow before
+handover: it ships with this skill, starts by name like any workflow,
+and takes its inputs as workflow args (the script's header comment
+names them; the run's result and journal carry the outcome back).
 
-<!-- foundry:engine-placeholders ensemble-runtime start -->
-
-## Running a workflow
-
-The runtime lives in the `ensemble-workflow` skill — a self-contained Node ≥24 launcher,
-nothing to install. Run a workflow with flags **before** the script path; the result is
-one line of JSON on stdout, logs on stderr:
-
-```bash
-node ~/.claude/skills/ensemble-workflow/scripts/ensemble.mjs --json-args '<json>' ~/.claude/skills/<skill>/workflows/<name>.js > <scratch>/<name>.json 2> <scratch>/<name>.log
-```
-
-`<skill>` is the skill this reference ships with — substitute its bundled workflow
-script's installed path (a skill that documents a concrete command already spells it
-out). Both paths are absolute so the command runs from any
-cwd — launch from the directory the move itself calls for (a blind stage from an empty
-scratch directory, a grounded one from the code repo), never from a directory chosen just
-to make a relative path resolve.
-
-The script **cannot touch the filesystem** (sandboxed): pass every input in `--json-args`,
-and **you are the driver** — write the returned stdout to `<scratch>`, read it, and bring
-the result back. Read each workflow script's header for the inputs it names.
-Everything else — the flags (`--budget`, `--concurrency`, `--timeout`), their defaults and
-when to set them, the live-engine requirement, and the fan-in limits — is owned by the
-`ensemble-workflow` skill; read it before running or authoring a workflow.
-
-<!-- foundry:engine-placeholders ensemble-runtime end -->
-
-The `--json-args` file names the repository, the audit window's base
+The args name the repository, the audit window's base
 commit, the paths to the obligation records (`build/obligations/`),
 `build/retired.md`, and the
 `build/teardowns/` directory, and the output path for the report. Two
