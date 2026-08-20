@@ -314,8 +314,8 @@ configuration applies again.
 
 `Permanent` and `PermanentGlobal` also handle location-scoped approvals —
 trusting a workspace attachment so that file operations within it no longer
-prompt. Location approvals are the only kind recorded against a particular
-space.
+prompt. For tool and location approvals alike, `Permanent` applies only in
+the approving space, while `PermanentGlobal` applies across all spaces.
 
 ### Timeout behaviour
 
