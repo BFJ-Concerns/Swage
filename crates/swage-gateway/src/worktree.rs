@@ -201,7 +201,8 @@ mod tests {
         };
         let host = WorktreeHost::new(config.clone());
         let run_id = Uuid::new_v4();
-        let first = host.provision(run_id, 0, &repo).await.unwrap();
+        let delegate_key = crate::turn::delegate_worktree_key("delegate-call-17");
+        let first = host.provision(run_id, delegate_key, &repo).await.unwrap();
         let second = host.provision(run_id, 1, &repo).await.unwrap();
         tokio::fs::write(first.join("first-only"), "one")
             .await
@@ -213,7 +214,14 @@ mod tests {
         assert!(!first.join("second-only").exists());
         assert_eq!(host.list_run(run_id).await.len(), 2);
         let resumed_host = WorktreeHost::new(config);
-        let resumed = resumed_host.provision(run_id, 0, &repo).await.unwrap();
+        let resumed = resumed_host
+            .provision(
+                run_id,
+                crate::turn::delegate_worktree_key("delegate-call-17"),
+                &repo,
+            )
+            .await
+            .unwrap();
         assert_eq!(resumed, first, "resume must reuse the owned path");
         let listed = Command::new("git")
             .arg("-C")

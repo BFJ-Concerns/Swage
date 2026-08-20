@@ -2,6 +2,7 @@ use super::{
     AgentConfig, Arc, GatewayToolAdvertisementFilter, Path, PathBuf, PermissionConfig, Tool,
     ToolRequireApprovalEntry, Uuid,
 };
+use crate::turn::{agent_workspace_from_policy, append_approved_location_paths};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct WorkspacePermissionSummary {
@@ -105,6 +106,51 @@ pub(crate) async fn load_trusted_workspace_policy(
         }
     }
     policy
+}
+
+/// Resolve a worker placement without widening the dispatching context's
+/// filesystem authority. A placement may select any directory already covered
+/// by the context's active workspace, trusted attachment grants, managed
+/// scratch root, or approved location grants.
+pub(crate) async fn resolve_authorised_worker_directory(
+    state: &crate::state::AppState,
+    space_id: Uuid,
+    context_id: Uuid,
+    active_workspace_attachment_id: Option<Uuid>,
+    requested: &str,
+) -> Result<PathBuf, String> {
+    let candidate = tokio::fs::canonicalize(requested)
+        .await
+        .map_err(|error| format!("cannot resolve worker cwd {requested:?}: {error}"))?;
+    if !candidate.is_dir() {
+        return Err(format!(
+            "worker cwd is not a directory: {}",
+            candidate.display()
+        ));
+    }
+
+    let policy =
+        load_trusted_workspace_policy(&state.storage, space_id, active_workspace_attachment_id)
+            .await;
+    let (_, mut permitted_roots) = agent_workspace_from_policy(&policy, space_id, context_id);
+    let approval_grants = state
+        .session_approval_grants
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone();
+    append_approved_location_paths(&mut permitted_roots, &approval_grants, space_id);
+
+    let authorised = permitted_roots.iter().any(|root| {
+        root.canonicalize()
+            .is_ok_and(|canonical_root| candidate.starts_with(canonical_root))
+    });
+    if !authorised {
+        return Err(format!(
+            "worker cwd {} is outside the dispatching context's permitted workspace roots and location grants",
+            candidate.display()
+        ));
+    }
+    Ok(candidate)
 }
 
 pub(super) fn build_permission_config(
