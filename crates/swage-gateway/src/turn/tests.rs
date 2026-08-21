@@ -8538,11 +8538,12 @@ async fn working_norms_selection_honours_disabled_forced_and_seeded_choices() {
 }
 
 #[tokio::test]
-async fn unrecorded_working_norms_draw_falls_back_before_content_is_chosen() {
+async fn unrecorded_context_choices_use_configured_assembly_and_native_norms() {
     let storage = Arc::new(MockStorage::new());
     let (state, session_id) = make_state_with_storage(vec![], Arc::clone(&storage)).await;
     storage.fail_audit_writes();
     let mut config = swage_config::ResolvedConfig::default();
+    config.context.assembly = "configured-assembly".to_owned();
     config.experimentation.enabled = true;
     config.experimentation.locations.insert(
         crate::experimentation::LOCATION_WORKING_NORMS.to_owned(),
@@ -8556,6 +8557,11 @@ async fn unrecorded_working_norms_draw_falls_back_before_content_is_chosen() {
         .await
         .expect("record failure should fail closed to the default content");
 
+    assert_eq!(
+        choices.assembly_name,
+        "configured-assembly",
+        "an unaudited choice must retain the configured assembly"
+    );
     assert_eq!(
         choices.working_norms_scaffold,
         swage_context::working_norms::WorkingNormsScaffold::Native
