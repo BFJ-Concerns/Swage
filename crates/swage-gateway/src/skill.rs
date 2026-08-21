@@ -77,7 +77,7 @@ pub fn parse_slash_command(input: &str) -> SlashCommandResult {
     }
 }
 
-use std::path::Path;
+use std::{collections::HashSet, path::Path};
 
 use swage_config::model::HierarchyLevel;
 use swage_config::skill::SkillDefinition;
@@ -100,6 +100,8 @@ pub struct ActiveSkillInfo {
     pub name: String,
     /// Full markdown instruction body from the skill definition.
     pub instructions: String,
+    /// Directory against which relative paths in the instructions resolve.
+    pub source_directory: std::path::PathBuf,
     /// Hierarchy level where this skill was discovered.
     pub level: HierarchyLevel,
     /// Convenience flag: true when `level` is `HierarchyLevel::Agent`.
@@ -175,7 +177,41 @@ impl SkillManager {
         if let Some(agent) = agent_dir {
             levels.push((HierarchyLevel::Agent, agent));
         }
-        swage_config::skill::discover_skills(&levels)
+        let (mut authored, mut warnings) = swage_config::skill::discover_skills(&levels);
+        let authored_names = authored
+            .iter()
+            .map(|skill| skill.name.clone())
+            .collect::<HashSet<_>>();
+        for shipped in crate::shipped_skills::SHIPPED_SKILLS {
+            if authored_names.contains(shipped.name) {
+                continue;
+            }
+            let source_path =
+                crate::shipped_skill_projection::skill_dir(root, shipped.name).join("SKILL.md");
+            match swage_config::skill::parse_skill_source(
+                shipped.source,
+                &source_path,
+                shipped.name,
+                HierarchyLevel::Global,
+            ) {
+                Ok(mut definition) => {
+                    definition.shipped = true;
+                    authored.push(definition);
+                }
+                Err(warning) => warnings.push(warning),
+            }
+        }
+        authored.sort_by(|left, right| {
+            let specificity = |level: &HierarchyLevel| match level {
+                HierarchyLevel::Agent => 0,
+                HierarchyLevel::Space => 1,
+                HierarchyLevel::Global => 2,
+            };
+            specificity(&left.level)
+                .cmp(&specificity(&right.level))
+                .then_with(|| left.name.cmp(&right.name))
+        });
+        (authored, warnings)
     }
 
     /// Activate a skill for a session.
@@ -292,6 +328,11 @@ impl SkillManager {
                         ActiveSkillInfo {
                             name: def.name.clone(),
                             instructions: def.instructions.clone(),
+                            source_directory: def
+                                .source_path
+                                .parent()
+                                .expect("skill source has a parent directory")
+                                .to_path_buf(),
                             level: def.level.clone(),
                             is_agent_level: is_agent,
                             activation_order: order,
@@ -352,6 +393,7 @@ mod tests {
             tools: vec![],
             level,
             source_path: PathBuf::from(format!("/skills/{name}/SKILL.md")),
+            shipped: false,
         }
     }
 
@@ -599,7 +641,10 @@ mod tests {
             Some(agent_dir.path()),
         );
 
-        assert_eq!(skills.len(), 3, "all three skills should be discovered");
+        for name in ["global-skill", "space-skill", "agent-skill"] {
+            assert!(skills.iter().any(|skill| skill.name == name));
+        }
+        assert_eq!(skills.iter().filter(|skill| skill.shipped).count(), 5);
         assert!(warnings.is_empty());
     }
 
@@ -614,8 +659,69 @@ mod tests {
 
         let (skills, _) = SkillManager::discover_available(root_dir.path(), space_dir.path(), None);
 
-        assert_eq!(skills.len(), 2);
+        assert_eq!(skills.len(), 7);
         assert!(skills.iter().all(|s| s.level != CfgLevel::Agent));
+    }
+
+    #[test]
+    fn authored_skills_shadow_shipped_definitions_at_every_level() {
+        for level in [CfgLevel::Global, CfgLevel::Space, CfgLevel::Agent] {
+            let root = TempDir::new().unwrap();
+            let space = TempDir::new().unwrap();
+            let agent = TempDir::new().unwrap();
+            let authored_base = match level {
+                CfgLevel::Global => root.path(),
+                CfgLevel::Space => space.path(),
+                CfgLevel::Agent => agent.path(),
+            };
+            write_skill_md(authored_base, "commission", "Authored commission.");
+
+            let (skills, warnings) =
+                SkillManager::discover_available(root.path(), space.path(), Some(agent.path()));
+            assert!(warnings.is_empty());
+            let matching = skills
+                .iter()
+                .filter(|skill| skill.name == "commission")
+                .collect::<Vec<_>>();
+            assert_eq!(matching.len(), 1);
+            assert_eq!(matching[0].level, level);
+            assert!(!matching[0].shipped);
+            assert_eq!(matching[0].description, "Authored commission.");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn projected_mutation_cannot_change_shipped_activation_body() {
+        let root = TempDir::new().unwrap();
+        let space = root.path().join("spaces/default");
+        crate::shipped_skill_projection::regenerate(root.path())
+            .await
+            .expect("render projection");
+        let projected =
+            crate::shipped_skill_projection::skill_dir(root.path(), "commission").join("SKILL.md");
+        std::fs::write(projected, "---\ndescription: tampered\n---\nTAMPERED BODY").unwrap();
+
+        let (available, warnings) = SkillManager::discover_available(root.path(), &space, None);
+        assert!(warnings.is_empty());
+        let commission = available
+            .iter()
+            .find(|skill| skill.name == "commission")
+            .expect("compiled commission skill");
+        assert!(commission.shipped);
+        assert_ne!(commission.description, "tampered");
+        assert!(!commission.instructions.contains("TAMPERED BODY"));
+
+        let (storage, session_id) = make_storage_with_session().await;
+        let tokeniser = TiktokenTokeniser::new("gpt-4o");
+        SkillManager::activate(session_id, "commission", &available, &storage, &tokeniser)
+            .await
+            .expect("activate shipped skill");
+        let active = SkillManager::build_active_skills(session_id, &available, &storage)
+            .await
+            .expect("load active skill");
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].instructions, commission.instructions);
+        assert!(!active[0].instructions.contains("TAMPERED BODY"));
     }
 
     // -----------------------------------------------------------------------

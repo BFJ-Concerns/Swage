@@ -13,20 +13,22 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use swage_core::{ChatMessage, CompletionRequest, Role, StorageError};
 use swage_protocol::client::workflow::{
-    CreateWorkflowScriptRequest, StartInlineWorkflowRunRequest, StartWorkflowRunRequest,
-    UpdateWorkflowScriptRequest, WorkflowBudget, WorkflowRun, WorkflowRunDetailResponse,
-    WorkflowRunListResponse, WorkflowRunState, WorkflowScript, WorkflowScriptListResponse,
+    CreateWorkflowScriptRequest, PostWorkflowRunEventRequest, PostWorkflowRunEventResponse,
+    StartInlineWorkflowRunRequest, StartWorkflowRunRequest, UpdateWorkflowScriptRequest,
+    WorkflowBudget, WorkflowRun, WorkflowRunDetailResponse, WorkflowRunEvent,
+    WorkflowRunEventSource, WorkflowRunListResponse, WorkflowRunState, WorkflowScript,
+    WorkflowScriptListResponse,
 };
 use swage_storage::WorkflowJournalRecord;
 use swage_storage::{
     NewAuditEvent, NewSession, NewThread, NewWorkflowJournalIntent, NewWorkflowRun,
-    NewWorkflowRunEvent, NewWorkflowScript, Storage, ThreadStore, WorkflowRunRecord,
-    WorkflowScriptRecord,
+    NewWorkflowRunEvent, NewWorkflowScript, Storage, ThreadStore, WorkflowRunEventRecord,
+    WorkflowRunRecord, WorkflowScriptRecord,
 };
 use swage_workflow::{
-    AgentCallRequest, AgentCallResult, EffectPayload, EffectReceipt, EffectRecoveryHost,
-    EngineLimits, GateRequest, RunEventPost, ScriptCapabilities, WorkflowCallRequest,
-    WorkflowEngine, WorkflowHost, journal_args_hash, recover_started_effect,
+    AgentCallRequest, AgentCallResult, AwaitEventRequest, EffectPayload, EffectReceipt,
+    EffectRecoveryHost, EngineLimits, GateRequest, RunEventPost, ScriptCapabilities,
+    WorkflowCallRequest, WorkflowEngine, WorkflowHost, journal_args_hash, recover_started_effect,
 };
 use tokio::sync::{Mutex, Notify, Semaphore, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -269,6 +271,7 @@ fn journal_wire(
         "workflow_call" => WorkflowJournalEntryKind::WorkflowCall,
         "timer" => WorkflowJournalEntryKind::Timer,
         "event" => WorkflowJournalEntryKind::Event,
+        "await_event" => WorkflowJournalEntryKind::AwaitEvent,
         "gate" => WorkflowJournalEntryKind::Gate,
         "budget" => WorkflowJournalEntryKind::Budget,
         "wind_down" => WorkflowJournalEntryKind::WindDown,
@@ -548,6 +551,10 @@ enum HostCommand {
         event: RunEventPost,
         reply: oneshot::Sender<Result<Value, String>>,
     },
+    AwaitEvent {
+        request: AwaitEventRequest,
+        reply: oneshot::Sender<Result<Value, String>>,
+    },
     Gate {
         request: GateRequest,
         cancellation: CancellationToken,
@@ -686,6 +693,20 @@ impl WorkflowHost for ChannelWorkflowHost {
         receive
             .await
             .map_err(|_| "workflow host dropped event reply".to_string())?
+    }
+
+    async fn await_run_event(
+        &self,
+        request: AwaitEventRequest,
+        _cancellation: CancellationToken,
+    ) -> Result<Value, String> {
+        let (reply, receive) = oneshot::channel();
+        self.tx
+            .send(HostCommand::AwaitEvent { request, reply })
+            .map_err(|_| "workflow host stopped".to_string())?;
+        receive
+            .await
+            .map_err(|_| "workflow host dropped awaited-event reply".to_string())?
     }
 
     async fn evaluate_wake_gate(
@@ -830,7 +851,12 @@ async fn run_ephemeral_agent_call(
     };
     let (events, _events_rx) = mpsc::unbounded_channel::<ServerEvent>();
     let request_schema = request.schema.clone();
-    let processing = crate::turn::process_turn_with_existing_turn(
+    let composition = crate::turn::DispatchContextComposition {
+        elements: request.elements.clone(),
+        variables: request.variables.clone(),
+        assembly: request.assembly.clone(),
+    };
+    let processing = crate::turn::process_turn_with_composition(
         state,
         session_id,
         Some(thread_id),
@@ -841,6 +867,7 @@ async fn run_ephemeral_agent_call(
         Some(request.max_attempts.saturating_sub(1)),
         None,
         crate::turn::TurnAttendance::Unattended,
+        composition,
     );
     tokio::pin!(processing);
     tokio::select! {
@@ -991,8 +1018,10 @@ async fn run_host_commands_inner(
     let mut replay_agent_orders = replay
         .iter()
         .filter(|entry| {
-            matches!(entry.kind.as_str(), "agent_call" | "workflow_call" | "gate")
-                && entry.status == "completed"
+            matches!(
+                entry.kind.as_str(),
+                "agent_call" | "workflow_call" | "gate" | "await_event"
+            ) && entry.status == "completed"
         })
         .filter_map(|entry| entry.completed_order.map(|order| (entry.seq, order)))
         .collect::<Vec<_>>();
@@ -1669,16 +1698,16 @@ async fn run_host_commands_inner(
                 };
                 let _ = reply.send(result);
             }
-            HostCommand::PostEvent { event, reply } => {
+            HostCommand::PostEvent { mut event, reply } => {
                 // Kind validation consumes no journal seq, so it is
                 // deterministic across live runs and replays alike.
-                if !matches!(event.kind.as_str(), "completion" | "failure" | "escalation") {
-                    let _ = reply.send(Err(format!(
-                        "RunEventError: unknown event kind {:?} (completion, failure, escalation)",
-                        event.kind
-                    )));
-                    continue;
-                }
+                event.kind = match normalise_run_event_kind(&event.kind) {
+                    Ok(kind) => kind,
+                    Err(error) => {
+                        let _ = reply.send(Err(error));
+                        continue;
+                    }
+                };
                 let current_seq = seq.fetch_add(1, Ordering::SeqCst);
                 let request_json = serde_json::json!({
                     "action": "post", "kind": event.kind, "payload": event.payload,
@@ -1722,6 +1751,134 @@ async fn run_host_commands_inner(
                     }
                 };
                 let _ = reply.send(result);
+            }
+            HostCommand::AwaitEvent { request, reply } => {
+                if request.kinds.is_empty() {
+                    let _ = reply.send(Err(
+                        "RunEventError: kinds must contain at least one namespaced event kind"
+                            .into(),
+                    ));
+                    continue;
+                }
+                let kinds = match request
+                    .kinds
+                    .iter()
+                    .map(|kind| normalise_run_event_kind(kind))
+                    .collect::<Result<Vec<_>, _>>()
+                {
+                    Ok(kinds) => kinds,
+                    Err(error) => {
+                        let _ = reply.send(Err(error));
+                        continue;
+                    }
+                };
+                let current_seq = seq.fetch_add(1, Ordering::SeqCst);
+                let request_json = serde_json::json!({"action": "await", "kinds": kinds});
+                let hash = journal_args_hash(&request_json);
+                let existing = replay.get(current_seq as usize).cloned();
+                if existing
+                    .as_ref()
+                    .is_some_and(|entry| entry.args_hash != hash)
+                {
+                    let _ = reply.send(Err("NondeterministicReplayError".into()));
+                    continue;
+                }
+                if let Some(entry) = existing
+                    .as_ref()
+                    .filter(|entry| entry.status == "completed")
+                {
+                    if let Some(rank) = replay_agent_ranks.get(&current_seq).copied() {
+                        await_replay_release(rank, &replay_release_rank, &replay_release_notify)
+                            .await;
+                    }
+                    let _ =
+                        reply.send(entry.result.clone().ok_or_else(|| {
+                            "completed await-event entry has no result".to_string()
+                        }));
+                    continue;
+                }
+                if let Some(entry) = existing.as_ref().filter(|entry| entry.status == "failed") {
+                    let _ = reply.send(Err(entry
+                        .error_message
+                        .clone()
+                        .unwrap_or_else(|| "recorded await-event failure".into())));
+                    continue;
+                }
+                let entry_id = match existing {
+                    Some(entry) => entry.id,
+                    None => match state
+                        .create_workflow_journal_intent(NewWorkflowJournalIntent {
+                            run_id,
+                            seq: current_seq,
+                            kind: "await_event".into(),
+                            args_hash: hash,
+                            request: request_json,
+                            effect_kind: None,
+                            idempotency_key: None,
+                            target_kind: None,
+                        })
+                        .await
+                    {
+                        Ok(entry) => entry.id,
+                        Err(error) => {
+                            let _ = reply.send(Err(error.to_string()));
+                            continue;
+                        }
+                    },
+                };
+                match complete_await_event(&state, run_id, entry_id, current_seq, &kinds).await {
+                    Ok(Some(result)) => {
+                        let _ = reply.send(Ok(result));
+                    }
+                    Ok(None) => {
+                        let distant = chrono::Utc::now() + chrono::Duration::days(36500);
+                        match state
+                            .storage
+                            .park_workflow_run_if_no_matching_events(run_id, distant, &kinds)
+                            .await
+                        {
+                            Ok(true) => {
+                                parked_due = Some(distant);
+                                park.cancel();
+                                parked_replies.push(reply);
+                            }
+                            Ok(false) => {
+                                // The pending read and park are deliberately
+                                // separated by script work. The storage CAS
+                                // closes that window: if a matching post won,
+                                // consume it now instead of sleeping past it.
+                                match complete_await_event(
+                                    &state,
+                                    run_id,
+                                    entry_id,
+                                    current_seq,
+                                    &kinds,
+                                )
+                                .await
+                                {
+                                    Ok(Some(result)) => {
+                                        let _ = reply.send(Ok(result));
+                                    }
+                                    Ok(None) => {
+                                        let _ = reply.send(Err(
+                                            "WorkflowCancelledError: run changed state before event wait could park"
+                                                .into(),
+                                        ));
+                                    }
+                                    Err(error) => {
+                                        let _ = reply.send(Err(error));
+                                    }
+                                }
+                            }
+                            Err(error) => {
+                                let _ = reply.send(Err(error.to_string()));
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        let _ = reply.send(Err(error));
+                    }
+                }
             }
             HostCommand::DeliverEvents { up_to_seq, reply } => {
                 let current_seq = seq.fetch_add(1, Ordering::SeqCst);
@@ -2175,17 +2332,189 @@ async fn complete_event_post(
             journal_entry_id: entry_id,
             kind: event.kind,
             payload: event.payload,
+            source_surface: "script".into(),
+            source_agent_id: None,
+            source_session_id: None,
+            source_turn_id: None,
         })
         .await
         .map_err(|error| error.to_string())?;
     let result = serde_json::json!({
         "seq": record.seq, "kind": record.kind, "payload": record.payload,
+        "source": {"surface": record.source_surface, "agent_id": record.source_agent_id,
+            "session_id": record.source_session_id, "turn_id": record.source_turn_id},
     });
     state
         .complete_workflow_journal_entry(entry_id, result.clone())
         .await
         .map_err(|error| error.to_string())?;
     Ok(result)
+}
+
+#[derive(Clone)]
+pub(crate) struct RunEventSource {
+    pub surface: &'static str,
+    pub agent_id: Option<String>,
+    pub session_id: Option<Uuid>,
+    pub turn_id: Option<Uuid>,
+}
+
+/// The one external post service used by operator, agent, and future posters.
+pub(crate) async fn post_external_run_event(
+    state: &AppState,
+    run_id: Uuid,
+    request: PostWorkflowRunEventRequest,
+    source: RunEventSource,
+) -> Result<PostWorkflowRunEventResponse, ApiError> {
+    let kind = normalise_run_event_kind(&request.kind).map_err(ApiError::validation)?;
+    let run = state
+        .storage
+        .get_workflow_run(run_id)
+        .await
+        .map_err(internal)?
+        .ok_or_else(|| ApiError::not_found("workflow run", run_id))?;
+    if matches!(run.state.as_str(), "completed" | "failed" | "cancelled") {
+        return Err(ApiError::conflict(format!(
+            "workflow run {run_id} is already {}",
+            run.state
+        )));
+    }
+    let record = state
+        .storage
+        .create_workflow_run_event(NewWorkflowRunEvent {
+            run_id,
+            journal_entry_id: Uuid::new_v4(),
+            kind,
+            payload: request.payload,
+            source_surface: source.surface.into(),
+            source_agent_id: source.agent_id,
+            source_session_id: source.session_id,
+            source_turn_id: source.turn_id,
+        })
+        .await
+        .map_err(internal)?;
+    let wake_provisioned = state
+        .storage
+        .make_parked_workflow_run_due(run_id)
+        .await
+        .map_err(internal)?;
+    if wake_provisioned {
+        resume_owed_workflow_runs(state).await;
+    }
+    Ok(PostWorkflowRunEventResponse {
+        event: WorkflowRunEvent {
+            seq: record.seq,
+            kind: record.kind,
+            payload: record.payload,
+            source: WorkflowRunEventSource {
+                surface: record.source_surface,
+                agent_id: record.source_agent_id,
+                session_id: record.source_session_id,
+                turn_id: record.source_turn_id,
+            },
+        },
+        wake_provisioned,
+    })
+}
+
+pub async fn post_operator_run_event(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(request): Json<PostWorkflowRunEventRequest>,
+) -> Result<Json<PostWorkflowRunEventResponse>, ApiError> {
+    Ok(Json(
+        post_external_run_event(
+            &state,
+            id,
+            request,
+            RunEventSource {
+                surface: "operator",
+                agent_id: None,
+                session_id: None,
+                turn_id: None,
+            },
+        )
+        .await?,
+    ))
+}
+
+fn normalise_run_event_kind(kind: &str) -> Result<String, String> {
+    let kind = kind.trim();
+    let segments = kind.split(['.', ':', '/']).collect::<Vec<_>>();
+    let namespaced = segments.len() >= 2 && segments.iter().all(|segment| !segment.is_empty());
+    let valid_chars = kind.chars().all(|character| {
+        character.is_ascii_alphanumeric() || matches!(character, '.' | ':' | '/' | '_' | '-')
+    });
+    if kind.is_empty() || !namespaced || !valid_chars {
+        return Err(format!(
+            "RunEventError: event kind {kind:?} must be a non-empty namespaced name using letters, numbers, '.', ':', '/', '_' or '-'"
+        ));
+    }
+    Ok(kind.to_string())
+}
+
+async fn complete_await_event(
+    state: &AppState,
+    run_id: Uuid,
+    entry_id: Uuid,
+    delivery_seq: u64,
+    kinds: &[String],
+) -> Result<Option<Value>, String> {
+    // Delivery and journal settlement are separate writes. If the process
+    // stopped between them, the delivery stamp identifies the event this
+    // started await already claimed; settle it before considering newer
+    // pending rows.
+    let events = state
+        .storage
+        .list_workflow_run_events(run_id)
+        .await
+        .map_err(|error| error.to_string())?;
+    if let Some(claimed) = events
+        .iter()
+        .find(|event| event.delivered_wake_seq == Some(delivery_seq))
+    {
+        let result = await_event_result(claimed);
+        state
+            .complete_workflow_journal_entry(entry_id, result.clone())
+            .await
+            .map_err(|error| error.to_string())?;
+        return Ok(Some(result));
+    }
+    let pending = state
+        .storage
+        .list_pending_workflow_run_events(run_id)
+        .await
+        .map_err(|error| error.to_string())?;
+    let Some(matched) = pending.iter().find(|event| kinds.contains(&event.kind)) else {
+        return Ok(None);
+    };
+    let delivered = state
+        .storage
+        .mark_workflow_run_event_delivered(run_id, matched.seq, delivery_seq)
+        .await
+        .map_err(|error| error.to_string())?;
+    if !delivered {
+        return Err(format!(
+            "RunEventError: event {} was delivered concurrently",
+            matched.seq
+        ));
+    }
+    let result = await_event_result(matched);
+    state
+        .complete_workflow_journal_entry(entry_id, result.clone())
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(Some(result))
+}
+
+fn await_event_result(event: &WorkflowRunEventRecord) -> Value {
+    serde_json::json!({
+        "seq": event.seq,
+        "kind": event.kind,
+        "payload": event.payload,
+        "source": {"surface": event.source_surface, "agent_id": event.source_agent_id,
+            "session_id": event.source_session_id, "turn_id": event.source_turn_id},
+    })
 }
 
 async fn complete_events_delivery(
@@ -3435,7 +3764,8 @@ mod tests {
     use super::*;
     use swage_protocol::client::workflow::{WorkflowJournalEntryKind, WorkflowJournalEntryStatus};
     use swage_storage::{
-        SessionStore, SpaceStore, SqliteStorage, Storage, TurnStore, WorkflowStore,
+        ContextSnapshotStore, SessionStore, SpaceStore, SqliteStorage, Storage, TurnStore,
+        WorkflowStore,
     };
     use swage_workflow::AgentSessionRef;
 
@@ -3838,6 +4168,9 @@ mod tests {
                 max_attempts: 1,
                 label: None,
                 session: None,
+                elements: None,
+                variables: None,
+                assembly: None,
             },
             CancellationToken::new(),
         )
@@ -3863,6 +4196,186 @@ mod tests {
             calls[0].result.as_deref(),
             Some("{\"output\":\"workflow\"}")
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn workflow_journal_preserves_and_recomposes_call_scoped_context() {
+        let swage_home = crate::test_support::SwageHomeGuard::new();
+        std::fs::create_dir_all(swage_home.path().join("assemblies"))
+            .expect("create assemblies directory");
+        std::fs::create_dir_all(swage_home.path().join("elements"))
+            .expect("create elements directory");
+        std::fs::write(
+            swage_home.path().join("assemblies/focused.js"),
+            "for (const element of elements) add(element.render());",
+        )
+        .expect("write named assembly");
+        std::fs::write(
+            swage_home.path().join("elements/current-work.md"),
+            "Owner: {{owner}}",
+        )
+        .expect("write selected element");
+        std::fs::write(
+            swage_home.path().join("elements/unrequested.md"),
+            "Must not reach the child",
+        )
+        .expect("write unrequested element");
+
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let run = storage
+            .create_workflow_run(NewWorkflowRun {
+                space_id: space.id,
+                parent_run_id: None,
+                parent_seq: None,
+                script_version_id: None,
+                source: Some("return null".into()),
+                source_hash: source_hash("return null"),
+                args: Value::Null,
+                budget: serde_json::json!({}),
+                engine_version: "test".into(),
+                dispatch_bound_agent_ids: vec![],
+            })
+            .await
+            .expect("run");
+        let provider = Arc::new(ScriptedRecordingProvider {
+            outputs: std::sync::Mutex::new(std::collections::VecDeque::from([
+                scripted_text_output("first child result"),
+                scripted_text_output("resumed child result"),
+            ])),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let (tx, rx) = mpsc::unbounded_channel();
+        let task = tokio::spawn(run_host_commands(
+            state,
+            run.id,
+            space.id,
+            vec![],
+            None,
+            WorkflowBudget {
+                max_agent_calls: None,
+                max_total_tokens: None,
+                reserved_closing_tokens: None,
+                max_concurrent_agent_calls: None,
+            },
+            vec![],
+            Arc::new(AtomicU32::new(0)),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(Mutex::new(std::collections::HashMap::new())),
+            CancellationToken::new(),
+            PARK_TIMER_THRESHOLD_MS,
+            rx,
+        ));
+        let request = AgentCallRequest {
+            prompt: "Use the briefing".into(),
+            agent: "default".into(),
+            model: None,
+            schema: None,
+            max_attempts: 1,
+            label: None,
+            session: None,
+            elements: Some(vec!["current-work".into()]),
+            variables: Some(std::collections::BTreeMap::from([(
+                "owner".into(),
+                "journal owner".into(),
+            )])),
+            assembly: Some("focused".into()),
+        };
+        let (reply, receive) = oneshot::channel();
+        tx.send(HostCommand::Agent {
+            request: request.clone(),
+            cancellation: CancellationToken::new(),
+            reply,
+        })
+        .expect("send initial agent call");
+        let first_result = receive
+            .await
+            .expect("receive initial agent result")
+            .expect("initial agent call");
+
+        let initial_journal = storage
+            .list_workflow_journal(run.id)
+            .await
+            .expect("read initial journal");
+        assert_eq!(initial_journal.len(), 1);
+        let expected = serde_json::to_value(&request).expect("serialise expected request");
+        assert_eq!(initial_journal[0].request, expected);
+        let replayed_request: AgentCallRequest =
+            serde_json::from_value(initial_journal[0].request.clone())
+                .expect("reconstruct agent request from journal");
+
+        let (reply, receive) = oneshot::channel();
+        tx.send(HostCommand::Agent {
+            request: replayed_request,
+            cancellation: CancellationToken::new(),
+            reply,
+        })
+        .expect("send replayed agent call");
+        let replayed_result = receive
+            .await
+            .expect("receive replayed agent result")
+            .expect("replayed agent call");
+        drop(tx);
+        task.await.expect("host loop");
+
+        let journal = storage
+            .list_workflow_journal(run.id)
+            .await
+            .expect("read journal");
+        assert_eq!(journal.len(), 2);
+        assert!(journal.iter().all(|entry| entry.request == expected));
+
+        let mut reports = Vec::new();
+        for result in [&first_result, &replayed_result] {
+            let report = storage
+                .get_snapshot(result.turn_id.expect("turn id"))
+                .await
+                .expect("read snapshot")
+                .expect("workflow child assembly report");
+            let mut report: Value = serde_json::from_str(&report).expect("report JSON");
+            assert_eq!(report["assembly_name"], "focused");
+            assert!(
+                report["elements"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|element| element["name"] == "current-work")
+            );
+            assert!(
+                report["elements"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|element| element["name"] != "unrequested")
+            );
+            report.as_object_mut().unwrap().remove("duration");
+            report.as_object_mut().unwrap().remove("provider_visible");
+            report.as_object_mut().unwrap().remove("total_tokens");
+            if let Some(orientation) = report["elements"].as_array_mut().and_then(|elements| {
+                elements
+                    .iter_mut()
+                    .find(|element| element["name"] == "orientation")
+            }) {
+                orientation.as_object_mut().unwrap().remove("token_count");
+            }
+            reports.push(report);
+        }
+        assert_eq!(reports[0], reports[1]);
+        let requests = provider.requests.lock().expect("provider requests");
+        assert!(requests.iter().all(|request| {
+            request
+                .messages
+                .iter()
+                .any(|message| message.text_content().contains("Owner: journal owner"))
+        }));
     }
 
     #[test]
@@ -4701,6 +5214,9 @@ mod tests {
             max_attempts: 1,
             label: None,
             session: None,
+            elements: None,
+            variables: None,
+            assembly: None,
         };
         let first_cancellation = CancellationToken::new();
         let (first_reply, first_receive) = oneshot::channel();
@@ -4858,6 +5374,9 @@ mod tests {
                 max_attempts: 1,
                 label: None,
                 session: None,
+                elements: None,
+                variables: None,
+                assembly: None,
             },
             cancellation: CancellationToken::new(),
             reply: first_reply,
@@ -4910,6 +5429,9 @@ mod tests {
                 max_attempts: 1,
                 label: None,
                 session: Some(token.clone()),
+                elements: None,
+                variables: None,
+                assembly: None,
             },
             cancellation: CancellationToken::new(),
             reply: second_reply,
@@ -5036,6 +5558,9 @@ mod tests {
                     session_id: foreign_session.id,
                     thread_id: Uuid::new_v4(),
                 }),
+                elements: None,
+                variables: None,
+                assembly: None,
             },
             cancellation: CancellationToken::new(),
             reply,
@@ -5285,7 +5810,7 @@ mod tests {
             run.id,
             entry.id,
             RunEventPost {
-                kind: "completion".into(),
+                kind: "worker.completion".into(),
                 payload: serde_json::json!({"worker": "w1"}),
             },
         )
@@ -5414,6 +5939,389 @@ mod tests {
         .unwrap_or_else(|_| panic!("run {run_id} did not reach {expected}"))
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn operator_event_wakes_awaiting_run_and_replay_returns_recorded_answer() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind gateway listener");
+        let address = listener.local_addr().expect("gateway address");
+        let server = tokio::spawn({
+            let state = state.clone();
+            async move {
+                axum::serve(listener, crate::server::build_router(state))
+                    .await
+                    .expect("serve gateway router");
+            }
+        });
+        let events_url = |run_id| format!("http://{address}/api/workflow-runs/{run_id}/events");
+        let client = reqwest::Client::new();
+        let source = r#"
+            const answer = await awaitEvent({ kinds: ["operator.decision"] });
+            return { verdict: answer.payload.verdict, source: answer.source.surface };
+        "#;
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(space.id),
+            Json(StartInlineWorkflowRunRequest {
+                source: source.into(),
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start awaiting run");
+        wait_for_run_state(&storage, started.id, "parked").await;
+
+        let invalid = client
+            .post(events_url(started.id))
+            .json(&PostWorkflowRunEventRequest {
+                kind: "not namespaced".into(),
+                payload: Value::Null,
+            })
+            .send()
+            .await
+            .expect("send invalid operator post");
+        assert_eq!(invalid.status().as_u16(), 422);
+        assert_eq!(
+            invalid
+                .json::<Value>()
+                .await
+                .expect("decode invalid operator response")["code"],
+            "validation_error"
+        );
+
+        let unrelated = client
+            .post(events_url(started.id))
+            .json(&PostWorkflowRunEventRequest {
+                kind: "extension.future-kind".into(),
+                payload: serde_json::json!({"online": true}),
+            })
+            .send()
+            .await
+            .expect("send unrelated operator post")
+            .error_for_status()
+            .expect("unrelated operator post status")
+            .json::<PostWorkflowRunEventResponse>()
+            .await
+            .expect("decode unrelated operator response");
+        assert!(unrelated.wake_provisioned);
+        wait_for_run_state(&storage, started.id, "parked").await;
+
+        let response = client
+            .post(events_url(started.id))
+            .json(&PostWorkflowRunEventRequest {
+                kind: " operator.decision ".into(),
+                payload: serde_json::json!({"nonce": "n-1", "verdict": "accept"}),
+            })
+            .send()
+            .await
+            .expect("send operator post")
+            .error_for_status()
+            .expect("operator post status")
+            .json::<PostWorkflowRunEventResponse>()
+            .await
+            .expect("decode operator response");
+        assert!(response.wake_provisioned);
+        assert_eq!(response.event.kind, "operator.decision");
+        let completed = wait_for_run_state(&storage, started.id, "completed").await;
+        assert_eq!(
+            completed.final_output,
+            Some(serde_json::json!({"verdict": "accept", "source": "operator"}))
+        );
+
+        let events = storage
+            .list_workflow_run_events(started.id)
+            .await
+            .expect("events");
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].kind, "extension.future-kind");
+        assert_eq!(events[1].kind, "operator.decision");
+        assert!(
+            events
+                .iter()
+                .all(|event| event.source_surface == "operator")
+        );
+        assert!(events[0].delivered_at.is_none());
+        assert!(events[1].delivered_at.is_some());
+        let journal = storage
+            .list_workflow_journal(started.id)
+            .await
+            .expect("journal");
+        assert_eq!(journal.len(), 1);
+        assert_eq!(journal[0].kind, "await_event");
+        assert_eq!(journal[0].status, "completed");
+
+        storage
+            .update_workflow_run_state(started.id, "interrupted", None, None, None)
+            .await
+            .expect("replay state");
+        let replayed = resume_workflow_run_record(
+            state.clone(),
+            storage.get_workflow_run(started.id).await.unwrap().unwrap(),
+        )
+        .await
+        .expect("replay run");
+        assert_eq!(replayed.state, WorkflowRunState::Running);
+        let replayed = wait_for_run_state(&storage, started.id, "completed").await;
+        assert_eq!(replayed.final_output, completed.final_output);
+        assert_eq!(
+            storage
+                .list_workflow_run_events(started.id)
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+        server.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sequential_same_kind_awaits_each_receive_one_queued_event() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(space.id),
+            Json(StartInlineWorkflowRunRequest {
+                source: r#"
+                    await awaitEvent({ kinds: ["control.start"] });
+                    const first = await awaitEvent({ kinds: ["operator.decision"] });
+                    const second = await awaitEvent({ kinds: ["operator.decision"] });
+                    return {
+                        seqs: [first.seq, second.seq],
+                        verdicts: [first.payload.verdict, second.payload.verdict],
+                    };
+                "#
+                .into(),
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start awaiting run");
+        wait_for_run_state(&storage, started.id, "parked").await;
+
+        let Json(_) = post_operator_run_event(
+            State(state.clone()),
+            Path(started.id),
+            Json(PostWorkflowRunEventRequest {
+                kind: "operator.decision".into(),
+                payload: serde_json::json!({"verdict": "first"}),
+            }),
+        )
+        .await
+        .expect("queue first same-kind answer");
+        wait_for_run_state(&storage, started.id, "parked").await;
+        let Json(_) = post_operator_run_event(
+            State(state.clone()),
+            Path(started.id),
+            Json(PostWorkflowRunEventRequest {
+                kind: "operator.decision".into(),
+                payload: serde_json::json!({"verdict": "second"}),
+            }),
+        )
+        .await
+        .expect("queue second same-kind answer");
+        wait_for_run_state(&storage, started.id, "parked").await;
+        let Json(_) = post_operator_run_event(
+            State(state),
+            Path(started.id),
+            Json(PostWorkflowRunEventRequest {
+                kind: "control.start".into(),
+                payload: Value::Null,
+            }),
+        )
+        .await
+        .expect("release queued awaits");
+
+        let completed = wait_for_run_state(&storage, started.id, "completed").await;
+        assert_eq!(
+            completed.final_output,
+            Some(serde_json::json!({
+                "seqs": [1, 2],
+                "verdicts": ["first", "second"],
+            }))
+        );
+        let events = storage
+            .list_workflow_run_events(started.id)
+            .await
+            .expect("events");
+        assert_eq!(events.len(), 3);
+        assert!(events.iter().all(|event| event.delivered_at.is_some()));
+        assert_ne!(events[0].delivered_wake_seq, events[1].delivered_wake_seq);
+        assert_eq!(events[0].delivered_wake_seq, Some(1));
+        assert_eq!(events[1].delivered_wake_seq, Some(2));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn replay_recovers_event_claimed_before_await_journal_completion() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(space.id),
+            Json(StartInlineWorkflowRunRequest {
+                source: r#"
+                    const answer = await awaitEvent({ kinds: ["operator.decision"] });
+                    return { seq: answer.seq, verdict: answer.payload.verdict };
+                "#
+                .into(),
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start awaiting run");
+        wait_for_run_state(&storage, started.id, "parked").await;
+
+        let journal = storage
+            .list_workflow_journal(started.id)
+            .await
+            .expect("started await journal");
+        assert_eq!(journal.len(), 1);
+        assert_eq!(journal[0].status, "started");
+        let event = storage
+            .create_workflow_run_event(NewWorkflowRunEvent {
+                run_id: started.id,
+                journal_entry_id: Uuid::new_v4(),
+                kind: "operator.decision".into(),
+                payload: serde_json::json!({"verdict": "accept"}),
+                source_surface: "operator".into(),
+                source_agent_id: None,
+                source_session_id: None,
+                source_turn_id: None,
+            })
+            .await
+            .expect("persist event");
+        assert!(
+            storage
+                .mark_workflow_run_event_delivered(started.id, event.seq, journal[0].seq)
+                .await
+                .expect("simulate delivery before crash")
+        );
+        storage
+            .update_workflow_run_state(started.id, "interrupted", None, None, None)
+            .await
+            .expect("simulate process interruption");
+
+        let replayed = resume_workflow_run_record(
+            state,
+            storage
+                .get_workflow_run(started.id)
+                .await
+                .expect("get interrupted run")
+                .expect("interrupted run"),
+        )
+        .await
+        .expect("resume interrupted run");
+        assert_eq!(replayed.state, WorkflowRunState::Running);
+        let completed = wait_for_run_state(&storage, started.id, "completed").await;
+        assert_eq!(
+            completed.final_output,
+            Some(serde_json::json!({"seq": event.seq, "verdict": "accept"}))
+        );
+        let journal = storage
+            .list_workflow_journal(started.id)
+            .await
+            .expect("recovered await journal");
+        assert_eq!(journal[0].status, "completed");
+        assert_eq!(journal[0].result.as_ref().unwrap()["seq"], event.seq);
+        assert!(
+            storage
+                .list_pending_workflow_run_events(started.id)
+                .await
+                .expect("pending events")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn script_event_operations_reject_invalid_kinds_without_journalling_them() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let Json(started) = start_inline_run(
+            State(state),
+            Path(space.id),
+            Json(StartInlineWorkflowRunRequest {
+                source: r#"
+                    let postError;
+                    let awaitError;
+                    try { await postEvent("", null); }
+                    catch (error) { postError = error.message; }
+                    try { await awaitEvent({ kinds: ["operator..decision"] }); }
+                    catch (error) { awaitError = error.message; }
+                    return { postError, awaitError };
+                "#
+                .into(),
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start invalid-kind run");
+
+        let completed = wait_for_run_state(&storage, started.id, "completed").await;
+        let output = completed.final_output.expect("invalid-kind output");
+        assert!(
+            output["postError"]
+                .as_str()
+                .is_some_and(|error| error.contains("non-empty namespaced name"))
+        );
+        assert!(
+            output["awaitError"]
+                .as_str()
+                .is_some_and(|error| error.contains("non-empty namespaced name"))
+        );
+        assert!(
+            storage
+                .list_workflow_journal(started.id)
+                .await
+                .expect("invalid-kind journal")
+                .is_empty()
+        );
+        assert!(
+            storage
+                .list_workflow_run_events(started.id)
+                .await
+                .expect("invalid-kind events")
+                .is_empty()
+        );
+    }
+
     async fn wait_for_workflow_thread_exit(run_id: Uuid) {
         tokio::time::timeout(std::time::Duration::from_millis(250), async {
             while workflow_thread_exists(run_id) {
@@ -5455,6 +6363,58 @@ mod tests {
             rx,
         ));
         (tx, task)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn await_event_consumes_match_that_arrives_during_park_cas() {
+        let provider = Arc::new(ScriptedGateProvider {
+            replies: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            calls: AtomicUsize::new(0),
+        });
+        let (storage, state, run) = event_gate_fixture(provider).await;
+        storage
+            .with_conn(|conn| {
+                conn.execute_batch(&format!(
+                    "CREATE TEMP TRIGGER insert_event_before_await_park \
+                     BEFORE UPDATE OF state ON workflow_runs \
+                     WHEN OLD.id = '{}' AND OLD.state = 'running' AND NEW.state = 'parked' \
+                     BEGIN \
+                       INSERT INTO workflow_run_events (id, run_id, journal_entry_id, seq, kind, payload_json, source_surface, posted_at) \
+                       VALUES (lower(hex(randomblob(16))), OLD.id, lower(hex(randomblob(16))), \
+                         (SELECT COALESCE(MAX(seq), 0) + 1 FROM workflow_run_events WHERE run_id = OLD.id), \
+                         'operator.decision', '{{\"verdict\":\"accept\"}}', 'operator', '2026-08-20T00:00:00Z'); \
+                       SELECT RAISE(IGNORE); \
+                     END;",
+                    run.id
+                ))
+            })
+            .await
+            .expect("install read-to-park race trigger");
+        let (tx, task) = spawn_event_loop(state, run.id, run.space_id, vec![]);
+
+        let (reply, receive) = oneshot::channel();
+        tx.send(HostCommand::AwaitEvent {
+            request: AwaitEventRequest {
+                kinds: vec!["operator.decision".into()],
+            },
+            reply,
+        })
+        .expect("await event");
+        let answer = receive
+            .await
+            .expect("await reply")
+            .expect("race winner is consumed");
+
+        assert_eq!(answer["payload"]["verdict"], "accept");
+        assert_eq!(answer["source"]["surface"], "operator");
+        let events = storage
+            .list_workflow_run_events(run.id)
+            .await
+            .expect("events");
+        assert_eq!(events.len(), 1);
+        assert!(events[0].delivered_at.is_some());
+        drop(tx);
+        task.await.expect("host loop");
     }
 
     async fn send_post_event(
@@ -5503,9 +6463,13 @@ mod tests {
         let (storage, state, run) = event_gate_fixture(Arc::clone(&provider)).await;
         let (tx, task) = spawn_event_loop(state.clone(), run.id, run.space_id, vec![]);
 
-        let first = send_post_event(&tx, "completion", serde_json::json!({"worker": "w1"}))
-            .await
-            .expect("first post");
+        let first = send_post_event(
+            &tx,
+            "worker.completion",
+            serde_json::json!({"worker": "w1"}),
+        )
+        .await
+        .expect("first post");
         assert_eq!(first["seq"], 1);
         let suppressed = send_gate(&tx, "wake when every pipeline has settled")
             .await
@@ -5515,9 +6479,13 @@ mod tests {
 
         // The suppressed event is still pending: the next gate reads it
         // again beside the new one — suppression consumes nothing.
-        send_post_event(&tx, "completion", serde_json::json!({"worker": "w2"}))
-            .await
-            .expect("second post");
+        send_post_event(
+            &tx,
+            "worker.completion",
+            serde_json::json!({"worker": "w2"}),
+        )
+        .await
+        .expect("second post");
         let waking = send_gate(&tx, "wake when every pipeline has settled")
             .await
             .expect("second gate");
@@ -5553,6 +6521,35 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn gate_treats_an_unfamiliar_event_kind_as_wakeable_data() {
+        let provider = Arc::new(ScriptedGateProvider {
+            replies: std::sync::Mutex::new(std::collections::VecDeque::from([
+                r#"{"wake": true, "reasoning": "the custom signal requires attention"}"#,
+            ])),
+            calls: AtomicUsize::new(0),
+        });
+        let (_storage, state, run) = event_gate_fixture(Arc::clone(&provider)).await;
+        let (tx, task) = spawn_event_loop(state, run.id, run.space_id, vec![]);
+
+        send_post_event(
+            &tx,
+            " experiment.signal-v2 ",
+            serde_json::json!({"outcome": "unexpected"}),
+        )
+        .await
+        .expect("post unfamiliar kind");
+        let verdict = send_gate(&tx, "wake for novel experimental outcomes")
+            .await
+            .expect("gate unfamiliar kind");
+
+        assert_eq!(verdict["wake"], true);
+        assert_eq!(verdict["events"][0]["kind"], "experiment.signal-v2");
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+        drop(tx);
+        task.await.expect("host loop");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn replayed_posts_and_gates_return_recorded_results_without_reexecution() {
         let provider = Arc::new(ScriptedGateProvider {
             replies: std::sync::Mutex::new(std::collections::VecDeque::from([
@@ -5562,9 +6559,13 @@ mod tests {
         });
         let (storage, state, run) = event_gate_fixture(Arc::clone(&provider)).await;
         let (tx, task) = spawn_event_loop(state.clone(), run.id, run.space_id, vec![]);
-        send_post_event(&tx, "escalation", serde_json::json!({"worker": "w1"}))
-            .await
-            .expect("post");
+        send_post_event(
+            &tx,
+            "worker.escalation",
+            serde_json::json!({"worker": "w1"}),
+        )
+        .await
+        .expect("post");
         let live = send_gate(&tx, "wake on any escalation")
             .await
             .expect("gate");
@@ -5581,9 +6582,13 @@ mod tests {
             .await
             .expect("journal");
         let (tx, task) = spawn_event_loop(state, run.id, run.space_id, replay);
-        let replayed_post = send_post_event(&tx, "escalation", serde_json::json!({"worker": "w1"}))
-            .await
-            .expect("replayed post");
+        let replayed_post = send_post_event(
+            &tx,
+            "worker.escalation",
+            serde_json::json!({"worker": "w1"}),
+        )
+        .await
+        .expect("replayed post");
         assert_eq!(replayed_post["seq"], 1);
         let replayed_gate = send_gate(&tx, "wake on any escalation")
             .await
@@ -5956,6 +6961,9 @@ mod tests {
             max_attempts: 1,
             label: None,
             session: None,
+            elements: None,
+            variables: None,
+            assembly: None,
         };
         let (first_reply, first_receive) = oneshot::channel();
         tx.send(HostCommand::Agent {
@@ -6064,6 +7072,9 @@ mod tests {
             max_attempts: 1,
             label: None,
             session: None,
+            elements: None,
+            variables: None,
+            assembly: None,
         };
         let first_cancellation = CancellationToken::new();
         let (first_reply, first_receive) = oneshot::channel();
@@ -6153,6 +7164,9 @@ mod tests {
             max_attempts: 1,
             label: None,
             session: None,
+            elements: None,
+            variables: None,
+            assembly: None,
         };
         for (seq, prompt) in [(0, "working one"), (1, "working two")] {
             let request_json = serde_json::to_value(request(prompt)).expect("working request");
@@ -6325,6 +7339,9 @@ mod tests {
             max_attempts: 1,
             label: None,
             session: None,
+            elements: None,
+            variables: None,
+            assembly: None,
         };
         let request_json = serde_json::to_value(&request).expect("request");
         for seq in 0..2 {
@@ -6443,6 +7460,9 @@ mod tests {
             max_attempts: 1,
             label: None,
             session: None,
+            elements: None,
+            variables: None,
+            assembly: None,
         };
         let working_json = serde_json::to_value(&working_request).expect("working request");
         storage
@@ -6560,6 +7580,9 @@ mod tests {
             max_attempts: 1,
             label: None,
             session: None,
+            elements: None,
+            variables: None,
+            assembly: None,
         };
         let (closing_reply, closing_receive) = oneshot::channel();
         tx.send(HostCommand::Agent {
@@ -6624,6 +7647,9 @@ mod tests {
             max_attempts: 1,
             label: None,
             session: None,
+            elements: None,
+            variables: None,
+            assembly: None,
         };
         let work_request = request("completed work");
         let work_json = serde_json::to_value(&work_request).expect("work request");
@@ -6846,6 +7872,9 @@ mod tests {
             max_attempts: 1,
             label: None,
             session: None,
+            elements: None,
+            variables: None,
+            assembly: None,
         };
         let work_request = request("completed work");
         let work_json = serde_json::to_value(&work_request).expect("work request");
@@ -7057,6 +8086,9 @@ mod tests {
             max_attempts: 1,
             label: None,
             session: None,
+            elements: None,
+            variables: None,
+            assembly: None,
         };
         let request_json = serde_json::to_value(&request).expect("request");
         let refused = storage
@@ -7254,7 +8286,7 @@ mod tests {
             None,
         );
         let source = r#"
-            await postEvent("escalation", { decisionQueued: true });
+            await postEvent("operator.escalation", { decisionQueued: true });
             const grounding = await deliverEvents(1);
             await agent(`make the lead decision from ${JSON.stringify(grounding)}`, {
                 agent: "default",
@@ -7328,7 +8360,7 @@ mod tests {
             .await
             .expect("events");
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0].kind, "escalation");
+        assert_eq!(events[0].kind, "operator.escalation");
         assert!(events[0].delivered_at.is_some());
         assert_eq!(handover["events_delivered_to_failed_call"], 1);
         assert_eq!(handover["events_pending"], 0);
@@ -7559,6 +8591,9 @@ mod tests {
             max_attempts: 1,
             label: None,
             session: None,
+            elements: None,
+            variables: None,
+            assembly: None,
         };
         let request = serde_json::to_value(request).expect("request");
         let mismatched = storage

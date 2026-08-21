@@ -213,6 +213,10 @@ impl Default for ToolPermissionConfig {
             "scheduling".to_string(),
             vec!["schedule".to_string(), "wake_me_later".to_string()],
         );
+        bundles.insert(
+            "session-authoring".to_string(),
+            vec!["session_values".to_string()],
+        );
         // Knowledge-base access at registry grain: reading the space's
         // gathered evidence and writing captures into it are separate powers,
         // so gathering workers can hold write without every reader gaining it.
