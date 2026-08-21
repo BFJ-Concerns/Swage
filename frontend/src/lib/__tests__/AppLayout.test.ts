@@ -66,13 +66,13 @@ function mockStreamingStore(): StreamingStore {
   };
 }
 
-function mockSpaceStore(hasCurrentSpace = true): SpaceStore {
+function mockSpaceStore(hasCurrentSpace = true, spaceId = "default"): SpaceStore {
   const space = {
-    id: "default",
-    name: "default",
+    id: spaceId,
+    name: spaceId,
     description: "",
-    is_default: true,
-    slug: "default",
+    is_default: spaceId === "default",
+    slug: spaceId,
     created_at: "",
   };
 
@@ -215,7 +215,7 @@ describe("AppLayout shell navigation", () => {
     expect(createConversation).toHaveBeenCalledWith(undefined, undefined, "researcher");
   });
 
-  it("does not retain an agent after the available definitions switch spaces", () => {
+  it("does not retain an agent when the selected space changes", () => {
     const conversationStore = mockConversationStore();
     const createConversation = vi.spyOn(conversationStore, "createConversation");
     const layout = createClassComponent({
@@ -241,11 +241,7 @@ describe("AppLayout shell navigation", () => {
     picker.dispatchEvent(new Event("change", { bubbles: true }));
     flushSync();
 
-    layout.$set({ agentDefinitions: [{
-      id: "space-two-agent", display_name: "Space two agent", description: "", instructions: "",
-      model_id: null, tool_permissions: null, skills: [], output_schema: null,
-      output_max_retries: null, is_builtin: false, source_scope: "space",
-    }] });
+    layout.$set({ spaceStore: mockSpaceStore(true, "second-space") });
     flushSync();
     (document.querySelector("button.new-btn") as HTMLButtonElement).click();
 
