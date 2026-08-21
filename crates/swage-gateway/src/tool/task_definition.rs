@@ -81,7 +81,11 @@ impl Tool for TaskDefinitionTool {
                     "additionalProperties":false
                 },
                 "output_schema":{"type":["object","null"]},
-                "output_max_retries":{"type":["integer","null"],"minimum":0}
+                "output_max_retries":{
+                    "type":["integer","null"],
+                    "minimum":0,
+                    "maximum":u32::MAX
+                }
             },
             "required":["action"],
             "additionalProperties":false
@@ -117,6 +121,21 @@ impl Tool for TaskDefinitionTool {
                     .and_then(Value::as_str)
                     .ok_or_else(|| invalid("'instructions' is required"))?
                     .to_owned();
+                let output_max_retries = params
+                    .get("output_max_retries")
+                    .filter(|value| !value.is_null())
+                    .map(|value| {
+                        value
+                            .as_u64()
+                            .and_then(|value| u32::try_from(value).ok())
+                            .ok_or_else(|| {
+                                invalid(format!(
+                                    "'output_max_retries' must be an integer between 0 and {}",
+                                    u32::MAX
+                                ))
+                            })
+                    })
+                    .transpose()?;
                 let definition = swage_storage::NewTaskDefinition {
                     id,
                     instructions,
@@ -132,10 +151,7 @@ impl Tool for TaskDefinitionTool {
                         .get("output_schema")
                         .filter(|v| !v.is_null())
                         .cloned(),
-                    output_max_retries: params
-                        .get("output_max_retries")
-                        .and_then(Value::as_u64)
-                        .map(|v| v as u32),
+                    output_max_retries,
                 };
                 crate::service::upsert_task_definition(
                     gateway,
@@ -215,6 +231,22 @@ mod tests {
             .expect_err("invalid identifiers must be rejected");
         assert!(matches!(invalid, ToolError::InvalidParameters { .. }));
         assert!(storage.list_task_definitions().await.unwrap().is_empty());
+
+        let invalid = tool
+            .execute(
+                json!({
+                    "action":"upsert",
+                    "id":"review",
+                    "instructions":"Contract.",
+                    "output_max_retries":u64::from(u32::MAX) + 1
+                }),
+                &context,
+            )
+            .await
+            .expect_err("retry counts above the durable contract must be rejected");
+        assert!(matches!(invalid, ToolError::InvalidParameters { .. }));
+        assert!(storage.list_task_definitions().await.unwrap().is_empty());
+        assert!(storage.list_audit_events().await.unwrap().is_empty());
 
         tool.execute(
             json!({
