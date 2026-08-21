@@ -18,6 +18,14 @@ use swage_core::{
 use crate::http::{HttpClient, SseEvent};
 use crate::provider::{LlmProvider, ProviderConfig, spawn_stream_forwarder};
 
+/// Known native-harness mismatch retained while this provider deliberately
+/// remains on Chat Completions. Recording it does not make it an admitted
+/// harness-parity divergence: a Responses API implementation is still needed.
+const OPENAI_REQUEST_DIVERGENCES: &[(&str, &str)] = &[(
+    "unresolved_product_defect",
+    "native GPT uses /v1/responses with client_metadata, include, input, parallel_tool_calls, prompt_cache_key, reasoning, store, and text; Swage uses Chat Completions with messages, stream_options, and tools",
+)];
+
 // ---------------------------------------------------------------------------
 // OpenAI wire types
 // ---------------------------------------------------------------------------
@@ -675,6 +683,7 @@ impl LlmProvider for OpenAiProvider {
         serde_json::json!({
             "provider": "openai",
             "protocol": "chat_completions",
+            "divergences": OPENAI_REQUEST_DIVERGENCES,
             "stream": stream,
             "body": self.build_request(request, stream),
         })
@@ -1038,6 +1047,13 @@ mod tests {
 
         assert_eq!(snapshot["provider"], "openai");
         assert_eq!(snapshot["protocol"], "chat_completions");
+        assert_eq!(
+            snapshot["divergences"],
+            serde_json::json!([[
+                "unresolved_product_defect",
+                "native GPT uses /v1/responses with client_metadata, include, input, parallel_tool_calls, prompt_cache_key, reasoning, store, and text; Swage uses Chat Completions with messages, stream_options, and tools"
+            ]])
+        );
         assert_eq!(snapshot["stream"], true);
         assert_eq!(snapshot["body"]["messages"][0]["role"], "user");
         assert_eq!(snapshot["body"]["tools"][0]["function"]["name"], "ping");
