@@ -121,6 +121,13 @@
     }
   }
 
+  function startNewConversation(): void {
+    activeSurface = "conversation";
+    connectionStore.disconnect();
+    conversationStore.clearActiveConversation();
+    router.navigate("/");
+  }
+
   // Proxy that implements ConversationStore but overrides the two navigation-
   // bearing actions. All other methods delegate straight to the base store.
   const routerAwareStore: ConversationStore = {
@@ -425,6 +432,7 @@
     {modelCatalogueReady}
     {defaultModelId}
     {agentDefinitions}
+    onNewConversation={startNewConversation}
     route={currentRoute}
     onNavigate={navigate}
     onSettingsSaved={refreshModelCatalogueAfterSave}
