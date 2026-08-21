@@ -1066,17 +1066,35 @@ async fn provision_worker_command(
         if entry.kind != "worker_placement" || entry.args_hash != hash {
             Err("NondeterministicReplayError".into())
         } else if entry.status == "completed" {
-            entry
+            let (path, can_write) = entry
                 .result
                 .as_ref()
                 .and_then(|result| {
+                    Some((
+                        result.get("path")?.as_str()?.to_string(),
+                        result.get("can_write")?.as_bool()?,
+                    ))
+                })
+                .ok_or_else(|| "completed worker placement has no path".to_string())?;
+            let repo = cwd.as_deref().ok_or_else(|| {
+                "WorkerPlacementError: isolation=worktree requires cwd to name the git repository"
+                    .to_string()
+            })?;
+            state
+                .worktree_host
+                .restore(
+                    run_id,
+                    current_seq,
+                    std::path::Path::new(repo),
+                    std::path::Path::new(&path),
+                )
+                .await
+                .map(|path| {
                     Some(ResolvedWorkerPlacement {
-                        path: result.get("path")?.as_str()?.to_string(),
-                        can_write: result.get("can_write")?.as_bool()?,
+                        path: path.to_string_lossy().into_owned(),
+                        can_write,
                     })
                 })
-                .map(Some)
-                .ok_or_else(|| "completed worker placement has no path".to_string())
         } else if entry.status == "failed" {
             Err(entry
                 .error_message
@@ -5726,7 +5744,8 @@ mod tests {
                 .expect("revoke repository grant")
         );
         grant_workspace(storage.as_ref(), space.id, &newly_allowed).await;
-        let (replay_tx, replay_task) = run_loop(make_state(), replay.clone());
+        let replay_state = make_state();
+        let (replay_tx, replay_task) = run_loop(replay_state.clone(), replay.clone());
         let (reply, receive) = oneshot::channel();
         replay_tx
             .send(HostCommand::ResolveWorkerDirectory {
@@ -5784,6 +5803,12 @@ mod tests {
             storage.list_workflow_journal(run.id).await.unwrap().len(),
             4,
             "replay must not add a worktree journal entry"
+        );
+        assert_eq!(replay_state.worktree_host.list_run(run.id).await.len(), 1);
+        replay_state.worktree_host.cleanup_run(run.id).await;
+        assert!(
+            !std::path::Path::new(&first_path).exists(),
+            "the replay host must own the restored worktree for terminal cleanup"
         );
 
         let (changed_tx, changed_task) = run_loop(make_state(), replay);
