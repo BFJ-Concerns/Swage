@@ -909,9 +909,16 @@ async fn run_ephemeral_agent_call(
     tokio::pin!(processing);
     let timeout = request.timeout_ms.map(std::time::Duration::from_millis);
     tokio::select! {
+        biased;
         result = &mut processing => result.map_err(|error| error.to_string())?,
         () = cancellation.cancelled() => {
             call_cancellation.cancel();
+            // The turn path owns the sandbox and active-turn registration.
+            // Let it observe cancellation and run that cleanup before the
+            // workflow cancellation is surfaced.
+            if let Err(error) = processing.await {
+                tracing::warn!(%error, "cancelled agent turn failed while settling cancellation");
+            }
             return Err("WorkflowCancelledError".into());
         }
         () = async {
@@ -921,6 +928,12 @@ async fn run_ephemeral_agent_call(
             }
         } => {
             call_cancellation.cancel();
+            // The turn path owns the sandbox and active-turn registration.
+            // Let it observe cancellation and run that cleanup before the
+            // timeout is surfaced to the workflow journal.
+            if let Err(error) = processing.await {
+                tracing::warn!(%error, "timed-out agent turn failed while settling cancellation");
+            }
             return Err(format!(
                 "AgentCallTimeoutError: agent call exceeded its {}ms deadline",
                 request.timeout_ms.expect("timeout branch requires a deadline")
@@ -3786,7 +3799,7 @@ mod tests {
     use swage_protocol::client::workflow::{WorkflowJournalEntryKind, WorkflowJournalEntryStatus};
     use swage_storage::{
         NewWorkspaceAttachment, SessionStore, SpaceStore, SqliteStorage, Storage, ToolCallStore,
-        TurnStore, WorkflowStore, WorkspaceAttachmentStore,
+        TurnState, TurnStore, WorkflowStore, WorkspaceAttachmentStore,
     };
     use swage_workflow::AgentSessionRef;
 
@@ -6052,7 +6065,7 @@ mod tests {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
         let space = storage.get_or_create_default().await.expect("space");
         let source = r#"return await agent("slow work", {
-            effort: "high", timeoutMs: 2000, maxAttempts: 1
+            effort: "high", timeoutMs: 10000, maxAttempts: 1
         });"#;
         let run = storage
             .create_workflow_run(NewWorkflowRun {
@@ -6100,7 +6113,7 @@ mod tests {
         assert_eq!(journal.len(), 1);
         assert_eq!(journal[0].status, "failed");
         assert_eq!(journal[0].request["effort"], "high");
-        assert_eq!(journal[0].request["timeout_ms"], 2000);
+        assert_eq!(journal[0].request["timeout_ms"], 10000);
         assert!(
             journal[0]
                 .error_message
@@ -6112,6 +6125,11 @@ mod tests {
             assert_eq!(requests.len(), 1);
             assert_eq!(requests[0].effort.as_deref(), Some("high"));
         }
+        wait_for_worker_turn_interrupted(&storage).await;
+        assert!(
+            state.active_turns.lock().await.is_empty(),
+            "timed-out worker must release its active-turn registration"
+        );
 
         storage
             .update_workflow_run_state(run.id, "interrupted", None, None, None)
@@ -6143,6 +6161,72 @@ mod tests {
                 .is_some_and(|error| error.contains("AgentCallTimeoutError:"))
         );
         assert_eq!(provider.requests.lock().expect("requests").len(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn parent_cancellation_wins_over_a_configured_agent_call_timeout() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let source = r#"return await agent("cancelled work", {
+            timeoutMs: 60000, maxAttempts: 1
+        });"#;
+        let run = storage
+            .create_workflow_run(NewWorkflowRun {
+                space_id: space.id,
+                parent_run_id: None,
+                parent_seq: None,
+                script_version_id: None,
+                source: Some(source.into()),
+                source_hash: source_hash(source),
+                args: Value::Null,
+                budget: serde_json::json!({}),
+                engine_version: "test".into(),
+                dispatch_bound_agent_ids: vec![],
+            })
+            .await
+            .expect("run");
+        let provider = Arc::new(ScriptedRecordingProvider {
+            outputs: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+
+        launch_existing_run(state.clone(), run.clone(), source.into(), None)
+            .await
+            .expect("launch cancellable workflow run");
+        wait_for_provider_requests(&provider, 1).await;
+        let Json(cancel_requested) = cancel_run(State(state.clone()), Path(run.id))
+            .await
+            .expect("cancel running workflow");
+        assert_eq!(cancel_requested.id, run.id);
+        wait_for_terminal(&state, run.id).await;
+
+        let cancelled_run = storage
+            .get_workflow_run(run.id)
+            .await
+            .expect("run query")
+            .expect("cancelled run");
+        let journal = storage
+            .list_workflow_journal(run.id)
+            .await
+            .expect("journal read-back");
+        assert_eq!(cancelled_run.state, "cancelled");
+        assert_eq!(journal.len(), 1);
+        assert_eq!(journal[0].status, "started");
+        assert_eq!(journal[0].error_message, None);
+        assert_eq!(provider.requests.lock().expect("requests").len(), 1);
+        wait_for_worker_turn_interrupted(&storage).await;
+        assert!(
+            state.active_turns.lock().await.is_empty(),
+            "cancelled worker must release its active-turn registration"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -9976,5 +10060,53 @@ mod tests {
         })
         .await
         .expect("terminal run");
+    }
+
+    async fn wait_for_provider_requests(provider: &ScriptedRecordingProvider, expected: usize) {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                if provider.requests.lock().expect("requests").len() >= expected {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("provider request");
+    }
+
+    async fn wait_for_worker_turn_interrupted(storage: &SqliteStorage) {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let sessions = storage
+                    .list_sessions_by_agent_id("__workflow_ephemeral__")
+                    .await
+                    .expect("worker sessions");
+                for session in sessions {
+                    for thread in storage
+                        .list_by_session(session.id)
+                        .await
+                        .expect("worker threads")
+                    {
+                        for turn in storage
+                            .list_turns_by_thread(thread.id)
+                            .await
+                            .expect("worker turns")
+                        {
+                            match turn.state {
+                                TurnState::Interrupted => return,
+                                TurnState::Completed | TurnState::Failed => {
+                                    panic!("cancelled worker turn ended {:?}", turn.state)
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("worker turn becomes interrupted");
     }
 }
