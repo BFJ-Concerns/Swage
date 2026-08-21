@@ -201,7 +201,11 @@ pub(super) fn append_approved_location_paths(
     allowed_paths: &mut Vec<PathBuf>,
     grants: &std::collections::HashSet<crate::state::ApprovalGrantKey>,
     space_id: Uuid,
+    session_metadata: Option<&serde_json::Value>,
 ) {
+    if worker_placement_metadata_present(session_metadata) {
+        return;
+    }
     for grant in grants
         .iter()
         .filter(|grant| grant.kind == swage_storage::model::ApprovalKind::Location)
@@ -212,6 +216,15 @@ pub(super) fn append_approved_location_paths(
             allowed_paths.push(path);
         }
     }
+}
+
+pub(crate) fn worker_placement_metadata_present(
+    session_metadata: Option<&serde_json::Value>,
+) -> bool {
+    session_metadata.is_some_and(|metadata| {
+        metadata.get("worker_placement_cwd").is_some()
+            || metadata.get("worker_placement_can_write").is_some()
+    })
 }
 
 pub(crate) fn load_session_config(

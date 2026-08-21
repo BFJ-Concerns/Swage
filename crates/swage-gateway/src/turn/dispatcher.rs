@@ -3,7 +3,7 @@ use super::{
     Path, PathBuf, RateLimitConfig, RateLimiter, Sandbox, SandboxedExecutor, ServerEvent, Tool,
     ToolDispatcher, TrustedWorkspacePath, TrustedWorkspacePolicy, Uuid,
     build_gateway_advertisement_filter, build_permission_config, load_trusted_workspace_policy,
-    mpsc,
+    mpsc, worker_placement_metadata_present,
 };
 
 pub(super) type GatewayToolAdvertisementFilter = dyn Fn(&dyn Tool) -> bool + Send + Sync;
@@ -176,18 +176,20 @@ pub(crate) fn apply_worker_placement_permission(
     agent_config: &AgentConfig,
     session_metadata: Option<&serde_json::Value>,
 ) {
-    let Some(can_write) = session_metadata
+    if !worker_placement_metadata_present(session_metadata) {
+        return;
+    }
+    let can_write = session_metadata
         .and_then(|metadata| metadata.get("worker_placement_can_write"))
         .and_then(serde_json::Value::as_bool)
-    else {
-        return;
-    };
+        .unwrap_or(false);
     policy.active_workspace = Some(TrustedWorkspacePath {
         path: agent_config.working_directory.clone(),
         is_trusted: true,
         can_read: true,
         can_write,
     });
+    policy.attachments.clear();
 }
 
 pub(super) async fn build_turn_sandbox(
