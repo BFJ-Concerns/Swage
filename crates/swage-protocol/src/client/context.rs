@@ -6,7 +6,6 @@ use ts_rs::TS;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
-#[ts(export)]
 pub struct AssemblyReport {
     pub assembly_name: String,
     pub elements: Vec<ElementReport>,
@@ -51,7 +50,6 @@ impl Default for AssemblyReport {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
-#[ts(export)]
 pub struct ElementReport {
     pub name: String,
     pub source: String,
@@ -63,7 +61,6 @@ pub struct ElementReport {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
-#[ts(export)]
 pub struct NamedAssemblyReport {
     pub assembly_name: String,
     pub resolved_level: String,
@@ -71,7 +68,6 @@ pub struct NamedAssemblyReport {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
-#[ts(export)]
 pub struct CompactionRecord {
     pub element: String,
     pub requested_strategy: String,
@@ -85,7 +81,6 @@ pub struct CompactionRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
-#[ts(export)]
 pub struct AssemblyError {
     pub assembly_name: String,
     pub error_kind: String,
@@ -94,7 +89,6 @@ pub struct AssemblyError {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
-#[ts(export)]
 pub struct TurnContextResponse {
     pub turn_id: Uuid,
     pub report: AssemblyReport,

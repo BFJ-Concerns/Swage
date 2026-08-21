@@ -29,7 +29,6 @@ pub struct RecoveryExportSummary {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
-#[ts(export)]
 pub struct RecoveryExportListResponse {
     pub exports: Vec<RecoveryExportSummary>,
 }

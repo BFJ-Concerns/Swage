@@ -6,7 +6,6 @@ use ts_rs::TS;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
-#[ts(export)]
 pub struct SubmitTurnRequest {
     pub conversation_id: Uuid,
     pub thread_id: Option<Uuid>,
@@ -16,14 +15,12 @@ pub struct SubmitTurnRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
-#[ts(export)]
 pub struct SubmitTurnResponse {
     pub turn_id: Uuid,
     pub status: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
-#[ts(export)]
 pub struct TurnPollResponse {
     pub turn_id: Uuid,
     pub state: String,
@@ -38,7 +35,6 @@ pub struct TurnPollResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
-#[ts(export)]
 pub struct SendMessageRequest {
     pub sender_agent_id: String,
     pub recipient_agent_id: String,
@@ -51,7 +47,6 @@ pub struct SendMessageRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
-#[ts(export)]
 pub struct MessageResponse {
     pub id: Uuid,
     pub status: String,
