@@ -108,6 +108,7 @@ const ADD_WORKFLOW_RUN_PARKING: &str = "
         inline_workflow_id   TEXT,
         inline_workflow_name TEXT,
         inline_workflow_version INTEGER,
+        carrying_skill       TEXT,
         source               TEXT,
         source_hash          TEXT NOT NULL,
         args_json            TEXT NOT NULL,
@@ -126,14 +127,16 @@ const ADD_WORKFLOW_RUN_PARKING: &str = "
     );
     INSERT INTO workflow_runs_parking_new (
         id, space_id, script_version_id, inline_workflow_id,
-        inline_workflow_name, inline_workflow_version, source, source_hash, args_json,
+        inline_workflow_name, inline_workflow_version, carrying_skill,
+        source, source_hash, args_json,
         budget_json, state, final_output_json, handover_json, error_message, engine_version,
         created_at, completed_at, parent_run_id, parent_seq,
         dispatch_bound_agent_ids_json
     )
     SELECT
         id, space_id, script_version_id, inline_workflow_id,
-        inline_workflow_name, inline_workflow_version, source, source_hash, args_json,
+        inline_workflow_name, inline_workflow_version, NULL,
+        source, source_hash, args_json,
         budget_json, state, final_output_json, NULL, error_message, engine_version,
         created_at, completed_at, parent_run_id, parent_seq,
         dispatch_bound_agent_ids_json
@@ -940,6 +943,7 @@ const COMPLETE_SCHEMA: &str = "
         inline_workflow_id  TEXT,
         inline_workflow_name TEXT,
         inline_workflow_version INTEGER,
+        carrying_skill      TEXT,
         source              TEXT,
         source_hash         TEXT NOT NULL,
         args_json           TEXT NOT NULL,
