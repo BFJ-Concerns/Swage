@@ -290,6 +290,7 @@ impl Agent {
         let mut llm_request = CompletionRequest {
             messages: assembled_context,
             model: self.config.model_id.clone(),
+            effort: request.effort.clone(),
             max_tokens: self.config.max_tokens,
             temperature: self.config.temperature,
             stop_sequences: self.config.stop_sequences.clone(),
@@ -1040,12 +1041,9 @@ fn format_tool_error_for_model(error: &swage_core::ToolError) -> String {
         } => format!(
             "Tool error: `{name}` requires {access} approval for `{path}` before it can run."
         ),
-        ToolError::RequiresDelegation {
-            name,
-            target_agent_id,
-            ..
-        } => format!(
-            "Tool error: `{name}` requires delegation to `{target_agent_id}`, but delegation was not completed."
+        ToolError::RequiresDelegation { request } => format!(
+            "Tool error: `{}` requires delegation to `{}`, but delegation was not completed.",
+            request.name, request.target_agent_id
         ),
     }
 }
@@ -1481,14 +1479,18 @@ impl Agent {
                 .await
             }
             // --- Tool-as-delegation: the LLM invoked the delegate tool ---
-            Err(swage_core::ToolError::RequiresDelegation {
-                name: _,
-                target_agent_id,
-                task,
-                context,
-                composition,
-                completion_mode,
-            }) => {
+            Err(swage_core::ToolError::RequiresDelegation { request }) => {
+                let swage_core::DelegationRequest {
+                    name: _,
+                    target_agent_id,
+                    task,
+                    task_definition,
+                    context,
+                    cwd,
+                    isolation,
+                    composition,
+                    completion_mode,
+                } = *request;
                 let handler = match &self.delegation_handler {
                     Some(h) => h.clone(),
                     None => {
@@ -1546,8 +1548,12 @@ impl Agent {
                     .handle_delegation(
                         &target_agent_id,
                         &task,
+                        task_definition.as_deref(),
                         transferred_context,
+                        cwd,
+                        isolation,
                         *composition,
+                        &call.call_id,
                         &self.config.agent_id,
                         execution.turn_id,
                         space_id,

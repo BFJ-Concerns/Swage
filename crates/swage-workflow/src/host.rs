@@ -1,52 +1,16 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::BTreeMap;
+pub use swage_protocol::client::workflow::{AgentCallRequest, AgentSessionRef};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-/// An opaque continuation token naming a worker session a run already
-/// created. Scripts receive it on an `agentStart` handle after the call
-/// completes and pass it back whole via the `session` option; its fields are
-/// host business. The token's values come from journalled results, so a
-/// resumed run rebuilds identical tokens and replay stays deterministic.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct AgentSessionRef {
-    pub session_id: Uuid,
-    pub thread_id: Uuid,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct AgentCallRequest {
-    pub prompt: String,
-    pub agent: String,
-    pub model: Option<String>,
-    pub schema: Option<Value>,
-    pub max_attempts: u32,
-    pub label: Option<String>,
-    /// Continue this worker session instead of creating a fresh one: the
-    /// next turn lands on the same session and thread, so the worker meets
-    /// its own history — a restated brief and the later "proceed" are one
-    /// session. `None` is the fresh-session default.
-    ///
-    /// `skip_serializing_if` is load-bearing beside `default`: journal args
-    /// hashes are computed over the serialised request, so an optional
-    /// field that serialises as `null` when unset would change every
-    /// existing entry's hash and fail interrupted runs on resume. Unset
-    /// must serialise to nothing.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session: Option<AgentSessionRef>,
-    /// Named briefing elements to compose for this child call. When omitted,
-    /// the configured element set remains unchanged.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub elements: Option<Vec<String>>,
-    /// Values visible only while composing this child call. These shadow
-    /// durable session values without changing the session-variable store.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub variables: Option<BTreeMap<String, String>>,
-    /// Named context assembly to use for this child call.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub assembly: Option<String>,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedWorkerPlacement {
+    pub path: String,
+    pub can_write: bool,
+    pub authority_path: String,
+    pub authority_context_id: Uuid,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -122,8 +86,57 @@ pub trait WorkflowHost: Send + Sync {
     async fn run_agent_call(
         &self,
         request: AgentCallRequest,
+        resolved_placement: Option<ResolvedWorkerPlacement>,
         cancellation: CancellationToken,
     ) -> Result<AgentCallResult, String>;
+
+    /// Resolve placement and admit one agent call through a single host
+    /// dispatch. Durable hosts override this to keep the two journal entries
+    /// adjacent even when several script promises begin together.
+    async fn dispatch_agent_call(
+        &self,
+        request: AgentCallRequest,
+        cancellation: CancellationToken,
+    ) -> Result<AgentCallResult, String> {
+        let resolved_placement = self
+            .resolve_worker_placement(&request, cancellation.clone())
+            .await
+            .map_err(|error| {
+                if error.starts_with("WorkerPlacementError")
+                    || error.starts_with("NondeterministicReplayError")
+                {
+                    error
+                } else {
+                    format!("WorkerPlacementError: {error}")
+                }
+            })?;
+        self.run_agent_call(request, resolved_placement, cancellation)
+            .await
+    }
+
+    /// Resolve a caller placement without changing the caller's request.
+    /// Hosts journal managed provisioning separately and return its durable
+    /// resolved path; a plain cwd needs no host operation.
+    async fn resolve_worker_placement(
+        &self,
+        request: &AgentCallRequest,
+        _cancellation: CancellationToken,
+    ) -> Result<Option<ResolvedWorkerPlacement>, String> {
+        Ok(request.cwd.clone().map(|path| ResolvedWorkerPlacement {
+            authority_path: path.clone(),
+            path,
+            can_write: true,
+            authority_context_id: Uuid::nil(),
+        }))
+    }
+
+    /// Return this run's provisioned worktrees through a journalled read.
+    async fn list_worker_placements(
+        &self,
+        _cancellation: CancellationToken,
+    ) -> Result<Value, String> {
+        Err("WorkerPlacementError: this host does not support placement listing".into())
+    }
 
     async fn deliver(
         &self,
@@ -234,8 +247,13 @@ mod tests {
     fn absent_composition_options_are_omitted_from_journal_shape() {
         let request = AgentCallRequest {
             prompt: "work".into(),
-            agent: "worker".into(),
+            agent: Some("worker".into()),
+            task: None,
             model: None,
+            effort: None,
+            timeout_ms: None,
+            cwd: None,
+            isolation: None,
             schema: None,
             max_attempts: 3,
             label: None,

@@ -22,6 +22,7 @@ pub mod session;
 pub mod session_variable;
 pub mod skill_activation;
 pub mod space;
+pub mod task_definition;
 pub mod thread;
 pub mod tool_call;
 pub mod turn;

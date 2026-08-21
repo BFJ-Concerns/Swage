@@ -972,6 +972,30 @@ pub struct NewAgentDefinition {
     pub output_max_retries: Option<u32>,
 }
 
+/// A durable named work contract resolved when a child is dispatched.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskDefinition {
+    pub id: String,
+    pub instructions: String,
+    pub model_id: Option<String>,
+    pub tool_permissions: Option<serde_json::Value>,
+    pub output_schema: Option<serde_json::Value>,
+    pub output_max_retries: Option<u32>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Whole replacement used by audited task-definition mutations.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NewTaskDefinition {
+    pub id: String,
+    pub instructions: String,
+    pub model_id: Option<String>,
+    pub tool_permissions: Option<serde_json::Value>,
+    pub output_schema: Option<serde_json::Value>,
+    pub output_max_retries: Option<u32>,
+}
+
 /// A manually appended audit event.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NewAuditEvent {
@@ -1844,6 +1868,17 @@ pub struct WorkflowScriptVersion {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WorkflowRunWorkerPlacement {
+    /// The exact directory that bounds every worker dispatched by the run.
+    pub path: String,
+    pub can_write: bool,
+    /// The durable grant provenance used to re-authorise `path` on every
+    /// worker start without widening back to the space's other attachments.
+    pub authority_path: String,
+    pub authority_context_id: Uuid,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WorkflowRunRecord {
     pub id: Uuid,
     pub space_id: Uuid,
@@ -1874,6 +1909,13 @@ pub struct WorkflowRunRecord {
     /// every worker turn, so nested dispatch cannot expand authority and
     /// suspension never freezes it. Empty means operator-started.
     pub dispatch_bound_agent_ids: Vec<String>,
+    /// The full ordered lineage of task permission overlays bounding this
+    /// run. Worker sessions re-resolve and intersect every definition at
+    /// each turn; a missing definition therefore fails closed.
+    pub dispatch_bound_task_definition_ids: Vec<String>,
+    /// Filesystem authority inherited from the session that launched this
+    /// run. `None` means the run was not launched by a placed worker.
+    pub inherited_worker_placement: Option<WorkflowRunWorkerPlacement>,
     /// When a parked run is due to wake. Set only while `state` is
     /// `parked`; cleared on every other state transition.
     pub wake_at: Option<DateTime<Utc>>,
@@ -1900,6 +1942,10 @@ pub struct NewWorkflowRun {
     pub engine_version: String,
     /// See `WorkflowRunRecord::dispatch_bound_agent_ids`.
     pub dispatch_bound_agent_ids: Vec<String>,
+    /// See `WorkflowRunRecord::dispatch_bound_task_definition_ids`.
+    pub dispatch_bound_task_definition_ids: Vec<String>,
+    /// See `WorkflowRunRecord::inherited_worker_placement`.
+    pub inherited_worker_placement: Option<WorkflowRunWorkerPlacement>,
 }
 
 /// One entry in a run's durable event queue. Events are namespaced data from

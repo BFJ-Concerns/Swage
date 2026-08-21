@@ -1448,6 +1448,8 @@ pub async fn submit_turn(
             subscription,
             output_schema,
             None,
+            None,
+            None,
             Some(turn_id),
             crate::turn::TurnAttendance::Unattended,
         )
@@ -1608,6 +1610,12 @@ async fn execute_external_delegate_message(
         None => Vec::new(),
     };
     bound_agent_ids.push(delegate_msg.sender_agent_id.clone());
+    let bound_task_definition_ids = match sender_turn_id {
+        Some(turn_id) => crate::turn::dispatch_bound_task_definition_ids_for_turn(&state, turn_id)
+            .await
+            .map_err(|error| ApiError::internal(error.to_string()))?,
+        None => Vec::new(),
+    };
     let effective_target_resolved = crate::turn::apply_dispatch_bounds(
         &state,
         &space.slug,
@@ -1618,8 +1626,20 @@ async fn execute_external_delegate_message(
     )
     .await
     .map_err(|error| ApiError::internal(error.to_string()))?;
-    let session_metadata = crate::turn::dispatch_bound_metadata(&bound_agent_ids)
+    let effective_target_resolved = crate::turn::apply_dispatch_task_bounds(
+        &state,
+        effective_target_resolved,
+        &bound_task_definition_ids,
+        &format!("delegated agent {:?}", delegate_msg.recipient_agent_id),
+    )
+    .await
+    .map_err(|error| ApiError::internal(error.to_string()))?;
+    let mut session_metadata = crate::turn::dispatch_bound_metadata(&bound_agent_ids)
         .expect("a delegated session always has at least its sender bound");
+    crate::turn::add_dispatch_bound_task_definition_ids(
+        &mut session_metadata,
+        &bound_task_definition_ids,
+    );
     let active_workspace_attachment_id =
         active_workspace_attachment_for_sender_turn(&state, sender_turn_id).await?;
     let mut target_agent_config = crate::turn::build_agent_config_for_space_workspace(
@@ -1634,12 +1654,6 @@ async fn execute_external_delegate_message(
     .await;
     target_agent_config.approval_prompts_enabled = false;
     let target_context_transfer_config = target_resolved.communication.context_transfer.clone();
-    let target_instructions = crate::turn::delegated_target_instructions_for_space(
-        &target_resolved.instructions,
-        &space.slug,
-        &delegate_msg.recipient_agent_id,
-    );
-
     // Delegated activity must not reach the parent WebSocket. Shared assembly
     // still emits ContextAssembled into this silent channel; the stored child-
     // turn snapshot is the delegated assembly's audit record.
@@ -1677,7 +1691,7 @@ async fn execute_external_delegate_message(
         ))),
         router: router.clone(),
         active_delegations: swage_agent::active_delegations(),
-        context_assembler: Some(crate::turn::delegated_context_assembler(
+        context_assembler: crate::turn::delegated_context_assembler(
             state.clone(),
             space.clone(),
             target_resolved.clone(),
@@ -1687,7 +1701,7 @@ async fn execute_external_delegate_message(
             crate::turn::effective_tool_permissions_record(&effective_target_resolved),
             crate::turn::DispatchContextComposition::from_payload(&delegate_msg.payload)
                 .map_err(|error| ApiError::validation(error.to_string()))?,
-        )),
+        ),
         snapshot_recorder: Some(crate::turn::delegation_snapshot_recorder(
             state.storage.clone(),
         )),
@@ -1699,7 +1713,6 @@ async fn execute_external_delegate_message(
             sender_turn_id,
             space_id,
             target_agent_config,
-            target_instructions,
             target_context_transfer_config,
             Some(dispatcher_build.dispatcher),
             session_metadata,

@@ -34,6 +34,8 @@ const OPENAI_REQUEST_DIVERGENCES: &[(&str, &str)] = &[(
 #[derive(Serialize)]
 struct ChatCompletionsRequest {
     model: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<String>,
     messages: Vec<OpenAiMessage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_tokens: Option<u32>,
@@ -380,6 +382,7 @@ impl OpenAiProvider {
 
         ChatCompletionsRequest {
             model,
+            reasoning_effort: request.effort.clone(),
             messages: Self::convert_messages(&request.messages),
             max_tokens: request.max_tokens,
             temperature: request.temperature,
@@ -412,6 +415,8 @@ impl OpenAiProvider {
 
         ChatCompletionsRequest {
             model,
+            // ToolCompletionRequest has no per-call effort surface.
+            reasoning_effort: None,
             messages: Self::convert_messages(&request.messages),
             max_tokens: request.max_tokens,
             temperature: request.temperature,
@@ -885,6 +890,7 @@ mod tests {
             "http://localhost",
         ));
         let request = CompletionRequest {
+            effort: None,
             messages: vec![],
             model: Some("custom-model".into()),
             max_tokens: Some(100),
@@ -899,10 +905,47 @@ mod tests {
     }
 
     #[test]
+    fn completion_effort_maps_to_openai_reasoning_effort() {
+        let provider =
+            OpenAiProvider::from_config(ProviderConfig::new("key", "model", "http://localhost"));
+        let request = CompletionRequest {
+            effort: Some("high".into()),
+            messages: vec![],
+            model: None,
+            max_tokens: None,
+            temperature: None,
+            stop_sequences: None,
+            metadata: None,
+            tool_definitions: vec![],
+        };
+        let body = serde_json::to_value(provider.build_request(&request, false)).unwrap();
+        assert_eq!(body["reasoning_effort"], "high");
+    }
+
+    #[test]
+    fn completion_without_effort_omits_openai_reasoning_effort() {
+        let provider =
+            OpenAiProvider::from_config(ProviderConfig::new("key", "model", "http://localhost"));
+        let request = CompletionRequest {
+            effort: None,
+            messages: vec![],
+            model: None,
+            max_tokens: None,
+            temperature: None,
+            stop_sequences: None,
+            metadata: None,
+            tool_definitions: vec![],
+        };
+        let body = serde_json::to_value(provider.build_request(&request, false)).unwrap();
+        assert!(!body.as_object().unwrap().contains_key("reasoning_effort"));
+    }
+
+    #[test]
     fn build_request_falls_back_to_config_model() {
         let provider =
             OpenAiProvider::from_config(ProviderConfig::new("key", "gpt-4o", "http://localhost"));
         let request = CompletionRequest {
+            effort: None,
             messages: vec![],
             model: None,
             max_tokens: None,
@@ -921,6 +964,7 @@ mod tests {
             OpenAiProvider::from_config(ProviderConfig::new("key", "gpt-4o", "http://localhost"));
         let declaration = "## Output Requirements\n\nReturn ONLY schema-compliant JSON.";
         let request = CompletionRequest {
+            effort: None,
             messages: vec![
                 ChatMessage::new(Role::User, "Return JSON"),
                 ChatMessage::new(Role::System, declaration),
@@ -944,6 +988,7 @@ mod tests {
         let provider =
             OpenAiProvider::from_config(ProviderConfig::new("key", "model", "http://localhost"));
         let request = CompletionRequest {
+            effort: None,
             messages: vec![],
             model: None,
             max_tokens: None,
@@ -971,6 +1016,7 @@ mod tests {
         let provider =
             OpenAiProvider::from_config(ProviderConfig::new("key", "model", "http://localhost"));
         let request = CompletionRequest {
+            effort: None,
             messages: vec![],
             model: None,
             max_tokens: None,
@@ -994,6 +1040,7 @@ mod tests {
         let provider =
             OpenAiProvider::from_config(ProviderConfig::new("key", "gpt-4o", "http://localhost"));
         let request = CompletionRequest {
+            effort: None,
             messages: vec![ChatMessage::new(Role::User, "Use a tool")],
             model: None,
             max_tokens: None,
@@ -1025,6 +1072,7 @@ mod tests {
         let provider =
             OpenAiProvider::from_config(ProviderConfig::new("key", "gpt-4o", "http://localhost"));
         let request = CompletionRequest {
+            effort: None,
             messages: vec![ChatMessage::new(Role::User, "Use a tool")],
             model: None,
             max_tokens: None,
@@ -1065,6 +1113,7 @@ mod tests {
         let provider =
             OpenAiProvider::from_config(ProviderConfig::new("key", "gpt-4o", "http://localhost"));
         let request = CompletionRequest {
+            effort: None,
             messages: vec![
                 ChatMessage::new(Role::User, "Use a tool"),
                 ChatMessage::with_tool_replay(
@@ -1107,6 +1156,7 @@ mod tests {
         let provider =
             OpenAiProvider::from_config(ProviderConfig::new("key", "gpt-4o", "http://localhost"));
         let request = CompletionRequest {
+            effort: None,
             messages: vec![ChatMessage::new(Role::User, "Use a tool")],
             model: None,
             max_tokens: None,

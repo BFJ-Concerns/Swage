@@ -569,6 +569,8 @@ pub async fn process_turn(
         output_schema_override,
         None,
         None,
+        None,
+        None,
         TurnAttendance::Attended,
     )
     .await
@@ -584,6 +586,8 @@ pub(crate) async fn process_turn_with_existing_turn(
     subscription: Arc<Mutex<SubscriptionState>>,
     output_schema_override: Option<serde_json::Value>,
     max_output_retries_override: Option<u32>,
+    effort_override: Option<String>,
+    cancellation_override: Option<CancellationToken>,
     existing_turn_id: Option<Uuid>,
     attendance: TurnAttendance,
 ) -> Result<(), GatewayError> {
@@ -596,6 +600,8 @@ pub(crate) async fn process_turn_with_existing_turn(
         subscription,
         output_schema_override,
         max_output_retries_override,
+        effort_override,
+        cancellation_override,
         existing_turn_id,
         attendance,
         DispatchContextComposition::default(),
@@ -618,12 +624,14 @@ pub(crate) async fn process_turn_with_composition(
     subscription: Arc<Mutex<SubscriptionState>>,
     output_schema_override: Option<serde_json::Value>,
     max_output_retries_override: Option<u32>,
+    effort_override: Option<String>,
+    cancellation_override: Option<CancellationToken>,
     existing_turn_id: Option<Uuid>,
     attendance: TurnAttendance,
     composition: DispatchContextComposition,
 ) -> Result<(), GatewayError> {
     // Step 1: Resolve the space and target thread for this session.
-    let session = state
+    let mut session = state
         .storage
         .get_session(session_id)
         .await?
@@ -665,6 +673,11 @@ pub(crate) async fn process_turn_with_composition(
         .await?
         .ok_or(GatewayError::SpaceNotFound { id: space_id })?;
     let space_slug = space.slug.clone();
+
+    // Placement identity is durable, but filesystem authority is not. Check
+    // the recorded authority root against today's attachment/location grants
+    // and replace the cached write bit before assembly or sandbox creation.
+    reauthorise_worker_placement_for_turn(state, &mut session).await?;
 
     // Load space-specific config. Missing space config falls back to the
     // startup config, but present invalid config fails the turn before any
@@ -709,6 +722,56 @@ pub(crate) async fn process_turn_with_composition(
         &format!("worker session {session_id}"),
     )
     .await?;
+    let bound_task_definition_ids = dispatch_bound_task_definition_ids(session.metadata.as_ref())?;
+    let config = apply_dispatch_task_bounds(
+        state,
+        config,
+        &bound_task_definition_ids,
+        &format!("worker session {session_id}"),
+    )
+    .await?;
+
+    // Task names ride child-session metadata, while the definition is
+    // resolved afresh for every execution. Missing or unreadable tasks fail
+    // closed: silently running a different contract would be false success.
+    let (config, task_defines_output_schema, task_defines_output_retries) = match session
+        .metadata
+        .as_ref()
+        .and_then(|m| m.get("task_definition"))
+        .and_then(serde_json::Value::as_str)
+    {
+        Some(task_id) => {
+            let definition =
+                crate::service::resolve_task_definition(state.storage.as_ref(), task_id).await?;
+            let decision = crate::experimentation::select_variant(
+                &config.experimentation,
+                crate::experimentation::LOCATION_TASK_PROMPT,
+                &[],
+                "definition",
+                session_id,
+            )
+            .map_err(|e| GatewayError::ConfigError(e.to_string()))?;
+            if let Err(error) = crate::experimentation::record_selection(
+                state,
+                crate::experimentation::LOCATION_TASK_PROMPT,
+                &decision,
+                Some(session_id),
+                None,
+            )
+            .await
+            {
+                tracing::warn!(%error, task_id, "task prompt variant record unavailable; serving the definition default");
+            }
+            let defines_output_schema = definition.output_schema.is_some();
+            let defines_output_retries = definition.output_max_retries.is_some();
+            (
+                apply_task_definition(config, &definition)?,
+                defines_output_schema,
+                defines_output_retries,
+            )
+        }
+        None => (config, false, false),
+    };
 
     ensure_selected_model_available(
         state,
@@ -756,7 +819,7 @@ pub(crate) async fn process_turn_with_composition(
     };
 
     // Step 5: Set up the cancellation token before any turn processing begins.
-    let cancel_token = CancellationToken::new();
+    let cancel_token = cancellation_override.unwrap_or_default();
     {
         let mut turns = state.active_turns.lock().await;
         turns.insert(session_id, cancel_token.clone());
@@ -927,8 +990,17 @@ pub(crate) async fn process_turn_with_composition(
         session.active_workspace_attachment_id,
     )
     .await;
-    let (workspace_root, mut allowed_paths) =
-        agent_workspace_from_policy(&workspace_policy, space_id, session.id);
+    let (workspace_root, mut allowed_paths) = if let Some(path) = session
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("worker_placement_cwd"))
+        .and_then(serde_json::Value::as_str)
+    {
+        let path = std::path::PathBuf::from(path);
+        (path.clone(), vec![path])
+    } else {
+        agent_workspace_from_policy(&workspace_policy, space_id, session.id)
+    };
 
     let environment =
         build_session_environment(&space, Some(workspace_root.display().to_string()), &session);
@@ -992,15 +1064,24 @@ pub(crate) async fn process_turn_with_composition(
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .clone();
-    append_approved_location_paths(&mut allowed_paths, &session_approval_grants, space_id);
+    append_approved_location_paths(
+        &mut allowed_paths,
+        &session_approval_grants,
+        space_id,
+        session.metadata.as_ref(),
+    );
     let mut agent_config = build_agent_config_with_workspace(
         session.agent_id.clone(),
         &config,
-        output_schema_override,
+        if task_defines_output_schema {
+            None
+        } else {
+            output_schema_override
+        },
         &workspace_root,
         allowed_paths,
     );
-    if let Some(max_retries) = max_output_retries_override {
+    if !task_defines_output_retries && let Some(max_retries) = max_output_retries_override {
         agent_config.max_output_retries = max_retries;
     }
     agent_config.approval_prompts_enabled = attendance == TurnAttendance::Attended;
@@ -1010,6 +1091,10 @@ pub(crate) async fn process_turn_with_composition(
     // enabled, this also spawns the per-turn sandbox and returns its cleanup
     // guard to this turn scope.
     let is_codex_turn = config.default_provider_protocol() == swage_config::Protocol::Codex;
+    let execution_context = match attendance {
+        TurnAttendance::Attended => "interactive turn",
+        TurnAttendance::Unattended => "unattended turn",
+    };
     let dispatcher_build = match build_gateway_dispatcher(
         state,
         &config,
@@ -1029,7 +1114,7 @@ pub(crate) async fn process_turn_with_composition(
             if let Err(audit_error) = record_degraded_execution(
                 state,
                 &detected_degradation,
-                "interactive turn",
+                execution_context,
                 Some(session_id),
                 Some(prepared_turn_id),
             )
@@ -1140,7 +1225,7 @@ pub(crate) async fn process_turn_with_composition(
             record_degraded_execution(
                 state,
                 &isolation,
-                "unattended turn",
+                execution_context,
                 Some(session_id),
                 Some(prepared_turn_id),
             )
@@ -1149,10 +1234,6 @@ pub(crate) async fn process_turn_with_composition(
                 "sandbox setup failed; execution was blocked: {error}"
             )));
         }
-    };
-    let execution_context = match attendance {
-        TurnAttendance::Attended => "interactive turn",
-        TurnAttendance::Unattended => "unattended turn",
     };
     if let Err(error) = record_degraded_execution(
         state,
@@ -1261,6 +1342,7 @@ pub(crate) async fn process_turn_with_composition(
             assembled_context: assembled_messages,
             parent_turn_id: None,
             existing_turn_id: Some(prepared_turn_id),
+            effort: effort_override,
             cancellation_token: cancel_token,
         };
         tokio::spawn(async move { agent.process_turn_streaming(turn_request, event_tx).await })
