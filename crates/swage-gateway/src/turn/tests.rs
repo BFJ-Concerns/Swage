@@ -8471,6 +8471,98 @@ async fn forced_default_context_assembly_runs_and_records_forced_reason() {
 }
 
 #[tokio::test]
+async fn working_norms_selection_honours_disabled_forced_and_seeded_choices() {
+    let storage = Arc::new(MockStorage::new());
+    let (state, session_id) = make_state_with_storage(vec![], Arc::clone(&storage)).await;
+
+    let mut disabled = swage_config::ResolvedConfig::default();
+    disabled.experimentation.enabled = false;
+    let choices = select_context_assembly(&state, &disabled, session_id, Uuid::nil(), None)
+        .await
+        .expect("disabled experimentation should serve defaults");
+    assert_eq!(
+        choices.working_norms_scaffold,
+        swage_context::working_norms::WorkingNormsScaffold::Native
+    );
+
+    let mut forced = swage_config::ResolvedConfig::default();
+    forced.experimentation.enabled = true;
+    forced.experimentation.locations.insert(
+        crate::experimentation::LOCATION_WORKING_NORMS.to_owned(),
+        swage_config::model::ExperimentLocationConfig {
+            enabled: true,
+            forced_variant: Some(WORKING_NORMS_FAMILY_FALLBACK.to_owned()),
+        },
+    );
+    let choices = select_context_assembly(&state, &forced, session_id, Uuid::nil(), None)
+        .await
+        .expect("registered fallback should be forceable");
+    assert_eq!(
+        choices.working_norms_scaffold,
+        swage_context::working_norms::WorkingNormsScaffold::FamilyFallback
+    );
+
+    forced
+        .experimentation
+        .locations
+        .get_mut(crate::experimentation::LOCATION_WORKING_NORMS)
+        .unwrap()
+        .forced_variant = None;
+    let native = select_context_assembly(&state, &forced, session_id, Uuid::nil(), None)
+        .await
+        .expect("seed zero should draw the default");
+    let fallback = select_context_assembly(&state, &forced, session_id, Uuid::from_u128(1), None)
+        .await
+        .expect("seed one should draw the registered alternative");
+    assert_eq!(
+        native.working_norms_scaffold,
+        swage_context::working_norms::WorkingNormsScaffold::Native
+    );
+    assert_eq!(
+        fallback.working_norms_scaffold,
+        swage_context::working_norms::WorkingNormsScaffold::FamilyFallback
+    );
+
+    let audit = state.storage.list_audit_events().await.unwrap();
+    assert!(
+        audit.iter().any(|event| {
+            event.entity_id == crate::experimentation::LOCATION_WORKING_NORMS
+                && event.metadata["reason"] == serde_json::json!("disabled")
+        }),
+        "missing disabled working-norms audit record: {audit:?}"
+    );
+    assert!(audit.iter().any(|event| {
+        event.entity_id == crate::experimentation::LOCATION_WORKING_NORMS
+            && event.metadata["reason"] == serde_json::json!("forced")
+    }));
+}
+
+#[tokio::test]
+async fn unrecorded_working_norms_draw_falls_back_before_content_is_chosen() {
+    let storage = Arc::new(MockStorage::new());
+    let (state, session_id) = make_state_with_storage(vec![], Arc::clone(&storage)).await;
+    storage.fail_audit_writes();
+    let mut config = swage_config::ResolvedConfig::default();
+    config.experimentation.enabled = true;
+    config.experimentation.locations.insert(
+        crate::experimentation::LOCATION_WORKING_NORMS.to_owned(),
+        swage_config::model::ExperimentLocationConfig {
+            enabled: true,
+            forced_variant: Some(WORKING_NORMS_FAMILY_FALLBACK.to_owned()),
+        },
+    );
+
+    let choices = select_context_assembly(&state, &config, session_id, Uuid::new_v4(), None)
+        .await
+        .expect("record failure should fail closed to the default content");
+
+    assert_eq!(
+        choices.working_norms_scaffold,
+        swage_context::working_norms::WorkingNormsScaffold::Native
+    );
+}
+
+#[tokio::test]
 async fn process_turn_uses_hot_swapped_runtime_tool_policy_for_next_turn() {
     let _guard = SwageHomeGuard::isolate();
     let chunks = vec![
@@ -9548,6 +9640,7 @@ fn named_assembly_elements_include_prompts_skills_memory_and_history() {
         test_environment(),
         vec![],
         "claude-test-model",
+        swage_context::working_norms::WorkingNormsScaffold::Native,
         &[],
         None,
     );
@@ -9582,6 +9675,7 @@ fn default_assembly_elements_exclude_memory() {
         test_environment(),
         vec![],
         "claude-test-model",
+        swage_context::working_norms::WorkingNormsScaffold::Native,
         &[],
         None,
     );
@@ -9635,6 +9729,7 @@ async fn named_assembly_loads_memory_and_can_compose_it() {
         test_environment(),
         vec![],
         "claude-test-model",
+        swage_context::working_norms::WorkingNormsScaffold::Native,
         &[],
         None,
     );
@@ -9838,6 +9933,7 @@ fn build_assembly_elements_memory_element_contains_provided_content() {
         test_environment(),
         vec![],
         "claude-test-model",
+        swage_context::working_norms::WorkingNormsScaffold::Native,
         &[],
         None,
     );
@@ -10018,6 +10114,7 @@ fn assembly_elements_layer_operator_guidance_after_instructions() {
         test_environment(),
         vec![],
         "claude-test-model",
+        swage_context::working_norms::WorkingNormsScaffold::Native,
         &[],
         None,
     );

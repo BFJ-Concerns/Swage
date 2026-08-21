@@ -7,7 +7,7 @@ use swage_context::named_element::discover_named_elements;
 use swage_context::orientation::{
     AvailableSkill, ChannelOrientation, OrientationElement, SessionEnvironment,
 };
-use swage_context::working_norms::WorkingNormsElement;
+use swage_context::working_norms::{WorkingNormsElement, WorkingNormsScaffold};
 
 #[cfg(test)]
 tokio::task_local! {
@@ -92,6 +92,7 @@ pub(crate) fn build_assembly_elements(
     environment: SessionEnvironment,
     available_skills: Vec<AvailableSkill>,
     model_id: &str,
+    working_norms_scaffold: WorkingNormsScaffold,
     hierarchy: &[(HierarchyLevel, PathBuf)],
     requested_elements: Option<&[String]>,
 ) -> Vec<Box<dyn ContextElement>> {
@@ -119,7 +120,10 @@ pub(crate) fn build_assembly_elements(
         // Models arrive over the proxy bare: the norms their own harness
         // would have supplied come from the assembly, keyed by the coming
         // turn's model family.
-        Box::new(WorkingNormsElement::for_model(model_id)),
+        Box::new(WorkingNormsElement::for_model(
+            model_id,
+            working_norms_scaffold,
+        )),
         Box::new(PromptsElement::new(rules)),
         Box::new(SkillsElement::new(active_skills)),
     ];
