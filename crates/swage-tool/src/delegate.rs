@@ -60,6 +60,21 @@ impl Tool for DelegateTool {
                     "enum": ["wait", "detach"],
                     "default": "wait",
                     "description": "Choose \"wait\" when this turn needs the delegate's result before continuing. Choose \"detach\" for independent work; the tool returns a durable delegate_message_id and child session/thread references while the delegate continues."
+                },
+                "elements": {
+                    "type": "array",
+                    "description": "Named briefing elements to compose for the delegated child.",
+                    "items": { "type": "string" }
+                },
+                "variables": {
+                    "type": "object",
+                    "description": "Call-scoped string values for the delegated child's context composition.",
+                    "additionalProperties": { "type": "string" }
+                },
+                "assembly": {
+                    "type": "string",
+                    "pattern": "^[a-z0-9-]+$",
+                    "description": "Named context assembly to use for the delegated child."
                 }
             },
             "required": ["target_agent", "task"]
@@ -92,6 +107,13 @@ impl Tool for DelegateTool {
             .to_string();
 
         let context = params.get("context").cloned();
+        let composition =
+            swage_core::DispatchContextComposition::from_payload(&params).map_err(|error| {
+                ToolError::InvalidParameters {
+                    name: DELEGATE_TOOL_NAME.to_string(),
+                    message: format!("invalid context composition: {error}"),
+                }
+            })?;
         let completion_mode = parse_completion_mode(params.get("completion_mode"))?;
 
         // Signal the agent turn loop to handle delegation.
@@ -100,6 +122,7 @@ impl Tool for DelegateTool {
             target_agent_id,
             task,
             context,
+            composition: Box::new(composition),
             completion_mode,
         })
     }
@@ -174,6 +197,61 @@ mod tests {
             }
             other => panic!("expected RequiresDelegation, got: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn delegate_tool_carries_context_composition_options() {
+        let tool = DelegateTool;
+        let ctx = MockToolContext::new("test-agent", "session-1");
+        let result = tool
+            .execute(
+                json!({
+                    "target_agent": "reviewer",
+                    "task": "Review independently",
+                    "elements": ["current-work"],
+                    "variables": {"owner": "delegate-owner"},
+                    "assembly": "focused"
+                }),
+                &ctx,
+            )
+            .await;
+
+        match result.unwrap_err() {
+            ToolError::RequiresDelegation { composition, .. } => {
+                assert_eq!(composition.elements, Some(vec!["current-work".into()]));
+                assert_eq!(
+                    composition
+                        .variables
+                        .as_ref()
+                        .and_then(|values| values.get("owner")),
+                    Some(&"delegate-owner".to_string())
+                );
+                assert_eq!(composition.assembly.as_deref(), Some("focused"));
+            }
+            other => panic!("expected RequiresDelegation, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn delegate_tool_rejects_unsafe_assembly_name() {
+        let tool = DelegateTool;
+        let ctx = MockToolContext::new("test-agent", "session-1");
+        let result = tool
+            .execute(
+                json!({
+                    "target_agent": "reviewer",
+                    "task": "Review independently",
+                    "assembly": "../../outside"
+                }),
+                &ctx,
+            )
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(ToolError::InvalidParameters { message, .. })
+                if message.contains("invalid context assembly name")
+        ));
     }
 
     #[tokio::test]

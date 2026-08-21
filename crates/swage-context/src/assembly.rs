@@ -12,6 +12,7 @@ use std::time::Instant;
 use swage_config::model::ContextConfig;
 use swage_core::ChatMessage;
 
+use crate::briefing::substitute_variables;
 use crate::compaction::TruncationCompactor;
 use crate::element::ContextElement;
 use crate::report::{AssemblyOutput, AssemblyReport, CompactionRecord, ElementReport};
@@ -52,6 +53,25 @@ pub fn default_assembly(
     config: &ContextConfig,
     tokeniser: &dyn Tokeniser,
 ) -> AssemblyOutput {
+    default_assembly_inner(elements, config, tokeniser, None)
+}
+
+/// Produce the built-in assembly while rendering session-value slots once.
+pub fn default_assembly_with_variables(
+    elements: &[Box<dyn ContextElement>],
+    config: &ContextConfig,
+    tokeniser: &dyn Tokeniser,
+    variables: &std::collections::BTreeMap<String, String>,
+) -> AssemblyOutput {
+    default_assembly_inner(elements, config, tokeniser, Some(variables))
+}
+
+fn default_assembly_inner(
+    elements: &[Box<dyn ContextElement>],
+    config: &ContextConfig,
+    tokeniser: &dyn Tokeniser,
+    variables: Option<&std::collections::BTreeMap<String, String>>,
+) -> AssemblyOutput {
     let start = Instant::now();
 
     // Sort elements by priority (highest first) for deterministic ordering.
@@ -74,8 +94,25 @@ pub fn default_assembly(
     let mut history_range: Option<std::ops::Range<usize>> = None;
 
     for element in &active {
-        let content = element.content();
-        let token_count = element.token_count(tokeniser);
+        let renders_session_values = variables.is_some() && element.renders_session_values();
+        let content = match (variables, renders_session_values) {
+            (Some(variables), true) => element
+                .content()
+                .into_iter()
+                .map(|message| {
+                    ChatMessage::new(
+                        message.role(),
+                        substitute_variables(&message.text_content(), variables),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            _ => element.content(),
+        };
+        let token_count = if renders_session_values {
+            tokeniser.count_messages(&content)
+        } else {
+            element.token_count(tokeniser)
+        };
         let source = element.source();
 
         if element.name() == "history" {
@@ -423,6 +460,43 @@ mod tests {
         assert!(names.contains(&"prompts"));
         assert!(names.contains(&"history"));
         assert!(!names.contains(&"memory"));
+    }
+
+    #[test]
+    fn report_preserves_element_token_accounting_when_no_values_are_rendered() {
+        struct CustomAccountingElement;
+
+        impl ContextElement for CustomAccountingElement {
+            fn name(&self) -> &str {
+                "custom-accounting"
+            }
+
+            fn priority(&self) -> i32 {
+                100
+            }
+
+            fn content(&self) -> Vec<ChatMessage> {
+                vec![ChatMessage::new(Role::System, "one message")]
+            }
+
+            fn token_count(&self, _tokeniser: &dyn Tokeniser) -> usize {
+                73
+            }
+
+            fn source(&self) -> String {
+                "custom accounting".to_owned()
+            }
+        }
+
+        let elements: Vec<Box<dyn ContextElement>> = vec![Box::new(CustomAccountingElement)];
+        let output = default_assembly_with_variables(
+            &elements,
+            &no_budget_config(),
+            &FixedCostTokeniser { cost: 10 },
+            &std::collections::BTreeMap::from([("task".to_owned(), "ignored".to_owned())]),
+        );
+
+        assert_eq!(output.report.elements[0].token_count, 73);
     }
 
     #[test]
