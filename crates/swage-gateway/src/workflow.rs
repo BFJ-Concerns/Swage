@@ -64,6 +64,13 @@ struct EffectiveWorkflow {
     carrying_skill: Option<String>,
 }
 
+#[derive(Clone)]
+struct InlineWorkflowIdentity {
+    id: Uuid,
+    name: String,
+    version: u32,
+}
+
 impl EffectiveWorkflow {
     fn from_builtin(space_id: Uuid, workflow: &'static BuiltinWorkflow) -> Self {
         let released_at = builtin_workflows::released_at(workflow);
@@ -82,6 +89,16 @@ impl EffectiveWorkflow {
             immutable: true,
             carrying_skill: None,
         }
+    }
+
+    fn inline_identity(&self) -> Option<InlineWorkflowIdentity> {
+        // Immutable workflows — built-in and skill-carried alike — keep their
+        // source inline rather than in the authored-version tables.
+        self.immutable.then(|| InlineWorkflowIdentity {
+            id: self.id,
+            name: self.name.clone(),
+            version: self.head_version,
+        })
     }
 
     fn from_carried(space_id: Uuid, skill: &SkillDefinition, name: String, source: String) -> Self {
@@ -601,6 +618,7 @@ impl WorkflowLauncher for GatewayWorkflowLauncher {
             self.state.clone(),
             session.space_id,
             script.script_version_id,
+            script.inline_identity(),
             script.source,
             args,
             budget.unwrap_or_default(),
@@ -2889,6 +2907,7 @@ async fn complete_workflow_call_entry(
                         request.name
                     )
                 })?;
+            let inline_identity = script.inline_identity();
             let parent_budget = parent
                 .as_ref()
                 .map(|parent| parent.budget.clone())
@@ -2900,6 +2919,11 @@ async fn complete_workflow_call_entry(
                     parent_run_id: Some(parent_run_id),
                     parent_seq: Some(parent_seq),
                     script_version_id: script.script_version_id,
+                    inline_workflow_id: inline_identity.as_ref().map(|identity| identity.id),
+                    inline_workflow_name: inline_identity
+                        .as_ref()
+                        .map(|identity| identity.name.clone()),
+                    inline_workflow_version: inline_identity.map(|identity| identity.version),
                     carrying_skill: script.carrying_skill.clone(),
                     source: script
                         .script_version_id
@@ -3266,6 +3290,7 @@ async fn start_run(
     state: AppState,
     space_id: Uuid,
     script_version_id: Option<Uuid>,
+    inline_identity: Option<InlineWorkflowIdentity>,
     source: String,
     args: Value,
     budget: WorkflowBudget,
@@ -3288,6 +3313,11 @@ async fn start_run(
             parent_run_id: None,
             parent_seq: None,
             script_version_id,
+            inline_workflow_id: inline_identity.as_ref().map(|identity| identity.id),
+            inline_workflow_name: inline_identity
+                .as_ref()
+                .map(|identity| identity.name.clone()),
+            inline_workflow_version: inline_identity.map(|identity| identity.version),
             carrying_skill,
             source: script_version_id.is_none().then(|| source.clone()),
             source_hash: source_hash(&source),
@@ -3653,6 +3683,7 @@ pub async fn start_inline_run(
             state,
             space_id,
             None,
+            None,
             request.source,
             request.args,
             request.budget.unwrap_or_default(),
@@ -3683,6 +3714,7 @@ pub async fn start_saved_run(
             state,
             script.space_id,
             script.script_version_id,
+            script.inline_identity(),
             script.source,
             request.args,
             request.budget.unwrap_or_default(),
@@ -4047,39 +4079,139 @@ mod tests {
         let (state, storage) = workflow_test_state();
         let space = storage.get_or_create_default().await.expect("space");
         let _skill_root = crate::skill::SpaceSkillRootGuard::empty(space.id);
-        let (authored, _) = storage
-            .create_workflow_script(NewWorkflowScript {
-                space_id: space.id,
-                name: "research-sweep".into(),
-                description: "Operator variant".into(),
-                source: "return 'operator';".into(),
-                delivery_grant: None,
-            })
+        let router = crate::server::build_router(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
-            .expect("authored script");
+            .expect("bind test gateway");
+        let address = listener.local_addr().expect("test gateway address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router)
+                .await
+                .expect("serve test gateway");
+        });
+        let client = reqwest::Client::new();
+        let base_url = format!("http://{address}");
 
-        let effective = resolve_workflow_by_name(&state, space.id, "research-sweep", &[])
+        let initial_list = client
+            .get(format!(
+                "{base_url}/api/spaces/{}/workflow-scripts",
+                space.id
+            ))
+            .send()
             .await
-            .expect("resolve")
-            .expect("effective script");
-        assert_eq!(effective.id, authored.id);
-        assert_eq!(effective.source, "return 'operator';");
-        assert!(!effective.built_in);
-
-        let Json(list) = list_scripts(
-            State(state),
-            Path(space.id),
-            Query(WorkflowScriptListQuery::default()),
-        )
-        .await
-        .expect("workflow list");
-        let listed = list
-            .scripts
+            .expect("list built-ins over HTTP")
+            .error_for_status()
+            .expect("built-in listing response")
+            .json::<Value>()
+            .await
+            .expect("serialise built-in listing");
+        let builtin = initial_list["scripts"]
+            .as_array()
+            .expect("script array")
             .iter()
-            .find(|script| script.name == "research-sweep")
-            .expect("listed operator variant");
-        assert_eq!(listed.id, authored.id);
-        assert!(!listed.built_in);
+            .find(|script| script["name"] == "research-sweep")
+            .expect("research-sweep built-in");
+        let builtin_id = builtin["id"].as_str().expect("built-in id").to_string();
+        assert_eq!(builtin["built_in"], true);
+
+        let authored = client
+            .post(format!(
+                "{base_url}/api/spaces/{}/workflow-scripts",
+                space.id
+            ))
+            .json(&serde_json::json!({
+                "name": "research-sweep",
+                "description": "Operator variant",
+                "source": "return 'operator';",
+                "delivery_grant": null
+            }))
+            .send()
+            .await
+            .expect("create authored shadow over HTTP")
+            .error_for_status()
+            .expect("authored shadow response")
+            .json::<Value>()
+            .await
+            .expect("serialise authored shadow");
+        let authored_id = authored["id"].as_str().expect("authored id");
+        assert_ne!(authored_id, builtin_id);
+        assert_eq!(authored["built_in"], false);
+
+        let hidden_read = client
+            .get(format!("{base_url}/api/workflow-scripts/{builtin_id}"))
+            .send()
+            .await
+            .expect("read hidden built-in over HTTP");
+        assert_eq!(hidden_read.status(), reqwest::StatusCode::NOT_FOUND);
+        assert_eq!(
+            hidden_read
+                .json::<Value>()
+                .await
+                .expect("serialise hidden read rejection")["code"],
+            "not_found"
+        );
+
+        let hidden_start = client
+            .post(format!("{base_url}/api/workflow-scripts/{builtin_id}/runs"))
+            .json(&serde_json::json!({ "args": null, "budget": null }))
+            .send()
+            .await
+            .expect("start hidden built-in over HTTP");
+        assert_eq!(hidden_start.status(), reqwest::StatusCode::NOT_FOUND);
+        assert_eq!(
+            hidden_start
+                .json::<Value>()
+                .await
+                .expect("serialise hidden start rejection")["code"],
+            "not_found"
+        );
+
+        let read = client
+            .get(format!("{base_url}/api/workflow-scripts/{authored_id}"))
+            .send()
+            .await
+            .expect("read authored winner over HTTP")
+            .error_for_status()
+            .expect("authored winner response")
+            .json::<Value>()
+            .await
+            .expect("serialise authored winner");
+        assert_eq!(read["id"], authored_id);
+        assert_eq!(read["name"], "research-sweep");
+        assert_eq!(read["built_in"], false);
+
+        let started = client
+            .post(format!(
+                "{base_url}/api/workflow-scripts/{authored_id}/runs"
+            ))
+            .json(&serde_json::json!({ "args": null, "budget": null }))
+            .send()
+            .await
+            .expect("start authored winner over HTTP")
+            .error_for_status()
+            .expect("authored winner launch response")
+            .json::<Value>()
+            .await
+            .expect("serialise authored winner launch");
+        assert_eq!(started["script_id"], authored_id);
+        assert_eq!(started["script_name"], "research-sweep");
+        assert_eq!(started["script_version"], 1);
+        let started_id = Uuid::parse_str(started["id"].as_str().expect("started run id"))
+            .expect("valid started run id");
+        wait_for_terminal(&state, started_id).await;
+        let run = storage
+            .get_workflow_run(started_id)
+            .await
+            .expect("run query")
+            .expect("run");
+        assert_eq!(
+            run.script_id.map(|id| id.to_string()).as_deref(),
+            Some(authored_id)
+        );
+        assert_eq!(run.script_name.as_deref(), Some("research-sweep"));
+        assert_eq!(run.script_version, Some(1));
+        assert_eq!(run.source, None);
+        server.abort();
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -4204,9 +4336,21 @@ mod tests {
             .expect("run");
         assert_eq!(run.engine_version, "rquickjs-0.12.2");
         assert_eq!(run.state, "failed");
+        assert_eq!(run.script_version_id, None);
+        assert_eq!(run.script_id, Some(listed.id));
+        assert_eq!(run.script_name.as_deref(), Some("research-sweep"));
+        assert_eq!(run.script_version, Some(1));
         assert_eq!(
             run.source.as_deref(),
             Some(
+                builtin_workflows::find_by_name("research-sweep")
+                    .unwrap()
+                    .source
+            )
+        );
+        assert_eq!(
+            run.source_hash,
+            source_hash(
                 builtin_workflows::find_by_name("research-sweep")
                     .unwrap()
                     .source
@@ -4301,6 +4445,12 @@ mod tests {
             .expect("run query")
             .expect("run");
         assert_eq!(
+            run.script_id,
+            Some(builtin_workflows::id(space.id, "research-sweep"))
+        );
+        assert_eq!(run.script_name.as_deref(), Some("research-sweep"));
+        assert_eq!(run.script_version, Some(1));
+        assert_eq!(
             run.source.as_deref(),
             Some(
                 builtin_workflows::find_by_name("research-sweep")
@@ -4359,6 +4509,12 @@ mod tests {
             .find(|run| run.parent_run_id == Some(started.id))
             .expect("built-in child run");
         assert_eq!(child.engine_version, "rquickjs-0.12.2");
+        assert_eq!(
+            child.script_id,
+            Some(builtin_workflows::id(space.id, "research-sweep"))
+        );
+        assert_eq!(child.script_name.as_deref(), Some("research-sweep"));
+        assert_eq!(child.script_version, Some(1));
         assert_eq!(
             child.source.as_deref(),
             Some(
@@ -4814,6 +4970,9 @@ mod tests {
                 parent_run_id: None,
                 parent_seq: None,
                 script_version_id: None,
+                inline_workflow_id: None,
+                inline_workflow_name: None,
+                inline_workflow_version: None,
                 carrying_skill: Some("operator-proof".into()),
                 source: Some(recorded_source.into()),
                 source_hash: source_hash(recorded_source),
@@ -4949,6 +5108,9 @@ mod tests {
                 parent_run_id: None,
                 parent_seq: None,
                 script_version_id: None,
+                inline_workflow_id: None,
+                inline_workflow_name: None,
+                inline_workflow_version: None,
                 carrying_skill: None,
                 source: Some("return null".into()),
                 source_hash: source_hash("return null"),
@@ -5481,6 +5643,9 @@ mod tests {
                 parent_run_id: None,
                 parent_seq: None,
                 script_version_id: None,
+                inline_workflow_id: None,
+                inline_workflow_name: None,
+                inline_workflow_version: None,
                 carrying_skill: None,
                 source: Some("return null".into()),
                 source_hash: source_hash("return null"),
@@ -5884,6 +6049,9 @@ mod tests {
                 parent_run_id: None,
                 parent_seq: None,
                 script_version_id: None,
+                inline_workflow_id: None,
+                inline_workflow_name: None,
+                inline_workflow_version: None,
                 carrying_skill: None,
                 source: Some("return null".into()),
                 source_hash: source_hash("return null"),
@@ -6016,6 +6184,9 @@ mod tests {
                 parent_run_id: None,
                 parent_seq: None,
                 script_version_id: None,
+                inline_workflow_id: None,
+                inline_workflow_name: None,
+                inline_workflow_version: None,
                 carrying_skill: None,
                 source: Some("return null".into()),
                 source_hash: source_hash("return null"),
@@ -6208,6 +6379,9 @@ mod tests {
                 parent_run_id: None,
                 parent_seq: None,
                 script_version_id: None,
+                inline_workflow_id: None,
+                inline_workflow_name: None,
+                inline_workflow_version: None,
                 carrying_skill: None,
                 source: Some("return null".into()),
                 source_hash: source_hash("return null"),
@@ -6413,6 +6587,9 @@ mod tests {
                 parent_run_id: None,
                 parent_seq: None,
                 script_version_id: None,
+                inline_workflow_id: None,
+                inline_workflow_name: None,
+                inline_workflow_version: None,
                 carrying_skill: None,
                 source: Some("return null".into()),
                 source_hash: source_hash("return null"),
@@ -6483,6 +6660,9 @@ mod tests {
                 parent_run_id: None,
                 parent_seq: None,
                 script_version_id: None,
+                inline_workflow_id: None,
+                inline_workflow_name: None,
+                inline_workflow_version: None,
                 carrying_skill: None,
                 source: Some("return null".into()),
                 source_hash: source_hash("return null"),
@@ -7533,6 +7713,9 @@ mod tests {
             parent_run_id: None,
             parent_seq: None,
             script_version_id: None,
+            inline_workflow_id: None,
+            inline_workflow_name: None,
+            inline_workflow_version: None,
             carrying_skill: None,
             source: Some(source.into()),
             source_hash: source_hash(source),
@@ -7614,6 +7797,9 @@ mod tests {
                 parent_run_id: None,
                 parent_seq: None,
                 script_version_id: None,
+                inline_workflow_id: None,
+                inline_workflow_name: None,
+                inline_workflow_version: None,
                 carrying_skill: None,
                 source: Some("return null".into()),
                 source_hash: source_hash("return null"),
@@ -7723,6 +7909,9 @@ mod tests {
                 parent_run_id: None,
                 parent_seq: None,
                 script_version_id: None,
+                inline_workflow_id: None,
+                inline_workflow_name: None,
+                inline_workflow_version: None,
                 carrying_skill: None,
                 source: Some("return null".into()),
                 source_hash: source_hash("return null"),
@@ -7847,6 +8036,9 @@ mod tests {
                 parent_run_id: None,
                 parent_seq: None,
                 script_version_id: None,
+                inline_workflow_id: None,
+                inline_workflow_name: None,
+                inline_workflow_version: None,
                 carrying_skill: None,
                 source: Some("return null".into()),
                 source_hash: source_hash("return null"),
@@ -8020,6 +8212,9 @@ mod tests {
                 parent_run_id: None,
                 parent_seq: None,
                 script_version_id: None,
+                inline_workflow_id: None,
+                inline_workflow_name: None,
+                inline_workflow_version: None,
                 carrying_skill: None,
                 source: Some("return null".into()),
                 source_hash: source_hash("return null"),
@@ -8139,6 +8334,9 @@ mod tests {
                 parent_run_id: None,
                 parent_seq: None,
                 script_version_id: None,
+                inline_workflow_id: None,
+                inline_workflow_name: None,
+                inline_workflow_version: None,
                 carrying_skill: None,
                 source: Some("return null".into()),
                 source_hash: source_hash("return null"),
@@ -8324,6 +8522,9 @@ mod tests {
                 parent_run_id: None,
                 parent_seq: None,
                 script_version_id: None,
+                inline_workflow_id: None,
+                inline_workflow_name: None,
+                inline_workflow_version: None,
                 carrying_skill: None,
                 source: Some("return null".into()),
                 source_hash: source_hash("return null"),
@@ -8547,6 +8748,9 @@ mod tests {
                 parent_run_id: None,
                 parent_seq: None,
                 script_version_id: None,
+                inline_workflow_id: None,
+                inline_workflow_name: None,
+                inline_workflow_version: None,
                 carrying_skill: None,
                 source: Some("return null".into()),
                 source_hash: source_hash("return null"),
@@ -8759,6 +8963,9 @@ mod tests {
                 parent_run_id: None,
                 parent_seq: None,
                 script_version_id: None,
+                inline_workflow_id: None,
+                inline_workflow_name: None,
+                inline_workflow_version: None,
                 carrying_skill: None,
                 source: Some(source.into()),
                 source_hash: source_hash(source),
@@ -9262,6 +9469,9 @@ mod tests {
                 parent_run_id: None,
                 parent_seq: None,
                 script_version_id: None,
+                inline_workflow_id: None,
+                inline_workflow_name: None,
+                inline_workflow_version: None,
                 carrying_skill: None,
                 source: Some(source.into()),
                 source_hash: source_hash(source),
