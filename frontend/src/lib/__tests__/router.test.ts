@@ -208,6 +208,47 @@ describe("popstate", () => {
 // ---------------------------------------------------------------------------
 
 describe("init with conversation store", () => {
+  it("does not clear a newer selection when an existence check reports 404", async () => {
+    window.history.replaceState(null, "", "/conversations/first-conv");
+    let rejectExistenceCheck: (error: Error) => void = () => {
+      throw new Error("existence check was not started");
+    };
+    const checkConversationExists = vi.fn(
+      () =>
+        new Promise<void>((_resolve, reject) => {
+          rejectExistenceCheck = reject;
+        }),
+    );
+    const clearActiveConversation = vi.fn();
+    const conversationStore = {
+      activeConversationId: "first-conv" as string | null,
+      checkConversationExists,
+      clearActiveConversation,
+      selectConversation: vi.fn().mockResolvedValue(undefined),
+    };
+    const router = createRouter({ conversationStore });
+
+    const initialisation = router.init();
+    await vi.waitFor(() => expect(checkConversationExists).toHaveBeenCalledOnce());
+    conversationStore.activeConversationId = "second-conv";
+    router.navigate("/conversations/second-conv");
+    rejectExistenceCheck(
+      new Error("HTTP 404 from GET /api/conversations/first-conv"),
+    );
+    await initialisation;
+
+    expect(clearActiveConversation).not.toHaveBeenCalled();
+    expect(window.location.pathname).toBe("/conversations/second-conv");
+    expect(router.currentRoute).toEqual({
+      path: "/conversations/second-conv",
+      conversationId: "second-conv",
+      settingsTab: null,
+      settingsSpaceSlug: null,
+      settingsSpaceTab: null,
+      notFound: false,
+    });
+  });
+
   it("calls selectConversation when URL contains a conversation ID", async () => {
     window.history.replaceState(null, "", "/conversations/init-conv");
     const checkConversationExists = vi.fn().mockResolvedValue(undefined);
