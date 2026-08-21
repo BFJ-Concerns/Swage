@@ -65,6 +65,9 @@ pub fn resolve_js_assembly(
     name: &str,
     search_levels: &[(HierarchyLevel, &Path)],
 ) -> Option<PathBuf> {
+    if swage_core::validate_context_assembly_name(name).is_err() {
+        return None;
+    }
     // Later entries are more specific (global → space → agent); search in
     // reverse so the most specific hit wins.
     search_levels.iter().rev().find_map(|(_, base)| {
@@ -638,5 +641,19 @@ mod tests {
             resolved.starts_with(&space),
             "the space-level assembly shadows the global one"
         );
+    }
+
+    #[test]
+    fn invalid_names_do_not_escape_the_assemblies_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = root.path().join("outside.js");
+        std::fs::write(&outside, "// must not resolve").unwrap();
+        let config = root.path().join("config");
+        std::fs::create_dir_all(config.join("assemblies")).unwrap();
+
+        assert!(
+            resolve_js_assembly("../../outside", &[(HierarchyLevel::Global, &config)]).is_none()
+        );
+        assert!(resolve_js_assembly("/outside", &[(HierarchyLevel::Global, &config)]).is_none());
     }
 }

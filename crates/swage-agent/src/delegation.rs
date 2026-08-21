@@ -11,8 +11,8 @@ use tokio::sync::RwLock;
 use uuid::Uuid;
 
 use swage_core::{
-    ChatMessage, DelegateCompletionMode, MessageKind, Role, render_message_for_model_context,
-    role_label_for_model_context,
+    ChatMessage, DelegateCompletionMode, DispatchContextComposition, MessageKind, Role,
+    render_message_for_model_context, role_label_for_model_context,
 };
 use swage_hook::HookRegistry;
 use swage_provider::LlmProvider;
@@ -577,15 +577,12 @@ pub trait DelegationHandler: Send + Sync {
     /// - Creating the delegate message and child session
     /// - Running the target agent via DelegationExecutor
     /// - Returning the result (or error) as a JSON value
-    #[allow(clippy::too_many_arguments)]
     async fn handle_delegation(
         &self,
         target_agent_id: &str,
         task: &str,
         context: Option<serde_json::Value>,
-        elements: Option<Vec<String>>,
-        variables: Option<std::collections::BTreeMap<String, String>>,
-        assembly: Option<String>,
+        composition: DispatchContextComposition,
         sender_agent_id: &str,
         sender_turn_id: Uuid,
         space_id: Uuid,

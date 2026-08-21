@@ -94,7 +94,7 @@ impl DelegationContextAssembler for GatewayDelegatedContextAssembler {
             .into_iter()
             .map(|variable| (variable.name, variable.value))
             .collect();
-        session_variables.extend(self.composition.variables.clone());
+        session_variables.extend(self.composition.variables.clone().unwrap_or_default());
         let environment =
             build_session_environment(&self.space, Some(self.working_directory.clone()), session);
         let available_skills = available_skills_for_agent(
@@ -229,9 +229,7 @@ impl DelegationHandler for GatewayDelegationHandler {
         target_agent_id: &str,
         task: &str,
         context: Option<serde_json::Value>,
-        elements: Option<Vec<String>>,
-        variables: Option<std::collections::BTreeMap<String, String>>,
-        assembly: Option<String>,
+        composition: DispatchContextComposition,
         sender_agent_id: &str,
         sender_turn_id: Uuid,
         space_id: Uuid,
@@ -352,29 +350,19 @@ impl DelegationHandler for GatewayDelegationHandler {
                 target_agent_config.working_directory.display().to_string(),
                 silent_ws_tx,
                 effective_tool_permissions_record(&effective_target_resolved),
-                DispatchContextComposition {
-                    elements: elements.clone(),
-                    variables: variables.clone().unwrap_or_default(),
-                    assembly: assembly.clone(),
-                },
+                composition.clone(),
             )),
             snapshot_recorder: Some(delegation_snapshot_recorder(self.state.storage.clone())),
         };
 
-        let mut payload = serde_json::json!({
-            "task": task,
-        });
+        let mut payload = serde_json::to_value(composition).map_err(|error| {
+            AgentError::InvalidConfig(format!(
+                "failed to encode delegated context composition: {error}"
+            ))
+        })?;
+        payload["task"] = serde_json::json!(task);
         if let Some(context) = context {
             payload["context"] = context;
-        }
-        if let Some(elements) = elements {
-            payload["elements"] = serde_json::json!(elements);
-        }
-        if let Some(variables) = variables {
-            payload["variables"] = serde_json::json!(variables);
-        }
-        if let Some(assembly) = assembly {
-            payload["assembly"] = serde_json::json!(assembly);
         }
 
         let delegate_msg = match router

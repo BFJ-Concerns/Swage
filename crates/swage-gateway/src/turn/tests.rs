@@ -7335,9 +7335,7 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
             "agent-b",
             "This must not start",
             None,
-            None,
-            None,
-            None,
+            DispatchContextComposition::default(),
             "gateway",
             root_turn.id,
             space.id,
@@ -7853,9 +7851,7 @@ async fn detached_delegate_can_be_cancelled_through_active_registry() {
             "agent-b",
             "Summarise independently",
             None,
-            None,
-            None,
-            None,
+            DispatchContextComposition::default(),
             "gateway",
             parent_turn.id,
             space.id,
@@ -8300,6 +8296,47 @@ async fn process_turn_uses_hot_swapped_runtime_config_for_next_turn() {
     assert_eq!(
         request.metadata,
         Some(serde_json::json!({"preset": "quick"}))
+    );
+}
+
+#[tokio::test]
+async fn invalid_call_scoped_assembly_is_rejected_before_provider_dispatch() {
+    let _guard = SwageHomeGuard::isolate();
+    let (provider, captured_request) = CapturingProvider::new(vec![]);
+    let (storage, session_id) = make_storage_with_session().await;
+    let state = AppState::new(
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
+        Arc::new(provider) as Arc<dyn LlmProvider>,
+        swage_config::ResolvedConfig::default(),
+        crate::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+    );
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let error = process_turn_with_composition(
+        &state,
+        session_id,
+        None,
+        "hi".into(),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+        None,
+        None,
+        TurnAttendance::Attended,
+        DispatchContextComposition {
+            assembly: Some("../../outside".into()),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect_err("unsafe call-scoped assembly must fail the turn");
+
+    assert!(error.to_string().contains("invalid context assembly name"));
+    assert!(
+        captured_request.lock().unwrap().is_none(),
+        "the provider must not run for an unsafe assembly override"
     );
 }
 
@@ -9713,10 +9750,10 @@ async fn delegated_assembly_applies_call_scoped_composition_over_live_state() {
         serde_json::json!({}),
         DispatchContextComposition {
             elements: Some(vec!["current-work".into()]),
-            variables: std::collections::BTreeMap::from([(
+            variables: Some(std::collections::BTreeMap::from([(
                 "owner".into(),
                 "dispatch owner".into(),
-            )]),
+            )])),
             assembly: Some("briefing".into()),
         },
     );

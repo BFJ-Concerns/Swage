@@ -1486,9 +1486,7 @@ impl Agent {
                 target_agent_id,
                 task,
                 context,
-                elements,
-                variables,
-                assembly,
+                composition,
                 completion_mode,
             }) => {
                 let handler = match &self.delegation_handler {
@@ -1549,9 +1547,7 @@ impl Agent {
                         &target_agent_id,
                         &task,
                         transferred_context,
-                        elements,
-                        variables,
-                        assembly,
+                        composition,
                         &self.config.agent_id,
                         execution.turn_id,
                         space_id,

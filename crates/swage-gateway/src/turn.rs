@@ -916,7 +916,7 @@ pub(crate) async fn process_turn_with_composition(
         .into_iter()
         .map(|variable| (variable.name, variable.value))
         .collect();
-    session_variables.extend(composition.variables.clone());
+    session_variables.extend(composition.variables.clone().unwrap_or_default());
 
     // The workspace root doubles as the session's working directory in the
     // orientation baseline, so it is resolved before elements are built.
@@ -1723,6 +1723,10 @@ async fn select_context_assembly(
     turn_id: Uuid,
     call_override: Option<&str>,
 ) -> Result<String, GatewayError> {
+    if let Some(call_override) = call_override {
+        swage_core::validate_context_assembly_name(call_override)
+            .map_err(GatewayError::ConfigError)?;
+    }
     // The assembly name is an experiment location: when variants are
     // registered for it, the selection loop chooses which serves this turn
     // (honouring the kill switch and forced pins), and every decision —
