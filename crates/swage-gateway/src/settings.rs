@@ -1274,15 +1274,31 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn save_settings_hot_applies_model_runtime_without_restart() {
-        let _swage_home = SwageHomeGuard::new();
+        let swage_home = SwageHomeGuard::new();
 
         let storage = std::sync::Arc::new(crate::turn::tests::MockStorage::new());
+        let mut initial_config = swage_config::ResolvedConfig::default();
+        initial_config.models.default = "local:fast".to_string();
+        initial_config.models.entries.insert(
+            "local:fast".to_string(),
+            swage_config::ModelEndpointConfig {
+                provider_id: "local".to_string(),
+                model_id: "fast-wire".to_string(),
+                aliases: vec![],
+                context_window: Some(4096),
+                generation_preset: Some("quick".to_string()),
+                default_effort: Some(swage_protocol::client::settings::Effort::Low),
+                capabilities: swage_config::ModelCapabilitiesConfig {
+                    reasoning_replay: true,
+                },
+            },
+        );
         let state = AppState::new(
             storage.clone() as std::sync::Arc<dyn swage_storage::store::Storage>,
             storage as std::sync::Arc<dyn swage_storage::store::SpaceStore>,
             std::sync::Arc::new(crate::turn::tests::MockProvider::new(vec![]))
                 as std::sync::Arc<dyn swage_provider::LlmProvider>,
-            swage_config::ResolvedConfig::default(),
+            initial_config,
             crate::tool::ToolDispatcher::allow_all(vec![]),
             None,
         );
@@ -1377,8 +1393,16 @@ mod tests {
         assert_eq!(changes[0].entity_kind, "settings");
         assert_eq!(changes[0].metadata["action"], "save_settings");
         assert_eq!(
+            changes[0].metadata["prior_state"]["models"]["local:fast"]["default_effort"],
+            "low"
+        );
+        assert_eq!(
             changes[0].metadata["new_state"]["models"]["local:fast"]["default_effort"],
             "high"
+        );
+        assert_ne!(
+            changes[0].metadata["prior_state"]["models"]["local:fast"]["default_effort"],
+            changes[0].metadata["new_state"]["models"]["local:fast"]["default_effort"]
         );
         assert_eq!(changes[0].metadata["new_state"]["context"]["timeout"], 7);
         assert_eq!(
@@ -1386,6 +1410,14 @@ mod tests {
             "shell"
         );
         assert!(changes[0].metadata["prior_state"]["providers"].is_object());
+
+        let reloaded =
+            swage_config::load_resolved_config_from(swage_home.path(), "default", "default")
+                .expect("saved settings should reload from durable configuration");
+        assert_eq!(
+            reloaded.models.entries["local:fast"].default_effort,
+            Some(swage_protocol::client::settings::Effort::High)
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
