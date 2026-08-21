@@ -93,6 +93,7 @@ pub(crate) fn build_assembly_elements(
     available_skills: Vec<AvailableSkill>,
     model_id: &str,
     hierarchy: &[(HierarchyLevel, PathBuf)],
+    requested_elements: Option<&[String]>,
 ) -> Vec<Box<dyn ContextElement>> {
     // Construct a single PromptRule from the resolved instructions string.
     // The config resolver has already merged hierarchy levels and assembled
@@ -126,14 +127,34 @@ pub(crate) fn build_assembly_elements(
         .iter()
         .map(|(level, path)| (level.clone(), path.as_path()))
         .collect::<Vec<_>>();
-    match discover_named_elements(&hierarchy_refs) {
-        Ok(named) => {
-            elements.extend(named.into_iter().map(|resolved| {
-                Box::new(BriefingElement::new(resolved)) as Box<dyn ContextElement>
-            }))
-        }
-        Err(error) => tracing::warn!(%error, "named context elements could not be loaded"),
-    }
+    let named_elements = match requested_elements {
+        Some(names) => names
+            .iter()
+            .filter_map(|name| match swage_context::named_element::resolve_named_element(
+                name,
+                &hierarchy_refs,
+            ) {
+                Ok(Some(resolved)) => Some(resolved),
+                Ok(None) => {
+                    tracing::warn!(element = %name, "requested context element was not found");
+                    None
+                }
+                Err(error) => {
+                    tracing::warn!(element = %name, %error, "requested context element could not be loaded");
+                    None
+                }
+            })
+            .collect(),
+        None => discover_named_elements(&hierarchy_refs).unwrap_or_else(|error| {
+            tracing::warn!(%error, "named context elements could not be loaded");
+            Vec::new()
+        }),
+    };
+    elements.extend(
+        named_elements
+            .into_iter()
+            .map(|resolved| Box::new(BriefingElement::new(resolved)) as Box<dyn ContextElement>),
+    );
     if let Some((content, space_name)) = memory {
         elements.push(Box::new(MemoryElement::new(content, space_name)));
     }
