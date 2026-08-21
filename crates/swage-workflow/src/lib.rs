@@ -9,11 +9,15 @@ use sha2::{Digest, Sha256};
 
 pub use engine::{EngineLimits, ScriptCapabilities, WorkflowEngine, WorkflowEngineError};
 pub use host::{
-    AgentCallRequest, AgentCallResult, AgentSessionRef, EffectPayload, EffectReceipt, GateRequest,
-    ResolvedWorkerPlacement, RunEventPost, WorkflowCallRequest, WorkflowHost,
+    AgentCallRequest, AgentCallResult, AgentSessionRef, AwaitEventRequest, EffectPayload,
+    EffectReceipt, GateRequest, ResolvedWorkerPlacement, RunEventPost, WorkflowCallRequest,
+    WorkflowHost,
 };
 pub use model::EffectKind;
 pub use recovery::{EffectRecoveryHost, recover_started_effect};
+
+/// Runtime version recorded on durable workflow runs.
+pub const QUICKJS_ENGINE_VERSION: &str = "rquickjs-0.12.2";
 
 /// Hash a canonical JSON host-call request for durable replay matching.
 pub fn journal_args_hash(request: &serde_json::Value) -> String {

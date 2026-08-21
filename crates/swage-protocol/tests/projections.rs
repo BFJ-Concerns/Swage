@@ -92,12 +92,20 @@ fn typescript_bindings_are_regenerated() {
         .expect("export workflow create");
     client::workflow::UpdateWorkflowScriptRequest::export_all(&cfg)
         .expect("export workflow update");
+    client::workflow::WorkflowScriptListQuery::export_all(&cfg)
+        .expect("export workflow script query");
     client::workflow::WorkflowScriptListResponse::export_all(&cfg)
         .expect("export workflow scripts");
     client::workflow::StartWorkflowRunRequest::export_all(&cfg)
         .expect("export workflow run request");
     client::workflow::StartInlineWorkflowRunRequest::export_all(&cfg)
         .expect("export inline workflow run request");
+    client::workflow::PostWorkflowRunEventRequest::export_all(&cfg)
+        .expect("export workflow event post request");
+    client::workflow::PostWorkflowRunEventResponse::export_all(&cfg)
+        .expect("export workflow event post response");
+    client::workflow::WorkflowDecisionEventPayload::export_all(&cfg)
+        .expect("export workflow decision event payload");
     client::workflow::WorkflowRunDetailResponse::export_all(&cfg).expect("export workflow detail");
     client::workflow::WorkflowRunListResponse::export_all(&cfg).expect("export workflow runs");
     client::workflow::WorkflowRunStartedEvent::export_all(&cfg)
@@ -106,6 +114,7 @@ fn typescript_bindings_are_regenerated() {
     client::workflow::WorkflowRunCompletedEvent::export_all(&cfg)
         .expect("export workflow completed event");
     client::workflow::WorkerIsolation::export_all(&cfg).expect("export worker isolation");
+    client::skill::SkillListResponse::export_all(&cfg).expect("export skill catalogue");
     hosting::PresenceSnapshotResponse::export_all(&cfg).expect("export hosting presence");
     hosting::MachineHeartbeatRequest::export_all(&cfg).expect("export hosting heartbeat");
     hosting::ApprovalListResponse::export_all(&cfg).expect("export hosting approvals");

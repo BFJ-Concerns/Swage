@@ -19,6 +19,7 @@ pub mod orientation_card;
 pub mod schedule;
 pub mod secret;
 pub mod session;
+pub mod session_variable;
 pub mod skill_activation;
 pub mod space;
 pub mod task_definition;

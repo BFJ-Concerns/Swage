@@ -4,6 +4,8 @@
 //! as `ChatMessage` values for the assembly engine. Agent-level skills are
 //! ordered first, followed by user-activated skills in activation order.
 
+use std::path::PathBuf;
+
 use swage_config::model::HierarchyLevel;
 use swage_core::{ChatMessage, Role};
 
@@ -23,6 +25,8 @@ pub struct ActiveSkill {
     pub name: String,
     /// The markdown body of the SKILL.md file — the skill's instructions.
     pub instructions: String,
+    /// Directory against which relative paths in the instructions resolve.
+    pub source_directory: PathBuf,
     /// Which config hierarchy level this skill was sourced from.
     pub level: HierarchyLevel,
     /// True when the skill was activated at the agent level (always-on).
@@ -102,7 +106,13 @@ impl ContextElement for SkillsElement {
         let combined = self
             .sorted_skills()
             .iter()
-            .map(|s| s.instructions.as_str())
+            .map(|s| {
+                format!(
+                    "Skill directory: {}\nResolve relative paths in these instructions against this directory.\n\n{}",
+                    s.source_directory.display(),
+                    s.instructions
+                )
+            })
             .collect::<Vec<_>>()
             .join("\n\n---\n\n");
 
@@ -173,6 +183,7 @@ mod tests {
         ActiveSkill {
             name: name.to_string(),
             instructions: instructions.to_string(),
+            source_directory: PathBuf::from(format!("/skills/{name}")),
             level: HierarchyLevel::Agent,
             is_agent_level: true,
             activation_order: 0,
@@ -183,6 +194,7 @@ mod tests {
         ActiveSkill {
             name: name.to_string(),
             instructions: instructions.to_string(),
+            source_directory: PathBuf::from(format!("/skills/{name}")),
             level: HierarchyLevel::Space,
             is_agent_level: false,
             activation_order: order,
@@ -221,6 +233,8 @@ mod tests {
         match &messages[0].content()[0] {
             swage_core::ContentPart::Text { text } => {
                 assert!(text.contains("You are a friendly assistant."));
+                assert!(text.contains("Skill directory: /skills/persona"));
+                assert!(text.contains("Resolve relative paths"));
             }
             _ => panic!("expected text content"),
         }

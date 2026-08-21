@@ -1,8 +1,11 @@
 //! Binary-versioned workflow scripts available without authored rows.
 
 use chrono::{DateTime, Utc};
-use sha2::{Digest, Sha256};
 use uuid::Uuid;
+
+use crate::synthetic_id::synthetic_id;
+
+const SYNTHETIC_ID_DOMAIN: &[u8] = b"swage builtin workflow";
 
 pub(crate) struct BuiltinWorkflow {
     pub(crate) name: &'static str,
@@ -25,18 +28,7 @@ pub(crate) fn find_by_name(name: &str) -> Option<&'static BuiltinWorkflow> {
 }
 
 pub(crate) fn id(space_id: Uuid, name: &str) -> Uuid {
-    let mut digest = Sha256::new();
-    digest.update(b"swage builtin workflow\0");
-    digest.update(space_id.as_bytes());
-    digest.update([0]);
-    digest.update(name.as_bytes());
-    let mut bytes: [u8; 16] = digest.finalize()[..16]
-        .try_into()
-        .expect("fixed digest slice");
-    // Mark this deterministic identifier as an RFC 9562 name-based UUID.
-    bytes[6] = (bytes[6] & 0x0f) | 0x50;
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    Uuid::from_bytes(bytes)
+    synthetic_id(SYNTHETIC_ID_DOMAIN, space_id, name)
 }
 
 pub(crate) fn released_at(workflow: &BuiltinWorkflow) -> DateTime<Utc> {

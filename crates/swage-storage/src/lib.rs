@@ -24,10 +24,11 @@ pub use model::{
     NewWorkflowScript, NewWorkspaceAttachment, ObservationOrigin, OrientationCard,
     OrientationCardLifecycle, OrientationCardLifecycleKind, PendingChannelOrigin, Schedule,
     ScheduleCreator, ScheduleKind, ScheduleRun, ScheduleRunState, ScheduleRunTrigger,
-    ScheduleRunUpdate, ScheduleStatus, SecretRecord, Session, SessionPolicy, SkipReason,
-    SourceObservation, Space, SpaceSlug, TaskDefinition, Thread, ThreadBranch, ThreadState,
-    ToolCallRecord, Turn, TurnState, UpdateSchedule, WorkflowJournalRecord, WorkflowRunEventRecord,
-    WorkflowRunRecord, WorkflowScriptRecord, WorkflowScriptVersion, WorkspaceAttachment,
+    ScheduleRunUpdate, ScheduleStatus, SecretRecord, Session, SessionPolicy, SessionVariable,
+    SkipReason, SourceObservation, Space, SpaceSlug, TaskDefinition, Thread, ThreadBranch,
+    ThreadState, ToolCallRecord, Turn, TurnState, UpdateSchedule, WorkflowJournalRecord,
+    WorkflowRunEventRecord, WorkflowRunRecord, WorkflowScriptRecord, WorkflowScriptVersion,
+    WorkspaceAttachment,
 };
 pub use sqlite::SqliteStorage;
 pub use store::{
@@ -35,6 +36,6 @@ pub use store::{
     AuditStore, BackgroundJobStore, ChannelLinkStore, ChannelQueueStore, CitationStore,
     ContextSnapshotStore, CurationAssertionStore, DeliveryStore, MaterialStore, MessageStore,
     ObservationStore, OrientationCardStore, ScheduleStore, SecretStore, SessionStore,
-    SkillActivationStore, SpaceStore, Storage, TaskDefinitionStore, ThreadStore, ToolCallStore,
-    TurnStore, WorkflowStore, WorkspaceAttachmentStore,
+    SessionVariableStore, SkillActivationStore, SpaceStore, Storage, TaskDefinitionStore,
+    ThreadStore, ToolCallStore, TurnStore, WorkflowStore, WorkspaceAttachmentStore,
 };

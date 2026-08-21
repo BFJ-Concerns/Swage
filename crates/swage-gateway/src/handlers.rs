@@ -15,7 +15,10 @@ use uuid::Uuid;
 use swage_agent::approval::ApprovalDecisionValue;
 use swage_core::GatewayError;
 use swage_protocol::{
-    client::{channel as channel_wire, schedule as schedule_wire},
+    client::{
+        channel as channel_wire, schedule as schedule_wire,
+        skill::{SkillItem, SkillListResponse},
+    },
     hosting::{
         AgentDefinitionListResponse, AgentDefinitionMutationResponse, AgentDefinitionResponse,
         AgentDefinitionScopeQuery, CreateAgentDefinitionRequest,
@@ -1145,27 +1148,6 @@ pub struct SkillsQueryParams {
     pub agent_id: Option<String>,
 }
 
-/// A single skill entry in the `GET /api/skills` response.
-#[derive(Debug, Serialize)]
-pub struct SkillItem {
-    pub name: String,
-    pub display_name: Option<String>,
-    pub description: String,
-    /// Hierarchy level where this skill was resolved: "agent", "space", or "global".
-    pub level: String,
-    /// Tool names the skill requests access to.
-    pub tools: Vec<String>,
-    /// True for agent-level skills — they are always active and cannot be
-    /// deactivated by the user.
-    pub always_active: bool,
-}
-
-/// Response body for `GET /api/skills`.
-#[derive(Debug, Serialize)]
-pub struct SkillListResponse {
-    pub skills: Vec<SkillItem>,
-}
-
 /// `GET /api/skills` — list skills available for a space/agent combination.
 ///
 /// Resolves skills from the Swage config hierarchy (global → space → agent),
@@ -1183,7 +1165,6 @@ pub async fn list_skills(
     State(state): State<AppState>,
     Query(params): Query<SkillsQueryParams>,
 ) -> Result<Json<SkillListResponse>, ApiError> {
-    use swage_config::skill::discover_skills;
     use swage_config::{HierarchyLevel, resolve_root};
 
     // Verify the space exists — return 404 for unknown IDs.
@@ -1205,30 +1186,14 @@ pub async fn list_skills(
         Err(_) => return Ok(Json(SkillListResponse { skills: vec![] })),
     };
 
-    // Build the hierarchy: global always included; space and agent directories
-    // are included only when they exist on disk.
     let space_dir = root.join("spaces").join(&space.slug);
-    let mut levels: Vec<(HierarchyLevel, std::path::PathBuf)> =
-        vec![(HierarchyLevel::Global, root)];
-
-    if space_dir.is_dir() {
-        levels.push((HierarchyLevel::Space, space_dir.clone()));
-
-        if let Some(ref agent_id) = params.agent_id {
-            let agent_dir = space_dir.join("agents").join(agent_id);
-            if agent_dir.is_dir() {
-                levels.push((HierarchyLevel::Agent, agent_dir));
-            }
-        }
-    }
-
-    // discover_skills takes borrowed (Level, &Path) pairs — build the refs here.
-    let level_refs: Vec<(HierarchyLevel, &std::path::Path)> = levels
-        .iter()
-        .map(|(l, p)| (l.clone(), p.as_path()))
-        .collect();
-
-    let (skills, _warnings) = discover_skills(&level_refs);
+    let agent_dir = params
+        .agent_id
+        .as_ref()
+        .map(|agent_id| space_dir.join("agents").join(agent_id));
+    let agent_dir = agent_dir.as_deref().filter(|path| path.is_dir());
+    let (skills, _warnings) =
+        crate::skill::SkillManager::discover_available(&root, &space_dir, agent_dir);
 
     let skill_items: Vec<SkillItem> = skills
         .into_iter()
@@ -1240,12 +1205,18 @@ pub async fn list_skills(
                 HierarchyLevel::Global => "global",
             };
             SkillItem {
+                id: s.shipped.then(|| {
+                    let shipped = crate::shipped_skills::find_by_name(&s.name)
+                        .expect("shipped definition has a catalogue entry");
+                    crate::shipped_skills::id(params.space_id, shipped.name)
+                }),
                 name: s.name,
                 display_name: s.display_name,
                 description: s.description,
                 level: level.to_string(),
                 tools: s.tools,
                 always_active,
+                shipped: s.shipped,
             }
         })
         .collect();
@@ -1716,6 +1687,8 @@ async fn execute_external_delegate_message(
             target_agent_config.working_directory.display().to_string(),
             silent_ws_tx,
             crate::turn::effective_tool_permissions_record(&effective_target_resolved),
+            crate::turn::DispatchContextComposition::from_payload(&delegate_msg.payload)
+                .map_err(|error| ApiError::validation(error.to_string()))?,
         )),
         snapshot_recorder: Some(crate::turn::delegation_snapshot_recorder(
             state.storage.clone(),
@@ -2573,6 +2546,8 @@ mod tests {
         use swage_core::{FinishReason, StreamChunk};
         use swage_storage::store::{AgentMessageStore, ApprovalStore};
 
+        let _swage_home = SwageHomeGuard::new();
+
         struct CountingEchoTool(Arc<AtomicUsize>);
 
         #[async_trait::async_trait]
@@ -2732,6 +2707,13 @@ mod tests {
             "---\ndescription: External specialist behaviour\n---\nUse the external specialist skill.\n",
         )
         .expect("write target skill");
+        let space_element = swage_home
+            .path()
+            .join("spaces/default/elements/current-work.md");
+        std::fs::create_dir_all(space_element.parent().unwrap())
+            .expect("create space element directory");
+        std::fs::write(&space_element, "Shared child grounding; task is {{task}}.")
+            .expect("write space context element");
         let config = swage_config::ResolvedConfig {
             instructions: "Use the external delegated specialist instructions.".to_string(),
             ..swage_config::ResolvedConfig::default()
@@ -2791,6 +2773,14 @@ mod tests {
             child_snapshot["elements"].is_array(),
             "external delegated assembly report should contain its element decisions"
         );
+        assert!(
+            child_snapshot["elements"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|element| element["name"] == "current-work"),
+            "external delegated assembly report should identify the space context element"
+        );
         let child_audit = storage
             .list_audit_events_by_session(child_sessions[0].id)
             .await
@@ -2830,6 +2820,10 @@ mod tests {
             request_text.contains("## Skills available in this session")
                 && request_text.contains("external-specialist — External specialist behaviour"),
             "external delegated provider request should include the target skill catalogue: {request_text}"
+        );
+        assert!(
+            request_text.contains("Shared child grounding; task is ⟦unset:task⟧."),
+            "external delegated provider request should include the rendered space context element: {request_text}"
         );
     }
 

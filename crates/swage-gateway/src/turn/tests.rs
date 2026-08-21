@@ -843,6 +843,7 @@ pub(crate) struct MockStorage {
     fail_append_message_at: AtomicUsize,
     append_message_calls: AtomicUsize,
     fail_message_lists: AtomicBool,
+    fail_session_variable_lists: AtomicBool,
     fail_secret_reads: AtomicBool,
     fail_audit_writes: AtomicBool,
     fail_snapshot_writes: AtomicBool,
@@ -961,6 +962,17 @@ impl swage_storage::WorkflowStore for MockStorage {
     ) -> Result<(), StorageError> {
         unimplemented!()
     }
+    async fn park_workflow_run_if_no_matching_events(
+        &self,
+        _: Uuid,
+        _: chrono::DateTime<chrono::Utc>,
+        _: &[String],
+    ) -> Result<bool, StorageError> {
+        unimplemented!()
+    }
+    async fn make_parked_workflow_run_due(&self, _: Uuid) -> Result<bool, StorageError> {
+        unimplemented!()
+    }
     async fn list_due_parked_workflow_runs(
         &self,
         _: chrono::DateTime<chrono::Utc>,
@@ -998,6 +1010,14 @@ impl swage_storage::WorkflowStore for MockStorage {
     ) -> Result<u64, StorageError> {
         unimplemented!()
     }
+    async fn mark_workflow_run_event_delivered(
+        &self,
+        _: Uuid,
+        _: u64,
+        _: u64,
+    ) -> Result<bool, StorageError> {
+        unimplemented!()
+    }
     async fn create_workflow_journal_intent(
         &self,
         _: swage_storage::NewWorkflowJournalIntent,
@@ -1022,6 +1042,34 @@ impl swage_storage::WorkflowStore for MockStorage {
         &self,
         _: Uuid,
     ) -> Result<Vec<swage_storage::WorkflowJournalRecord>, StorageError> {
+        unimplemented!()
+    }
+}
+
+#[async_trait]
+impl swage_storage::SessionVariableStore for MockStorage {
+    async fn set_session_variable(
+        &self,
+        _: Uuid,
+        _: &str,
+        _: &str,
+    ) -> Result<swage_storage::SessionVariable, StorageError> {
+        unimplemented!()
+    }
+
+    async fn list_session_variables(
+        &self,
+        _: Uuid,
+    ) -> Result<Vec<swage_storage::SessionVariable>, StorageError> {
+        if self.fail_session_variable_lists.load(Ordering::SeqCst) {
+            return Err(StorageError::QueryFailed(
+                "injected session variable list failure".into(),
+            ));
+        }
+        Ok(Vec::new())
+    }
+
+    async fn delete_session_variable(&self, _: Uuid, _: &str) -> Result<bool, StorageError> {
         unimplemented!()
     }
 }
@@ -1066,6 +1114,7 @@ impl MockStorage {
             fail_append_message_at: AtomicUsize::new(0),
             append_message_calls: AtomicUsize::new(0),
             fail_message_lists: AtomicBool::new(false),
+            fail_session_variable_lists: AtomicBool::new(false),
             fail_secret_reads: AtomicBool::new(false),
             fail_audit_writes: AtomicBool::new(false),
             fail_snapshot_writes: AtomicBool::new(false),
@@ -1090,6 +1139,11 @@ impl MockStorage {
 
     fn fail_message_lists(&self) {
         self.fail_message_lists.store(true, Ordering::SeqCst);
+    }
+
+    fn fail_session_variable_lists(&self) {
+        self.fail_session_variable_lists
+            .store(true, Ordering::SeqCst);
     }
 
     fn fail_secret_reads(&self) {
@@ -4794,6 +4848,40 @@ async fn history_rebuild_failure_clears_active_turn() {
 }
 
 #[tokio::test]
+async fn session_variable_read_failure_clears_active_turn() {
+    let storage = Arc::new(MockStorage::new());
+    storage.fail_session_variable_lists();
+    let (state, session_id) = make_state_with_storage(vec![], storage).await;
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    process_turn(
+        &state,
+        session_id,
+        None,
+        "message".to_string(),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .expect_err("the injected session variable read must fail");
+
+    assert!(
+        !state.active_turns.lock().await.contains_key(&session_id),
+        "session variable read failure must release the turn guard"
+    );
+    let thread = state
+        .storage
+        .list_by_session(session_id)
+        .await
+        .unwrap()
+        .remove(0);
+    let turns = state.storage.list_turns_by_thread(thread.id).await.unwrap();
+    assert_eq!(turns[0].state, TurnState::Failed);
+    assert_subsequent_turn_is_not_blocked(&state, session_id).await;
+}
+
+#[tokio::test]
 async fn approved_sandbox_fallback_build_failure_clears_active_turn() {
     let (state, session_id) = make_state_with_session(vec![]).await;
     state.fail_next_dispatcher_builds(2);
@@ -5518,6 +5606,7 @@ async fn multi_round_tool_calling() {
 
 #[tokio::test]
 async fn second_tool_round_request_keeps_structured_tool_messages() {
+    let _swage_home = SwageHomeGuard::isolate();
     let round_1 = vec![
         StreamChunk::ToolUse {
             call_id: "c1".into(),
@@ -6953,6 +7042,9 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
                 "target_agent": "agent-b",
                 "task": "Summarise this request",
                 "task_definition": "strict-review",
+                "elements": ["delegated-brief"],
+                "variables": {"owner": "delegating parent"},
+                "assembly": "delegated-focus",
             }),
         },
         StreamChunk::Done {
@@ -7014,6 +7106,19 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
     ]);
 
     let swage_home = tempfile::TempDir::new().expect("temp swage home");
+    std::fs::create_dir_all(swage_home.path().join("assemblies"))
+        .expect("create assembly directory");
+    std::fs::write(
+        swage_home.path().join("assemblies/delegated-focus.js"),
+        "for (const element of elements) add(element.name === 'delegated-brief' ? element.render() : element);",
+    )
+    .expect("write delegated assembly");
+    std::fs::create_dir_all(swage_home.path().join("elements")).expect("create element directory");
+    std::fs::write(
+        swage_home.path().join("elements/delegated-brief.md"),
+        "Delegated owner: {{owner}}",
+    )
+    .expect("write delegated briefing");
     let space_skill_dir = swage_home
         .path()
         .join("spaces/default/skills/foreground-only");
@@ -7180,6 +7285,14 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
         child_snapshot["elements"].is_array(),
         "delegated assembly report should contain its element decisions"
     );
+    assert_eq!(child_snapshot["assembly_name"], "delegated-focus");
+    assert!(
+        child_snapshot["elements"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|element| element["name"] == "delegated-brief")
+    );
     assert_eq!(
         child_snapshot["effective_tool_permissions"],
         serde_json::json!({
@@ -7285,6 +7398,10 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
         .map(ChatMessage::text_content)
         .collect::<Vec<_>>()
         .join("\n\n");
+    assert!(
+        child_request_text.contains("Delegated owner: delegating parent"),
+        "delegated provider request should render call-scoped variables: {child_request_text}"
+    );
     assert!(
         captured_requests[1]
             .tool_definitions
@@ -7411,6 +7528,7 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
             None,
             None,
             None,
+            DispatchContextComposition::default(),
             "missing-lineage-delegate",
             "gateway",
             root_turn.id,
@@ -7973,6 +8091,7 @@ async fn delegated_read_only_location_approval_allows_read_and_refuses_write() {
             None,
             Some(attachment.to_string_lossy().into_owned()),
             None,
+            DispatchContextComposition::default(),
             "read-only-placement-delegate",
             "gateway",
             parent_turn.id,
@@ -8157,6 +8276,7 @@ async fn placed_delegate_keeps_exact_read_only_authority_when_delegating_again()
             None,
             Some(placed_workspace.to_string_lossy().into_owned()),
             None,
+            DispatchContextComposition::default(),
             "outer-placed-delegate",
             "gateway",
             parent_turn.id,
@@ -8314,6 +8434,7 @@ async fn delegate_worktree_provisions_isolated_cwd_and_records_resolved_placemen
             None,
             Some(repo.to_string_lossy().into_owned()),
             Some(swage_protocol::client::workflow::WorkerIsolation::Worktree),
+            DispatchContextComposition::default(),
             "wait-worktree-delegate-call",
             "gateway",
             parent_turn.id,
@@ -8345,6 +8466,7 @@ async fn delegate_worktree_provisions_isolated_cwd_and_records_resolved_placemen
             None,
             Some(repo.to_string_lossy().into_owned()),
             Some(swage_protocol::client::workflow::WorkerIsolation::Worktree),
+            DispatchContextComposition::default(),
             "worktree-delegate-call",
             "gateway",
             parent_turn.id,
@@ -8506,6 +8628,7 @@ async fn detached_delegate_can_be_cancelled_through_active_registry() {
             None,
             Some(delegated_cwd.path().to_string_lossy().into_owned()),
             Some(swage_protocol::client::workflow::WorkerIsolation::Worktree),
+            DispatchContextComposition::default(),
             "detached-placement-delegate",
             "gateway",
             parent_turn.id,
@@ -8542,6 +8665,7 @@ async fn detached_delegate_can_be_cancelled_through_active_registry() {
             None,
             Some(denied_cwd.path().to_string_lossy().into_owned()),
             None,
+            DispatchContextComposition::default(),
             "denied-placement-delegate",
             "gateway",
             parent_turn.id,
@@ -9017,7 +9141,50 @@ async fn process_turn_uses_hot_swapped_runtime_config_for_next_turn() {
 }
 
 #[tokio::test]
-async fn unknown_forced_context_assembly_fails_before_provider_and_audit() {
+async fn invalid_call_scoped_assembly_is_rejected_before_provider_dispatch() {
+    let _guard = SwageHomeGuard::isolate();
+    let (provider, captured_request) = CapturingProvider::new(vec![]);
+    let (storage, session_id) = make_storage_with_session().await;
+    let state = AppState::new(
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
+        Arc::new(provider) as Arc<dyn LlmProvider>,
+        swage_config::ResolvedConfig::default(),
+        crate::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+    );
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let error = process_turn_with_composition(
+        &state,
+        session_id,
+        None,
+        "hi".into(),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+        None,
+        None,
+        None,
+        None,
+        TurnAttendance::Attended,
+        DispatchContextComposition {
+            assembly: Some("../../outside".into()),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect_err("unsafe call-scoped assembly must fail the turn");
+
+    assert!(error.to_string().contains("invalid context assembly name"));
+    assert!(
+        captured_request.lock().unwrap().is_none(),
+        "the provider must not run for an unsafe assembly override"
+    );
+}
+
+#[tokio::test]
+async fn unknown_forced_context_assembly_rejects_call_scoped_override() {
     let _guard = SwageHomeGuard::isolate();
     let (provider, captured_request) = CapturingProvider::new(vec![]);
     let (storage, session_id) = make_storage_with_session().await;
@@ -9039,7 +9206,7 @@ async fn unknown_forced_context_assembly_fails_before_provider_and_audit() {
     );
 
     let (tx, _rx) = mpsc::unbounded_channel();
-    let error = process_turn(
+    let error = process_turn_with_composition(
         &state,
         session_id,
         None,
@@ -9047,6 +9214,15 @@ async fn unknown_forced_context_assembly_fails_before_provider_and_audit() {
         tx,
         Arc::new(Mutex::new(SubscriptionState::new(true))),
         None,
+        None,
+        None,
+        None,
+        None,
+        TurnAttendance::Attended,
+        DispatchContextComposition {
+            assembly: Some("default".into()),
+            ..Default::default()
+        },
     )
     .await
     .expect_err("unknown forced assembly must fail the turn");
@@ -9137,6 +9313,98 @@ async fn forced_default_context_assembly_runs_and_records_forced_reason() {
             && event.metadata["variant"] == serde_json::json!("default")
             && event.metadata["reason"] == serde_json::json!("forced")
     }));
+}
+
+#[tokio::test]
+async fn working_norms_selection_honours_disabled_forced_and_seeded_choices() {
+    let storage = Arc::new(MockStorage::new());
+    let (state, session_id) = make_state_with_storage(vec![], Arc::clone(&storage)).await;
+
+    let mut disabled = swage_config::ResolvedConfig::default();
+    disabled.experimentation.enabled = false;
+    let choices = select_context_assembly(&state, &disabled, session_id, Uuid::nil(), None)
+        .await
+        .expect("disabled experimentation should serve defaults");
+    assert_eq!(
+        choices.working_norms_scaffold,
+        swage_context::working_norms::WorkingNormsScaffold::Native
+    );
+
+    let mut forced = swage_config::ResolvedConfig::default();
+    forced.experimentation.enabled = true;
+    forced.experimentation.locations.insert(
+        crate::experimentation::LOCATION_WORKING_NORMS.to_owned(),
+        swage_config::model::ExperimentLocationConfig {
+            enabled: true,
+            forced_variant: Some(WORKING_NORMS_FAMILY_FALLBACK.to_owned()),
+        },
+    );
+    let choices = select_context_assembly(&state, &forced, session_id, Uuid::nil(), None)
+        .await
+        .expect("registered fallback should be forceable");
+    assert_eq!(
+        choices.working_norms_scaffold,
+        swage_context::working_norms::WorkingNormsScaffold::FamilyFallback
+    );
+
+    forced
+        .experimentation
+        .locations
+        .get_mut(crate::experimentation::LOCATION_WORKING_NORMS)
+        .unwrap()
+        .forced_variant = None;
+    let native = select_context_assembly(&state, &forced, session_id, Uuid::nil(), None)
+        .await
+        .expect("seed zero should draw the default");
+    let fallback = select_context_assembly(&state, &forced, session_id, Uuid::from_u128(1), None)
+        .await
+        .expect("seed one should draw the registered alternative");
+    assert_eq!(
+        native.working_norms_scaffold,
+        swage_context::working_norms::WorkingNormsScaffold::Native
+    );
+    assert_eq!(
+        fallback.working_norms_scaffold,
+        swage_context::working_norms::WorkingNormsScaffold::FamilyFallback
+    );
+
+    let audit = state.storage.list_audit_events().await.unwrap();
+    assert!(
+        audit.iter().any(|event| {
+            event.entity_id == crate::experimentation::LOCATION_WORKING_NORMS
+                && event.metadata["reason"] == serde_json::json!("disabled")
+        }),
+        "missing disabled working-norms audit record: {audit:?}"
+    );
+    assert!(audit.iter().any(|event| {
+        event.entity_id == crate::experimentation::LOCATION_WORKING_NORMS
+            && event.metadata["reason"] == serde_json::json!("forced")
+    }));
+}
+
+#[tokio::test]
+async fn unrecorded_working_norms_draw_falls_back_before_content_is_chosen() {
+    let storage = Arc::new(MockStorage::new());
+    let (state, session_id) = make_state_with_storage(vec![], Arc::clone(&storage)).await;
+    storage.fail_audit_writes();
+    let mut config = swage_config::ResolvedConfig::default();
+    config.experimentation.enabled = true;
+    config.experimentation.locations.insert(
+        crate::experimentation::LOCATION_WORKING_NORMS.to_owned(),
+        swage_config::model::ExperimentLocationConfig {
+            enabled: true,
+            forced_variant: Some(WORKING_NORMS_FAMILY_FALLBACK.to_owned()),
+        },
+    );
+
+    let choices = select_context_assembly(&state, &config, session_id, Uuid::new_v4(), None)
+        .await
+        .expect("record failure should fail closed to the default content");
+
+    assert_eq!(
+        choices.working_norms_scaffold,
+        swage_context::working_norms::WorkingNormsScaffold::Native
+    );
 }
 
 #[tokio::test]
@@ -10217,6 +10485,9 @@ fn named_assembly_elements_include_prompts_skills_memory_and_history() {
         test_environment(),
         vec![],
         "claude-test-model",
+        swage_context::working_norms::WorkingNormsScaffold::Native,
+        &[],
+        None,
     );
 
     // Should produce six elements: orientation, working norms, prompts,
@@ -10249,6 +10520,9 @@ fn default_assembly_elements_exclude_memory() {
         test_environment(),
         vec![],
         "claude-test-model",
+        swage_context::working_norms::WorkingNormsScaffold::Native,
+        &[],
+        None,
     );
 
     assert_eq!(elements.len(), 5);
@@ -10300,6 +10574,9 @@ async fn named_assembly_loads_memory_and_can_compose_it() {
         test_environment(),
         vec![],
         "claude-test-model",
+        swage_context::working_norms::WorkingNormsScaffold::Native,
+        &[],
+        None,
     );
 
     let dir = tempfile::tempdir().unwrap();
@@ -10318,6 +10595,7 @@ async fn named_assembly_loads_memory_and_can_compose_it() {
         &elements,
         &swage_config::model::ContextConfig::default(),
         &TiktokenTokeniser::new("gpt-5"),
+        &std::collections::BTreeMap::new(),
     );
 
     assert!(
@@ -10327,6 +10605,161 @@ async fn named_assembly_loads_memory_and_can_compose_it() {
         "a named assembly should be able to compose the loaded memory element"
     );
     assert_eq!(output.report.assembly_name, "memory-aware");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn delegated_assembly_applies_call_scoped_composition_over_live_state() {
+    let swage_home = tempfile::TempDir::new().expect("temp swage home");
+    std::fs::create_dir_all(swage_home.path().join("assemblies"))
+        .expect("create assembly directory");
+    std::fs::write(
+        swage_home.path().join("assemblies/briefing.js"),
+        "add(elements.find(element => element.name === 'current-work').render());",
+    )
+    .expect("write assembly");
+    let _guard = SwageHomeGuard::set_to(swage_home.path());
+
+    let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
+    let space = storage
+        .get_or_create_default()
+        .await
+        .expect("create default space");
+    let element_path = swage_home
+        .path()
+        .join("spaces")
+        .join(&space.slug)
+        .join("elements/current-work.md");
+    std::fs::create_dir_all(element_path.parent().unwrap()).expect("create element directory");
+    std::fs::write(&element_path, "Task: {{task}}; owner: {{owner}}")
+        .expect("write space briefing");
+    std::fs::write(
+        element_path.parent().unwrap().join("unrequested.md"),
+        "This briefing must not be composed",
+    )
+    .expect("write unrequested briefing");
+    let session = storage
+        .create_session(NewSession {
+            space_id: space.id,
+            agent_id: "delegate".into(),
+            metadata: None,
+            active_workspace_attachment_id: None,
+        })
+        .await
+        .expect("create delegated session");
+    swage_storage::SessionVariableStore::set_session_variable(
+        storage.as_ref(),
+        session.id,
+        "task",
+        "inspect delegated context",
+    )
+    .await
+    .expect("save delegated session value");
+
+    let mut config = swage_config::ResolvedConfig::default();
+    config.context.assembly = "default".into();
+    config.instructions = "Task: {{task}}; owner: {{owner}}".into();
+    let state = AppState::new(
+        Arc::clone(&storage) as Arc<dyn swage_storage::Storage>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::SpaceStore>,
+        Arc::new(MockProvider::new(vec![])) as Arc<dyn LlmProvider>,
+        config.clone(),
+        crate::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+    );
+    let host_context =
+        swage_tool::context::MockToolContext::new("delegate", session.id.to_string());
+    let (tool_event_tx, _tool_event_rx) = mpsc::unbounded_channel();
+    let tool_context = crate::tool_executor::GatewayToolContext::new(
+        &host_context,
+        tool_event_tx,
+        state.storage.clone(),
+    )
+    .with_app_state(Some(state.clone()));
+    let session_value_dispatcher = crate::tool::ToolDispatcher::allow_all(vec![Arc::new(
+        crate::tool::session_variable::SessionVariableTool,
+    )
+        as Arc<dyn crate::tool::Tool>]);
+    let (context_event_tx, _context_event_rx) = mpsc::unbounded_channel();
+    let assembler = crate::turn::delegation::delegated_context_assembler(
+        state,
+        space,
+        config,
+        "delegate".into(),
+        "/workspace".into(),
+        context_event_tx,
+        serde_json::json!({}),
+        DispatchContextComposition {
+            elements: Some(vec!["current-work".into()]),
+            variables: Some(std::collections::BTreeMap::from([(
+                "owner".into(),
+                "dispatch owner".into(),
+            )])),
+            assembly: Some("briefing".into()),
+        },
+    );
+
+    let output = assembler
+        .assemble(&session, Uuid::new_v4(), vec![])
+        .await
+        .expect("assemble delegated context");
+    let context = output
+        .messages
+        .iter()
+        .map(ChatMessage::text_content)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        context.contains("Task: inspect delegated context; owner: dispatch owner"),
+        "delegated assembly should combine session and call-scoped values: {context}"
+    );
+    assert!(
+        output.report["elements"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|element| element["name"] == "current-work"),
+        "the delegated assembly report should identify the named briefing"
+    );
+    assert_eq!(output.report["assembly_name"], "briefing");
+    assert!(
+        output.report["elements"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|element| element["name"] != "unrequested"),
+        "only requested named briefings should reach the child assembly report"
+    );
+
+    std::fs::write(&element_path, "Updated task: {{task}}; owner: {{owner}}")
+        .expect("edit space briefing");
+    session_value_dispatcher
+        .dispatch(
+            "session_values",
+            serde_json::json!({
+                "action": "set",
+                "name": "task",
+                "value": "verify current state"
+            }),
+            &tool_context,
+            "delegate",
+        )
+        .await
+        .expect("update delegated session value through the session_values tool");
+    let recomposed = assembler
+        .assemble(&session, Uuid::new_v4(), vec![])
+        .await
+        .expect("reassemble delegated context");
+    let recomposed_context = recomposed
+        .messages
+        .iter()
+        .map(ChatMessage::text_content)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        recomposed_context.contains("Updated task: verify current state; owner: dispatch owner"),
+        "a later dispatch should re-read the file and current values: {recomposed_context}"
+    );
+    assert!(!recomposed_context.contains("inspect delegated context"));
 }
 
 /// When memory_content is non-empty, the memory element produces a system
@@ -10345,6 +10778,9 @@ fn build_assembly_elements_memory_element_contains_provided_content() {
         test_environment(),
         vec![],
         "claude-test-model",
+        swage_context::working_norms::WorkingNormsScaffold::Native,
+        &[],
+        None,
     );
 
     let memory = elements.iter().find(|e| e.name() == "memory").unwrap();
@@ -10523,6 +10959,9 @@ fn assembly_elements_layer_operator_guidance_after_instructions() {
         test_environment(),
         vec![],
         "claude-test-model",
+        swage_context::working_norms::WorkingNormsScaffold::Native,
+        &[],
+        None,
     );
 
     let prompts = elements.iter().find(|e| e.name() == "prompts").unwrap();

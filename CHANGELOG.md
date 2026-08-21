@@ -7,10 +7,16 @@ All notable changes to Swage are documented in this file.
 ### Added
 
 - Durable named task definitions bundle instructions, an output contract, a model preference, and narrowing permissions for workflow and delegated child dispatches.
-
 - Workflow and delegation authors can place individual workers in a chosen working directory or a runtime-provisioned isolated git worktree.
 - Workflow agent calls now honour per-call reasoning effort and host-enforced timeout options.
 - Workflow scripts can now dispatch ephemeral workers by prompt and model options without naming an agent definition.
+- Skills can carry immediately runnable workflow scripts, with same-named authored workflows taking precedence.
+- Fresh installations discover and activate the shipped development-process skills, with same-named operator skills taking precedence.
+- Models now receive per-model native-harness scaffolds with family fallback, with each scaffold's divergence register recorded.
+- Dispatches can name context elements, variable bindings, and an assembly for the child.
+- Named reusable Markdown context elements now resolve through the global, space, and agent configuration hierarchy, with live session values rendered into each briefing at composition time.
+- Workflow runs can wait on external events, answered through operator or granted agent posts.
+- Session leads can save named values for their session and use them to fill parameterised context elements at composition time.
 - Fresh installations now include front-loaded orchestration, research sweep, and segment orchestration workflows as immutable built-ins.
 - Settings now lists the effective agent definitions for the selected space, with read-only source and configuration details for each winner.
 - New conversations can now choose from the effective agent definitions available to their space, including the shipped default.
@@ -24,6 +30,8 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- Sandbox startup no longer fails when `TMPDIR` has a long path.
+- Generated TypeScript turn-poll responses now expose token counts as numbers rather than bigints.
 - Fresh-session schedules created from Settings now use the currently selected space.
 - Streamed tool calls now remain attached to their assistant turn after completion and appear before the response both immediately and after reloading conversation history.
 

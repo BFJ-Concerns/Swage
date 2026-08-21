@@ -73,7 +73,7 @@ pub async fn run_placeholder_turn(
     let subscription = Arc::new(Mutex::new(SubscriptionState::new(false)));
     tokio::spawn(async move { while ws_rx.recv().await.is_some() {} });
 
-    crate::turn::process_turn_with_existing_turn(
+    Box::pin(crate::turn::process_turn_with_existing_turn(
         state,
         session_id,
         Some(thread.id),
@@ -86,7 +86,7 @@ pub async fn run_placeholder_turn(
         None,
         Some(turn_id),
         crate::turn::TurnAttendance::Unattended,
-    )
+    ))
     .await?;
 
     let turn = state.storage.get_turn(turn_id).await?.ok_or_else(|| {

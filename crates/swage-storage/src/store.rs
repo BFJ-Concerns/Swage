@@ -16,9 +16,10 @@ use crate::model::{
     NewToolCall, NewTurn, NewWorkflowJournalIntent, NewWorkflowRun, NewWorkflowRunEvent,
     NewWorkflowScript, NewWorkspaceAttachment, OrientationCard, OrientationCardLifecycle,
     PendingChannelOrigin, Schedule, ScheduleRun, ScheduleRunUpdate, SecretRecord, Session,
-    SourceObservation, Space, SpaceSlug, TaskDefinition, Thread, ThreadBranch, ThreadState,
-    ToolCallRecord, Turn, TurnState, UpdateSchedule, WorkflowJournalRecord, WorkflowRunEventRecord,
-    WorkflowRunRecord, WorkflowScriptRecord, WorkflowScriptVersion, WorkspaceAttachment,
+    SessionVariable, SourceObservation, Space, SpaceSlug, TaskDefinition, Thread, ThreadBranch,
+    ThreadState, ToolCallRecord, Turn, TurnState, UpdateSchedule, WorkflowJournalRecord,
+    WorkflowRunEventRecord, WorkflowRunRecord, WorkflowScriptRecord, WorkflowScriptVersion,
+    WorkspaceAttachment,
 };
 
 // ---------------------------------------------------------------------------
@@ -233,6 +234,25 @@ pub trait TaskDefinitionStore: Send + Sync {
     async fn get_task_definition(&self, id: &str) -> Result<Option<TaskDefinition>, StorageError>;
     async fn list_task_definitions(&self) -> Result<Vec<TaskDefinition>, StorageError>;
     async fn delete_task_definition(&self, id: &str) -> Result<bool, StorageError>;
+}
+
+#[async_trait]
+pub trait SessionVariableStore: Send + Sync {
+    async fn set_session_variable(
+        &self,
+        session_id: Uuid,
+        name: &str,
+        value: &str,
+    ) -> Result<SessionVariable, StorageError>;
+    async fn list_session_variables(
+        &self,
+        session_id: Uuid,
+    ) -> Result<Vec<SessionVariable>, StorageError>;
+    async fn delete_session_variable(
+        &self,
+        session_id: Uuid,
+        name: &str,
+    ) -> Result<bool, StorageError>;
 }
 
 /// Store for a space's knowledge base: immutable source observations and
@@ -1026,6 +1046,18 @@ pub trait WorkflowStore: Send + Sync {
         id: Uuid,
         wake_at: chrono::DateTime<chrono::Utc>,
     ) -> Result<(), StorageError>;
+    /// Atomically park a running event waiter only if none of the kinds it
+    /// awaits is pending. `false` means a matching event arrived first or the
+    /// run changed state.
+    async fn park_workflow_run_if_no_matching_events(
+        &self,
+        id: Uuid,
+        wake_at: chrono::DateTime<chrono::Utc>,
+        kinds: &[String],
+    ) -> Result<bool, StorageError>;
+    /// Atomically make a parked run due now. False means cancellation or
+    /// another waker moved it first.
+    async fn make_parked_workflow_run_due(&self, id: Uuid) -> Result<bool, StorageError>;
     /// Parked runs whose `wake_at` has arrived, oldest due first.
     async fn list_due_parked_workflow_runs(
         &self,
@@ -1061,6 +1093,14 @@ pub trait WorkflowStore: Send + Sync {
         up_to_seq: u64,
         delivered_wake_seq: u64,
     ) -> Result<u64, StorageError>;
+    /// Stamp one pending event as returned by an `awaitEvent` call. Other
+    /// pending kinds remain available to later waits.
+    async fn mark_workflow_run_event_delivered(
+        &self,
+        run_id: Uuid,
+        event_seq: u64,
+        delivered_wake_seq: u64,
+    ) -> Result<bool, StorageError>;
     async fn create_workflow_journal_intent(
         &self,
         intent: NewWorkflowJournalIntent,
@@ -1112,6 +1152,7 @@ pub trait Storage:
     + AgentMemoryStore
     + AgentDefinitionStore
     + TaskDefinitionStore
+    + SessionVariableStore
     + ObservationStore
     + CurationAssertionStore
     + CitationStore
@@ -1147,6 +1188,7 @@ impl<T> Storage for T where
         + AgentMemoryStore
         + AgentDefinitionStore
         + TaskDefinitionStore
+        + SessionVariableStore
         + ObservationStore
         + CurationAssertionStore
         + CitationStore
@@ -1477,6 +1519,27 @@ mod tests {
             unimplemented!()
         }
         async fn delete_task_definition(&self, _: &str) -> Result<bool, StorageError> {
+            unimplemented!()
+        }
+    }
+
+    #[async_trait]
+    impl SessionVariableStore for StubStorage {
+        async fn set_session_variable(
+            &self,
+            _: Uuid,
+            _: &str,
+            _: &str,
+        ) -> Result<SessionVariable, StorageError> {
+            unimplemented!()
+        }
+        async fn list_session_variables(
+            &self,
+            _: Uuid,
+        ) -> Result<Vec<SessionVariable>, StorageError> {
+            unimplemented!()
+        }
+        async fn delete_session_variable(&self, _: Uuid, _: &str) -> Result<bool, StorageError> {
             unimplemented!()
         }
     }
@@ -2265,6 +2328,17 @@ mod tests {
         ) -> Result<(), StorageError> {
             unimplemented!()
         }
+        async fn park_workflow_run_if_no_matching_events(
+            &self,
+            _: Uuid,
+            _: chrono::DateTime<chrono::Utc>,
+            _: &[String],
+        ) -> Result<bool, StorageError> {
+            unimplemented!()
+        }
+        async fn make_parked_workflow_run_due(&self, _: Uuid) -> Result<bool, StorageError> {
+            Ok(false)
+        }
         async fn list_due_parked_workflow_runs(
             &self,
             _: chrono::DateTime<chrono::Utc>,
@@ -2300,6 +2374,14 @@ mod tests {
             _: u64,
             _: u64,
         ) -> Result<u64, StorageError> {
+            unimplemented!()
+        }
+        async fn mark_workflow_run_event_delivered(
+            &self,
+            _: Uuid,
+            _: u64,
+            _: u64,
+        ) -> Result<bool, StorageError> {
             unimplemented!()
         }
         async fn create_workflow_journal_intent(

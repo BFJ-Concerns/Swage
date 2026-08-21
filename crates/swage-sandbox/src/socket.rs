@@ -1,12 +1,39 @@
 //! Unix domain socket lifecycle management.
 //!
-//! Creates socket files in a temporary directory, detects stale sockets from
-//! previous crashes, and ensures cleanup on shutdown.
+//! Creates socket files in the user's runtime directory, detects stale sockets
+//! from previous crashes, and ensures cleanup on shutdown.
 
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use swage_core::SandboxError;
 use tokio::net::UnixListener;
+
+const FALLBACK_SOCKET_ROOT: &str = "/tmp";
+
+fn socket_root() -> Result<PathBuf, SandboxError> {
+    let Some(xdg_runtime_dir) = std::env::var_os("XDG_RUNTIME_DIR") else {
+        return Ok(PathBuf::from(FALLBACK_SOCKET_ROOT));
+    };
+
+    let root = PathBuf::from(xdg_runtime_dir).join("swage");
+    std::fs::create_dir_all(&root).map_err(|error| SandboxError::SpawnFailed {
+        message: format!(
+            "failed to create Unix socket directory at {}: {error}",
+            root.display()
+        ),
+    })?;
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).map_err(|error| {
+        SandboxError::SpawnFailed {
+            message: format!(
+                "failed to protect Unix socket directory at {}: {error}",
+                root.display()
+            ),
+        }
+    })?;
+
+    Ok(root)
+}
 
 /// Manages the lifecycle of a Unix domain socket file.
 ///
@@ -18,13 +45,13 @@ pub struct SocketManager {
 }
 
 impl SocketManager {
-    /// Creates a Unix domain socket in the system temp directory.
+    /// Creates a Unix domain socket under the user's short runtime root.
     ///
     /// The socket file is named `{prefix}-{uuid}.sock` so multiple sandboxes
     /// can coexist without path collisions. Returns the manager (which owns
     /// cleanup) and the bound listener ready to accept connections.
     pub fn create(prefix: &str) -> Result<(Self, UnixListener), SandboxError> {
-        let path = std::env::temp_dir().join(format!("{}-{}.sock", prefix, uuid::Uuid::new_v4()));
+        let path = socket_root()?.join(format!("{}-{}.sock", prefix, uuid::Uuid::new_v4()));
 
         let listener = UnixListener::bind(&path).map_err(|e| SandboxError::SpawnFailed {
             message: format!("failed to bind Unix socket at {}: {e}", path.display()),
@@ -78,7 +105,7 @@ impl SocketManager {
         }
     }
 
-    /// Scans the temp directory and removes stale socket files whose names
+    /// Scans the socket root and removes stale socket files whose names
     /// start with `{prefix}-`.
     ///
     /// Intended for use at startup to clean up sockets left by a previous
@@ -86,14 +113,20 @@ impl SocketManager {
     /// active sockets from concurrently running sandboxes are left alone.
     #[cfg(test)]
     pub fn cleanup_stale(prefix: &str) {
-        let temp_dir = std::env::temp_dir();
+        let socket_root = match socket_root() {
+            Ok(root) => root,
+            Err(error) => {
+                tracing::warn!(%error, "failed to resolve stale socket directory");
+                return;
+            }
+        };
         let name_prefix = format!("{prefix}-");
 
-        let entries = match std::fs::read_dir(&temp_dir) {
+        let entries = match std::fs::read_dir(&socket_root) {
             Ok(e) => e,
             Err(e) => {
                 tracing::warn!(
-                    dir = %temp_dir.display(),
+                    dir = %socket_root.display(),
                     error = %e,
                     "failed to read temp dir during stale socket cleanup"
                 );
@@ -132,6 +165,10 @@ mod tests {
 
     const TEST_PREFIX: &str = "swage-test-socket";
 
+    fn test_socket_root() -> PathBuf {
+        socket_root().expect("socket root should resolve")
+    }
+
     fn wait_until_stale(path: &Path) {
         let deadline = Instant::now() + Duration::from_millis(250);
         while Instant::now() < deadline {
@@ -157,6 +194,64 @@ mod tests {
 
         // path() should point at the file we just created.
         assert!(mgr.path().is_absolute(), "socket path should be absolute");
+    }
+
+    #[test]
+    fn create_is_independent_of_long_tmpdir() {
+        let root = tempfile::tempdir_in(FALLBACK_SOCKET_ROOT)
+            .expect("short temporary test root should be created");
+        let long_tmp = root.path().join("t".repeat(120));
+        std::fs::create_dir(&long_tmp).expect("long TMPDIR should be created");
+        let xdg_runtime_dir = root.path().join("runtime");
+
+        let output = std::process::Command::new(
+            std::env::current_exe().expect("current test executable should resolve"),
+        )
+        .args([
+            "--exact",
+            "socket::tests::create_is_independent_of_long_tmpdir_child",
+            "--ignored",
+            "--nocapture",
+        ])
+        .env("TMPDIR", &long_tmp)
+        .env("XDG_RUNTIME_DIR", &xdg_runtime_dir)
+        .output()
+        .expect("isolated socket regression test should run");
+
+        assert!(
+            output.status.success(),
+            "isolated socket regression test failed:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "run in an isolated child process by create_is_independent_of_long_tmpdir"]
+    async fn create_is_independent_of_long_tmpdir_child() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let tmpdir = PathBuf::from(std::env::var_os("TMPDIR").expect("TMPDIR should be set"));
+        let xdg_runtime_dir = PathBuf::from(
+            std::env::var_os("XDG_RUNTIME_DIR").expect("XDG_RUNTIME_DIR should be set"),
+        );
+        let expected_root = xdg_runtime_dir.join("swage");
+        let (manager, _listener) =
+            SocketManager::create(TEST_PREFIX).expect("socket should bind outside long TMPDIR");
+        let socket_address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+        let sun_path_capacity = socket_address.sun_path.len();
+
+        assert!(tmpdir.as_os_str().as_bytes().len() >= sun_path_capacity);
+        assert_eq!(manager.path().parent(), Some(expected_root.as_path()));
+        assert!(manager.path().as_os_str().as_bytes().len() < sun_path_capacity);
+        assert_eq!(
+            std::fs::metadata(&expected_root)
+                .expect("runtime socket directory should exist")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
     }
 
     #[tokio::test]
@@ -209,7 +304,7 @@ mod tests {
 
     #[test]
     fn cleanup_on_nonexistent_path_is_safe() {
-        let path = std::env::temp_dir().join("swage-nonexistent-12345.sock");
+        let path = test_socket_root().join("swage-nonexistent-12345.sock");
         // Must not panic or error.
         SocketManager::cleanup(&path);
     }
@@ -218,7 +313,7 @@ mod tests {
 
     #[test]
     fn is_stale_false_for_nonexistent_path() {
-        let path = std::env::temp_dir().join("swage-never-created-99999.sock");
+        let path = test_socket_root().join("swage-never-created-99999.sock");
         assert!(
             !SocketManager::is_stale(&path),
             "non-existent path should not be considered stale"
@@ -240,7 +335,7 @@ mod tests {
     fn is_stale_true_for_abandoned_socket() {
         use std::os::unix::net::UnixListener as StdUnixListener;
 
-        let path = std::env::temp_dir().join(format!(
+        let path = test_socket_root().join(format!(
             "{}-stale-test-{}.sock",
             TEST_PREFIX,
             uuid::Uuid::new_v4()
@@ -266,8 +361,8 @@ mod tests {
         let prefix = format!("swage-sc-{short_id}");
 
         // Create two stale sockets with the test prefix.
-        let path1 = std::env::temp_dir().join(format!("{prefix}-a.sock"));
-        let path2 = std::env::temp_dir().join(format!("{prefix}-b.sock"));
+        let path1 = test_socket_root().join(format!("{prefix}-a.sock"));
+        let path2 = test_socket_root().join(format!("{prefix}-b.sock"));
         let listener1 = StdUnixListener::bind(&path1).unwrap();
         let listener2 = StdUnixListener::bind(&path2).unwrap();
         drop(listener1);
