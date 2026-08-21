@@ -115,15 +115,15 @@ pub enum WorkingNormsScaffold {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DivergenceCategory {
+pub enum DivergenceCategory {
     ProprietaryToolMaterial,
     DynamicVendorContext,
 }
 
 #[derive(Debug, Clone, Copy)]
-struct Divergence {
-    category: DivergenceCategory,
-    material: &'static str,
+pub struct Divergence {
+    pub category: DivergenceCategory,
+    pub material: &'static str,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -205,31 +205,31 @@ const MODEL_SCAFFOLDS: &[ModelScaffold] = &[
     ModelScaffold {
         model_id: "claude-sonnet-5",
         family_text: CLAUDE_NATIVE,
-        model_text: "Balance autonomous completion with concise progress reporting; keep the final response complete and outcome-led.",
+        model_text: "",
         divergences: STANDARD_DIVERGENCES,
     },
     ModelScaffold {
         model_id: "claude-sonnet-5[1m]",
         family_text: CLAUDE_NATIVE,
-        model_text: "Balance autonomous completion with concise progress reporting; keep the final response complete and outcome-led.",
+        model_text: "",
         divergences: STANDARD_DIVERGENCES,
     },
     ModelScaffold {
         model_id: "claude-haiku-4-5-20251001",
         family_text: CLAUDE_NATIVE,
-        model_text: "Prefer a short direct route through the work while preserving explicit verification and honest failure reporting.",
+        model_text: "",
         divergences: STANDARD_DIVERGENCES,
     },
     ModelScaffold {
         model_id: "gpt-5.6-luna",
         family_text: GPT_NATIVE,
-        model_text: "Prefer the smallest complete sequence of verifiable actions and keep coordination overhead proportionate to the task.",
+        model_text: "",
         divergences: STANDARD_DIVERGENCES,
     },
     ModelScaffold {
         model_id: "gpt-5.6-terra",
         family_text: GPT_NATIVE,
-        model_text: "Balance implementation pace with enough explanation for the operator to verify decisions and remaining limits.",
+        model_text: "",
         divergences: STANDARD_DIVERGENCES,
     },
     ModelScaffold {
@@ -261,23 +261,11 @@ impl WorkingNormsElement {
 
     fn render(&self) -> String {
         if let Some(scaffold) = self.scaffold {
-            let divergences = scaffold
-                .divergences
-                .iter()
-                .enumerate()
-                .map(|(index, divergence)| {
-                    let category = match divergence.category {
-                        DivergenceCategory::ProprietaryToolMaterial => "Proprietary tool material",
-                        DivergenceCategory::DynamicVendorContext => "Dynamic vendor context",
-                    };
-                    format!("{}. {category}: {}.", index + 1, divergence.material)
-                })
+            return [COMMON_NORMS, scaffold.family_text, scaffold.model_text]
+                .into_iter()
+                .filter(|text| !text.is_empty())
                 .collect::<Vec<_>>()
-                .join("\n");
-            return format!(
-                "{COMMON_NORMS}\n\n{}\n\n{}\n\n## Native harness divergences\n{divergences}",
-                scaffold.family_text, scaffold.model_text
-            );
+                .join("\n\n");
         }
         match self.family {
             ModelFamily::Claude => format!("{COMMON_NORMS}\n\n{CLAUDE_NORMS}"),
@@ -292,6 +280,13 @@ fn exact_scaffold(model_id: &str) -> Option<&'static ModelScaffold> {
     MODEL_SCAFFOLDS
         .iter()
         .find(|scaffold| scaffold.model_id.eq_ignore_ascii_case(model_id))
+}
+
+/// Return the audit register for material intentionally omitted from an exact
+/// model scaffold. The register is product evidence, not model instructions,
+/// so it is never included in [`WorkingNormsElement`] content.
+pub fn native_harness_divergences(model_id: &str) -> Option<&'static [Divergence]> {
+    exact_scaffold(model_id).map(|scaffold| scaffold.divergences)
 }
 
 impl ContextElement for WorkingNormsElement {
@@ -386,15 +381,24 @@ mod tests {
     }
 
     #[test]
-    fn exact_models_receive_native_scaffolds_and_an_enumerated_divergence_register() {
+    fn exact_models_receive_native_scaffolds_with_a_separate_divergence_register() {
         let text = WorkingNormsElement::for_model(" CLAUDE-FABLE-5 ", WorkingNormsScaffold::Native)
             .content()[0]
             .text_content();
 
         assert!(text.contains("Write for a teammate returning to the work"));
-        assert!(text.contains("## Native harness divergences"));
-        assert!(text.contains("1. Proprietary tool material:"));
-        assert!(text.contains("2. Dynamic vendor context:"));
+        assert!(!text.contains("Native harness divergences"));
+
+        let divergences = native_harness_divergences(" CLAUDE-FABLE-5 ").unwrap();
+        assert_eq!(divergences.len(), 2);
+        assert_eq!(
+            divergences[0].category,
+            DivergenceCategory::ProprietaryToolMaterial
+        );
+        assert_eq!(
+            divergences[1].category,
+            DivergenceCategory::DynamicVendorContext
+        );
     }
 
     #[test]
@@ -418,9 +422,36 @@ mod tests {
             .text_content();
 
         assert_ne!(luna, sol);
-        assert!(!luna.contains("native collaboration-tool protocol"));
-        assert!(sol.contains("native collaboration-tool protocol"));
         assert!(sol.contains("coordinate independent tasks"));
+        assert!(!luna.contains("coordinate independent tasks"));
+        assert!(
+            native_harness_divergences("gpt-5.6-sol").unwrap()[0]
+                .material
+                .contains("native collaboration-tool protocol")
+        );
+    }
+
+    #[test]
+    fn models_without_a_sourced_native_difference_do_not_invent_one() {
+        let luna = WorkingNormsElement::for_model("gpt-5.6-luna", WorkingNormsScaffold::Native)
+            .content()[0]
+            .text_content();
+        let terra = WorkingNormsElement::for_model("gpt-5.6-terra", WorkingNormsScaffold::Native)
+            .content()[0]
+            .text_content();
+        let sonnet =
+            WorkingNormsElement::for_model("claude-sonnet-5", WorkingNormsScaffold::Native)
+                .content()[0]
+                .text_content();
+        let haiku = WorkingNormsElement::for_model(
+            "claude-haiku-4-5-20251001",
+            WorkingNormsScaffold::Native,
+        )
+        .content()[0]
+            .text_content();
+
+        assert_eq!(luna, terra);
+        assert_eq!(sonnet, haiku);
     }
 
     #[test]
