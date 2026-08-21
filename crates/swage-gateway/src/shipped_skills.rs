@@ -127,9 +127,12 @@ pub(crate) fn workflow_files(skill_name: &str) -> impl Iterator<Item = &'static 
         .into_iter()
         .flat_map(|skill| skill.files.iter())
         .filter(move |file| {
-            file.path
-                .strip_prefix(skill_name)
-                .is_some_and(|path| path.starts_with("/workflows/") && path.ends_with(".js"))
+            file.path.strip_prefix(skill_name).is_some_and(|path| {
+                path.starts_with("/workflows/")
+                    && std::path::Path::new(path)
+                        .extension()
+                        .is_some_and(|extension| extension.eq_ignore_ascii_case("js"))
+            })
         })
 }
 
