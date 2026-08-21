@@ -16,7 +16,7 @@ pub struct WorktreeConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProvisionedWorktree {
-    pub run_id: Uuid,
+    pub owner_id: Uuid,
     pub seq: u64,
     pub repo: PathBuf,
     pub path: PathBuf,
@@ -35,34 +35,39 @@ impl WorktreeHost {
         }
     }
 
-    pub async fn provision(&self, run_id: Uuid, seq: u64, repo: &Path) -> Result<PathBuf, String> {
+    pub async fn provision(
+        &self,
+        owner_id: Uuid,
+        seq: u64,
+        repo: &Path,
+    ) -> Result<PathBuf, String> {
         let path = self
             .config
             .root
-            .join(run_id.to_string())
+            .join(owner_id.to_string())
             .join(format!("worker-{seq}"));
-        self.provision_at(run_id, seq, repo, path).await
+        self.provision_at(owner_id, seq, repo, path).await
     }
 
     pub async fn restore(
         &self,
-        run_id: Uuid,
+        owner_id: Uuid,
         seq: u64,
         repo: &Path,
         path: &Path,
     ) -> Result<PathBuf, String> {
-        self.provision_at(run_id, seq, repo, path.to_path_buf())
+        self.provision_at(owner_id, seq, repo, path.to_path_buf())
             .await
     }
 
     async fn provision_at(
         &self,
-        run_id: Uuid,
+        owner_id: Uuid,
         seq: u64,
         repo: &Path,
         path: PathBuf,
     ) -> Result<PathBuf, String> {
-        let key = (run_id, seq);
+        let key = (owner_id, seq);
         if let Some(existing) = self.inner.lock().await.get(&key) {
             return Ok(existing.path.clone());
         }
@@ -76,7 +81,7 @@ impl WorktreeHost {
             self.inner.lock().await.insert(
                 key,
                 ProvisionedWorktree {
-                    run_id,
+                    owner_id,
                     seq,
                     repo,
                     path: path.clone(),
@@ -110,7 +115,7 @@ impl WorktreeHost {
         self.inner.lock().await.insert(
             key,
             ProvisionedWorktree {
-                run_id,
+                owner_id,
                 seq,
                 repo,
                 path: path.clone(),
@@ -119,22 +124,22 @@ impl WorktreeHost {
         Ok(path)
     }
 
-    pub async fn list_run(&self, run_id: Uuid) -> Vec<ProvisionedWorktree> {
+    pub async fn list_owner(&self, owner_id: Uuid) -> Vec<ProvisionedWorktree> {
         self.inner
             .lock()
             .await
             .values()
-            .filter(|item| item.run_id == run_id)
+            .filter(|item| item.owner_id == owner_id)
             .cloned()
             .collect()
     }
 
-    pub async fn cleanup_run(&self, run_id: Uuid) {
+    pub async fn cleanup_owner(&self, owner_id: Uuid) {
         let resources = {
             let mut inner = self.inner.lock().await;
             let keys = inner
                 .keys()
-                .filter(|(id, _)| *id == run_id)
+                .filter(|(id, _)| *id == owner_id)
                 .copied()
                 .collect::<Vec<_>>();
             keys.into_iter()
@@ -155,19 +160,19 @@ impl WorktreeHost {
                 .output()
                 .await;
         }
-        let _ = tokio::fs::remove_dir(self.config.root.join(run_id.to_string())).await;
+        let _ = tokio::fs::remove_dir(self.config.root.join(owner_id.to_string())).await;
     }
 
     pub async fn shutdown(&self) {
-        let run_ids = self
+        let owner_ids = self
             .inner
             .lock()
             .await
             .values()
-            .map(|item| item.run_id)
+            .map(|item| item.owner_id)
             .collect::<std::collections::HashSet<_>>();
-        for run_id in run_ids {
-            self.cleanup_run(run_id).await;
+        for owner_id in owner_ids {
+            self.cleanup_owner(owner_id).await;
         }
     }
 }
@@ -222,10 +227,9 @@ mod tests {
             root: temp.path().join("worktrees"),
         };
         let host = WorktreeHost::new(config.clone());
-        let run_id = Uuid::new_v4();
-        let delegate_key = crate::turn::delegate_worktree_key("delegate-call-17");
-        let first = host.provision(run_id, delegate_key, &repo).await.unwrap();
-        let second = host.provision(run_id, 1, &repo).await.unwrap();
+        let owner_id = Uuid::new_v4();
+        let first = host.provision(owner_id, 0, &repo).await.unwrap();
+        let second = host.provision(owner_id, 1, &repo).await.unwrap();
         tokio::fs::write(first.join("first-only"), "one")
             .await
             .unwrap();
@@ -234,16 +238,9 @@ mod tests {
             .unwrap();
         assert!(!second.join("first-only").exists());
         assert!(!first.join("second-only").exists());
-        assert_eq!(host.list_run(run_id).await.len(), 2);
+        assert_eq!(host.list_owner(owner_id).await.len(), 2);
         let resumed_host = WorktreeHost::new(config);
-        let resumed = resumed_host
-            .provision(
-                run_id,
-                crate::turn::delegate_worktree_key("delegate-call-17"),
-                &repo,
-            )
-            .await
-            .unwrap();
+        let resumed = resumed_host.provision(owner_id, 0, &repo).await.unwrap();
         assert_eq!(resumed, first, "resume must reuse the owned path");
         let listed = Command::new("git")
             .arg("-C")
@@ -261,13 +258,13 @@ mod tests {
             "resume must not provision a duplicate beside the main tree and two workers"
         );
         resumed_host.shutdown().await;
-        host.cleanup_run(run_id).await;
+        host.cleanup_owner(owner_id).await;
         assert!(!first.exists() && !second.exists());
         assert!(
             !temp
                 .path()
                 .join("worktrees")
-                .join(run_id.to_string())
+                .join(owner_id.to_string())
                 .exists()
         );
     }
