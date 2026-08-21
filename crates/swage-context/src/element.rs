@@ -47,6 +47,14 @@ pub trait ContextElement: Send + Sync {
     /// any order.
     fn content(&self) -> Vec<ChatMessage>;
 
+    /// Whether the built-in composer should render session-value slots in this element.
+    ///
+    /// Most model context is literal, including conversation history. Template-backed
+    /// elements opt in so brace-shaped text from users is never interpreted accidentally.
+    fn renders_session_values(&self) -> bool {
+        false
+    }
+
     /// Estimate the token cost of this element's content.
     ///
     /// The tokeniser is provided by the caller so elements do not need to

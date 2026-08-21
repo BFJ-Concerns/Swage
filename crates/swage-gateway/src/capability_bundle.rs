@@ -404,6 +404,7 @@ pub fn skill_definition_from_bundle(
         tools: bundle.requested_tools.clone(),
         level,
         source_path: bundle.bundle_dir.join(SKILL_FILE),
+        shipped: false,
     })
 }
 

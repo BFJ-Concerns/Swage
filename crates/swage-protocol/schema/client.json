@@ -67,6 +67,12 @@
     "orientation_find": {
       "$ref": "#/$defs/OrientationFindResponse"
     },
+    "post_workflow_run_event_request": {
+      "$ref": "#/$defs/PostWorkflowRunEventRequest"
+    },
+    "post_workflow_run_event_response": {
+      "$ref": "#/$defs/PostWorkflowRunEventResponse"
+    },
     "promote_material": {
       "$ref": "#/$defs/PromoteMaterialRequest"
     },
@@ -105,6 +111,9 @@
     },
     "settings": {
       "$ref": "#/$defs/SettingsResponse"
+    },
+    "skills": {
+      "$ref": "#/$defs/SkillListResponse"
     },
     "space_list": {
       "$ref": "#/$defs/SpaceListResponse"
@@ -166,6 +175,9 @@
     "worker_isolation": {
       "$ref": "#/$defs/WorkerIsolation"
     },
+    "workflow_decision_event_payload": {
+      "$ref": "#/$defs/WorkflowDecisionEventPayload"
+    },
     "workflow_entry_event": {
       "$ref": "#/$defs/WorkflowEntryEvent"
     },
@@ -183,6 +195,9 @@
     },
     "workflow_script_list": {
       "$ref": "#/$defs/WorkflowScriptListResponse"
+    },
+    "workflow_script_list_query": {
+      "$ref": "#/$defs/WorkflowScriptListQuery"
     },
     "workspace_attachment_list": {
       "$ref": "#/$defs/WorkspaceAttachmentListResponse"
@@ -217,6 +232,7 @@
     "send_message",
     "message_response",
     "settings",
+    "skills",
     "save_settings",
     "model_discovery",
     "restart_status",
@@ -241,9 +257,13 @@
     "provider_sign_in_state",
     "create_workflow_script_request",
     "update_workflow_script_request",
+    "workflow_script_list_query",
     "workflow_script_list",
     "start_workflow_run_request",
     "start_inline_workflow_run_request",
+    "post_workflow_run_event_request",
+    "post_workflow_run_event_response",
+    "workflow_decision_event_payload",
     "workflow_run_detail",
     "workflow_run_list",
     "workflow_run_started_event",
@@ -2016,6 +2036,34 @@
       "required": [
         "cards",
         "guidance"
+      ]
+    },
+    "PostWorkflowRunEventRequest": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string"
+        },
+        "payload": true
+      },
+      "required": [
+        "kind",
+        "payload"
+      ]
+    },
+    "PostWorkflowRunEventResponse": {
+      "type": "object",
+      "properties": {
+        "event": {
+          "$ref": "#/$defs/WorkflowRunEvent"
+        },
+        "wake_provisioned": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "event",
+        "wake_provisioned"
       ]
     },
     "PricingConfig": {
@@ -3893,6 +3941,70 @@
         "device_code"
       ]
     },
+    "SkillItem": {
+      "type": "object",
+      "properties": {
+        "always_active": {
+          "type": "boolean"
+        },
+        "description": {
+          "type": "string"
+        },
+        "display_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "description": "Stable synthetic identifier for a shipped skill in this space.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "level": {
+          "description": "Resolved hierarchy level: `agent`, `space`, or `global`.",
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "shipped": {
+          "description": "True when the definition is compiled into Swage rather than authored.",
+          "type": "boolean"
+        },
+        "tools": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "name",
+        "description",
+        "level",
+        "tools",
+        "always_active",
+        "shipped"
+      ]
+    },
+    "SkillListResponse": {
+      "type": "object",
+      "properties": {
+        "skills": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SkillItem"
+          }
+        }
+      },
+      "required": [
+        "skills"
+      ]
+    },
     "SkipReason": {
       "description": "Why a run was skipped rather than executed.",
       "oneOf": [
@@ -4603,6 +4715,34 @@
         }
       }
     },
+    "WorkflowDecisionEventPayload": {
+      "type": "object",
+      "properties": {
+        "dispositions": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": true
+        },
+        "nonce": {
+          "type": "string"
+        },
+        "note": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "verdict": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "nonce",
+        "verdict"
+      ]
+    },
     "WorkflowEffectDetail": {
       "type": "object",
       "properties": {
@@ -4730,7 +4870,8 @@
             "log",
             "phase",
             "workflow_call",
-            "timer"
+            "timer",
+            "await_event"
           ]
         },
         {
@@ -4774,6 +4915,12 @@
         "args": true,
         "budget": {
           "$ref": "#/$defs/WorkflowBudget"
+        },
+        "carrying_skill": {
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "completed_at": {
           "type": [
@@ -4870,6 +5017,61 @@
         "wake_metrics"
       ]
     },
+    "WorkflowRunEvent": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string"
+        },
+        "payload": true,
+        "seq": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "source": {
+          "$ref": "#/$defs/WorkflowRunEventSource"
+        }
+      },
+      "required": [
+        "seq",
+        "kind",
+        "payload",
+        "source"
+      ]
+    },
+    "WorkflowRunEventSource": {
+      "description": "Attribution is derived by the gateway, never accepted from a poster.",
+      "type": "object",
+      "properties": {
+        "agent_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "session_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "surface": {
+          "type": "string"
+        },
+        "turn_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        }
+      },
+      "required": [
+        "surface"
+      ]
+    },
     "WorkflowRunListResponse": {
       "type": "object",
       "properties": {
@@ -4962,6 +5164,18 @@
         "created_at",
         "updated_at"
       ]
+    },
+    "WorkflowScriptListQuery": {
+      "type": "object",
+      "properties": {
+        "agent_id": {
+          "description": "Agent whose effective skill layer should contribute carried workflows.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
     },
     "WorkflowScriptListResponse": {
       "type": "object",

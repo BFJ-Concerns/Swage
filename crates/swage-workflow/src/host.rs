@@ -35,9 +35,13 @@ pub struct WorkflowCallRequest {
 /// wake decision, never instructions to anyone.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RunEventPost {
-    /// `completion`, `failure`, or `escalation`.
     pub kind: String,
     pub payload: Value,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AwaitEventRequest {
+    pub kinds: Vec<String>,
 }
 
 /// A wake-gate evaluation over the run's pending events: a cheap model reads
@@ -186,6 +190,16 @@ pub trait WorkflowHost: Send + Sync {
         Err("RunEventError: this host does not support run events".into())
     }
 
+    /// Return the next matching undelivered event. A live run parks when no
+    /// match exists; replay returns the journalled answer.
+    async fn await_run_event(
+        &self,
+        _request: AwaitEventRequest,
+        _cancellation: CancellationToken,
+    ) -> Result<Value, String> {
+        Err("RunEventError: this host does not support awaiting run events".into())
+    }
+
     /// Evaluate the wake gate over the run's pending events (journalled; a
     /// replayed evaluation returns its recorded verdict). Resolves to
     /// `{wake, reasoning, events, read_up_to_seq}` — the events the gate
@@ -218,5 +232,36 @@ pub trait WorkflowHost: Send + Sync {
     /// journal near the ceiling.
     async fn budget_snapshot(&self, _cancellation: CancellationToken) -> Result<Value, String> {
         Err("BudgetSnapshotError: this host does not support budget snapshots".into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn absent_composition_options_are_omitted_from_journal_shape() {
+        let request = AgentCallRequest {
+            prompt: "work".into(),
+            agent: Some("worker".into()),
+            task: None,
+            model: None,
+            effort: None,
+            timeout_ms: None,
+            cwd: None,
+            isolation: None,
+            schema: None,
+            max_attempts: 3,
+            label: None,
+            session: None,
+            elements: None,
+            variables: None,
+            assembly: None,
+        };
+
+        let value = serde_json::to_value(request).expect("serialise agent request");
+        assert!(!value.as_object().unwrap().contains_key("elements"));
+        assert!(!value.as_object().unwrap().contains_key("variables"));
+        assert!(!value.as_object().unwrap().contains_key("assembly"));
     }
 }

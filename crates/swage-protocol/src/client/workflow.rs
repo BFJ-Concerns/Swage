@@ -104,6 +104,12 @@ pub struct WorkflowScriptListResponse {
     pub scripts: Vec<WorkflowScript>,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, TS, JsonSchema)]
+pub struct WorkflowScriptListQuery {
+    /// Agent whose effective skill layer should contribute carried workflows.
+    pub agent_id: Option<String>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
 pub struct WorkflowBudget {
     pub max_agent_calls: Option<u32>,
@@ -130,6 +136,50 @@ pub struct StartInlineWorkflowRunRequest {
     pub budget: Option<WorkflowBudget>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+pub struct WorkflowRunEvent {
+    #[ts(type = "number")]
+    pub seq: u64,
+    pub kind: String,
+    #[ts(type = "unknown")]
+    pub payload: Value,
+    pub source: WorkflowRunEventSource,
+}
+
+/// Attribution is derived by the gateway, never accepted from a poster.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+pub struct WorkflowRunEventSource {
+    pub surface: String,
+    pub agent_id: Option<String>,
+    pub session_id: Option<Uuid>,
+    pub turn_id: Option<Uuid>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+pub struct PostWorkflowRunEventRequest {
+    pub kind: String,
+    #[ts(type = "unknown")]
+    pub payload: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+pub struct PostWorkflowRunEventResponse {
+    pub event: WorkflowRunEvent,
+    pub wake_provisioned: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+pub struct WorkflowDecisionEventPayload {
+    pub nonce: String,
+    pub verdict: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub note: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "unknown[]")]
+    pub dispositions: Option<Vec<Value>>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkflowRunState {
@@ -150,6 +200,7 @@ pub struct WorkflowRun {
     pub script_id: Option<Uuid>,
     pub script_name: Option<String>,
     pub script_version: Option<u32>,
+    pub carrying_skill: Option<String>,
     pub state: WorkflowRunState,
     #[ts(type = "unknown")]
     pub args: Value,
@@ -178,6 +229,7 @@ pub enum WorkflowJournalEntryKind {
     /// A pending-queue operation: an event posted, or events stamped
     /// delivered by a wake.
     Event,
+    AwaitEvent,
     /// A wake-gate evaluation: a cheap model judged the pending events; its
     /// verdict and reasoning are the entry's result.
     Gate,

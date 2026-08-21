@@ -349,6 +349,8 @@ pub enum ToolError {
         cwd: Option<String>,
         /// Optional runtime-managed child isolation.
         isolation: Option<swage_protocol::client::workflow::WorkerIsolation>,
+        /// Call-scoped inputs used to compose the child's context.
+        composition: Box<crate::DispatchContextComposition>,
         /// Whether the parent turn should wait for the child result.
         completion_mode: DelegateCompletionMode,
     },

@@ -46,6 +46,8 @@ mod schedule_integration;
 
 #[path = "integration/schedule_tools_integration.rs"]
 mod schedule_tools_integration;
+#[path = "integration/session_variable_integration.rs"]
+mod session_variable_integration;
 #[path = "integration/skills_endpoint_integration.rs"]
 mod skills_endpoint_integration;
 #[path = "integration/skills_integration.rs"]
@@ -60,3 +62,5 @@ mod tui_cli_integration;
 mod unified_turn_loop_integration;
 #[path = "integration/web_interface_integration.rs"]
 mod web_interface_integration;
+#[path = "integration/workflow_integration.rs"]
+mod workflow_integration;

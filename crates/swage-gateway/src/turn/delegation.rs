@@ -1,15 +1,15 @@
 use super::{
     AgentError, AppState, Arc, CancellationToken, DelegationExecutor, DelegationHandler,
-    GatewayDispatcherRequest, MessageRouter, NewAgentMessage, Uuid, apply_agent_definition,
-    apply_dispatch_bounds, available_skills_for_agent, build_agent_config_for_space_workspace,
-    build_approval_registrar, build_assembly_elements,
+    DispatchContextComposition, GatewayDispatcherRequest, MessageRouter, NewAgentMessage, Uuid,
+    apply_agent_definition, apply_dispatch_bounds, available_skills_for_agent,
+    build_agent_config_for_space_workspace, build_approval_registrar, build_assembly_elements,
     build_gateway_dispatcher_for_unattended_execution, build_session_environment,
-    delegated_target_instructions_for_space, dispatch_bound_agent_ids_for_turn,
-    dispatch_bound_metadata, effective_tool_permissions_record, execute_context_assembly,
-    load_active_skills_for_agent, load_memory_for_assembly, load_session_config, load_space_memory,
-    load_trusted_workspace_policy, mpsc, operator_guidance_rules,
-    resolve_authorised_worker_directory, resolve_swage_root, select_context_assembly,
-    shutdown_sandbox_guard,
+    configuration_hierarchy, delegated_target_instructions_for_space,
+    dispatch_bound_agent_ids_for_turn, dispatch_bound_metadata, effective_tool_permissions_record,
+    execute_context_assembly, load_active_skills_for_agent, load_memory_for_assembly,
+    load_session_config, load_space_memory, load_trusted_workspace_policy, mpsc,
+    operator_guidance_rules, resolve_authorised_worker_directory, resolve_swage_root,
+    select_context_assembly, shutdown_sandbox_guard,
 };
 use crate::turn::workspace::ResolvedWorkerDirectory;
 use sha2::{Digest, Sha256};
@@ -36,6 +36,7 @@ struct GatewayDelegatedContextAssembler {
     swage_root: Option<std::path::PathBuf>,
     context_event_tx: mpsc::UnboundedSender<crate::websocket::ServerEvent>,
     effective_tool_permissions: serde_json::Value,
+    composition: DispatchContextComposition,
 }
 
 pub(crate) fn delegated_context_assembler(
@@ -46,6 +47,7 @@ pub(crate) fn delegated_context_assembler(
     working_directory: String,
     context_event_tx: mpsc::UnboundedSender<crate::websocket::ServerEvent>,
     effective_tool_permissions: serde_json::Value,
+    composition: DispatchContextComposition,
 ) -> Arc<dyn DelegationContextAssembler> {
     Arc::new(GatewayDelegatedContextAssembler {
         state,
@@ -56,6 +58,7 @@ pub(crate) fn delegated_context_assembler(
         swage_root: resolve_swage_root(),
         context_event_tx,
         effective_tool_permissions,
+        composition,
     })
 }
 
@@ -77,9 +80,16 @@ impl DelegationContextAssembler for GatewayDelegatedContextAssembler {
             &self.config.declared_skills,
         )
         .await;
-        let assembly_name = select_context_assembly(&self.state, &self.config, session.id, turn_id)
-            .await
-            .map_err(|error| AgentError::InvalidConfig(error.to_string()))?;
+        let context_choices = select_context_assembly(
+            &self.state,
+            &self.config,
+            session.id,
+            turn_id,
+            self.composition.assembly.as_deref(),
+        )
+        .await
+        .map_err(|error| AgentError::InvalidConfig(error.to_string()))?;
+        let assembly_name = context_choices.assembly_name;
         let memory_content = load_memory_for_assembly(&assembly_name, || async {
             match self.swage_root.as_deref() {
                 Some(root) => load_space_memory(root, &self.space.slug).await,
@@ -87,6 +97,16 @@ impl DelegationContextAssembler for GatewayDelegatedContextAssembler {
             }
         })
         .await;
+        let mut session_variables: std::collections::BTreeMap<String, String> = self
+            .state
+            .storage
+            .list_session_variables(session.id)
+            .await
+            .map_err(AgentError::StorageFailed)?
+            .into_iter()
+            .map(|variable| (variable.name, variable.value))
+            .collect();
+        session_variables.extend(self.composition.variables.clone().unwrap_or_default());
         let environment =
             build_session_environment(&self.space, Some(self.working_directory.clone()), session);
         let available_skills = available_skills_for_agent(
@@ -105,6 +125,11 @@ impl DelegationContextAssembler for GatewayDelegatedContextAssembler {
         .await;
         let operator_guidance =
             operator_guidance_rules(self.swage_root.as_deref(), &workspace_policy);
+        let hierarchy = self
+            .swage_root
+            .as_deref()
+            .map(|root| configuration_hierarchy(root, &self.space.slug, &self.agent_id))
+            .unwrap_or_default();
         let elements = build_assembly_elements(
             &self.config.instructions,
             operator_guidance,
@@ -114,6 +139,9 @@ impl DelegationContextAssembler for GatewayDelegatedContextAssembler {
             environment,
             available_skills,
             self.config.default_model_id(),
+            context_choices.working_norms_scaffold,
+            &hierarchy,
+            self.composition.elements.as_deref(),
         );
         let tokeniser = TiktokenTokeniser::new(self.config.default_model_id());
         let output = execute_context_assembly(
@@ -124,6 +152,7 @@ impl DelegationContextAssembler for GatewayDelegatedContextAssembler {
             self.swage_root.as_deref(),
             &self.space.slug,
             &self.agent_id,
+            &session_variables,
         );
         let mut assembly_report = output.report;
         assembly_report.effective_tool_permissions = Some(self.effective_tool_permissions.clone());
@@ -216,6 +245,7 @@ impl DelegationHandler for GatewayDelegationHandler {
         context: Option<serde_json::Value>,
         cwd: Option<String>,
         isolation: Option<swage_protocol::client::workflow::WorkerIsolation>,
+        composition: DispatchContextComposition,
         delegate_call_id: &str,
         sender_agent_id: &str,
         sender_turn_id: Uuid,
@@ -425,18 +455,22 @@ impl DelegationHandler for GatewayDelegationHandler {
                 target_agent_config.working_directory.display().to_string(),
                 silent_ws_tx,
                 effective_tool_permissions_record(&effective_target_resolved),
+                composition.clone(),
             )),
             snapshot_recorder: Some(delegation_snapshot_recorder(self.state.storage.clone())),
         };
 
-        let mut payload = serde_json::json!({
-            "task": task,
-            "task_definition": task_definition,
-            "placement": {
-                "cwd": placement.as_ref().map(|placement| &placement.path),
-                "requested_cwd": cwd,
-                "isolation": isolation,
-            },
+        let mut payload = serde_json::to_value(composition).map_err(|error| {
+            AgentError::InvalidConfig(format!(
+                "failed to encode delegated context composition: {error}"
+            ))
+        })?;
+        payload["task"] = serde_json::json!(task);
+        payload["task_definition"] = serde_json::json!(task_definition);
+        payload["placement"] = serde_json::json!({
+            "cwd": placement.as_ref().map(|placement| &placement.path),
+            "requested_cwd": cwd,
+            "isolation": isolation,
         });
         if let Some(owner_id) = worktree_owner_id {
             payload["placement"]["owner_id"] = serde_json::json!(owner_id);

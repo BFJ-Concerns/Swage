@@ -36,6 +36,9 @@ pub struct SkillDefinition {
     pub level: HierarchyLevel,
     /// Path to the `SKILL.md` file — used for diagnostics and the assembly report.
     pub source_path: PathBuf,
+    /// Whether this definition is compiled into the product rather than authored
+    /// in the operator's configuration hierarchy.
+    pub shipped: bool,
 }
 
 /// Describes a skill directory or file that was skipped during discovery.
@@ -86,15 +89,29 @@ pub fn parse_skill_file(
         reason: format!("failed to read file: {e}"),
     })?;
 
+    parse_skill_source(&raw, path, skill_name, source_level)
+}
+
+/// Parse a skill definition from an in-memory source using the same grammar as
+/// [`parse_skill_file`].
+///
+/// `source_path` identifies where sibling files resolve for diagnostics and
+/// context assembly; parsing never reads it.
+pub fn parse_skill_source(
+    raw: &str,
+    source_path: &Path,
+    skill_name: &str,
+    source_level: HierarchyLevel,
+) -> Result<SkillDefinition, SkillWarning> {
     let (display_name, description, tools, body) =
-        parse_skill_frontmatter(&raw).map_err(|reason| SkillWarning {
-            file_path: path.to_path_buf(),
+        parse_skill_frontmatter(raw).map_err(|reason| SkillWarning {
+            file_path: source_path.to_path_buf(),
             reason,
         })?;
 
     // description is required — a skill without one is not usable.
     let description = description.ok_or_else(|| SkillWarning {
-        file_path: path.to_path_buf(),
+        file_path: source_path.to_path_buf(),
         reason: "missing required `description` field in frontmatter".to_string(),
     })?;
 
@@ -106,7 +123,8 @@ pub fn parse_skill_file(
         instructions: body.trim().to_string(),
         tools,
         level: source_level,
-        source_path: path.to_path_buf(),
+        source_path: source_path.to_path_buf(),
+        shipped: false,
     })
 }
 
@@ -344,6 +362,22 @@ mod tests {
     use std::path::PathBuf;
     use tempfile::TempDir;
 
+    #[test]
+    fn embedded_source_uses_the_file_parser_grammar() {
+        let directory = TempDir::new().expect("temporary skill directory");
+        let path = directory.path().join("SKILL.md");
+        let source = "---\nname: Example\ndescription: Embedded parser proof\ntools:\n  - shell\n---\n\nRead references/proof.md.\n";
+        fs::write(&path, source).expect("write skill source");
+
+        let from_file = parse_skill_file(&path, "example", HierarchyLevel::Global)
+            .expect("file-backed skill parses");
+        let from_embedded = parse_skill_source(source, &path, "example", HierarchyLevel::Global)
+            .expect("embedded skill parses");
+
+        assert_eq!(from_embedded, from_file);
+        assert_eq!(from_embedded.instructions, "Read references/proof.md.");
+    }
+
     // ── SkillDefinition tests ────────────────────────────────────────────────
 
     /// SkillDefinition can be constructed with all required fields.
@@ -357,6 +391,7 @@ mod tests {
             tools: vec!["bash".to_string(), "read".to_string()],
             level: HierarchyLevel::Global,
             source_path: PathBuf::from("/global/skills/my-skill/SKILL.md"),
+            shipped: false,
         };
 
         assert_eq!(skill.name, "my-skill");
@@ -382,6 +417,7 @@ mod tests {
             tools: vec![],
             level: HierarchyLevel::Space,
             source_path: PathBuf::from("/space/skills/unnamed-skill/SKILL.md"),
+            shipped: false,
         };
 
         assert!(skill.display_name.is_none());
@@ -399,6 +435,7 @@ mod tests {
             tools: vec!["glob".to_string()],
             level: HierarchyLevel::Agent,
             source_path: PathBuf::from("/agent/skills/clonable/SKILL.md"),
+            shipped: false,
         };
 
         let cloned = original.clone();
@@ -416,6 +453,7 @@ mod tests {
             tools: vec![],
             level: HierarchyLevel::Global,
             source_path: PathBuf::from("/skills/debuggable/SKILL.md"),
+            shipped: false,
         };
 
         let debug_str = format!("{skill:?}");

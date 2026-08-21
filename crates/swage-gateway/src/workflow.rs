@@ -7,26 +7,30 @@ use std::sync::{
 
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use swage_config::skill::SkillDefinition;
 use swage_core::{ChatMessage, CompletionRequest, Role, StorageError};
 use swage_protocol::client::workflow::{
-    CreateWorkflowScriptRequest, StartInlineWorkflowRunRequest, StartWorkflowRunRequest,
-    UpdateWorkflowScriptRequest, WorkflowBudget, WorkflowRun, WorkflowRunDetailResponse,
-    WorkflowRunListResponse, WorkflowRunState, WorkflowScript, WorkflowScriptListResponse,
+    CreateWorkflowScriptRequest, PostWorkflowRunEventRequest, PostWorkflowRunEventResponse,
+    StartInlineWorkflowRunRequest, StartWorkflowRunRequest, UpdateWorkflowScriptRequest,
+    WorkflowBudget, WorkflowRun, WorkflowRunDetailResponse, WorkflowRunEvent,
+    WorkflowRunEventSource, WorkflowRunListResponse, WorkflowRunState, WorkflowScript,
+    WorkflowScriptListQuery, WorkflowScriptListResponse,
 };
 use swage_storage::WorkflowJournalRecord;
 use swage_storage::{
     NewAuditEvent, NewSession, NewThread, NewWorkflowJournalIntent, NewWorkflowRun,
-    NewWorkflowRunEvent, NewWorkflowScript, Storage, ThreadStore, WorkflowRunRecord,
-    WorkflowScriptRecord,
+    NewWorkflowRunEvent, NewWorkflowScript, Storage, ThreadStore, WorkflowRunEventRecord,
+    WorkflowRunRecord, WorkflowScriptRecord,
 };
 use swage_workflow::{
-    AgentCallRequest, AgentCallResult, EffectPayload, EffectReceipt, EffectRecoveryHost,
-    EngineLimits, GateRequest, ResolvedWorkerPlacement, RunEventPost, ScriptCapabilities,
-    WorkflowCallRequest, WorkflowEngine, WorkflowHost, journal_args_hash, recover_started_effect,
+    AgentCallRequest, AgentCallResult, AwaitEventRequest, EffectPayload, EffectReceipt,
+    EffectRecoveryHost, EngineLimits, GateRequest, QUICKJS_ENGINE_VERSION,
+    ResolvedWorkerPlacement, RunEventPost, ScriptCapabilities, WorkflowCallRequest, WorkflowEngine,
+    WorkflowHost, journal_args_hash, recover_started_effect,
 };
 use tokio::sync::{Mutex, Notify, Semaphore, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -42,6 +46,8 @@ use crate::{
     workflow_delivery::{DeliveryCapability, capability_from_grant},
 };
 
+const CARRIED_WORKFLOW_ID_DOMAIN: &[u8] = b"swage skill carried workflow";
+
 #[derive(Clone)]
 struct EffectiveWorkflow {
     id: Uuid,
@@ -55,6 +61,8 @@ struct EffectiveWorkflow {
     created_at: chrono::DateTime<chrono::Utc>,
     updated_at: chrono::DateTime<chrono::Utc>,
     built_in: bool,
+    immutable: bool,
+    carrying_skill: Option<String>,
 }
 
 impl EffectiveWorkflow {
@@ -72,8 +80,112 @@ impl EffectiveWorkflow {
             created_at: released_at,
             updated_at: released_at,
             built_in: true,
+            immutable: true,
+            carrying_skill: None,
         }
     }
+
+    fn from_carried(space_id: Uuid, skill: &SkillDefinition, name: String, source: String) -> Self {
+        let identity = format!("{}/{}", skill.name, name);
+        Self {
+            id: crate::synthetic_id::synthetic_id(CARRIED_WORKFLOW_ID_DOMAIN, space_id, &identity),
+            space_id,
+            name,
+            description: format!("Workflow carried by the {} skill.", skill.name),
+            head_version: 1,
+            source,
+            script_version_id: None,
+            delivery_grant: None,
+            created_at: chrono::DateTime::UNIX_EPOCH,
+            updated_at: chrono::DateTime::UNIX_EPOCH,
+            built_in: false,
+            immutable: true,
+            carrying_skill: Some(skill.name.clone()),
+        }
+    }
+}
+
+fn carried_workflows(
+    space_id: Uuid,
+    skills: &[SkillDefinition],
+) -> Result<Vec<EffectiveWorkflow>, String> {
+    let mut workflows = Vec::new();
+    for skill in skills {
+        if skill.shipped {
+            for file in crate::shipped_skills::workflow_files(&skill.name) {
+                let name = file
+                    .path
+                    .rsplit_once('/')
+                    .and_then(|(_, file)| file.strip_suffix(".js"))
+                    .ok_or_else(|| format!("invalid shipped workflow path: {}", file.path))?;
+                workflows.push(EffectiveWorkflow::from_carried(
+                    space_id,
+                    skill,
+                    name.into(),
+                    file.contents.into(),
+                ));
+            }
+            continue;
+        }
+
+        let directory = skill
+            .source_path
+            .parent()
+            .ok_or_else(|| format!("skill {} has no source directory", skill.name))?
+            .join("workflows");
+        let entries = match std::fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(format!(
+                    "failed to read workflows carried by skill {}: {error}",
+                    skill.name
+                ));
+            }
+        };
+        let mut paths = Vec::new();
+        for entry in entries {
+            let path = entry
+                .map_err(|error| {
+                    format!(
+                        "failed to inspect workflows carried by skill {}: {error}",
+                        skill.name
+                    )
+                })?
+                .path();
+            if path.extension().is_some_and(|extension| extension == "js") {
+                paths.push(path);
+            }
+        }
+        paths.sort();
+        for path in paths {
+            let Some(name) = path.file_stem().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            let source = std::fs::read_to_string(&path).map_err(|error| {
+                format!(
+                    "failed to read workflow {} carried by skill {}: {error}",
+                    path.display(),
+                    skill.name
+                )
+            })?;
+            workflows.push(EffectiveWorkflow::from_carried(
+                space_id,
+                skill,
+                name.into(),
+                source,
+            ));
+        }
+    }
+    Ok(workflows)
+}
+
+async fn discover_skills_for_space(
+    state: &AppState,
+    space_id: Uuid,
+    agent_id: Option<&str>,
+) -> Result<Vec<SkillDefinition>, String> {
+    crate::skill::discover_available_for_space_from_config(state, space_id, agent_id).await
 }
 
 async fn authored_workflow(
@@ -98,6 +210,8 @@ async fn authored_workflow(
         created_at: record.created_at,
         updated_at: record.updated_at,
         built_in: false,
+        immutable: false,
+        carrying_skill: None,
     })
 }
 
@@ -105,6 +219,7 @@ async fn resolve_workflow_by_name(
     state: &AppState,
     space_id: Uuid,
     name: &str,
+    skills: &[SkillDefinition],
 ) -> Result<Option<EffectiveWorkflow>, String> {
     if let Some(record) = state
         .storage
@@ -116,6 +231,12 @@ async fn resolve_workflow_by_name(
     {
         return authored_workflow(state, record).await.map(Some);
     }
+    if let Some(workflow) = carried_workflows(space_id, skills)?
+        .into_iter()
+        .find(|workflow| workflow.name == name)
+    {
+        return Ok(Some(workflow));
+    }
     Ok(builtin_workflows::find_by_name(name)
         .map(|workflow| EffectiveWorkflow::from_builtin(space_id, workflow)))
 }
@@ -123,7 +244,11 @@ async fn resolve_workflow_by_name(
 async fn resolve_workflow_by_id(
     state: &AppState,
     id: Uuid,
+    agent_id: Option<&str>,
 ) -> Result<Option<EffectiveWorkflow>, String> {
+    if let Some(agent_id) = agent_id {
+        crate::skill::validate_agent_scope_id(agent_id).map_err(|error| error.to_string())?;
+    }
     if let Some(record) = state
         .storage
         .get_workflow_script(id)
@@ -138,11 +263,20 @@ async fn resolve_workflow_by_id(
         .await
         .map_err(|error| error.to_string())?
     {
-        if let Some(workflow) = BUILTIN_WORKFLOWS
-            .iter()
-            .find(|workflow| builtin_workflows::id(space.id, workflow.name) == id)
+        if let Some(agent_id) = agent_id
+            && !crate::skill::agent_scope_is_visible(state, space.id, agent_id)
+                .await
+                .map_err(|error| error.to_string())?
         {
-            return Ok(Some(EffectiveWorkflow::from_builtin(space.id, workflow)));
+            continue;
+        }
+        let skills = discover_skills_for_space(state, space.id, agent_id).await?;
+        if let Some(workflow) = list_effective_workflows(state, space.id, &skills)
+            .await?
+            .into_iter()
+            .find(|workflow| workflow.id == id)
+        {
+            return Ok(Some(workflow));
         }
     }
     Ok(None)
@@ -151,6 +285,7 @@ async fn resolve_workflow_by_id(
 async fn list_effective_workflows(
     state: &AppState,
     space_id: Uuid,
+    skills: &[SkillDefinition],
 ) -> Result<Vec<EffectiveWorkflow>, String> {
     let records = state
         .storage
@@ -163,10 +298,16 @@ async fn list_effective_workflows(
     for record in records {
         workflows.push(authored_workflow(state, record).await?);
     }
+    let mut effective_names = authored_names;
+    for workflow in carried_workflows(space_id, skills)? {
+        if effective_names.insert(workflow.name.clone()) {
+            workflows.push(workflow);
+        }
+    }
     workflows.extend(
         BUILTIN_WORKFLOWS
             .iter()
-            .filter(|workflow| !authored_names.contains(workflow.name))
+            .filter(|workflow| !effective_names.contains(workflow.name))
             .map(|workflow| EffectiveWorkflow::from_builtin(space_id, workflow)),
     );
     workflows.sort_by(|left, right| left.name.cmp(&right.name));
@@ -254,6 +395,7 @@ fn journal_wire(
         "workflow_call" => WorkflowJournalEntryKind::WorkflowCall,
         "timer" => WorkflowJournalEntryKind::Timer,
         "event" => WorkflowJournalEntryKind::Event,
+        "await_event" => WorkflowJournalEntryKind::AwaitEvent,
         "gate" => WorkflowJournalEntryKind::Gate,
         "budget" => WorkflowJournalEntryKind::Budget,
         "wind_down" => WorkflowJournalEntryKind::WindDown,
@@ -448,7 +590,9 @@ impl WorkflowLauncher for GatewayWorkflowLauncher {
             .await
             .map_err(|error| error.to_string())?
             .ok_or_else(|| format!("session {session_id} was not found"))?;
-        let script = resolve_workflow_by_name(&self.state, session.space_id, name)
+        let skills =
+            crate::websocket::discover_available_for_session(&self.state, session_id).await?;
+        let script = resolve_workflow_by_name(&self.state, session.space_id, name, &skills)
             .await?
             .ok_or_else(|| format!("workflow script {name:?} was not found"))?;
         let mut dispatch_bound_agent_ids =
@@ -463,6 +607,7 @@ impl WorkflowLauncher for GatewayWorkflowLauncher {
             args,
             budget.unwrap_or_default(),
             script.delivery_grant,
+            script.carrying_skill,
             // The run inherits every bound on the dispatching session, then
             // adds that session's own agent. Each worker turn re-resolves the
             // entire lineage before intersecting grants.
@@ -548,6 +693,10 @@ enum HostCommand {
     },
     PostEvent {
         event: RunEventPost,
+        reply: oneshot::Sender<Result<Value, String>>,
+    },
+    AwaitEvent {
+        request: AwaitEventRequest,
         reply: oneshot::Sender<Result<Value, String>>,
     },
     Gate {
@@ -756,6 +905,20 @@ impl WorkflowHost for ChannelWorkflowHost {
             .map_err(|_| "workflow host dropped event reply".to_string())?
     }
 
+    async fn await_run_event(
+        &self,
+        request: AwaitEventRequest,
+        _cancellation: CancellationToken,
+    ) -> Result<Value, String> {
+        let (reply, receive) = oneshot::channel();
+        self.tx
+            .send(HostCommand::AwaitEvent { request, reply })
+            .map_err(|_| "workflow host stopped".to_string())?;
+        receive
+            .await
+            .map_err(|_| "workflow host dropped awaited-event reply".to_string())?
+    }
+
     async fn evaluate_wake_gate(
         &self,
         request: GateRequest,
@@ -933,7 +1096,12 @@ async fn run_ephemeral_agent_call(
         .as_ref()
         .map(|_| request.max_attempts.saturating_sub(1));
     let call_cancellation = cancellation.child_token();
-    let processing = crate::turn::process_turn_with_existing_turn(
+    let composition = crate::turn::DispatchContextComposition {
+        elements: request.elements.clone(),
+        variables: request.variables.clone(),
+        assembly: request.assembly.clone(),
+    };
+    let processing = crate::turn::process_turn_with_composition(
         state,
         session_id,
         Some(thread_id),
@@ -946,6 +1114,7 @@ async fn run_ephemeral_agent_call(
         Some(call_cancellation.clone()),
         None,
         crate::turn::TurnAttendance::Unattended,
+        composition,
     );
     tokio::pin!(processing);
     let timeout = request.timeout_ms.map(std::time::Duration::from_millis);
@@ -1318,8 +1487,10 @@ async fn run_host_commands_inner(
     let mut replay_agent_orders = replay
         .iter()
         .filter(|entry| {
-            matches!(entry.kind.as_str(), "agent_call" | "workflow_call" | "gate")
-                && entry.status == "completed"
+            matches!(
+                entry.kind.as_str(),
+                "agent_call" | "workflow_call" | "gate" | "await_event"
+            ) && entry.status == "completed"
         })
         .filter_map(|entry| entry.completed_order.map(|order| (entry.seq, order)))
         .collect::<Vec<_>>();
@@ -2102,16 +2273,16 @@ async fn run_host_commands_inner(
                 };
                 let _ = reply.send(result);
             }
-            HostCommand::PostEvent { event, reply } => {
+            HostCommand::PostEvent { mut event, reply } => {
                 // Kind validation consumes no journal seq, so it is
                 // deterministic across live runs and replays alike.
-                if !matches!(event.kind.as_str(), "completion" | "failure" | "escalation") {
-                    let _ = reply.send(Err(format!(
-                        "RunEventError: unknown event kind {:?} (completion, failure, escalation)",
-                        event.kind
-                    )));
-                    continue;
-                }
+                event.kind = match normalise_run_event_kind(&event.kind) {
+                    Ok(kind) => kind,
+                    Err(error) => {
+                        let _ = reply.send(Err(error));
+                        continue;
+                    }
+                };
                 let current_seq = seq.fetch_add(1, Ordering::SeqCst);
                 let request_json = serde_json::json!({
                     "action": "post", "kind": event.kind, "payload": event.payload,
@@ -2155,6 +2326,134 @@ async fn run_host_commands_inner(
                     }
                 };
                 let _ = reply.send(result);
+            }
+            HostCommand::AwaitEvent { request, reply } => {
+                if request.kinds.is_empty() {
+                    let _ = reply.send(Err(
+                        "RunEventError: kinds must contain at least one namespaced event kind"
+                            .into(),
+                    ));
+                    continue;
+                }
+                let kinds = match request
+                    .kinds
+                    .iter()
+                    .map(|kind| normalise_run_event_kind(kind))
+                    .collect::<Result<Vec<_>, _>>()
+                {
+                    Ok(kinds) => kinds,
+                    Err(error) => {
+                        let _ = reply.send(Err(error));
+                        continue;
+                    }
+                };
+                let current_seq = seq.fetch_add(1, Ordering::SeqCst);
+                let request_json = serde_json::json!({"action": "await", "kinds": kinds});
+                let hash = journal_args_hash(&request_json);
+                let existing = replay.get(current_seq as usize).cloned();
+                if existing
+                    .as_ref()
+                    .is_some_and(|entry| entry.args_hash != hash)
+                {
+                    let _ = reply.send(Err("NondeterministicReplayError".into()));
+                    continue;
+                }
+                if let Some(entry) = existing
+                    .as_ref()
+                    .filter(|entry| entry.status == "completed")
+                {
+                    if let Some(rank) = replay_agent_ranks.get(&current_seq).copied() {
+                        await_replay_release(rank, &replay_release_rank, &replay_release_notify)
+                            .await;
+                    }
+                    let _ =
+                        reply.send(entry.result.clone().ok_or_else(|| {
+                            "completed await-event entry has no result".to_string()
+                        }));
+                    continue;
+                }
+                if let Some(entry) = existing.as_ref().filter(|entry| entry.status == "failed") {
+                    let _ = reply.send(Err(entry
+                        .error_message
+                        .clone()
+                        .unwrap_or_else(|| "recorded await-event failure".into())));
+                    continue;
+                }
+                let entry_id = match existing {
+                    Some(entry) => entry.id,
+                    None => match state
+                        .create_workflow_journal_intent(NewWorkflowJournalIntent {
+                            run_id,
+                            seq: current_seq,
+                            kind: "await_event".into(),
+                            args_hash: hash,
+                            request: request_json,
+                            effect_kind: None,
+                            idempotency_key: None,
+                            target_kind: None,
+                        })
+                        .await
+                    {
+                        Ok(entry) => entry.id,
+                        Err(error) => {
+                            let _ = reply.send(Err(error.to_string()));
+                            continue;
+                        }
+                    },
+                };
+                match complete_await_event(&state, run_id, entry_id, current_seq, &kinds).await {
+                    Ok(Some(result)) => {
+                        let _ = reply.send(Ok(result));
+                    }
+                    Ok(None) => {
+                        let distant = chrono::Utc::now() + chrono::Duration::days(36500);
+                        match state
+                            .storage
+                            .park_workflow_run_if_no_matching_events(run_id, distant, &kinds)
+                            .await
+                        {
+                            Ok(true) => {
+                                parked_due = Some(distant);
+                                park.cancel();
+                                parked_replies.push(reply);
+                            }
+                            Ok(false) => {
+                                // The pending read and park are deliberately
+                                // separated by script work. The storage CAS
+                                // closes that window: if a matching post won,
+                                // consume it now instead of sleeping past it.
+                                match complete_await_event(
+                                    &state,
+                                    run_id,
+                                    entry_id,
+                                    current_seq,
+                                    &kinds,
+                                )
+                                .await
+                                {
+                                    Ok(Some(result)) => {
+                                        let _ = reply.send(Ok(result));
+                                    }
+                                    Ok(None) => {
+                                        let _ = reply.send(Err(
+                                            "WorkflowCancelledError: run changed state before event wait could park"
+                                                .into(),
+                                        ));
+                                    }
+                                    Err(error) => {
+                                        let _ = reply.send(Err(error));
+                                    }
+                                }
+                            }
+                            Err(error) => {
+                                let _ = reply.send(Err(error.to_string()));
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        let _ = reply.send(Err(error));
+                    }
+                }
             }
             HostCommand::DeliverEvents { up_to_seq, reply } => {
                 let current_seq = seq.fetch_add(1, Ordering::SeqCst);
@@ -2723,17 +3022,189 @@ async fn complete_event_post(
             journal_entry_id: entry_id,
             kind: event.kind,
             payload: event.payload,
+            source_surface: "script".into(),
+            source_agent_id: None,
+            source_session_id: None,
+            source_turn_id: None,
         })
         .await
         .map_err(|error| error.to_string())?;
     let result = serde_json::json!({
         "seq": record.seq, "kind": record.kind, "payload": record.payload,
+        "source": {"surface": record.source_surface, "agent_id": record.source_agent_id,
+            "session_id": record.source_session_id, "turn_id": record.source_turn_id},
     });
     state
         .complete_workflow_journal_entry(entry_id, result.clone())
         .await
         .map_err(|error| error.to_string())?;
     Ok(result)
+}
+
+#[derive(Clone)]
+pub(crate) struct RunEventSource {
+    pub surface: &'static str,
+    pub agent_id: Option<String>,
+    pub session_id: Option<Uuid>,
+    pub turn_id: Option<Uuid>,
+}
+
+/// The one external post service used by operator, agent, and future posters.
+pub(crate) async fn post_external_run_event(
+    state: &AppState,
+    run_id: Uuid,
+    request: PostWorkflowRunEventRequest,
+    source: RunEventSource,
+) -> Result<PostWorkflowRunEventResponse, ApiError> {
+    let kind = normalise_run_event_kind(&request.kind).map_err(ApiError::validation)?;
+    let run = state
+        .storage
+        .get_workflow_run(run_id)
+        .await
+        .map_err(internal)?
+        .ok_or_else(|| ApiError::not_found("workflow run", run_id))?;
+    if matches!(run.state.as_str(), "completed" | "failed" | "cancelled") {
+        return Err(ApiError::conflict(format!(
+            "workflow run {run_id} is already {}",
+            run.state
+        )));
+    }
+    let record = state
+        .storage
+        .create_workflow_run_event(NewWorkflowRunEvent {
+            run_id,
+            journal_entry_id: Uuid::new_v4(),
+            kind,
+            payload: request.payload,
+            source_surface: source.surface.into(),
+            source_agent_id: source.agent_id,
+            source_session_id: source.session_id,
+            source_turn_id: source.turn_id,
+        })
+        .await
+        .map_err(internal)?;
+    let wake_provisioned = state
+        .storage
+        .make_parked_workflow_run_due(run_id)
+        .await
+        .map_err(internal)?;
+    if wake_provisioned {
+        resume_owed_workflow_runs(state).await;
+    }
+    Ok(PostWorkflowRunEventResponse {
+        event: WorkflowRunEvent {
+            seq: record.seq,
+            kind: record.kind,
+            payload: record.payload,
+            source: WorkflowRunEventSource {
+                surface: record.source_surface,
+                agent_id: record.source_agent_id,
+                session_id: record.source_session_id,
+                turn_id: record.source_turn_id,
+            },
+        },
+        wake_provisioned,
+    })
+}
+
+pub async fn post_operator_run_event(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(request): Json<PostWorkflowRunEventRequest>,
+) -> Result<Json<PostWorkflowRunEventResponse>, ApiError> {
+    Ok(Json(
+        post_external_run_event(
+            &state,
+            id,
+            request,
+            RunEventSource {
+                surface: "operator",
+                agent_id: None,
+                session_id: None,
+                turn_id: None,
+            },
+        )
+        .await?,
+    ))
+}
+
+fn normalise_run_event_kind(kind: &str) -> Result<String, String> {
+    let kind = kind.trim();
+    let segments = kind.split(['.', ':', '/']).collect::<Vec<_>>();
+    let namespaced = segments.len() >= 2 && segments.iter().all(|segment| !segment.is_empty());
+    let valid_chars = kind.chars().all(|character| {
+        character.is_ascii_alphanumeric() || matches!(character, '.' | ':' | '/' | '_' | '-')
+    });
+    if kind.is_empty() || !namespaced || !valid_chars {
+        return Err(format!(
+            "RunEventError: event kind {kind:?} must be a non-empty namespaced name using letters, numbers, '.', ':', '/', '_' or '-'"
+        ));
+    }
+    Ok(kind.to_string())
+}
+
+async fn complete_await_event(
+    state: &AppState,
+    run_id: Uuid,
+    entry_id: Uuid,
+    delivery_seq: u64,
+    kinds: &[String],
+) -> Result<Option<Value>, String> {
+    // Delivery and journal settlement are separate writes. If the process
+    // stopped between them, the delivery stamp identifies the event this
+    // started await already claimed; settle it before considering newer
+    // pending rows.
+    let events = state
+        .storage
+        .list_workflow_run_events(run_id)
+        .await
+        .map_err(|error| error.to_string())?;
+    if let Some(claimed) = events
+        .iter()
+        .find(|event| event.delivered_wake_seq == Some(delivery_seq))
+    {
+        let result = await_event_result(claimed);
+        state
+            .complete_workflow_journal_entry(entry_id, result.clone())
+            .await
+            .map_err(|error| error.to_string())?;
+        return Ok(Some(result));
+    }
+    let pending = state
+        .storage
+        .list_pending_workflow_run_events(run_id)
+        .await
+        .map_err(|error| error.to_string())?;
+    let Some(matched) = pending.iter().find(|event| kinds.contains(&event.kind)) else {
+        return Ok(None);
+    };
+    let delivered = state
+        .storage
+        .mark_workflow_run_event_delivered(run_id, matched.seq, delivery_seq)
+        .await
+        .map_err(|error| error.to_string())?;
+    if !delivered {
+        return Err(format!(
+            "RunEventError: event {} was delivered concurrently",
+            matched.seq
+        ));
+    }
+    let result = await_event_result(matched);
+    state
+        .complete_workflow_journal_entry(entry_id, result.clone())
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(Some(result))
+}
+
+fn await_event_result(event: &WorkflowRunEventRecord) -> Value {
+    serde_json::json!({
+        "seq": event.seq,
+        "kind": event.kind,
+        "payload": event.payload,
+        "source": {"surface": event.source_surface, "agent_id": event.source_agent_id,
+            "session_id": event.source_session_id, "turn_id": event.source_turn_id},
+    })
 }
 
 async fn complete_events_delivery(
@@ -2910,14 +3381,11 @@ async fn complete_workflow_call_entry(
     request: WorkflowCallRequest,
     cancellation: CancellationToken,
 ) -> Result<Value, String> {
-    let script = resolve_workflow_by_name(state, space_id, &request.name)
-        .await?
-        .ok_or_else(|| {
-            format!(
-                "WorkflowCompositionError: workflow script {:?} was not found",
-                request.name
-            )
-        })?;
+    let parent = state
+        .storage
+        .get_workflow_run(parent_run_id)
+        .await
+        .map_err(|error| error.to_string())?;
     let existing_child = state
         .storage
         .find_child_workflow_run(parent_run_id, parent_seq)
@@ -2931,22 +3399,31 @@ async fn complete_workflow_call_entry(
                 // script's current head: the record's script_version_id and
                 // source_hash identify what ran, and a script update between
                 // crash and resume must not swap the source underneath them.
-                let source = match child.script_version_id {
+                let (source, grant) = match child.script_version_id {
                     Some(recorded_version_id) => {
-                        state
+                        let version = state
                             .storage
                             .get_workflow_script_version(recorded_version_id)
                             .await
                             .map_err(|error| error.to_string())?
-                            .ok_or_else(|| "child workflow script version is missing".to_string())?
-                            .source
+                            .ok_or_else(|| {
+                                "child workflow script version is missing".to_string()
+                            })?;
+                        let script = state
+                            .storage
+                            .get_workflow_script(version.script_id)
+                            .await
+                            .map_err(|error| error.to_string())?
+                            .ok_or_else(|| "child workflow script is missing".to_string())?;
+                        (version.source, script.delivery_grant)
                     }
-                    None => child
-                        .source
-                        .clone()
-                        .ok_or_else(|| "child workflow run has no recorded source".to_string())?,
+                    None => (
+                        child.source.clone().ok_or_else(|| {
+                            "child workflow run has no recorded source".to_string()
+                        })?,
+                        None,
+                    ),
                 };
-                let grant = script.delivery_grant.clone();
                 state
                     .storage
                     .update_workflow_run_state(child.id, "running", None, None, None)
@@ -2966,11 +3443,19 @@ async fn complete_workflow_call_entry(
             _ => child,
         },
         None => {
-            let parent = state
-                .storage
-                .get_workflow_run(parent_run_id)
-                .await
-                .map_err(|error| error.to_string())?;
+            let agent_id = parent
+                .as_ref()
+                .and_then(|run| run.dispatch_bound_agent_ids.last())
+                .map(String::as_str);
+            let skills = discover_skills_for_space(state, space_id, agent_id).await?;
+            let script = resolve_workflow_by_name(state, space_id, &request.name, &skills)
+                .await?
+                .ok_or_else(|| {
+                    format!(
+                        "WorkflowCompositionError: workflow script {:?} was not found",
+                        request.name
+                    )
+                })?;
             let parent_budget = parent
                 .as_ref()
                 .map(|parent| parent.budget.clone())
@@ -2982,6 +3467,7 @@ async fn complete_workflow_call_entry(
                     parent_run_id: Some(parent_run_id),
                     parent_seq: Some(parent_seq),
                     script_version_id: script.script_version_id,
+                    carrying_skill: script.carrying_skill.clone(),
                     source: script
                         .script_version_id
                         .is_none()
@@ -2994,7 +3480,7 @@ async fn complete_workflow_call_entry(
                     // pool — but confinement flows down, which is what the
                     // budget contract promises.
                     budget: parent_budget,
-                    engine_version: "rquickjs-0.12.0".into(),
+                    engine_version: QUICKJS_ENGINE_VERSION.into(),
                     // Confinement flows down here too: the child's workers
                     // stay bounded by whatever context dispatched the parent.
                     dispatch_bound_agent_ids: parent
@@ -3132,6 +3618,46 @@ fn internal(error: impl std::fmt::Display) -> ApiError {
     ApiError::internal(error.to_string())
 }
 
+async fn validate_agent_scope_for_space(
+    state: &AppState,
+    space_id: Uuid,
+    agent_id: Option<&str>,
+) -> Result<(), ApiError> {
+    let Some(agent_id) = agent_id else {
+        return Ok(());
+    };
+    if crate::skill::agent_scope_is_visible(state, space_id, agent_id).await? {
+        Ok(())
+    } else {
+        Err(ApiError::validation(format!(
+            "no agent definition named '{agent_id}' is visible to space {space_id}"
+        )))
+    }
+}
+
+async fn validate_agent_scope_for_any_space(
+    state: &AppState,
+    agent_id: Option<&str>,
+) -> Result<(), ApiError> {
+    let Some(agent_id) = agent_id else {
+        return Ok(());
+    };
+    crate::skill::validate_agent_scope_id(agent_id)?;
+    let spaces = state
+        .space_store
+        .list_all()
+        .await
+        .map_err(|error| ApiError(swage_core::GatewayError::Storage(error)))?;
+    for space in spaces {
+        if crate::skill::agent_scope_is_visible(state, space.id, agent_id).await? {
+            return Ok(());
+        }
+    }
+    Err(ApiError::validation(format!(
+        "no agent definition named '{agent_id}' is visible to any space"
+    )))
+}
+
 fn script_wire(record: WorkflowScriptRecord, head_version: u32) -> WorkflowScript {
     WorkflowScript {
         id: record.id,
@@ -3183,6 +3709,7 @@ fn run_wire(record: WorkflowRunRecord) -> Result<WorkflowRun, ApiError> {
         script_id: record.script_id,
         script_name: record.script_name,
         script_version: record.script_version,
+        carrying_skill: record.carrying_skill,
         state: run_state(&record.state)?,
         args: record.args,
         budget: budget_wire(&record.budget),
@@ -3222,6 +3749,7 @@ pub async fn create_script(
 pub async fn list_scripts(
     State(state): State<AppState>,
     Path(space_id): Path<Uuid>,
+    Query(query): Query<WorkflowScriptListQuery>,
 ) -> Result<Json<WorkflowScriptListResponse>, ApiError> {
     state
         .space_store
@@ -3229,7 +3757,11 @@ pub async fn list_scripts(
         .await
         .map_err(internal)?
         .ok_or_else(|| ApiError::not_found("space", space_id))?;
-    let scripts = list_effective_workflows(&state, space_id)
+    validate_agent_scope_for_space(&state, space_id, query.agent_id.as_deref()).await?;
+    let skills = discover_skills_for_space(&state, space_id, query.agent_id.as_deref())
+        .await
+        .map_err(internal)?;
+    let scripts = list_effective_workflows(&state, space_id, &skills)
         .await
         .map_err(internal)?
         .into_iter()
@@ -3241,8 +3773,10 @@ pub async fn list_scripts(
 pub async fn get_script(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
+    Query(query): Query<WorkflowScriptListQuery>,
 ) -> Result<Json<WorkflowScript>, ApiError> {
-    let workflow = resolve_workflow_by_id(&state, id)
+    validate_agent_scope_for_any_space(&state, query.agent_id.as_deref()).await?;
+    let workflow = resolve_workflow_by_id(&state, id, query.agent_id.as_deref())
         .await
         .map_err(internal)?
         .ok_or_else(|| ApiError::not_found("workflow script", id))?;
@@ -3252,15 +3786,17 @@ pub async fn get_script(
 pub async fn update_script(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
+    Query(query): Query<WorkflowScriptListQuery>,
     Json(request): Json<UpdateWorkflowScriptRequest>,
 ) -> Result<Json<WorkflowScript>, ApiError> {
-    if resolve_workflow_by_id(&state, id)
+    validate_agent_scope_for_any_space(&state, query.agent_id.as_deref()).await?;
+    if resolve_workflow_by_id(&state, id, query.agent_id.as_deref())
         .await
         .map_err(internal)?
-        .is_some_and(|workflow| workflow.built_in)
+        .is_some_and(|workflow| workflow.immutable)
     {
         return Err(ApiError::conflict(
-            "built-in workflow scripts are immutable; create a same-named workflow in the space to customise it".into(),
+            "carried and built-in workflow scripts are immutable; create a same-named workflow in the space to customise it".into(),
         ));
     }
     let _record = state
@@ -3283,7 +3819,7 @@ pub async fn update_script(
             .await
             .map_err(internal)?;
     }
-    get_script(State(state), Path(id)).await
+    get_script(State(state), Path(id), Query(query)).await
 }
 
 fn source_hash(source: &str) -> String {
@@ -3301,6 +3837,7 @@ async fn start_run(
     args: Value,
     budget: WorkflowBudget,
     delivery_grant: Option<Value>,
+    carrying_skill: Option<String>,
     dispatch_bound_agent_ids: Vec<String>,
 ) -> Result<WorkflowRun, ApiError> {
     validate_budget(&budget)?;
@@ -3318,11 +3855,12 @@ async fn start_run(
             parent_run_id: None,
             parent_seq: None,
             script_version_id,
+            carrying_skill,
             source: script_version_id.is_none().then(|| source.clone()),
             source_hash: source_hash(&source),
             args,
             budget: serde_json::to_value(budget).map_err(internal)?,
-            engine_version: "rquickjs-0.12.0".into(),
+            engine_version: QUICKJS_ENGINE_VERSION.into(),
             dispatch_bound_agent_ids,
         })
         .await
@@ -3690,6 +4228,7 @@ pub async fn start_inline_run(
             request.args,
             request.budget.unwrap_or_default(),
             None,
+            None,
             // Operator-started: no dispatch bound beyond each worker's own
             // resolved config.
             vec![],
@@ -3701,12 +4240,15 @@ pub async fn start_inline_run(
 pub async fn start_saved_run(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
+    Query(query): Query<WorkflowScriptListQuery>,
     Json(request): Json<StartWorkflowRunRequest>,
 ) -> Result<Json<WorkflowRun>, ApiError> {
-    let script = resolve_workflow_by_id(&state, id)
+    validate_agent_scope_for_any_space(&state, query.agent_id.as_deref()).await?;
+    let script = resolve_workflow_by_id(&state, id, query.agent_id.as_deref())
         .await
         .map_err(internal)?
         .ok_or_else(|| ApiError::not_found("workflow script", id))?;
+    validate_agent_scope_for_space(&state, script.space_id, query.agent_id.as_deref()).await?;
     Ok(Json(
         start_run(
             state,
@@ -3716,7 +4258,8 @@ pub async fn start_saved_run(
             request.args,
             request.budget.unwrap_or_default(),
             script.delivery_grant,
-            vec![],
+            script.carrying_skill,
+            query.agent_id.into_iter().collect(),
         )
         .await?,
     ))
@@ -3974,9 +4517,9 @@ mod tests {
     use super::*;
     use swage_protocol::client::workflow::{WorkflowJournalEntryKind, WorkflowJournalEntryStatus};
     use swage_storage::{
-        AuditStore, NewWorkspaceAttachment, SessionStore, SpaceStore, SqliteStorage, Storage,
-        TaskDefinitionStore, ToolCallStore, TurnState, TurnStore, WorkflowStore,
-        WorkspaceAttachmentStore,
+        AgentDefinitionStore, AuditStore, ContextSnapshotStore, NewWorkspaceAttachment,
+        SessionStore, SpaceStore, SqliteStorage, Storage, TaskDefinitionStore, ToolCallStore,
+        TurnState, TurnStore, WorkflowStore, WorkspaceAttachmentStore,
     };
     use swage_workflow::AgentSessionRef;
 
@@ -4011,24 +4554,53 @@ mod tests {
             .id
     }
 
+    async fn store_test_agent(storage: &SqliteStorage, space_id: Uuid, agent_id: &str) {
+        storage
+            .upsert_agent_definition(swage_storage::NewAgentDefinition {
+                id: agent_id.into(),
+                space_id: Some(space_id),
+                display_name: "Workflow test agent".into(),
+                description: String::new(),
+                instructions: String::new(),
+                model_id: None,
+                tool_permissions: None,
+                skills: vec![],
+                output_schema: None,
+                output_max_retries: None,
+            })
+            .await
+            .expect("store workflow test agent definition");
+    }
+
     #[tokio::test(flavor = "multi_thread")]
-    async fn empty_space_lists_the_built_in_workflows() {
+    async fn empty_space_lists_shipped_carried_and_built_in_workflows() {
         let (state, storage) = workflow_test_state();
         let space = storage.get_or_create_default().await.expect("space");
+        let _skill_root = crate::skill::SpaceSkillRootGuard::empty(space.id);
 
-        let Json(list) = list_scripts(State(state), Path(space.id))
-            .await
-            .expect("workflow list");
+        let Json(list) = list_scripts(
+            State(state),
+            Path(space.id),
+            Query(WorkflowScriptListQuery::default()),
+        )
+        .await
+        .expect("workflow list");
 
-        assert_eq!(list.scripts.len(), 1);
+        let names = list
+            .scripts
+            .iter()
+            .map(|script| script.name.as_str())
+            .collect::<Vec<_>>();
+        assert!(names.contains(&"research-sweep"));
+        assert!(names.contains(&"build-verify"));
+        assert!(names.contains(&"teardown-audit"));
         assert_eq!(
             list.scripts
                 .iter()
-                .map(|script| script.name.as_str())
-                .collect::<Vec<_>>(),
-            ["research-sweep"]
+                .find(|script| script.name == "research-sweep")
+                .map(|script| script.built_in),
+            Some(true)
         );
-        assert!(list.scripts.iter().all(|script| script.built_in));
         assert!(
             list.scripts
                 .iter()
@@ -4037,9 +4609,34 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn workflow_catalogue_rejects_agent_path_components_and_unknown_agents() {
+        let (state, storage) = workflow_test_state();
+        let space = storage.get_or_create_default().await.expect("space");
+        let root = tempfile::tempdir().expect("skill root");
+        let _skill_root = crate::skill::SpaceSkillRootGuard::at(space.id, root.path());
+
+        for agent_id in ["../gateway", "/tmp/escaped", "missing-agent"] {
+            let error = list_scripts(
+                State(state.clone()),
+                Path(space.id),
+                Query(WorkflowScriptListQuery {
+                    agent_id: Some(agent_id.into()),
+                }),
+            )
+            .await
+            .expect_err("invalid agent scope must be rejected");
+            assert!(matches!(
+                error.0,
+                swage_core::GatewayError::ValidationError(_)
+            ));
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn authored_workflow_shadows_the_same_named_builtin() {
         let (state, storage) = workflow_test_state();
         let space = storage.get_or_create_default().await.expect("space");
+        let _skill_root = crate::skill::SpaceSkillRootGuard::empty(space.id);
         let (authored, _) = storage
             .create_workflow_script(NewWorkflowScript {
                 space_id: space.id,
@@ -4051,7 +4648,7 @@ mod tests {
             .await
             .expect("authored script");
 
-        let effective = resolve_workflow_by_name(&state, space.id, "research-sweep")
+        let effective = resolve_workflow_by_name(&state, space.id, "research-sweep", &[])
             .await
             .expect("resolve")
             .expect("effective script");
@@ -4059,10 +4656,13 @@ mod tests {
         assert_eq!(effective.source, "return 'operator';");
         assert!(!effective.built_in);
 
-        let Json(list) = list_scripts(State(state), Path(space.id))
-            .await
-            .expect("workflow list");
-        assert_eq!(list.scripts.len(), 1);
+        let Json(list) = list_scripts(
+            State(state),
+            Path(space.id),
+            Query(WorkflowScriptListQuery::default()),
+        )
+        .await
+        .expect("workflow list");
         let listed = list
             .scripts
             .iter()
@@ -4073,27 +4673,97 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn carried_workflow_shadows_the_same_named_builtin_when_listed_and_started() {
+        let root = tempfile::tempdir().expect("skill root");
+        let skill_dir = root.path().join("skills/research-shadow");
+        std::fs::create_dir_all(skill_dir.join("workflows")).expect("workflow directory");
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\ndescription: Carried built-in shadow proof.\n---\n\nInstructions.\n",
+        )
+        .expect("skill definition");
+        let carried_source = "return { source: 'carried-shadow' };\n";
+        std::fs::write(
+            skill_dir.join("workflows/research-sweep.js"),
+            carried_source,
+        )
+        .expect("carried workflow");
+
+        let (state, storage) = workflow_test_state();
+        let space = storage.get_or_create_default().await.expect("space");
+        let _skill_root = crate::skill::SpaceSkillRootGuard::at(space.id, root.path());
+
+        let Json(list) = list_scripts(
+            State(state.clone()),
+            Path(space.id),
+            Query(WorkflowScriptListQuery::default()),
+        )
+        .await
+        .expect("workflow list");
+        let listed = list
+            .scripts
+            .into_iter()
+            .find(|script| script.name == "research-sweep")
+            .expect("research sweep");
+        assert!(!listed.built_in);
+
+        let Json(started) = start_saved_run(
+            State(state.clone()),
+            Path(listed.id),
+            Query(WorkflowScriptListQuery::default()),
+            Json(StartWorkflowRunRequest {
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start carried built-in shadow");
+        wait_for_terminal(&state, started.id).await;
+        let run = storage
+            .get_workflow_run(started.id)
+            .await
+            .expect("run query")
+            .expect("run");
+        assert_eq!(
+            run.final_output,
+            Some(serde_json::json!({"source": "carried-shadow"}))
+        );
+        assert_eq!(run.source.as_deref(), Some(carried_source));
+        assert_eq!(run.carrying_skill.as_deref(), Some("research-shadow"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn listed_builtin_can_be_read_and_started_but_not_updated() {
         let (state, storage) = workflow_test_state();
         let space = storage.get_or_create_default().await.expect("space");
-        let Json(list) = list_scripts(State(state.clone()), Path(space.id))
-            .await
-            .expect("workflow list");
+        let _skill_root = crate::skill::SpaceSkillRootGuard::empty(space.id);
+        let Json(list) = list_scripts(
+            State(state.clone()),
+            Path(space.id),
+            Query(WorkflowScriptListQuery::default()),
+        )
+        .await
+        .expect("workflow list");
         let listed = list
             .scripts
             .into_iter()
             .find(|script| script.name == "research-sweep")
             .expect("research sweep");
 
-        let Json(read) = get_script(State(state.clone()), Path(listed.id))
-            .await
-            .expect("read built-in");
+        let Json(read) = get_script(
+            State(state.clone()),
+            Path(listed.id),
+            Query(WorkflowScriptListQuery::default()),
+        )
+        .await
+        .expect("read built-in");
         assert_eq!(read.id, listed.id);
         assert!(read.built_in);
 
         let update_error = update_script(
             State(state.clone()),
             Path(listed.id),
+            Query(WorkflowScriptListQuery::default()),
             Json(UpdateWorkflowScriptRequest {
                 description: Some("changed".into()),
                 ..Default::default()
@@ -4108,6 +4778,7 @@ mod tests {
         let Json(started) = start_saved_run(
             State(state.clone()),
             Path(listed.id),
+            Query(WorkflowScriptListQuery::default()),
             Json(StartWorkflowRunRequest {
                 args: Value::Null,
                 budget: None,
@@ -4121,6 +4792,7 @@ mod tests {
             .await
             .expect("run query")
             .expect("run");
+        assert_eq!(run.engine_version, "rquickjs-0.12.2");
         assert_eq!(run.state, "failed");
         assert_eq!(
             run.source.as_deref(),
@@ -4130,6 +4802,66 @@ mod tests {
                     .source
             )
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn listed_shipped_carried_workflow_can_start_but_not_update() {
+        let (state, storage) = workflow_test_state();
+        let space = storage.get_or_create_default().await.expect("space");
+        let _skill_root = crate::skill::SpaceSkillRootGuard::empty(space.id);
+        let Json(list) = list_scripts(
+            State(state.clone()),
+            Path(space.id),
+            Query(WorkflowScriptListQuery::default()),
+        )
+        .await
+        .expect("workflow list");
+        let listed = list
+            .scripts
+            .into_iter()
+            .find(|script| script.name == "build-verify")
+            .expect("shipped carried workflow");
+        assert!(!listed.built_in);
+
+        let update_error = update_script(
+            State(state.clone()),
+            Path(listed.id),
+            Query(WorkflowScriptListQuery::default()),
+            Json(UpdateWorkflowScriptRequest {
+                source: Some("return 'changed';".into()),
+                ..Default::default()
+            }),
+        )
+        .await
+        .expect_err("carried update must fail");
+        assert!(
+            matches!(update_error.0, swage_core::GatewayError::SpaceConflict(message) if message.contains("immutable"))
+        );
+
+        let Json(started) = start_saved_run(
+            State(state.clone()),
+            Path(listed.id),
+            Query(WorkflowScriptListQuery::default()),
+            Json(StartWorkflowRunRequest {
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start shipped carried workflow");
+        wait_for_terminal(&state, started.id).await;
+        let run = storage
+            .get_workflow_run(started.id)
+            .await
+            .expect("run query")
+            .expect("run");
+        let embedded = crate::shipped_skills::workflow_files("assembly")
+            .find(|file| file.path.ends_with("/build-verify.js"))
+            .expect("embedded build verify")
+            .contents;
+        assert_eq!(run.carrying_skill.as_deref(), Some("assembly"));
+        assert_eq!(run.source.as_deref(), Some(embedded));
+        assert_eq!(run.source_hash, source_hash(embedded));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -4145,6 +4877,7 @@ mod tests {
             })
             .await
             .expect("session");
+        let _skill_root = crate::websocket::SessionSkillRootGuard::empty(session.id);
 
         let started = GatewayWorkflowLauncher::new(state.clone())
             .start_by_name(session.id, "research-sweep", Value::Null, None, false)
@@ -4171,6 +4904,7 @@ mod tests {
     async fn workflow_composition_resolves_a_builtin_child() {
         let (state, storage) = workflow_test_state();
         let space = storage.get_or_create_default().await.expect("space");
+        let _skill_root = crate::skill::SpaceSkillRootGuard::empty(space.id);
         let (parent, _) = storage
             .create_workflow_script(NewWorkflowScript {
                 space_id: space.id,
@@ -4185,6 +4919,7 @@ mod tests {
         let Json(started) = start_saved_run(
             State(state.clone()),
             Path(parent.id),
+            Query(WorkflowScriptListQuery::default()),
             Json(StartWorkflowRunRequest {
                 args: Value::Null,
                 budget: None,
@@ -4213,6 +4948,7 @@ mod tests {
             .into_iter()
             .find(|run| run.parent_run_id == Some(started.id))
             .expect("built-in child run");
+        assert_eq!(child.engine_version, "rquickjs-0.12.2");
         assert_eq!(
             child.source.as_deref(),
             Some(
@@ -4227,6 +4963,478 @@ mod tests {
                 .as_deref()
                 .is_some_and(|message| message.contains("args.topic"))
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn operator_skill_workflow_runs_by_name_and_authored_source_shadows_it() {
+        const AGENT_ID: &str = "workflow-agent";
+        let root = tempfile::tempdir().expect("skill root");
+        let skill_dir = root.path().join("skills/operator-proof");
+        std::fs::create_dir_all(skill_dir.join("workflows")).expect("workflow directory");
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\ndescription: Operator carried workflow proof.\n---\n\nInstructions.\n",
+        )
+        .expect("skill definition");
+        let carried_source = "return { source: 'carried' };\n";
+        std::fs::write(skill_dir.join("workflows/proof.js"), carried_source)
+            .expect("carried workflow");
+
+        let (state, storage) = workflow_test_state();
+        let space = storage.get_or_create_default().await.expect("space");
+        store_test_agent(&storage, space.id, AGENT_ID).await;
+        let session = storage
+            .create_session(NewSession {
+                space_id: space.id,
+                agent_id: AGENT_ID.into(),
+                metadata: None,
+                active_workspace_attachment_id: None,
+            })
+            .await
+            .expect("session");
+        let _skill_root = crate::websocket::SessionSkillRootGuard::at(session.id, root.path());
+
+        let available = crate::websocket::discover_available_for_session(&state, session.id)
+            .await
+            .expect("skill discovery");
+        let listed = list_effective_workflows(&state, space.id, &available)
+            .await
+            .expect("effective workflows");
+        let carried = listed
+            .iter()
+            .find(|workflow| workflow.name == "proof")
+            .expect("carried workflow listed");
+        assert_eq!(carried.carrying_skill.as_deref(), Some("operator-proof"));
+        assert!(carried.immutable);
+
+        let started = GatewayWorkflowLauncher::new(state.clone())
+            .start_by_name(session.id, "proof", Value::Null, None, false)
+            .await
+            .expect("start carried workflow without saving");
+        let run_id: Uuid = serde_json::from_value(started["id"].clone()).expect("run id");
+        wait_for_terminal(&state, run_id).await;
+        let carried_run = storage
+            .get_workflow_run(run_id)
+            .await
+            .expect("run query")
+            .expect("carried run");
+        assert_eq!(
+            carried_run.final_output,
+            Some(serde_json::json!({"source": "carried"}))
+        );
+        assert_eq!(carried_run.source.as_deref(), Some(carried_source));
+        assert_eq!(carried_run.source_hash, source_hash(carried_source));
+        assert_eq!(
+            carried_run.carrying_skill.as_deref(),
+            Some("operator-proof")
+        );
+        let Json(detail) = get_run(State(state.clone()), Path(run_id))
+            .await
+            .expect("wire run detail");
+        assert_eq!(detail.run.carrying_skill.as_deref(), Some("operator-proof"));
+
+        storage
+            .create_workflow_script(NewWorkflowScript {
+                space_id: space.id,
+                name: "proof".into(),
+                description: "Authored shadow".into(),
+                source: "return { source: 'authored' };".into(),
+                delivery_grant: None,
+            })
+            .await
+            .expect("authored shadow");
+        let shadowed = GatewayWorkflowLauncher::new(state.clone())
+            .start_by_name(session.id, "proof", Value::Null, None, false)
+            .await
+            .expect("start authored shadow");
+        let shadowed_id: Uuid =
+            serde_json::from_value(shadowed["id"].clone()).expect("shadowed run id");
+        wait_for_terminal(&state, shadowed_id).await;
+        let shadowed_run = storage
+            .get_workflow_run(shadowed_id)
+            .await
+            .expect("shadowed query")
+            .expect("shadowed run");
+        assert_eq!(
+            shadowed_run.final_output,
+            Some(serde_json::json!({"source": "authored"}))
+        );
+        assert_eq!(shadowed_run.carrying_skill, None);
+        assert!(shadowed_run.source.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn agent_skill_workflow_ids_use_the_scope_that_listed_them() {
+        const AGENT_ID: &str = "workflow-agent";
+        let root = tempfile::tempdir().expect("skill root");
+        let (state, storage) = workflow_test_state();
+        let space = storage.get_or_create_default().await.expect("space");
+        store_test_agent(&storage, space.id, AGENT_ID).await;
+        let space_skill_dir = root
+            .path()
+            .join("spaces")
+            .join(&space.slug)
+            .join("skills/scoped-proof");
+        let agent_skill_dir = root
+            .path()
+            .join("spaces")
+            .join(&space.slug)
+            .join(format!("agents/{AGENT_ID}/skills/scoped-proof"));
+        std::fs::create_dir_all(space_skill_dir.join("workflows"))
+            .expect("space workflow directory");
+        std::fs::create_dir_all(agent_skill_dir.join("workflows"))
+            .expect("agent workflow directory");
+        std::fs::write(
+            space_skill_dir.join("SKILL.md"),
+            "---\ndescription: Space carried workflow proof.\n---\n\nInstructions.\n",
+        )
+        .expect("space skill definition");
+        std::fs::write(
+            space_skill_dir.join("workflows/shared.js"),
+            "return { scope: 'space' };\n",
+        )
+        .expect("space carried workflow");
+        std::fs::write(
+            agent_skill_dir.join("SKILL.md"),
+            "---\ndescription: Agent carried workflow proof.\n---\n\nInstructions.\n",
+        )
+        .expect("agent skill definition");
+        std::fs::write(
+            agent_skill_dir.join("workflows/shared.js"),
+            "return { scope: 'agent' };\n",
+        )
+        .expect("agent override workflow");
+        std::fs::write(
+            agent_skill_dir.join("workflows/agent-only.js"),
+            "return { scope: 'agent-only' };\n",
+        )
+        .expect("agent-only workflow");
+        std::fs::write(
+            agent_skill_dir.join("workflows/composed-parent.js"),
+            "return await workflow('agent-only', {});\n",
+        )
+        .expect("agent-scoped composed workflow");
+        let session = storage
+            .create_session(NewSession {
+                space_id: space.id,
+                agent_id: AGENT_ID.into(),
+                metadata: None,
+                active_workspace_attachment_id: None,
+            })
+            .await
+            .expect("session");
+        let _space_root = crate::skill::SpaceSkillRootGuard::at(space.id, root.path());
+        let _session_root = crate::websocket::SessionSkillRootGuard::at(session.id, root.path());
+
+        let Json(unscoped) = list_scripts(
+            State(state.clone()),
+            Path(space.id),
+            Query(WorkflowScriptListQuery::default()),
+        )
+        .await
+        .expect("unscoped workflow list");
+        let unscoped_shared = unscoped
+            .scripts
+            .iter()
+            .find(|script| script.name == "shared")
+            .expect("space workflow in unscoped list");
+        assert!(
+            unscoped
+                .scripts
+                .iter()
+                .all(|script| script.name != "agent-only")
+        );
+
+        let Json(scoped) = list_scripts(
+            State(state.clone()),
+            Path(space.id),
+            Query(WorkflowScriptListQuery {
+                agent_id: Some(AGENT_ID.into()),
+            }),
+        )
+        .await
+        .expect("agent-scoped workflow list");
+        let scoped_shared = scoped
+            .scripts
+            .iter()
+            .find(|script| script.name == "shared")
+            .expect("agent override in scoped list");
+        assert_eq!(scoped_shared.id, unscoped_shared.id);
+        let agent_only = scoped
+            .scripts
+            .iter()
+            .find(|script| script.name == "agent-only")
+            .expect("agent-only workflow in scoped list");
+        let agent_scope = || {
+            Query(WorkflowScriptListQuery {
+                agent_id: Some(AGENT_ID.into()),
+            })
+        };
+
+        let started = GatewayWorkflowLauncher::new(state.clone())
+            .start_by_name(session.id, "agent-only", Value::Null, None, false)
+            .await
+            .expect("start agent-only workflow by name from its owning session");
+        let run_id: Uuid = serde_json::from_value(started["id"].clone()).expect("run id");
+        wait_for_terminal(&state, run_id).await;
+        let run = storage
+            .get_workflow_run(run_id)
+            .await
+            .expect("name-launched run query")
+            .expect("name-launched run");
+        assert_eq!(
+            run.final_output,
+            Some(serde_json::json!({"scope": "agent-only"}))
+        );
+        assert_eq!(run.carrying_skill.as_deref(), Some("scoped-proof"));
+        assert_eq!(run.dispatch_bound_agent_ids, vec![AGENT_ID]);
+
+        let Json(read) = get_script(State(state.clone()), Path(agent_only.id), agent_scope())
+            .await
+            .expect("read agent-only workflow by scoped ID");
+        assert_eq!(read.id, agent_only.id);
+
+        let update_error = update_script(
+            State(state.clone()),
+            Path(agent_only.id),
+            agent_scope(),
+            Json(UpdateWorkflowScriptRequest {
+                source: Some("return 'changed';".into()),
+                ..Default::default()
+            }),
+        )
+        .await
+        .expect_err("agent-only carried workflow must remain immutable");
+        assert!(
+            matches!(update_error.0, swage_core::GatewayError::SpaceConflict(message) if message.contains("immutable"))
+        );
+
+        let Json(started) = start_saved_run(
+            State(state.clone()),
+            Path(agent_only.id),
+            agent_scope(),
+            Json(StartWorkflowRunRequest {
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start agent-only workflow by scoped ID");
+        wait_for_terminal(&state, started.id).await;
+        let run = storage
+            .get_workflow_run(started.id)
+            .await
+            .expect("run query")
+            .expect("run");
+        assert_eq!(
+            run.final_output,
+            Some(serde_json::json!({"scope": "agent-only"}))
+        );
+        assert_eq!(run.carrying_skill.as_deref(), Some("scoped-proof"));
+
+        let Json(started) = start_saved_run(
+            State(state.clone()),
+            Path(scoped_shared.id),
+            agent_scope(),
+            Json(StartWorkflowRunRequest {
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start agent override by scoped ID");
+        wait_for_terminal(&state, started.id).await;
+        let run = storage
+            .get_workflow_run(started.id)
+            .await
+            .expect("override run query")
+            .expect("override run");
+        assert_eq!(
+            run.final_output,
+            Some(serde_json::json!({"scope": "agent"}))
+        );
+
+        let composed_parent = scoped
+            .scripts
+            .iter()
+            .find(|script| script.name == "composed-parent")
+            .expect("agent-scoped composed parent");
+        let Json(started) = start_saved_run(
+            State(state.clone()),
+            Path(composed_parent.id),
+            agent_scope(),
+            Json(StartWorkflowRunRequest {
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start agent-scoped composed workflow");
+        wait_for_terminal(&state, started.id).await;
+        let parent = storage
+            .get_workflow_run(started.id)
+            .await
+            .expect("composed parent query")
+            .expect("composed parent run");
+        assert_eq!(
+            parent.final_output,
+            Some(serde_json::json!({"scope": "agent-only"}))
+        );
+        assert_eq!(parent.dispatch_bound_agent_ids, vec![AGENT_ID]);
+        let child = storage
+            .list_workflow_runs(space.id)
+            .await
+            .expect("composed runs")
+            .into_iter()
+            .find(|run| run.parent_run_id == Some(started.id))
+            .expect("agent-scoped child run");
+        assert_eq!(
+            child.final_output,
+            Some(serde_json::json!({"scope": "agent-only"}))
+        );
+        assert_eq!(child.dispatch_bound_agent_ids, vec![AGENT_ID]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn saved_authored_run_rejects_an_agent_visible_only_in_another_space() {
+        const FOREIGN_AGENT_ID: &str = "foreign-workflow-agent";
+        let (state, storage) = workflow_test_state();
+        let workflow_space = storage
+            .get_or_create_default()
+            .await
+            .expect("workflow space");
+        let foreign_space = SpaceStore::create(
+            &*storage,
+            swage_storage::NewSpace {
+                name: "Foreign workflow agent space".into(),
+                slug: "foreign-workflow-agent-space".into(),
+            },
+        )
+        .await
+        .expect("foreign space");
+        store_test_agent(&storage, foreign_space.id, FOREIGN_AGENT_ID).await;
+        let (script, _) = storage
+            .create_workflow_script(NewWorkflowScript {
+                space_id: workflow_space.id,
+                name: "scope-validation-proof".into(),
+                description: String::new(),
+                source: "return { started: true };".into(),
+                delivery_grant: None,
+            })
+            .await
+            .expect("authored script");
+
+        let error = start_saved_run(
+            State(state),
+            Path(script.id),
+            Query(WorkflowScriptListQuery {
+                agent_id: Some(FOREIGN_AGENT_ID.into()),
+            }),
+            Json(StartWorkflowRunRequest {
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect_err("foreign agent scope must be rejected");
+        assert!(
+            matches!(error.0, swage_core::GatewayError::ValidationError(message) if message.contains(&workflow_space.id.to_string()))
+        );
+        assert!(
+            storage
+                .list_workflow_runs(workflow_space.id)
+                .await
+                .expect("workflow runs")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn composed_shipped_workflow_retains_embedded_source_and_skill_attribution() {
+        let (state, storage) = workflow_test_state();
+        let space = storage.get_or_create_default().await.expect("space");
+        let _skill_root = crate::skill::SpaceSkillRootGuard::empty(space.id);
+        let (parent, _) = storage
+            .create_workflow_script(NewWorkflowScript {
+                space_id: space.id,
+                name: "parent".into(),
+                description: String::new(),
+                source: "return await workflow('teardown-audit', {});".into(),
+                delivery_grant: None,
+            })
+            .await
+            .expect("parent");
+
+        let Json(started) = start_saved_run(
+            State(state.clone()),
+            Path(parent.id),
+            Query(WorkflowScriptListQuery::default()),
+            Json(StartWorkflowRunRequest {
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start parent");
+        wait_for_terminal(&state, started.id).await;
+        let child = storage
+            .list_workflow_runs(space.id)
+            .await
+            .expect("runs")
+            .into_iter()
+            .find(|run| run.parent_run_id == Some(started.id))
+            .expect("shipped child run");
+        let embedded = crate::shipped_skills::workflow_files("maestro")
+            .find(|file| file.path.ends_with("/teardown-audit.js"))
+            .expect("embedded teardown audit")
+            .contents;
+        assert_eq!(child.carrying_skill.as_deref(), Some("maestro"));
+        assert_eq!(child.source.as_deref(), Some(embedded));
+        assert_eq!(child.source_hash, source_hash(embedded));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn interrupted_carried_run_resumes_from_its_recorded_inline_source() {
+        let (state, storage) = workflow_test_state();
+        let space = storage.get_or_create_default().await.expect("space");
+        let recorded_source = "return { resumed: true };";
+        let run = storage
+            .create_workflow_run(NewWorkflowRun {
+                space_id: space.id,
+                parent_run_id: None,
+                parent_seq: None,
+                script_version_id: None,
+                carrying_skill: Some("operator-proof".into()),
+                source: Some(recorded_source.into()),
+                source_hash: source_hash(recorded_source),
+                args: Value::Null,
+                budget: serde_json::to_value(WorkflowBudget::default()).expect("budget"),
+                engine_version: "test".into(),
+                dispatch_bound_agent_ids: vec![],
+            })
+            .await
+            .expect("run");
+        storage
+            .update_workflow_run_state(run.id, "interrupted", None, None, None)
+            .await
+            .expect("interrupt run");
+
+        let Json(resumed) = resume_run(State(state.clone()), Path(run.id))
+            .await
+            .expect("resume carried run");
+        wait_for_terminal(&state, resumed.id).await;
+        let resumed = storage
+            .get_workflow_run(run.id)
+            .await
+            .expect("run query")
+            .expect("resumed run");
+        assert_eq!(
+            resumed.final_output,
+            Some(serde_json::json!({"resumed": true}))
+        );
+        assert_eq!(resumed.source.as_deref(), Some(recorded_source));
+        assert_eq!(resumed.source_hash, source_hash(recorded_source));
+        assert_eq!(resumed.carrying_skill.as_deref(), Some("operator-proof"));
     }
 
     #[tokio::test]
@@ -4275,6 +5483,9 @@ mod tests {
                 max_attempts: 1,
                 label: None,
                 session: None,
+                elements: None,
+                variables: None,
+                assembly: None,
             },
             None,
             CancellationToken::new(),
@@ -4301,6 +5512,194 @@ mod tests {
             calls[0].result.as_deref(),
             Some("{\"output\":\"workflow\"}")
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn workflow_journal_preserves_and_recomposes_call_scoped_context() {
+        let swage_home = crate::test_support::SwageHomeGuard::new();
+        std::fs::create_dir_all(swage_home.path().join("assemblies"))
+            .expect("create assemblies directory");
+        std::fs::create_dir_all(swage_home.path().join("elements"))
+            .expect("create elements directory");
+        std::fs::write(
+            swage_home.path().join("assemblies/focused.js"),
+            "for (const element of elements) add(element.render());",
+        )
+        .expect("write named assembly");
+        std::fs::write(
+            swage_home.path().join("elements/current-work.md"),
+            "Owner: {{owner}}",
+        )
+        .expect("write selected element");
+        std::fs::write(
+            swage_home.path().join("elements/unrequested.md"),
+            "Must not reach the child",
+        )
+        .expect("write unrequested element");
+
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let run = storage
+            .create_workflow_run(NewWorkflowRun {
+                space_id: space.id,
+                parent_run_id: None,
+                parent_seq: None,
+                script_version_id: None,
+                carrying_skill: None,
+                source: Some("return null".into()),
+                source_hash: source_hash("return null"),
+                args: Value::Null,
+                budget: serde_json::json!({}),
+                engine_version: "test".into(),
+                dispatch_bound_agent_ids: vec![],
+            })
+            .await
+            .expect("run");
+        let provider = Arc::new(ScriptedRecordingProvider {
+            outputs: std::sync::Mutex::new(std::collections::VecDeque::from([
+                scripted_text_output("first child result"),
+                scripted_text_output("resumed child result"),
+            ])),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let (tx, rx) = mpsc::unbounded_channel();
+        let task = tokio::spawn(run_host_commands(
+            state,
+            run.id,
+            space.id,
+            vec![],
+            None,
+            WorkflowBudget {
+                max_agent_calls: None,
+                max_total_tokens: None,
+                reserved_closing_tokens: None,
+                max_concurrent_agent_calls: None,
+            },
+            vec![],
+            Arc::new(AtomicU32::new(0)),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(Mutex::new(std::collections::HashMap::new())),
+            CancellationToken::new(),
+            PARK_TIMER_THRESHOLD_MS,
+            rx,
+        ));
+        let request = AgentCallRequest {
+            prompt: "Use the briefing".into(),
+            agent: Some("default".into()),
+            task: None,
+            model: None,
+            effort: None,
+            timeout_ms: None,
+            cwd: None,
+            isolation: None,
+            schema: None,
+            max_attempts: 1,
+            label: None,
+            session: None,
+            elements: Some(vec!["current-work".into()]),
+            variables: Some(std::collections::BTreeMap::from([(
+                "owner".into(),
+                "journal owner".into(),
+            )])),
+            assembly: Some("focused".into()),
+        };
+        let (reply, receive) = oneshot::channel();
+        tx.send(HostCommand::Agent {
+            request: request.clone(),
+            resolved_working_directory: None,
+            cancellation: CancellationToken::new(),
+            reply,
+        })
+        .expect("send initial agent call");
+        let first_result = receive
+            .await
+            .expect("receive initial agent result")
+            .expect("initial agent call");
+
+        let initial_journal = storage
+            .list_workflow_journal(run.id)
+            .await
+            .expect("read initial journal");
+        assert_eq!(initial_journal.len(), 1);
+        let expected = serde_json::to_value(&request).expect("serialise expected request");
+        assert_eq!(initial_journal[0].request, expected);
+        let replayed_request: AgentCallRequest =
+            serde_json::from_value(initial_journal[0].request.clone())
+                .expect("reconstruct agent request from journal");
+
+        let (reply, receive) = oneshot::channel();
+        tx.send(HostCommand::Agent {
+            request: replayed_request,
+            resolved_working_directory: None,
+            cancellation: CancellationToken::new(),
+            reply,
+        })
+        .expect("send replayed agent call");
+        let replayed_result = receive
+            .await
+            .expect("receive replayed agent result")
+            .expect("replayed agent call");
+        drop(tx);
+        task.await.expect("host loop");
+
+        let journal = storage
+            .list_workflow_journal(run.id)
+            .await
+            .expect("read journal");
+        assert_eq!(journal.len(), 2);
+        assert!(journal.iter().all(|entry| entry.request == expected));
+
+        let mut reports = Vec::new();
+        for result in [&first_result, &replayed_result] {
+            let report = storage
+                .get_snapshot(result.turn_id.expect("turn id"))
+                .await
+                .expect("read snapshot")
+                .expect("workflow child assembly report");
+            let mut report: Value = serde_json::from_str(&report).expect("report JSON");
+            assert_eq!(report["assembly_name"], "focused");
+            assert!(
+                report["elements"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|element| element["name"] == "current-work")
+            );
+            assert!(
+                report["elements"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|element| element["name"] != "unrequested")
+            );
+            report.as_object_mut().unwrap().remove("duration");
+            report.as_object_mut().unwrap().remove("provider_visible");
+            report.as_object_mut().unwrap().remove("total_tokens");
+            if let Some(orientation) = report["elements"].as_array_mut().and_then(|elements| {
+                elements
+                    .iter_mut()
+                    .find(|element| element["name"] == "orientation")
+            }) {
+                orientation.as_object_mut().unwrap().remove("token_count");
+            }
+            reports.push(report);
+        }
+        assert_eq!(reports[0], reports[1]);
+        let requests = provider.requests.lock().expect("provider requests");
+        assert!(requests.iter().all(|request| {
+            request
+                .messages
+                .iter()
+                .any(|message| message.text_content().contains("Owner: journal owner"))
+        }));
     }
 
     #[test]
@@ -4780,6 +6179,7 @@ mod tests {
                 parent_run_id: None,
                 parent_seq: None,
                 script_version_id: None,
+                carrying_skill: None,
                 source: Some("return null".into()),
                 source_hash: source_hash("return null"),
                 args: Value::Null,
@@ -5182,6 +6582,7 @@ mod tests {
                 parent_run_id: None,
                 parent_seq: None,
                 script_version_id: None,
+                carrying_skill: None,
                 source: Some("return null".into()),
                 source_hash: source_hash("return null"),
                 args: Value::Null,
@@ -5233,6 +6634,9 @@ mod tests {
             max_attempts: 1,
             label: None,
             session: None,
+            elements: None,
+            variables: None,
+            assembly: None,
         };
         let first_cancellation = CancellationToken::new();
         let (first_reply, first_receive) = oneshot::channel();
@@ -5318,6 +6722,7 @@ mod tests {
                 parent_run_id: None,
                 parent_seq: None,
                 script_version_id: None,
+                carrying_skill: None,
                 source: Some("return null".into()),
                 source_hash: source_hash("return null"),
                 args: Value::Null,
@@ -5396,6 +6801,9 @@ mod tests {
                 max_attempts: 1,
                 label: None,
                 session: None,
+                elements: None,
+                variables: None,
+                assembly: None,
             },
             cancellation: CancellationToken::new(),
             reply: first_reply,
@@ -5454,6 +6862,9 @@ mod tests {
                 max_attempts: 1,
                 label: None,
                 session: Some(token.clone()),
+                elements: None,
+                variables: None,
+                assembly: None,
             },
             cancellation: CancellationToken::new(),
             reply: second_reply,
@@ -5479,6 +6890,9 @@ mod tests {
                 max_attempts: 1,
                 label: None,
                 session: Some(token.clone()),
+                elements: None,
+                variables: None,
+                assembly: None,
             },
             cancellation: CancellationToken::new(),
             reply: replacement_reply,
@@ -5566,6 +6980,7 @@ mod tests {
                 args: Value::Null,
                 budget: serde_json::json!({}),
                 engine_version: "test".into(),
+                carrying_skill: None,
                 dispatch_bound_agent_ids: vec!["lead".into()],
             })
             .await
@@ -5739,6 +7154,9 @@ mod tests {
             max_attempts: 1,
             label: None,
             session: None,
+            elements: None,
+            variables: None,
+            assembly: None,
         };
 
         let first = run_ephemeral_agent_call(
@@ -5905,6 +7323,7 @@ mod tests {
                 args: Value::Null,
                 budget: serde_json::json!({}),
                 engine_version: "test".into(),
+                carrying_skill: None,
                 dispatch_bound_agent_ids: vec![],
             })
             .await
@@ -6548,6 +7967,7 @@ mod tests {
                 args: Value::Null,
                 budget: serde_json::json!({}),
                 engine_version: "test".into(),
+                carrying_skill: None,
                 dispatch_bound_agent_ids: vec![],
             })
             .await
@@ -6651,6 +8071,7 @@ mod tests {
                 args: Value::Null,
                 budget: serde_json::json!({}),
                 engine_version: "test".into(),
+                carrying_skill: None,
                 dispatch_bound_agent_ids: vec![],
             })
             .await
@@ -6709,6 +8130,7 @@ mod tests {
                 parent_run_id: None,
                 parent_seq: None,
                 script_version_id: None,
+                carrying_skill: None,
                 source: Some("return null".into()),
                 source_hash: source_hash("return null"),
                 args: Value::Null,
@@ -6777,6 +8199,9 @@ mod tests {
                     session_id: foreign_session.id,
                     thread_id: Uuid::new_v4(),
                 }),
+                elements: None,
+                variables: None,
+                assembly: None,
             },
             cancellation: CancellationToken::new(),
             reply,
@@ -6824,6 +8249,9 @@ mod tests {
                     session_id: Uuid::new_v4(),
                     thread_id: Uuid::new_v4(),
                 }),
+                elements: None,
+                variables: None,
+                assembly: None,
             },
             None,
             CancellationToken::new(),
@@ -6951,6 +8379,7 @@ mod tests {
                 parent_run_id: None,
                 parent_seq: None,
                 script_version_id: None,
+                carrying_skill: None,
                 source: Some("return null".into()),
                 source_hash: source_hash("return null"),
                 args: Value::Null,
@@ -7020,6 +8449,7 @@ mod tests {
                 parent_run_id: None,
                 parent_seq: None,
                 script_version_id: None,
+                carrying_skill: None,
                 source: Some("return null".into()),
                 source_hash: source_hash("return null"),
                 args: Value::Null,
@@ -7055,7 +8485,7 @@ mod tests {
             run.id,
             entry.id,
             RunEventPost {
-                kind: "completion".into(),
+                kind: "worker.completion".into(),
                 payload: serde_json::json!({"worker": "w1"}),
             },
         )
@@ -7184,6 +8614,389 @@ mod tests {
         .unwrap_or_else(|_| panic!("run {run_id} did not reach {expected}"))
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn operator_event_wakes_awaiting_run_and_replay_returns_recorded_answer() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind gateway listener");
+        let address = listener.local_addr().expect("gateway address");
+        let server = tokio::spawn({
+            let state = state.clone();
+            async move {
+                axum::serve(listener, crate::server::build_router(state))
+                    .await
+                    .expect("serve gateway router");
+            }
+        });
+        let events_url = |run_id| format!("http://{address}/api/workflow-runs/{run_id}/events");
+        let client = reqwest::Client::new();
+        let source = r#"
+            const answer = await awaitEvent({ kinds: ["operator.decision"] });
+            return { verdict: answer.payload.verdict, source: answer.source.surface };
+        "#;
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(space.id),
+            Json(StartInlineWorkflowRunRequest {
+                source: source.into(),
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start awaiting run");
+        wait_for_run_state(&storage, started.id, "parked").await;
+
+        let invalid = client
+            .post(events_url(started.id))
+            .json(&PostWorkflowRunEventRequest {
+                kind: "not namespaced".into(),
+                payload: Value::Null,
+            })
+            .send()
+            .await
+            .expect("send invalid operator post");
+        assert_eq!(invalid.status().as_u16(), 422);
+        assert_eq!(
+            invalid
+                .json::<Value>()
+                .await
+                .expect("decode invalid operator response")["code"],
+            "validation_error"
+        );
+
+        let unrelated = client
+            .post(events_url(started.id))
+            .json(&PostWorkflowRunEventRequest {
+                kind: "extension.future-kind".into(),
+                payload: serde_json::json!({"online": true}),
+            })
+            .send()
+            .await
+            .expect("send unrelated operator post")
+            .error_for_status()
+            .expect("unrelated operator post status")
+            .json::<PostWorkflowRunEventResponse>()
+            .await
+            .expect("decode unrelated operator response");
+        assert!(unrelated.wake_provisioned);
+        wait_for_run_state(&storage, started.id, "parked").await;
+
+        let response = client
+            .post(events_url(started.id))
+            .json(&PostWorkflowRunEventRequest {
+                kind: " operator.decision ".into(),
+                payload: serde_json::json!({"nonce": "n-1", "verdict": "accept"}),
+            })
+            .send()
+            .await
+            .expect("send operator post")
+            .error_for_status()
+            .expect("operator post status")
+            .json::<PostWorkflowRunEventResponse>()
+            .await
+            .expect("decode operator response");
+        assert!(response.wake_provisioned);
+        assert_eq!(response.event.kind, "operator.decision");
+        let completed = wait_for_run_state(&storage, started.id, "completed").await;
+        assert_eq!(
+            completed.final_output,
+            Some(serde_json::json!({"verdict": "accept", "source": "operator"}))
+        );
+
+        let events = storage
+            .list_workflow_run_events(started.id)
+            .await
+            .expect("events");
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].kind, "extension.future-kind");
+        assert_eq!(events[1].kind, "operator.decision");
+        assert!(
+            events
+                .iter()
+                .all(|event| event.source_surface == "operator")
+        );
+        assert!(events[0].delivered_at.is_none());
+        assert!(events[1].delivered_at.is_some());
+        let journal = storage
+            .list_workflow_journal(started.id)
+            .await
+            .expect("journal");
+        assert_eq!(journal.len(), 1);
+        assert_eq!(journal[0].kind, "await_event");
+        assert_eq!(journal[0].status, "completed");
+
+        storage
+            .update_workflow_run_state(started.id, "interrupted", None, None, None)
+            .await
+            .expect("replay state");
+        let replayed = resume_workflow_run_record(
+            state.clone(),
+            storage.get_workflow_run(started.id).await.unwrap().unwrap(),
+        )
+        .await
+        .expect("replay run");
+        assert_eq!(replayed.state, WorkflowRunState::Running);
+        let replayed = wait_for_run_state(&storage, started.id, "completed").await;
+        assert_eq!(replayed.final_output, completed.final_output);
+        assert_eq!(
+            storage
+                .list_workflow_run_events(started.id)
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+        server.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sequential_same_kind_awaits_each_receive_one_queued_event() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(space.id),
+            Json(StartInlineWorkflowRunRequest {
+                source: r#"
+                    await awaitEvent({ kinds: ["control.start"] });
+                    const first = await awaitEvent({ kinds: ["operator.decision"] });
+                    const second = await awaitEvent({ kinds: ["operator.decision"] });
+                    return {
+                        seqs: [first.seq, second.seq],
+                        verdicts: [first.payload.verdict, second.payload.verdict],
+                    };
+                "#
+                .into(),
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start awaiting run");
+        wait_for_run_state(&storage, started.id, "parked").await;
+
+        let Json(_) = post_operator_run_event(
+            State(state.clone()),
+            Path(started.id),
+            Json(PostWorkflowRunEventRequest {
+                kind: "operator.decision".into(),
+                payload: serde_json::json!({"verdict": "first"}),
+            }),
+        )
+        .await
+        .expect("queue first same-kind answer");
+        wait_for_run_state(&storage, started.id, "parked").await;
+        let Json(_) = post_operator_run_event(
+            State(state.clone()),
+            Path(started.id),
+            Json(PostWorkflowRunEventRequest {
+                kind: "operator.decision".into(),
+                payload: serde_json::json!({"verdict": "second"}),
+            }),
+        )
+        .await
+        .expect("queue second same-kind answer");
+        wait_for_run_state(&storage, started.id, "parked").await;
+        let Json(_) = post_operator_run_event(
+            State(state),
+            Path(started.id),
+            Json(PostWorkflowRunEventRequest {
+                kind: "control.start".into(),
+                payload: Value::Null,
+            }),
+        )
+        .await
+        .expect("release queued awaits");
+
+        let completed = wait_for_run_state(&storage, started.id, "completed").await;
+        assert_eq!(
+            completed.final_output,
+            Some(serde_json::json!({
+                "seqs": [1, 2],
+                "verdicts": ["first", "second"],
+            }))
+        );
+        let events = storage
+            .list_workflow_run_events(started.id)
+            .await
+            .expect("events");
+        assert_eq!(events.len(), 3);
+        assert!(events.iter().all(|event| event.delivered_at.is_some()));
+        assert_ne!(events[0].delivered_wake_seq, events[1].delivered_wake_seq);
+        assert_eq!(events[0].delivered_wake_seq, Some(1));
+        assert_eq!(events[1].delivered_wake_seq, Some(2));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn replay_recovers_event_claimed_before_await_journal_completion() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(space.id),
+            Json(StartInlineWorkflowRunRequest {
+                source: r#"
+                    const answer = await awaitEvent({ kinds: ["operator.decision"] });
+                    return { seq: answer.seq, verdict: answer.payload.verdict };
+                "#
+                .into(),
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start awaiting run");
+        wait_for_run_state(&storage, started.id, "parked").await;
+
+        let journal = storage
+            .list_workflow_journal(started.id)
+            .await
+            .expect("started await journal");
+        assert_eq!(journal.len(), 1);
+        assert_eq!(journal[0].status, "started");
+        let event = storage
+            .create_workflow_run_event(NewWorkflowRunEvent {
+                run_id: started.id,
+                journal_entry_id: Uuid::new_v4(),
+                kind: "operator.decision".into(),
+                payload: serde_json::json!({"verdict": "accept"}),
+                source_surface: "operator".into(),
+                source_agent_id: None,
+                source_session_id: None,
+                source_turn_id: None,
+            })
+            .await
+            .expect("persist event");
+        assert!(
+            storage
+                .mark_workflow_run_event_delivered(started.id, event.seq, journal[0].seq)
+                .await
+                .expect("simulate delivery before crash")
+        );
+        storage
+            .update_workflow_run_state(started.id, "interrupted", None, None, None)
+            .await
+            .expect("simulate process interruption");
+
+        let replayed = resume_workflow_run_record(
+            state,
+            storage
+                .get_workflow_run(started.id)
+                .await
+                .expect("get interrupted run")
+                .expect("interrupted run"),
+        )
+        .await
+        .expect("resume interrupted run");
+        assert_eq!(replayed.state, WorkflowRunState::Running);
+        let completed = wait_for_run_state(&storage, started.id, "completed").await;
+        assert_eq!(
+            completed.final_output,
+            Some(serde_json::json!({"seq": event.seq, "verdict": "accept"}))
+        );
+        let journal = storage
+            .list_workflow_journal(started.id)
+            .await
+            .expect("recovered await journal");
+        assert_eq!(journal[0].status, "completed");
+        assert_eq!(journal[0].result.as_ref().unwrap()["seq"], event.seq);
+        assert!(
+            storage
+                .list_pending_workflow_run_events(started.id)
+                .await
+                .expect("pending events")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn script_event_operations_reject_invalid_kinds_without_journalling_them() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let Json(started) = start_inline_run(
+            State(state),
+            Path(space.id),
+            Json(StartInlineWorkflowRunRequest {
+                source: r#"
+                    let postError;
+                    let awaitError;
+                    try { await postEvent("", null); }
+                    catch (error) { postError = error.message; }
+                    try { await awaitEvent({ kinds: ["operator..decision"] }); }
+                    catch (error) { awaitError = error.message; }
+                    return { postError, awaitError };
+                "#
+                .into(),
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start invalid-kind run");
+
+        let completed = wait_for_run_state(&storage, started.id, "completed").await;
+        let output = completed.final_output.expect("invalid-kind output");
+        assert!(
+            output["postError"]
+                .as_str()
+                .is_some_and(|error| error.contains("non-empty namespaced name"))
+        );
+        assert!(
+            output["awaitError"]
+                .as_str()
+                .is_some_and(|error| error.contains("non-empty namespaced name"))
+        );
+        assert!(
+            storage
+                .list_workflow_journal(started.id)
+                .await
+                .expect("invalid-kind journal")
+                .is_empty()
+        );
+        assert!(
+            storage
+                .list_workflow_run_events(started.id)
+                .await
+                .expect("invalid-kind events")
+                .is_empty()
+        );
+    }
+
     async fn wait_for_workflow_thread_exit(run_id: Uuid) {
         tokio::time::timeout(std::time::Duration::from_millis(250), async {
             while workflow_thread_exists(run_id) {
@@ -7225,6 +9038,58 @@ mod tests {
             rx,
         ));
         (tx, task)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn await_event_consumes_match_that_arrives_during_park_cas() {
+        let provider = Arc::new(ScriptedGateProvider {
+            replies: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            calls: AtomicUsize::new(0),
+        });
+        let (storage, state, run) = event_gate_fixture(provider).await;
+        storage
+            .with_conn(|conn| {
+                conn.execute_batch(&format!(
+                    "CREATE TEMP TRIGGER insert_event_before_await_park \
+                     BEFORE UPDATE OF state ON workflow_runs \
+                     WHEN OLD.id = '{}' AND OLD.state = 'running' AND NEW.state = 'parked' \
+                     BEGIN \
+                       INSERT INTO workflow_run_events (id, run_id, journal_entry_id, seq, kind, payload_json, source_surface, posted_at) \
+                       VALUES (lower(hex(randomblob(16))), OLD.id, lower(hex(randomblob(16))), \
+                         (SELECT COALESCE(MAX(seq), 0) + 1 FROM workflow_run_events WHERE run_id = OLD.id), \
+                         'operator.decision', '{{\"verdict\":\"accept\"}}', 'operator', '2026-08-20T00:00:00Z'); \
+                       SELECT RAISE(IGNORE); \
+                     END;",
+                    run.id
+                ))
+            })
+            .await
+            .expect("install read-to-park race trigger");
+        let (tx, task) = spawn_event_loop(state, run.id, run.space_id, vec![]);
+
+        let (reply, receive) = oneshot::channel();
+        tx.send(HostCommand::AwaitEvent {
+            request: AwaitEventRequest {
+                kinds: vec!["operator.decision".into()],
+            },
+            reply,
+        })
+        .expect("await event");
+        let answer = receive
+            .await
+            .expect("await reply")
+            .expect("race winner is consumed");
+
+        assert_eq!(answer["payload"]["verdict"], "accept");
+        assert_eq!(answer["source"]["surface"], "operator");
+        let events = storage
+            .list_workflow_run_events(run.id)
+            .await
+            .expect("events");
+        assert_eq!(events.len(), 1);
+        assert!(events[0].delivered_at.is_some());
+        drop(tx);
+        task.await.expect("host loop");
     }
 
     async fn send_post_event(
@@ -7273,9 +9138,13 @@ mod tests {
         let (storage, state, run) = event_gate_fixture(Arc::clone(&provider)).await;
         let (tx, task) = spawn_event_loop(state.clone(), run.id, run.space_id, vec![]);
 
-        let first = send_post_event(&tx, "completion", serde_json::json!({"worker": "w1"}))
-            .await
-            .expect("first post");
+        let first = send_post_event(
+            &tx,
+            "worker.completion",
+            serde_json::json!({"worker": "w1"}),
+        )
+        .await
+        .expect("first post");
         assert_eq!(first["seq"], 1);
         let suppressed = send_gate(&tx, "wake when every pipeline has settled")
             .await
@@ -7285,9 +9154,13 @@ mod tests {
 
         // The suppressed event is still pending: the next gate reads it
         // again beside the new one — suppression consumes nothing.
-        send_post_event(&tx, "completion", serde_json::json!({"worker": "w2"}))
-            .await
-            .expect("second post");
+        send_post_event(
+            &tx,
+            "worker.completion",
+            serde_json::json!({"worker": "w2"}),
+        )
+        .await
+        .expect("second post");
         let waking = send_gate(&tx, "wake when every pipeline has settled")
             .await
             .expect("second gate");
@@ -7323,6 +9196,35 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn gate_treats_an_unfamiliar_event_kind_as_wakeable_data() {
+        let provider = Arc::new(ScriptedGateProvider {
+            replies: std::sync::Mutex::new(std::collections::VecDeque::from([
+                r#"{"wake": true, "reasoning": "the custom signal requires attention"}"#,
+            ])),
+            calls: AtomicUsize::new(0),
+        });
+        let (_storage, state, run) = event_gate_fixture(Arc::clone(&provider)).await;
+        let (tx, task) = spawn_event_loop(state, run.id, run.space_id, vec![]);
+
+        send_post_event(
+            &tx,
+            " experiment.signal-v2 ",
+            serde_json::json!({"outcome": "unexpected"}),
+        )
+        .await
+        .expect("post unfamiliar kind");
+        let verdict = send_gate(&tx, "wake for novel experimental outcomes")
+            .await
+            .expect("gate unfamiliar kind");
+
+        assert_eq!(verdict["wake"], true);
+        assert_eq!(verdict["events"][0]["kind"], "experiment.signal-v2");
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+        drop(tx);
+        task.await.expect("host loop");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn replayed_posts_and_gates_return_recorded_results_without_reexecution() {
         let provider = Arc::new(ScriptedGateProvider {
             replies: std::sync::Mutex::new(std::collections::VecDeque::from([
@@ -7332,9 +9234,13 @@ mod tests {
         });
         let (storage, state, run) = event_gate_fixture(Arc::clone(&provider)).await;
         let (tx, task) = spawn_event_loop(state.clone(), run.id, run.space_id, vec![]);
-        send_post_event(&tx, "escalation", serde_json::json!({"worker": "w1"}))
-            .await
-            .expect("post");
+        send_post_event(
+            &tx,
+            "worker.escalation",
+            serde_json::json!({"worker": "w1"}),
+        )
+        .await
+        .expect("post");
         let live = send_gate(&tx, "wake on any escalation")
             .await
             .expect("gate");
@@ -7351,9 +9257,13 @@ mod tests {
             .await
             .expect("journal");
         let (tx, task) = spawn_event_loop(state, run.id, run.space_id, replay);
-        let replayed_post = send_post_event(&tx, "escalation", serde_json::json!({"worker": "w1"}))
-            .await
-            .expect("replayed post");
+        let replayed_post = send_post_event(
+            &tx,
+            "worker.escalation",
+            serde_json::json!({"worker": "w1"}),
+        )
+        .await
+        .expect("replayed post");
         assert_eq!(replayed_post["seq"], 1);
         let replayed_gate = send_gate(&tx, "wake on any escalation")
             .await
@@ -7589,6 +9499,7 @@ mod tests {
             parent_run_id: None,
             parent_seq: None,
             script_version_id: None,
+            carrying_skill: None,
             source: Some(source.into()),
             source_hash: source_hash(source),
             args: Value::Null,
@@ -7669,6 +9580,7 @@ mod tests {
                 parent_run_id: None,
                 parent_seq: None,
                 script_version_id: None,
+                carrying_skill: None,
                 source: Some("return null".into()),
                 source_hash: source_hash("return null"),
                 args: Value::Null,
@@ -7725,6 +9637,9 @@ mod tests {
             max_attempts: 1,
             label: None,
             session: None,
+            elements: None,
+            variables: None,
+            assembly: None,
         };
         let (first_reply, first_receive) = oneshot::channel();
         tx.send(HostCommand::Agent {
@@ -7782,6 +9697,7 @@ mod tests {
                 parent_run_id: None,
                 parent_seq: None,
                 script_version_id: None,
+                carrying_skill: None,
                 source: Some("return null".into()),
                 source_hash: source_hash("return null"),
                 args: Value::Null,
@@ -7838,6 +9754,9 @@ mod tests {
             max_attempts: 1,
             label: None,
             session: None,
+            elements: None,
+            variables: None,
+            assembly: None,
         };
         let first_cancellation = CancellationToken::new();
         let (first_reply, first_receive) = oneshot::channel();
@@ -7911,6 +9830,7 @@ mod tests {
                 parent_run_id: None,
                 parent_seq: None,
                 script_version_id: None,
+                carrying_skill: None,
                 source: Some("return null".into()),
                 source_hash: source_hash("return null"),
                 args: Value::Null,
@@ -7933,6 +9853,9 @@ mod tests {
             max_attempts: 1,
             label: None,
             session: None,
+            elements: None,
+            variables: None,
+            assembly: None,
         };
         for (seq, prompt) in [(0, "working one"), (1, "working two")] {
             let request_json = serde_json::to_value(request(prompt)).expect("working request");
@@ -8089,6 +10012,7 @@ mod tests {
                 parent_run_id: None,
                 parent_seq: None,
                 script_version_id: None,
+                carrying_skill: None,
                 source: Some("return null".into()),
                 source_hash: source_hash("return null"),
                 args: Value::Null,
@@ -8111,6 +10035,9 @@ mod tests {
             max_attempts: 1,
             label: None,
             session: None,
+            elements: None,
+            variables: None,
+            assembly: None,
         };
         let request_json = serde_json::to_value(&request).expect("request");
         for seq in 0..2 {
@@ -8212,6 +10139,7 @@ mod tests {
                 parent_run_id: None,
                 parent_seq: None,
                 script_version_id: None,
+                carrying_skill: None,
                 source: Some("return null".into()),
                 source_hash: source_hash("return null"),
                 args: Value::Null,
@@ -8234,6 +10162,9 @@ mod tests {
             max_attempts: 1,
             label: None,
             session: None,
+            elements: None,
+            variables: None,
+            assembly: None,
         };
         let working_json = serde_json::to_value(&working_request).expect("working request");
         storage
@@ -8357,6 +10288,9 @@ mod tests {
             max_attempts: 1,
             label: None,
             session: None,
+            elements: None,
+            variables: None,
+            assembly: None,
         };
         let (closing_reply, closing_receive) = oneshot::channel();
         tx.send(HostCommand::Agent {
@@ -8403,6 +10337,7 @@ mod tests {
                 parent_run_id: None,
                 parent_seq: None,
                 script_version_id: None,
+                carrying_skill: None,
                 source: Some("return null".into()),
                 source_hash: source_hash("return null"),
                 args: Value::Null,
@@ -8425,6 +10360,9 @@ mod tests {
             max_attempts: 1,
             label: None,
             session: None,
+            elements: None,
+            variables: None,
+            assembly: None,
         };
         let work_request = request("completed work");
         let work_json = serde_json::to_value(&work_request).expect("work request");
@@ -8631,6 +10569,7 @@ mod tests {
                 parent_run_id: None,
                 parent_seq: None,
                 script_version_id: None,
+                carrying_skill: None,
                 source: Some("return null".into()),
                 source_hash: source_hash("return null"),
                 args: Value::Null,
@@ -8653,6 +10592,9 @@ mod tests {
             max_attempts: 1,
             label: None,
             session: None,
+            elements: None,
+            variables: None,
+            assembly: None,
         };
         let work_request = request("completed work");
         let work_json = serde_json::to_value(&work_request).expect("work request");
@@ -8847,6 +10789,7 @@ mod tests {
                 parent_run_id: None,
                 parent_seq: None,
                 script_version_id: None,
+                carrying_skill: None,
                 source: Some(source.into()),
                 source_hash: source_hash(source),
                 args: Value::Null,
@@ -8869,6 +10812,9 @@ mod tests {
             max_attempts: 1,
             label: None,
             session: None,
+            elements: None,
+            variables: None,
+            assembly: None,
         };
         let request_json = serde_json::to_value(&request).expect("request");
         let refused = storage
@@ -9066,7 +11012,7 @@ mod tests {
             None,
         );
         let source = r#"
-            await postEvent("escalation", { decisionQueued: true });
+            await postEvent("operator.escalation", { decisionQueued: true });
             const grounding = await deliverEvents(1);
             await agent(`make the lead decision from ${JSON.stringify(grounding)}`, {
                 agent: "default",
@@ -9140,7 +11086,7 @@ mod tests {
             .await
             .expect("events");
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0].kind, "escalation");
+        assert_eq!(events[0].kind, "operator.escalation");
         assert!(events[0].delivered_at.is_some());
         assert_eq!(handover["events_delivered_to_failed_call"], 1);
         assert_eq!(handover["events_pending"], 0);
@@ -9351,6 +11297,7 @@ mod tests {
                 parent_run_id: None,
                 parent_seq: None,
                 script_version_id: None,
+                carrying_skill: None,
                 source: Some(source.into()),
                 source_hash: source_hash(source),
                 args: Value::Null,
@@ -9373,6 +11320,9 @@ mod tests {
             max_attempts: 1,
             label: None,
             session: None,
+            elements: None,
+            variables: None,
+            assembly: None,
         };
         let request = serde_json::to_value(request).expect("request");
         let mismatched = storage
@@ -9478,6 +11428,7 @@ mod tests {
         let Json(started) = start_saved_run(
             State(state.clone()),
             Path(script.id),
+            Query(WorkflowScriptListQuery::default()),
             Json(StartWorkflowRunRequest {
                 args: Value::Null,
                 budget: Some(WorkflowBudget {
@@ -9805,6 +11756,7 @@ mod tests {
         let Json(started) = start_saved_run(
             State(state.clone()),
             Path(script.id),
+            Query(WorkflowScriptListQuery::default()),
             Json(StartWorkflowRunRequest {
                 args: Value::Null,
                 budget: Some(budget.clone()),
@@ -9928,6 +11880,7 @@ mod tests {
         let Json(started) = start_saved_run(
             State(state.clone()),
             Path(script.id),
+            Query(WorkflowScriptListQuery::default()),
             Json(StartWorkflowRunRequest {
                 args: Value::Null,
                 budget: Some(WorkflowBudget {
@@ -10017,6 +11970,7 @@ mod tests {
         let Json(started) = start_saved_run(
             State(state.clone()),
             Path(script.id),
+            Query(WorkflowScriptListQuery::default()),
             Json(StartWorkflowRunRequest {
                 args: Value::Null,
                 budget: Some(WorkflowBudget {
@@ -10140,6 +12094,7 @@ mod tests {
         let Json(started) = start_saved_run(
             State(state.clone()),
             Path(script.id),
+            Query(WorkflowScriptListQuery::default()),
             Json(StartWorkflowRunRequest {
                 args: Value::Null,
                 budget: Some(WorkflowBudget {
@@ -10267,6 +12222,7 @@ mod tests {
         let Json(started) = start_saved_run(
             State(state.clone()),
             Path(script.id),
+            Query(WorkflowScriptListQuery::default()),
             Json(StartWorkflowRunRequest {
                 args: serde_json::json!({"content":"checked"}),
                 budget: None,
@@ -10313,6 +12269,7 @@ mod tests {
         let Json(started) = start_saved_run(
             State(state.clone()),
             Path(script.id),
+            Query(WorkflowScriptListQuery::default()),
             Json(StartWorkflowRunRequest {
                 args: Value::Null,
                 budget: Some(WorkflowBudget {
@@ -10351,6 +12308,7 @@ mod tests {
     async fn composed_run_executes_the_child_and_journals_its_output() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
         let space = storage.get_or_create_default().await.expect("space");
+        let _skill_root = crate::skill::SpaceSkillRootGuard::empty(space.id);
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn SpaceStore>,
@@ -10383,6 +12341,7 @@ mod tests {
         let Json(started) = start_saved_run(
             State(state.clone()),
             Path(parent.id),
+            Query(WorkflowScriptListQuery::default()),
             Json(StartWorkflowRunRequest {
                 args: Value::Null,
                 budget: None,
@@ -10426,6 +12385,7 @@ mod tests {
     async fn a_child_run_cannot_compose_further() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
         let space = storage.get_or_create_default().await.expect("space");
+        let _skill_root = crate::skill::SpaceSkillRootGuard::empty(space.id);
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn SpaceStore>,
@@ -10468,6 +12428,7 @@ mod tests {
         let Json(started) = start_saved_run(
             State(state.clone()),
             Path(parent.id),
+            Query(WorkflowScriptListQuery::default()),
             Json(StartWorkflowRunRequest {
                 args: Value::Null,
                 budget: None,

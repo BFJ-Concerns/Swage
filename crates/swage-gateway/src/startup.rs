@@ -16,6 +16,8 @@ use swage_config::LogLevel;
 use swage_storage::{ChannelQueueStore, WorkflowStore};
 use tokio_util::sync::CancellationToken;
 
+const CODEX_COMPLETION_UNSUPPORTED_REASON: &str = "Codex turns run through the App Server harness";
+
 /// Run the gateway to completion.
 ///
 /// Loads configuration, initialises all subsystems, binds the TCP listener,
@@ -68,6 +70,9 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
     if let Err(problem) = ensure_managed_secret_key(&root) {
         eprintln!("{problem}");
         std::process::exit(1);
+    }
+    if let Err(error) = crate::shipped_skill_projection::regenerate(&root).await {
+        warn!(%error, "failed to regenerate shipped skill resources");
     }
     let db_path = root.join("swage.db");
 
@@ -628,9 +633,10 @@ pub(crate) fn build_tool_dispatcher_with_browser(
         knowledge::KnowledgeCurateOrientationTool, knowledge::KnowledgeCurateTool,
         knowledge::KnowledgeOrientTool, knowledge::KnowledgeRecordTool,
         knowledge::KnowledgeSearchTool, memory::MemoryTool, plugin::discover_plugin_tools,
-        python_execute::PythonExecuteTool, schedule::ScheduleTool, schedule::WakeMeLaterTool,
-        shell::ShellTool, task_definition::TaskDefinitionTool,
-        tool_result_read::ToolResultReadTool, url_fetch::UrlFetchTool, web_search::WebSearchTool,
+        python_execute::PythonExecuteTool, run_event::RunEventPostTool, schedule::ScheduleTool,
+        schedule::WakeMeLaterTool, session_variable::SessionVariableTool, shell::ShellTool,
+        task_definition::TaskDefinitionTool, tool_result_read::ToolResultReadTool,
+        url_fetch::UrlFetchTool, web_search::WebSearchTool,
     };
     use std::time::Duration;
 
@@ -668,6 +674,8 @@ pub(crate) fn build_tool_dispatcher_with_browser(
         Arc::new(ScheduleTool),
         Arc::new(TaskDefinitionTool),
         Arc::new(WakeMeLaterTool),
+        Arc::new(RunEventPostTool),
+        Arc::new(SessionVariableTool),
         // Knowledge-base tools: the space's gathered external evidence.
         // Host-only; read, capture authoring, and curation authoring are
         // separately grantable.
@@ -884,7 +892,6 @@ async fn create_provider_with_retry(
     }
 
     let mut providers = Vec::new();
-    let mut has_codex_provider = false;
     for model_id in ordered_runtime_model_ids(config) {
         let Some(model_endpoint) = config.models.entries.get(&model_id) else {
             continue;
@@ -902,7 +909,6 @@ async fn create_provider_with_retry(
         // Codex is thread/turn-shaped and runs below the provider-parity
         // selection surface. It must never enter the completion failover chain.
         if provider_endpoint.protocol == swage_config::Protocol::Codex {
-            has_codex_provider = true;
             continue;
         }
 
@@ -935,17 +941,8 @@ async fn create_provider_with_retry(
     }
 
     if providers.is_empty() {
-        if has_codex_provider {
-            return Arc::new(swage_provider::UnsupportedLlmProvider::new(
-                "Codex turns run through the App Server harness",
-            ));
-        }
-        tracing::warn!(
-            "No usable provider/model pairs are configured. \
-             Messaging will fail until configuration is fixed."
-        );
         return Arc::new(swage_provider::UnsupportedLlmProvider::new(
-            "no usable provider/model pairs are configured",
+            CODEX_COMPLETION_UNSUPPORTED_REASON,
         ));
     }
 
@@ -985,7 +982,7 @@ fn concrete_provider(
             swage_provider::google::GoogleProvider::from_config(provider_config),
         ),
         swage_config::Protocol::Codex => Box::new(swage_provider::UnsupportedLlmProvider::new(
-            "Codex turns run through the App Server harness",
+            CODEX_COMPLETION_UNSUPPORTED_REASON,
         )),
     }
 }
@@ -998,11 +995,9 @@ fn build_provider_chain(
     use swage_provider::failover::FailoverConfig;
 
     let mut providers = providers.into_iter();
-    let Some(first) = providers.next() else {
-        return Arc::new(swage_provider::UnsupportedLlmProvider::new(
-            "no usable provider/model pairs are configured",
-        ));
-    };
+    let first = providers
+        .next()
+        .expect("provider chain is non-empty after default provider validation");
 
     let mut chain = ProviderChainBuilder::new()
         .provider_boxed(first)
@@ -1393,7 +1388,7 @@ mod tests {
         assert!(matches!(
             completion_error,
             swage_core::ProviderError::InvalidConfig { message }
-                if message == "Codex turns run through the App Server harness"
+                if message == CODEX_COMPLETION_UNSUPPORTED_REASON
         ));
     }
 

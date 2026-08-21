@@ -1490,6 +1490,7 @@ impl Agent {
                 context,
                 cwd,
                 isolation,
+                composition,
                 completion_mode,
             }) => {
                 let handler = match &self.delegation_handler {
@@ -1553,6 +1554,7 @@ impl Agent {
                         transferred_context,
                         cwd,
                         isolation,
+                        *composition,
                         &call.call_id,
                         &self.config.agent_id,
                         execution.turn_id,
