@@ -2,6 +2,8 @@ use super::{
     ActiveSkill, AppState, ChatMessage, ContextElement, HierarchyLevel, HistoryElement,
     MemoryElement, Path, PathBuf, PromptRule, PromptsElement, SkillManager, SkillsElement, Uuid,
 };
+use swage_context::briefing::BriefingElement;
+use swage_context::named_element::discover_named_elements;
 use swage_context::orientation::{
     AvailableSkill, ChannelOrientation, OrientationElement, SessionEnvironment,
 };
@@ -50,15 +52,11 @@ pub(crate) fn delegated_target_instructions_for_space(
 ) -> String {
     resolve_swage_root()
         .map(|root| {
-            let space_dir = root.join("spaces").join(space_slug);
-            let agent_dir = space_dir.join("agents").join(target_agent_id);
-            let agent_dir_opt = if agent_dir.is_dir() {
-                Some(agent_dir.as_path())
-            } else {
-                None
-            };
+            let hierarchy = configuration_hierarchy(&root, space_slug, target_agent_id);
+            let space_dir = &hierarchy[1].1;
+            let agent_dir_opt = hierarchy[2].1.is_dir().then_some(hierarchy[2].1.as_path());
             let (available, _warnings) =
-                SkillManager::discover_available(&root, &space_dir, agent_dir_opt);
+                SkillManager::discover_available(&root, space_dir, agent_dir_opt);
             delegated_target_instructions(target_instructions, &available)
         })
         .unwrap_or_else(|| target_instructions.to_string())
@@ -94,6 +92,8 @@ pub(crate) fn build_assembly_elements(
     environment: SessionEnvironment,
     available_skills: Vec<AvailableSkill>,
     model_id: &str,
+    hierarchy: &[(HierarchyLevel, PathBuf)],
+    requested_elements: Option<&[String]>,
 ) -> Vec<Box<dyn ContextElement>> {
     // Construct a single PromptRule from the resolved instructions string.
     // The config resolver has already merged hierarchy levels and assembled
@@ -123,6 +123,38 @@ pub(crate) fn build_assembly_elements(
         Box::new(PromptsElement::new(rules)),
         Box::new(SkillsElement::new(active_skills)),
     ];
+    let hierarchy_refs = hierarchy
+        .iter()
+        .map(|(level, path)| (level.clone(), path.as_path()))
+        .collect::<Vec<_>>();
+    let named_elements = match requested_elements {
+        Some(names) => names
+            .iter()
+            .filter_map(|name| match swage_context::named_element::resolve_named_element(
+                name,
+                &hierarchy_refs,
+            ) {
+                Ok(Some(resolved)) => Some(resolved),
+                Ok(None) => {
+                    tracing::warn!(element = %name, "requested context element was not found");
+                    None
+                }
+                Err(error) => {
+                    tracing::warn!(element = %name, %error, "requested context element could not be loaded");
+                    None
+                }
+            })
+            .collect(),
+        None => discover_named_elements(&hierarchy_refs).unwrap_or_else(|error| {
+            tracing::warn!(%error, "named context elements could not be loaded");
+            Vec::new()
+        }),
+    };
+    elements.extend(
+        named_elements
+            .into_iter()
+            .map(|resolved| Box::new(BriefingElement::new(resolved)) as Box<dyn ContextElement>),
+    );
     if let Some((content, space_name)) = memory {
         elements.push(Box::new(MemoryElement::new(content, space_name)));
     }
@@ -211,14 +243,10 @@ pub(crate) fn available_skills_for_agent(
     let Some(root) = swage_root else {
         return vec![];
     };
-    let space_dir = root.join("spaces").join(space_slug);
-    let agent_dir = space_dir.join("agents").join(agent_id);
-    let agent_dir_opt = if agent_dir.is_dir() {
-        Some(agent_dir.as_path())
-    } else {
-        None
-    };
-    let (available, _warnings) = SkillManager::discover_available(root, &space_dir, agent_dir_opt);
+    let hierarchy = configuration_hierarchy(root, space_slug, agent_id);
+    let space_dir = &hierarchy[1].1;
+    let agent_dir_opt = hierarchy[2].1.is_dir().then_some(hierarchy[2].1.as_path());
+    let (available, _warnings) = SkillManager::discover_available(root, space_dir, agent_dir_opt);
     available
         .into_iter()
         .map(|skill| AvailableSkill {
@@ -226,6 +254,21 @@ pub(crate) fn available_skills_for_agent(
             trigger: skill.description,
         })
         .collect()
+}
+
+/// Construct the shared global → space → agent config hierarchy.
+pub(crate) fn configuration_hierarchy(
+    root: &Path,
+    space_slug: &str,
+    agent_id: &str,
+) -> Vec<(HierarchyLevel, PathBuf)> {
+    let space = root.join("spaces").join(space_slug);
+    let agent = space.join("agents").join(agent_id);
+    vec![
+        (HierarchyLevel::Global, root.to_path_buf()),
+        (HierarchyLevel::Space, space),
+        (HierarchyLevel::Agent, agent),
+    ]
 }
 
 /// Load space memory content by reading all `.md` files from the space's
@@ -316,7 +359,7 @@ pub(crate) fn resolve_swage_root() -> Option<PathBuf> {
         Err(error) => {
             tracing::warn!(
                 error = %error.kind,
-                "failed to resolve swage root; proceeding without skills, memory, or custom assembly"
+                "failed to resolve swage root; proceeding without skills, memory, context elements, or custom assembly"
             );
             None
         }
@@ -335,14 +378,10 @@ pub(crate) async fn load_active_skills_for_agent(
     let Some(root) = swage_root else {
         return vec![];
     };
-    let space_dir = root.join("spaces").join(space_slug);
-    let agent_dir = space_dir.join("agents").join(agent_id);
-    let agent_dir_opt = if agent_dir.is_dir() {
-        Some(agent_dir.as_path())
-    } else {
-        None
-    };
-    let (available, _warnings) = SkillManager::discover_available(root, &space_dir, agent_dir_opt);
+    let hierarchy = configuration_hierarchy(root, space_slug, agent_id);
+    let space_dir = &hierarchy[1].1;
+    let agent_dir_opt = hierarchy[2].1.is_dir().then_some(hierarchy[2].1.as_path());
+    let (available, _warnings) = SkillManager::discover_available(root, space_dir, agent_dir_opt);
 
     // Agent-level skills are automatic for the current agent context. Store
     // them idempotently so the normal activation ordering and filtering path is
