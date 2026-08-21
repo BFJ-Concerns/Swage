@@ -7253,6 +7253,15 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
         ]),
         "delegated child should persist its complete dispatch-bound lineage"
     );
+    assert_eq!(
+        child_sessions[0]
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("task_definition"))
+            .and_then(serde_json::Value::as_str),
+        Some("strict-review"),
+        "delegated child should persist its task definition for later turns"
+    );
 
     let child_threads = state
         .storage
@@ -7507,6 +7516,16 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
             .iter()
             .all(|definition| definition["name"] != "shell"),
         "a subsequent child turn must re-read its metadata and remain bounded"
+    );
+    let next_child_request_text = captured_requests[5]
+        .messages
+        .iter()
+        .map(ChatMessage::text_content)
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    assert!(
+        next_child_request_text.contains("Task-defined delegated instruction."),
+        "a subsequent child turn must re-resolve its persisted task definition: {next_child_request_text}"
     );
     drop(captured_requests);
 
