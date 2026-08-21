@@ -629,8 +629,8 @@ pub(crate) fn build_tool_dispatcher_with_browser(
         knowledge::KnowledgeOrientTool, knowledge::KnowledgeRecordTool,
         knowledge::KnowledgeSearchTool, memory::MemoryTool, plugin::discover_plugin_tools,
         python_execute::PythonExecuteTool, schedule::ScheduleTool, schedule::WakeMeLaterTool,
-        shell::ShellTool, tool_result_read::ToolResultReadTool, url_fetch::UrlFetchTool,
-        web_search::WebSearchTool,
+        shell::ShellTool, task_definition::TaskDefinitionTool,
+        tool_result_read::ToolResultReadTool, url_fetch::UrlFetchTool, web_search::WebSearchTool,
     };
     use std::time::Duration;
 
@@ -666,6 +666,7 @@ pub(crate) fn build_tool_dispatcher_with_browser(
         // Schedule tools reach the gateway's schedule service through the host
         // tool context; both are host-only (requires_device_execution).
         Arc::new(ScheduleTool),
+        Arc::new(TaskDefinitionTool),
         Arc::new(WakeMeLaterTool),
         // Knowledge-base tools: the space's gathered external evidence.
         // Host-only; read, capture authoring, and curation authoring are

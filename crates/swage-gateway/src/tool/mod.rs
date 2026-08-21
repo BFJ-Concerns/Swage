@@ -18,6 +18,7 @@ pub mod plugin;
 pub mod python_execute;
 pub mod schedule;
 pub mod shell;
+pub mod task_definition;
 pub mod tool_result_read;
 pub mod url_fetch;
 pub mod web_search;

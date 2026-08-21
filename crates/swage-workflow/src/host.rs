@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use swage_protocol::client::workflow::WorkerIsolation;
+pub use swage_protocol::client::workflow::{AgentCallRequest, AgentSessionRef};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -9,61 +9,6 @@ use uuid::Uuid;
 pub struct ResolvedWorkerPlacement {
     pub path: String,
     pub can_write: bool,
-}
-
-/// An opaque continuation token naming a worker session a run already
-/// created. Scripts receive it on an `agentStart` handle after the call
-/// completes and pass it back whole via the `session` option; its fields are
-/// host business. The token's values come from journalled results, so a
-/// resumed run rebuilds identical tokens and replay stays deterministic.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct AgentSessionRef {
-    pub session_id: Uuid,
-    pub thread_id: Uuid,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct AgentCallRequest {
-    pub prompt: String,
-    /// Optional durable definition giving the worker its character. When
-    /// absent, the host creates a definition-less ephemeral worker whose
-    /// authority still comes from the dispatching context.
-    ///
-    /// Both serde attributes are load-bearing: journal argument hashes cover
-    /// this serialised request, so historical named calls must not acquire an
-    /// `agent: null` field when replayed.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent: Option<String>,
-    pub model: Option<String>,
-    /// Provider reasoning effort for this call. Absent preserves the ambient
-    /// provider or model default and the historical journal request shape.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub effort: Option<String>,
-    /// Host-enforced deadline for this call in milliseconds.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub timeout_ms: Option<u64>,
-    /// Caller-selected working directory. This remains unresolved in the
-    /// journalled request so its argument hash is stable across hosts.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cwd: Option<String>,
-    /// Optional runtime-managed isolation for the worker.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub isolation: Option<WorkerIsolation>,
-    pub schema: Option<Value>,
-    pub max_attempts: u32,
-    pub label: Option<String>,
-    /// Continue this worker session instead of creating a fresh one: the
-    /// next turn lands on the same session and thread, so the worker meets
-    /// its own history — a restated brief and the later "proceed" are one
-    /// session. `None` is the fresh-session default.
-    ///
-    /// `skip_serializing_if` is load-bearing beside `default`: journal args
-    /// hashes are computed over the serialised request, so an optional
-    /// field that serialises as `null` when unset would change every
-    /// existing entry's hash and fail interrupted runs on resume. Unset
-    /// must serialise to nothing.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session: Option<AgentSessionRef>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

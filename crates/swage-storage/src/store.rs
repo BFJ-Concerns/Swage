@@ -12,13 +12,13 @@ use crate::model::{
     NewApprovalRequest, NewAttachment, NewAuditEvent, NewBackgroundJob, NewChannelInboundMessage,
     NewChannelLink, NewCurationAssertion, NewDeliveryRecord, NewDeviceRegistration,
     NewKnowledgeCitation, NewMaterial, NewMessage, NewOrientationCard, NewSchedule, NewScheduleRun,
-    NewSecretRecord, NewSession, NewSourceObservation, NewSpace, NewThread, NewToolCall, NewTurn,
-    NewWorkflowJournalIntent, NewWorkflowRun, NewWorkflowRunEvent, NewWorkflowScript,
-    NewWorkspaceAttachment, OrientationCard, OrientationCardLifecycle, PendingChannelOrigin,
-    Schedule, ScheduleRun, ScheduleRunUpdate, SecretRecord, Session, SourceObservation, Space,
-    SpaceSlug, Thread, ThreadBranch, ThreadState, ToolCallRecord, Turn, TurnState, UpdateSchedule,
-    WorkflowJournalRecord, WorkflowRunEventRecord, WorkflowRunRecord, WorkflowScriptRecord,
-    WorkflowScriptVersion, WorkspaceAttachment,
+    NewSecretRecord, NewSession, NewSourceObservation, NewSpace, NewTaskDefinition, NewThread,
+    NewToolCall, NewTurn, NewWorkflowJournalIntent, NewWorkflowRun, NewWorkflowRunEvent,
+    NewWorkflowScript, NewWorkspaceAttachment, OrientationCard, OrientationCardLifecycle,
+    PendingChannelOrigin, Schedule, ScheduleRun, ScheduleRunUpdate, SecretRecord, Session,
+    SourceObservation, Space, SpaceSlug, TaskDefinition, Thread, ThreadBranch, ThreadState,
+    ToolCallRecord, Turn, TurnState, UpdateSchedule, WorkflowJournalRecord, WorkflowRunEventRecord,
+    WorkflowRunRecord, WorkflowScriptRecord, WorkflowScriptVersion, WorkspaceAttachment,
 };
 
 // ---------------------------------------------------------------------------
@@ -222,6 +222,17 @@ pub trait AgentDefinitionStore: Send + Sync {
         agent_id: &str,
         space_id: Option<Uuid>,
     ) -> Result<bool, StorageError>;
+}
+
+#[async_trait]
+pub trait TaskDefinitionStore: Send + Sync {
+    async fn upsert_task_definition(
+        &self,
+        definition: NewTaskDefinition,
+    ) -> Result<TaskDefinition, StorageError>;
+    async fn get_task_definition(&self, id: &str) -> Result<Option<TaskDefinition>, StorageError>;
+    async fn list_task_definitions(&self) -> Result<Vec<TaskDefinition>, StorageError>;
+    async fn delete_task_definition(&self, id: &str) -> Result<bool, StorageError>;
 }
 
 /// Store for a space's knowledge base: immutable source observations and
@@ -1100,6 +1111,7 @@ pub trait Storage:
     + AuditStore
     + AgentMemoryStore
     + AgentDefinitionStore
+    + TaskDefinitionStore
     + ObservationStore
     + CurationAssertionStore
     + CitationStore
@@ -1134,6 +1146,7 @@ impl<T> Storage for T where
         + AuditStore
         + AgentMemoryStore
         + AgentDefinitionStore
+        + TaskDefinitionStore
         + ObservationStore
         + CurationAssertionStore
         + CitationStore
@@ -1442,6 +1455,28 @@ mod tests {
             _: &str,
             _: Option<Uuid>,
         ) -> Result<bool, StorageError> {
+            unimplemented!()
+        }
+    }
+
+    #[async_trait]
+    impl TaskDefinitionStore for StubStorage {
+        async fn upsert_task_definition(
+            &self,
+            _: NewTaskDefinition,
+        ) -> Result<TaskDefinition, StorageError> {
+            unimplemented!()
+        }
+        async fn get_task_definition(
+            &self,
+            _: &str,
+        ) -> Result<Option<TaskDefinition>, StorageError> {
+            unimplemented!()
+        }
+        async fn list_task_definitions(&self) -> Result<Vec<TaskDefinition>, StorageError> {
+            unimplemented!()
+        }
+        async fn delete_task_definition(&self, _: &str) -> Result<bool, StorageError> {
             unimplemented!()
         }
     }
