@@ -254,6 +254,25 @@ impl DelegationHandler for GatewayDelegationHandler {
                     crate::service::resolve_task_definition(self.state.storage.as_ref(), id)
                         .await
                         .map_err(|error| AgentError::InvalidConfig(error.to_string()))?;
+                let decision = crate::experimentation::select_variant(
+                    &target_resolved.experimentation,
+                    crate::experimentation::LOCATION_TASK_PROMPT,
+                    &[],
+                    "definition",
+                    sender_turn_id,
+                )
+                .map_err(|error| AgentError::InvalidConfig(error.to_string()))?;
+                if let Err(error) = crate::experimentation::record_selection(
+                    &self.state,
+                    crate::experimentation::LOCATION_TASK_PROMPT,
+                    &decision,
+                    None,
+                    Some(sender_turn_id),
+                )
+                .await
+                {
+                    tracing::warn!(%error, task_id = id, "task prompt variant record unavailable; serving the definition default");
+                }
                 super::apply_task_definition(target_resolved, &definition)
                     .map_err(|error| AgentError::InvalidConfig(error.to_string()))?
             }
