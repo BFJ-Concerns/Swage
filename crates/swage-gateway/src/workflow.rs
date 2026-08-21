@@ -974,7 +974,12 @@ async fn run_ephemeral_agent_call(
     };
     let (events, _events_rx) = mpsc::unbounded_channel::<ServerEvent>();
     let request_schema = request.schema.clone();
-    let processing = crate::turn::process_turn_with_existing_turn(
+    let composition = crate::turn::DispatchContextComposition {
+        elements: request.elements.clone(),
+        variables: request.variables.clone(),
+        assembly: request.assembly.clone(),
+    };
+    let processing = crate::turn::process_turn_with_composition(
         state,
         session_id,
         Some(thread_id),
@@ -985,6 +990,7 @@ async fn run_ephemeral_agent_call(
         Some(request.max_attempts.saturating_sub(1)),
         None,
         crate::turn::TurnAttendance::Unattended,
+        composition,
     );
     tokio::pin!(processing);
     tokio::select! {
@@ -3939,8 +3945,8 @@ mod tests {
     use super::*;
     use swage_protocol::client::workflow::{WorkflowJournalEntryKind, WorkflowJournalEntryStatus};
     use swage_storage::{
-        AgentDefinitionStore, SessionStore, SpaceStore, SqliteStorage, Storage, TurnStore,
-        WorkflowStore,
+        AgentDefinitionStore, ContextSnapshotStore, SessionStore, SpaceStore, SqliteStorage,
+        Storage, TurnStore, WorkflowStore,
     };
     use swage_workflow::AgentSessionRef;
 
@@ -4879,6 +4885,9 @@ mod tests {
                 max_attempts: 1,
                 label: None,
                 session: None,
+                elements: None,
+                variables: None,
+                assembly: None,
             },
             CancellationToken::new(),
         )
@@ -4904,6 +4913,186 @@ mod tests {
             calls[0].result.as_deref(),
             Some("{\"output\":\"workflow\"}")
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn workflow_journal_preserves_and_recomposes_call_scoped_context() {
+        let swage_home = crate::test_support::SwageHomeGuard::new();
+        std::fs::create_dir_all(swage_home.path().join("assemblies"))
+            .expect("create assemblies directory");
+        std::fs::create_dir_all(swage_home.path().join("elements"))
+            .expect("create elements directory");
+        std::fs::write(
+            swage_home.path().join("assemblies/focused.js"),
+            "for (const element of elements) add(element.render());",
+        )
+        .expect("write named assembly");
+        std::fs::write(
+            swage_home.path().join("elements/current-work.md"),
+            "Owner: {{owner}}",
+        )
+        .expect("write selected element");
+        std::fs::write(
+            swage_home.path().join("elements/unrequested.md"),
+            "Must not reach the child",
+        )
+        .expect("write unrequested element");
+
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let run = storage
+            .create_workflow_run(NewWorkflowRun {
+                space_id: space.id,
+                parent_run_id: None,
+                parent_seq: None,
+                script_version_id: None,
+                source: Some("return null".into()),
+                source_hash: source_hash("return null"),
+                args: Value::Null,
+                budget: serde_json::json!({}),
+                engine_version: "test".into(),
+                dispatch_bound_agent_ids: vec![],
+            })
+            .await
+            .expect("run");
+        let provider = Arc::new(ScriptedRecordingProvider {
+            outputs: std::sync::Mutex::new(std::collections::VecDeque::from([
+                scripted_text_output("first child result"),
+                scripted_text_output("resumed child result"),
+            ])),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let (tx, rx) = mpsc::unbounded_channel();
+        let task = tokio::spawn(run_host_commands(
+            state,
+            run.id,
+            space.id,
+            vec![],
+            None,
+            WorkflowBudget {
+                max_agent_calls: None,
+                max_total_tokens: None,
+                reserved_closing_tokens: None,
+                max_concurrent_agent_calls: None,
+            },
+            vec![],
+            Arc::new(AtomicU32::new(0)),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(Mutex::new(std::collections::HashMap::new())),
+            CancellationToken::new(),
+            PARK_TIMER_THRESHOLD_MS,
+            rx,
+        ));
+        let request = AgentCallRequest {
+            prompt: "Use the briefing".into(),
+            agent: "default".into(),
+            model: None,
+            schema: None,
+            max_attempts: 1,
+            label: None,
+            session: None,
+            elements: Some(vec!["current-work".into()]),
+            variables: Some(std::collections::BTreeMap::from([(
+                "owner".into(),
+                "journal owner".into(),
+            )])),
+            assembly: Some("focused".into()),
+        };
+        let (reply, receive) = oneshot::channel();
+        tx.send(HostCommand::Agent {
+            request: request.clone(),
+            cancellation: CancellationToken::new(),
+            reply,
+        })
+        .expect("send initial agent call");
+        let first_result = receive
+            .await
+            .expect("receive initial agent result")
+            .expect("initial agent call");
+
+        let initial_journal = storage
+            .list_workflow_journal(run.id)
+            .await
+            .expect("read initial journal");
+        assert_eq!(initial_journal.len(), 1);
+        let expected = serde_json::to_value(&request).expect("serialise expected request");
+        assert_eq!(initial_journal[0].request, expected);
+        let replayed_request: AgentCallRequest =
+            serde_json::from_value(initial_journal[0].request.clone())
+                .expect("reconstruct agent request from journal");
+
+        let (reply, receive) = oneshot::channel();
+        tx.send(HostCommand::Agent {
+            request: replayed_request,
+            cancellation: CancellationToken::new(),
+            reply,
+        })
+        .expect("send replayed agent call");
+        let replayed_result = receive
+            .await
+            .expect("receive replayed agent result")
+            .expect("replayed agent call");
+        drop(tx);
+        task.await.expect("host loop");
+
+        let journal = storage
+            .list_workflow_journal(run.id)
+            .await
+            .expect("read journal");
+        assert_eq!(journal.len(), 2);
+        assert!(journal.iter().all(|entry| entry.request == expected));
+
+        let mut reports = Vec::new();
+        for result in [&first_result, &replayed_result] {
+            let report = storage
+                .get_snapshot(result.turn_id.expect("turn id"))
+                .await
+                .expect("read snapshot")
+                .expect("workflow child assembly report");
+            let mut report: Value = serde_json::from_str(&report).expect("report JSON");
+            assert_eq!(report["assembly_name"], "focused");
+            assert!(
+                report["elements"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|element| element["name"] == "current-work")
+            );
+            assert!(
+                report["elements"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|element| element["name"] != "unrequested")
+            );
+            report.as_object_mut().unwrap().remove("duration");
+            report.as_object_mut().unwrap().remove("provider_visible");
+            report.as_object_mut().unwrap().remove("total_tokens");
+            if let Some(orientation) = report["elements"].as_array_mut().and_then(|elements| {
+                elements
+                    .iter_mut()
+                    .find(|element| element["name"] == "orientation")
+            }) {
+                orientation.as_object_mut().unwrap().remove("token_count");
+            }
+            reports.push(report);
+        }
+        assert_eq!(reports[0], reports[1]);
+        let requests = provider.requests.lock().expect("provider requests");
+        assert!(requests.iter().all(|request| {
+            request
+                .messages
+                .iter()
+                .any(|message| message.text_content().contains("Owner: journal owner"))
+        }));
     }
 
     #[test]
@@ -5738,6 +5927,9 @@ mod tests {
             max_attempts: 1,
             label: None,
             session: None,
+            elements: None,
+            variables: None,
+            assembly: None,
         };
         let first_cancellation = CancellationToken::new();
         let (first_reply, first_receive) = oneshot::channel();
@@ -5893,6 +6085,9 @@ mod tests {
                 max_attempts: 1,
                 label: None,
                 session: None,
+                elements: None,
+                variables: None,
+                assembly: None,
             },
             cancellation: CancellationToken::new(),
             reply: first_reply,
@@ -5945,6 +6140,9 @@ mod tests {
                 max_attempts: 1,
                 label: None,
                 session: Some(token.clone()),
+                elements: None,
+                variables: None,
+                assembly: None,
             },
             cancellation: CancellationToken::new(),
             reply: second_reply,
@@ -6069,6 +6267,9 @@ mod tests {
                     session_id: foreign_session.id,
                     thread_id: Uuid::new_v4(),
                 }),
+                elements: None,
+                variables: None,
+                assembly: None,
             },
             cancellation: CancellationToken::new(),
             reply,
@@ -7461,6 +7662,9 @@ mod tests {
             max_attempts: 1,
             label: None,
             session: None,
+            elements: None,
+            variables: None,
+            assembly: None,
         };
         let (first_reply, first_receive) = oneshot::channel();
         tx.send(HostCommand::Agent {
@@ -7567,6 +7771,9 @@ mod tests {
             max_attempts: 1,
             label: None,
             session: None,
+            elements: None,
+            variables: None,
+            assembly: None,
         };
         let first_cancellation = CancellationToken::new();
         let (first_reply, first_receive) = oneshot::channel();
@@ -7654,6 +7861,9 @@ mod tests {
             max_attempts: 1,
             label: None,
             session: None,
+            elements: None,
+            variables: None,
+            assembly: None,
         };
         for (seq, prompt) in [(0, "working one"), (1, "working two")] {
             let request_json = serde_json::to_value(request(prompt)).expect("working request");
@@ -7824,6 +8034,9 @@ mod tests {
             max_attempts: 1,
             label: None,
             session: None,
+            elements: None,
+            variables: None,
+            assembly: None,
         };
         let request_json = serde_json::to_value(&request).expect("request");
         for seq in 0..2 {
@@ -7940,6 +8153,9 @@ mod tests {
             max_attempts: 1,
             label: None,
             session: None,
+            elements: None,
+            variables: None,
+            assembly: None,
         };
         let working_json = serde_json::to_value(&working_request).expect("working request");
         storage
@@ -8057,6 +8273,9 @@ mod tests {
             max_attempts: 1,
             label: None,
             session: None,
+            elements: None,
+            variables: None,
+            assembly: None,
         };
         let (closing_reply, closing_receive) = oneshot::channel();
         tx.send(HostCommand::Agent {
@@ -8119,6 +8338,9 @@ mod tests {
             max_attempts: 1,
             label: None,
             session: None,
+            elements: None,
+            variables: None,
+            assembly: None,
         };
         let work_request = request("completed work");
         let work_json = serde_json::to_value(&work_request).expect("work request");
@@ -8339,6 +8561,9 @@ mod tests {
             max_attempts: 1,
             label: None,
             session: None,
+            elements: None,
+            variables: None,
+            assembly: None,
         };
         let work_request = request("completed work");
         let work_json = serde_json::to_value(&work_request).expect("work request");
@@ -8548,6 +8773,9 @@ mod tests {
             max_attempts: 1,
             label: None,
             session: None,
+            elements: None,
+            variables: None,
+            assembly: None,
         };
         let request_json = serde_json::to_value(&request).expect("request");
         let refused = storage
@@ -9048,6 +9276,9 @@ mod tests {
             max_attempts: 1,
             label: None,
             session: None,
+            elements: None,
+            variables: None,
+            assembly: None,
         };
         let request = serde_json::to_value(request).expect("request");
         let mismatched = storage
