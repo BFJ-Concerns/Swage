@@ -7973,8 +7973,12 @@ mod tests {
         );
         drop(writes);
         assert!(!repo.join("first-marker").exists() && !repo.join("second-marker").exists());
+        let completed_run_root = fixture
+            .path()
+            .join("worker-worktrees")
+            .join(started.id.to_string());
         for _ in 0..20 {
-            if paths.iter().all(|path| !path.exists()) {
+            if paths.iter().all(|path| !path.exists()) && !completed_run_root.exists() {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
@@ -7984,11 +7988,7 @@ mod tests {
             "completed-run cleanup must remove every provisioned worktree: {paths:?}"
         );
         assert!(
-            !fixture
-                .path()
-                .join("worker-worktrees")
-                .join(started.id.to_string())
-                .exists(),
+            !completed_run_root.exists(),
             "completed-run cleanup must remove the empty per-run directory"
         );
 
