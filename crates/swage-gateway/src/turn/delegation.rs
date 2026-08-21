@@ -328,6 +328,10 @@ impl DelegationHandler for GatewayDelegationHandler {
         .map_err(|error| AgentError::InvalidConfig(error.to_string()))?;
         let mut session_metadata = dispatch_bound_metadata(&bound_agent_ids)
             .expect("a delegated session always has at least its sender bound");
+        if let Some(task_definition) = task_definition {
+            session_metadata["task_definition"] =
+                serde_json::Value::String(task_definition.to_string());
+        }
 
         let sender_filesystem_authority =
             self.filesystem_authority_for_turn(sender_turn_id).await?;
