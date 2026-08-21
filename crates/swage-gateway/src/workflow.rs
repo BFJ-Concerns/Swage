@@ -28,9 +28,9 @@ use swage_storage::{
 };
 use swage_workflow::{
     AgentCallRequest, AgentCallResult, AwaitEventRequest, EffectPayload, EffectReceipt,
-    EffectRecoveryHost, EngineLimits, GateRequest, QUICKJS_ENGINE_VERSION,
-    ResolvedWorkerPlacement, RunEventPost, ScriptCapabilities, WorkflowCallRequest, WorkflowEngine,
-    WorkflowHost, journal_args_hash, recover_started_effect,
+    EffectRecoveryHost, EngineLimits, GateRequest, QUICKJS_ENGINE_VERSION, ResolvedWorkerPlacement,
+    RunEventPost, ScriptCapabilities, WorkflowCallRequest, WorkflowEngine, WorkflowHost,
+    journal_args_hash, recover_started_effect,
 };
 use tokio::sync::{Mutex, Notify, Semaphore, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -7324,8 +7324,14 @@ mod tests {
             timeout_ms: None,
             cwd: None,
             isolation: None,
-            schema: None,
-            max_attempts: 1,
+            // A call can carry its own output settings alongside a named
+            // task, but the task's durable contract must govern the worker.
+            schema: Some(serde_json::json!({
+                "type": "object",
+                "required": ["call_level_override"],
+                "properties": {"call_level_override": {"const": true}}
+            })),
+            max_attempts: 5,
             label: None,
             session: None,
             elements: None,
