@@ -618,9 +618,9 @@
                       <div class="model-facts">
                         <span>{model.context_window ? `${model.context_window.toLocaleString()} ctx` : "context unknown"}</span>
                         <span>{model.generation_preset ?? "provider generation defaults"}</span>
-                        <label>
-                          <span class="sr-only">Default effort for {modelKey}</span>
-                          <select bind:value={model.default_effort}>
+                        <label class="model-effort">
+                          <span aria-hidden="true">Default effort</span>
+                          <select aria-label={`Default effort for ${modelKey}`} bind:value={model.default_effort}>
                             <option value={undefined}>No effort</option>
                             <option value="low">Low</option>
                             <option value="medium">Medium</option>
@@ -1350,6 +1350,18 @@
   .model-facts span {
     padding: 2px 6px;
     border: 1px solid var(--rule-soft);
+  }
+
+  .model-effort {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--ink);
+  }
+
+  .model-facts .model-effort span {
+    padding: 0;
+    border: 0;
   }
 
   .model-facts .fact-strong {
