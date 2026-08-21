@@ -41,7 +41,51 @@ impl Tool for TaskDefinitionTool {
         "Create, list, update, or delete durable named task definitions. Changes are whole-definition configuration mutations and are audited."
     }
     fn parameters(&self) -> Value {
-        json!({"type":"object","properties":{"action":{"type":"string","enum":["upsert","list","delete"]},"id":{"type":"string"},"instructions":{"type":"string"},"model_id":{"type":["string","null"]},"tool_permissions":{"type":["object","null"]},"output_schema":{"type":["object","null"]},"output_max_retries":{"type":["integer","null"],"minimum":0}},"required":["action"]})
+        let string_array = || json!({"type":"array","items":{"type":"string"}});
+        json!({
+            "type":"object",
+            "properties":{
+                "action":{"type":"string","enum":["upsert","list","delete"]},
+                "id":{"type":"string"},
+                "instructions":{"type":"string"},
+                "model_id":{"type":["string","null"]},
+                "tool_permissions":{
+                    "type":["object","null"],
+                    "properties":{
+                        "allow":string_array(),
+                        "deny":string_array(),
+                        "bundles":{
+                            "type":"object",
+                            "additionalProperties":{"type":"array","items":{"type":"string"}}
+                        },
+                        "require_approval":{
+                            "type":"array",
+                            "items":{
+                                "oneOf":[
+                                    {"type":"string"},
+                                    {
+                                        "type":"object",
+                                        "properties":{
+                                            "tool":{"type":"string"},
+                                            "timeout":{"type":["integer","null"],"minimum":0},
+                                            "timeout_policy":{"type":["string","null"],"enum":["deny","allow",null]}
+                                        },
+                                        "required":["tool"],
+                                        "additionalProperties":false
+                                    }
+                                ]
+                            }
+                        }
+                    },
+                    "required":["allow","deny","bundles","require_approval"],
+                    "additionalProperties":false
+                },
+                "output_schema":{"type":["object","null"]},
+                "output_max_retries":{"type":["integer","null"],"minimum":0}
+            },
+            "required":["action"],
+            "additionalProperties":false
+        })
     }
     fn requires_device_execution(&self) -> bool {
         true
