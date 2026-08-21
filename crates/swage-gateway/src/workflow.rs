@@ -244,6 +244,9 @@ async fn resolve_workflow_by_id(
     id: Uuid,
     agent_id: Option<&str>,
 ) -> Result<Option<EffectiveWorkflow>, String> {
+    if let Some(agent_id) = agent_id {
+        crate::skill::validate_agent_scope_id(agent_id).map_err(|error| error.to_string())?;
+    }
     if let Some(record) = state
         .storage
         .get_workflow_script(id)
@@ -258,6 +261,13 @@ async fn resolve_workflow_by_id(
         .await
         .map_err(|error| error.to_string())?
     {
+        if let Some(agent_id) = agent_id
+            && !crate::skill::agent_scope_is_visible(state, space.id, agent_id)
+                .await
+                .map_err(|error| error.to_string())?
+        {
+            continue;
+        }
         let skills = discover_skills_for_space(state, space.id, agent_id).await?;
         if let Some(workflow) = list_effective_workflows(state, space.id, &skills)
             .await?
@@ -3034,6 +3044,46 @@ fn internal(error: impl std::fmt::Display) -> ApiError {
     ApiError::internal(error.to_string())
 }
 
+async fn validate_agent_scope_for_space(
+    state: &AppState,
+    space_id: Uuid,
+    agent_id: Option<&str>,
+) -> Result<(), ApiError> {
+    let Some(agent_id) = agent_id else {
+        return Ok(());
+    };
+    if crate::skill::agent_scope_is_visible(state, space_id, agent_id).await? {
+        Ok(())
+    } else {
+        Err(ApiError::validation(format!(
+            "no agent definition named '{agent_id}' is visible to space {space_id}"
+        )))
+    }
+}
+
+async fn validate_agent_scope_for_any_space(
+    state: &AppState,
+    agent_id: Option<&str>,
+) -> Result<(), ApiError> {
+    let Some(agent_id) = agent_id else {
+        return Ok(());
+    };
+    crate::skill::validate_agent_scope_id(agent_id)?;
+    let spaces = state
+        .space_store
+        .list_all()
+        .await
+        .map_err(|error| ApiError(swage_core::GatewayError::Storage(error)))?;
+    for space in spaces {
+        if crate::skill::agent_scope_is_visible(state, space.id, agent_id).await? {
+            return Ok(());
+        }
+    }
+    Err(ApiError::validation(format!(
+        "no agent definition named '{agent_id}' is visible to any space"
+    )))
+}
+
 fn script_wire(record: WorkflowScriptRecord, head_version: u32) -> WorkflowScript {
     WorkflowScript {
         id: record.id,
@@ -3133,6 +3183,7 @@ pub async fn list_scripts(
         .await
         .map_err(internal)?
         .ok_or_else(|| ApiError::not_found("space", space_id))?;
+    validate_agent_scope_for_space(&state, space_id, query.agent_id.as_deref()).await?;
     let skills = discover_skills_for_space(&state, space_id, query.agent_id.as_deref())
         .await
         .map_err(internal)?;
@@ -3150,6 +3201,7 @@ pub async fn get_script(
     Path(id): Path<Uuid>,
     Query(query): Query<WorkflowScriptListQuery>,
 ) -> Result<Json<WorkflowScript>, ApiError> {
+    validate_agent_scope_for_any_space(&state, query.agent_id.as_deref()).await?;
     let workflow = resolve_workflow_by_id(&state, id, query.agent_id.as_deref())
         .await
         .map_err(internal)?
@@ -3163,6 +3215,7 @@ pub async fn update_script(
     Query(query): Query<WorkflowScriptListQuery>,
     Json(request): Json<UpdateWorkflowScriptRequest>,
 ) -> Result<Json<WorkflowScript>, ApiError> {
+    validate_agent_scope_for_any_space(&state, query.agent_id.as_deref()).await?;
     if resolve_workflow_by_id(&state, id, query.agent_id.as_deref())
         .await
         .map_err(internal)?
@@ -3612,6 +3665,7 @@ pub async fn start_saved_run(
     Query(query): Query<WorkflowScriptListQuery>,
     Json(request): Json<StartWorkflowRunRequest>,
 ) -> Result<Json<WorkflowRun>, ApiError> {
+    validate_agent_scope_for_any_space(&state, query.agent_id.as_deref()).await?;
     let script = resolve_workflow_by_id(&state, id, query.agent_id.as_deref())
         .await
         .map_err(internal)?
@@ -3626,7 +3680,7 @@ pub async fn start_saved_run(
             request.budget.unwrap_or_default(),
             script.delivery_grant,
             script.carrying_skill,
-            vec![],
+            query.agent_id.into_iter().collect(),
         )
         .await?,
     ))
@@ -3935,6 +3989,30 @@ mod tests {
                 .iter()
                 .all(|script| script.space_id == space.id)
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn workflow_catalogue_rejects_agent_path_components_and_unknown_agents() {
+        let (state, storage) = workflow_test_state();
+        let space = storage.get_or_create_default().await.expect("space");
+        let root = tempfile::tempdir().expect("skill root");
+        let _skill_root = crate::skill::SpaceSkillRootGuard::at(space.id, root.path());
+
+        for agent_id in ["../gateway", "/tmp/escaped", "missing-agent"] {
+            let error = list_scripts(
+                State(state.clone()),
+                Path(space.id),
+                Query(WorkflowScriptListQuery {
+                    agent_id: Some(agent_id.into()),
+                }),
+            )
+            .await
+            .expect_err("invalid agent scope must be rejected");
+            assert!(matches!(
+                error.0,
+                swage_core::GatewayError::ValidationError(_)
+            ));
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -4348,6 +4426,11 @@ mod tests {
             "return { scope: 'agent-only' };\n",
         )
         .expect("agent-only workflow");
+        std::fs::write(
+            agent_skill_dir.join("workflows/composed-parent.js"),
+            "return await workflow('agent-only', {});\n",
+        )
+        .expect("agent-scoped composed workflow");
         let session = storage
             .create_session(NewSession {
                 space_id: space.id,
@@ -4469,6 +4552,46 @@ mod tests {
             run.final_output,
             Some(serde_json::json!({"scope": "agent"}))
         );
+
+        let composed_parent = scoped
+            .scripts
+            .iter()
+            .find(|script| script.name == "composed-parent")
+            .expect("agent-scoped composed parent");
+        let Json(started) = start_saved_run(
+            State(state.clone()),
+            Path(composed_parent.id),
+            agent_scope(),
+            Json(StartWorkflowRunRequest {
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start agent-scoped composed workflow");
+        wait_for_terminal(&state, started.id).await;
+        let parent = storage
+            .get_workflow_run(started.id)
+            .await
+            .expect("composed parent query")
+            .expect("composed parent run");
+        assert_eq!(
+            parent.final_output,
+            Some(serde_json::json!({"scope": "agent-only"}))
+        );
+        assert_eq!(parent.dispatch_bound_agent_ids, vec!["gateway"]);
+        let child = storage
+            .list_workflow_runs(space.id)
+            .await
+            .expect("composed runs")
+            .into_iter()
+            .find(|run| run.parent_run_id == Some(started.id))
+            .expect("agent-scoped child run");
+        assert_eq!(
+            child.final_output,
+            Some(serde_json::json!({"scope": "agent-only"}))
+        );
+        assert_eq!(child.dispatch_bound_agent_ids, vec!["gateway"]);
     }
 
     #[tokio::test(flavor = "multi_thread")]

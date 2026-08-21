@@ -87,6 +87,8 @@ use uuid::Uuid;
 
 use crate::state::AppState;
 
+const DEFAULT_AGENT_ID: &str = "gateway";
+
 #[cfg(test)]
 static TEST_SPACE_SKILL_ROOTS: std::sync::LazyLock<
     std::sync::Mutex<std::collections::HashMap<Uuid, std::path::PathBuf>>,
@@ -162,6 +164,37 @@ impl From<swage_core::StorageError> for SkillError {
 /// This makes the type trivially testable and avoids shared mutable state.
 pub struct SkillManager;
 
+/// Validate an agent selector before it can become a filesystem path component.
+pub(crate) fn validate_agent_scope_id(agent_id: &str) -> Result<(), swage_core::GatewayError> {
+    if agent_id.is_empty()
+        || !agent_id
+            .chars()
+            .all(|c| matches!(c, 'a'..='z' | '0'..='9' | '-'))
+    {
+        return Err(swage_core::GatewayError::ValidationError(
+            "agent_id must match [a-z0-9-]+".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Whether an agent selector names a definition visible in the selected space.
+pub(crate) async fn agent_scope_is_visible(
+    state: &AppState,
+    space_id: Uuid,
+    agent_id: &str,
+) -> Result<bool, swage_core::GatewayError> {
+    validate_agent_scope_id(agent_id)?;
+    if agent_id == DEFAULT_AGENT_ID {
+        return Ok(true);
+    }
+    Ok(state
+        .storage
+        .resolve_agent_definition(agent_id, space_id)
+        .await?
+        .is_some())
+}
+
 /// Discover the effective skills for one space and optional agent beneath an
 /// already selected Swage root.
 pub(crate) async fn discover_available_for_space(
@@ -177,7 +210,20 @@ pub(crate) async fn discover_available_for_space(
         .map_err(|error| format!("failed to load space {space_id}: {error}"))?
         .ok_or_else(|| format!("space {space_id} was not found"))?;
     let space_dir = root.join("spaces").join(space.slug);
-    let agent_dir = agent_id.map(|agent| space_dir.join("agents").join(agent));
+    let agent_dir = match agent_id {
+        Some(agent) => {
+            if !agent_scope_is_visible(state, space_id, agent)
+                .await
+                .map_err(|error| error.to_string())?
+            {
+                return Err(format!(
+                    "no agent definition named '{agent}' is visible to space {space_id}"
+                ));
+            }
+            Some(space_dir.join("agents").join(agent))
+        }
+        None => None,
+    };
     Ok(SkillManager::discover_available(&root, &space_dir, agent_dir.as_deref()).0)
 }
 
