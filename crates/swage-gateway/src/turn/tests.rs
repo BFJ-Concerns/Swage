@@ -10394,6 +10394,61 @@ fn sandbox_config_skips_missing_trusted_workspace_paths() {
 }
 
 #[test]
+fn worker_placement_replaces_other_filesystem_authority() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let placement = temp_dir.path().join("placement");
+    let sibling_workspace = temp_dir.path().join("sibling");
+    let approved_location = temp_dir.path().join("approved");
+    std::fs::create_dir_all(&placement).unwrap();
+    std::fs::create_dir_all(&sibling_workspace).unwrap();
+    std::fs::create_dir_all(&approved_location).unwrap();
+
+    let agent_config =
+        AgentConfig::new("worker").with_workspace(&placement, vec![placement.clone()]);
+    let mut policy = TrustedWorkspacePolicy {
+        permissions: WorkspacePermissionSummary {
+            has_read: true,
+            has_write: true,
+        },
+        active_workspace: None,
+        attachments: vec![TrustedWorkspacePath {
+            path: sibling_workspace.clone(),
+            is_trusted: true,
+            can_read: true,
+            can_write: true,
+        }],
+    };
+    let metadata = serde_json::json!({
+        "worker_placement_cwd": placement,
+        "worker_placement_can_write": false,
+    });
+
+    apply_worker_placement_permission(&mut policy, &agent_config, Some(&metadata));
+
+    assert!(policy.attachments.is_empty());
+    let sandbox_config = build_sandbox_config(&agent_config, Some(&policy)).unwrap();
+    let placement = sandbox_path(&placement);
+    let sibling_workspace = sandbox_path(&sibling_workspace);
+    assert!(sandbox_config.read_only_mounts.contains(&placement));
+    assert!(!sandbox_config.read_write_mounts.contains(&placement));
+    assert!(!sandbox_config.read_only_mounts.contains(&sibling_workspace));
+    assert!(
+        !sandbox_config
+            .read_write_mounts
+            .contains(&sibling_workspace)
+    );
+
+    let grants = std::collections::HashSet::from([crate::state::ApprovalGrantKey::location(
+        None,
+        approved_location.to_string_lossy(),
+        "write",
+    )]);
+    let mut allowed_paths = vec![placement.clone()];
+    append_approved_location_paths(&mut allowed_paths, &grants, Uuid::new_v4(), Some(&metadata));
+    assert_eq!(allowed_paths, vec![placement]);
+}
+
+#[test]
 fn agent_workspace_uses_active_workspace_and_attachment_grants() {
     let temp_dir = tempfile::tempdir().unwrap();
     let active_workspace = temp_dir.path().join("active");

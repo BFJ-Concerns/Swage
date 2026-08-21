@@ -1045,7 +1045,12 @@ pub(crate) async fn process_turn_with_composition(
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .clone();
-    append_approved_location_paths(&mut allowed_paths, &session_approval_grants, space_id);
+    append_approved_location_paths(
+        &mut allowed_paths,
+        &session_approval_grants,
+        space_id,
+        session.metadata.as_ref(),
+    );
     let mut agent_config = build_agent_config_with_workspace(
         session.agent_id.clone(),
         &config,
