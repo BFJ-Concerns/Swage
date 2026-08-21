@@ -380,34 +380,6 @@ fn server_event_skill_deactivated_serialises() {
 // Skill dispatch tests [5cpd]
 // -----------------------------------------------------------------------
 
-struct SessionSkillRootGuard {
-    session_id: Uuid,
-    _root: tempfile::TempDir,
-}
-
-impl SessionSkillRootGuard {
-    fn empty(session_id: Uuid) -> Self {
-        let root = tempfile::TempDir::new().expect("temp skill root");
-        TEST_SKILL_ROOTS
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .insert(session_id, root.path().to_path_buf());
-        Self {
-            session_id,
-            _root: root,
-        }
-    }
-}
-
-impl Drop for SessionSkillRootGuard {
-    fn drop(&mut self) {
-        TEST_SKILL_ROOTS
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .remove(&self.session_id);
-    }
-}
-
 #[tokio::test]
 async fn activate_skill_with_missing_session_surfaces_discovery_error() {
     let state = make_empty_state();

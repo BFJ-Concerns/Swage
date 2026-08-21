@@ -46,6 +46,12 @@ pub struct WorkflowScriptListResponse {
     pub scripts: Vec<WorkflowScript>,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, TS, JsonSchema)]
+pub struct WorkflowScriptListQuery {
+    /// Agent whose effective skill layer should contribute carried workflows.
+    pub agent_id: Option<String>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
 pub struct WorkflowBudget {
     pub max_agent_calls: Option<u32>,
@@ -136,6 +142,7 @@ pub struct WorkflowRun {
     pub script_id: Option<Uuid>,
     pub script_name: Option<String>,
     pub script_version: Option<u32>,
+    pub carrying_skill: Option<String>,
     pub state: WorkflowRunState,
     #[ts(type = "unknown")]
     pub args: Value,
