@@ -7,8 +7,7 @@ use super::{
     apply_dispatch_task_bounds, available_skills_for_agent, build_agent_config_for_space_workspace,
     build_approval_registrar, build_assembly_elements,
     build_gateway_dispatcher_for_unattended_execution, build_session_environment,
-    configuration_hierarchy, delegated_target_instructions_for_space,
-    dispatch_bound_agent_ids_for_turn, dispatch_bound_metadata,
+    configuration_hierarchy, dispatch_bound_agent_ids_for_turn, dispatch_bound_metadata,
     dispatch_bound_task_definition_ids_for_turn, effective_tool_permissions_record,
     execute_context_assembly, load_active_skills_for_agent, load_memory_for_assembly,
     load_session_config, load_space_memory, load_trusted_workspace_policy, mpsc,
@@ -418,11 +417,6 @@ impl DelegationHandler for GatewayDelegationHandler {
                 .with_workspace(placement.path.clone(), vec![placement.path.clone()]);
         }
         target_agent_config.approval_prompts_enabled = false;
-        let target_instructions = delegated_target_instructions_for_space(
-            &target_resolved.instructions,
-            &space.slug,
-            target_agent_id,
-        );
         let target_context_transfer_config = target_resolved.communication.context_transfer.clone();
 
         // Delegated child agents execute within the gateway runtime, but their
@@ -474,7 +468,7 @@ impl DelegationHandler for GatewayDelegationHandler {
             delegation_handler: Some(Arc::new(self.clone())),
             router: router.clone(),
             active_delegations: self.active_delegations.clone(),
-            context_assembler: Some(delegated_context_assembler(
+            context_assembler: delegated_context_assembler(
                 self.state.clone(),
                 space.clone(),
                 target_resolved.clone(),
@@ -483,7 +477,7 @@ impl DelegationHandler for GatewayDelegationHandler {
                 silent_ws_tx,
                 effective_tool_permissions_record(&effective_target_resolved),
                 composition.clone(),
-            )),
+            ),
             snapshot_recorder: Some(delegation_snapshot_recorder(self.state.storage.clone())),
         };
 
@@ -545,7 +539,6 @@ impl DelegationHandler for GatewayDelegationHandler {
                         Some(sender_turn_id),
                         space_id,
                         target_agent_config,
-                        target_instructions,
                         target_context_transfer_config,
                         Some(target_dispatcher),
                         session_metadata,
@@ -603,7 +596,6 @@ impl DelegationHandler for GatewayDelegationHandler {
                             Some(sender_turn_id),
                             space_id,
                             target_agent_config,
-                            target_instructions,
                             target_context_transfer_config,
                             Some(target_dispatcher),
                             session_metadata,

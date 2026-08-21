@@ -30,6 +30,7 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- Provider fallback catalogues are current, attendance audit records distinguish interactive turns, and the context inspector identifies per-element token counts as non-additive estimates.
 - Retained built-in workflow IDs now return not found after a same-named authored workflow shadows them, while the authored workflow remains readable and launchable by its own ID.
 - Sandbox startup no longer fails when `TMPDIR` has a long path.
 - Generated TypeScript turn-poll responses now expose token counts as numbers rather than bigints.
