@@ -6,6 +6,7 @@ All notable changes to Swage are documented in this file.
 
 ### Added
 
+- Skills can carry immediately runnable workflow scripts, with same-named authored workflows taking precedence.
 - Fresh installations discover and activate the shipped development-process skills, with same-named operator skills taking precedence.
 - Models now receive per-model native-harness scaffolds with family fallback, with each scaffold's divergence register recorded.
 - Dispatches can name context elements, variable bindings, and an assembly for the child.

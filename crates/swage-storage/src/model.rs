@@ -1858,6 +1858,8 @@ pub struct WorkflowRunRecord {
     pub script_id: Option<Uuid>,
     pub script_name: Option<String>,
     pub script_version: Option<u32>,
+    /// Canonical name of the skill whose bundled workflow source this run used.
+    pub carrying_skill: Option<String>,
     pub source: Option<String>,
     pub source_hash: String,
     pub args: serde_json::Value,
@@ -1885,6 +1887,7 @@ pub struct NewWorkflowRun {
     pub parent_run_id: Option<Uuid>,
     pub parent_seq: Option<u64>,
     pub script_version_id: Option<Uuid>,
+    pub carrying_skill: Option<String>,
     pub source: Option<String>,
     pub source_hash: String,
     pub args: serde_json::Value,

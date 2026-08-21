@@ -62,3 +62,5 @@ mod tui_cli_integration;
 mod unified_turn_loop_integration;
 #[path = "integration/web_interface_integration.rs"]
 mod web_interface_integration;
+#[path = "integration/workflow_integration.rs"]
+mod workflow_integration;

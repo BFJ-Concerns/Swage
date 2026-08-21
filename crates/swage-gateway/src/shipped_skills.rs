@@ -122,6 +122,20 @@ pub(crate) fn find_by_name(name: &str) -> Option<&'static ShippedSkill> {
     SHIPPED_SKILLS.iter().find(|skill| skill.name == name)
 }
 
+pub(crate) fn workflow_files(skill_name: &str) -> impl Iterator<Item = &'static ShippedFile> {
+    find_by_name(skill_name)
+        .into_iter()
+        .flat_map(|skill| skill.files.iter())
+        .filter(move |file| {
+            file.path.strip_prefix(skill_name).is_some_and(|path| {
+                path.starts_with("/workflows/")
+                    && std::path::Path::new(path)
+                        .extension()
+                        .is_some_and(|extension| extension.eq_ignore_ascii_case("js"))
+            })
+        })
+}
+
 pub(crate) fn id(space_id: Uuid, name: &str) -> Uuid {
     synthetic_id(SYNTHETIC_ID_DOMAIN, space_id, name)
 }
@@ -198,5 +212,24 @@ mod tests {
             id(space, "assembly"),
             crate::builtin_workflows::id(space, "assembly")
         );
+    }
+
+    #[test]
+    fn workflow_catalogue_returns_embedded_auxiliary_sources() {
+        let workflows = workflow_files("assembly").collect::<Vec<_>>();
+        assert!(
+            workflows
+                .iter()
+                .any(|file| file.path == "assembly/workflows/build-verify.js")
+        );
+        let build_verify = workflows
+            .iter()
+            .find(|file| file.path.ends_with("/build-verify.js"))
+            .expect("embedded build-verify workflow");
+        assert_eq!(
+            build_verify.contents.as_bytes(),
+            include_bytes!("../../../shipped/skills/assembly/workflows/build-verify.js")
+        );
+        assert!(workflow_files("workflow-authoring").next().is_none());
     }
 }
