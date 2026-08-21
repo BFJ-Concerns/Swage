@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { flushSync, mount, tick, unmount } from "svelte";
+import { createClassComponent } from "svelte/legacy";
 import AgentDefinitionsPanel from "../components/AgentDefinitionsPanel.svelte";
 import type { EffectiveAgentDefinitionResponse } from "../protocol/EffectiveAgentDefinitionResponse";
 
@@ -60,6 +61,7 @@ describe("AgentDefinitionsPanel", () => {
       tool_permissions: { allow: ["web_search"] },
       skills: ["citations", "analysis"],
       output_schema: { type: "object", required: ["answer"] },
+      output_max_retries: 4,
     });
     const definitions = [
       definition("gateway", "built_in", { display_name: "Standard assistant" }),
@@ -87,6 +89,7 @@ describe("AgentDefinitionsPanel", () => {
     expect(detail?.textContent).toContain("web_search");
     expect(detail?.textContent).toContain("citations, analysis");
     expect(detail?.textContent).toContain('"required"');
+    expect(detail?.textContent).toContain("Output retries4");
     expect(detail?.querySelector("button, input, select, textarea")).toBeNull();
     expect(detail?.textContent).not.toContain("variant");
   });
@@ -101,7 +104,7 @@ describe("AgentDefinitionsPanel", () => {
     const detail = document.querySelector('[aria-label="Minimal configuration"]');
     expect(detail?.textContent).toContain("Use the configured default");
     expect(detail?.textContent).toContain("None");
-    expect(detail?.textContent?.match(/Not set/g)?.length).toBe(3);
+    expect(detail?.textContent?.match(/Not set/g)?.length).toBe(4);
   });
 
   it("does not fetch configuration without a selected space", () => {
@@ -110,5 +113,29 @@ describe("AgentDefinitionsPanel", () => {
 
     expect(document.body.textContent).toContain("Select a space");
     expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("requests and renders the inventory for a newly selected space", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        definitions: [definition("first", "space", { display_name: "First space agent" })],
+      }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        definitions: [definition("second", "space", { display_name: "Second space agent" })],
+      }), { status: 200 }));
+    const panel = createClassComponent({
+      component: AgentDefinitionsPanel,
+      target: document.body,
+      props: { spaceId: "space-1" },
+    });
+    await vi.waitFor(() => expect(document.body.textContent).toContain("First space agent"));
+
+    panel.$set({ spaceId: "space-2" });
+    await vi.waitFor(() => expect(document.body.textContent).toContain("Second space agent"));
+
+    expect(fetchSpy).toHaveBeenNthCalledWith(1, "/api/spaces/space-1/agent-definitions", { method: "GET" });
+    expect(fetchSpy).toHaveBeenNthCalledWith(2, "/api/spaces/space-2/agent-definitions", { method: "GET" });
+    expect(document.body.textContent).not.toContain("First space agent");
+    panel.$destroy();
   });
 });

@@ -363,7 +363,11 @@
       //    will bring its space into scope along the way.
       await router.init();
       if (spaceStore.currentSpace) {
-        agentDefinitions = await listEffectiveAgentDefinitions(spaceStore.currentSpace.id);
+        try {
+          agentDefinitions = await listEffectiveAgentDefinitions(spaceStore.currentSpace.id);
+        } catch (error) {
+          console.error("Failed to load agent definitions:", error);
+        }
       }
     } catch {
       // Any failure here means the gateway is unreachable. Show a clear error

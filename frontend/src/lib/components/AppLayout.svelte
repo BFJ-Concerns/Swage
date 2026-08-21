@@ -69,6 +69,21 @@
   const currentSpace = $derived(spaceStore?.currentSpace ?? null);
   const activeConversation = $derived(conversationStore.activeConversation);
   let selectedAgentId = $state("");
+  let selectedAgentSpaceId = $state<string | null | undefined>(undefined);
+  $effect(() => {
+    const currentSpaceId = currentSpace?.id ?? null;
+    if (selectedAgentSpaceId === undefined) {
+      selectedAgentSpaceId = currentSpaceId;
+    } else if (currentSpaceId !== selectedAgentSpaceId) {
+      selectedAgentId = "";
+      selectedAgentSpaceId = currentSpaceId;
+    } else if (
+      selectedAgentId &&
+      !agentDefinitions.some((definition) => definition.id === selectedAgentId)
+    ) {
+      selectedAgentId = "";
+    }
+  });
   const settingsTab = $derived(route?.settingsTab ?? null);
   const settingsSpaceSlug = $derived(route?.settingsSpaceSlug ?? null);
   const settingsSpaceTab = $derived(route?.settingsSpaceTab ?? null);
