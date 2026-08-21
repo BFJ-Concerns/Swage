@@ -246,6 +246,16 @@ async fn real_tool_audits_whole_state_and_updated_values_recompose() {
     dispatcher
         .dispatch(
             "session_values",
+            json!({"action":"set","name":"owner","value":"operator"}),
+            &context,
+            "gateway",
+        )
+        .await
+        .unwrap();
+
+    dispatcher
+        .dispatch(
+            "session_values",
             json!({"action":"set","name":"task","value":"verify audit"}),
             &context,
             "gateway",
@@ -262,27 +272,35 @@ async fn real_tool_audits_whole_state_and_updated_values_recompose() {
         .collect();
     assert_eq!(
         render(second)[0].text_content(),
-        "Task: verify audit; owner: ⟦unset:owner⟧"
+        "Task: verify audit; owner: operator"
     );
 
     let events = storage
         .list_audit_events_by_session(session.id)
         .await
         .unwrap();
-    assert_eq!(events.len(), 2);
-    assert_eq!(events[1].session_id, Some(session.id));
-    assert_eq!(events[1].metadata["prior_state"], json!({}));
+    assert_eq!(events.len(), 3);
+    assert_eq!(events[2].session_id, Some(session.id));
+    assert_eq!(events[2].metadata["prior_state"], json!({}));
+    assert_eq!(
+        events[2].metadata["new_state"],
+        json!({"task":"inspect storage"})
+    );
+    assert_eq!(
+        events[1].metadata["prior_state"],
+        json!({"task":"inspect storage"})
+    );
     assert_eq!(
         events[1].metadata["new_state"],
-        json!({"task":"inspect storage"})
+        json!({"owner":"operator", "task":"inspect storage"})
     );
     assert_eq!(
         events[0].metadata["prior_state"],
-        json!({"task":"inspect storage"})
+        json!({"owner":"operator", "task":"inspect storage"})
     );
     assert_eq!(
         events[0].metadata["new_state"],
-        json!({"task":"verify audit"})
+        json!({"owner":"operator", "task":"verify audit"})
     );
 
     dispatcher
@@ -294,25 +312,25 @@ async fn real_tool_audits_whole_state_and_updated_values_recompose() {
         )
         .await
         .unwrap();
-    assert!(
-        state
-            .storage
-            .list_session_variables(session.id)
-            .await
-            .unwrap()
-            .is_empty()
-    );
+    let remaining = state
+        .storage
+        .list_session_variables(session.id)
+        .await
+        .unwrap();
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].name, "owner");
+    assert_eq!(remaining[0].value, "operator");
     let events = storage
         .list_audit_events_by_session(session.id)
         .await
         .unwrap();
-    assert_eq!(events.len(), 3);
+    assert_eq!(events.len(), 4);
     assert_eq!(events[0].metadata["action"], "remove_session_value");
     assert_eq!(
         events[0].metadata["prior_state"],
-        json!({"task":"verify audit"})
+        json!({"owner":"operator", "task":"verify audit"})
     );
-    assert_eq!(events[0].metadata["new_state"], json!({}));
+    assert_eq!(events[0].metadata["new_state"], json!({"owner":"operator"}));
 
     let missing = dispatcher
         .dispatch(
@@ -333,7 +351,7 @@ async fn real_tool_audits_whole_state_and_updated_values_recompose() {
             .await
             .unwrap()
             .len(),
-        3,
+        4,
         "a rejected removal must not create an audit event"
     );
 }

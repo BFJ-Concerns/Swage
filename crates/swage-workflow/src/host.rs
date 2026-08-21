@@ -73,9 +73,13 @@ pub struct WorkflowCallRequest {
 /// wake decision, never instructions to anyone.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RunEventPost {
-    /// `completion`, `failure`, or `escalation`.
     pub kind: String,
     pub payload: Value,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AwaitEventRequest {
+    pub kinds: Vec<String>,
 }
 
 /// A wake-gate evaluation over the run's pending events: a cheap model reads
@@ -175,6 +179,16 @@ pub trait WorkflowHost: Send + Sync {
         _cancellation: CancellationToken,
     ) -> Result<Value, String> {
         Err("RunEventError: this host does not support run events".into())
+    }
+
+    /// Return the next matching undelivered event. A live run parks when no
+    /// match exists; replay returns the journalled answer.
+    async fn await_run_event(
+        &self,
+        _request: AwaitEventRequest,
+        _cancellation: CancellationToken,
+    ) -> Result<Value, String> {
+        Err("RunEventError: this host does not support awaiting run events".into())
     }
 
     /// Evaluate the wake gate over the run's pending events (journalled; a

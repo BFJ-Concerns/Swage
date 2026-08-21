@@ -98,6 +98,12 @@ fn typescript_bindings_are_regenerated() {
         .expect("export workflow run request");
     client::workflow::StartInlineWorkflowRunRequest::export_all(&cfg)
         .expect("export inline workflow run request");
+    client::workflow::PostWorkflowRunEventRequest::export_all(&cfg)
+        .expect("export workflow event post request");
+    client::workflow::PostWorkflowRunEventResponse::export_all(&cfg)
+        .expect("export workflow event post response");
+    client::workflow::WorkflowDecisionEventPayload::export_all(&cfg)
+        .expect("export workflow decision event payload");
     client::workflow::WorkflowRunDetailResponse::export_all(&cfg).expect("export workflow detail");
     client::workflow::WorkflowRunListResponse::export_all(&cfg).expect("export workflow runs");
     client::workflow::WorkflowRunStartedEvent::export_all(&cfg)
