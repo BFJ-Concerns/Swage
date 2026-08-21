@@ -835,7 +835,7 @@ async fn run_ephemeral_agent_call(
     let request_schema = request.schema.clone();
     let composition = crate::turn::DispatchContextComposition {
         elements: request.elements.clone(),
-        variables: request.variables.clone().unwrap_or_default(),
+        variables: request.variables.clone(),
         assembly: request.assembly.clone(),
     };
     let processing = crate::turn::process_turn_with_composition(

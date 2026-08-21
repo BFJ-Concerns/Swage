@@ -73,6 +73,7 @@ impl Tool for DelegateTool {
                 },
                 "assembly": {
                     "type": "string",
+                    "pattern": "^[a-z0-9-]+$",
                     "description": "Named context assembly to use for the delegated child."
                 }
             },
@@ -113,9 +114,6 @@ impl Tool for DelegateTool {
                     message: format!("invalid context composition: {error}"),
                 }
             })?;
-        let elements = composition.elements;
-        let variables = params.get("variables").map(|_| composition.variables);
-        let assembly = composition.assembly;
         let completion_mode = parse_completion_mode(params.get("completion_mode"))?;
 
         // Signal the agent turn loop to handle delegation.
@@ -124,9 +122,7 @@ impl Tool for DelegateTool {
             target_agent_id,
             task,
             context,
-            elements,
-            variables,
-            assembly,
+            composition,
             completion_mode,
         })
     }
@@ -221,21 +217,41 @@ mod tests {
             .await;
 
         match result.unwrap_err() {
-            ToolError::RequiresDelegation {
-                elements,
-                variables,
-                assembly,
-                ..
-            } => {
-                assert_eq!(elements, Some(vec!["current-work".into()]));
+            ToolError::RequiresDelegation { composition, .. } => {
+                assert_eq!(composition.elements, Some(vec!["current-work".into()]));
                 assert_eq!(
-                    variables.as_ref().and_then(|values| values.get("owner")),
+                    composition
+                        .variables
+                        .as_ref()
+                        .and_then(|values| values.get("owner")),
                     Some(&"delegate-owner".to_string())
                 );
-                assert_eq!(assembly.as_deref(), Some("focused"));
+                assert_eq!(composition.assembly.as_deref(), Some("focused"));
             }
             other => panic!("expected RequiresDelegation, got: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn delegate_tool_rejects_unsafe_assembly_name() {
+        let tool = DelegateTool;
+        let ctx = MockToolContext::new("test-agent", "session-1");
+        let result = tool
+            .execute(
+                json!({
+                    "target_agent": "reviewer",
+                    "task": "Review independently",
+                    "assembly": "../../outside"
+                }),
+                &ctx,
+            )
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(ToolError::InvalidParameters { message, .. })
+                if message.contains("invalid context assembly name")
+        ));
     }
 
     #[tokio::test]

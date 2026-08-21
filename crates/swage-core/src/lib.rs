@@ -22,7 +22,7 @@ pub mod tool;
 // Convenience re-exports
 // ---------------------------------------------------------------------------
 
-pub use dispatch::DispatchContextComposition;
+pub use dispatch::{DispatchContextComposition, validate_context_assembly_name};
 pub use error::{
     ApprovalTimeoutPolicy, DelegateCompletionMode, GatewayError, HookError, PermissionDeniedReason,
     ProviderError, RuntimeError, SafetyError, SandboxError, SecretError, StorageError, SwageError,

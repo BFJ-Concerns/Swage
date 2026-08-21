@@ -2,20 +2,20 @@
 
 use std::collections::BTreeMap;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// Context components selected for one child dispatch.
 ///
 /// These values are applied while composing the child turn and are not
 /// persisted into the child's session-variable store.
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct DispatchContextComposition {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub elements: Option<Vec<String>>,
-    #[serde(default)]
-    pub variables: BTreeMap<String, String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub variables: Option<BTreeMap<String, String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assembly: Option<String>,
 }
 
@@ -25,8 +25,26 @@ impl DispatchContextComposition {
     /// Unknown fields belong to the surrounding dispatch contract and are
     /// deliberately ignored.
     pub fn from_payload(payload: &Value) -> Result<Self, serde_json::Error> {
-        serde_json::from_value(payload.clone())
+        let composition: Self = serde_json::from_value(payload.clone())?;
+        if let Some(name) = composition.assembly.as_deref() {
+            validate_context_assembly_name(name).map_err(serde::de::Error::custom)?;
+        }
+        Ok(composition)
     }
+}
+
+/// Validate the stable identifier used to address a context assembly.
+pub fn validate_context_assembly_name(name: &str) -> Result<(), String> {
+    if name.is_empty()
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+    {
+        return Err(format!(
+            "invalid context assembly name '{name}': use lowercase letters, digits, and hyphens"
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -45,8 +63,23 @@ mod tests {
         .expect("decode composition");
 
         assert_eq!(composition.elements, Some(vec!["current-work".into()]));
-        assert_eq!(composition.variables.get("owner"), Some(&"Ada".into()));
+        assert_eq!(
+            composition
+                .variables
+                .as_ref()
+                .and_then(|variables| variables.get("owner")),
+            Some(&"Ada".into())
+        );
         assert_eq!(composition.assembly.as_deref(), Some("focused"));
+    }
+
+    #[test]
+    fn payload_decoder_rejects_assembly_names_that_can_escape_the_hierarchy() {
+        for name in ["../config", "/tmp/config", "Uppercase", "with/slash"] {
+            let error = DispatchContextComposition::from_payload(&json!({"assembly": name}))
+                .expect_err("unsafe assembly name must be rejected");
+            assert!(error.to_string().contains("invalid context assembly name"));
+        }
     }
 
     #[test]
