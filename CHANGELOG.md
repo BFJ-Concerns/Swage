@@ -6,6 +6,12 @@ All notable changes to Swage are documented in this file.
 
 ### Added
 
+- Fresh installations discover and activate the shipped development-process skills, with same-named operator skills taking precedence.
+- Models now receive per-model native-harness scaffolds with family fallback, with each scaffold's divergence register recorded.
+- Dispatches can name context elements, variable bindings, and an assembly for the child.
+- Named reusable Markdown context elements now resolve through the global, space, and agent configuration hierarchy, with live session values rendered into each briefing at composition time.
+- Workflow runs can wait on external events, answered through operator or granted agent posts.
+- Session leads can save named values for their session and use them to fill parameterised context elements at composition time.
 - Fresh installations now include front-loaded orchestration, research sweep, and segment orchestration workflows as immutable built-ins.
 - Settings now lists the effective agent definitions for the selected space, with read-only source and configuration details for each winner.
 - New conversations can now choose from the effective agent definitions available to their space, including the shipped default.

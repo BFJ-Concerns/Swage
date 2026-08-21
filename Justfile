@@ -1,5 +1,10 @@
 import? "Justfile.local"
 
+# Default the test stage to cargo-nextest (parallel scheduling, flake
+# retries per .config/nextest.toml); set SWAGE_TEST_RUNNER=cargo on a
+# machine without cargo-nextest installed.
+export SWAGE_TEST_RUNNER := env("SWAGE_TEST_RUNNER", "nextest")
+
 default:
     @just --list
 

@@ -80,8 +80,20 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
         ),
         ("050_workflow_run_events", CREATE_WORKFLOW_RUN_EVENTS),
         ("051_workflow_run_parking", ADD_WORKFLOW_RUN_PARKING),
+        ("052_session_variables", CREATE_SESSION_VARIABLES),
     ]
 }
+
+const CREATE_SESSION_VARIABLES: &str = "
+    CREATE TABLE session_variables (
+        session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        name TEXT NOT NULL,
+        value TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (session_id, name)
+    );
+";
 
 /// Durable waits: a run sleeping on a long timer parks — no engine, no
 /// per-run OS thread — recording when it is due (`wake_at`); a background
@@ -132,8 +144,8 @@ const ADD_WORKFLOW_RUN_PARKING: &str = "
         WHERE parent_run_id IS NOT NULL;
 ";
 
-/// A run's durable pending-event queue: completions, failures, and
-/// escalations accumulate as data between lead wakes. Events stay pending
+/// A run's durable event queue: namespaced events from registered posters
+/// accumulate as data between lead wakes. Events stay pending
 /// until a wake delivers them — a gate that suppresses a wake consumes
 /// nothing, so suppressed events ride the next wake for retrospective
 /// review. Each row is keyed to the journal entry that posted it, making the
@@ -146,8 +158,12 @@ const CREATE_WORKFLOW_RUN_EVENTS: &str = "
         run_id             TEXT NOT NULL REFERENCES workflow_runs(id) ON DELETE CASCADE,
         journal_entry_id   TEXT NOT NULL UNIQUE,
         seq                INTEGER NOT NULL,
-        kind               TEXT NOT NULL CHECK (kind IN ('completion', 'failure', 'escalation')),
+        kind               TEXT NOT NULL,
         payload_json       TEXT NOT NULL,
+        source_surface     TEXT NOT NULL,
+        source_agent_id    TEXT,
+        source_session_id  TEXT,
+        source_turn_id     TEXT,
         posted_at          TEXT NOT NULL,
         delivered_wake_seq INTEGER,
         delivered_at       TEXT,
@@ -162,7 +178,7 @@ const CREATE_WORKFLOW_RUN_EVENTS: &str = "
         run_id            TEXT NOT NULL REFERENCES workflow_runs(id) ON DELETE CASCADE,
         seq               INTEGER NOT NULL,
         completed_order   INTEGER,
-        kind              TEXT NOT NULL CHECK (kind IN ('agent_call', 'effect', 'log', 'phase', 'workflow_call', 'timer', 'event', 'gate', 'budget', 'wind_down')),
+        kind              TEXT NOT NULL CHECK (kind IN ('agent_call', 'effect', 'log', 'phase', 'workflow_call', 'timer', 'event', 'await_event', 'gate', 'budget', 'wind_down')),
         status            TEXT NOT NULL CHECK (status IN ('started', 'completed', 'failed')),
         args_hash         TEXT NOT NULL,
         request_json      TEXT NOT NULL,

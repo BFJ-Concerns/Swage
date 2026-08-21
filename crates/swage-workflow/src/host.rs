@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeMap;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -35,6 +36,17 @@ pub struct AgentCallRequest {
     /// must serialise to nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session: Option<AgentSessionRef>,
+    /// Named briefing elements to compose for this child call. When omitted,
+    /// the configured element set remains unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elements: Option<Vec<String>>,
+    /// Values visible only while composing this child call. These shadow
+    /// durable session values without changing the session-variable store.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub variables: Option<BTreeMap<String, String>>,
+    /// Named context assembly to use for this child call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assembly: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -61,9 +73,13 @@ pub struct WorkflowCallRequest {
 /// wake decision, never instructions to anyone.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RunEventPost {
-    /// `completion`, `failure`, or `escalation`.
     pub kind: String,
     pub payload: Value,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AwaitEventRequest {
+    pub kinds: Vec<String>,
 }
 
 /// A wake-gate evaluation over the run's pending events: a cheap model reads
@@ -165,6 +181,16 @@ pub trait WorkflowHost: Send + Sync {
         Err("RunEventError: this host does not support run events".into())
     }
 
+    /// Return the next matching undelivered event. A live run parks when no
+    /// match exists; replay returns the journalled answer.
+    async fn await_run_event(
+        &self,
+        _request: AwaitEventRequest,
+        _cancellation: CancellationToken,
+    ) -> Result<Value, String> {
+        Err("RunEventError: this host does not support awaiting run events".into())
+    }
+
     /// Evaluate the wake gate over the run's pending events (journalled; a
     /// replayed evaluation returns its recorded verdict). Resolves to
     /// `{wake, reasoning, events, read_up_to_seq}` — the events the gate
@@ -197,5 +223,31 @@ pub trait WorkflowHost: Send + Sync {
     /// journal near the ceiling.
     async fn budget_snapshot(&self, _cancellation: CancellationToken) -> Result<Value, String> {
         Err("BudgetSnapshotError: this host does not support budget snapshots".into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn absent_composition_options_are_omitted_from_journal_shape() {
+        let request = AgentCallRequest {
+            prompt: "work".into(),
+            agent: "worker".into(),
+            model: None,
+            schema: None,
+            max_attempts: 3,
+            label: None,
+            session: None,
+            elements: None,
+            variables: None,
+            assembly: None,
+        };
+
+        let value = serde_json::to_value(request).expect("serialise agent request");
+        assert!(!value.as_object().unwrap().contains_key("elements"));
+        assert!(!value.as_object().unwrap().contains_key("variables"));
+        assert!(!value.as_object().unwrap().contains_key("assembly"));
     }
 }
