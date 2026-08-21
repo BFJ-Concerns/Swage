@@ -73,9 +73,10 @@
     <p class="status error">{errorMessage}</p>
   {:else if report}
     <p class="summary">
-      Assembled by <strong>{report.assembly_name}</strong> — {totalTokens}
-      tokens across {report.elements.length} elements in
-      {durationMs}&nbsp;ms.
+      Assembled by <strong>{report.assembly_name}</strong> — request total:
+      {totalTokens} tokens in {durationMs}&nbsp;ms. The
+      {report.elements.length} per-element estimates below are non-additive and
+      do not sum to the request total.
     </p>
 
     <table class="elements">
@@ -83,7 +84,7 @@
         <tr>
           <th scope="col">Element</th>
           <th scope="col">From</th>
-          <th scope="col" class="numeric">Tokens</th>
+          <th scope="col" class="numeric">Estimated tokens</th>
         </tr>
       </thead>
       <tbody>
