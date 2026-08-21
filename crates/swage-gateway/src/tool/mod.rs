@@ -16,6 +16,7 @@ pub mod memory;
 pub mod nested_tool_runtime;
 pub mod plugin;
 pub mod python_execute;
+pub mod run_event;
 pub mod schedule;
 pub mod session_variable;
 pub mod shell;

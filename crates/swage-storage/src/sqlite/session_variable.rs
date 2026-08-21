@@ -106,7 +106,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn variables_are_isolated_replaced_sorted_and_removed() {
+    async fn variables_are_isolated_replaced_sorted_removed_and_cascade_deleted() {
         let storage = SqliteStorage::in_memory().unwrap();
         let first = session(&storage, "first").await;
         let second = session(&storage, "second").await;
@@ -150,6 +150,15 @@ mod tests {
         assert_eq!(
             storage.list_session_variables(second).await.unwrap()[0].value,
             "other"
+        );
+
+        storage.delete_session(first).await.unwrap();
+        assert!(
+            storage
+                .list_session_variables(first)
+                .await
+                .unwrap()
+                .is_empty()
         );
     }
 }
