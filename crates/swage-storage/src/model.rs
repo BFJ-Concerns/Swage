@@ -1898,6 +1898,10 @@ pub struct WorkflowRunRecord {
     /// every worker turn, so nested dispatch cannot expand authority and
     /// suspension never freezes it. Empty means operator-started.
     pub dispatch_bound_agent_ids: Vec<String>,
+    /// The full ordered lineage of task permission overlays bounding this
+    /// run. Worker sessions re-resolve and intersect every definition at
+    /// each turn; a missing definition therefore fails closed.
+    pub dispatch_bound_task_definition_ids: Vec<String>,
     /// When a parked run is due to wake. Set only while `state` is
     /// `parked`; cleared on every other state transition.
     pub wake_at: Option<DateTime<Utc>>,
@@ -1924,6 +1928,8 @@ pub struct NewWorkflowRun {
     pub engine_version: String,
     /// See `WorkflowRunRecord::dispatch_bound_agent_ids`.
     pub dispatch_bound_agent_ids: Vec<String>,
+    /// See `WorkflowRunRecord::dispatch_bound_task_definition_ids`.
+    pub dispatch_bound_task_definition_ids: Vec<String>,
 }
 
 /// One entry in a run's durable event queue. Events are namespaced data from
