@@ -75,6 +75,7 @@ struct AnthropicOutputConfig {
 struct AnthropicThinkingConfig {
     #[serde(rename = "type")]
     kind: &'static str,
+    display: &'static str,
 }
 
 /// Wire representation of a tool definition for the Anthropic API.
@@ -897,9 +898,10 @@ impl AnthropicProvider {
                     swage_core::Effort::Max => "max",
                 },
             }),
-            thinking: request
-                .effort
-                .map(|_| AnthropicThinkingConfig { kind: "adaptive" }),
+            thinking: request.effort.map(|_| AnthropicThinkingConfig {
+                kind: "adaptive",
+                display: "omitted",
+            }),
             messages,
             max_tokens: request.max_tokens.unwrap_or(4096),
             system,
@@ -1553,6 +1555,7 @@ mod tests {
                 .unwrap();
             assert_eq!(body["output_config"]["effort"], expected);
             assert_eq!(body["thinking"]["type"], "adaptive");
+            assert_eq!(body["thinking"]["display"], "omitted");
         }
     }
 

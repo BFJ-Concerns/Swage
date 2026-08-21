@@ -1186,7 +1186,7 @@ async fn run_ephemeral_agent_call(
         Arc::new(Mutex::new(SubscriptionState::new(false))),
         request.schema,
         request_schema_retries,
-        request.effort.clone(),
+        request.effort,
         Some(call_cancellation.clone()),
         None,
         crate::turn::TurnAttendance::Unattended,
