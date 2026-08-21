@@ -36,6 +36,32 @@ impl WorktreeHost {
     }
 
     pub async fn provision(&self, run_id: Uuid, seq: u64, repo: &Path) -> Result<PathBuf, String> {
+        let path = self
+            .config
+            .root
+            .join(run_id.to_string())
+            .join(format!("worker-{seq}"));
+        self.provision_at(run_id, seq, repo, path).await
+    }
+
+    pub async fn restore(
+        &self,
+        run_id: Uuid,
+        seq: u64,
+        repo: &Path,
+        path: &Path,
+    ) -> Result<PathBuf, String> {
+        self.provision_at(run_id, seq, repo, path.to_path_buf())
+            .await
+    }
+
+    async fn provision_at(
+        &self,
+        run_id: Uuid,
+        seq: u64,
+        repo: &Path,
+        path: PathBuf,
+    ) -> Result<PathBuf, String> {
         let key = (run_id, seq);
         if let Some(existing) = self.inner.lock().await.get(&key) {
             return Ok(existing.path.clone());
@@ -46,11 +72,6 @@ impl WorktreeHost {
                 repo.display()
             )
         })?;
-        let path = self
-            .config
-            .root
-            .join(run_id.to_string())
-            .join(format!("worker-{seq}"));
         if path.join(".git").exists() {
             self.inner.lock().await.insert(
                 key,
@@ -157,7 +178,7 @@ mod tests {
 
     #[tokio::test]
     async fn provisions_isolated_siblings_and_lists_then_removes_them() {
-        let temp = tempfile::tempdir_in("/tmp/scratch").unwrap();
+        let temp = tempfile::tempdir().unwrap();
         let repo = temp.path().join("repo");
         tokio::fs::create_dir(&repo).await.unwrap();
         for args in [

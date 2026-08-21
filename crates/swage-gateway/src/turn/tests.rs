@@ -7835,8 +7835,8 @@ async fn completed_detached_result_reaches_parent_next_turn() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn delegated_read_only_attachment_allows_read_and_refuses_write() {
-    let fixture = tempfile::tempdir_in("/tmp/scratch").expect("placement fixture");
+async fn delegated_read_only_location_approval_allows_read_and_refuses_write() {
+    let fixture = tempfile::tempdir().expect("placement fixture");
     let attachment = fixture.path().join("read-only");
     std::fs::create_dir(&attachment).expect("read-only attachment");
     std::fs::write(attachment.join("readable.txt"), "delegated readable proof")
@@ -7846,16 +7846,6 @@ async fn delegated_read_only_attachment_allows_read_and_refuses_write() {
         .get_or_create_default()
         .await
         .expect("default space");
-    storage
-        .create_workspace_attachment(NewWorkspaceAttachment {
-            space_id: space.id,
-            label: "delegated read-only cwd".into(),
-            path: attachment.to_string_lossy().into_owned(),
-            permissions: vec!["read".into()],
-            is_trusted: true,
-        })
-        .await
-        .expect("grant delegated read-only cwd");
     let session = storage
         .create_session(NewSession {
             space_id: space.id,
@@ -7930,6 +7920,15 @@ async fn delegated_read_only_attachment_allows_read_and_refuses_write() {
     )
     .with_worktree_root(fixture.path().join("worker-worktrees"))
     .with_test_sandbox();
+    state
+        .session_approval_grants
+        .lock()
+        .expect("location approval grants")
+        .insert(crate::state::ApprovalGrantKey::location(
+            Some(space.id),
+            attachment.to_string_lossy(),
+            "read",
+        ));
 
     let outcome = GatewayDelegationHandler::new(state.clone())
         .handle_delegation(
@@ -7998,6 +7997,342 @@ async fn delegated_read_only_attachment_allows_read_and_refuses_write() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn placed_delegate_keeps_exact_read_only_authority_when_delegating_again() {
+    let fixture = tempfile::tempdir().expect("placement fixture");
+    let default_workspace = fixture.path().join("default-workspace");
+    let placed_workspace = fixture.path().join("placed-read-only");
+    std::fs::create_dir(&default_workspace).expect("default workspace");
+    std::fs::create_dir(&placed_workspace).expect("placed workspace");
+    let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
+    let space = storage
+        .get_or_create_default()
+        .await
+        .expect("default space");
+    let default_attachment = storage
+        .create_workspace_attachment(NewWorkspaceAttachment {
+            space_id: space.id,
+            label: "writable default".into(),
+            path: default_workspace.to_string_lossy().into_owned(),
+            permissions: vec!["read".into(), "write".into()],
+            is_trusted: true,
+        })
+        .await
+        .expect("grant writable default");
+    storage
+        .create_workspace_attachment(NewWorkspaceAttachment {
+            space_id: space.id,
+            label: "placed read-only".into(),
+            path: placed_workspace.to_string_lossy().into_owned(),
+            permissions: vec!["read".into()],
+            is_trusted: true,
+        })
+        .await
+        .expect("grant read-only placement");
+    let session = storage
+        .create_session(NewSession {
+            space_id: space.id,
+            agent_id: "gateway".to_string(),
+            metadata: None,
+            active_workspace_attachment_id: Some(default_attachment.id),
+        })
+        .await
+        .expect("create session");
+    let root_thread = ThreadStore::create(
+        &*storage,
+        NewThread {
+            session_id: session.id,
+            agent_id: "gateway".to_string(),
+        },
+    )
+    .await
+    .expect("create root thread");
+    let parent_turn = storage
+        .create_turn(NewTurn {
+            thread_id: root_thread.id,
+            agent_id: "gateway".to_string(),
+            state: TurnState::Processing,
+            user_input: Some("start nested delegated work".to_string()),
+            parent_turn_id: None,
+        })
+        .await
+        .expect("create parent turn");
+    let provider = MultiRoundMockProvider::new(vec![
+        vec![
+            StreamChunk::ToolUse {
+                call_id: "nested-delegate".into(),
+                name: "delegate".into(),
+                arguments: serde_json::json!({
+                    "target_agent": "agent-c",
+                    "task": "Try to write without choosing another cwd",
+                }),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ],
+        vec![
+            StreamChunk::ToolUse {
+                call_id: "nested-write".into(),
+                name: "file_write".into(),
+                arguments: serde_json::json!({
+                    "path": "nested-write.txt",
+                    "content": "must not be written",
+                }),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ],
+        vec![
+            StreamChunk::Delta {
+                content: "nested write was refused".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ],
+        vec![
+            StreamChunk::Delta {
+                content: "nested delegation complete".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ],
+    ]);
+    let state = AppState::new(
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
+        Arc::new(provider) as Arc<dyn LlmProvider>,
+        swage_config::ResolvedConfig::default(),
+        crate::tool::ToolDispatcher::allow_all(vec![
+            Arc::new(swage_tool::delegate::DelegateTool) as Arc<dyn Tool>,
+            Arc::new(SandboxedFileTool::new("file_write")) as Arc<dyn Tool>,
+        ]),
+        None,
+    )
+    .with_worktree_root(fixture.path().join("worker-worktrees"))
+    .with_test_sandbox();
+
+    let outcome = GatewayDelegationHandler::new(state)
+        .handle_delegation(
+            "agent-b",
+            "Delegate once more",
+            None,
+            Some(placed_workspace.to_string_lossy().into_owned()),
+            None,
+            "outer-placed-delegate",
+            "gateway",
+            parent_turn.id,
+            space.id,
+            CancellationToken::new(),
+            DelegateCompletionMode::Wait,
+        )
+        .await
+        .expect("nested delegation should complete");
+    assert!(matches!(outcome, DelegationOutcome::Completed(_)));
+
+    let nested_session = storage
+        .list_sessions_by_agent_id("agent-c")
+        .await
+        .expect("list nested sessions")
+        .into_iter()
+        .next()
+        .expect("nested child session");
+    assert_eq!(
+        nested_session
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("worker_placement_cwd"))
+            .and_then(serde_json::Value::as_str),
+        Some(placed_workspace.to_string_lossy().as_ref())
+    );
+    assert_eq!(
+        nested_session
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("worker_placement_can_write"))
+            .and_then(serde_json::Value::as_bool),
+        Some(false)
+    );
+    assert!(
+        !default_workspace.join("nested-write.txt").exists(),
+        "nested delegation must not regain the writable default workspace"
+    );
+    assert!(
+        !placed_workspace.join("nested-write.txt").exists(),
+        "nested delegation must retain the placed worker's read-only authority"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn delegate_worktree_provisions_isolated_cwd_and_records_resolved_placement() {
+    let fixture = tempfile::tempdir().expect("worktree fixture");
+    let repo = fixture.path().join("repo");
+    std::fs::create_dir(&repo).expect("repository directory");
+    for args in [
+        &["init"][..],
+        &["config", "user.email", "test@example.invalid"][..],
+        &["config", "user.name", "Test"][..],
+    ] {
+        assert!(
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(args)
+                .status()
+                .expect("run git setup")
+                .success()
+        );
+    }
+    std::fs::write(repo.join("seed"), "seed").expect("seed repository");
+    for args in [&["add", "seed"][..], &["commit", "-m", "seed"][..]] {
+        assert!(
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(args)
+                .status()
+                .expect("commit repository")
+                .success()
+        );
+    }
+
+    let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
+    let space = storage
+        .get_or_create_default()
+        .await
+        .expect("default space");
+    let repo_attachment = storage
+        .create_workspace_attachment(NewWorkspaceAttachment {
+            space_id: space.id,
+            label: "worktree source".into(),
+            path: repo.to_string_lossy().into_owned(),
+            permissions: vec!["read".into(), "write".into()],
+            is_trusted: true,
+        })
+        .await
+        .expect("grant worktree source");
+    let session = storage
+        .create_session(NewSession {
+            space_id: space.id,
+            agent_id: "gateway".to_string(),
+            metadata: None,
+            active_workspace_attachment_id: Some(repo_attachment.id),
+        })
+        .await
+        .expect("create session");
+    let root_thread = ThreadStore::create(
+        &*storage,
+        NewThread {
+            session_id: session.id,
+            agent_id: "gateway".to_string(),
+        },
+    )
+    .await
+    .expect("create root thread");
+    let parent_turn = storage
+        .create_turn(NewTurn {
+            thread_id: root_thread.id,
+            agent_id: "gateway".to_string(),
+            state: TurnState::Processing,
+            user_input: Some("start isolated delegated work".to_string()),
+            parent_turn_id: None,
+        })
+        .await
+        .expect("create parent turn");
+    let provider = MultiRoundMockProvider::new(vec![
+        vec![
+            StreamChunk::ToolUse {
+                call_id: "write-in-worktree".into(),
+                name: "delegated_marker_write".into(),
+                arguments: serde_json::json!({}),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ],
+        vec![
+            StreamChunk::Delta {
+                content: "isolated write complete".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ],
+    ]);
+    let state = AppState::new(
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
+        Arc::new(provider) as Arc<dyn LlmProvider>,
+        swage_config::ResolvedConfig::default(),
+        crate::tool::ToolDispatcher::allow_all(vec![
+            Arc::new(DelegatedMarkerWriteTool) as Arc<dyn Tool>
+        ]),
+        None,
+    )
+    .with_worktree_root(fixture.path().join("worker-worktrees"));
+    let outcome = GatewayDelegationHandler::new(state.clone())
+        .handle_delegation(
+            "agent-b",
+            "Write only in an isolated worktree",
+            None,
+            Some(repo.to_string_lossy().into_owned()),
+            Some(swage_protocol::client::workflow::WorkerIsolation::Worktree),
+            "worktree-delegate-call",
+            "gateway",
+            parent_turn.id,
+            space.id,
+            CancellationToken::new(),
+            DelegateCompletionMode::Detach,
+        )
+        .await
+        .expect("worktree delegation should start");
+    let detached = match outcome {
+        DelegationOutcome::Detached(detached) => detached,
+        DelegationOutcome::Completed(_) => panic!("expected detached delegation"),
+    };
+
+    let provisioned = state.worktree_host.list_run(parent_turn.id).await;
+    assert_eq!(provisioned.len(), 1, "one delegate worktree should exist");
+    let worktree = &provisioned[0].path;
+    for _ in 0..20 {
+        if worktree.join("delegated-marker").exists() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert_eq!(
+        std::fs::read_to_string(worktree.join("delegated-marker"))
+            .expect("marker should be written inside the worktree"),
+        "placed"
+    );
+    assert!(
+        !repo.join("delegated-marker").exists(),
+        "delegate writes must not touch the source repository"
+    );
+
+    let delegate = storage
+        .get_agent_message(detached.delegate_message_id)
+        .await
+        .expect("read delegate record")
+        .expect("durable delegate record");
+    assert_eq!(
+        delegate.payload["placement"]["requested_cwd"],
+        repo.to_string_lossy().as_ref()
+    );
+    assert_eq!(
+        delegate.payload["placement"]["cwd"],
+        worktree.to_string_lossy().as_ref()
+    );
+    assert_eq!(
+        delegate.payload["placement"]["isolation"],
+        serde_json::to_value(swage_protocol::client::workflow::WorkerIsolation::Worktree)
+            .expect("serialise isolation")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn detached_delegate_can_be_cancelled_through_active_registry() {
     let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
     let space = storage
@@ -8040,8 +8375,7 @@ async fn detached_delegate_can_be_cancelled_through_active_registry() {
         child_release,
         "Detached child answer".to_string(),
     );
-    let placement_fixture =
-        tempfile::tempdir_in("/tmp/scratch").expect("placement fixture");
+    let placement_fixture = tempfile::tempdir().expect("placement fixture");
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
@@ -8054,7 +8388,7 @@ async fn detached_delegate_can_be_cancelled_through_active_registry() {
     )
     .with_worktree_root(placement_fixture.path().join("worker-worktrees"));
     let handler = GatewayDelegationHandler::new(state.clone());
-    let delegated_cwd = tempfile::tempdir_in("/tmp/scratch").expect("delegated cwd");
+    let delegated_cwd = tempfile::tempdir().expect("delegated cwd");
     storage
         .create_workspace_attachment(NewWorkspaceAttachment {
             space_id: space.id,
@@ -8097,7 +8431,7 @@ async fn detached_delegate_can_be_cancelled_through_active_registry() {
         "placed"
     );
 
-    let denied_cwd = tempfile::tempdir_in("/tmp/scratch").expect("denied cwd");
+    let denied_cwd = tempfile::tempdir().expect("denied cwd");
     let denied = match handler
         .handle_delegation(
             "agent-b",

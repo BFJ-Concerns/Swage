@@ -293,12 +293,13 @@ impl DelegationHandler for GatewayDelegationHandler {
         )
         .await
         .map_err(|error| AgentError::InvalidConfig(error.to_string()))?;
-        let session_metadata = dispatch_bound_metadata(&bound_agent_ids)
+        let mut session_metadata = dispatch_bound_metadata(&bound_agent_ids)
             .expect("a delegated session always has at least its sender bound");
 
-        let active_workspace_attachment_id = self
-            .active_workspace_attachment_for_turn(sender_turn_id)
-            .await?;
+        let sender_filesystem_authority =
+            self.filesystem_authority_for_turn(sender_turn_id).await?;
+        let active_workspace_attachment_id =
+            sender_filesystem_authority.active_workspace_attachment_id;
         let mut target_agent_config = build_agent_config_for_space_workspace(
             &self.state,
             target_agent_id.to_string(),
@@ -317,12 +318,13 @@ impl DelegationHandler for GatewayDelegationHandler {
                         space_id,
                         sender_turn_id,
                         active_workspace_attachment_id,
+                        sender_filesystem_authority.placement.as_ref(),
                         cwd,
                     )
                     .await
                     .map_err(AgentError::InvalidConfig)?,
                 ),
-                None => None,
+                None => sender_filesystem_authority.placement.clone(),
             },
             Some(swage_protocol::client::workflow::WorkerIsolation::Worktree) => {
                 let repo = cwd.as_deref().ok_or_else(|| {
@@ -336,6 +338,7 @@ impl DelegationHandler for GatewayDelegationHandler {
                     space_id,
                     sender_turn_id,
                     active_workspace_attachment_id,
+                    sender_filesystem_authority.placement.as_ref(),
                     repo,
                 )
                 .await
@@ -348,7 +351,7 @@ impl DelegationHandler for GatewayDelegationHandler {
                         .provision(sender_turn_id, stable_key, &repo.path)
                         .await
                         .map_err(AgentError::InvalidConfig)?,
-                    can_write: true,
+                    can_write: repo.can_write,
                 })
             }
         };
@@ -370,17 +373,18 @@ impl DelegationHandler for GatewayDelegationHandler {
         // this silent channel; the stored child-turn snapshot is the delegated
         // assembly's audit record.
         let (silent_ws_tx, _silent_ws_rx) = mpsc::unbounded_channel();
-        let placement_metadata = placement.as_ref().map(|placement| {
-            serde_json::json!({
-                "worker_placement_can_write": placement.can_write,
-            })
-        });
+        if let Some(placement) = placement.as_ref() {
+            session_metadata["worker_placement_cwd"] =
+                serde_json::Value::String(placement.path.to_string_lossy().into_owned());
+            session_metadata["worker_placement_can_write"] =
+                serde_json::Value::Bool(placement.can_write);
+        }
         let target_dispatcher_build = build_gateway_dispatcher_for_unattended_execution(
             &self.state,
             GatewayDispatcherRequest {
                 config: &effective_target_resolved,
                 agent_config: &target_agent_config,
-                session_metadata: placement_metadata.as_ref(),
+                session_metadata: Some(&session_metadata),
                 space_id: Some(space_id),
                 active_workspace_attachment_id,
                 ws_tx: silent_ws_tx.clone(),
@@ -568,10 +572,21 @@ impl DelegationHandler for GatewayDelegationHandler {
 }
 
 impl GatewayDelegationHandler {
+    #[cfg(test)]
     pub(super) async fn active_workspace_attachment_for_turn(
         &self,
         turn_id: Uuid,
     ) -> Result<Option<Uuid>, AgentError> {
+        Ok(self
+            .filesystem_authority_for_turn(turn_id)
+            .await?
+            .active_workspace_attachment_id)
+    }
+
+    async fn filesystem_authority_for_turn(
+        &self,
+        turn_id: Uuid,
+    ) -> Result<DispatchFilesystemAuthority, AgentError> {
         let turn = self.state.storage.get_turn(turn_id).await?.ok_or_else(|| {
             swage_core::StorageError::NotFound {
                 entity: "turn".into(),
@@ -588,6 +603,40 @@ impl GatewayDelegationHandler {
             .get_session(thread.session_id)
             .await?
             .ok_or(AgentError::SessionNotFound(thread.session_id))?;
-        Ok(session.active_workspace_attachment_id)
+        let placement = match session
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("worker_placement_cwd"))
+            .and_then(serde_json::Value::as_str)
+        {
+            Some(path) => {
+                let path = tokio::fs::canonicalize(path).await.map_err(|error| {
+                    AgentError::InvalidConfig(format!(
+                        "cannot resolve dispatching worker placement {path:?}: {error}"
+                    ))
+                })?;
+                let can_write = session
+                    .metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.get("worker_placement_can_write"))
+                    .and_then(serde_json::Value::as_bool)
+                    .ok_or_else(|| {
+                        AgentError::InvalidConfig(
+                            "dispatching worker placement is missing its write authority".into(),
+                        )
+                    })?;
+                Some(ResolvedWorkerDirectory { path, can_write })
+            }
+            None => None,
+        };
+        Ok(DispatchFilesystemAuthority {
+            active_workspace_attachment_id: session.active_workspace_attachment_id,
+            placement,
+        })
     }
+}
+
+struct DispatchFilesystemAuthority {
+    active_workspace_attachment_id: Option<Uuid>,
+    placement: Option<ResolvedWorkerDirectory>,
 }
