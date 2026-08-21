@@ -242,6 +242,7 @@ async fn resolve_workflow_by_name(
 async fn resolve_workflow_by_id(
     state: &AppState,
     id: Uuid,
+    agent_id: Option<&str>,
 ) -> Result<Option<EffectiveWorkflow>, String> {
     if let Some(record) = state
         .storage
@@ -257,18 +258,13 @@ async fn resolve_workflow_by_id(
         .await
         .map_err(|error| error.to_string())?
     {
-        let skills = discover_skills_for_space(state, space.id, None).await?;
-        if let Some(workflow) = carried_workflows(space.id, &skills)?
+        let skills = discover_skills_for_space(state, space.id, agent_id).await?;
+        if let Some(workflow) = list_effective_workflows(state, space.id, &skills)
+            .await?
             .into_iter()
             .find(|workflow| workflow.id == id)
         {
             return Ok(Some(workflow));
-        }
-        if let Some(workflow) = BUILTIN_WORKFLOWS
-            .iter()
-            .find(|workflow| builtin_workflows::id(space.id, workflow.name) == id)
-        {
-            return Ok(Some(EffectiveWorkflow::from_builtin(space.id, workflow)));
         }
     }
     Ok(None)
@@ -3152,8 +3148,9 @@ pub async fn list_scripts(
 pub async fn get_script(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
+    Query(query): Query<WorkflowScriptListQuery>,
 ) -> Result<Json<WorkflowScript>, ApiError> {
-    let workflow = resolve_workflow_by_id(&state, id)
+    let workflow = resolve_workflow_by_id(&state, id, query.agent_id.as_deref())
         .await
         .map_err(internal)?
         .ok_or_else(|| ApiError::not_found("workflow script", id))?;
@@ -3163,9 +3160,10 @@ pub async fn get_script(
 pub async fn update_script(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
+    Query(query): Query<WorkflowScriptListQuery>,
     Json(request): Json<UpdateWorkflowScriptRequest>,
 ) -> Result<Json<WorkflowScript>, ApiError> {
-    if resolve_workflow_by_id(&state, id)
+    if resolve_workflow_by_id(&state, id, query.agent_id.as_deref())
         .await
         .map_err(internal)?
         .is_some_and(|workflow| workflow.immutable)
@@ -3194,7 +3192,7 @@ pub async fn update_script(
             .await
             .map_err(internal)?;
     }
-    get_script(State(state), Path(id)).await
+    get_script(State(state), Path(id), Query(query)).await
 }
 
 fn source_hash(source: &str) -> String {
@@ -3611,9 +3609,10 @@ pub async fn start_inline_run(
 pub async fn start_saved_run(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
+    Query(query): Query<WorkflowScriptListQuery>,
     Json(request): Json<StartWorkflowRunRequest>,
 ) -> Result<Json<WorkflowRun>, ApiError> {
-    let script = resolve_workflow_by_id(&state, id)
+    let script = resolve_workflow_by_id(&state, id, query.agent_id.as_deref())
         .await
         .map_err(internal)?
         .ok_or_else(|| ApiError::not_found("workflow script", id))?;
@@ -3996,15 +3995,20 @@ mod tests {
             .find(|script| script.name == "research-sweep")
             .expect("research sweep");
 
-        let Json(read) = get_script(State(state.clone()), Path(listed.id))
-            .await
-            .expect("read built-in");
+        let Json(read) = get_script(
+            State(state.clone()),
+            Path(listed.id),
+            Query(WorkflowScriptListQuery::default()),
+        )
+        .await
+        .expect("read built-in");
         assert_eq!(read.id, listed.id);
         assert!(read.built_in);
 
         let update_error = update_script(
             State(state.clone()),
             Path(listed.id),
+            Query(WorkflowScriptListQuery::default()),
             Json(UpdateWorkflowScriptRequest {
                 description: Some("changed".into()),
                 ..Default::default()
@@ -4019,6 +4023,7 @@ mod tests {
         let Json(started) = start_saved_run(
             State(state.clone()),
             Path(listed.id),
+            Query(WorkflowScriptListQuery::default()),
             Json(StartWorkflowRunRequest {
                 args: Value::Null,
                 budget: None,
@@ -4065,6 +4070,7 @@ mod tests {
         let update_error = update_script(
             State(state.clone()),
             Path(listed.id),
+            Query(WorkflowScriptListQuery::default()),
             Json(UpdateWorkflowScriptRequest {
                 source: Some("return 'changed';".into()),
                 ..Default::default()
@@ -4079,6 +4085,7 @@ mod tests {
         let Json(started) = start_saved_run(
             State(state.clone()),
             Path(listed.id),
+            Query(WorkflowScriptListQuery::default()),
             Json(StartWorkflowRunRequest {
                 args: Value::Null,
                 budget: None,
@@ -4156,6 +4163,7 @@ mod tests {
         let Json(started) = start_saved_run(
             State(state.clone()),
             Path(parent.id),
+            Query(WorkflowScriptListQuery::default()),
             Json(StartWorkflowRunRequest {
                 args: Value::Null,
                 budget: None,
@@ -4297,26 +4305,49 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn agent_skill_workflow_uses_the_same_listing_and_name_resolution_scope() {
+    async fn agent_skill_workflow_ids_use_the_scope_that_listed_them() {
         let root = tempfile::tempdir().expect("skill root");
         let (state, storage) = workflow_test_state();
         let space = storage.get_or_create_default().await.expect("space");
-        let skill_dir = root
+        let space_skill_dir = root
             .path()
             .join("spaces")
             .join(&space.slug)
-            .join("agents/gateway/skills/agent-proof");
-        std::fs::create_dir_all(skill_dir.join("workflows")).expect("workflow directory");
+            .join("skills/scoped-proof");
+        let agent_skill_dir = root
+            .path()
+            .join("spaces")
+            .join(&space.slug)
+            .join("agents/gateway/skills/scoped-proof");
+        std::fs::create_dir_all(space_skill_dir.join("workflows"))
+            .expect("space workflow directory");
+        std::fs::create_dir_all(agent_skill_dir.join("workflows"))
+            .expect("agent workflow directory");
         std::fs::write(
-            skill_dir.join("SKILL.md"),
+            space_skill_dir.join("SKILL.md"),
+            "---\ndescription: Space carried workflow proof.\n---\n\nInstructions.\n",
+        )
+        .expect("space skill definition");
+        std::fs::write(
+            space_skill_dir.join("workflows/shared.js"),
+            "return { scope: 'space' };\n",
+        )
+        .expect("space carried workflow");
+        std::fs::write(
+            agent_skill_dir.join("SKILL.md"),
             "---\ndescription: Agent carried workflow proof.\n---\n\nInstructions.\n",
         )
-        .expect("skill definition");
+        .expect("agent skill definition");
         std::fs::write(
-            skill_dir.join("workflows/agent-proof.js"),
+            agent_skill_dir.join("workflows/shared.js"),
             "return { scope: 'agent' };\n",
         )
-        .expect("carried workflow");
+        .expect("agent override workflow");
+        std::fs::write(
+            agent_skill_dir.join("workflows/agent-only.js"),
+            "return { scope: 'agent-only' };\n",
+        )
+        .expect("agent-only workflow");
         let session = storage
             .create_session(NewSession {
                 space_id: space.id,
@@ -4336,11 +4367,16 @@ mod tests {
         )
         .await
         .expect("unscoped workflow list");
+        let unscoped_shared = unscoped
+            .scripts
+            .iter()
+            .find(|script| script.name == "shared")
+            .expect("space workflow in unscoped list");
         assert!(
             unscoped
                 .scripts
                 .iter()
-                .all(|script| script.name != "agent-proof")
+                .all(|script| script.name != "agent-only")
         );
 
         let Json(scoped) = list_scripts(
@@ -4352,29 +4388,87 @@ mod tests {
         )
         .await
         .expect("agent-scoped workflow list");
+        let scoped_shared = scoped
+            .scripts
+            .iter()
+            .find(|script| script.name == "shared")
+            .expect("agent override in scoped list");
+        assert_eq!(scoped_shared.id, unscoped_shared.id);
+        let agent_only = scoped
+            .scripts
+            .iter()
+            .find(|script| script.name == "agent-only")
+            .expect("agent-only workflow in scoped list");
+        let agent_scope = || {
+            Query(WorkflowScriptListQuery {
+                agent_id: Some("gateway".into()),
+            })
+        };
+
+        let Json(read) = get_script(State(state.clone()), Path(agent_only.id), agent_scope())
+            .await
+            .expect("read agent-only workflow by scoped ID");
+        assert_eq!(read.id, agent_only.id);
+
+        let update_error = update_script(
+            State(state.clone()),
+            Path(agent_only.id),
+            agent_scope(),
+            Json(UpdateWorkflowScriptRequest {
+                source: Some("return 'changed';".into()),
+                ..Default::default()
+            }),
+        )
+        .await
+        .expect_err("agent-only carried workflow must remain immutable");
         assert!(
-            scoped
-                .scripts
-                .iter()
-                .any(|script| script.name == "agent-proof")
+            matches!(update_error.0, swage_core::GatewayError::SpaceConflict(message) if message.contains("immutable"))
         );
 
-        let started = GatewayWorkflowLauncher::new(state.clone())
-            .start_by_name(session.id, "agent-proof", Value::Null, None, false)
-            .await
-            .expect("agent-scoped name launch");
-        let run_id: Uuid = serde_json::from_value(started["id"].clone()).expect("run id");
-        wait_for_terminal(&state, run_id).await;
+        let Json(started) = start_saved_run(
+            State(state.clone()),
+            Path(agent_only.id),
+            agent_scope(),
+            Json(StartWorkflowRunRequest {
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start agent-only workflow by scoped ID");
+        wait_for_terminal(&state, started.id).await;
         let run = storage
-            .get_workflow_run(run_id)
+            .get_workflow_run(started.id)
             .await
             .expect("run query")
             .expect("run");
         assert_eq!(
             run.final_output,
+            Some(serde_json::json!({"scope": "agent-only"}))
+        );
+        assert_eq!(run.carrying_skill.as_deref(), Some("scoped-proof"));
+
+        let Json(started) = start_saved_run(
+            State(state.clone()),
+            Path(scoped_shared.id),
+            agent_scope(),
+            Json(StartWorkflowRunRequest {
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start agent override by scoped ID");
+        wait_for_terminal(&state, started.id).await;
+        let run = storage
+            .get_workflow_run(started.id)
+            .await
+            .expect("override run query")
+            .expect("override run");
+        assert_eq!(
+            run.final_output,
             Some(serde_json::json!({"scope": "agent"}))
         );
-        assert_eq!(run.carrying_skill.as_deref(), Some("agent-proof"));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -4396,6 +4490,7 @@ mod tests {
         let Json(started) = start_saved_run(
             State(state.clone()),
             Path(parent.id),
+            Query(WorkflowScriptListQuery::default()),
             Json(StartWorkflowRunRequest {
                 args: Value::Null,
                 budget: None,
@@ -8779,6 +8874,7 @@ mod tests {
         let Json(started) = start_saved_run(
             State(state.clone()),
             Path(script.id),
+            Query(WorkflowScriptListQuery::default()),
             Json(StartWorkflowRunRequest {
                 args: Value::Null,
                 budget: Some(WorkflowBudget {
@@ -9106,6 +9202,7 @@ mod tests {
         let Json(started) = start_saved_run(
             State(state.clone()),
             Path(script.id),
+            Query(WorkflowScriptListQuery::default()),
             Json(StartWorkflowRunRequest {
                 args: Value::Null,
                 budget: Some(budget.clone()),
@@ -9229,6 +9326,7 @@ mod tests {
         let Json(started) = start_saved_run(
             State(state.clone()),
             Path(script.id),
+            Query(WorkflowScriptListQuery::default()),
             Json(StartWorkflowRunRequest {
                 args: Value::Null,
                 budget: Some(WorkflowBudget {
@@ -9318,6 +9416,7 @@ mod tests {
         let Json(started) = start_saved_run(
             State(state.clone()),
             Path(script.id),
+            Query(WorkflowScriptListQuery::default()),
             Json(StartWorkflowRunRequest {
                 args: Value::Null,
                 budget: Some(WorkflowBudget {
@@ -9441,6 +9540,7 @@ mod tests {
         let Json(started) = start_saved_run(
             State(state.clone()),
             Path(script.id),
+            Query(WorkflowScriptListQuery::default()),
             Json(StartWorkflowRunRequest {
                 args: Value::Null,
                 budget: Some(WorkflowBudget {
@@ -9568,6 +9668,7 @@ mod tests {
         let Json(started) = start_saved_run(
             State(state.clone()),
             Path(script.id),
+            Query(WorkflowScriptListQuery::default()),
             Json(StartWorkflowRunRequest {
                 args: serde_json::json!({"content":"checked"}),
                 budget: None,
@@ -9614,6 +9715,7 @@ mod tests {
         let Json(started) = start_saved_run(
             State(state.clone()),
             Path(script.id),
+            Query(WorkflowScriptListQuery::default()),
             Json(StartWorkflowRunRequest {
                 args: Value::Null,
                 budget: Some(WorkflowBudget {
@@ -9685,6 +9787,7 @@ mod tests {
         let Json(started) = start_saved_run(
             State(state.clone()),
             Path(parent.id),
+            Query(WorkflowScriptListQuery::default()),
             Json(StartWorkflowRunRequest {
                 args: Value::Null,
                 budget: None,
@@ -9771,6 +9874,7 @@ mod tests {
         let Json(started) = start_saved_run(
             State(state.clone()),
             Path(parent.id),
+            Query(WorkflowScriptListQuery::default()),
             Json(StartWorkflowRunRequest {
                 args: Value::Null,
                 budget: None,
