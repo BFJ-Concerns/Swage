@@ -905,6 +905,10 @@ async fn run_ephemeral_agent_call(
     };
     let (events, _events_rx) = mpsc::unbounded_channel::<ServerEvent>();
     let request_schema = request.schema.clone();
+    let request_schema_retries = request
+        .schema
+        .as_ref()
+        .map(|_| request.max_attempts.saturating_sub(1));
     let call_cancellation = cancellation.child_token();
     let processing = crate::turn::process_turn_with_existing_turn(
         state,
@@ -914,7 +918,7 @@ async fn run_ephemeral_agent_call(
         events,
         Arc::new(Mutex::new(SubscriptionState::new(false))),
         request.schema,
-        Some(request.max_attempts.saturating_sub(1)),
+        request_schema_retries,
         request.effort.clone(),
         Some(call_cancellation.clone()),
         None,
@@ -3812,8 +3816,9 @@ mod tests {
     use super::*;
     use swage_protocol::client::workflow::{WorkflowJournalEntryKind, WorkflowJournalEntryStatus};
     use swage_storage::{
-        NewWorkspaceAttachment, SessionStore, SpaceStore, SqliteStorage, Storage, ToolCallStore,
-        TurnState, TurnStore, WorkflowStore, WorkspaceAttachmentStore,
+        AuditStore, NewWorkspaceAttachment, SessionStore, SpaceStore, SqliteStorage, Storage,
+        TaskDefinitionStore, ToolCallStore, TurnState, TurnStore, WorkflowStore,
+        WorkspaceAttachmentStore,
     };
     use swage_workflow::AgentSessionRef;
 
@@ -5450,6 +5455,192 @@ mod tests {
             Some(Value::String("bounded work completed".into()))
         );
         assert_eq!(provider.requests.lock().expect("requests").len(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn workflow_dispatch_re_resolves_and_applies_named_tasks() {
+        let _guard = crate::test_support::SwageHomeGuard::new();
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        storage
+            .upsert_task_definition(swage_storage::NewTaskDefinition {
+                id: "review".into(),
+                instructions: "First workflow task instruction.".into(),
+                model_id: Some("first".into()),
+                tool_permissions: Some(serde_json::json!({
+                    "allow": [], "deny": [], "bundles": {}, "require_approval": []
+                })),
+                output_schema: Some(serde_json::json!({
+                    "type": "object",
+                    "required": ["result"],
+                    "properties": {"result": {"type": "string"}}
+                })),
+                output_max_retries: Some(1),
+            })
+            .await
+            .expect("store first definition");
+        let provider = Arc::new(ScriptedRecordingProvider {
+            outputs: std::sync::Mutex::new(std::collections::VecDeque::from([
+                scripted_text_output("not valid JSON"),
+                scripted_text_output(r#"{"result":"first"}"#),
+                scripted_text_output(r#"{"updated":true}"#),
+            ])),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let config = swage_config::ResolvedConfig {
+            instructions: "Base worker instruction.".into(),
+            models: swage_config::ModelCatalogConfig {
+                default: "first".into(),
+                entries: [
+                    (
+                        "first".into(),
+                        swage_config::ModelEndpointConfig {
+                            provider_id: "test".into(),
+                            model_id: "first-wire".into(),
+                            ..Default::default()
+                        },
+                    ),
+                    (
+                        "second".into(),
+                        swage_config::ModelEndpointConfig {
+                            provider_id: "test".into(),
+                            model_id: "second-wire".into(),
+                            ..Default::default()
+                        },
+                    ),
+                ]
+                .into_iter()
+                .collect(),
+            },
+            tools: swage_config::ToolConfig {
+                permissions: swage_config::ToolPermissionConfig {
+                    allow: vec!["shell".into()],
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
+            config,
+            crate::tool::ToolDispatcher::allow_all(vec![
+                Arc::new(WorkflowShellTool) as Arc<dyn crate::tool::Tool>
+            ]),
+            None,
+        );
+        let request = || AgentCallRequest {
+            prompt: "Use the current review contract".into(),
+            agent: None,
+            task: Some("review".into()),
+            model: None,
+            effort: None,
+            timeout_ms: None,
+            cwd: None,
+            isolation: None,
+            schema: None,
+            max_attempts: 1,
+            label: None,
+            session: None,
+        };
+
+        let first = run_ephemeral_agent_call(
+            &state,
+            Uuid::new_v4(),
+            space.id,
+            &[],
+            request(),
+            None,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("first named dispatch");
+        assert_eq!(first.output, serde_json::json!({"result":"first"}));
+        {
+            let requests = provider.requests.lock().expect("requests");
+            assert_eq!(requests.len(), 2, "invalid output must consume the task retry");
+            let text = requests[0]
+                .messages
+                .iter()
+                .map(swage_core::ChatMessage::text_content)
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(text.contains("First workflow task instruction."));
+            assert_eq!(requests[0].model.as_deref(), Some("first-wire"));
+            assert!(
+                requests[0].tool_definitions.is_empty(),
+                "the task's empty allow-set must narrow the base shell grant"
+            );
+        }
+        assert!(storage.list_audit_events().await.unwrap().iter().any(|event| {
+            event.event_kind == "variant_selected"
+                && event.entity_id == crate::experimentation::LOCATION_TASK_PROMPT
+        }));
+
+        storage
+            .upsert_task_definition(swage_storage::NewTaskDefinition {
+                id: "review".into(),
+                instructions: "Edited workflow task instruction.".into(),
+                model_id: Some("second".into()),
+                tool_permissions: Some(serde_json::json!({
+                    "allow": [], "deny": [], "bundles": {}, "require_approval": []
+                })),
+                output_schema: Some(serde_json::json!({
+                    "type": "object",
+                    "required": ["updated"],
+                    "properties": {"updated": {"const": true}}
+                })),
+                output_max_retries: Some(0),
+            })
+            .await
+            .expect("edit definition");
+        let second = run_ephemeral_agent_call(
+            &state,
+            Uuid::new_v4(),
+            space.id,
+            &[],
+            request(),
+            None,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("redispatch edited definition");
+        assert_eq!(second.output, serde_json::json!({"updated":true}));
+        let requests = provider.requests.lock().expect("requests");
+        let edited = &requests[2];
+        let edited_text = edited
+            .messages
+            .iter()
+            .map(swage_core::ChatMessage::text_content)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(edited_text.contains("Edited workflow task instruction."));
+        assert!(!edited_text.contains("First workflow task instruction."));
+        assert_eq!(edited.model.as_deref(), Some("second-wire"));
+        drop(requests);
+
+        let missing = AgentCallRequest {
+            task: Some("missing".into()),
+            ..request()
+        };
+        let error = run_ephemeral_agent_call(
+            &state,
+            Uuid::new_v4(),
+            space.id,
+            &[],
+            missing,
+            None,
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("missing task must fail before provider dispatch");
+        assert!(
+            error.contains("no task definition 'missing' exists"),
+            "unexpected missing-task error: {error}"
+        );
+        assert_eq!(provider.requests.lock().expect("requests").len(), 3);
     }
 
     #[tokio::test(flavor = "multi_thread")]

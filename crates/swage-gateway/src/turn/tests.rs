@@ -34,7 +34,7 @@ use swage_storage::{
         AgentDefinitionStore, AgentMessageStore, ApprovalStore, AttachmentStore,
         BackgroundJobStore, ChannelLinkStore, ContextSnapshotStore, DeviceStore, MaterialStore,
         MessageStore, ScheduleStore, SessionStore, SkillActivationStore, SpaceStore, ThreadStore,
-        ToolCallStore, TurnStore, WorkspaceAttachmentStore,
+        TaskDefinitionStore, ToolCallStore, TurnStore, WorkspaceAttachmentStore,
     },
 };
 
@@ -6879,12 +6879,25 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
             space_id: Some(space.id),
             display_name: "Agent B".into(),
             description: String::new(),
-            instructions: "Definition-only delegated instruction.".into(),
+            instructions: String::new(),
             model_id: None,
             tool_permissions: Some(serde_json::json!({
                 "allow": ["shell"], "deny": [], "bundles": {}
             })),
             skills: vec!["definition-declared".into()],
+            output_schema: None,
+            output_max_retries: None,
+        })
+        .await
+        .expect("store delegated agent definition");
+    storage
+        .upsert_task_definition(swage_storage::NewTaskDefinition {
+            id: "strict-review".into(),
+            instructions: "Task-defined delegated instruction.".into(),
+            model_id: Some("task-review-model".into()),
+            tool_permissions: Some(serde_json::json!({
+                "allow": ["shell"], "deny": [], "bundles": {}, "require_approval": []
+            })),
             output_schema: Some(serde_json::json!({
                 "type": "object",
                 "required": ["result"],
@@ -6904,6 +6917,7 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
             arguments: serde_json::json!({
                 "target_agent": "agent-b",
                 "task": "Summarise this request",
+                "task_definition": "strict-review",
             }),
         },
         StreamChunk::Done {
@@ -7007,6 +7021,19 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
         Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
         swage_config::ResolvedConfig {
+            models: swage_config::ModelCatalogConfig {
+                default: "task-review-model".into(),
+                entries: [(
+                    "task-review-model".into(),
+                    swage_config::ModelEndpointConfig {
+                        provider_id: "test".into(),
+                        model_id: "task-review-wire".into(),
+                        ..Default::default()
+                    },
+                )]
+                .into_iter()
+                .collect(),
+            },
             communication: swage_config::CommunicationConfig {
                 context_transfer: swage_config::ContextTransferConfig {
                     mode: swage_config::ContextTransferMode::Explicit,
@@ -7266,9 +7293,23 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
         "delegated provider request should include definition-declared skill instructions: {child_request_text}"
     );
     assert!(
-        child_request_text.contains("Definition-only delegated instruction."),
-        "a genuinely reached child must receive its durable definition rather than file config alone: {child_request_text}"
+        child_request_text.contains("Task-defined delegated instruction."),
+        "a genuinely reached child must receive its named task instructions: {child_request_text}"
     );
+    assert_eq!(
+        captured_requests[1].model.as_deref(),
+        Some("task-review-wire"),
+        "the delegated child must use the named task's model preference"
+    );
+    let child_audit = state
+        .storage
+        .list_audit_events()
+        .await
+        .expect("list child task audit events");
+    assert!(child_audit.iter().any(|event| {
+        event.event_kind == "variant_selected"
+            && event.entity_id == crate::experimentation::LOCATION_TASK_PROMPT
+    }));
     assert!(
         !child_request_text.contains("Use the parent foreground skill."),
         "delegated provider request must not inherit user-activated parent skills: {child_request_text}"
