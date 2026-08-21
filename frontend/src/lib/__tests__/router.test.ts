@@ -174,6 +174,31 @@ describe("navigate", () => {
 // ---------------------------------------------------------------------------
 
 describe("popstate", () => {
+  it("restores the active route when selecting browser history fails", async () => {
+    window.history.replaceState(null, "", "/conversations/active-conv");
+    const onRouteChange = vi.fn();
+    const router = createRouter({
+      onRouteChange,
+      conversationStore: {
+        activeConversationId: "active-conv",
+        checkConversationExists: vi.fn().mockResolvedValue(undefined),
+        clearActiveConversation: vi.fn(),
+        selectConversation: vi.fn().mockRejectedValue(new Error("HTTP 503 gateway unavailable")),
+      },
+    });
+    await router.init();
+    onRouteChange.mockClear();
+
+    window.history.replaceState(null, "", "/conversations/unavailable-conv");
+    window.dispatchEvent(new PopStateEvent("popstate"));
+    await vi.waitFor(() =>
+      expect(window.location.pathname).toBe("/conversations/active-conv"),
+    );
+
+    expect(router.currentRoute.conversationId).toBe("active-conv");
+    expect(onRouteChange).toHaveBeenLastCalledWith(router.currentRoute);
+  });
+
   it("notifies its consumer after browser navigation", async () => {
     const onRouteChange = vi.fn();
     const router = createRouter({ onRouteChange });

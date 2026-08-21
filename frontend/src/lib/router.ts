@@ -194,7 +194,14 @@ export function createRouter(options?: RouterOptions): Router {
       window.addEventListener("popstate", () => {
         // popstate is synchronous in terms of the URL update; async selection
         // runs in the background and updates currentRoute when it settles.
-        applyLocation();
+        void applyLocation().catch(() => {
+          const activeConversationId = options?.conversationStore?.activeConversationId;
+          const fallbackPath = activeConversationId
+            ? `/conversations/${activeConversationId}`
+            : "/";
+          window.history.replaceState(null, "", fallbackPath);
+          updateRoute(parseRoute(fallbackPath));
+        });
       });
 
       // Apply the initial URL — this kicks off conversation selection if
