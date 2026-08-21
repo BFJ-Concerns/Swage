@@ -114,9 +114,8 @@ pub async fn save_settings(
     request: SaveSettingsRequest,
 ) -> Result<SettingsResponse, ApiError> {
     validate_settings_request(&request)?;
-    let prior_models = serde_json::to_value(&state.active_config().models).map_err(|error| {
-        ApiError::validation(format!("failed to snapshot model settings: {error}"))
-    })?;
+    let prior_settings = serde_json::to_value(load_settings(state).await?)
+        .map_err(|error| ApiError::validation(format!("failed to snapshot settings: {error}")))?;
     let SaveSettingsRequest {
         default_provider,
         providers: requested_providers,
@@ -256,27 +255,27 @@ pub async fn save_settings(
     let provider = crate::startup::create_provider(&runtime_config, &state.secret_manager).await;
     let tool_dispatcher =
         crate::startup::build_tool_dispatcher(&runtime_config, state.storage.clone());
-    let new_models = serde_json::to_value(&runtime_config.models).map_err(|error| {
-        ApiError::validation(format!("failed to snapshot model settings: {error}"))
-    })?;
     state.replace_runtime(runtime_config, provider, tool_dispatcher);
+    let response = load_settings(state).await?;
+    let new_settings = serde_json::to_value(&response)
+        .map_err(|error| ApiError::validation(format!("failed to snapshot settings: {error}")))?;
     crate::config_change::record_config_change(
         state,
         crate::config_change::ConfigChange {
-            entity_kind: "model_catalog",
+            entity_kind: "settings",
             entity_id: "global",
-            action: "save_model_settings",
+            action: "save_settings",
             source: "operator_http",
             session_id: None,
-            summary: "saved model settings",
-            prior_state: Some(prior_models),
-            new_state: Some(new_models),
+            summary: "saved settings",
+            prior_state: Some(prior_settings),
+            new_state: Some(new_settings),
         },
     )
     .await
     .map_err(ApiError::from)?;
 
-    load_settings(state).await
+    Ok(response)
 }
 
 pub(crate) async fn persist_permanent_tool_approval_for_space(
@@ -1366,12 +1365,18 @@ mod tests {
             .filter(|event| event.event_kind == "configuration_change")
             .collect();
         assert_eq!(changes.len(), 1);
-        assert_eq!(changes[0].entity_kind, "model_catalog");
+        assert_eq!(changes[0].entity_kind, "settings");
+        assert_eq!(changes[0].metadata["action"], "save_settings");
         assert_eq!(
-            changes[0].metadata["new_state"]["entries"]["local:fast"]["default_effort"],
+            changes[0].metadata["new_state"]["models"]["local:fast"]["default_effort"],
             "high"
         );
-        assert!(changes[0].metadata["prior_state"].is_object());
+        assert_eq!(changes[0].metadata["new_state"]["context"]["timeout"], 7);
+        assert_eq!(
+            changes[0].metadata["new_state"]["tool_permissions"]["deny"][0],
+            "shell"
+        );
+        assert!(changes[0].metadata["prior_state"]["providers"].is_object());
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -586,7 +586,7 @@ pub(crate) async fn process_turn_with_existing_turn(
     subscription: Arc<Mutex<SubscriptionState>>,
     output_schema_override: Option<serde_json::Value>,
     max_output_retries_override: Option<u32>,
-    effort_override: Option<String>,
+    effort_override: Option<swage_core::Effort>,
     cancellation_override: Option<CancellationToken>,
     existing_turn_id: Option<Uuid>,
     attendance: TurnAttendance,
@@ -624,7 +624,7 @@ pub(crate) async fn process_turn_with_composition(
     subscription: Arc<Mutex<SubscriptionState>>,
     output_schema_override: Option<serde_json::Value>,
     max_output_retries_override: Option<u32>,
-    effort_override: Option<String>,
+    effort_override: Option<swage_core::Effort>,
     cancellation_override: Option<CancellationToken>,
     existing_turn_id: Option<Uuid>,
     attendance: TurnAttendance,
@@ -1331,16 +1331,8 @@ pub(crate) async fn process_turn_with_composition(
                 )));
             }
         };
-        let effort = match effort_override.as_deref() {
-            Some("low") => Some(swage_core::Effort::Low),
-            Some("medium") => Some(swage_core::Effort::Medium),
-            Some("high") => Some(swage_core::Effort::High),
-            Some("max" | "xhigh") => Some(swage_core::Effort::Max),
-            Some(value) => {
-                return Err(GatewayError::ConfigError(format!(
-                    "unsupported effort {value:?}; expected low, medium, high, or max"
-                )));
-            }
+        let effort = match effort_override {
+            Some(effort) => Some(effort),
             None => session
                 .metadata
                 .as_ref()
