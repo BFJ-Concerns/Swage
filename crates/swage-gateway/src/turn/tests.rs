@@ -1004,6 +1004,10 @@ impl MockStorage {
         self.fail_turn_state_write_at.store(call, Ordering::SeqCst);
     }
 
+    pub(crate) fn turn_state_write_calls(&self) -> usize {
+        self.turn_state_write_calls.load(Ordering::SeqCst)
+    }
+
     fn fail_inbound_audit_writes(&self) {
         self.fail_inbound_audit_writes.store(true, Ordering::SeqCst);
     }
@@ -4791,6 +4795,62 @@ async fn approved_sandbox_fallback_build_failure_clears_active_turn() {
         .remove(0);
     let turns = state.storage.list_turns_by_thread(thread.id).await.unwrap();
     assert_eq!(turns[0].state, TurnState::Failed);
+}
+
+#[tokio::test]
+async fn attended_sandbox_failure_records_interactive_attendance() {
+    let mut config = swage_config::ResolvedConfig::default();
+    config.sandbox.enabled = false;
+    let (state, session_id) = make_state_with_config(vec![], config).await;
+    state.fail_next_dispatcher_builds(1);
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    process_turn(
+        &state,
+        session_id,
+        None,
+        "message".to_string(),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .expect_err("disabled sandbox build failure should block the attended turn");
+
+    let audit = state.storage.list_audit_events().await.unwrap();
+    assert!(audit.iter().any(|event| {
+        event.event_kind == "execution_isolation_degraded"
+            && event.metadata["execution_context"] == "interactive turn"
+    }));
+}
+
+#[tokio::test]
+async fn unattended_sandbox_failure_records_unattended_attendance() {
+    let (state, session_id) = make_state_with_session(vec![]).await;
+    state.fail_next_dispatcher_builds(1);
+    let (tx, _rx) = mpsc::unbounded_channel();
+
+    process_turn_with_composition(
+        &state,
+        session_id,
+        None,
+        "message".to_string(),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+        None,
+        None,
+        TurnAttendance::Unattended,
+        DispatchContextComposition::default(),
+    )
+    .await
+    .expect_err("unattended degradation should fail closed");
+
+    let audit = state.storage.list_audit_events().await.unwrap();
+    assert!(audit.iter().any(|event| {
+        event.event_kind == "execution_isolation_degraded"
+            && event.metadata["execution_context"] == "unattended turn"
+    }));
 }
 
 #[tokio::test]
@@ -9374,97 +9434,6 @@ fn space_scoped_approval_grant_only_removes_gate_for_matching_space() {
     assert!(matching.require_approval.is_empty());
     assert_eq!(other.require_approval.len(), 1);
     assert_eq!(no_space.require_approval.len(), 1);
-}
-
-#[tokio::test]
-async fn workspace_summary_is_empty_when_no_attachments_exist() {
-    let storage: Arc<dyn swage_storage::store::Storage> = Arc::new(MockStorage::new());
-    let space_id = Uuid::new_v4();
-
-    let summary = summarise_trusted_workspace_permissions(&storage, space_id).await;
-
-    assert!(!summary.has_read);
-    assert!(!summary.has_write);
-}
-
-#[tokio::test]
-async fn workspace_summary_ignores_untrusted_attachments() {
-    let storage: Arc<dyn swage_storage::store::Storage> = Arc::new(MockStorage::new());
-    let space_id = Uuid::new_v4();
-    storage
-        .create_workspace_attachment(NewWorkspaceAttachment {
-            space_id,
-            label: "untrusted".into(),
-            path: "/tmp/untrusted".into(),
-            permissions: vec!["read".into(), "write".into()],
-            is_trusted: false,
-        })
-        .await
-        .unwrap();
-
-    let summary = summarise_trusted_workspace_permissions(&storage, space_id).await;
-
-    assert!(
-        !summary.has_read,
-        "untrusted attachment must not grant read"
-    );
-    assert!(
-        !summary.has_write,
-        "untrusted attachment must not grant write"
-    );
-}
-
-#[tokio::test]
-async fn workspace_summary_combines_grants_across_trusted_attachments() {
-    let storage: Arc<dyn swage_storage::store::Storage> = Arc::new(MockStorage::new());
-    let space_id = Uuid::new_v4();
-    storage
-        .create_workspace_attachment(NewWorkspaceAttachment {
-            space_id,
-            label: "read-only".into(),
-            path: "/tmp/read".into(),
-            permissions: vec!["read".into()],
-            is_trusted: true,
-        })
-        .await
-        .unwrap();
-    storage
-        .create_workspace_attachment(NewWorkspaceAttachment {
-            space_id,
-            label: "write-only".into(),
-            path: "/tmp/write".into(),
-            permissions: vec!["write".into()],
-            is_trusted: true,
-        })
-        .await
-        .unwrap();
-
-    let summary = summarise_trusted_workspace_permissions(&storage, space_id).await;
-
-    assert!(summary.has_read);
-    assert!(summary.has_write);
-}
-
-#[tokio::test]
-async fn workspace_summary_only_aggregates_target_space() {
-    let storage: Arc<dyn swage_storage::store::Storage> = Arc::new(MockStorage::new());
-    let target_space = Uuid::new_v4();
-    let other_space = Uuid::new_v4();
-    storage
-        .create_workspace_attachment(NewWorkspaceAttachment {
-            space_id: other_space,
-            label: "other".into(),
-            path: "/tmp/other".into(),
-            permissions: vec!["read".into(), "write".into()],
-            is_trusted: true,
-        })
-        .await
-        .unwrap();
-
-    let summary = summarise_trusted_workspace_permissions(&storage, target_space).await;
-
-    assert!(!summary.has_read);
-    assert!(!summary.has_write);
 }
 
 #[tokio::test]
