@@ -9111,8 +9111,25 @@ mod tests {
         Arc<RecordingGateProvider>,
         Arc<RecordingGateProvider>,
     ) {
-        let default = Arc::new(RecordingGateProvider::new("default-provider-model"));
-        let selected = Arc::new(RecordingGateProvider::new("provider-facing-model"));
+        configured_event_gate_fixture_with_models(
+            "default-provider-model",
+            "provider-facing-model",
+        )
+        .await
+    }
+
+    async fn configured_event_gate_fixture_with_models(
+        default_provider_model: &'static str,
+        selected_provider_model: &'static str,
+    ) -> (
+        Arc<SqliteStorage>,
+        AppState,
+        swage_storage::WorkflowRunRecord,
+        Arc<RecordingGateProvider>,
+        Arc<RecordingGateProvider>,
+    ) {
+        let default = Arc::new(RecordingGateProvider::new(default_provider_model));
+        let selected = Arc::new(RecordingGateProvider::new(selected_provider_model));
         let provider = Arc::new(swage_provider::failover::FailoverProvider::with_defaults(
             vec![
                 Arc::clone(&default) as Arc<dyn swage_provider::LlmProvider>,
@@ -9127,7 +9144,7 @@ mod tests {
                         "default".into(),
                         swage_config::ModelEndpointConfig {
                             provider_id: "default-provider".into(),
-                            model_id: "default-provider-model".into(),
+                            model_id: default_provider_model.into(),
                             ..Default::default()
                         },
                     ),
@@ -9135,7 +9152,7 @@ mod tests {
                         "gate-alias".into(),
                         swage_config::ModelEndpointConfig {
                             provider_id: "selected-provider".into(),
-                            model_id: "provider-facing-model".into(),
+                            model_id: selected_provider_model.into(),
                             ..Default::default()
                         },
                     ),
@@ -9242,6 +9259,30 @@ mod tests {
 
         assert_eq!(selected.calls.load(Ordering::SeqCst), 1);
         assert_eq!(default.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn gate_provider_resolution_is_model_id_only_when_provider_models_collide() {
+        let (_storage, state, run, default, selected) =
+            configured_event_gate_fixture_with_models("shared-model", "shared-model").await;
+
+        evaluate_run_gate(
+            &state,
+            run.id,
+            &GateRequest {
+                criteria: "wake on completion".into(),
+                model: Some("gate-alias".into()),
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .expect("gate verdict");
+
+        // Gate evaluation passes only the catalogue entry's provider-facing
+        // model ID to the shared provider resolver. Provider IDs are not part
+        // of this contract, so a collision retains configured provider order.
+        assert_eq!(default.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(selected.calls.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test(flavor = "multi_thread")]
