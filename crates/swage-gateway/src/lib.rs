@@ -72,6 +72,8 @@ pub mod secret;
 pub mod server;
 pub mod service;
 pub mod settings;
+mod shipped_skill_projection;
+mod shipped_skills;
 pub mod shutdown;
 pub mod skill;
 pub mod startup;
