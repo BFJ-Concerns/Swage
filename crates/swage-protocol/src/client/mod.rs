@@ -83,6 +83,7 @@ pub struct ClientSurface {
     provider_sign_in_state: provider_signin::ProviderSignInState,
     create_workflow_script_request: workflow::CreateWorkflowScriptRequest,
     update_workflow_script_request: workflow::UpdateWorkflowScriptRequest,
+    workflow_script_list_query: workflow::WorkflowScriptListQuery,
     workflow_script_list: workflow::WorkflowScriptListResponse,
     start_workflow_run_request: workflow::StartWorkflowRunRequest,
     start_inline_workflow_run_request: workflow::StartInlineWorkflowRunRequest,
