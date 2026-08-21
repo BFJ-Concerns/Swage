@@ -9133,13 +9133,19 @@ impl crate::tool::Tool for ContextCaptureTool {
 
 /// Create a storage with a session + thread and return (storage, session_id).
 async fn make_storage_with_session() -> (Arc<MockStorage>, Uuid) {
+    make_storage_with_session_metadata(None).await
+}
+
+async fn make_storage_with_session_metadata(
+    metadata: Option<serde_json::Value>,
+) -> (Arc<MockStorage>, Uuid) {
     let storage = Arc::new(MockStorage::new());
     let space = storage.get_or_create_default().await.expect("space");
     let session = storage
         .create_session(NewSession {
             space_id: space.id,
             agent_id: "gateway".to_string(),
-            metadata: None,
+            metadata,
             active_workspace_attachment_id: None,
         })
         .await
@@ -9155,6 +9161,58 @@ async fn make_storage_with_session() -> (Arc<MockStorage>, Uuid) {
     .await
     .expect("thread");
     (storage, session_id)
+}
+
+async fn capture_provider_effort_for_session(
+    metadata: Option<serde_json::Value>,
+) -> Option<swage_core::Effort> {
+    let chunks = vec![
+        StreamChunk::Delta {
+            content: "Hello".into(),
+        },
+        StreamChunk::Done {
+            finish_reason: None,
+        },
+    ];
+    let (provider, captured_request) = CapturingProvider::new(chunks);
+    let (storage, session_id) = make_storage_with_session_metadata(metadata).await;
+    let state = AppState::new(
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
+        Arc::new(provider) as Arc<dyn LlmProvider>,
+        swage_config::ResolvedConfig::default(),
+        crate::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+    );
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    process_turn(
+        &state,
+        session_id,
+        None,
+        "hi".into(),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .expect("turn ok");
+
+    captured_request
+        .lock()
+        .unwrap()
+        .take()
+        .expect("provider should receive the turn request")
+        .effort
+}
+
+#[tokio::test]
+async fn process_turn_forwards_persisted_session_effort_to_provider() {
+    assert_eq!(
+        capture_provider_effort_for_session(Some(serde_json::json!({"effort": "high"}))).await,
+        Some(swage_core::Effort::High)
+    );
+    assert_eq!(capture_provider_effort_for_session(None).await, None);
 }
 
 #[tokio::test]
