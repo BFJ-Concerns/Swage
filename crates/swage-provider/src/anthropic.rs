@@ -23,12 +23,12 @@ const ANTHROPIC_MESSAGES_PATH: &str = "/v1/messages?beta=true";
 
 /// Native-harness request material that Swage cannot reproduce honestly.
 ///
-/// This is provider audit data, not model-facing context. The categories are
-/// the admitted Swage-supplied class and the two irreproducible classes.
+/// This is provider audit data, not model-facing context. An OPEN entry is an
+/// unpermitted mismatch, not an admitted harness-parity divergence.
 const ANTHROPIC_REQUEST_DIVERGENCES: &[(&str, &str)] = &[
     (
-        "dynamic_vendor_context",
-        "thinking and output_config are selected by the vendor harness at request time",
+        "unresolved_product_defect",
+        "OPEN: native thinking and output_config request controls have no honest Swage mapping; this is not a permitted harness-parity divergence",
     ),
     (
         "dynamic_vendor_context",
@@ -60,8 +60,6 @@ struct MessagesRequest {
     stream: Option<bool>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<AnthropicTool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    metadata: Option<serde_json::Value>,
 }
 
 /// Wire representation of a tool definition for the Anthropic API.
@@ -608,7 +606,6 @@ impl AnthropicProvider {
             system: request.system_prompt.clone(),
             stream: if stream { Some(true) } else { None },
             tools,
-            metadata: None,
         }
     }
 
@@ -896,7 +893,8 @@ impl AnthropicProvider {
                     })
                 })
                 .collect(),
-            metadata: request.metadata.clone(),
+            // Completion metadata is Swage/provider-specific free-form data,
+            // not Anthropic's narrowly defined user_id metadata object.
         }
     }
 
@@ -943,7 +941,8 @@ impl AnthropicProvider {
             system,
             stream: if stream { Some(true) } else { None },
             tools,
-            metadata: request.metadata.clone(),
+            // Completion metadata is Swage/provider-specific free-form data,
+            // not Anthropic's narrowly defined user_id metadata object.
         }
     }
 }
@@ -1716,7 +1715,7 @@ mod tests {
         assert_eq!(snapshot["protocol"], "messages");
         assert_eq!(snapshot["path"], "/v1/messages?beta=true");
         assert_eq!(snapshot["stream"], true);
-        assert_eq!(snapshot["body"]["metadata"]["trace_id"], "caller-owned");
+        assert!(snapshot["body"].get("metadata").is_none());
         assert_eq!(snapshot["body"]["system"], "Be careful");
         assert_eq!(snapshot["body"]["messages"][0]["role"], "user");
         assert_eq!(snapshot["body"]["tools"][0]["name"], "ping");
@@ -1724,8 +1723,8 @@ mod tests {
             snapshot["divergences"],
             serde_json::json!([
                 [
-                    "dynamic_vendor_context",
-                    "thinking and output_config are selected by the vendor harness at request time"
+                    "unresolved_product_defect",
+                    "OPEN: native thinking and output_config request controls have no honest Swage mapping; this is not a permitted harness-parity divergence"
                 ],
                 [
                     "dynamic_vendor_context",
@@ -1744,7 +1743,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_completion_propagates_caller_metadata() {
+    fn tool_completion_does_not_guess_anthropic_metadata_mapping() {
         let provider = AnthropicProvider::new("key", "model");
         let request = ToolCompletionRequest {
             messages: vec![],
@@ -1760,7 +1759,7 @@ mod tests {
             serde_json::to_value(provider.build_request_for_tool_completion(&request, false))
                 .unwrap();
 
-        assert_eq!(body["metadata"]["session"], "swage-owned");
+        assert!(body.get("metadata").is_none());
     }
 
     #[test]
