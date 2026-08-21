@@ -12,6 +12,7 @@ pub mod provider_signin;
 pub mod recovery;
 pub mod schedule;
 pub mod settings;
+pub mod skill;
 pub mod space;
 pub mod turn;
 pub mod voice;
@@ -57,6 +58,7 @@ pub struct ClientSurface {
     send_message: turn::SendMessageRequest,
     message_response: turn::MessageResponse,
     settings: settings::SettingsResponse,
+    skills: skill::SkillListResponse,
     save_settings: settings::SaveSettingsRequest,
     model_discovery: settings::ModelDiscoveryResponse,
     restart_status: settings::RestartStatusResponse,

@@ -69,6 +69,9 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
         eprintln!("{problem}");
         std::process::exit(1);
     }
+    if let Err(error) = crate::shipped_skill_projection::regenerate(&root).await {
+        warn!(%error, "failed to regenerate shipped skill resources");
+    }
     let db_path = root.join("swage.db");
 
     // Step 4: Open persistent storage.

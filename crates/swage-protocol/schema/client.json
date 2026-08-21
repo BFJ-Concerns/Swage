@@ -112,6 +112,9 @@
     "settings": {
       "$ref": "#/$defs/SettingsResponse"
     },
+    "skills": {
+      "$ref": "#/$defs/SkillListResponse"
+    },
     "space_list": {
       "$ref": "#/$defs/SpaceListResponse"
     },
@@ -223,6 +226,7 @@
     "send_message",
     "message_response",
     "settings",
+    "skills",
     "save_settings",
     "model_discovery",
     "restart_status",
@@ -3927,6 +3931,70 @@
       "enum": [
         "browser",
         "device_code"
+      ]
+    },
+    "SkillItem": {
+      "type": "object",
+      "properties": {
+        "always_active": {
+          "type": "boolean"
+        },
+        "description": {
+          "type": "string"
+        },
+        "display_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "description": "Stable synthetic identifier for a shipped skill in this space.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "level": {
+          "description": "Resolved hierarchy level: `agent`, `space`, or `global`.",
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "shipped": {
+          "description": "True when the definition is compiled into Swage rather than authored.",
+          "type": "boolean"
+        },
+        "tools": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "name",
+        "description",
+        "level",
+        "tools",
+        "always_active",
+        "shipped"
+      ]
+    },
+    "SkillListResponse": {
+      "type": "object",
+      "properties": {
+        "skills": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SkillItem"
+          }
+        }
+      },
+      "required": [
+        "skills"
       ]
     },
     "SkipReason": {
