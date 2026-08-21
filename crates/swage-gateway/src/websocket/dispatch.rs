@@ -40,35 +40,18 @@ pub(crate) async fn discover_available_for_session(
         }
     };
 
-    // Fetch space to get the slug used in path construction.
-    let space = match state.space_store.get(session.space_id).await {
-        Ok(Some(p)) => p,
-        Err(e) => {
-            return Err(format!(
-                "skill discovery failed while loading space {} for session {session_id}: {e}",
-                session.space_id
-            ));
-        }
-        _ => {
-            return Err(format!(
-                "skill discovery failed: space {} for session {session_id} was not found",
-                session.space_id
-            ));
-        }
-    };
-
     let root = skill_root_for_session(session_id)
         .map(Ok)
         .unwrap_or_else(swage_config::discovery::resolve_root)
-        .map_err(|e| format!("skill discovery failed for session {session_id}: {e}"))?;
-
-    // Build hierarchy paths that mirror load_resolved_config_from.
-    let space_dir = root.join("spaces").join(&space.slug);
-    let agent_dir = space_dir.join("agents").join(&session.agent_id);
-
-    let (skills, _warnings) =
-        crate::skill::SkillManager::discover_available(&root, &space_dir, Some(&agent_dir));
-    Ok(skills)
+        .map_err(|error| format!("skill discovery failed for session {session_id}: {error}"))?;
+    crate::skill::discover_available_for_space(
+        state,
+        session.space_id,
+        Some(&session.agent_id),
+        &root,
+    )
+    .await
+    .map_err(|error| format!("skill discovery failed for session {session_id}: {error}"))
 }
 
 #[cfg(test)]
@@ -83,6 +66,48 @@ fn skill_root_for_session(session_id: Uuid) -> Option<std::path::PathBuf> {
 #[cfg(not(test))]
 fn skill_root_for_session(_session_id: Uuid) -> Option<std::path::PathBuf> {
     None
+}
+
+#[cfg(test)]
+pub(crate) struct SessionSkillRootGuard {
+    session_id: Uuid,
+    _root: Option<tempfile::TempDir>,
+}
+
+#[cfg(test)]
+impl SessionSkillRootGuard {
+    pub(crate) fn at(session_id: Uuid, root: &std::path::Path) -> Self {
+        TEST_SKILL_ROOTS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(session_id, root.to_path_buf());
+        Self {
+            session_id,
+            _root: None,
+        }
+    }
+
+    pub(crate) fn empty(session_id: Uuid) -> Self {
+        let root = tempfile::TempDir::new().expect("temp skill root");
+        TEST_SKILL_ROOTS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(session_id, root.path().to_path_buf());
+        Self {
+            session_id,
+            _root: Some(root),
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for SessionSkillRootGuard {
+    fn drop(&mut self) {
+        TEST_SKILL_ROOTS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(&self.session_id);
+    }
 }
 
 /// Parse and dispatch a raw text frame from the client.

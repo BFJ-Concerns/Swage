@@ -13,7 +13,7 @@ use crate::state::AppState;
 #[cfg(test)]
 use axum::http::StatusCode;
 #[cfg(test)]
-pub(crate) use dispatch::TEST_SKILL_ROOTS;
+pub(crate) use dispatch::SessionSkillRootGuard;
 pub(crate) use dispatch::discover_available_for_session;
 use dispatch::dispatch_client_message;
 #[cfg(test)]

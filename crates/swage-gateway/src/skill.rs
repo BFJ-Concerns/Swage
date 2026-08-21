@@ -85,6 +85,13 @@ use swage_context::tokeniser::Tokeniser;
 use swage_storage::SkillActivationStore;
 use uuid::Uuid;
 
+use crate::state::AppState;
+
+#[cfg(test)]
+static TEST_SPACE_SKILL_ROOTS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<Uuid, std::path::PathBuf>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
 // ─────────────────────────────────────────────────────────────────────────────
@@ -154,6 +161,93 @@ impl From<swage_core::StorageError> for SkillError {
 /// Stateless utility — all operations receive their dependencies as arguments.
 /// This makes the type trivially testable and avoids shared mutable state.
 pub struct SkillManager;
+
+/// Discover the effective skills for one space and optional agent beneath an
+/// already selected Swage root.
+pub(crate) async fn discover_available_for_space(
+    state: &AppState,
+    space_id: Uuid,
+    agent_id: Option<&str>,
+    root: &Path,
+) -> Result<Vec<SkillDefinition>, String> {
+    let space = state
+        .space_store
+        .get(space_id)
+        .await
+        .map_err(|error| format!("failed to load space {space_id}: {error}"))?
+        .ok_or_else(|| format!("space {space_id} was not found"))?;
+    let space_dir = root.join("spaces").join(space.slug);
+    let agent_dir = agent_id.map(|agent| space_dir.join("agents").join(agent));
+    Ok(SkillManager::discover_available(&root, &space_dir, agent_dir.as_deref()).0)
+}
+
+pub(crate) async fn discover_available_for_space_from_config(
+    state: &AppState,
+    space_id: Uuid,
+    agent_id: Option<&str>,
+) -> Result<Vec<SkillDefinition>, String> {
+    let root = skill_root_for_space(space_id)
+        .map(Ok)
+        .unwrap_or_else(swage_config::discovery::resolve_root)
+        .map_err(|error| error.to_string())?;
+    discover_available_for_space(state, space_id, agent_id, &root).await
+}
+
+#[cfg(test)]
+fn skill_root_for_space(space_id: Uuid) -> Option<std::path::PathBuf> {
+    TEST_SPACE_SKILL_ROOTS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .get(&space_id)
+        .cloned()
+}
+
+#[cfg(not(test))]
+fn skill_root_for_space(_space_id: Uuid) -> Option<std::path::PathBuf> {
+    None
+}
+
+#[cfg(test)]
+pub(crate) struct SpaceSkillRootGuard {
+    space_id: Uuid,
+    _root: Option<tempfile::TempDir>,
+}
+
+#[cfg(test)]
+impl SpaceSkillRootGuard {
+    pub(crate) fn at(space_id: Uuid, root: &Path) -> Self {
+        TEST_SPACE_SKILL_ROOTS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(space_id, root.to_path_buf());
+        Self {
+            space_id,
+            _root: None,
+        }
+    }
+
+    pub(crate) fn empty(space_id: Uuid) -> Self {
+        let root = tempfile::TempDir::new().expect("temp skill root");
+        TEST_SPACE_SKILL_ROOTS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(space_id, root.path().to_path_buf());
+        Self {
+            space_id,
+            _root: Some(root),
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for SpaceSkillRootGuard {
+    fn drop(&mut self) {
+        TEST_SPACE_SKILL_ROOTS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(&self.space_id);
+    }
+}
 
 impl SkillManager {
     /// Discover skills available to a conversation.
