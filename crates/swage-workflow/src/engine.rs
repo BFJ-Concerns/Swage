@@ -677,6 +677,9 @@ impl WorkflowEngine {
                                 max_attempts: merged.maxAttempts ?? 3,
                                 label: merged.label ?? null,
                                 session: merged.session ?? null,
+                                elements: merged.elements ?? null,
+                                variables: merged.variables ?? null,
+                                assembly: merged.assembly ?? null,
                             };
                         };
                         globalThis.agent = async (prompt, options = {}) => {
@@ -1202,6 +1205,44 @@ mod tests {
         assert_eq!(requests[1].model.as_deref(), Some("strong"));
         // An explicit `undefined` must fall back, not erase the default.
         assert_eq!(requests[1].agent, "worker");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn agent_calls_carry_call_scoped_context_composition_options() {
+        let host = Arc::new(SurfaceHost::new());
+        WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                r#"
+                await agent("inspect", {
+                    agent: "worker",
+                    elements: ["current-work", "constraints"],
+                    variables: { owner: "dispatch-owner" },
+                    assembly: "focused"
+                });
+                return null;
+                "#,
+                "null",
+                CancellationToken::new(),
+                Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                ScriptCapabilities::default(),
+            )
+            .await
+            .expect("composition options run");
+
+        let requests = host.agent_requests.lock().unwrap();
+        assert_eq!(
+            requests[0].elements.as_deref(),
+            Some(["current-work".to_string(), "constraints".to_string()].as_slice())
+        );
+        assert_eq!(
+            requests[0]
+                .variables
+                .as_ref()
+                .and_then(|values| values.get("owner"))
+                .map(String::as_str),
+            Some("dispatch-owner")
+        );
+        assert_eq!(requests[0].assembly.as_deref(), Some("focused"));
     }
 
     #[tokio::test(flavor = "current_thread")]

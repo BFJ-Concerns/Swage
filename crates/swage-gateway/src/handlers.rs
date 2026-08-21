@@ -1714,6 +1714,8 @@ async fn execute_external_delegate_message(
             target_agent_config.working_directory.display().to_string(),
             silent_ws_tx,
             crate::turn::effective_tool_permissions_record(&effective_target_resolved),
+            crate::turn::DispatchContextComposition::from_payload(&delegate_msg.payload)
+                .map_err(|error| ApiError::validation(error.to_string()))?,
         )),
         snapshot_recorder: Some(crate::turn::delegation_snapshot_recorder(
             state.storage.clone(),
@@ -2730,6 +2732,13 @@ mod tests {
             "---\ndescription: External specialist behaviour\n---\nUse the external specialist skill.\n",
         )
         .expect("write target skill");
+        let space_element = swage_home
+            .path()
+            .join("spaces/default/elements/current-work.md");
+        std::fs::create_dir_all(space_element.parent().unwrap())
+            .expect("create space element directory");
+        std::fs::write(&space_element, "Shared child grounding; task is {{task}}.")
+            .expect("write space context element");
         let config = swage_config::ResolvedConfig {
             instructions: "Use the external delegated specialist instructions.".to_string(),
             ..swage_config::ResolvedConfig::default()
@@ -2789,6 +2798,14 @@ mod tests {
             child_snapshot["elements"].is_array(),
             "external delegated assembly report should contain its element decisions"
         );
+        assert!(
+            child_snapshot["elements"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|element| element["name"] == "current-work"),
+            "external delegated assembly report should identify the space context element"
+        );
         let child_audit = storage
             .list_audit_events_by_session(child_sessions[0].id)
             .await
@@ -2828,6 +2845,10 @@ mod tests {
             request_text.contains("## Skills available in this session")
                 && request_text.contains("external-specialist — External specialist behaviour"),
             "external delegated provider request should include the target skill catalogue: {request_text}"
+        );
+        assert!(
+            request_text.contains("Shared child grounding; task is ⟦unset:task⟧."),
+            "external delegated provider request should include the rendered space context element: {request_text}"
         );
     }
 

@@ -325,7 +325,9 @@ async fn run_poll_loop(state: AppState, client: Arc<TelegramClient>, shutdown: C
                     failing = false;
                 }
                 backoff = Duration::from_secs(1);
-                if let Err(error) = ingest_updates(&state, &client, &bot_id, updates).await {
+                if let Err(error) =
+                    Box::pin(ingest_updates(&state, &client, &bot_id, updates)).await
+                {
                     warn!("failed to ingest telegram updates: {error}");
                 }
             }
@@ -1010,7 +1012,7 @@ mod tests {
             .await?
             .and_then(|value| value.parse::<i64>().ok());
         let updates = client.get_updates(cursor.map(|value| value + 1), 0).await?;
-        ingest_updates(state, client, &bot_id, updates).await
+        Box::pin(ingest_updates(state, client, &bot_id, updates)).await
     }
 
     async fn link_chat(
