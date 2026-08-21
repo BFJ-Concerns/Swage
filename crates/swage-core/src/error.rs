@@ -344,7 +344,7 @@ pub enum ToolError {
         /// Optional context to transfer to the delegate agent.
         context: Option<serde_json::Value>,
         /// Call-scoped inputs used to compose the child's context.
-        composition: crate::DispatchContextComposition,
+        composition: Box<crate::DispatchContextComposition>,
         /// Whether the parent turn should wait for the child result.
         completion_mode: DelegateCompletionMode,
     },
