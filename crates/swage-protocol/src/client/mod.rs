@@ -90,5 +90,4 @@ pub struct ClientSurface {
     workflow_entry_event: workflow::WorkflowEntryEvent,
     workflow_run_completed_event: workflow::WorkflowRunCompletedEvent,
     worker_isolation: workflow::WorkerIsolation,
-    agent_call_request: workflow::AgentCallRequest,
 }

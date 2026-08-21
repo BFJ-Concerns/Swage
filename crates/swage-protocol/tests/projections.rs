@@ -106,7 +106,6 @@ fn typescript_bindings_are_regenerated() {
     client::workflow::WorkflowRunCompletedEvent::export_all(&cfg)
         .expect("export workflow completed event");
     client::workflow::WorkerIsolation::export_all(&cfg).expect("export worker isolation");
-    client::workflow::AgentCallRequest::export_all(&cfg).expect("export agent call request");
     hosting::PresenceSnapshotResponse::export_all(&cfg).expect("export hosting presence");
     hosting::MachineHeartbeatRequest::export_all(&cfg).expect("export hosting heartbeat");
     hosting::ApprovalListResponse::export_all(&cfg).expect("export hosting approvals");

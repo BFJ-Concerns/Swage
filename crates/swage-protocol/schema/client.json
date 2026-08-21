@@ -4,9 +4,6 @@
   "description": "Anchor type for the client surface's schema document.\n\nEvery wire type on the surface is reachable from here, so a single\n`schema_for!` call produces one document with the full type graph in\n`$defs`. The struct itself never crosses the wire — it exists only so\nthe schema generator has a root to walk from.",
   "type": "object",
   "properties": {
-    "agent_call_request": {
-      "$ref": "#/$defs/AgentCallRequest"
-    },
     "attachment_list": {
       "$ref": "#/$defs/AttachmentListResponse"
     },
@@ -252,113 +249,9 @@
     "workflow_run_started_event",
     "workflow_entry_event",
     "workflow_run_completed_event",
-    "worker_isolation",
-    "agent_call_request"
+    "worker_isolation"
   ],
   "$defs": {
-    "AgentCallRequest": {
-      "description": "A journal-stable workflow child dispatch request.",
-      "type": "object",
-      "properties": {
-        "agent": {
-          "description": "Omission is load-bearing: journal argument hashes are computed over\nthe serialised request, so an unset selector must serialise to nothing.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "cwd": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "effort": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "isolation": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/WorkerIsolation"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "label": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "max_attempts": {
-          "type": "integer",
-          "format": "uint32",
-          "minimum": 0
-        },
-        "model": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "prompt": {
-          "type": "string"
-        },
-        "schema": true,
-        "session": {
-          "description": "Omission is load-bearing: a fresh call and a continuation must retain\ndistinct journal argument hashes.",
-          "anyOf": [
-            {
-              "$ref": "#/$defs/AgentSessionRef"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "task": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "timeout_ms": {
-          "type": [
-            "integer",
-            "null"
-          ],
-          "format": "uint64",
-          "minimum": 0
-        }
-      },
-      "required": [
-        "prompt",
-        "max_attempts"
-      ]
-    },
-    "AgentSessionRef": {
-      "description": "Opaque continuation token for a workflow worker session.",
-      "type": "object",
-      "properties": {
-        "session_id": {
-          "type": "string",
-          "format": "uuid"
-        },
-        "thread_id": {
-          "type": "string",
-          "format": "uuid"
-        }
-      },
-      "required": [
-        "session_id",
-        "thread_id"
-      ]
-    },
     "ApprovalDecisionScope": {
       "description": "How widely an approved decision should apply.",
       "type": "string",

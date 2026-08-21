@@ -11,11 +11,6 @@ pub struct ResolvedWorkerPlacement {
     pub can_write: bool,
 }
 
-/// An opaque continuation token naming a worker session a run already
-/// created. Scripts receive it on an `agentStart` handle after the call
-/// completes and pass it back whole via the `session` option; its fields are
-/// host business. The token's values come from journalled results, so a
-/// resumed run rebuilds identical tokens and replay stays deterministic.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AgentCallResult {
     pub output: Value,

@@ -256,7 +256,17 @@ mod tests {
 
     #[tokio::test]
     async fn delegate_tool_forwards_named_task_definition() {
-        let result=DelegateTool.execute(json!({"target_agent":"reviewer","task":"Review","task_definition":"strict-review"}),&MockToolContext::new("test-agent","session-1")).await.unwrap_err();
+        let result = DelegateTool
+            .execute(
+                json!({
+                    "target_agent": "reviewer",
+                    "task": "Review",
+                    "task_definition": "strict-review"
+                }),
+                &MockToolContext::new("test-agent", "session-1"),
+            )
+            .await
+            .unwrap_err();
         match result {
             ToolError::RequiresDelegation {
                 task_definition, ..
