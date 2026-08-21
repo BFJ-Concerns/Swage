@@ -2,6 +2,7 @@
 /** Behavioural coverage for the shell's conversation, operator, and settings surfaces. */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { flushSync, mount, unmount } from "svelte";
+import { createClassComponent } from "svelte/legacy";
 import AppLayout from "../components/AppLayout.svelte";
 import { parseRoute } from "../router";
 import type { ConversationStore } from "../stores/conversations";
@@ -65,13 +66,13 @@ function mockStreamingStore(): StreamingStore {
   };
 }
 
-function mockSpaceStore(hasCurrentSpace = true): SpaceStore {
+function mockSpaceStore(hasCurrentSpace = true, spaceId = "default"): SpaceStore {
   const space = {
-    id: "default",
-    name: "default",
+    id: spaceId,
+    name: spaceId,
     description: "",
-    is_default: true,
-    slug: "default",
+    is_default: spaceId === "default",
+    slug: spaceId,
     created_at: "",
   };
 
@@ -212,6 +213,40 @@ describe("AppLayout shell navigation", () => {
     (document.querySelector("button.new-btn") as HTMLButtonElement).click();
 
     expect(createConversation).toHaveBeenCalledWith(undefined, undefined, "researcher");
+  });
+
+  it("does not retain an agent when the selected space changes", () => {
+    const conversationStore = mockConversationStore();
+    const createConversation = vi.spyOn(conversationStore, "createConversation");
+    const layout = createClassComponent({
+      component: AppLayout,
+      target: document.body,
+      props: {
+        conversationStore,
+        connectionStore: mockConnectionStore(),
+        streamingStore: mockStreamingStore(),
+        spaceStore: mockSpaceStore(),
+        onRetry: () => {},
+        activeSurface: "conversation",
+        onSelectSurface: () => {},
+        agentDefinitions: [{
+          id: "space-one-agent", display_name: "Space one agent", description: "", instructions: "",
+          model_id: null, tool_permissions: null, skills: [], output_schema: null,
+          output_max_retries: null, is_builtin: false, source_scope: "space",
+        }],
+      },
+    });
+    const picker = document.querySelector('select[aria-label="Agent"]') as HTMLSelectElement;
+    picker.value = "space-one-agent";
+    picker.dispatchEvent(new Event("change", { bubbles: true }));
+    flushSync();
+
+    layout.$set({ spaceStore: mockSpaceStore(true, "second-space") });
+    flushSync();
+    (document.querySelector("button.new-btn") as HTMLButtonElement).click();
+
+    expect(createConversation).toHaveBeenCalledWith(undefined, undefined, null);
+    layout.$destroy();
   });
 
   it("passes the selected agent when the first message creates a conversation", () => {

@@ -12,7 +12,7 @@
  *   - Each tool call produces a .tool-call element
  *   - Multiple tool calls on one message render in order
  *   - Messages without tool_calls do not produce .tool-call elements
- *   - Live activeToolCalls render after the streaming content block
+ *   - Live activeToolCalls render before the streaming content block
  *   - Live tool calls without result have isLive=true (pulse indicator)
  *   - Live tool calls with a result have isLive=false (no pulse)
  */
@@ -387,6 +387,28 @@ describe("historical tool calls from committed messages", () => {
 // ---------------------------------------------------------------------------
 
 describe("live tool calls from streaming store", () => {
+  it("renders live tool calls before the streamed response", () => {
+    const store = makeConversationStore([]);
+    const streaming = {
+      ...makeStreamingStore([makeToolCall({ call_id: "live-1" })], true),
+      get streamedContent() {
+        return "Answer after the tool";
+      },
+    };
+
+    component = mount(MessageDisplay, {
+      target: document.body,
+      props: { store, streamingStore: streaming },
+    });
+
+    const toolCalls = document.querySelector(".tool-calls-live");
+    const response = document.querySelector(".message.streaming");
+    expect(toolCalls).not.toBeNull();
+    expect(response).not.toBeNull();
+    expect(toolCalls!.compareDocumentPosition(response!) & Node.DOCUMENT_POSITION_FOLLOWING)
+      .not.toBe(0);
+  });
+
   it("renders a .tool-call element for each active tool call", () => {
     const store = makeConversationStore([]);
     const streaming = makeStreamingStore(
