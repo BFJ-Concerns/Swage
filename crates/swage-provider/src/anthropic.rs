@@ -52,6 +52,8 @@ const ANTHROPIC_REQUEST_DIVERGENCES: &[(&str, &str)] = &[
 #[derive(Serialize)]
 struct MessagesRequest {
     model: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    output_config: Option<AnthropicOutputConfig>,
     messages: Vec<AnthropicMessage>,
     max_tokens: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -60,6 +62,11 @@ struct MessagesRequest {
     stream: Option<bool>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<AnthropicTool>,
+}
+
+#[derive(Serialize)]
+struct AnthropicOutputConfig {
+    effort: String,
 }
 
 /// Wire representation of a tool definition for the Anthropic API.
@@ -601,6 +608,8 @@ impl AnthropicProvider {
 
         MessagesRequest {
             model: self.config.model.clone(),
+            // The legacy LlmRequest surface has no per-call effort option.
+            output_config: None,
             messages,
             max_tokens: request.max_tokens.unwrap_or(4096),
             system: request.system_prompt.clone(),
@@ -871,6 +880,10 @@ impl AnthropicProvider {
                 .model
                 .clone()
                 .unwrap_or_else(|| self.config.model.clone()),
+            output_config: request
+                .effort
+                .clone()
+                .map(|effort| AnthropicOutputConfig { effort }),
             messages,
             max_tokens: request.max_tokens.unwrap_or(4096),
             system,
@@ -936,6 +949,8 @@ impl AnthropicProvider {
                 .model
                 .clone()
                 .unwrap_or_else(|| self.config.model.clone()),
+            // ToolCompletionRequest has no per-call effort surface.
+            output_config: None,
             messages,
             max_tokens: request.max_tokens.unwrap_or(4096),
             system,
@@ -1476,6 +1491,7 @@ mod tests {
         let provider = AnthropicProvider::new("key", "model");
         let declaration = "## Output Requirements\n\nReturn ONLY schema-compliant JSON.";
         let request = CompletionRequest {
+            effort: None,
             messages: vec![
                 ChatMessage::new(Role::User, "Return JSON"),
                 ChatMessage::new(Role::System, declaration),
@@ -1494,6 +1510,42 @@ mod tests {
         assert_eq!(body["system"], declaration);
         assert_eq!(body["messages"].as_array().unwrap().len(), 1);
         assert_eq!(body["messages"][0]["role"], "user");
+    }
+
+    #[test]
+    fn completion_effort_maps_to_anthropic_output_config() {
+        let provider = AnthropicProvider::new("key", "model");
+        let request = CompletionRequest {
+            effort: Some("medium".into()),
+            messages: vec![ChatMessage::new(Role::User, "Think carefully")],
+            model: None,
+            max_tokens: None,
+            temperature: None,
+            stop_sequences: None,
+            metadata: None,
+            tool_definitions: vec![],
+        };
+        let body =
+            serde_json::to_value(provider.build_request_for_completion(&request, false)).unwrap();
+        assert_eq!(body["output_config"]["effort"], "medium");
+    }
+
+    #[test]
+    fn completion_without_effort_omits_anthropic_output_config() {
+        let provider = AnthropicProvider::new("key", "model");
+        let request = CompletionRequest {
+            effort: None,
+            messages: vec![ChatMessage::new(Role::User, "Think carefully")],
+            model: None,
+            max_tokens: None,
+            temperature: None,
+            stop_sequences: None,
+            metadata: None,
+            tool_definitions: vec![],
+        };
+        let body =
+            serde_json::to_value(provider.build_request_for_completion(&request, false)).unwrap();
+        assert!(!body.as_object().unwrap().contains_key("output_config"));
     }
 
     // --- tool definitions in wire request ---
@@ -1688,6 +1740,7 @@ mod tests {
             "https://api.anthropic.com",
         ));
         let request = CompletionRequest {
+            effort: None,
             messages: vec![
                 ChatMessage::new(Role::System, "Be careful"),
                 ChatMessage::new(Role::User, "Use a tool"),
@@ -2086,6 +2139,7 @@ mod tests {
         use swage_core::{ChatMessage, CompletionRequest, Role};
         let provider = AnthropicProvider::new("key", "claude-3-opus");
         let request = CompletionRequest {
+            effort: None,
             messages: vec![
                 ChatMessage::new(Role::System, "be helpful"),
                 ChatMessage::new(Role::User, "hello"),
@@ -2108,6 +2162,7 @@ mod tests {
         use swage_core::CompletionRequest;
         let provider = AnthropicProvider::new("key", "claude-3-opus");
         let request = CompletionRequest {
+            effort: None,
             messages: vec![],
             model: None,
             max_tokens: None,
@@ -2125,6 +2180,7 @@ mod tests {
         use swage_core::CompletionRequest;
         let provider = AnthropicProvider::new("key", "claude-3-opus");
         let request = CompletionRequest {
+            effort: None,
             messages: vec![],
             model: Some("claude-3-haiku".into()),
             max_tokens: None,
@@ -2142,6 +2198,7 @@ mod tests {
         use swage_core::CompletionRequest;
         let provider = AnthropicProvider::new("key", "model");
         let request = CompletionRequest {
+            effort: None,
             messages: vec![],
             model: None,
             max_tokens: None,

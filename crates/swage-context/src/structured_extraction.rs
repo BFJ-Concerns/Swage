@@ -110,6 +110,7 @@ impl StructuredExtractionCompactor {
         let prompt = build_extraction_prompt(messages);
 
         let request = CompletionRequest {
+            effort: None,
             messages: vec![ChatMessage::new(Role::System, &prompt)],
             model: None,
             max_tokens: Some(budget as u32),

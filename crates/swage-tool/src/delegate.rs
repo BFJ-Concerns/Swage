@@ -48,6 +48,10 @@ impl Tool for DelegateTool {
                     "type": "string",
                     "description": "Task description for the delegate agent."
                 },
+                "task_definition": {
+                    "type": "string",
+                    "description": "Optional named task definition to apply to the child."
+                },
                 "context": {
                     "type": "array",
                     "description": "Optional context messages to transfer to the delegate.",
@@ -60,6 +64,15 @@ impl Tool for DelegateTool {
                     "enum": ["wait", "detach"],
                     "default": "wait",
                     "description": "Choose \"wait\" when this turn needs the delegate's result before continuing. Choose \"detach\" for independent work; the tool returns a durable delegate_message_id and child session/thread references while the delegate continues."
+                },
+                "cwd": {
+                    "type": "string",
+                    "description": "Working directory for the delegated worker."
+                },
+                "isolation": {
+                    "type": "string",
+                    "enum": ["worktree"],
+                    "description": "Ask the runtime to provision an isolated git worktree rooted at cwd."
                 },
                 "elements": {
                     "type": "array",
@@ -107,6 +120,24 @@ impl Tool for DelegateTool {
             .to_string();
 
         let context = params.get("context").cloned();
+        let task_definition = params
+            .get("task_definition")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let cwd = params
+            .get("cwd")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let isolation = match params.get("isolation").and_then(Value::as_str) {
+            None => None,
+            Some("worktree") => Some(swage_protocol::client::workflow::WorkerIsolation::Worktree),
+            Some(other) => {
+                return Err(ToolError::InvalidParameters {
+                    name: DELEGATE_TOOL_NAME.to_string(),
+                    message: format!("isolation must be \"worktree\", got {other:?}"),
+                });
+            }
+        };
         let composition =
             swage_core::DispatchContextComposition::from_payload(&params).map_err(|error| {
                 ToolError::InvalidParameters {
@@ -118,12 +149,17 @@ impl Tool for DelegateTool {
 
         // Signal the agent turn loop to handle delegation.
         Err(ToolError::RequiresDelegation {
-            name: DELEGATE_TOOL_NAME.to_string(),
-            target_agent_id,
-            task,
-            context,
-            composition: Box::new(composition),
-            completion_mode,
+            request: Box::new(swage_core::DelegationRequest {
+                name: DELEGATE_TOOL_NAME.to_string(),
+                target_agent_id,
+                task,
+                task_definition,
+                context,
+                cwd,
+                isolation,
+                composition: Box::new(composition),
+                completion_mode,
+            }),
         })
     }
 }
@@ -161,17 +197,11 @@ mod tests {
         assert!(result.is_err());
 
         match result.unwrap_err() {
-            ToolError::RequiresDelegation {
-                target_agent_id,
-                task,
-                context,
-                completion_mode,
-                ..
-            } => {
-                assert_eq!(target_agent_id, "reviewer");
-                assert_eq!(task, "Review this code for correctness");
-                assert!(context.is_none());
-                assert_eq!(completion_mode, DelegateCompletionMode::Wait);
+            ToolError::RequiresDelegation { request } => {
+                assert_eq!(request.target_agent_id, "reviewer");
+                assert_eq!(request.task, "Review this code for correctness");
+                assert!(request.context.is_none());
+                assert_eq!(request.completion_mode, DelegateCompletionMode::Wait);
             }
             other => panic!("expected RequiresDelegation, got: {other:?}"),
         }
@@ -190,10 +220,33 @@ mod tests {
         let result = tool.execute(params, &ctx).await;
 
         match result.unwrap_err() {
-            ToolError::RequiresDelegation {
-                completion_mode, ..
-            } => {
-                assert_eq!(completion_mode, DelegateCompletionMode::Detach);
+            ToolError::RequiresDelegation { request } => {
+                assert_eq!(request.completion_mode, DelegateCompletionMode::Detach);
+            }
+            other => panic!("expected RequiresDelegation, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn delegate_tool_forwards_cwd_and_worktree_isolation() {
+        let result = DelegateTool
+            .execute(
+                json!({
+                    "target_agent": "reviewer",
+                    "task": "Review independently",
+                    "cwd": "/repo",
+                    "isolation": "worktree"
+                }),
+                &MockToolContext::new("test-agent", "session-1"),
+            )
+            .await;
+        match result.unwrap_err() {
+            ToolError::RequiresDelegation { request } => {
+                assert_eq!(request.cwd.as_deref(), Some("/repo"));
+                assert_eq!(
+                    request.isolation,
+                    Some(swage_protocol::client::workflow::WorkerIsolation::Worktree)
+                );
             }
             other => panic!("expected RequiresDelegation, got: {other:?}"),
         }
@@ -217,16 +270,20 @@ mod tests {
             .await;
 
         match result.unwrap_err() {
-            ToolError::RequiresDelegation { composition, .. } => {
-                assert_eq!(composition.elements, Some(vec!["current-work".into()]));
+            ToolError::RequiresDelegation { request } => {
                 assert_eq!(
-                    composition
+                    request.composition.elements,
+                    Some(vec!["current-work".into()])
+                );
+                assert_eq!(
+                    request
+                        .composition
                         .variables
                         .as_ref()
                         .and_then(|values| values.get("owner")),
                     Some(&"delegate-owner".to_string())
                 );
-                assert_eq!(composition.assembly.as_deref(), Some("focused"));
+                assert_eq!(request.composition.assembly.as_deref(), Some("focused"));
             }
             other => panic!("expected RequiresDelegation, got: {other:?}"),
         }
@@ -266,10 +323,31 @@ mod tests {
 
         let result = tool.execute(params, &ctx).await;
         match result.unwrap_err() {
-            ToolError::RequiresDelegation { context, .. } => {
-                assert!(context.is_some());
+            ToolError::RequiresDelegation { request } => {
+                assert!(request.context.is_some());
             }
             other => panic!("expected RequiresDelegation, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn delegate_tool_forwards_named_task_definition() {
+        let result = DelegateTool
+            .execute(
+                json!({
+                    "target_agent": "reviewer",
+                    "task": "Review",
+                    "task_definition": "strict-review"
+                }),
+                &MockToolContext::new("test-agent", "session-1"),
+            )
+            .await
+            .unwrap_err();
+        match result {
+            ToolError::RequiresDelegation { request } => {
+                assert_eq!(request.task_definition.as_deref(), Some("strict-review"))
+            }
+            other => panic!("expected delegation, got {other:?}"),
         }
     }
 

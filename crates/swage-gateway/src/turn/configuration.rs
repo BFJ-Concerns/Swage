@@ -8,6 +8,13 @@ use super::{
 /// re-resolved at every turn, so nested dispatch cannot shed an inherited
 /// bound and suspension cannot freeze authority.
 pub(crate) const DISPATCH_BOUND_METADATA_KEY: &str = "dispatch_bound_agent_ids";
+pub(crate) const DISPATCH_BOUND_TASK_METADATA_KEY: &str = "dispatch_bound_task_definition_ids";
+pub(crate) const WORKER_PLACEMENT_CWD_METADATA_KEY: &str = "worker_placement_cwd";
+pub(crate) const WORKER_PLACEMENT_CAN_WRITE_METADATA_KEY: &str = "worker_placement_can_write";
+pub(crate) const WORKER_PLACEMENT_AUTHORITY_PATH_METADATA_KEY: &str =
+    "worker_placement_authority_path";
+pub(crate) const WORKER_PLACEMENT_AUTHORITY_CONTEXT_METADATA_KEY: &str =
+    "worker_placement_authority_context_id";
 
 pub(crate) fn dispatch_bound_agent_ids(
     metadata: Option<&serde_json::Value>,
@@ -41,6 +48,39 @@ pub(crate) fn dispatch_bound_metadata(agent_ids: &[String]) -> Option<serde_json
     })
 }
 
+pub(crate) fn dispatch_bound_task_definition_ids(
+    metadata: Option<&serde_json::Value>,
+) -> Result<Vec<String>, GatewayError> {
+    let Some(value) = metadata.and_then(|metadata| metadata.get(DISPATCH_BOUND_TASK_METADATA_KEY))
+    else {
+        return Ok(Vec::new());
+    };
+    let values = value.as_array().ok_or_else(|| {
+        GatewayError::ConfigError(format!(
+            "session metadata field {DISPATCH_BOUND_TASK_METADATA_KEY:?} must be an array"
+        ))
+    })?;
+    values
+        .iter()
+        .map(|value| {
+            value.as_str().map(str::to_string).ok_or_else(|| {
+                GatewayError::ConfigError(format!(
+                    "session metadata field {DISPATCH_BOUND_TASK_METADATA_KEY:?} must contain only task definition ids"
+                ))
+            })
+        })
+        .collect()
+}
+
+pub(crate) fn add_dispatch_bound_task_definition_ids(
+    metadata: &mut serde_json::Value,
+    task_definition_ids: &[String],
+) {
+    if !task_definition_ids.is_empty() {
+        metadata[DISPATCH_BOUND_TASK_METADATA_KEY] = serde_json::json!(task_definition_ids);
+    }
+}
+
 pub(crate) async fn dispatch_bound_agent_ids_for_turn(
     state: &AppState,
     turn_id: Uuid,
@@ -69,6 +109,49 @@ pub(crate) async fn dispatch_bound_agent_ids_for_turn(
             ))
         })?;
     dispatch_bound_agent_ids(session.metadata.as_ref())
+}
+
+/// Return every task permission overlay that bounds a child dispatched by
+/// this turn. The sender's own task joins the lineage inherited from its
+/// dispatchers; definitions themselves remain live and are resolved at the
+/// descendant's next start.
+pub(crate) async fn dispatch_bound_task_definition_ids_for_turn(
+    state: &AppState,
+    turn_id: Uuid,
+) -> Result<Vec<String>, GatewayError> {
+    let turn = state.storage.get_turn(turn_id).await?.ok_or_else(|| {
+        GatewayError::ConfigError(format!(
+            "cannot resolve dispatch bounds: sender turn {turn_id} was not found"
+        ))
+    })?;
+    let thread = swage_storage::store::ThreadStore::get(state.storage.as_ref(), turn.thread_id)
+        .await?
+        .ok_or_else(|| {
+            GatewayError::ConfigError(format!(
+                "cannot resolve dispatch bounds: sender thread {} was not found",
+                turn.thread_id
+            ))
+        })?;
+    let session = state
+        .storage
+        .get_session(thread.session_id)
+        .await?
+        .ok_or_else(|| {
+            GatewayError::ConfigError(format!(
+                "cannot resolve dispatch bounds: sender session {} was not found",
+                thread.session_id
+            ))
+        })?;
+    let mut task_definition_ids = dispatch_bound_task_definition_ids(session.metadata.as_ref())?;
+    if let Some(task_definition_id) = session
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("task_definition"))
+        .and_then(serde_json::Value::as_str)
+    {
+        task_definition_ids.push(task_definition_id.to_string());
+    }
+    Ok(task_definition_ids)
 }
 
 pub(crate) async fn apply_dispatch_bounds(
@@ -100,6 +183,40 @@ pub(crate) async fn apply_dispatch_bounds(
             }
         };
         config = apply_dispatch_bound(config, &bound);
+    }
+    Ok(config)
+}
+
+pub(crate) async fn apply_dispatch_task_bounds(
+    state: &AppState,
+    mut config: swage_config::ResolvedConfig,
+    bound_task_definition_ids: &[String],
+    subject: &str,
+) -> Result<swage_config::ResolvedConfig, GatewayError> {
+    for task_definition_id in bound_task_definition_ids {
+        let definition = crate::service::resolve_task_definition(
+            state.storage.as_ref(),
+            task_definition_id,
+        )
+        .await
+        .map_err(|error| {
+            GatewayError::ConfigError(format!(
+                "failed to resolve dispatch task bound {task_definition_id:?} for {subject}: {error}"
+            ))
+        })?;
+        if let Some(value) = definition.tool_permissions {
+            let permissions = serde_json::from_value::<
+                swage_config::model::ToolPermissionConfig,
+            >(value)
+            .map_err(|error| {
+                GatewayError::ConfigError(format!(
+                    "dispatch task bound {task_definition_id:?} for {subject} has invalid permissions: {error}"
+                ))
+            })?;
+            let mut bound = swage_config::ResolvedConfig::default();
+            bound.tools.permissions = permissions;
+            config = apply_dispatch_bound(config, &bound);
+        }
     }
     Ok(config)
 }
@@ -201,7 +318,11 @@ pub(super) fn append_approved_location_paths(
     allowed_paths: &mut Vec<PathBuf>,
     grants: &std::collections::HashSet<crate::state::ApprovalGrantKey>,
     space_id: Uuid,
+    session_metadata: Option<&serde_json::Value>,
 ) {
+    if worker_placement_metadata_present(session_metadata) {
+        return;
+    }
     for grant in grants
         .iter()
         .filter(|grant| grant.kind == swage_storage::model::ApprovalKind::Location)
@@ -212,6 +333,23 @@ pub(super) fn append_approved_location_paths(
             allowed_paths.push(path);
         }
     }
+}
+
+pub(crate) fn worker_placement_metadata_present(
+    session_metadata: Option<&serde_json::Value>,
+) -> bool {
+    session_metadata.is_some_and(|metadata| {
+        metadata.get(WORKER_PLACEMENT_CWD_METADATA_KEY).is_some()
+            || metadata
+                .get(WORKER_PLACEMENT_CAN_WRITE_METADATA_KEY)
+                .is_some()
+            || metadata
+                .get(WORKER_PLACEMENT_AUTHORITY_PATH_METADATA_KEY)
+                .is_some()
+            || metadata
+                .get(WORKER_PLACEMENT_AUTHORITY_CONTEXT_METADATA_KEY)
+                .is_some()
+    })
 }
 
 pub(crate) fn load_session_config(
@@ -314,6 +452,53 @@ pub(crate) fn apply_agent_definition(
     }
 
     config
+}
+
+/// Apply a resolved task definition as a final, narrowing child overlay.
+pub(crate) fn apply_task_definition(
+    mut config: swage_config::ResolvedConfig,
+    definition: &swage_storage::TaskDefinition,
+) -> Result<swage_config::ResolvedConfig, GatewayError> {
+    if !definition.instructions.trim().is_empty() {
+        config.instructions = if config.instructions.is_empty() {
+            definition.instructions.clone()
+        } else {
+            format!("{}\n\n{}", config.instructions, definition.instructions)
+        };
+    }
+    if let Some(model) = definition
+        .model_id
+        .as_deref()
+        .filter(|v| !v.trim().is_empty())
+    {
+        if !config.models.entries.contains_key(model) {
+            return Err(GatewayError::ValidationError(format!(
+                "task definition '{}' prefers unconfigured model '{model}'",
+                definition.id
+            )));
+        }
+        config.models.default = model.to_owned();
+    }
+    if let Some(value) = &definition.tool_permissions {
+        let permissions =
+            serde_json::from_value::<swage_config::model::ToolPermissionConfig>(value.clone())
+                .map_err(|e| {
+                    GatewayError::ValidationError(format!(
+                        "task definition '{}' has invalid permissions: {e}",
+                        definition.id
+                    ))
+                })?;
+        let mut bound = swage_config::ResolvedConfig::default();
+        bound.tools.permissions = permissions;
+        config = apply_dispatch_bound(config, &bound);
+    }
+    if let Some(schema) = &definition.output_schema {
+        config.output.schema = Some(schema.clone());
+    }
+    if let Some(retries) = definition.output_max_retries {
+        config.output.max_retries = retries;
+    }
+    Ok(config)
 }
 
 /// Intersection, never expansion: the effective allow is what both the
@@ -683,6 +868,35 @@ mod tests {
                 .contains(&"browser_navigate".to_string()),
             "overlay denies are added"
         );
+    }
+
+    #[test]
+    fn task_definition_expands_bundles_and_carries_approval_without_expanding() {
+        let mut config = swage_config::ResolvedConfig::default();
+        config.tools.permissions.allow = vec!["file_read".into(), "shell".into()];
+        let definition = swage_storage::TaskDefinition {
+            id: "inspect".into(),
+            instructions: "Inspect only.".into(),
+            model_id: None,
+            tool_permissions: Some(
+                serde_json::json!({"allow":["readers"],"deny":[],"bundles":{"readers":["file_read","web_search"]},"require_approval":["readers"]}),
+            ),
+            output_schema: Some(serde_json::json!({"type":"object"})),
+            output_max_retries: Some(4),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        let applied = apply_task_definition(config, &definition).unwrap();
+        assert_eq!(applied.tools.permissions.allow, vec!["file_read"]);
+        assert_eq!(
+            applied.tools.permissions.require_approval,
+            vec![swage_config::model::RequireApprovalEntry::Simple(
+                "file_read".into()
+            )]
+        );
+        assert_eq!(applied.output.schema, definition.output_schema);
+        assert_eq!(applied.output.max_retries, 4);
+        assert!(applied.instructions.ends_with("Inspect only."));
     }
 
     #[test]

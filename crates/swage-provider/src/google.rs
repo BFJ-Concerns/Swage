@@ -873,6 +873,7 @@ mod tests {
             "https://generativelanguage.googleapis.com",
         ));
         let request = CompletionRequest {
+            effort: None,
             messages: vec![
                 ChatMessage::new(Role::System, "Be helpful"),
                 ChatMessage::new(Role::User, "Hello"),
@@ -901,6 +902,7 @@ mod tests {
             "https://generativelanguage.googleapis.com",
         ));
         let request = CompletionRequest {
+            effort: None,
             messages: vec![
                 ChatMessage::new(Role::System, "Be helpful"),
                 ChatMessage::new(Role::User, "Use a tool"),

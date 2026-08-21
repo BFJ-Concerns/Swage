@@ -20,6 +20,7 @@ pub mod run_event;
 pub mod schedule;
 pub mod session_variable;
 pub mod shell;
+pub mod task_definition;
 pub mod tool_result_read;
 pub mod url_fetch;
 pub mod web_search;

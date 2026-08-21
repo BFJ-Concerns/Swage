@@ -10,7 +10,8 @@ use sha2::{Digest, Sha256};
 pub use engine::{EngineLimits, ScriptCapabilities, WorkflowEngine, WorkflowEngineError};
 pub use host::{
     AgentCallRequest, AgentCallResult, AgentSessionRef, AwaitEventRequest, EffectPayload,
-    EffectReceipt, GateRequest, RunEventPost, WorkflowCallRequest, WorkflowHost,
+    EffectReceipt, GateRequest, ResolvedWorkerPlacement, RunEventPost, WorkflowCallRequest,
+    WorkflowHost,
 };
 pub use model::EffectKind;
 pub use recovery::{EffectRecoveryHost, recover_started_effect};

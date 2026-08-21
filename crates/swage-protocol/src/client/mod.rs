@@ -95,4 +95,5 @@ pub struct ClientSurface {
     workflow_run_started_event: workflow::WorkflowRunStartedEvent,
     workflow_entry_event: workflow::WorkflowEntryEvent,
     workflow_run_completed_event: workflow::WorkflowRunCompletedEvent,
+    worker_isolation: workflow::WorkerIsolation,
 }

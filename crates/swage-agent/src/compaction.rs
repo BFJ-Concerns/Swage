@@ -124,6 +124,7 @@ async fn try_summarise(messages: Vec<ChatMessage>, provider: &dyn LlmProvider) -
         .join("\n");
 
     let summarise_request = CompletionRequest {
+        effort: None,
         messages: vec![ChatMessage::new(
             Role::User,
             format!(
