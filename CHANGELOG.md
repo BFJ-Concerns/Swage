@@ -36,6 +36,7 @@ All notable changes to Swage are documented in this file.
 - Generated TypeScript turn-poll responses now expose token counts as numbers rather than bigints.
 - Fresh-session schedules created from Settings now use the currently selected space.
 - Agent definition details now show the configured maximum output retries.
+- Switching spaces no longer carries an unavailable agent into a new conversation.
 - Streamed tool calls now remain attached to their assistant turn after completion and appear before the response both immediately and after reloading conversation history.
 
 ## 0.2.0 — 2026-08-13
