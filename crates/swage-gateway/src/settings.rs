@@ -394,7 +394,7 @@ pub async fn discover_models(
         None => (provider_for_discovery(state, &provider_id).await?, None),
     };
 
-    // Last-resort catalogues refreshed from provider documentation on 2026-08-21.
+    // Last-resort catalogues current for this fixes batch as of 2026-08-21.
     let mut models = match provider.protocol {
         swage_config::Protocol::OpenRouter => discover_openrouter_models().await?,
         swage_config::Protocol::OpenAi => {
