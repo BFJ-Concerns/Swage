@@ -83,6 +83,7 @@ pub async fn load_settings(state: &AppState) -> Result<SettingsResponse, ApiErro
                     aliases: model.aliases.clone(),
                     context_window: model.context_window,
                     generation_preset: model.generation_preset.clone(),
+                    default_effort: model.default_effort,
                     capabilities: model.capabilities.clone(),
                 },
             ))
@@ -113,6 +114,9 @@ pub async fn save_settings(
     request: SaveSettingsRequest,
 ) -> Result<SettingsResponse, ApiError> {
     validate_settings_request(&request)?;
+    let prior_models = serde_json::to_value(&state.active_config().models).map_err(|error| {
+        ApiError::validation(format!("failed to snapshot model settings: {error}"))
+    })?;
     let SaveSettingsRequest {
         default_provider,
         providers: requested_providers,
@@ -161,6 +165,7 @@ pub async fn save_settings(
                     aliases: model.aliases.clone(),
                     context_window: model.context_window,
                     generation_preset: model.generation_preset.clone(),
+                    default_effort: model.default_effort,
                     capabilities: model.capabilities.clone(),
                 },
             ))
@@ -227,6 +232,7 @@ pub async fn save_settings(
                     aliases: model.aliases,
                     context_window: model.context_window,
                     generation_preset: model.generation_preset,
+                    default_effort: model.default_effort,
                     capabilities: model.capabilities,
                 },
             ))
@@ -250,7 +256,25 @@ pub async fn save_settings(
     let provider = crate::startup::create_provider(&runtime_config, &state.secret_manager).await;
     let tool_dispatcher =
         crate::startup::build_tool_dispatcher(&runtime_config, state.storage.clone());
+    let new_models = serde_json::to_value(&runtime_config.models).map_err(|error| {
+        ApiError::validation(format!("failed to snapshot model settings: {error}"))
+    })?;
     state.replace_runtime(runtime_config, provider, tool_dispatcher);
+    crate::config_change::record_config_change(
+        state,
+        crate::config_change::ConfigChange {
+            entity_kind: "model_catalog",
+            entity_id: "global",
+            action: "save_model_settings",
+            source: "operator_http",
+            session_id: None,
+            summary: "saved model settings",
+            prior_state: Some(prior_models),
+            new_state: Some(new_models),
+        },
+    )
+    .await
+    .map_err(ApiError::from)?;
 
     load_settings(state).await
 }
@@ -1280,6 +1304,7 @@ mod tests {
                     aliases: vec![],
                     context_window: Some(4096),
                     generation_preset: Some("quick".to_string()),
+                    default_effort: Some(swage_protocol::client::settings::Effort::High),
                     capabilities: swage_protocol::client::settings::ModelCapabilitiesConfig {
                         reasoning_replay: true,
                     },
@@ -1335,6 +1360,18 @@ mod tests {
         assert_eq!(state.active_config().context.timeout, 7);
         assert_eq!(state.active_config().tools.permissions.deny, vec!["shell"]);
         assert!(!state.restart_required());
+        let events = state.storage.list_audit_events().await.unwrap();
+        let changes: Vec<_> = events
+            .iter()
+            .filter(|event| event.event_kind == "configuration_change")
+            .collect();
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].entity_kind, "model_catalog");
+        assert_eq!(
+            changes[0].metadata["new_state"]["entries"]["local:fast"]["default_effort"],
+            "high"
+        );
+        assert!(changes[0].metadata["prior_state"].is_object());
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1420,6 +1457,7 @@ mod tests {
                     aliases: vec![],
                     context_window: None,
                     generation_preset: None,
+                    default_effort: None,
                     capabilities:
                         swage_protocol::client::settings::ModelCapabilitiesConfig::default(),
                 },
@@ -1534,6 +1572,7 @@ mod tests {
                     aliases: vec![],
                     context_window: None,
                     generation_preset: None,
+                    default_effort: None,
                     capabilities:
                         swage_protocol::client::settings::ModelCapabilitiesConfig::default(),
                 },

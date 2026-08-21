@@ -1190,6 +1190,16 @@
             "null"
           ]
         },
+        "effort": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Effort"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "selected_model_id": {
           "type": [
             "string",
@@ -1495,6 +1505,15 @@
       "required": [
         "secs",
         "nanos"
+      ]
+    },
+    "Effort": {
+      "type": "string",
+      "enum": [
+        "low",
+        "medium",
+        "high",
+        "max"
       ]
     },
     "ElementReport": {
@@ -1930,6 +1949,16 @@
           ],
           "format": "uint32",
           "minimum": 0
+        },
+        "default_effort": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Effort"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "generation_preset": {
           "type": [

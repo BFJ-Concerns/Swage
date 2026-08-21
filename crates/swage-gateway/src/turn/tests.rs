@@ -5864,6 +5864,7 @@ async fn second_tool_round_request_replays_reasoning_when_model_capability_opts_
             aliases: Vec::new(),
             context_window: None,
             generation_preset: None,
+            default_effort: None,
             capabilities: swage_config::ModelCapabilitiesConfig {
                 reasoning_replay: true,
             },
@@ -9327,6 +9328,7 @@ async fn process_turn_uses_hot_swapped_runtime_config_for_next_turn() {
                     aliases: vec![],
                     context_window: None,
                     generation_preset: Some("quick".to_string()),
+                    default_effort: None,
                     capabilities: swage_config::ModelCapabilitiesConfig::default(),
                 },
             )]
@@ -9771,6 +9773,7 @@ fn effective_session_config_uses_known_selected_model_as_default() {
                         aliases: vec![],
                         context_window: None,
                         generation_preset: None,
+                        default_effort: None,
                         capabilities: swage_config::ModelCapabilitiesConfig::default(),
                     },
                 ),
@@ -9782,6 +9785,7 @@ fn effective_session_config_uses_known_selected_model_as_default() {
                         aliases: vec![],
                         context_window: None,
                         generation_preset: None,
+                        default_effort: None,
                         capabilities: swage_config::ModelCapabilitiesConfig::default(),
                     },
                 ),

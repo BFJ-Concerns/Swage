@@ -35,6 +35,7 @@
   // Local draft content — cleared after every successful send.
   let content = $state("");
   let selectedModel = $state("");
+  let selectedEffort = $state<"" | "low" | "medium" | "high" | "max">("");
 
   $effect(() => {
     const fallback = selectedModelId ?? modelOptions[0] ?? "";
@@ -63,7 +64,7 @@
     // Guard: no-op when there is nothing to send or a turn is in progress.
     if (!store || !trimmed || store.isStreaming || hasNoConfiguredModels) return;
 
-    store.startTurn(trimmed, selectedModel || null, selectedAgentId || null);
+    store.startTurn(trimmed, selectedModel || null, selectedAgentId || null, selectedEffort || null);
 
     // Clear draft and return focus to the textarea so the user can keep typing.
     content = "";
@@ -102,6 +103,13 @@
       <div class="field-toolbar">
         {#if canSelectAgent}
           <AgentPicker definitions={agentDefinitions} bind:selectedAgentId disabled={!store || store?.isStreaming} />
+          <select bind:value={selectedEffort} aria-label="Effort" disabled={!store || store?.isStreaming}>
+            <option value="">Model default</option>
+            <option value="low">Low effort</option>
+            <option value="medium">Medium effort</option>
+            <option value="high">High effort</option>
+            <option value="max">Maximum effort</option>
+          </select>
         {/if}
         {#if modelOptions.length > 0}
           <select
