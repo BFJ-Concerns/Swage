@@ -6,7 +6,7 @@ All notable changes to Swage are documented in this file.
 
 ### Added
 
-- Conversations can choose a reasoning effort at creation, while each configured model can provide the inherited default.
+- New conversations can choose a reasoning effort from the main composer, while each configured model can provide the inherited default.
 - Durable named task definitions bundle instructions, an output contract, a model preference, and narrowing permissions for workflow and delegated child dispatches.
 - Workflow and delegation authors can place individual workers in a chosen working directory or a runtime-provisioned isolated git worktree.
 - Workflow agent calls now honour per-call reasoning effort and host-enforced timeout options.

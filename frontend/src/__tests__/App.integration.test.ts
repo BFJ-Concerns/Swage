@@ -812,7 +812,7 @@ describe("App", () => {
     expect(surfaceNavigation?.parentElement?.textContent).toContain("MANAGED");
   });
 
-  it("creates a conversation from the real app wiring and navigates to it", async () => {
+  it("starts the sidebar journey through the configured composer", async () => {
     const defaultSpace = makeSpace();
     const created: ConversationResponse = {
       id: "conv-new",
@@ -824,6 +824,17 @@ describe("App", () => {
     vi.mocked(spacesApi.listSpaces).mockResolvedValueOnce([defaultSpace]);
     vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([]);
     vi.mocked(conversationsApi.createConversation).mockResolvedValueOnce(created);
+    vi.mocked(settingsApi.fetchSettings).mockResolvedValueOnce(makeSettings({
+      "local:reasoning": {
+        provider_id: "local",
+        model_id: "reasoning",
+        aliases: [],
+        context_window: 128_000,
+        generation_preset: null,
+        default_effort: "low",
+        capabilities: { reasoning_replay: false },
+      },
+    }));
 
     component = mount(App, { target: document.body });
     await settleUi();
@@ -836,17 +847,35 @@ describe("App", () => {
     flushSync(() => newButton!.click());
     await settleUi();
 
+    expect(conversationsApi.createConversation).not.toHaveBeenCalled();
+    const effortSelect = document.querySelector<HTMLSelectElement>('select[aria-label="Effort"]');
+    expect(effortSelect).not.toBeNull();
+    flushSync(() => {
+      effortSelect!.value = "high";
+      effortSelect!.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+
+    const textarea = document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Message"]');
+    expect(textarea).not.toBeNull();
+    flushSync(() => {
+      textarea!.value = "Start with deliberate reasoning";
+      textarea!.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    const sendButton = document.querySelector<HTMLButtonElement>(".action.send");
+    flushSync(() => sendButton!.click());
+    await settleUi();
+
     expect(conversationsApi.createConversation).toHaveBeenCalledWith(
       defaultSpace.id,
-      undefined,
+      "local:reasoning",
       null,
-      undefined,
+      "high",
     );
     expect(websocketHarness.client.connect).toHaveBeenCalledTimes(1);
     expect(websocketHarness.client.connect).toHaveBeenCalledWith("conv-new");
     expect(window.location.pathname).toBe("/conversations/conv-new");
     expect(document.querySelector(".message-display")?.textContent).toContain(
-      "Send a message below to start the conversation.",
+      "Start with deliberate reasoning",
     );
   });
 

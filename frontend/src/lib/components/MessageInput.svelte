@@ -5,6 +5,7 @@
 <script lang="ts">
   import type { StreamingStore } from "../stores/streaming";
   import type { EffectiveAgentDefinitionResponse } from "../protocol/EffectiveAgentDefinitionResponse";
+  import type { Effort } from "../protocol/Effort";
   import AgentPicker from "./AgentPicker.svelte";
 
   interface Props {
@@ -35,7 +36,7 @@
   // Local draft content — cleared after every successful send.
   let content = $state("");
   let selectedModel = $state("");
-  let selectedEffort = $state<"" | "low" | "medium" | "high" | "max">("");
+  let selectedEffort = $state<"" | Effort>("");
 
   $effect(() => {
     const fallback = selectedModelId ?? modelOptions[0] ?? "";
