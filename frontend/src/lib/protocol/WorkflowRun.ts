@@ -2,4 +2,12 @@
 import type { WorkflowBudget } from "./WorkflowBudget";
 import type { WorkflowRunState } from "./WorkflowRunState";
 
-export type WorkflowRun = { id: string, space_id: string, script_id: string | null, script_name: string | null, script_version: number | null, carrying_skill: string | null, state: WorkflowRunState, args: unknown, budget: WorkflowBudget, final_output: unknown, handover: unknown, error_message: string | null, created_at: string, completed_at: string | null, };
+export type WorkflowRun = { id: string, space_id: string, script_id: string | null, script_name: string | null, script_version: number | null, carrying_skill: string | null,
+/**
+ * Source retained for runs whose workflow was not a saved script version.
+ */
+source: string | null,
+/**
+ * SHA-256 of the exact source executed by this run.
+ */
+source_hash: string, state: WorkflowRunState, args: unknown, budget: WorkflowBudget, final_output: unknown, handover: unknown, error_message: string | null, created_at: string, completed_at: string | null, };
