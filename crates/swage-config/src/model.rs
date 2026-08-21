@@ -90,6 +90,8 @@ pub struct ModelEndpointConfig {
     pub context_window: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generation_preset: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_effort: Option<swage_protocol::client::settings::Effort>,
     #[serde(default, skip_serializing_if = "ModelCapabilitiesConfig::is_empty")]
     pub capabilities: ModelCapabilitiesConfig,
 }
@@ -830,6 +832,7 @@ impl ResolvedConfig {
                 aliases: Vec::new(),
                 context_window: None,
                 generation_preset: None,
+                default_effort: None,
                 capabilities: ModelCapabilitiesConfig::default(),
             });
         model.model_id = model_id;

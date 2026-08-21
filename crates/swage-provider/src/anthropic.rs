@@ -27,8 +27,8 @@ const ANTHROPIC_MESSAGES_PATH: &str = "/v1/messages?beta=true";
 /// unpermitted mismatch, not an admitted harness-parity divergence.
 const ANTHROPIC_REQUEST_DIVERGENCES: &[(&str, &str)] = &[
     (
-        "unresolved_product_defect",
-        "OPEN: native thinking and output_config request controls have no honest Swage mapping; this is not a permitted harness-parity divergence",
+        "swage_supplied",
+        "thinking and output_config are jointly sourced from the resolved Swage effort choice",
     ),
     (
         "dynamic_vendor_context",
@@ -54,6 +54,8 @@ struct MessagesRequest {
     model: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     output_config: Option<AnthropicOutputConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking: Option<AnthropicThinkingConfig>,
     messages: Vec<AnthropicMessage>,
     max_tokens: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -66,7 +68,14 @@ struct MessagesRequest {
 
 #[derive(Serialize)]
 struct AnthropicOutputConfig {
-    effort: String,
+    effort: &'static str,
+}
+
+#[derive(Serialize)]
+struct AnthropicThinkingConfig {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    display: &'static str,
 }
 
 /// Wire representation of a tool definition for the Anthropic API.
@@ -610,6 +619,7 @@ impl AnthropicProvider {
             model: self.config.model.clone(),
             // The legacy LlmRequest surface has no per-call effort option.
             output_config: None,
+            thinking: None,
             messages,
             max_tokens: request.max_tokens.unwrap_or(4096),
             system: request.system_prompt.clone(),
@@ -880,10 +890,18 @@ impl AnthropicProvider {
                 .model
                 .clone()
                 .unwrap_or_else(|| self.config.model.clone()),
-            output_config: request
-                .effort
-                .clone()
-                .map(|effort| AnthropicOutputConfig { effort }),
+            output_config: request.effort.map(|effort| AnthropicOutputConfig {
+                effort: match effort {
+                    swage_core::Effort::Low => "low",
+                    swage_core::Effort::Medium => "medium",
+                    swage_core::Effort::High => "high",
+                    swage_core::Effort::Max => "max",
+                },
+            }),
+            thinking: request.effort.map(|_| AnthropicThinkingConfig {
+                kind: "adaptive",
+                display: "omitted",
+            }),
             messages,
             max_tokens: request.max_tokens.unwrap_or(4096),
             system,
@@ -951,6 +969,7 @@ impl AnthropicProvider {
                 .unwrap_or_else(|| self.config.model.clone()),
             // ToolCompletionRequest has no per-call effort surface.
             output_config: None,
+            thinking: None,
             messages,
             max_tokens: request.max_tokens.unwrap_or(4096),
             system,
@@ -1442,6 +1461,7 @@ mod tests {
         );
 
         let completion = |max_tokens| CompletionRequest {
+            effort: None,
             messages: vec![],
             model: None,
             max_tokens,
@@ -1513,21 +1533,30 @@ mod tests {
     }
 
     #[test]
-    fn completion_effort_maps_to_anthropic_output_config() {
+    fn every_completion_effort_maps_to_both_anthropic_controls() {
         let provider = AnthropicProvider::new("key", "model");
-        let request = CompletionRequest {
-            effort: Some("medium".into()),
-            messages: vec![ChatMessage::new(Role::User, "Think carefully")],
-            model: None,
-            max_tokens: None,
-            temperature: None,
-            stop_sequences: None,
-            metadata: None,
-            tool_definitions: vec![],
-        };
-        let body =
-            serde_json::to_value(provider.build_request_for_completion(&request, false)).unwrap();
-        assert_eq!(body["output_config"]["effort"], "medium");
+        for (effort, expected) in [
+            (swage_core::Effort::Low, "low"),
+            (swage_core::Effort::Medium, "medium"),
+            (swage_core::Effort::High, "high"),
+            (swage_core::Effort::Max, "max"),
+        ] {
+            let request = CompletionRequest {
+                effort: Some(effort),
+                messages: vec![ChatMessage::new(Role::User, "Think carefully")],
+                model: None,
+                max_tokens: None,
+                temperature: None,
+                stop_sequences: None,
+                metadata: None,
+                tool_definitions: vec![],
+            };
+            let body = serde_json::to_value(provider.build_request_for_completion(&request, false))
+                .unwrap();
+            assert_eq!(body["output_config"]["effort"], expected);
+            assert_eq!(body["thinking"]["type"], "adaptive");
+            assert_eq!(body["thinking"]["display"], "omitted");
+        }
     }
 
     #[test]
@@ -1546,6 +1575,7 @@ mod tests {
         let body =
             serde_json::to_value(provider.build_request_for_completion(&request, false)).unwrap();
         assert!(!body.as_object().unwrap().contains_key("output_config"));
+        assert!(!body.as_object().unwrap().contains_key("thinking"));
     }
 
     // --- tool definitions in wire request ---
@@ -1776,8 +1806,8 @@ mod tests {
             snapshot["divergences"],
             serde_json::json!([
                 [
-                    "unresolved_product_defect",
-                    "OPEN: native thinking and output_config request controls have no honest Swage mapping; this is not a permitted harness-parity divergence"
+                    "swage_supplied",
+                    "thinking and output_config are jointly sourced from the resolved Swage effort choice"
                 ],
                 [
                     "dynamic_vendor_context",

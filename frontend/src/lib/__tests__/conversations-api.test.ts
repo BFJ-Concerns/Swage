@@ -123,11 +123,11 @@ describe("createConversation", () => {
     await expect(createConversation("proj-1")).rejects.toThrow("400");
   });
 
-  it("sends the selected model and agent together", async () => {
+  it("sends the selected model, agent, and effort together", async () => {
     const fetchMock = vi.mocked(fetch);
     fetchMock.mockResolvedValueOnce(mockResponse({ id: "new-conv" }, 201));
 
-    await createConversation("proj-1", "small-model", "researcher");
+    await createConversation("proj-1", "small-model", "researcher", "high");
 
     expect(fetchMock).toHaveBeenCalledWith("/api/spaces/proj-1/sessions", {
       method: "POST",
@@ -135,6 +135,7 @@ describe("createConversation", () => {
       body: JSON.stringify({
         selected_model_id: "small-model",
         agent_id: "researcher",
+        effort: "high",
       }),
     });
   });

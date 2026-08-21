@@ -39,6 +39,7 @@ fn turn_state_to_wire(state: &TurnState) -> WireTurnState {
 pub struct ConversationService {
     pub(crate) storage: Arc<dyn Storage>,
     pub(crate) space_store: Arc<dyn SpaceStore>,
+    config: Option<swage_config::ResolvedConfig>,
 }
 
 impl ConversationService {
@@ -46,7 +47,33 @@ impl ConversationService {
         Self {
             storage,
             space_store,
+            config: None,
         }
+    }
+
+    pub fn with_config(mut self, config: swage_config::ResolvedConfig) -> Self {
+        self.config = Some(config);
+        self
+    }
+
+    fn resolved_effort(
+        &self,
+        selected_model_id: Option<&str>,
+        requested: Option<swage_protocol::client::settings::Effort>,
+    ) -> Option<swage_protocol::client::settings::Effort> {
+        requested.or_else(|| {
+            let config = self.config.as_ref()?;
+            let model_id = selected_model_id
+                .filter(|id| config.models.entries.contains_key(*id))
+                .unwrap_or(&config.models.default);
+            config.models.entries.get(model_id)?.default_effort
+        })
+    }
+
+    fn effort_metadata(
+        effort: Option<swage_protocol::client::settings::Effort>,
+    ) -> Option<JsonValue> {
+        effort.map(|effort| serde_json::json!({"effort": effort}))
     }
 
     /// Create a new conversation in the default space.
@@ -65,6 +92,7 @@ impl ConversationService {
         self.create_conversation_from_request(CreateConversationRequest {
             selected_model_id,
             agent_id: None,
+            effort: None,
         })
         .await
     }
@@ -75,17 +103,19 @@ impl ConversationService {
     ) -> Result<ConversationResponse, GatewayError> {
         let space = self.space_store.get_or_create_default().await?;
         let agent_id = self.validated_agent_id(space.id, request.agent_id).await?;
+        let selected_model_id = normalise_selected_model_id(request.selected_model_id);
+        let effort = self.resolved_effort(selected_model_id.as_deref(), request.effort);
         let active_workspace_attachment_id = self.default_workspace_for_space(space.id).await?;
         let mut session = self
             .storage
             .create_session(NewSession {
                 space_id: space.id,
                 agent_id: agent_id.clone(),
-                metadata: None,
+                metadata: Self::effort_metadata(effort),
                 active_workspace_attachment_id,
             })
             .await?;
-        if let Some(selected_model_id) = normalise_selected_model_id(request.selected_model_id) {
+        if let Some(selected_model_id) = selected_model_id {
             session = self
                 .storage
                 .set_session_selected_model(session.id, Some(selected_model_id))
@@ -329,8 +359,15 @@ impl ConversationService {
             .await?
             .ok_or(GatewayError::SpaceNotFound { id: space_id })?;
         let agent_id = self.validated_agent_id(space_id, request.agent_id).await?;
-        self.create_session_in_space_for_agent(space_id, &agent_id, request.selected_model_id)
-            .await
+        let selected_model_id = normalise_selected_model_id(request.selected_model_id);
+        let effort = self.resolved_effort(selected_model_id.as_deref(), request.effort);
+        self.create_session_in_space_for_agent_with_effort(
+            space_id,
+            &agent_id,
+            selected_model_id,
+            effort,
+        )
+        .await
     }
 
     /// Create a new session in the specified space, owned by a specific agent.
@@ -344,6 +381,22 @@ impl ConversationService {
         agent_id: &str,
         selected_model_id: Option<String>,
     ) -> Result<ConversationResponse, GatewayError> {
+        self.create_session_in_space_for_agent_with_effort(
+            space_id,
+            agent_id,
+            selected_model_id,
+            None,
+        )
+        .await
+    }
+
+    async fn create_session_in_space_for_agent_with_effort(
+        &self,
+        space_id: Uuid,
+        agent_id: &str,
+        selected_model_id: Option<String>,
+        effort: Option<swage_protocol::client::settings::Effort>,
+    ) -> Result<ConversationResponse, GatewayError> {
         // Verify the space exists — return 404 rather than a FK constraint error.
         self.space_store
             .get(space_id)
@@ -356,7 +409,7 @@ impl ConversationService {
             .create_session(NewSession {
                 space_id,
                 agent_id: agent_id.to_string(),
-                metadata: None,
+                metadata: Self::effort_metadata(effort),
                 active_workspace_attachment_id,
             })
             .await?;

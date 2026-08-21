@@ -7,6 +7,15 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum Effort {
+    Low,
+    Medium,
+    High,
+    Max,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "lowercase")]
 pub enum ProviderProtocol {
@@ -64,6 +73,9 @@ pub struct ModelSettings {
     pub aliases: Vec<String>,
     pub context_window: Option<u32>,
     pub generation_preset: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub default_effort: Option<Effort>,
     #[serde(default)]
     pub capabilities: ModelCapabilitiesConfig,
 }
