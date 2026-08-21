@@ -35,6 +35,17 @@ fn config_from_wire<C: DeserializeOwned, W: Serialize>(value: W) -> Result<C, Ap
     .map_err(|error| ApiError::validation(format!("invalid settings: {error}")))
 }
 
+fn settings_audit_snapshot(settings: &SettingsResponse) -> Result<serde_json::Value, ApiError> {
+    let mut snapshot = serde_json::to_value(settings)
+        .map_err(|error| ApiError::validation(format!("failed to snapshot settings: {error}")))?;
+    if let Some(api_key) = snapshot.pointer_mut("/tool_runtime/search/api_key")
+        && !api_key.is_null()
+    {
+        *api_key = serde_json::Value::String("[REDACTED]".to_string());
+    }
+    Ok(snapshot)
+}
+
 fn tool_runtime_from_config(
     config: &swage_config::ToolConfig,
 ) -> Result<ToolRuntimeSettings, ApiError> {
@@ -114,8 +125,7 @@ pub async fn save_settings(
     request: SaveSettingsRequest,
 ) -> Result<SettingsResponse, ApiError> {
     validate_settings_request(&request)?;
-    let prior_settings = serde_json::to_value(load_settings(state).await?)
-        .map_err(|error| ApiError::validation(format!("failed to snapshot settings: {error}")))?;
+    let prior_settings = settings_audit_snapshot(&load_settings(state).await?)?;
     let SaveSettingsRequest {
         default_provider,
         providers: requested_providers,
@@ -257,8 +267,7 @@ pub async fn save_settings(
         crate::startup::build_tool_dispatcher(&runtime_config, state.storage.clone());
     state.replace_runtime(runtime_config, provider, tool_dispatcher);
     let response = load_settings(state).await?;
-    let new_settings = serde_json::to_value(&response)
-        .map_err(|error| ApiError::validation(format!("failed to snapshot settings: {error}")))?;
+    let new_settings = settings_audit_snapshot(&response)?;
     crate::config_change::record_config_change(
         state,
         crate::config_change::ConfigChange {
@@ -1416,12 +1425,18 @@ mod tests {
         }
 
         let storage = std::sync::Arc::new(crate::turn::tests::MockStorage::new());
+        let mut config = swage_config::ResolvedConfig::default();
+        config.tools.search = Some(swage_config::SearchProviderConfig {
+            provider_type: "searxng".to_string(),
+            base_url: "http://127.0.0.1:8080".to_string(),
+            api_key: Some("old-search-key".into()),
+        });
         let state = AppState::new(
             storage.clone() as std::sync::Arc<dyn swage_storage::store::Storage>,
             storage as std::sync::Arc<dyn swage_storage::store::SpaceStore>,
             std::sync::Arc::new(crate::turn::tests::MockProvider::new(vec![]))
                 as std::sync::Arc<dyn swage_provider::LlmProvider>,
-            swage_config::ResolvedConfig::default(),
+            config,
             crate::tool::ToolDispatcher::allow_all(vec![]),
             None,
         );
@@ -1478,7 +1493,7 @@ mod tests {
                 search: Some(swage_protocol::client::settings::SearchProviderConfig {
                     provider_type: "searxng".to_string(),
                     base_url: "http://127.0.0.1:8080".to_string(),
-                    api_key: None,
+                    api_key: Some("new-search-key".to_string()),
                 }),
             }),
             tool_permissions: None,
@@ -1511,6 +1526,22 @@ mod tests {
             "hot-rebuilt dispatcher should include tools from the saved plugin directory"
         );
         assert!(!state.restart_required());
+        let events = state.storage.list_audit_events().await.unwrap();
+        let change = events
+            .iter()
+            .find(|event| event.event_kind == "configuration_change")
+            .expect("settings configuration change");
+        assert_eq!(
+            change.metadata["prior_state"]["tool_runtime"]["search"]["api_key"],
+            "[REDACTED]"
+        );
+        assert_eq!(
+            change.metadata["new_state"]["tool_runtime"]["search"]["api_key"],
+            "[REDACTED]"
+        );
+        let audit_json = serde_json::to_string(&change.metadata).unwrap();
+        assert!(!audit_json.contains("old-search-key"));
+        assert!(!audit_json.contains("new-search-key"));
     }
 
     #[tokio::test(flavor = "multi_thread")]
