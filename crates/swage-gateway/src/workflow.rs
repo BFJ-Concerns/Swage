@@ -28,8 +28,9 @@ use swage_storage::{
 };
 use swage_workflow::{
     AgentCallRequest, AgentCallResult, AwaitEventRequest, EffectPayload, EffectReceipt,
-    EffectRecoveryHost, EngineLimits, GateRequest, RunEventPost, ScriptCapabilities,
-    WorkflowCallRequest, WorkflowEngine, WorkflowHost, journal_args_hash, recover_started_effect,
+    EffectRecoveryHost, EngineLimits, GateRequest, QUICKJS_ENGINE_VERSION, RunEventPost,
+    ScriptCapabilities, WorkflowCallRequest, WorkflowEngine, WorkflowHost, journal_args_hash,
+    recover_started_effect,
 };
 use tokio::sync::{Mutex, Notify, Semaphore, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -2936,7 +2937,7 @@ async fn complete_workflow_call_entry(
                     // pool — but confinement flows down, which is what the
                     // budget contract promises.
                     budget: parent_budget,
-                    engine_version: "rquickjs-0.12.0".into(),
+                    engine_version: QUICKJS_ENGINE_VERSION.into(),
                     // Confinement flows down here too: the child's workers
                     // stay bounded by whatever context dispatched the parent.
                     dispatch_bound_agent_ids: parent
@@ -3322,7 +3323,7 @@ async fn start_run(
             source_hash: source_hash(&source),
             args,
             budget: serde_json::to_value(budget).map_err(internal)?,
-            engine_version: "rquickjs-0.12.0".into(),
+            engine_version: QUICKJS_ENGINE_VERSION.into(),
             dispatch_bound_agent_ids,
         })
         .await
@@ -4333,6 +4334,7 @@ mod tests {
             .await
             .expect("run query")
             .expect("run");
+        assert_eq!(run.engine_version, "rquickjs-0.12.2");
         assert_eq!(run.state, "failed");
         assert_eq!(run.script_version_id, None);
         assert_eq!(run.script_id, Some(listed.id));
@@ -4506,6 +4508,7 @@ mod tests {
             .into_iter()
             .find(|run| run.parent_run_id == Some(started.id))
             .expect("built-in child run");
+        assert_eq!(child.engine_version, "rquickjs-0.12.2");
         assert_eq!(
             child.script_id,
             Some(builtin_workflows::id(space.id, "research-sweep"))

@@ -30,7 +30,9 @@ pub struct TurnPollResponse {
     pub assistant_response: Option<String>,
     #[ts(type = "unknown")]
     pub structured_output: Option<serde_json::Value>,
+    #[ts(type = "number | null")]
     pub input_tokens: Option<i64>,
+    #[ts(type = "number | null")]
     pub output_tokens: Option<i64>,
     pub parent_turn_id: Option<Uuid>,
 }
