@@ -3,9 +3,8 @@
 //! Models arrive over the operator's proxy bare, with none of the prompt
 //! scaffolding their vendor harnesses supply, so the built-in assembly
 //! provides the equivalent: working norms adapted to Swage's tools, selected
-//! by the coming turn's model family. The common norms render for every
-//! session; a recognised family appends its own emphasis; an unrecognised
-//! one degrades to the common norms, never to silence.
+//! by the coming turn's exact model id. A model-specific native scaffold is
+//! preferred; the established family text remains the conservative fallback.
 //!
 //! Every string here is instruction text: it steers each session of a whole
 //! model family, so edits are drafting-tier work, not routine maintenance.
@@ -71,28 +70,228 @@ exactly the arguments their descriptions declare, and let tool results \
 settle any fact you assert afterwards. Prefer several small verifiable \
 steps over one large speculative one.";
 
+const CLAUDE_NATIVE: &str = "\
+You are an interactive agent helping with software-engineering tasks. Text \
+outside tool use is shown to the operator as GitHub-flavoured Markdown. A \
+denied tool call means the operator declined it: adapt instead of retrying it \
+unchanged. Prefer a dedicated file or search tool when one fits, and issue \
+independent tool calls together. Write code in the surrounding style. Confirm \
+hard-to-reverse or outward-facing actions unless they are already authorised, \
+inspect before overwriting, and report failures and skipped checks plainly.";
+
+const CLAUDE_FABLE_NATIVE: &str = "\
+Write for a teammate returning to the work, not as a process log. Give a brief \
+update before the first tool call and when a load-bearing fact changes the \
+direction. Put every conclusion the operator needs in the final response and \
+lead it with the outcome. Prefer readable complete sentences over compressed \
+shorthand. Comment code only where the code cannot express the constraint. \
+Operate autonomously on reversible work already implied by the request; stop \
+only for destructive action or a genuine scope decision.";
+
+const CLAUDE_OPUS_NATIVE: &str = "\
+Do the requested work at its stated scope, making routine judgement calls \
+yourself and reserving questions for materially different interpretations. \
+If one part is blocked, finish the rest and state the gap. Raise a real concern \
+briefly, then continue under an explicit assumption where that is safe. Correct \
+only errors that would change the operator's code, conclusion, or decision.";
+
+const GPT_NATIVE: &str = "\
+Collaborate with the operator until the goal is genuinely handled. Lead with \
+the outcome, use plain language, and match detail to the reader. Keep progress \
+updates brief and restate every conclusion needed in the final response. Use \
+fast targeted search, parallelise independent work, preserve unrelated changes, \
+and verify implementation work in proportion to risk. Make safe in-scope \
+assumptions; stop when completion needs new authority or a material scope choice.";
+
+const GPT_SOL_NATIVE: &str = "\
+For work explicitly authorised for delegation, coordinate independent tasks \
+as one shared effort and treat worker results as evidence to inspect before \
+adopting them.";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkingNormsScaffold {
+    Native,
+    FamilyFallback,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DivergenceCategory {
+    ProprietaryToolMaterial,
+    DynamicVendorContext,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Divergence {
+    category: DivergenceCategory,
+    material: &'static str,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ModelScaffold {
+    model_id: &'static str,
+    family_text: &'static str,
+    model_text: &'static str,
+    divergences: &'static [Divergence],
+}
+
+const STANDARD_DIVERGENCES: &[Divergence] = &[
+    Divergence {
+        category: DivergenceCategory::ProprietaryToolMaterial,
+        material: "vendor tool definitions, tool-specific instructions, permission mechanics, and client-only control channels",
+    },
+    Divergence {
+        category: DivergenceCategory::DynamicVendorContext,
+        material: "working directory, date, platform, sandbox state, available capabilities, skills, memory paths, and context-window notices injected at request time",
+    },
+];
+
+const GPT_SOL_DIVERGENCES: &[Divergence] = &[
+    Divergence {
+        category: DivergenceCategory::ProprietaryToolMaterial,
+        material: "vendor tool definitions, tool-specific instructions, permission mechanics, client-only control channels, and the native collaboration-tool protocol",
+    },
+    STANDARD_DIVERGENCES[1],
+];
+
+const MODEL_SCAFFOLDS: &[ModelScaffold] = &[
+    ModelScaffold {
+        model_id: "claude-fable-5",
+        family_text: CLAUDE_NATIVE,
+        model_text: CLAUDE_FABLE_NATIVE,
+        divergences: STANDARD_DIVERGENCES,
+    },
+    ModelScaffold {
+        model_id: "claude-fable-5[1m]",
+        family_text: CLAUDE_NATIVE,
+        model_text: CLAUDE_FABLE_NATIVE,
+        divergences: STANDARD_DIVERGENCES,
+    },
+    ModelScaffold {
+        model_id: "claude-opus-5",
+        family_text: CLAUDE_NATIVE,
+        model_text: CLAUDE_OPUS_NATIVE,
+        divergences: STANDARD_DIVERGENCES,
+    },
+    ModelScaffold {
+        model_id: "claude-opus-5[1m]",
+        family_text: CLAUDE_NATIVE,
+        model_text: CLAUDE_OPUS_NATIVE,
+        divergences: STANDARD_DIVERGENCES,
+    },
+    ModelScaffold {
+        model_id: "claude-opus-4-8",
+        family_text: CLAUDE_NATIVE,
+        model_text: CLAUDE_OPUS_NATIVE,
+        divergences: STANDARD_DIVERGENCES,
+    },
+    ModelScaffold {
+        model_id: "claude-opus-4-8[1m]",
+        family_text: CLAUDE_NATIVE,
+        model_text: CLAUDE_OPUS_NATIVE,
+        divergences: STANDARD_DIVERGENCES,
+    },
+    ModelScaffold {
+        model_id: "claude-opus-4-6",
+        family_text: CLAUDE_NATIVE,
+        model_text: CLAUDE_OPUS_NATIVE,
+        divergences: STANDARD_DIVERGENCES,
+    },
+    ModelScaffold {
+        model_id: "claude-opus-4-6[1m]",
+        family_text: CLAUDE_NATIVE,
+        model_text: CLAUDE_OPUS_NATIVE,
+        divergences: STANDARD_DIVERGENCES,
+    },
+    ModelScaffold {
+        model_id: "claude-sonnet-5",
+        family_text: CLAUDE_NATIVE,
+        model_text: "Balance autonomous completion with concise progress reporting; keep the final response complete and outcome-led.",
+        divergences: STANDARD_DIVERGENCES,
+    },
+    ModelScaffold {
+        model_id: "claude-sonnet-5[1m]",
+        family_text: CLAUDE_NATIVE,
+        model_text: "Balance autonomous completion with concise progress reporting; keep the final response complete and outcome-led.",
+        divergences: STANDARD_DIVERGENCES,
+    },
+    ModelScaffold {
+        model_id: "claude-haiku-4-5-20251001",
+        family_text: CLAUDE_NATIVE,
+        model_text: "Prefer a short direct route through the work while preserving explicit verification and honest failure reporting.",
+        divergences: STANDARD_DIVERGENCES,
+    },
+    ModelScaffold {
+        model_id: "gpt-5.6-luna",
+        family_text: GPT_NATIVE,
+        model_text: "Prefer the smallest complete sequence of verifiable actions and keep coordination overhead proportionate to the task.",
+        divergences: STANDARD_DIVERGENCES,
+    },
+    ModelScaffold {
+        model_id: "gpt-5.6-terra",
+        family_text: GPT_NATIVE,
+        model_text: "Balance implementation pace with enough explanation for the operator to verify decisions and remaining limits.",
+        divergences: STANDARD_DIVERGENCES,
+    },
+    ModelScaffold {
+        model_id: "gpt-5.6-sol",
+        family_text: GPT_NATIVE,
+        model_text: GPT_SOL_NATIVE,
+        divergences: GPT_SOL_DIVERGENCES,
+    },
+];
+
 /// The context element carrying the working norms for the coming turn's
 /// model. Priority 105 places it after baseline orientation (110) and
 /// before operator prompts (100): norms are platform baseline that
 /// operator instructions extend.
 pub struct WorkingNormsElement {
     family: ModelFamily,
+    scaffold: Option<&'static ModelScaffold>,
 }
 
 impl WorkingNormsElement {
-    pub fn for_model(model_id: &str) -> Self {
+    pub fn for_model(model_id: &str, selection: WorkingNormsScaffold) -> Self {
         Self {
             family: ModelFamily::from_model_id(model_id),
+            scaffold: (selection == WorkingNormsScaffold::Native)
+                .then(|| exact_scaffold(model_id))
+                .flatten(),
         }
     }
 
     fn render(&self) -> String {
+        if let Some(scaffold) = self.scaffold {
+            let divergences = scaffold
+                .divergences
+                .iter()
+                .enumerate()
+                .map(|(index, divergence)| {
+                    let category = match divergence.category {
+                        DivergenceCategory::ProprietaryToolMaterial => "Proprietary tool material",
+                        DivergenceCategory::DynamicVendorContext => "Dynamic vendor context",
+                    };
+                    format!("{}. {category}: {}.", index + 1, divergence.material)
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            return format!(
+                "{COMMON_NORMS}\n\n{}\n\n{}\n\n## Native harness divergences\n{divergences}",
+                scaffold.family_text, scaffold.model_text
+            );
+        }
         match self.family {
             ModelFamily::Claude => format!("{COMMON_NORMS}\n\n{CLAUDE_NORMS}"),
             ModelFamily::Gpt => format!("{COMMON_NORMS}\n\n{GPT_NORMS}"),
             ModelFamily::Unknown => COMMON_NORMS.to_string(),
         }
     }
+}
+
+fn exact_scaffold(model_id: &str) -> Option<&'static ModelScaffold> {
+    let model_id = model_id.trim();
+    MODEL_SCAFFOLDS
+        .iter()
+        .find(|scaffold| scaffold.model_id.eq_ignore_ascii_case(model_id))
 }
 
 impl ContextElement for WorkingNormsElement {
@@ -148,13 +347,19 @@ mod tests {
 
     #[test]
     fn a_recognised_family_appends_its_norms_to_the_common_ones() {
-        let text = WorkingNormsElement::for_model("claude-opus-5").content()[0].text_content();
+        let text =
+            WorkingNormsElement::for_model("claude-opus-5", WorkingNormsScaffold::FamilyFallback)
+                .content()[0]
+                .text_content();
         assert!(text.contains("## Working norms"));
         assert!(text.contains("Work to completion"));
         assert!(text.contains("issue those tool calls together"));
         assert!(!text.contains("ending your turn"), "no GPT text on Claude");
 
-        let text = WorkingNormsElement::for_model("gpt-5.6-luna").content()[0].text_content();
+        let text =
+            WorkingNormsElement::for_model("gpt-5.6-luna", WorkingNormsScaffold::FamilyFallback)
+                .content()[0]
+                .text_content();
         assert!(text.contains("Work to completion"));
         assert!(text.contains("fully resolved before ending your turn"));
         assert!(
@@ -165,7 +370,7 @@ mod tests {
 
     #[test]
     fn an_unknown_family_degrades_to_common_norms_never_silence() {
-        let element = WorkingNormsElement::for_model("glm-5.2");
+        let element = WorkingNormsElement::for_model("glm-5.2", WorkingNormsScaffold::Native);
         let text = element.content()[0].text_content();
         assert!(text.contains("Work to completion"));
         assert!(!text.contains("tool calls together"));
@@ -174,8 +379,59 @@ mod tests {
 
     #[test]
     fn priority_sits_between_orientation_and_operator_prompts() {
-        let element = WorkingNormsElement::for_model("claude-opus-5");
+        let element =
+            WorkingNormsElement::for_model("claude-opus-5", WorkingNormsScaffold::FamilyFallback);
         assert!(element.priority() < 110);
         assert!(element.priority() > 100);
+    }
+
+    #[test]
+    fn exact_models_receive_native_scaffolds_and_an_enumerated_divergence_register() {
+        let text = WorkingNormsElement::for_model(" CLAUDE-FABLE-5 ", WorkingNormsScaffold::Native)
+            .content()[0]
+            .text_content();
+
+        assert!(text.contains("Write for a teammate returning to the work"));
+        assert!(text.contains("## Native harness divergences"));
+        assert!(text.contains("1. Proprietary tool material:"));
+        assert!(text.contains("2. Dynamic vendor context:"));
+    }
+
+    #[test]
+    fn exact_model_miss_conservatively_uses_the_existing_family_fallback() {
+        let text = WorkingNormsElement::for_model("claude-future-6", WorkingNormsScaffold::Native)
+            .content()[0]
+            .text_content();
+
+        assert!(text.contains("issue those tool calls together"));
+        assert!(!text.contains("Native harness divergences"));
+        assert!(!text.contains("Write for a teammate returning to the work"));
+    }
+
+    #[test]
+    fn two_models_in_one_family_differ_where_their_native_harnesses_differ() {
+        let luna = WorkingNormsElement::for_model("gpt-5.6-luna", WorkingNormsScaffold::Native)
+            .content()[0]
+            .text_content();
+        let sol = WorkingNormsElement::for_model("gpt-5.6-sol", WorkingNormsScaffold::Native)
+            .content()[0]
+            .text_content();
+
+        assert_ne!(luna, sol);
+        assert!(!luna.contains("native collaboration-tool protocol"));
+        assert!(sol.contains("native collaboration-tool protocol"));
+        assert!(sol.contains("coordinate independent tasks"));
+    }
+
+    #[test]
+    fn family_fallback_selection_bypasses_an_available_exact_scaffold() {
+        let text =
+            WorkingNormsElement::for_model("gpt-5.6-sol", WorkingNormsScaffold::FamilyFallback)
+                .content()[0]
+                .text_content();
+
+        assert!(text.contains("fully resolved before ending your turn"));
+        assert!(!text.contains("Native harness divergences"));
+        assert!(!text.contains("coordinate independent tasks"));
     }
 }
