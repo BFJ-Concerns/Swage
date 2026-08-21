@@ -12,6 +12,7 @@ pub mod provider_signin;
 pub mod recovery;
 pub mod schedule;
 pub mod settings;
+pub mod skill;
 pub mod space;
 pub mod turn;
 pub mod voice;
@@ -57,6 +58,7 @@ pub struct ClientSurface {
     send_message: turn::SendMessageRequest,
     message_response: turn::MessageResponse,
     settings: settings::SettingsResponse,
+    skills: skill::SkillListResponse,
     save_settings: settings::SaveSettingsRequest,
     model_discovery: settings::ModelDiscoveryResponse,
     restart_status: settings::RestartStatusResponse,
@@ -84,6 +86,9 @@ pub struct ClientSurface {
     workflow_script_list: workflow::WorkflowScriptListResponse,
     start_workflow_run_request: workflow::StartWorkflowRunRequest,
     start_inline_workflow_run_request: workflow::StartInlineWorkflowRunRequest,
+    post_workflow_run_event_request: workflow::PostWorkflowRunEventRequest,
+    post_workflow_run_event_response: workflow::PostWorkflowRunEventResponse,
+    workflow_decision_event_payload: workflow::WorkflowDecisionEventPayload,
     workflow_run_detail: workflow::WorkflowRunDetailResponse,
     workflow_run_list: workflow::WorkflowRunListResponse,
     workflow_run_started_event: workflow::WorkflowRunStartedEvent,
