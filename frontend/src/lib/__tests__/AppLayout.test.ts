@@ -233,7 +233,7 @@ describe("AppLayout shell navigation", () => {
     flushSync();
     (document.querySelector("button.send") as HTMLButtonElement).click();
 
-    expect(startTurn).toHaveBeenCalledWith("Hello", null, "researcher");
+    expect(startTurn).toHaveBeenCalledWith("Hello", null, "researcher", null);
   });
 
   it("renders the space switcher in the shell", () => {
