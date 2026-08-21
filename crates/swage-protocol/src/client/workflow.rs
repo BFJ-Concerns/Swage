@@ -1,5 +1,7 @@
 //! Durable JavaScript workflows and their read-only run traces.
 
+use std::collections::BTreeMap;
+
 use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -63,6 +65,17 @@ pub struct AgentCallRequest {
     /// must serialise to nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session: Option<AgentSessionRef>,
+    /// Named briefing elements to compose for this child call. When omitted,
+    /// the configured element set remains unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elements: Option<Vec<String>>,
+    /// Values visible only while composing this child call. These shadow
+    /// durable session values without changing the session-variable store.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub variables: Option<BTreeMap<String, String>>,
+    /// Named context assembly to use for this child call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assembly: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
@@ -352,6 +365,9 @@ mod task_request_tests {
             max_attempts: 1,
             label: None,
             session: None,
+            elements: None,
+            variables: None,
+            assembly: None,
         };
         let value = serde_json::to_value(request).unwrap();
         assert!(!value.as_object().unwrap().contains_key("task"));
@@ -371,6 +387,9 @@ mod task_request_tests {
             max_attempts: 1,
             label: None,
             session: None,
+            elements: None,
+            variables: None,
+            assembly: None,
         })
         .unwrap();
         assert_eq!(value["task"], "review");
