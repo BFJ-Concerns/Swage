@@ -369,6 +369,7 @@ describe("durable local updates", () => {
   it("preserves the existing preview for a tool-only assistant message", async () => {
     const store = createConversationStore();
     vi.mocked(api.listConversations).mockResolvedValueOnce([
+      makeSummary("conv-2", "2026-01-01T00:00:30Z"),
       { ...makeSummary("conv-1"), message_preview: "Read README.md" },
     ]);
     await store.loadConversations("proj-1");
@@ -398,7 +399,15 @@ describe("durable local updates", () => {
       content: "",
       tool_calls: [expect.objectContaining({ call_id: "call-1" })],
     });
-    expect(store.conversations[0].message_preview).toBe("Read README.md");
+    expect(store.conversations[0]).toMatchObject({
+      id: "conv-1",
+      last_activity: "2026-01-01T00:01:00Z",
+      message_preview: "Read README.md",
+    });
+    expect(store.conversations.map((conversation) => conversation.id)).toEqual([
+      "conv-1",
+      "conv-2",
+    ]);
   });
 
   it("marks the summary as interrupted when an interrupted assistant message is appended", async () => {

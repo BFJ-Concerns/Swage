@@ -294,6 +294,16 @@
       </div>
     {/each}
 
+    <!-- ---- Live tool calls: updated in real-time as the agent works ---- -->
+    <!-- isLive is true for calls still running (no result yet), false once done. -->
+    {#if activeToolCalls.length > 0}
+      <div class="tool-calls-live">
+        {#each activeToolCalls as toolCall (toolCall.call_id)}
+          <ToolCallDisplay {toolCall} isLive={toolCall.status === null} />
+        {/each}
+      </div>
+    {/if}
+
     <!-- ---- Live streaming content: grows as tokens arrive ---- -->
     {#if isStreaming || streamedContent}
       <div class="message assistant streaming" aria-label="Assistant message">
@@ -329,16 +339,6 @@
         <span class="retry-label">
           retry {providerRetry.attempt} of {providerRetry.max_retries} · provider · {providerRetry.provider}
         </span>
-      </div>
-    {/if}
-
-    <!-- ---- Live tool calls: updated in real-time as the agent works ---- -->
-    <!-- isLive is true for calls still running (no result yet), false once done. -->
-    {#if activeToolCalls.length > 0}
-      <div class="tool-calls-live">
-        {#each activeToolCalls as toolCall (toolCall.call_id)}
-          <ToolCallDisplay {toolCall} isLive={toolCall.status === null} />
-        {/each}
       </div>
     {/if}
 
