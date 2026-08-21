@@ -92,6 +92,8 @@ fn typescript_bindings_are_regenerated() {
         .expect("export workflow create");
     client::workflow::UpdateWorkflowScriptRequest::export_all(&cfg)
         .expect("export workflow update");
+    client::workflow::WorkflowScriptListQuery::export_all(&cfg)
+        .expect("export workflow script query");
     client::workflow::WorkflowScriptListResponse::export_all(&cfg)
         .expect("export workflow scripts");
     client::workflow::StartWorkflowRunRequest::export_all(&cfg)
