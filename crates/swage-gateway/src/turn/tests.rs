@@ -8119,6 +8119,7 @@ async fn placed_delegate_keeps_exact_read_only_authority_when_delegating_again()
             "agent-b",
             "Delegate once more",
             None,
+            None,
             Some(placed_workspace.to_string_lossy().into_owned()),
             None,
             "outer-placed-delegate",
@@ -8276,6 +8277,7 @@ async fn delegate_worktree_provisions_isolated_cwd_and_records_resolved_placemen
         .handle_delegation(
             "agent-b",
             "Write only in an isolated worktree",
+            None,
             None,
             Some(repo.to_string_lossy().into_owned()),
             Some(swage_protocol::client::workflow::WorkerIsolation::Worktree),
