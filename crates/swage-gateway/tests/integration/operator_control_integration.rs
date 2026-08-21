@@ -283,7 +283,8 @@ async fn effective_agent_definition_endpoint_selects_the_requested_space() {
             "output_max_retries": null
         }),
     ] {
-        let (status, body) = post_json(&router, "/api/operator/agent-definitions", definition).await;
+        let (status, body) =
+            post_json(&router, "/api/operator/agent-definitions", definition).await;
         assert_eq!(status, StatusCode::OK, "{body}");
     }
 
@@ -294,13 +295,21 @@ async fn effective_agent_definition_endpoint_selects_the_requested_space() {
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let definitions = body["definitions"].as_array().unwrap();
-    assert_eq!(definitions.len(), 2, "built-in plus the shadow winner: {body}");
+    assert_eq!(
+        definitions.len(),
+        2,
+        "built-in plus the shadow winner: {body}"
+    );
     assert_eq!(definitions[0]["id"], "gateway");
     assert_eq!(definitions[0]["source_scope"], "built_in");
     assert_eq!(definitions[1]["id"], "shared");
     assert_eq!(definitions[1]["instructions"], "space winner");
     assert_eq!(definitions[1]["source_scope"], "space");
-    assert!(definitions.iter().all(|definition| definition["id"] != "foreign"));
+    assert!(
+        definitions
+            .iter()
+            .all(|definition| definition["id"] != "foreign")
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
