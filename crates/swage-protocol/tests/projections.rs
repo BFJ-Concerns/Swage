@@ -122,12 +122,6 @@ fn typescript_bindings_are_regenerated() {
         .expect("export effective agent definition list");
     hosting::AgentDefinitionMutationResponse::export_all(&cfg)
         .expect("export agent definition mutation");
-    hosting::TaskDefinitionListResponse::export_all(&cfg).expect("export task definition list");
-    hosting::CreateTaskDefinitionRequest::export_all(&cfg).expect("export task definition create");
-    hosting::TaskDefinitionMutationRequest::export_all(&cfg)
-        .expect("export task definition update");
-    hosting::TaskDefinitionMutationResponse::export_all(&cfg)
-        .expect("export task definition mutation");
     hosting::KnowledgeMirrorRegenerateResponse::export_all(&cfg)
         .expect("export knowledge mirror regenerate");
     device::RegisterDeviceRequest::export_all(&cfg).expect("export device registration");
