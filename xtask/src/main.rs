@@ -287,7 +287,7 @@ fn check() -> Result<()> {
     setup()?;
     run_command(
         "Checking Rust workspace",
-        command("cargo", ["check", "--workspace"]),
+        command("cargo", ["check", "--workspace", "--all-targets"]),
     )?;
     run_command(
         "Checking frontend types",
