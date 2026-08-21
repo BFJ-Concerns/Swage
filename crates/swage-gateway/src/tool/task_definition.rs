@@ -269,13 +269,16 @@ mod tests {
             "Edited contract."
         );
 
-        tool.execute(
-            json!({"action":"delete","id":"review"}),
-            &context,
-        )
-        .await
-        .expect("delete");
-        assert!(storage.get_task_definition("review").await.unwrap().is_none());
+        tool.execute(json!({"action":"delete","id":"review"}), &context)
+            .await
+            .expect("delete");
+        assert!(
+            storage
+                .get_task_definition("review")
+                .await
+                .unwrap()
+                .is_none()
+        );
         let deleted = storage
             .list_audit_events()
             .await

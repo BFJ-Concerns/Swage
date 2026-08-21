@@ -5560,7 +5560,11 @@ mod tests {
         assert_eq!(first.output, serde_json::json!({"result":"first"}));
         {
             let requests = provider.requests.lock().expect("requests");
-            assert_eq!(requests.len(), 2, "invalid output must consume the task retry");
+            assert_eq!(
+                requests.len(),
+                2,
+                "invalid output must consume the task retry"
+            );
             let text = requests[0]
                 .messages
                 .iter()
@@ -5574,10 +5578,17 @@ mod tests {
                 "the task's empty allow-set must narrow the base shell grant"
             );
         }
-        assert!(storage.list_audit_events().await.unwrap().iter().any(|event| {
-            event.event_kind == "variant_selected"
-                && event.entity_id == crate::experimentation::LOCATION_TASK_PROMPT
-        }));
+        assert!(
+            storage
+                .list_audit_events()
+                .await
+                .unwrap()
+                .iter()
+                .any(|event| {
+                    event.event_kind == "variant_selected"
+                        && event.entity_id == crate::experimentation::LOCATION_TASK_PROMPT
+                })
+        );
 
         storage
             .upsert_task_definition(swage_storage::NewTaskDefinition {

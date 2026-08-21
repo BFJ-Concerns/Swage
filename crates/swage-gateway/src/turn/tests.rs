@@ -33,8 +33,8 @@ use swage_storage::{
     store::{
         AgentDefinitionStore, AgentMessageStore, ApprovalStore, AttachmentStore,
         BackgroundJobStore, ChannelLinkStore, ContextSnapshotStore, DeviceStore, MaterialStore,
-        MessageStore, ScheduleStore, SessionStore, SkillActivationStore, SpaceStore, ThreadStore,
-        TaskDefinitionStore, ToolCallStore, TurnStore, WorkspaceAttachmentStore,
+        MessageStore, ScheduleStore, SessionStore, SkillActivationStore, SpaceStore,
+        TaskDefinitionStore, ThreadStore, ToolCallStore, TurnStore, WorkspaceAttachmentStore,
     },
 };
 
