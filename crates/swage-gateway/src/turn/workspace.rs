@@ -24,19 +24,6 @@ pub(crate) struct TrustedWorkspacePolicy {
     pub(crate) attachments: Vec<TrustedWorkspacePath>,
 }
 
-/// Inspect the space's workspace attachments and derive which permission
-/// grants are in force. Storage failures degrade to "no grants" so that a
-/// transient lookup error never silently widens the policy.
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) async fn summarise_trusted_workspace_permissions(
-    storage: &Arc<dyn swage_storage::store::Storage>,
-    space_id: Uuid,
-) -> WorkspacePermissionSummary {
-    load_trusted_workspace_policy(storage, space_id, None)
-        .await
-        .permissions
-}
-
 pub(crate) async fn load_trusted_workspace_policy(
     storage: &Arc<dyn swage_storage::store::Storage>,
     space_id: Uuid,

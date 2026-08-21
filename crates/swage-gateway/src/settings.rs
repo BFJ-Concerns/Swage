@@ -394,6 +394,7 @@ pub async fn discover_models(
         None => (provider_for_discovery(state, &provider_id).await?, None),
     };
 
+    // Last-resort catalogues current for this fixes batch as of 2026-08-21.
     let mut models = match provider.protocol {
         swage_config::Protocol::OpenRouter => discover_openrouter_models().await?,
         swage_config::Protocol::OpenAi => {
@@ -404,15 +405,21 @@ pub async fn discover_models(
                 };
                 discover_openai_compatible_models(base_url, api_key.as_deref()).await?
             } else {
-                known_models(&["gpt-4.1", "gpt-4.1-mini", "gpt-4o", "gpt-4o-mini"])
+                known_models(&["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"])
             }
         }
         swage_config::Protocol::Anthropic => known_models(&[
-            "claude-sonnet-4-20250514",
-            "claude-opus-4-20250514",
-            "claude-3-5-haiku-20241022",
+            "claude-fable-5",
+            "claude-opus-5",
+            "claude-sonnet-5",
+            "claude-haiku-4-5",
         ]),
-        swage_config::Protocol::Google => known_models(&["gemini-2.5-pro", "gemini-2.5-flash"]),
+        swage_config::Protocol::Google => known_models(&[
+            "gemini-3.6-flash",
+            "gemini-3.5-flash",
+            "gemini-3.5-flash-lite",
+            "gemini-3.1-pro-preview",
+        ]),
         swage_config::Protocol::Codex => {
             let response = state
                 .codex_supervisor

@@ -34,30 +34,6 @@ use crate::socket::SocketManager;
 const CREDENTIAL_ENV_VARS: &[&str] = &["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GOOGLE_API_KEY"];
 
 // ---------------------------------------------------------------------------
-// Platform detection
-// ---------------------------------------------------------------------------
-
-/// Which sandbox implementation is available on the current platform.
-#[cfg(test)]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SandboxPlatform {
-    /// `bwrap` is installed — full namespace isolation is available.
-    Bubblewrap,
-    /// `bwrap` is absent or unavailable — fallback mode only.
-    FallbackOnly,
-}
-
-/// Returns the strongest sandbox implementation available on this platform.
-#[cfg(test)]
-pub fn detect_platform() -> SandboxPlatform {
-    if crate::bubblewrap::find_bwrap().is_ok() {
-        SandboxPlatform::Bubblewrap
-    } else {
-        SandboxPlatform::FallbackOnly
-    }
-}
-
-// ---------------------------------------------------------------------------
 // FallbackSandbox
 // ---------------------------------------------------------------------------
 
@@ -407,7 +383,7 @@ mod tests {
     use swage_core::{CompletionResponse, FinishReason, SandboxError};
     use tokio::net::UnixStream;
 
-    use super::{CREDENTIAL_ENV_VARS, FallbackSandbox, SandboxPlatform, detect_platform};
+    use super::{CREDENTIAL_ENV_VARS, FallbackSandbox};
     use crate::config::SandboxConfig;
     use crate::ipc::message::IpcMessage;
     use crate::ipc::transport::IpcTransport;
@@ -515,37 +491,6 @@ mod tests {
         assert!(
             !is_pid_running(pid),
             "timed-out fallback startup should terminate and reap child process {pid}"
-        );
-    }
-
-    // -----------------------------------------------------------------------
-    // SandboxPlatform
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn sandbox_platform_variants_are_distinct() {
-        assert_ne!(SandboxPlatform::Bubblewrap, SandboxPlatform::FallbackOnly);
-    }
-
-    #[test]
-    fn sandbox_platform_is_debug() {
-        let debug = format!("{:?}", SandboxPlatform::Bubblewrap);
-        assert!(debug.contains("Bubblewrap"));
-        let debug = format!("{:?}", SandboxPlatform::FallbackOnly);
-        assert!(debug.contains("FallbackOnly"));
-    }
-
-    #[test]
-    fn detect_platform_returns_a_valid_variant() {
-        // The result depends on whether bwrap is installed, but it must be
-        // one of the two valid variants — the function must not panic or error.
-        let platform = detect_platform();
-        assert!(
-            matches!(
-                platform,
-                SandboxPlatform::Bubblewrap | SandboxPlatform::FallbackOnly
-            ),
-            "detect_platform must return a valid SandboxPlatform, got: {platform:?}"
         );
     }
 

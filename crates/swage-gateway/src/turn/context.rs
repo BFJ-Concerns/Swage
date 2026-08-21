@@ -14,59 +14,6 @@ tokio::task_local! {
     static SPACE_MEMORY_LOAD_COUNT: std::cell::Cell<usize>;
 }
 
-pub(super) fn delegated_target_instructions(
-    target_instructions: &str,
-    available_skills: &[swage_config::skill::SkillDefinition],
-) -> String {
-    let agent_skills = available_skills
-        .iter()
-        .enumerate()
-        .filter(|(_, skill)| skill.level == HierarchyLevel::Agent)
-        .map(|(order, skill)| ActiveSkill {
-            name: skill.name.clone(),
-            instructions: skill.instructions.clone(),
-            source_directory: skill
-                .source_path
-                .parent()
-                .expect("skill source has a parent directory")
-                .to_path_buf(),
-            level: skill.level.clone(),
-            is_agent_level: true,
-            activation_order: order as u32,
-        })
-        .collect::<Vec<_>>();
-    let skill_context = SkillsElement::new(agent_skills)
-        .content()
-        .into_iter()
-        .map(|message| message.text_content())
-        .collect::<Vec<_>>()
-        .join("\n\n");
-
-    match (target_instructions.trim(), skill_context.trim()) {
-        ("", "") => String::new(),
-        (instructions, "") => instructions.to_string(),
-        ("", skills) => format!("Active Skills\n\n{skills}"),
-        (instructions, skills) => format!("{instructions}\n\nActive Skills\n\n{skills}"),
-    }
-}
-
-pub(crate) fn delegated_target_instructions_for_space(
-    target_instructions: &str,
-    space_slug: &str,
-    target_agent_id: &str,
-) -> String {
-    resolve_swage_root()
-        .map(|root| {
-            let hierarchy = configuration_hierarchy(&root, space_slug, target_agent_id);
-            let space_dir = &hierarchy[1].1;
-            let agent_dir_opt = hierarchy[2].1.is_dir().then_some(hierarchy[2].1.as_path());
-            let (available, _warnings) =
-                SkillManager::discover_available(&root, space_dir, agent_dir_opt);
-            delegated_target_instructions(target_instructions, &available)
-        })
-        .unwrap_or_else(|| target_instructions.to_string())
-}
-
 /// Build the context assembly elements for a turn.
 ///
 /// Constructs typed elements from the resolved turn inputs:
