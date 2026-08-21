@@ -49,7 +49,7 @@ use swage_config::HierarchyLevel;
 use swage_config::model::ContextConfig;
 use swage_core::{ChatMessage, Role};
 
-use crate::assembly::default_assembly;
+use crate::assembly::default_assembly_with_variables;
 use crate::element::ContextElement;
 use crate::report::{AssemblyError, AssemblyOutput};
 use crate::tokeniser::Tokeniser;
@@ -65,6 +65,9 @@ pub fn resolve_js_assembly(
     name: &str,
     search_levels: &[(HierarchyLevel, &Path)],
 ) -> Option<PathBuf> {
+    if swage_core::validate_context_assembly_name(name).is_err() {
+        return None;
+    }
     // Later entries are more specific (global → space → agent); search in
     // reverse so the most specific hit wins.
     search_levels.iter().rev().find_map(|(_, base)| {
@@ -93,6 +96,7 @@ pub fn assemble_named(
             elements,
             config,
             tokeniser,
+            variables,
         );
     };
     let source = match std::fs::read_to_string(path) {
@@ -104,6 +108,7 @@ pub fn assemble_named(
                 elements,
                 config,
                 tokeniser,
+                variables,
             );
         }
     };
@@ -116,6 +121,7 @@ pub fn assemble_named(
             elements,
             config,
             tokeniser,
+            variables,
         ),
         Ok((messages, added)) => {
             // The report describes what actually ran: one element row per
@@ -162,6 +168,7 @@ pub fn assemble_named(
             elements,
             config,
             tokeniser,
+            variables,
         ),
     }
 }
@@ -172,9 +179,10 @@ fn fallback(
     elements: &[Box<dyn ContextElement>],
     config: &ContextConfig,
     tokeniser: &dyn Tokeniser,
+    variables: &BTreeMap<String, String>,
 ) -> AssemblyOutput {
     tracing::warn!(assembly = name, %message, "assembly fell back to default");
-    let mut output = default_assembly(elements, config, tokeniser);
+    let mut output = default_assembly_with_variables(elements, config, tokeniser, variables);
     output.report.errors.push(AssemblyError {
         assembly_name: name.to_owned(),
         error_kind: "script_failure".to_owned(),
@@ -386,7 +394,9 @@ fn script_error(ctx: &rquickjs::Ctx<'_>, error: rquickjs::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::briefing::BriefingElement;
     use crate::history::HistoryElement;
+    use crate::named_element::ResolvedNamedElement;
     use crate::prompts::PromptsElement;
     use swage_config::model::ContextConfig;
     use swage_config::prompt_rule::PromptRule;
@@ -567,17 +577,25 @@ mod tests {
 
     #[test]
     fn missing_assembly_falls_back_to_default_with_error_report() {
-        let elements = test_elements();
+        let elements: Vec<Box<dyn ContextElement>> =
+            vec![Box::new(BriefingElement::new(ResolvedNamedElement {
+                name: "current-work".into(),
+                level: HierarchyLevel::Space,
+                path: "elements/current-work.md".into(),
+                content: "Task: {{task}}".into(),
+            }))];
+        let variables = BTreeMap::from([("task".to_owned(), "audit storage".to_owned())]);
         let output = assemble_named(
             "no-such-assembly",
             None,
             &elements,
             &ContextConfig::default(),
             &WordTokeniser,
-            &BTreeMap::new(),
+            &variables,
         );
 
         assert!(!output.messages.is_empty(), "fallback still assembles");
+        assert_eq!(output.messages[0].text_content(), "Task: audit storage");
         assert_eq!(output.report.errors.len(), 1);
         assert_eq!(output.report.errors[0].fallback_used, "default");
     }
@@ -623,5 +641,19 @@ mod tests {
             resolved.starts_with(&space),
             "the space-level assembly shadows the global one"
         );
+    }
+
+    #[test]
+    fn invalid_names_do_not_escape_the_assemblies_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = root.path().join("outside.js");
+        std::fs::write(&outside, "// must not resolve").unwrap();
+        let config = root.path().join("config");
+        std::fs::create_dir_all(config.join("assemblies")).unwrap();
+
+        assert!(
+            resolve_js_assembly("../../outside", &[(HierarchyLevel::Global, &config)]).is_none()
+        );
+        assert!(resolve_js_assembly("/outside", &[(HierarchyLevel::Global, &config)]).is_none());
     }
 }
