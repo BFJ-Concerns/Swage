@@ -10,7 +10,7 @@ use crate::{state::AppState, subscription::SubscriptionState, turn};
 use super::{ClientEvent, ServerEvent, error_codes};
 
 #[cfg(test)]
-pub(super) static TEST_SKILL_ROOTS: std::sync::LazyLock<
+pub(crate) static TEST_SKILL_ROOTS: std::sync::LazyLock<
     std::sync::Mutex<std::collections::HashMap<Uuid, std::path::PathBuf>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
@@ -21,7 +21,7 @@ pub(super) static TEST_SKILL_ROOTS: std::sync::LazyLock<
 /// Infrastructure failures are returned to the caller so slash-command and
 /// explicit activation flows can surface the real problem instead of treating
 /// the outage as an empty skill catalogue.
-pub(super) async fn discover_available_for_session(
+pub(crate) async fn discover_available_for_session(
     state: &AppState,
     session_id: Uuid,
 ) -> Result<Vec<swage_config::skill::SkillDefinition>, String> {

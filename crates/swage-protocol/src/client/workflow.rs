@@ -136,6 +136,7 @@ pub struct WorkflowRun {
     pub script_id: Option<Uuid>,
     pub script_name: Option<String>,
     pub script_version: Option<u32>,
+    pub carrying_skill: Option<String>,
     pub state: WorkflowRunState,
     #[ts(type = "unknown")]
     pub args: Value,
