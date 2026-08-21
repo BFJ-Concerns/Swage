@@ -1205,6 +1205,13 @@ async fn resolve_agent_placement_command(
     seq: &AtomicU64,
     request: &AgentCallRequest,
 ) -> Result<Option<ResolvedWorkerPlacement>, String> {
+    if request.session.is_some() && (request.cwd.is_some() || request.isolation.is_some()) {
+        return Err(
+            "WorkerPlacementError: a continued worker keeps its original placement; cwd and \
+             isolation cannot be supplied with session"
+                .into(),
+        );
+    }
     match request.isolation {
         Some(isolation) => {
             let current_seq = seq.fetch_add(1, Ordering::SeqCst);
@@ -5434,6 +5441,42 @@ mod tests {
             .expect("second reply")
             .expect("second result");
 
+        let (replacement_reply, replacement_receive) = oneshot::channel();
+        tx.send(HostCommand::DispatchAgent {
+            request: AgentCallRequest {
+                cwd: Some("/unused-replacement".into()),
+                isolation: Some(swage_protocol::client::workflow::WorkerIsolation::Worktree),
+                effort: None,
+                timeout_ms: None,
+                prompt: "move the continued worker".into(),
+                agent: Some("worker".into()),
+                model: None,
+                schema: None,
+                max_attempts: 1,
+                label: None,
+                session: Some(token.clone()),
+            },
+            cancellation: CancellationToken::new(),
+            reply: replacement_reply,
+        })
+        .expect("replacement call");
+        assert_eq!(
+            replacement_receive
+                .await
+                .expect("replacement reply")
+                .expect_err("continued placement must be immutable"),
+            "WorkerPlacementError: a continued worker keeps its original placement; cwd and isolation cannot be supplied with session"
+        );
+        assert!(
+            storage
+                .list_workflow_journal(run.id)
+                .await
+                .expect("journal")
+                .iter()
+                .all(|entry| entry.kind != "worker_placement"),
+            "a rejected continuation must not provision or journal an unused worktree"
+        );
+
         // Same session, same thread: the restating worker IS the working one.
         assert_eq!(second.session_id, Some(token.session_id));
         assert_eq!(second.thread_id, Some(token.thread_id));
@@ -6108,8 +6151,48 @@ mod tests {
             retained_path.exists(),
             "failed-run worktree should remain available for inspection"
         );
+
+        let cancelled_source = format!(
+            r#"
+            await agent("prepare cancelled run", {{ cwd: {cwd}, isolation: "worktree", maxAttempts: 1 }});
+            return await wait({{ timerMs: 120000 }});
+        "#
+        );
+        let Json(cancelled) = start_inline_run(
+            State(state.clone()),
+            Path(space.id),
+            Json(StartInlineWorkflowRunRequest {
+                source: cancelled_source,
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start cancellable placement run");
+        wait_for_run_state(&storage, cancelled.id, "parked").await;
+        wait_for_workflow_thread_exit(cancelled.id).await;
+        let cancelled_path = storage
+            .list_workflow_journal(cancelled.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find_map(|entry| {
+                (entry.kind == "worker_placement")
+                    .then(|| entry.result?["path"].as_str().map(std::path::PathBuf::from))?
+            })
+            .expect("cancelled run should have a worktree path");
+        let Json(cancelled_record) = cancel_run(State(state.clone()), Path(cancelled.id))
+            .await
+            .expect("cancel parked placement run");
+        assert_eq!(cancelled_record.state, WorkflowRunState::Cancelled);
+        assert!(
+            cancelled_path.exists(),
+            "cancelled-run worktree should remain available for inspection"
+        );
+
         state.worktree_host.shutdown().await;
         assert!(!retained_path.exists());
+        assert!(!cancelled_path.exists());
         assert!(
             !fixture
                 .path()
@@ -6117,6 +6200,14 @@ mod tests {
                 .join(failed.id.to_string())
                 .exists(),
             "shutdown cleanup must remove the empty per-run directory"
+        );
+        assert!(
+            !fixture
+                .path()
+                .join("worker-worktrees")
+                .join(cancelled.id.to_string())
+                .exists(),
+            "shutdown cleanup must remove the cancelled run directory"
         );
     }
 
@@ -6819,7 +6910,7 @@ mod tests {
         run_id: Uuid,
         expected: &str,
     ) -> WorkflowRunRecord {
-        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
             loop {
                 let run = storage
                     .get_workflow_run(run_id)
