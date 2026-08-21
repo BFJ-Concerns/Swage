@@ -5457,6 +5457,7 @@ async fn multi_round_tool_calling() {
 
 #[tokio::test]
 async fn second_tool_round_request_keeps_structured_tool_messages() {
+    let _swage_home = SwageHomeGuard::isolate();
     let round_1 = vec![
         StreamChunk::ToolUse {
             call_id: "c1".into(),
