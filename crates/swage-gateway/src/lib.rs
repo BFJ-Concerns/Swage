@@ -80,6 +80,7 @@ pub mod startup;
 pub mod state;
 pub mod subscription;
 pub mod supervision;
+mod synthetic_id;
 pub mod telegram;
 pub mod thread_selection;
 pub mod tool;

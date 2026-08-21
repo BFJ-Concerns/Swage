@@ -1,7 +1,10 @@
 //! Binary-versioned skills available without operator-authored files.
 
-use sha2::{Digest, Sha256};
 use uuid::Uuid;
+
+use crate::synthetic_id::synthetic_id;
+
+const SYNTHETIC_ID_DOMAIN: &[u8] = b"swage shipped skill";
 
 pub(crate) struct ShippedFile {
     pub(crate) path: &'static str,
@@ -120,48 +123,69 @@ pub(crate) fn find_by_name(name: &str) -> Option<&'static ShippedSkill> {
 }
 
 pub(crate) fn id(space_id: Uuid, name: &str) -> Uuid {
-    let mut digest = Sha256::new();
-    digest.update(b"swage shipped skill\0");
-    digest.update(space_id.as_bytes());
-    digest.update([0]);
-    digest.update(name.as_bytes());
-    let mut bytes: [u8; 16] = digest.finalize()[..16]
-        .try_into()
-        .expect("fixed digest slice");
-    bytes[6] = (bytes[6] & 0x0f) | 0x50;
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    Uuid::from_bytes(bytes)
+    synthetic_id(SYNTHETIC_ID_DOMAIN, space_id, name)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{collections::BTreeMap, fs, path::Path};
+
+    fn repository_files(root: &Path) -> BTreeMap<String, Vec<u8>> {
+        fn visit(root: &Path, directory: &Path, files: &mut BTreeMap<String, Vec<u8>>) {
+            for entry in fs::read_dir(directory).expect("read shipped skills directory") {
+                let entry = entry.expect("read shipped skill entry");
+                let path = entry.path();
+                if path.is_dir() {
+                    visit(root, &path, files);
+                } else {
+                    let relative = path
+                        .strip_prefix(root)
+                        .expect("shipped file beneath catalogue root")
+                        .to_str()
+                        .expect("UTF-8 shipped file path")
+                        .replace('\\', "/");
+                    let previous =
+                        files.insert(relative, fs::read(&path).expect("read shipped skill file"));
+                    assert!(previous.is_none(), "duplicate shipped file path");
+                }
+            }
+        }
+
+        let mut files = BTreeMap::new();
+        visit(root, root, &mut files);
+        files
+    }
 
     #[test]
     fn catalogue_embeds_every_shipped_file_byte_for_byte() {
-        let repo_files = [
-            include_str!("../../../shipped/skills/assembly/SKILL.md"),
-            include_str!("../../../shipped/skills/commission/SKILL.md"),
-            include_str!("../../../shipped/skills/maestro/SKILL.md"),
-            include_str!("../../../shipped/skills/project-docs/SKILL.md"),
-            include_str!("../../../shipped/skills/workflow-authoring/SKILL.md"),
-        ];
-        assert_eq!(SHIPPED_SKILLS.len(), repo_files.len());
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../shipped/skills");
+        let repo_files = repository_files(&root);
+        let mut embedded_files = BTreeMap::new();
+        for file in SHIPPED_SKILLS.iter().flat_map(|skill| skill.files.iter()) {
+            let previous = embedded_files.insert(file.path.to_owned(), file.contents.as_bytes());
+            assert!(previous.is_none(), "duplicate embedded file path");
+        }
+
         assert_eq!(
-            SHIPPED_SKILLS
-                .iter()
-                .map(|skill| skill.files.len())
-                .sum::<usize>(),
-            51
+            embedded_files.keys().collect::<Vec<_>>(),
+            repo_files.keys().collect::<Vec<_>>()
         );
-        for (skill, repo_source) in SHIPPED_SKILLS.iter().zip(repo_files) {
-            assert_eq!(skill.source.as_bytes(), repo_source.as_bytes());
+        for (path, repo_bytes) in &repo_files {
+            assert_eq!(
+                embedded_files.get(path).expect("repository file embedded"),
+                &repo_bytes.as_slice(),
+                "embedded bytes differ for {path}"
+            );
+        }
+
+        for skill in SHIPPED_SKILLS {
             let embedded_skill = skill
                 .files
                 .iter()
                 .find(|file| file.path == format!("{}/SKILL.md", skill.name))
                 .expect("embedded SKILL.md");
-            assert_eq!(embedded_skill.contents.as_bytes(), repo_source.as_bytes());
+            assert_eq!(embedded_skill.contents, skill.source);
         }
     }
 
