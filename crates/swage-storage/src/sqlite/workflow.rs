@@ -67,9 +67,9 @@ fn run_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkflowRunRecord> {
     let parent_run_id: Option<String> = row.get(2)?;
     let script_version_id: Option<String> = row.get(4)?;
     let script_id: Option<String> = row.get(5)?;
-    let final_output: Option<String> = row.get(13)?;
-    let handover: Option<String> = row.get(14)?;
-    let completed_at: Option<String> = row.get(18)?;
+    let final_output: Option<String> = row.get(14)?;
+    let handover: Option<String> = row.get(15)?;
+    let completed_at: Option<String> = row.get(19)?;
     Ok(WorkflowRunRecord {
         id: uuid(row.get(0)?)?,
         space_id: uuid(row.get(1)?)?,
@@ -79,34 +79,25 @@ fn run_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkflowRunRecord> {
         script_id: script_id.map(uuid).transpose()?,
         script_name: row.get(6)?,
         script_version: row.get::<_, Option<i64>>(7)?.map(|value| value as u32),
-        source: row.get(8)?,
-        source_hash: row.get(9)?,
-        args: serde_json::from_str(&row.get::<_, String>(10)?).map_err(|error| {
-            rusqlite::Error::FromSqlConversionFailure(
-                10,
-                rusqlite::types::Type::Text,
-                Box::new(error),
-            )
-        })?,
-        budget: serde_json::from_str(&row.get::<_, String>(11)?).map_err(|error| {
+        carrying_skill: row.get(8)?,
+        source: row.get(9)?,
+        source_hash: row.get(10)?,
+        args: serde_json::from_str(&row.get::<_, String>(11)?).map_err(|error| {
             rusqlite::Error::FromSqlConversionFailure(
                 11,
                 rusqlite::types::Type::Text,
                 Box::new(error),
             )
         })?,
-        state: row.get(12)?,
+        budget: serde_json::from_str(&row.get::<_, String>(12)?).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                12,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })?,
+        state: row.get(13)?,
         final_output: final_output
-            .map(|value| serde_json::from_str(&value))
-            .transpose()
-            .map_err(|error| {
-                rusqlite::Error::FromSqlConversionFailure(
-                    13,
-                    rusqlite::types::Type::Text,
-                    Box::new(error),
-                )
-            })?,
-        handover: handover
             .map(|value| serde_json::from_str(&value))
             .transpose()
             .map_err(|error| {
@@ -116,19 +107,29 @@ fn run_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkflowRunRecord> {
                     Box::new(error),
                 )
             })?,
-        error_message: row.get(15)?,
-        engine_version: row.get(16)?,
-        dispatch_bound_agent_ids: serde_json::from_str(&row.get::<_, String>(19)?).map_err(
+        handover: handover
+            .map(|value| serde_json::from_str(&value))
+            .transpose()
+            .map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    15,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })?,
+        error_message: row.get(16)?,
+        engine_version: row.get(17)?,
+        dispatch_bound_agent_ids: serde_json::from_str(&row.get::<_, String>(20)?).map_err(
             |error| {
                 rusqlite::Error::FromSqlConversionFailure(
-                    19,
+                    20,
                     rusqlite::types::Type::Text,
                     Box::new(error),
                 )
             },
         )?,
-        wake_at: row.get::<_, Option<String>>(20)?.map(time).transpose()?,
-        created_at: time(row.get(17)?)?,
+        wake_at: row.get::<_, Option<String>>(21)?.map(time).transpose()?,
+        created_at: time(row.get(18)?)?,
         completed_at: completed_at.map(time).transpose()?,
     })
 }
@@ -140,7 +141,7 @@ const RUN_COLUMNS: &str = "id, space_id, parent_run_id, parent_seq, script_versi
     COALESCE((SELECT script_id FROM workflow_script_versions WHERE id = workflow_runs.script_version_id), inline_workflow_id), \
     COALESCE((SELECT name FROM workflow_scripts WHERE id = (SELECT script_id FROM workflow_script_versions WHERE id = workflow_runs.script_version_id)), inline_workflow_name), \
     COALESCE((SELECT version FROM workflow_script_versions WHERE id = workflow_runs.script_version_id), inline_workflow_version), \
-    source, source_hash, args_json, budget_json, state, final_output_json, handover_json, error_message, engine_version, created_at, completed_at, dispatch_bound_agent_ids_json, wake_at";
+    carrying_skill, source, source_hash, args_json, budget_json, state, final_output_json, handover_json, error_message, engine_version, created_at, completed_at, dispatch_bound_agent_ids_json, wake_at";
 const JOURNAL_COLUMNS: &str = "id, run_id, seq, completed_order, kind, status, args_hash, request_json, result_json, error_message, effect_kind, idempotency_key, target_kind, started_at, completed_at";
 const RUN_EVENT_COLUMNS: &str = "id, run_id, journal_entry_id, seq, kind, payload_json, source_surface, source_agent_id, source_session_id, source_turn_id, posted_at, delivered_wake_seq, delivered_at";
 
@@ -332,7 +333,7 @@ impl WorkflowStore for SqliteStorage {
             .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
         let dispatch_bound_agent_ids = serde_json::to_string(&run.dispatch_bound_agent_ids)
             .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
-        self.with_conn(move |conn| { conn.execute("INSERT INTO workflow_runs (id, space_id, parent_run_id, parent_seq, script_version_id, inline_workflow_id, inline_workflow_name, inline_workflow_version, source, source_hash, args_json, budget_json, state, engine_version, dispatch_bound_agent_ids_json, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 'running', ?13, ?14, ?15)", params![id.to_string(), run.space_id.to_string(), run.parent_run_id.map(|v| v.to_string()), run.parent_seq.map(|v| v as i64), run.script_version_id.map(|v| v.to_string()), run.inline_workflow_id.map(|v| v.to_string()), run.inline_workflow_name, run.inline_workflow_version, run.source, run.source_hash, args, budget, run.engine_version, dispatch_bound_agent_ids, now.to_rfc3339()])?; conn.query_row(&format!("SELECT {RUN_COLUMNS} FROM workflow_runs WHERE id = ?1"), [id.to_string()], run_row) }).await
+        self.with_conn(move |conn| { conn.execute("INSERT INTO workflow_runs (id, space_id, parent_run_id, parent_seq, script_version_id, inline_workflow_id, inline_workflow_name, inline_workflow_version, carrying_skill, source, source_hash, args_json, budget_json, state, engine_version, dispatch_bound_agent_ids_json, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, 'running', ?14, ?15, ?16)", params![id.to_string(), run.space_id.to_string(), run.parent_run_id.map(|v| v.to_string()), run.parent_seq.map(|v| v as i64), run.script_version_id.map(|v| v.to_string()), run.inline_workflow_id.map(|v| v.to_string()), run.inline_workflow_name, run.inline_workflow_version, run.carrying_skill, run.source, run.source_hash, args, budget, run.engine_version, dispatch_bound_agent_ids, now.to_rfc3339()])?; conn.query_row(&format!("SELECT {RUN_COLUMNS} FROM workflow_runs WHERE id = ?1"), [id.to_string()], run_row) }).await
     }
 
     async fn get_workflow_run(&self, id: Uuid) -> Result<Option<WorkflowRunRecord>, StorageError> {
@@ -704,6 +705,7 @@ mod tests {
                 inline_workflow_id: None,
                 inline_workflow_name: None,
                 inline_workflow_version: None,
+                carrying_skill: None,
                 source: None,
                 source_hash: "hash".into(),
                 args: serde_json::json!({}),
@@ -727,6 +729,7 @@ mod tests {
                 inline_workflow_id: Some(inline_id),
                 inline_workflow_name: Some("compiled-workflow".into()),
                 inline_workflow_version: Some(3),
+                carrying_skill: None,
                 source: Some("return 3".into()),
                 source_hash: "inline-hash".into(),
                 args: serde_json::json!({}),
@@ -842,6 +845,7 @@ mod tests {
                 inline_workflow_id: None,
                 inline_workflow_name: None,
                 inline_workflow_version: None,
+                carrying_skill: None,
                 source: Some("return null".into()),
                 source_hash: "hash".into(),
                 args: serde_json::json!({}),
