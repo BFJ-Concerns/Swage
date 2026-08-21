@@ -337,6 +337,7 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
     if let Some(browser_host) = browser_host {
         browser_host.shutdown().await;
     }
+    state.worktree_host.shutdown().await;
 
     // Step 12c: Remove runtime metadata now that the gateway has stopped.
     if let Err(e) = RuntimeMetadata::remove() {
@@ -634,7 +635,8 @@ pub(crate) fn build_tool_dispatcher_with_browser(
         knowledge::KnowledgeSearchTool, memory::MemoryTool, plugin::discover_plugin_tools,
         python_execute::PythonExecuteTool, run_event::RunEventPostTool, schedule::ScheduleTool,
         schedule::WakeMeLaterTool, session_variable::SessionVariableTool, shell::ShellTool,
-        tool_result_read::ToolResultReadTool, url_fetch::UrlFetchTool, web_search::WebSearchTool,
+        task_definition::TaskDefinitionTool, tool_result_read::ToolResultReadTool,
+        url_fetch::UrlFetchTool, web_search::WebSearchTool,
     };
     use std::time::Duration;
 
@@ -670,6 +672,7 @@ pub(crate) fn build_tool_dispatcher_with_browser(
         // Schedule tools reach the gateway's schedule service through the host
         // tool context; both are host-only (requires_device_execution).
         Arc::new(ScheduleTool),
+        Arc::new(TaskDefinitionTool),
         Arc::new(WakeMeLaterTool),
         Arc::new(RunEventPostTool),
         Arc::new(SessionVariableTool),
@@ -1294,6 +1297,7 @@ mod tests {
         let provider = create_provider_with_retry(&config, &secret_manager, retry).await;
         let response = provider
             .complete(swage_core::CompletionRequest {
+                effort: None,
                 messages: vec![],
                 model: None,
                 max_tokens: None,
@@ -1358,6 +1362,7 @@ mod tests {
                         let provider_model = provider.model_id().to_string();
                         let completion_error = provider
                             .complete(swage_core::CompletionRequest {
+                                effort: None,
                                 messages: vec![],
                                 model: None,
                                 max_tokens: None,
@@ -1669,6 +1674,7 @@ mod tests {
         let provider = create_provider(&config, &secret_manager).await;
         let result = provider
             .complete(swage_core::CompletionRequest {
+                effort: None,
                 messages: vec![],
                 model: None,
                 max_tokens: None,

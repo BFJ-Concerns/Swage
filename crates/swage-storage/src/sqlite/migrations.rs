@@ -80,7 +80,8 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
         ),
         ("050_workflow_run_events", CREATE_WORKFLOW_RUN_EVENTS),
         ("051_workflow_run_parking", ADD_WORKFLOW_RUN_PARKING),
-        ("052_session_variables", CREATE_SESSION_VARIABLES),
+        ("052_task_definitions", CREATE_TASK_DEFINITION_TABLE),
+        ("053_session_variables", CREATE_SESSION_VARIABLES),
     ]
 }
 
@@ -123,7 +124,9 @@ const ADD_WORKFLOW_RUN_PARKING: &str = "
         parent_run_id        TEXT REFERENCES workflow_runs(id),
         parent_seq           INTEGER,
         dispatch_bound_agent_ids_json TEXT NOT NULL,
-        wake_at              TEXT
+        dispatch_bound_task_definition_ids_json TEXT NOT NULL,
+        wake_at              TEXT,
+        inherited_worker_placement_json TEXT
     );
     INSERT INTO workflow_runs_parking_new (
         id, space_id, script_version_id, inline_workflow_id,
@@ -131,7 +134,8 @@ const ADD_WORKFLOW_RUN_PARKING: &str = "
         source, source_hash, args_json,
         budget_json, state, final_output_json, handover_json, error_message, engine_version,
         created_at, completed_at, parent_run_id, parent_seq,
-        dispatch_bound_agent_ids_json
+        dispatch_bound_agent_ids_json, dispatch_bound_task_definition_ids_json,
+        inherited_worker_placement_json
     )
     SELECT
         id, space_id, script_version_id, inline_workflow_id,
@@ -139,7 +143,8 @@ const ADD_WORKFLOW_RUN_PARKING: &str = "
         source, source_hash, args_json,
         budget_json, state, final_output_json, NULL, error_message, engine_version,
         created_at, completed_at, parent_run_id, parent_seq,
-        dispatch_bound_agent_ids_json
+        dispatch_bound_agent_ids_json, dispatch_bound_task_definition_ids_json,
+        inherited_worker_placement_json
     FROM workflow_runs;
     DROP TABLE workflow_runs;
     ALTER TABLE workflow_runs_parking_new RENAME TO workflow_runs;
@@ -186,7 +191,7 @@ const CREATE_WORKFLOW_RUN_EVENTS: &str = "
         run_id            TEXT NOT NULL REFERENCES workflow_runs(id) ON DELETE CASCADE,
         seq               INTEGER NOT NULL,
         completed_order   INTEGER,
-        kind              TEXT NOT NULL CHECK (kind IN ('agent_call', 'effect', 'log', 'phase', 'workflow_call', 'timer', 'event', 'await_event', 'gate', 'budget', 'wind_down')),
+        kind              TEXT NOT NULL CHECK (kind IN ('agent_call', 'worker_placement', 'effect', 'log', 'phase', 'workflow_call', 'timer', 'event', 'await_event', 'gate', 'budget', 'wind_down')),
         status            TEXT NOT NULL CHECK (status IN ('started', 'completed', 'failed')),
         args_hash         TEXT NOT NULL,
         request_json      TEXT NOT NULL,
@@ -955,7 +960,9 @@ const COMPLETE_SCHEMA: &str = "
         engine_version      TEXT NOT NULL,
         created_at          TEXT NOT NULL,
         completed_at        TEXT,
-        dispatch_bound_agent_ids_json TEXT NOT NULL DEFAULT '[]'
+        dispatch_bound_agent_ids_json TEXT NOT NULL DEFAULT '[]',
+        dispatch_bound_task_definition_ids_json TEXT NOT NULL DEFAULT '[]',
+        inherited_worker_placement_json TEXT
     );
 
     CREATE INDEX IF NOT EXISTS idx_workflow_runs_space_created
@@ -1415,6 +1422,19 @@ const CREATE_AGENT_DEFINITION_TABLE: &str = "
         ON agent_definitions(id) WHERE space_id IS NULL;
     CREATE INDEX IF NOT EXISTS idx_agent_definitions_space
         ON agent_definitions(space_id);
+";
+
+const CREATE_TASK_DEFINITION_TABLE: &str = "
+    CREATE TABLE IF NOT EXISTS task_definitions (
+        id TEXT PRIMARY KEY,
+        instructions TEXT NOT NULL DEFAULT '',
+        model_id TEXT,
+        tool_permissions_json TEXT,
+        output_schema_json TEXT,
+        output_max_retries INTEGER,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
 ";
 
 /// Apply all pending migrations to `conn`.

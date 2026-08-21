@@ -128,6 +128,7 @@ pub async fn evaluate_transfer_async(
             let max_tokens = summary_budget.unwrap_or(512);
 
             let request = CompletionRequest {
+                effort: None,
                 messages: vec![ChatMessage::new(
                     Role::User,
                     format!(

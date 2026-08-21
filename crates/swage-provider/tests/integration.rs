@@ -187,6 +187,7 @@ async fn reliability_stack_retries_then_fails_over_to_secondary() {
 
     // Send a completion — should exhaust retries on primary, failover to secondary.
     let request = CompletionRequest {
+        effort: None,
         messages: vec![],
         model: None,
         max_tokens: Some(100),
@@ -355,6 +356,7 @@ async fn circuit_open_triggers_failover_to_secondary() {
         .build();
 
     let make_request = || CompletionRequest {
+        effort: None,
         messages: vec![],
         model: None,
         max_tokens: Some(100),
@@ -403,6 +405,7 @@ async fn streaming_through_reliability_stack_delivers_chunks() {
         .build();
 
     let request = CompletionRequest {
+        effort: None,
         messages: vec![],
         model: None,
         max_tokens: Some(100),
@@ -459,6 +462,7 @@ async fn permanent_error_bypasses_retry_and_failover() {
         .build();
 
     let request = CompletionRequest {
+        effort: None,
         messages: vec![],
         model: None,
         max_tokens: Some(100),
