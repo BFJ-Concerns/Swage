@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use swage_core::{ChatMessage, Role};
 
 use crate::element::ContextElement;
-use crate::named_element::{ResolvedNamedElement, validate_element_name};
+use crate::named_element::{ResolvedNamedElement, has_valid_element_name_shape};
 use crate::tokeniser::Tokeniser;
 
 /// Apply the session-value substitution contract to Markdown content.
@@ -20,7 +20,7 @@ pub fn substitute_variables(template: &str, variables: &BTreeMap<String, String>
             return rendered;
         };
         let name = &candidate[..end];
-        if validate_element_name(name).is_ok() {
+        if has_valid_element_name_shape(name) {
             if let Some(value) = variables.get(name) {
                 rendered.push_str(value);
             } else {
@@ -103,7 +103,10 @@ mod tests {
         });
         assert_eq!(element.name(), "current-work");
         assert_eq!(element.priority(), 100);
-        assert!(element.source().contains("briefing 'current-work' (Space"));
+        assert_eq!(
+            element.source(),
+            "briefing 'current-work' (Space, elements/current-work.md)"
+        );
         assert_eq!(
             element.content()[0].text_content(),
             "Task: {{task}}; owner: {{owner}}"
@@ -116,6 +119,17 @@ mod tests {
             "Task: audit storage; owner: ⟦unset:owner⟧"
         );
         assert!(element.token_count(&TiktokenTokeniser::new("gpt-4o")) > 0);
+
+        let output = default_assembly_with_variables(
+            &[Box::new(element)],
+            &swage_config::model::ContextConfig::default(),
+            &TiktokenTokeniser::new("gpt-4o"),
+            &BTreeMap::new(),
+        );
+        assert_eq!(
+            output.report.elements[0].source,
+            "briefing 'current-work' (Space, elements/current-work.md)"
+        );
     }
 
     #[test]
