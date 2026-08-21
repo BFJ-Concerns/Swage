@@ -3938,7 +3938,8 @@ mod tests {
     use super::*;
     use swage_protocol::client::workflow::{WorkflowJournalEntryKind, WorkflowJournalEntryStatus};
     use swage_storage::{
-        SessionStore, SpaceStore, SqliteStorage, Storage, TurnStore, WorkflowStore,
+        AgentDefinitionStore, SessionStore, SpaceStore, SqliteStorage, Storage, TurnStore,
+        WorkflowStore,
     };
     use swage_workflow::AgentSessionRef;
 
@@ -3953,6 +3954,24 @@ mod tests {
             None,
         );
         (state, storage)
+    }
+
+    async fn store_test_agent(storage: &SqliteStorage, space_id: Uuid, agent_id: &str) {
+        storage
+            .upsert_agent_definition(swage_storage::NewAgentDefinition {
+                id: agent_id.into(),
+                space_id: Some(space_id),
+                display_name: "Workflow test agent".into(),
+                description: String::new(),
+                instructions: String::new(),
+                model_id: None,
+                tool_permissions: None,
+                skills: vec![],
+                output_schema: None,
+                output_max_retries: None,
+            })
+            .await
+            .expect("store workflow test agent definition");
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -4288,6 +4307,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn operator_skill_workflow_runs_by_name_and_authored_source_shadows_it() {
+        const AGENT_ID: &str = "workflow-agent";
         let root = tempfile::tempdir().expect("skill root");
         let skill_dir = root.path().join("skills/operator-proof");
         std::fs::create_dir_all(skill_dir.join("workflows")).expect("workflow directory");
@@ -4302,10 +4322,11 @@ mod tests {
 
         let (state, storage) = workflow_test_state();
         let space = storage.get_or_create_default().await.expect("space");
+        store_test_agent(&storage, space.id, AGENT_ID).await;
         let session = storage
             .create_session(NewSession {
                 space_id: space.id,
-                agent_id: "gateway".into(),
+                agent_id: AGENT_ID.into(),
                 metadata: None,
                 active_workspace_attachment_id: None,
             })
@@ -4384,9 +4405,11 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn agent_skill_workflow_ids_use_the_scope_that_listed_them() {
+        const AGENT_ID: &str = "workflow-agent";
         let root = tempfile::tempdir().expect("skill root");
         let (state, storage) = workflow_test_state();
         let space = storage.get_or_create_default().await.expect("space");
+        store_test_agent(&storage, space.id, AGENT_ID).await;
         let space_skill_dir = root
             .path()
             .join("spaces")
@@ -4396,7 +4419,7 @@ mod tests {
             .path()
             .join("spaces")
             .join(&space.slug)
-            .join("agents/gateway/skills/scoped-proof");
+            .join(format!("agents/{AGENT_ID}/skills/scoped-proof"));
         std::fs::create_dir_all(space_skill_dir.join("workflows"))
             .expect("space workflow directory");
         std::fs::create_dir_all(agent_skill_dir.join("workflows"))
@@ -4434,7 +4457,7 @@ mod tests {
         let session = storage
             .create_session(NewSession {
                 space_id: space.id,
-                agent_id: "gateway".into(),
+                agent_id: AGENT_ID.into(),
                 metadata: None,
                 active_workspace_attachment_id: None,
             })
@@ -4466,7 +4489,7 @@ mod tests {
             State(state.clone()),
             Path(space.id),
             Query(WorkflowScriptListQuery {
-                agent_id: Some("gateway".into()),
+                agent_id: Some(AGENT_ID.into()),
             }),
         )
         .await
@@ -4484,7 +4507,7 @@ mod tests {
             .expect("agent-only workflow in scoped list");
         let agent_scope = || {
             Query(WorkflowScriptListQuery {
-                agent_id: Some("gateway".into()),
+                agent_id: Some(AGENT_ID.into()),
             })
         };
 
@@ -4579,7 +4602,7 @@ mod tests {
             parent.final_output,
             Some(serde_json::json!({"scope": "agent-only"}))
         );
-        assert_eq!(parent.dispatch_bound_agent_ids, vec!["gateway"]);
+        assert_eq!(parent.dispatch_bound_agent_ids, vec![AGENT_ID]);
         let child = storage
             .list_workflow_runs(space.id)
             .await
@@ -4591,7 +4614,7 @@ mod tests {
             child.final_output,
             Some(serde_json::json!({"scope": "agent-only"}))
         );
-        assert_eq!(child.dispatch_bound_agent_ids, vec!["gateway"]);
+        assert_eq!(child.dispatch_bound_agent_ids, vec![AGENT_ID]);
     }
 
     #[tokio::test(flavor = "multi_thread")]
