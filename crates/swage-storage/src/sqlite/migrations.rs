@@ -80,6 +80,7 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
         ),
         ("050_workflow_run_events", CREATE_WORKFLOW_RUN_EVENTS),
         ("051_workflow_run_parking", ADD_WORKFLOW_RUN_PARKING),
+        ("052_task_definitions", CREATE_TASK_DEFINITION_TABLE),
     ]
 }
 
@@ -1387,6 +1388,19 @@ const CREATE_AGENT_DEFINITION_TABLE: &str = "
         ON agent_definitions(id) WHERE space_id IS NULL;
     CREATE INDEX IF NOT EXISTS idx_agent_definitions_space
         ON agent_definitions(space_id);
+";
+
+const CREATE_TASK_DEFINITION_TABLE: &str = "
+    CREATE TABLE IF NOT EXISTS task_definitions (
+        id TEXT PRIMARY KEY,
+        instructions TEXT NOT NULL DEFAULT '',
+        model_id TEXT,
+        tool_permissions_json TEXT,
+        output_schema_json TEXT,
+        output_max_retries INTEGER,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
 ";
 
 /// Apply all pending migrations to `conn`.

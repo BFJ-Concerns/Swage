@@ -212,6 +212,7 @@ impl DelegationHandler for GatewayDelegationHandler {
         &self,
         target_agent_id: &str,
         task: &str,
+        task_definition: Option<&str>,
         context: Option<serde_json::Value>,
         cwd: Option<String>,
         isolation: Option<swage_protocol::client::workflow::WorkerIsolation>,
@@ -249,6 +250,36 @@ impl DelegationHandler for GatewayDelegationHandler {
                 );
                 target_resolved
             }
+        };
+        let target_resolved = match task_definition {
+            Some(id) => {
+                let definition =
+                    crate::service::resolve_task_definition(self.state.storage.as_ref(), id)
+                        .await
+                        .map_err(|error| AgentError::InvalidConfig(error.to_string()))?;
+                let decision = crate::experimentation::select_variant(
+                    &target_resolved.experimentation,
+                    crate::experimentation::LOCATION_TASK_PROMPT,
+                    &[],
+                    "definition",
+                    sender_turn_id,
+                )
+                .map_err(|error| AgentError::InvalidConfig(error.to_string()))?;
+                if let Err(error) = crate::experimentation::record_selection(
+                    &self.state,
+                    crate::experimentation::LOCATION_TASK_PROMPT,
+                    &decision,
+                    None,
+                    Some(sender_turn_id),
+                )
+                .await
+                {
+                    tracing::warn!(%error, task_id = id, "task prompt variant record unavailable; serving the definition default");
+                }
+                super::apply_task_definition(target_resolved, &definition)
+                    .map_err(|error| AgentError::InvalidConfig(error.to_string()))?
+            }
+            None => target_resolved,
         };
 
         let mut bound_agent_ids = dispatch_bound_agent_ids_for_turn(&self.state, sender_turn_id)
@@ -400,6 +431,7 @@ impl DelegationHandler for GatewayDelegationHandler {
 
         let mut payload = serde_json::json!({
             "task": task,
+            "task_definition": task_definition,
             "placement": {
                 "cwd": placement.as_ref().map(|placement| &placement.path),
                 "requested_cwd": cwd,

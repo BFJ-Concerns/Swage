@@ -962,6 +962,30 @@ pub struct NewAgentDefinition {
     pub output_max_retries: Option<u32>,
 }
 
+/// A durable named work contract resolved when a child is dispatched.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskDefinition {
+    pub id: String,
+    pub instructions: String,
+    pub model_id: Option<String>,
+    pub tool_permissions: Option<serde_json::Value>,
+    pub output_schema: Option<serde_json::Value>,
+    pub output_max_retries: Option<u32>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Whole replacement used by audited task-definition mutations.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NewTaskDefinition {
+    pub id: String,
+    pub instructions: String,
+    pub model_id: Option<String>,
+    pub tool_permissions: Option<serde_json::Value>,
+    pub output_schema: Option<serde_json::Value>,
+    pub output_max_retries: Option<u32>,
+}
+
 /// A manually appended audit event.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NewAuditEvent {

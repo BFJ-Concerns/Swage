@@ -1,11 +1,13 @@
 mod agent_definition;
 mod conversation;
 mod space;
+mod task_definition;
 mod workspace_attachment;
 
 pub use agent_definition::*;
 pub use conversation::*;
 pub use space::*;
+pub use task_definition::*;
 pub use workspace_attachment::*;
 
 #[cfg(test)]

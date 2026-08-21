@@ -33,8 +33,8 @@ use swage_storage::{
     store::{
         AgentDefinitionStore, AgentMessageStore, ApprovalStore, AttachmentStore,
         BackgroundJobStore, ChannelLinkStore, ContextSnapshotStore, DeviceStore, MaterialStore,
-        MessageStore, ScheduleStore, SessionStore, SkillActivationStore, SpaceStore, ThreadStore,
-        ToolCallStore, TurnStore, WorkspaceAttachmentStore,
+        MessageStore, ScheduleStore, SessionStore, SkillActivationStore, SpaceStore,
+        TaskDefinitionStore, ThreadStore, ToolCallStore, TurnStore, WorkspaceAttachmentStore,
     },
 };
 
@@ -3312,6 +3312,30 @@ impl swage_storage::store::AgentDefinitionStore for MockStorage {
         _: Option<uuid::Uuid>,
     ) -> Result<bool, StorageError> {
         unimplemented!("turn tests do not author agent definitions")
+    }
+}
+
+#[async_trait]
+impl swage_storage::TaskDefinitionStore for MockStorage {
+    async fn upsert_task_definition(
+        &self,
+        _: swage_storage::NewTaskDefinition,
+    ) -> Result<swage_storage::TaskDefinition, StorageError> {
+        unimplemented!("turn tests use SQLite for task definitions")
+    }
+    async fn get_task_definition(
+        &self,
+        _: &str,
+    ) -> Result<Option<swage_storage::TaskDefinition>, StorageError> {
+        Ok(None)
+    }
+    async fn list_task_definitions(
+        &self,
+    ) -> Result<Vec<swage_storage::TaskDefinition>, StorageError> {
+        Ok(vec![])
+    }
+    async fn delete_task_definition(&self, _: &str) -> Result<bool, StorageError> {
+        unimplemented!("turn tests use SQLite for task definitions")
     }
 }
 
@@ -6890,12 +6914,25 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
             space_id: Some(space.id),
             display_name: "Agent B".into(),
             description: String::new(),
-            instructions: "Definition-only delegated instruction.".into(),
+            instructions: String::new(),
             model_id: None,
             tool_permissions: Some(serde_json::json!({
                 "allow": ["shell"], "deny": [], "bundles": {}
             })),
             skills: vec!["definition-declared".into()],
+            output_schema: None,
+            output_max_retries: None,
+        })
+        .await
+        .expect("store delegated agent definition");
+    storage
+        .upsert_task_definition(swage_storage::NewTaskDefinition {
+            id: "strict-review".into(),
+            instructions: "Task-defined delegated instruction.".into(),
+            model_id: Some("task-review-model".into()),
+            tool_permissions: Some(serde_json::json!({
+                "allow": ["shell"], "deny": [], "bundles": {}, "require_approval": []
+            })),
             output_schema: Some(serde_json::json!({
                 "type": "object",
                 "required": ["result"],
@@ -6915,6 +6952,7 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
             arguments: serde_json::json!({
                 "target_agent": "agent-b",
                 "task": "Summarise this request",
+                "task_definition": "strict-review",
             }),
         },
         StreamChunk::Done {
@@ -7018,6 +7056,19 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
         Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
         swage_config::ResolvedConfig {
+            models: swage_config::ModelCatalogConfig {
+                default: "task-review-model".into(),
+                entries: [(
+                    "task-review-model".into(),
+                    swage_config::ModelEndpointConfig {
+                        provider_id: "test".into(),
+                        model_id: "task-review-wire".into(),
+                        ..Default::default()
+                    },
+                )]
+                .into_iter()
+                .collect(),
+            },
             communication: swage_config::CommunicationConfig {
                 context_transfer: swage_config::ContextTransferConfig {
                     mode: swage_config::ContextTransferMode::Explicit,
@@ -7277,9 +7328,23 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
         "delegated provider request should include definition-declared skill instructions: {child_request_text}"
     );
     assert!(
-        child_request_text.contains("Definition-only delegated instruction."),
-        "a genuinely reached child must receive its durable definition rather than file config alone: {child_request_text}"
+        child_request_text.contains("Task-defined delegated instruction."),
+        "a genuinely reached child must receive its named task instructions: {child_request_text}"
     );
+    assert_eq!(
+        captured_requests[1].model.as_deref(),
+        Some("task-review-wire"),
+        "the delegated child must use the named task's model preference"
+    );
+    let child_audit = state
+        .storage
+        .list_audit_events()
+        .await
+        .expect("list child task audit events");
+    assert!(child_audit.iter().any(|event| {
+        event.event_kind == "variant_selected"
+            && event.entity_id == crate::experimentation::LOCATION_TASK_PROMPT
+    }));
     assert!(
         !child_request_text.contains("Use the parent foreground skill."),
         "delegated provider request must not inherit user-activated parent skills: {child_request_text}"
@@ -7342,6 +7407,7 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
         .handle_delegation(
             "agent-b",
             "This must not start",
+            None,
             None,
             None,
             None,
@@ -7904,6 +7970,7 @@ async fn delegated_read_only_location_approval_allows_read_and_refuses_write() {
             "agent-b",
             "Exercise read-only placement",
             None,
+            None,
             Some(attachment.to_string_lossy().into_owned()),
             None,
             "read-only-placement-delegate",
@@ -8087,6 +8154,7 @@ async fn placed_delegate_keeps_exact_read_only_authority_when_delegating_again()
             "agent-b",
             "Delegate once more",
             None,
+            None,
             Some(placed_workspace.to_string_lossy().into_owned()),
             None,
             "outer-placed-delegate",
@@ -8243,6 +8311,7 @@ async fn delegate_worktree_provisions_isolated_cwd_and_records_resolved_placemen
             "agent-b",
             "Write only in an isolated worktree and wait",
             None,
+            None,
             Some(repo.to_string_lossy().into_owned()),
             Some(swage_protocol::client::workflow::WorkerIsolation::Worktree),
             "wait-worktree-delegate-call",
@@ -8272,6 +8341,7 @@ async fn delegate_worktree_provisions_isolated_cwd_and_records_resolved_placemen
         .handle_delegation(
             "agent-b",
             "Write only in an isolated worktree",
+            None,
             None,
             Some(repo.to_string_lossy().into_owned()),
             Some(swage_protocol::client::workflow::WorkerIsolation::Worktree),
@@ -8433,6 +8503,7 @@ async fn detached_delegate_can_be_cancelled_through_active_registry() {
             "agent-b",
             "Summarise independently",
             None,
+            None,
             Some(delegated_cwd.path().to_string_lossy().into_owned()),
             Some(swage_protocol::client::workflow::WorkerIsolation::Worktree),
             "detached-placement-delegate",
@@ -8467,6 +8538,7 @@ async fn detached_delegate_can_be_cancelled_through_active_registry() {
         .handle_delegation(
             "agent-b",
             "This placement must be rejected",
+            None,
             None,
             Some(denied_cwd.path().to_string_lossy().into_owned()),
             None,

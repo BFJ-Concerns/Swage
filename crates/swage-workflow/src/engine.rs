@@ -668,6 +668,9 @@ impl WorkflowEngine {
                                 ...(merged.agent === undefined || merged.agent === null
                                     ? {}
                                     : { agent: merged.agent }),
+                                ...(merged.task === undefined || merged.task === null
+                                    ? {}
+                                    : { task: String(merged.task) }),
                                 model: merged.model ?? null,
                                 ...(merged.effort === undefined || merged.effort === null
                                     ? {}
@@ -1273,11 +1276,31 @@ mod tests {
             "an unset agent must not perturb journal argument hashes: {serialised}"
         );
         assert!(
-            serialised.get("effort").is_none()
+            serialised.get("task").is_none()
+                && serialised.get("effort").is_none()
                 && serialised.get("timeout_ms").is_none()
                 && serialised.get("cwd").is_none()
                 && serialised.get("isolation").is_none(),
             "unset call options must not perturb journal argument hashes: {serialised}"
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_call_projects_named_task_to_the_host() {
+        let host = Arc::new(SurfaceHost::new());
+        WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                r#"await agent("review", { task: "strict-review" }); return null;"#,
+                "null",
+                CancellationToken::new(),
+                Some(host.clone()),
+                ScriptCapabilities::default(),
+            )
+            .await
+            .expect("task call");
+        assert_eq!(
+            host.agent_requests.lock().unwrap()[0].task.as_deref(),
+            Some("strict-review")
         );
     }
 
