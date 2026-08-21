@@ -13,7 +13,7 @@ use crate::{
 };
 
 fn named_host_error(error: &str, fallback: &str) -> (String, String) {
-    const NAMES: [(&str, &str); 12] = [
+    const NAMES: [(&str, &str); 13] = [
         ("AgentCallError", "AgentCallError"),
         ("AgentCallTimeoutError", "AgentCallTimeoutError"),
         ("BudgetExceededError", "BudgetExceededError"),
@@ -21,6 +21,7 @@ fn named_host_error(error: &str, fallback: &str) -> (String, String) {
         ("DeliveryNotGrantedError", "DeliveryNotGrantedError"),
         ("WorkflowCancelledError", "WorkflowCancelledError"),
         ("NondeterministicReplayError", "NondeterministicCallError"),
+        ("WorkerPlacementError", "WorkerPlacementError"),
         ("EmptyAgentOutputError", "EmptyAgentOutputError"),
         ("WorkflowCompositionError", "WorkflowCompositionError"),
         ("WaitTimerError", "WaitTimerError"),
@@ -310,17 +311,7 @@ impl WorkflowEngine {
                                 };
                                 let mut request = request;
                                 request.prompt = prompt;
-                                let resolved_placement = match host
-                                    .resolve_worker_placement(&request, cancellation.clone())
-                                    .await
-                                {
-                                    Ok(path) => path,
-                                    Err(error) => return serde_json::json!({
-                                        "ok": false,
-                                        "error": {"name": "WorkerPlacementError", "message": error}
-                                    }).to_string(),
-                                };
-                                match host.run_agent_call(request.clone(), resolved_placement, cancellation).await {
+                                match host.dispatch_agent_call(request.clone(), cancellation).await {
                                     Ok(result) => {
                                         if request.schema.is_none()
                                             && result.output.as_str().is_some_and(|value| value.trim().is_empty())
@@ -2009,6 +2000,10 @@ mod tests {
         assert_eq!(
             named_host_error("NondeterministicReplayError", "AgentCallError"),
             ("NondeterministicCallError".into(), String::new())
+        );
+        assert_eq!(
+            named_host_error("WorkerPlacementError: denied", "AgentCallError"),
+            ("WorkerPlacementError".into(), "denied".into())
         );
         assert_eq!(
             named_host_error("provider unavailable", "AgentCallError"),

@@ -157,7 +157,7 @@ mod tests {
 
     #[tokio::test]
     async fn provisions_isolated_siblings_and_lists_then_removes_them() {
-        let temp = tempfile::tempdir_in("/tmp/scratch").unwrap();
+        let temp = tempfile::tempdir().unwrap();
         let repo = temp.path().join("repo");
         tokio::fs::create_dir(&repo).await.unwrap();
         for args in [
