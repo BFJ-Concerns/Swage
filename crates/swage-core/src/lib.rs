@@ -8,6 +8,7 @@
 //! as the foundation that all other crates build upon.
 
 pub mod config;
+pub mod dispatch;
 pub mod error;
 pub mod message;
 pub mod message_rendering;
@@ -21,6 +22,7 @@ pub mod tool;
 // Convenience re-exports
 // ---------------------------------------------------------------------------
 
+pub use dispatch::{DispatchContextComposition, validate_context_assembly_name};
 pub use error::{
     ApprovalTimeoutPolicy, DelegateCompletionMode, GatewayError, HookError, PermissionDeniedReason,
     ProviderError, RuntimeError, SafetyError, SandboxError, SecretError, StorageError, SwageError,
