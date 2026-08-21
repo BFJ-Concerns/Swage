@@ -278,7 +278,6 @@ pub struct CommunicationConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
-#[ts(export)]
 pub struct SettingsResponse {
     pub providers: HashMap<String, ProviderSettings>,
     pub default_provider: String,
@@ -298,7 +297,6 @@ pub struct SettingsResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
-#[ts(export)]
 pub struct SaveSettingsRequest {
     pub default_provider: String,
     pub providers: HashMap<String, SaveProviderSettings>,
@@ -331,13 +329,11 @@ pub struct DiscoveredModel {
     pub context_window: Option<u32>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
-#[ts(export)]
 pub struct ModelDiscoveryResponse {
     pub provider_id: String,
     pub models: Vec<DiscoveredModel>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
-#[ts(export)]
 pub struct RestartStatusResponse {
     pub restart_required: bool,
     pub can_restart: bool,
