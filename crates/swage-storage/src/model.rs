@@ -5,6 +5,16 @@ use serde::{Deserialize, Serialize};
 use swage_core::{Role, StorageError};
 use uuid::Uuid;
 
+/// One durable string value scoped to a session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionVariable {
+    pub session_id: Uuid,
+    pub name: String,
+    pub value: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
 /// Persisted context snapshot metadata for space-scoped listing.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ContextSnapshotRecord {
@@ -1884,9 +1894,9 @@ pub struct NewWorkflowRun {
     pub dispatch_bound_agent_ids: Vec<String>,
 }
 
-/// One entry in a run's durable pending-event queue. Events are data —
-/// completions, failures, escalations posted between lead wakes — never
-/// instructions. `seq` is assigned by the store, dense per run;
+/// One entry in a run's durable event queue. Events are namespaced data from
+/// registered posters, never instructions. `seq` is assigned by the store,
+/// dense per run;
 /// `journal_entry_id` keys the row to the journal entry that posted it, so a
 /// replayed post finds its existing row instead of duplicating it. A pending
 /// event has `delivered_at` NULL; delivery stamps the journal seq of the
@@ -1899,6 +1909,10 @@ pub struct WorkflowRunEventRecord {
     pub seq: u64,
     pub kind: String,
     pub payload: serde_json::Value,
+    pub source_surface: String,
+    pub source_agent_id: Option<String>,
+    pub source_session_id: Option<Uuid>,
+    pub source_turn_id: Option<Uuid>,
     pub posted_at: DateTime<Utc>,
     pub delivered_wake_seq: Option<u64>,
     pub delivered_at: Option<DateTime<Utc>>,
@@ -1910,6 +1924,10 @@ pub struct NewWorkflowRunEvent {
     pub journal_entry_id: Uuid,
     pub kind: String,
     pub payload: serde_json::Value,
+    pub source_surface: String,
+    pub source_agent_id: Option<String>,
+    pub source_session_id: Option<Uuid>,
+    pub source_turn_id: Option<Uuid>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -71,6 +71,9 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
         eprintln!("{problem}");
         std::process::exit(1);
     }
+    if let Err(error) = crate::shipped_skill_projection::regenerate(&root).await {
+        warn!(%error, "failed to regenerate shipped skill resources");
+    }
     let db_path = root.join("swage.db");
 
     // Step 4: Open persistent storage.
@@ -629,9 +632,9 @@ pub(crate) fn build_tool_dispatcher_with_browser(
         knowledge::KnowledgeCurateOrientationTool, knowledge::KnowledgeCurateTool,
         knowledge::KnowledgeOrientTool, knowledge::KnowledgeRecordTool,
         knowledge::KnowledgeSearchTool, memory::MemoryTool, plugin::discover_plugin_tools,
-        python_execute::PythonExecuteTool, schedule::ScheduleTool, schedule::WakeMeLaterTool,
-        shell::ShellTool, tool_result_read::ToolResultReadTool, url_fetch::UrlFetchTool,
-        web_search::WebSearchTool,
+        python_execute::PythonExecuteTool, run_event::RunEventPostTool, schedule::ScheduleTool,
+        schedule::WakeMeLaterTool, session_variable::SessionVariableTool, shell::ShellTool,
+        tool_result_read::ToolResultReadTool, url_fetch::UrlFetchTool, web_search::WebSearchTool,
     };
     use std::time::Duration;
 
@@ -668,6 +671,8 @@ pub(crate) fn build_tool_dispatcher_with_browser(
         // tool context; both are host-only (requires_device_execution).
         Arc::new(ScheduleTool),
         Arc::new(WakeMeLaterTool),
+        Arc::new(RunEventPostTool),
+        Arc::new(SessionVariableTool),
         // Knowledge-base tools: the space's gathered external evidence.
         // Host-only; read, capture authoring, and curation authoring are
         // separately grantable.

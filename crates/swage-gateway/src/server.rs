@@ -122,6 +122,10 @@ pub fn build_router(state: AppState) -> Router {
             get(workflow::list_runs).post(workflow::start_inline_run),
         )
         .route("/api/workflow-runs/{id}", get(workflow::get_run))
+        .route(
+            "/api/workflow-runs/{id}/events",
+            post(workflow::post_operator_run_event),
+        )
         .route("/api/workflow-runs/{id}/cancel", post(workflow::cancel_run))
         .route("/api/workflow-runs/{id}/resume", post(workflow::resume_run))
         .route(

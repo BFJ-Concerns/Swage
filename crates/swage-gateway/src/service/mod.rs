@@ -1,10 +1,12 @@
 mod agent_definition;
 mod conversation;
+mod session_variable;
 mod space;
 mod workspace_attachment;
 
 pub use agent_definition::*;
 pub use conversation::*;
+pub use session_variable::*;
 pub use space::*;
 pub use workspace_attachment::*;
 

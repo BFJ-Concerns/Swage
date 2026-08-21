@@ -53,6 +53,7 @@ pub struct ChannelOrientation {
 pub struct AvailableSkill {
     pub name: String,
     pub trigger: String,
+    pub shipped: bool,
 }
 
 // ── Element ───────────────────────────────────────────────────────────────────
@@ -141,7 +142,11 @@ impl OrientationElement {
                  it:\n",
             );
             for skill in &self.available_skills {
-                skills.push_str(&format!("- {} — {}\n", skill.name, skill.trigger));
+                let provenance = if skill.shipped { " (shipped)" } else { "" };
+                skills.push_str(&format!(
+                    "- {}{} — {}\n",
+                    skill.name, provenance, skill.trigger
+                ));
             }
             blocks.push(skills.trim_end().to_string());
         }
@@ -258,11 +263,27 @@ mod tests {
             vec![AvailableSkill {
                 name: "release-notes".into(),
                 trigger: "drafting release notes for a tagged build".into(),
+                shipped: false,
             }],
         );
 
         let text = element.content()[0].text_content();
         assert!(text.contains("release-notes — drafting release notes"));
+    }
+
+    #[test]
+    fn shipped_skills_are_identified_in_the_catalogue() {
+        let element = OrientationElement::new(
+            bare_environment(),
+            vec![AvailableSkill {
+                name: "commission".into(),
+                trigger: "shape project intent".into(),
+                shipped: true,
+            }],
+        );
+
+        let text = element.content()[0].text_content();
+        assert!(text.contains("commission (shipped) — shape project intent"));
     }
 
     #[test]

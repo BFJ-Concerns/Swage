@@ -69,6 +69,8 @@ use history::rebuild_thread_history_messages;
 pub(crate) use operator_guidance::*;
 pub(crate) use workspace::*;
 
+pub(crate) use swage_core::DispatchContextComposition;
+
 // Gateway messaging spans three surfaces: REST endpoints for durable messages
 // and turn submission, session-scoped WebSocket events for live approval and
 // delegation updates, and in-process routing between running agents.
@@ -572,11 +574,6 @@ pub async fn process_turn(
     .await
 }
 
-#[tracing::instrument(
-    name = "turn",
-    skip(state, content, ws_tx, subscription),
-    fields(turn_id = tracing::field::Empty),
-)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn process_turn_with_existing_turn(
     state: &AppState,
@@ -589,6 +586,41 @@ pub(crate) async fn process_turn_with_existing_turn(
     max_output_retries_override: Option<u32>,
     existing_turn_id: Option<Uuid>,
     attendance: TurnAttendance,
+) -> Result<(), GatewayError> {
+    process_turn_with_composition(
+        state,
+        session_id,
+        target_thread_id,
+        content,
+        ws_tx,
+        subscription,
+        output_schema_override,
+        max_output_retries_override,
+        existing_turn_id,
+        attendance,
+        DispatchContextComposition::default(),
+    )
+    .await
+}
+
+#[tracing::instrument(
+    name = "turn",
+    skip(state, content, ws_tx, subscription, composition),
+    fields(turn_id = tracing::field::Empty),
+)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn process_turn_with_composition(
+    state: &AppState,
+    session_id: Uuid,
+    target_thread_id: Option<Uuid>,
+    content: String,
+    ws_tx: mpsc::UnboundedSender<ServerEvent>,
+    subscription: Arc<Mutex<SubscriptionState>>,
+    output_schema_override: Option<serde_json::Value>,
+    max_output_retries_override: Option<u32>,
+    existing_turn_id: Option<Uuid>,
+    attendance: TurnAttendance,
+    composition: DispatchContextComposition,
 ) -> Result<(), GatewayError> {
     // Step 1: Resolve the space and target thread for this session.
     let session = state
@@ -841,20 +873,28 @@ pub(crate) async fn process_turn_with_existing_turn(
     )
     .await?;
 
-    let assembly_name =
-        match select_context_assembly(state, &config, session_id, prepared_turn_id).await {
-            Ok(assembly_name) => assembly_name,
-            Err(error) => {
-                record_terminal_state_and_release(
-                    state,
-                    session_id,
-                    prepared_turn_id,
-                    TurnState::Failed,
-                )
-                .await?;
-                return Err(error);
-            }
-        };
+    let context_choices = match select_context_assembly(
+        state,
+        &config,
+        session_id,
+        prepared_turn_id,
+        composition.assembly.as_deref(),
+    )
+    .await
+    {
+        Ok(context_choices) => context_choices,
+        Err(error) => {
+            record_terminal_state_and_release(
+                state,
+                session_id,
+                prepared_turn_id,
+                TurnState::Failed,
+            )
+            .await?;
+            return Err(error);
+        }
+    };
+    let assembly_name = context_choices.assembly_name;
     let memory_content = load_memory_for_assembly(&assembly_name, || async {
         match swage_root_opt.as_deref() {
             Some(root) => load_space_memory(root, &space_slug).await,
@@ -862,6 +902,22 @@ pub(crate) async fn process_turn_with_existing_turn(
         }
     })
     .await;
+    let mut session_variables: std::collections::BTreeMap<String, String> =
+        record_failed_turn_and_release_on_error(
+            state,
+            session_id,
+            prepared_turn_id,
+            state
+                .storage
+                .list_session_variables(session_id)
+                .await
+                .map_err(GatewayError::from),
+        )
+        .await?
+        .into_iter()
+        .map(|variable| (variable.name, variable.value))
+        .collect();
+    session_variables.extend(composition.variables.clone().unwrap_or_default());
 
     // The workspace root doubles as the session's working directory in the
     // orientation baseline, so it is resolved before elements are built.
@@ -880,6 +936,10 @@ pub(crate) async fn process_turn_with_existing_turn(
         available_skills_for_agent(&space_slug, &session.agent_id, swage_root_opt.as_deref());
 
     let operator_guidance = operator_guidance_rules(swage_root_opt.as_deref(), &workspace_policy);
+    let hierarchy = swage_root_opt
+        .as_deref()
+        .map(|root| configuration_hierarchy(root, &space_slug, &session.agent_id))
+        .unwrap_or_default();
 
     let elements = build_assembly_elements(
         &config.instructions,
@@ -890,6 +950,9 @@ pub(crate) async fn process_turn_with_existing_turn(
         environment,
         available_skills,
         config.default_model_id(),
+        context_choices.working_norms_scaffold,
+        &hierarchy,
+        composition.elements.as_deref(),
     );
     let tokeniser = TiktokenTokeniser::new(config.default_model_id());
 
@@ -905,6 +968,7 @@ pub(crate) async fn process_turn_with_existing_turn(
         swage_root_opt.as_deref(),
         &space_slug,
         &session.agent_id,
+        &session_variables,
     );
     let (assembled_messages, assembly_report) = (output.messages, output.report);
 
@@ -1654,19 +1718,35 @@ pub(crate) async fn process_turn_with_existing_turn(
     Ok(())
 }
 
+pub(super) struct ContextChoices {
+    assembly_name: String,
+    working_norms_scaffold: swage_context::working_norms::WorkingNormsScaffold,
+}
+
+const WORKING_NORMS_NATIVE: &str = "native";
+const WORKING_NORMS_FAMILY_FALLBACK: &str = "family-fallback";
+
 async fn select_context_assembly(
     state: &AppState,
     config: &swage_config::ResolvedConfig,
     session_id: Uuid,
     turn_id: Uuid,
-) -> Result<String, GatewayError> {
+    call_override: Option<&str>,
+) -> Result<ContextChoices, GatewayError> {
+    if let Some(call_override) = call_override {
+        swage_core::validate_context_assembly_name(call_override)
+            .map_err(GatewayError::ConfigError)?;
+    }
     // The assembly name is an experiment location: when variants are
     // registered for it, the selection loop chooses which serves this turn
     // (honouring the kill switch and forced pins), and every decision —
     // including "experimentation is off" — lands in the audit trail. The
     // report and every model-facing surface stay function-named; the audit
     // record is the only place the variant id appears.
-    let configured_assembly = config.context.assembly.trim().to_owned();
+    let configured_assembly = call_override
+        .unwrap_or(&config.context.assembly)
+        .trim()
+        .to_owned();
     let assembly_variants: Vec<&str> = vec![];
     let decision = crate::experimentation::select_variant(
         &config.experimentation,
@@ -1700,19 +1780,18 @@ async fn select_context_assembly(
     };
 
     // The working-norms text is its own experiment location, drawn beside
-    // the assembly choice: no alternatives are registered yet, so the
-    // built-in text serves, but every turn's draw is already recorded and
-    // blinded — the seam variant texts will compete through.
-    let norms_variants: Vec<&str> = vec![];
+    // the assembly choice. The exact-model native scaffold is the default;
+    // the established family text remains a registered alternative.
+    let norms_variants = [WORKING_NORMS_FAMILY_FALLBACK];
     let norms_decision = crate::experimentation::select_variant(
         &config.experimentation,
         crate::experimentation::LOCATION_WORKING_NORMS,
         &norms_variants,
-        "built-in",
+        WORKING_NORMS_NATIVE,
         turn_id,
     )
     .map_err(|error| GatewayError::ConfigError(error.to_string()))?;
-    if let Err(error) = crate::experimentation::record_selection(
+    let norms_decision = match crate::experimentation::record_selection(
         state,
         crate::experimentation::LOCATION_WORKING_NORMS,
         &norms_decision,
@@ -1721,14 +1800,30 @@ async fn select_context_assembly(
     )
     .await
     {
-        tracing::error!(
-            %error,
-            variant = %norms_decision.variant,
-            "working-norms selection could not be recorded; serving the built-in text"
-        );
-    }
+        Ok(()) => norms_decision,
+        Err(error) => {
+            tracing::error!(
+                %error,
+                variant = %norms_decision.variant,
+                "working-norms selection could not be recorded; serving the native scaffold"
+            );
+            crate::experimentation::VariantDecision {
+                variant: WORKING_NORMS_NATIVE.to_owned(),
+                reason: crate::experimentation::SelectionReason::RecordUnavailable,
+            }
+        }
+    };
+    let working_norms_scaffold = match norms_decision.variant.as_str() {
+        WORKING_NORMS_FAMILY_FALLBACK => {
+            swage_context::working_norms::WorkingNormsScaffold::FamilyFallback
+        }
+        _ => swage_context::working_norms::WorkingNormsScaffold::Native,
+    };
 
-    Ok(decision.variant)
+    Ok(ContextChoices {
+        assembly_name: decision.variant,
+        working_norms_scaffold,
+    })
 }
 
 fn execute_context_assembly(
@@ -1739,25 +1834,20 @@ fn execute_context_assembly(
     swage_root: Option<&Path>,
     space_slug: &str,
     agent_id: &str,
+    variables: &std::collections::BTreeMap<String, String>,
 ) -> swage_context::report::AssemblyOutput {
     let assembly_name = assembly_name.trim();
     if is_default_context_assembly(assembly_name) {
-        return swage_context::assembly::assemble(elements, &config.context, tokeniser);
+        return swage_context::assembly::default_assembly_with_variables(
+            elements,
+            &config.context,
+            tokeniser,
+            variables,
+        );
     }
 
-    let search_levels: Vec<(swage_config::HierarchyLevel, PathBuf)> = swage_root
-        .map(|root| {
-            let space_dir = root.join("spaces").join(space_slug);
-            let agent_dir = space_dir.join("agents").join(agent_id);
-            let mut levels = vec![
-                (swage_config::HierarchyLevel::Global, root.to_path_buf()),
-                (swage_config::HierarchyLevel::Space, space_dir),
-            ];
-            if agent_dir.is_dir() {
-                levels.push((swage_config::HierarchyLevel::Agent, agent_dir));
-            }
-            levels
-        })
+    let search_levels = swage_root
+        .map(|root| configuration_hierarchy(root, space_slug, agent_id))
         .unwrap_or_default();
     let level_refs: Vec<(swage_config::HierarchyLevel, &Path)> = search_levels
         .iter()
@@ -1770,6 +1860,7 @@ fn execute_context_assembly(
         elements,
         &config.context,
         tokeniser,
+        variables,
     )
 }
 

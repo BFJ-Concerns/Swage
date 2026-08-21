@@ -24,8 +24,8 @@ pub use model::{
     NewWorkspaceAttachment, ObservationOrigin, OrientationCard, OrientationCardLifecycle,
     OrientationCardLifecycleKind, PendingChannelOrigin, Schedule, ScheduleCreator, ScheduleKind,
     ScheduleRun, ScheduleRunState, ScheduleRunTrigger, ScheduleRunUpdate, ScheduleStatus,
-    SecretRecord, Session, SessionPolicy, SkipReason, SourceObservation, Space, SpaceSlug, Thread,
-    ThreadBranch, ThreadState, ToolCallRecord, Turn, TurnState, UpdateSchedule,
+    SecretRecord, Session, SessionPolicy, SessionVariable, SkipReason, SourceObservation, Space,
+    SpaceSlug, Thread, ThreadBranch, ThreadState, ToolCallRecord, Turn, TurnState, UpdateSchedule,
     WorkflowJournalRecord, WorkflowRunEventRecord, WorkflowRunRecord, WorkflowScriptRecord,
     WorkflowScriptVersion, WorkspaceAttachment,
 };
@@ -35,6 +35,6 @@ pub use store::{
     AuditStore, BackgroundJobStore, ChannelLinkStore, ChannelQueueStore, CitationStore,
     ContextSnapshotStore, CurationAssertionStore, DeliveryStore, MaterialStore, MessageStore,
     ObservationStore, OrientationCardStore, ScheduleStore, SecretStore, SessionStore,
-    SkillActivationStore, SpaceStore, Storage, ThreadStore, ToolCallStore, TurnStore,
-    WorkflowStore, WorkspaceAttachmentStore,
+    SessionVariableStore, SkillActivationStore, SpaceStore, Storage, ThreadStore, ToolCallStore,
+    TurnStore, WorkflowStore, WorkspaceAttachmentStore,
 };

@@ -129,12 +129,12 @@ async fn unknown_space_returns_404() {
     assert_eq!(body["code"], "not_found");
 }
 
-/// Known space but fresh config root → returns 200 with empty skills list.
+/// Known space and a fresh config root expose only the compiled catalogue.
 ///
 /// When `SWAGE_HOME` points at a fresh directory, the handler has no skills
 /// to discover and should degrade gracefully rather than returning an error.
 #[tokio::test(flavor = "multi_thread")]
-async fn known_space_fresh_config_root_returns_empty() {
+async fn known_space_fresh_config_root_returns_shipped_catalogue() {
     let (router, storage) = make_router();
 
     // Create a space in storage — it exists but has no config directory.
@@ -156,10 +156,23 @@ async fn known_space_fresh_config_root_returns_empty() {
     let skills = body["skills"]
         .as_array()
         .expect("response should have a skills array");
-    assert!(
-        skills.is_empty(),
-        "fresh config root should produce an empty skill list"
+    assert_eq!(skills.len(), 5, "fresh roots expose all shipped skills");
+    let names = skills
+        .iter()
+        .map(|skill| skill["name"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        names,
+        [
+            "assembly",
+            "commission",
+            "maestro",
+            "project-docs",
+            "workflow-authoring"
+        ]
     );
+    assert!(skills.iter().all(|skill| skill["shipped"] == true));
+    assert!(skills.iter().all(|skill| skill["id"].as_str().is_some()));
     assert!(root.is_dir(), "skill discovery should auto-create the root");
 }
 
@@ -342,6 +355,37 @@ async fn space_skill_shadows_global() {
     assert_eq!(code_reviews[0]["description"], "Space code review");
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn authored_skill_shadows_same_named_shipped_entry() {
+    let (router, storage) = make_router();
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path();
+    let space = storage
+        .create(NewSpace {
+            name: "shadow-shipped".into(),
+            slug: "shadow-shipped".into(),
+        })
+        .await
+        .unwrap();
+    create_skill(root, "commission", "Operator commission", &[]);
+
+    let mut env_guard = ProcessEnvGuard::new();
+    env_guard.set_swage_home(root);
+    let (status, body) = get(&router, &format!("/api/skills?space_id={}", space.id)).await;
+
+    assert_eq!(status, StatusCode::OK, "response: {body}");
+    let matching = body["skills"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|skill| skill["name"] == "commission")
+        .collect::<Vec<_>>();
+    assert_eq!(matching.len(), 1);
+    assert_eq!(matching[0]["description"], "Operator commission");
+    assert_eq!(matching[0]["shipped"], false);
+    assert!(matching[0]["id"].is_null());
+}
+
 /// Sorting: agent skills appear first, then space, then global; within each level alphabetically.
 #[tokio::test(flavor = "multi_thread")]
 async fn skills_are_sorted_by_level_then_alphabetically() {
@@ -383,8 +427,13 @@ async fn skills_are_sorted_by_level_then_alphabetically() {
     .await;
 
     assert_eq!(status, StatusCode::OK, "response: {body}");
-    let skills = body["skills"].as_array().unwrap();
-    assert_eq!(skills.len(), 4, "all 4 unique skills should appear");
+    let skills = body["skills"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|skill| skill["shipped"] == false)
+        .collect::<Vec<_>>();
+    assert_eq!(skills.len(), 4, "all 4 authored skills should appear");
 
     // Agent comes first.
     assert_eq!(skills[0]["level"], "agent", "agent skill should sort first");
