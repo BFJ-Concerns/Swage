@@ -1069,14 +1069,13 @@ async fn provision_worker_command(
             entry
                 .result
                 .as_ref()
-                .and_then(|value| value.get("path"))
-                .and_then(Value::as_str)
-                .map(|path| {
+                .and_then(|result| {
                     Some(ResolvedWorkerPlacement {
-                        path: path.to_string(),
-                        can_write: true,
+                        path: result.get("path")?.as_str()?.to_string(),
+                        can_write: result.get("can_write")?.as_bool()?,
                     })
                 })
+                .map(Some)
                 .ok_or_else(|| "completed worker placement has no path".to_string())
         } else if entry.status == "failed" {
             Err(entry
@@ -2509,25 +2508,32 @@ async fn complete_worker_placement(
         "WorkerPlacementError: isolation=worktree requires cwd to name the git repository"
             .to_string()
     })?;
-    let repo = match resolve_authorised_worker_directory(state, space_id, run_id, None, repo).await
+    let repo = match resolve_authorised_worker_directory(state, space_id, run_id, None, None, repo)
+        .await
     {
-        Ok(repo) => repo.path,
+        Ok(repo) => repo,
         Err(error) => {
             let error = format!("WorkerPlacementError: {error}");
             let _ = state.fail_workflow_journal_entry(entry_id, &error).await;
             return Err(error);
         }
     };
-    match state.worktree_host.provision(run_id, seq, &repo).await {
+    match state.worktree_host.provision(run_id, seq, &repo.path).await {
         Ok(path) => {
             let path = path.to_string_lossy().into_owned();
             state
-                .complete_workflow_journal_entry(entry_id, serde_json::json!({"path": path}))
+                .complete_workflow_journal_entry(
+                    entry_id,
+                    serde_json::json!({
+                        "path": path,
+                        "can_write": repo.can_write,
+                    }),
+                )
                 .await
                 .map_err(|error| error.to_string())?;
             Ok(Some(ResolvedWorkerPlacement {
                 path,
-                can_write: true,
+                can_write: repo.can_write,
             }))
         }
         Err(error) => {
@@ -2544,7 +2550,7 @@ async fn complete_worker_directory_resolution(
     entry_id: Uuid,
     cwd: &str,
 ) -> Result<Option<ResolvedWorkerPlacement>, String> {
-    match resolve_authorised_worker_directory(state, space_id, context_id, None, cwd).await {
+    match resolve_authorised_worker_directory(state, space_id, context_id, None, None, cwd).await {
         Ok(directory) => {
             let placement = ResolvedWorkerPlacement {
                 path: directory.path.to_string_lossy().into_owned(),
