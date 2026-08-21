@@ -122,3 +122,127 @@ impl Tool for TaskDefinitionTool {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use swage_provider::LlmProvider;
+    use swage_storage::{AuditStore, SpaceStore, SqliteStorage, TaskDefinitionStore};
+    use swage_tool::context::MockToolContext;
+    use tokio::sync::mpsc;
+
+    use super::*;
+    use crate::turn::tests::MockProvider;
+
+    fn context() -> (GatewayToolContext, Arc<SqliteStorage>) {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let provider = Arc::new(MockProvider::new(vec![]));
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn swage_storage::Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            provider as Arc<dyn LlmProvider>,
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let base = MockToolContext::new("author", "not-a-session");
+        let (ws_tx, _ws_rx) = mpsc::unbounded_channel();
+        let context = GatewayToolContext::new(
+            &base,
+            ws_tx,
+            Arc::clone(&storage) as Arc<dyn swage_storage::Storage>,
+        )
+        .with_app_state(Some(state));
+        (context, storage)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn tool_validates_and_audits_whole_definition_mutations() {
+        let (context, storage) = context();
+        let tool = TaskDefinitionTool;
+
+        let invalid = tool
+            .execute(
+                json!({"action":"upsert","id":"Bad Id","instructions":"Contract."}),
+                &context,
+            )
+            .await
+            .expect_err("invalid identifiers must be rejected");
+        assert!(matches!(invalid, ToolError::InvalidParameters { .. }));
+        assert!(storage.list_task_definitions().await.unwrap().is_empty());
+
+        tool.execute(
+            json!({
+                "action":"upsert",
+                "id":"review",
+                "instructions":"First contract.",
+                "tool_permissions":{
+                    "allow":["file_read"],
+                    "deny":[],
+                    "bundles":{},
+                    "require_approval":[]
+                },
+                "output_schema":{"type":"object"},
+                "output_max_retries":2
+            }),
+            &context,
+        )
+        .await
+        .expect("create");
+        tool.execute(
+            json!({
+                "action":"upsert",
+                "id":"review",
+                "instructions":"Edited contract.",
+                "output_schema":{"type":"string"},
+                "output_max_retries":1
+            }),
+            &context,
+        )
+        .await
+        .expect("update");
+
+        let listed = tool
+            .execute(json!({"action":"list"}), &context)
+            .await
+            .expect("list");
+        assert_eq!(listed["definitions"][0]["instructions"], "Edited contract.");
+        let changes: Vec<_> = storage
+            .list_audit_events()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|event| event.entity_kind == "task_definition")
+            .collect();
+        assert_eq!(changes.len(), 2);
+        let edited = changes
+            .iter()
+            .find(|event| event.metadata["prior_state"]["instructions"] == "First contract.")
+            .expect("update audit");
+        assert_eq!(
+            edited.metadata["new_state"]["instructions"],
+            "Edited contract."
+        );
+
+        tool.execute(
+            json!({"action":"delete","id":"review"}),
+            &context,
+        )
+        .await
+        .expect("delete");
+        assert!(storage.get_task_definition("review").await.unwrap().is_none());
+        let deleted = storage
+            .list_audit_events()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|event| event.metadata["action"] == "delete_task_definition")
+            .expect("delete audit");
+        assert_eq!(
+            deleted.metadata["prior_state"]["instructions"],
+            "Edited contract."
+        );
+        assert!(deleted.metadata["new_state"].is_null());
+    }
+}
