@@ -25,6 +25,11 @@ pub(super) fn delegated_target_instructions(
         .map(|(order, skill)| ActiveSkill {
             name: skill.name.clone(),
             instructions: skill.instructions.clone(),
+            source_directory: skill
+                .source_path
+                .parent()
+                .expect("skill source has a parent directory")
+                .to_path_buf(),
             level: skill.level.clone(),
             is_agent_level: true,
             activation_order: order as u32,
@@ -256,6 +261,7 @@ pub(crate) fn available_skills_for_agent(
         .map(|skill| AvailableSkill {
             name: skill.name,
             trigger: skill.description,
+            shipped: skill.shipped,
         })
         .collect()
 }
@@ -417,6 +423,7 @@ pub(crate) async fn load_active_skills_for_agent(
                 .map(|info| ActiveSkill {
                     name: info.name,
                     instructions: info.instructions,
+                    source_directory: info.source_directory,
                     level: info.level,
                     is_agent_level: info.is_agent_level,
                     activation_order: info.activation_order as u32,
@@ -442,6 +449,11 @@ pub(crate) async fn load_active_skills_for_agent(
         active.push(ActiveSkill {
             name: skill.name.clone(),
             instructions: skill.instructions.clone(),
+            source_directory: skill
+                .source_path
+                .parent()
+                .expect("skill source has a parent directory")
+                .to_path_buf(),
             level: skill.level.clone(),
             is_agent_level: skill.level == HierarchyLevel::Agent,
             activation_order: active.len() as u32,
@@ -449,4 +461,30 @@ pub(crate) async fn load_active_skills_for_agent(
     }
 
     active
+}
+
+#[cfg(test)]
+mod shipped_skill_tests {
+    use super::*;
+
+    #[test]
+    fn fresh_orientation_catalogue_contains_all_shipped_skills() {
+        let root = tempfile::tempdir().expect("temporary root");
+        let available = available_skills_for_agent("default", "gateway", Some(root.path()));
+        assert_eq!(available.len(), 5);
+        assert!(available.iter().all(|skill| skill.shipped));
+        assert_eq!(
+            available
+                .iter()
+                .map(|skill| skill.name.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "assembly",
+                "commission",
+                "maestro",
+                "project-docs",
+                "workflow-authoring"
+            ]
+        );
+    }
 }

@@ -55,13 +55,21 @@ const WEBSOCKET_EVENT_DEADLINE: Duration = Duration::from_secs(120);
 /// A provider that streams a fixed response with token usage data.
 struct FixedResponseProvider {
     response_text: String,
+    requests: Arc<std::sync::Mutex<Vec<CompletionRequest>>>,
 }
 
 impl FixedResponseProvider {
     fn new(text: &str) -> Self {
         Self {
             response_text: text.to_string(),
+            requests: Arc::new(std::sync::Mutex::new(Vec::new())),
         }
+    }
+
+    fn with_capture(text: &str) -> (Self, Arc<std::sync::Mutex<Vec<CompletionRequest>>>) {
+        let provider = Self::new(text);
+        let requests = Arc::clone(&provider.requests);
+        (provider, requests)
     }
 }
 
@@ -87,8 +95,9 @@ impl LlmProvider for FixedResponseProvider {
 
     fn stream(
         &self,
-        _request: CompletionRequest,
+        request: CompletionRequest,
     ) -> Pin<Box<dyn futures::Stream<Item = StreamChunk> + Send>> {
+        self.requests.lock().unwrap().push(request);
         let chunks = vec![
             StreamChunk::Delta {
                 content: self.response_text.clone(),
@@ -103,6 +112,64 @@ impl LlmProvider for FixedResponseProvider {
         ];
         Box::pin(futures::stream::iter(chunks))
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn fresh_root_lists_orients_and_activates_a_shipped_skill() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path();
+    let _env_guard = SwageHomeGuard::set(root);
+    let (provider, requests) = FixedResponseProvider::with_capture("Commission ready.");
+    let (router, addr, storage) =
+        start_test_server_with_config(provider, swage_config::ResolvedConfig::default()).await;
+    let space = swage_storage::store::SpaceStore::get_or_create_default(storage.as_ref())
+        .await
+        .unwrap();
+
+    let (status, catalogue) = http(
+        &router,
+        "GET",
+        &format!("/api/skills?space_id={}", space.id),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(catalogue["skills"].as_array().unwrap().len(), 5);
+    assert!(
+        catalogue["skills"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|skill| skill["shipped"] == true)
+    );
+
+    let (status, conversation) = http(&router, "POST", "/api/conversations").await;
+    assert_eq!(status, StatusCode::CREATED);
+    let conversation_id = conversation["id"].as_str().unwrap();
+    let (mut sink, mut stream) = connect_ws(addr, conversation_id).await;
+    ws_send(
+        &mut sink,
+        json!({"type": "send_message", "content": "/commission shape this project"}),
+    )
+    .await;
+    let activated =
+        ws_wait_for_event(&mut stream, "skill_activated", WEBSOCKET_EVENT_DEADLINE).await;
+    assert_eq!(activated["name"], "commission");
+    ws_wait_for_event(&mut stream, "turn_complete", WEBSOCKET_EVENT_DEADLINE).await;
+
+    let captured = requests.lock().unwrap();
+    let prompt = captured[0]
+        .messages
+        .iter()
+        .map(|message| message.text_content())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(prompt.contains("commission (shipped)"));
+    assert!(prompt.contains("assembly (shipped)"));
+    assert!(
+        prompt.contains("Planning is building joint understanding between the user and the model")
+    );
+    let projected_dir = root.join("generated/shipped-skills/commission");
+    assert!(prompt.contains(&format!("Skill directory: {}", projected_dir.display())));
 }
 
 // ---------------------------------------------------------------------------
