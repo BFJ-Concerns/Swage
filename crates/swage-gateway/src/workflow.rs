@@ -860,6 +860,15 @@ async fn run_ephemeral_agent_call(
                 metadata["worker_placement_cwd"] = Value::String(placement.path.clone());
                 metadata["worker_placement_can_write"] = Value::Bool(placement.can_write);
             }
+            if let Some(task) = request.task.as_ref() {
+                // Resolve now to fail the dispatch before creating a child,
+                // but persist only its name; the turn path re-resolves the
+                // current definition and keeps the journalled request stable.
+                crate::service::resolve_task_definition(state.storage.as_ref(), task)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                metadata["task_definition"] = Value::String(task.clone());
+            }
             let session = state
                 .storage
                 .create_session(NewSession {
@@ -4079,6 +4088,7 @@ mod tests {
                 timeout_ms: None,
                 prompt: "Use echo".into(),
                 agent: Some("gateway".into()),
+                task: None,
                 model: None,
                 schema: None,
                 max_attempts: 1,
@@ -5036,6 +5046,7 @@ mod tests {
             timeout_ms: None,
             prompt: "hold capacity".into(),
             agent: Some("default".into()),
+            task: None,
             model: None,
             schema: None,
             max_attempts: 1,
@@ -5198,6 +5209,7 @@ mod tests {
                 timeout_ms: None,
                 prompt: "restate the brief".into(),
                 agent: Some("worker".into()),
+                task: None,
                 model: None,
                 schema: None,
                 max_attempts: 1,
@@ -5255,6 +5267,7 @@ mod tests {
                 timeout_ms: None,
                 prompt: "now do the work".into(),
                 agent: Some("worker".into()),
+                task: None,
                 model: None,
                 schema: None,
                 max_attempts: 1,
@@ -6214,6 +6227,7 @@ mod tests {
                 timeout_ms: None,
                 prompt: "hijack".into(),
                 agent: Some("worker".into()),
+                task: None,
                 model: None,
                 schema: None,
                 max_attempts: 1,
@@ -7129,6 +7143,7 @@ mod tests {
             timeout_ms: None,
             prompt: "account usage".into(),
             agent: Some("default".into()),
+            task: None,
             model: None,
             schema: None,
             max_attempts: 1,
@@ -7241,6 +7256,7 @@ mod tests {
             timeout_ms: None,
             prompt: prompt.into(),
             agent: Some("default".into()),
+            task: None,
             model: None,
             schema: None,
             max_attempts: 1,
@@ -7335,6 +7351,7 @@ mod tests {
             timeout_ms: None,
             prompt: prompt.into(),
             agent: Some("default".into()),
+            task: None,
             model: None,
             schema: None,
             max_attempts: 1,
@@ -7512,6 +7529,7 @@ mod tests {
             timeout_ms: None,
             prompt: "resume work".into(),
             agent: Some("default".into()),
+            task: None,
             model: None,
             schema: None,
             max_attempts: 1,
@@ -7634,6 +7652,7 @@ mod tests {
             timeout_ms: None,
             prompt: "resume working call".into(),
             agent: Some("default".into()),
+            task: None,
             model: None,
             schema: None,
             max_attempts: 1,
@@ -7756,6 +7775,7 @@ mod tests {
             timeout_ms: None,
             prompt: "closing call".into(),
             agent: Some("default".into()),
+            task: None,
             model: None,
             schema: None,
             max_attempts: 1,
@@ -7823,6 +7843,7 @@ mod tests {
             timeout_ms: None,
             prompt: prompt.into(),
             agent: Some("default".into()),
+            task: None,
             model: None,
             schema: None,
             max_attempts: 1,
@@ -8050,6 +8071,7 @@ mod tests {
             timeout_ms: None,
             prompt: prompt.into(),
             agent: Some("default".into()),
+            task: None,
             model: None,
             schema: None,
             max_attempts: 1,
@@ -8265,6 +8287,7 @@ mod tests {
             timeout_ms: None,
             prompt: "must not execute".into(),
             agent: Some("default".into()),
+            task: None,
             model: None,
             schema: None,
             max_attempts: 1,
@@ -8768,6 +8791,7 @@ mod tests {
             timeout_ms: None,
             prompt: "known failing call".into(),
             agent: Some("default".into()),
+            task: None,
             model: None,
             schema: None,
             max_attempts: 1,

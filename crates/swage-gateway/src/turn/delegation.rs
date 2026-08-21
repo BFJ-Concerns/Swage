@@ -209,6 +209,7 @@ impl DelegationHandler for GatewayDelegationHandler {
         &self,
         target_agent_id: &str,
         task: &str,
+        task_definition: Option<&str>,
         context: Option<serde_json::Value>,
         cwd: Option<String>,
         isolation: Option<swage_protocol::client::workflow::WorkerIsolation>,
@@ -246,6 +247,17 @@ impl DelegationHandler for GatewayDelegationHandler {
                 );
                 target_resolved
             }
+        };
+        let target_resolved = match task_definition {
+            Some(id) => {
+                let definition =
+                    crate::service::resolve_task_definition(self.state.storage.as_ref(), id)
+                        .await
+                        .map_err(|error| AgentError::InvalidConfig(error.to_string()))?;
+                super::apply_task_definition(target_resolved, &definition)
+                    .map_err(|error| AgentError::InvalidConfig(error.to_string()))?
+            }
+            None => target_resolved,
         };
 
         let mut bound_agent_ids = dispatch_bound_agent_ids_for_turn(&self.state, sender_turn_id)
@@ -391,6 +403,7 @@ impl DelegationHandler for GatewayDelegationHandler {
 
         let mut payload = serde_json::json!({
             "task": task,
+            "task_definition": task_definition,
             "placement": {
                 "cwd": placement.as_ref().map(|placement| &placement.path),
                 "requested_cwd": cwd,

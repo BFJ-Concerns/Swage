@@ -48,6 +48,10 @@ impl Tool for DelegateTool {
                     "type": "string",
                     "description": "Task description for the delegate agent."
                 },
+                "task_definition": {
+                    "type": "string",
+                    "description": "Optional named task definition to apply to the child."
+                },
                 "context": {
                     "type": "array",
                     "description": "Optional context messages to transfer to the delegate.",
@@ -101,6 +105,10 @@ impl Tool for DelegateTool {
             .to_string();
 
         let context = params.get("context").cloned();
+        let task_definition = params
+            .get("task_definition")
+            .and_then(Value::as_str)
+            .map(str::to_string);
         let cwd = params
             .get("cwd")
             .and_then(Value::as_str)
@@ -122,6 +130,7 @@ impl Tool for DelegateTool {
             name: DELEGATE_TOOL_NAME.to_string(),
             target_agent_id,
             task,
+            task_definition,
             context,
             cwd,
             isolation,
@@ -242,6 +251,17 @@ mod tests {
                 assert!(context.is_some());
             }
             other => panic!("expected RequiresDelegation, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn delegate_tool_forwards_named_task_definition() {
+        let result=DelegateTool.execute(json!({"target_agent":"reviewer","task":"Review","task_definition":"strict-review"}),&MockToolContext::new("test-agent","session-1")).await.unwrap_err();
+        match result {
+            ToolError::RequiresDelegation {
+                task_definition, ..
+            } => assert_eq!(task_definition.as_deref(), Some("strict-review")),
+            other => panic!("expected delegation, got {other:?}"),
         }
     }
 

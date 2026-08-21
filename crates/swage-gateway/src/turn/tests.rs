@@ -3281,6 +3281,30 @@ impl swage_storage::store::AgentDefinitionStore for MockStorage {
 }
 
 #[async_trait]
+impl swage_storage::TaskDefinitionStore for MockStorage {
+    async fn upsert_task_definition(
+        &self,
+        _: swage_storage::NewTaskDefinition,
+    ) -> Result<swage_storage::TaskDefinition, StorageError> {
+        unimplemented!("turn tests use SQLite for task definitions")
+    }
+    async fn get_task_definition(
+        &self,
+        _: &str,
+    ) -> Result<Option<swage_storage::TaskDefinition>, StorageError> {
+        Ok(None)
+    }
+    async fn list_task_definitions(
+        &self,
+    ) -> Result<Vec<swage_storage::TaskDefinition>, StorageError> {
+        Ok(vec![])
+    }
+    async fn delete_task_definition(&self, _: &str) -> Result<bool, StorageError> {
+        unimplemented!("turn tests use SQLite for task definitions")
+    }
+}
+
+#[async_trait]
 impl swage_storage::store::ObservationStore for MockStorage {
     async fn record_observation(
         &self,
@@ -7310,6 +7334,7 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
             None,
             None,
             None,
+            None,
             "missing-lineage-delegate",
             "gateway",
             root_turn.id,
@@ -7870,6 +7895,7 @@ async fn delegated_read_only_attachment_allows_read_and_refuses_write() {
             "agent-b",
             "Exercise read-only placement",
             None,
+            None,
             Some(attachment.to_string_lossy().into_owned()),
             None,
             "read-only-placement-delegate",
@@ -8004,6 +8030,7 @@ async fn detached_delegate_can_be_cancelled_through_active_registry() {
             "agent-b",
             "Summarise independently",
             None,
+            None,
             Some(delegated_cwd.path().to_string_lossy().into_owned()),
             None,
             "detached-placement-delegate",
@@ -8034,6 +8061,7 @@ async fn detached_delegate_can_be_cancelled_through_active_registry() {
         .handle_delegation(
             "agent-b",
             "This placement must be rejected",
+            None,
             None,
             Some(denied_cwd.path().to_string_lossy().into_owned()),
             None,

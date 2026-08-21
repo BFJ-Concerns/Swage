@@ -18,9 +18,11 @@ use swage_protocol::{
     client::{channel as channel_wire, schedule as schedule_wire},
     hosting::{
         AgentDefinitionListResponse, AgentDefinitionMutationResponse, AgentDefinitionResponse,
-        AgentDefinitionScopeQuery, CreateAgentDefinitionRequest,
+        AgentDefinitionScopeQuery, CreateAgentDefinitionRequest, CreateTaskDefinitionRequest,
         EffectiveAgentDefinitionListResponse, EffectiveAgentDefinitionResponse,
-        EffectiveAgentDefinitionSourceScope, UpdateAgentDefinitionRequest,
+        EffectiveAgentDefinitionSourceScope, TaskDefinitionListResponse,
+        TaskDefinitionMutationRequest, TaskDefinitionMutationResponse, TaskDefinitionResponse,
+        UpdateAgentDefinitionRequest,
     },
 };
 
@@ -412,6 +414,88 @@ pub async fn delete_agent_definition(
     )
     .await?;
     Ok(Json(mutation_response(change)))
+}
+
+fn task_definition_response(value: swage_storage::TaskDefinition) -> TaskDefinitionResponse {
+    TaskDefinitionResponse {
+        id: value.id,
+        instructions: value.instructions,
+        model_id: value.model_id,
+        tool_permissions: value.tool_permissions,
+        output_schema: value.output_schema,
+        output_max_retries: value.output_max_retries,
+        created_at: value.created_at,
+        updated_at: value.updated_at,
+    }
+}
+fn new_task_definition(
+    id: String,
+    value: TaskDefinitionMutationRequest,
+) -> swage_storage::NewTaskDefinition {
+    swage_storage::NewTaskDefinition {
+        id,
+        instructions: value.instructions,
+        model_id: value.model_id,
+        tool_permissions: value.tool_permissions,
+        output_schema: value.output_schema,
+        output_max_retries: value.output_max_retries,
+    }
+}
+pub async fn list_task_definitions(
+    State(state): State<AppState>,
+) -> Result<Json<TaskDefinitionListResponse>, ApiError> {
+    let definitions = state
+        .storage
+        .list_task_definitions()
+        .await
+        .map_err(GatewayError::from)?
+        .into_iter()
+        .map(task_definition_response)
+        .collect();
+    Ok(Json(TaskDefinitionListResponse { definitions }))
+}
+pub async fn create_task_definition(
+    State(state): State<AppState>,
+    Json(request): Json<CreateTaskDefinitionRequest>,
+) -> Result<Json<TaskDefinitionMutationResponse>, ApiError> {
+    let change = crate::service::upsert_task_definition(
+        &state,
+        new_task_definition(request.id, request.definition),
+        "operator_http",
+        None,
+    )
+    .await?;
+    Ok(Json(TaskDefinitionMutationResponse {
+        id: change.id,
+        summary: change.summary,
+    }))
+}
+pub async fn update_task_definition(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(request): Json<TaskDefinitionMutationRequest>,
+) -> Result<Json<TaskDefinitionMutationResponse>, ApiError> {
+    let change = crate::service::upsert_task_definition(
+        &state,
+        new_task_definition(id, request),
+        "operator_http",
+        None,
+    )
+    .await?;
+    Ok(Json(TaskDefinitionMutationResponse {
+        id: change.id,
+        summary: change.summary,
+    }))
+}
+pub async fn delete_task_definition(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<TaskDefinitionMutationResponse>, ApiError> {
+    let change = crate::service::delete_task_definition(&state, &id, "operator_http", None).await?;
+    Ok(Json(TaskDefinitionMutationResponse {
+        id: change.id,
+        summary: change.summary,
+    }))
 }
 
 /// `GET /api/operator/search` — search durable operator-visible history.

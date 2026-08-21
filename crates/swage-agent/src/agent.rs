@@ -1486,6 +1486,7 @@ impl Agent {
                 name: _,
                 target_agent_id,
                 task,
+                task_definition,
                 context,
                 cwd,
                 isolation,
@@ -1548,6 +1549,7 @@ impl Agent {
                     .handle_delegation(
                         &target_agent_id,
                         &task,
+                        task_definition.as_deref(),
                         transferred_context,
                         cwd,
                         isolation,

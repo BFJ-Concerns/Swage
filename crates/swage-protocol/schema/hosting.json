@@ -24,6 +24,9 @@
     "approvals": {
       "$ref": "#/$defs/ApprovalListResponse"
     },
+    "create_task_definition": {
+      "$ref": "#/$defs/CreateTaskDefinitionRequest"
+    },
     "devices": {
       "$ref": "#/$defs/DeviceListResponse"
     },
@@ -41,6 +44,15 @@
     },
     "presence": {
       "$ref": "#/$defs/PresenceSnapshotResponse"
+    },
+    "task_definition_list": {
+      "$ref": "#/$defs/TaskDefinitionListResponse"
+    },
+    "task_definition_mutation": {
+      "$ref": "#/$defs/TaskDefinitionMutationResponse"
+    },
+    "update_task_definition": {
+      "$ref": "#/$defs/TaskDefinitionMutationRequest"
     }
   },
   "required": [
@@ -51,6 +63,10 @@
     "operator_overview",
     "agent_definition_scope",
     "agent_definition_list",
+    "task_definition_list",
+    "create_task_definition",
+    "update_task_definition",
+    "task_definition_mutation",
     "effective_agent_definition_list",
     "agent_definition_create",
     "agent_definition_update",
@@ -402,6 +418,37 @@
         "id",
         "display_name",
         "description",
+        "instructions"
+      ]
+    },
+    "CreateTaskDefinitionRequest": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "instructions": {
+          "type": "string"
+        },
+        "model_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "output_max_retries": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "output_schema": true,
+        "tool_permissions": true
+      },
+      "required": [
+        "id",
         "instructions"
       ]
     },
@@ -1228,6 +1275,103 @@
             "session_id"
           ]
         }
+      ]
+    },
+    "TaskDefinitionListResponse": {
+      "type": "object",
+      "properties": {
+        "definitions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TaskDefinitionResponse"
+          }
+        }
+      },
+      "required": [
+        "definitions"
+      ]
+    },
+    "TaskDefinitionMutationRequest": {
+      "type": "object",
+      "properties": {
+        "instructions": {
+          "type": "string"
+        },
+        "model_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "output_max_retries": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "output_schema": true,
+        "tool_permissions": true
+      },
+      "required": [
+        "instructions"
+      ]
+    },
+    "TaskDefinitionMutationResponse": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "summary": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "summary"
+      ]
+    },
+    "TaskDefinitionResponse": {
+      "type": "object",
+      "properties": {
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "id": {
+          "type": "string"
+        },
+        "instructions": {
+          "type": "string"
+        },
+        "model_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "output_max_retries": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "output_schema": true,
+        "tool_permissions": true,
+        "updated_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "instructions",
+        "created_at",
+        "updated_at"
       ]
     },
     "UpdateAgentDefinitionRequest": {

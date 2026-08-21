@@ -106,6 +106,8 @@ fn typescript_bindings_are_regenerated() {
     client::workflow::WorkflowRunCompletedEvent::export_all(&cfg)
         .expect("export workflow completed event");
     client::workflow::WorkerIsolation::export_all(&cfg).expect("export worker isolation");
+    client::workflow::AgentCallRequest::export_all(&cfg).expect("export agent call request");
+    client::workflow::DelegateRequest::export_all(&cfg).expect("export delegate request");
     hosting::PresenceSnapshotResponse::export_all(&cfg).expect("export hosting presence");
     hosting::MachineHeartbeatRequest::export_all(&cfg).expect("export hosting heartbeat");
     hosting::ApprovalListResponse::export_all(&cfg).expect("export hosting approvals");
@@ -121,6 +123,12 @@ fn typescript_bindings_are_regenerated() {
         .expect("export effective agent definition list");
     hosting::AgentDefinitionMutationResponse::export_all(&cfg)
         .expect("export agent definition mutation");
+    hosting::TaskDefinitionListResponse::export_all(&cfg).expect("export task definition list");
+    hosting::CreateTaskDefinitionRequest::export_all(&cfg).expect("export task definition create");
+    hosting::TaskDefinitionMutationRequest::export_all(&cfg)
+        .expect("export task definition update");
+    hosting::TaskDefinitionMutationResponse::export_all(&cfg)
+        .expect("export task definition mutation");
     hosting::KnowledgeMirrorRegenerateResponse::export_all(&cfg)
         .expect("export knowledge mirror regenerate");
     device::RegisterDeviceRequest::export_all(&cfg).expect("export device registration");

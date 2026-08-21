@@ -19,15 +19,15 @@ pub use model::{
     NewAgentMessage, NewApprovalRequest, NewAttachment, NewAuditEvent, NewBackgroundJob,
     NewChannelInboundMessage, NewChannelLink, NewCurationAssertion, NewDeliveryRecord,
     NewKnowledgeCitation, NewMaterial, NewMessage, NewOrientationCard, NewSchedule, NewScheduleRun,
-    NewSecretRecord, NewSession, NewSourceObservation, NewSpace, NewThread, NewToolCall, NewTurn,
-    NewWorkflowJournalIntent, NewWorkflowRun, NewWorkflowRunEvent, NewWorkflowScript,
-    NewWorkspaceAttachment, ObservationOrigin, OrientationCard, OrientationCardLifecycle,
-    OrientationCardLifecycleKind, PendingChannelOrigin, Schedule, ScheduleCreator, ScheduleKind,
-    ScheduleRun, ScheduleRunState, ScheduleRunTrigger, ScheduleRunUpdate, ScheduleStatus,
-    SecretRecord, Session, SessionPolicy, SkipReason, SourceObservation, Space, SpaceSlug, Thread,
-    ThreadBranch, ThreadState, ToolCallRecord, Turn, TurnState, UpdateSchedule,
-    WorkflowJournalRecord, WorkflowRunEventRecord, WorkflowRunRecord, WorkflowScriptRecord,
-    WorkflowScriptVersion, WorkspaceAttachment,
+    NewSecretRecord, NewSession, NewSourceObservation, NewSpace, NewTaskDefinition, NewThread,
+    NewToolCall, NewTurn, NewWorkflowJournalIntent, NewWorkflowRun, NewWorkflowRunEvent,
+    NewWorkflowScript, NewWorkspaceAttachment, ObservationOrigin, OrientationCard,
+    OrientationCardLifecycle, OrientationCardLifecycleKind, PendingChannelOrigin, Schedule,
+    ScheduleCreator, ScheduleKind, ScheduleRun, ScheduleRunState, ScheduleRunTrigger,
+    ScheduleRunUpdate, ScheduleStatus, SecretRecord, Session, SessionPolicy, SkipReason,
+    SourceObservation, Space, SpaceSlug, TaskDefinition, Thread, ThreadBranch, ThreadState,
+    ToolCallRecord, Turn, TurnState, UpdateSchedule, WorkflowJournalRecord, WorkflowRunEventRecord,
+    WorkflowRunRecord, WorkflowScriptRecord, WorkflowScriptVersion, WorkspaceAttachment,
 };
 pub use sqlite::SqliteStorage;
 pub use store::{
@@ -35,6 +35,6 @@ pub use store::{
     AuditStore, BackgroundJobStore, ChannelLinkStore, ChannelQueueStore, CitationStore,
     ContextSnapshotStore, CurationAssertionStore, DeliveryStore, MaterialStore, MessageStore,
     ObservationStore, OrientationCardStore, ScheduleStore, SecretStore, SessionStore,
-    SkillActivationStore, SpaceStore, Storage, ThreadStore, ToolCallStore, TurnStore,
-    WorkflowStore, WorkspaceAttachmentStore,
+    SkillActivationStore, SpaceStore, Storage, TaskDefinitionStore, ThreadStore, ToolCallStore,
+    TurnStore, WorkflowStore, WorkspaceAttachmentStore,
 };

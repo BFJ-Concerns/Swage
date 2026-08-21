@@ -30,6 +30,7 @@ pub const LOCATION_CONTEXT_ASSEMBLY: &str = "context.assembly";
 /// session receives for its family. The built-in text serves until
 /// alternatives register; every draw is recorded like any location's.
 pub const LOCATION_WORKING_NORMS: &str = "context.working_norms";
+pub const LOCATION_TASK_PROMPT: &str = "task.prompt";
 
 /// Why the selected variant was selected. Recorded verbatim; the reasons are
 /// the audit trail's vocabulary, so they name situations, not code paths.
