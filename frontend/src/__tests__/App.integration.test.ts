@@ -454,6 +454,27 @@ describe("App", () => {
     expect(document.querySelector(".message-display")?.textContent).toContain("Restored from URL");
   });
 
+  it("keeps the gateway available when startup agent inventory loading fails", async () => {
+    const defaultSpace = makeSpace();
+    const linkedConversation = makeConversationSummary({ id: "conv-linked" });
+    vi.mocked(spacesApi.listSpaces).mockResolvedValueOnce([defaultSpace]);
+    vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([linkedConversation]);
+    vi.mocked(conversationsApi.getConversation).mockResolvedValue(
+      makeConversationDetail({ id: linkedConversation.id }),
+    );
+    vi.mocked(agentDefinitionsApi.listEffectiveAgentDefinitions).mockRejectedValueOnce(
+      new Error("agent inventory unavailable"),
+    );
+    window.history.replaceState(null, "", `/conversations/${linkedConversation.id}`);
+
+    component = mount(App, { target: document.body });
+    await settleUi();
+
+    expect(agentDefinitionsApi.listEffectiveAgentDefinitions).toHaveBeenCalledWith(defaultSpace.id);
+    expect(document.querySelector(".conversation-list")).not.toBeNull();
+    expect(document.querySelector(".error-screen")).toBeNull();
+  });
+
   it("falls back to the root with a notice for a stale deep link", async () => {
     vi.mocked(spacesApi.listSpaces).mockResolvedValueOnce([makeSpace()]);
     vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([]);
