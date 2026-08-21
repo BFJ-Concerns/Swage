@@ -1911,6 +1911,11 @@ pub struct NewWorkflowRun {
     pub parent_run_id: Option<Uuid>,
     pub parent_seq: Option<u64>,
     pub script_version_id: Option<Uuid>,
+    /// Identity carried beside inline source when the source belongs to an
+    /// immutable workflow outside the authored-version tables.
+    pub inline_workflow_id: Option<Uuid>,
+    pub inline_workflow_name: Option<String>,
+    pub inline_workflow_version: Option<u32>,
     pub carrying_skill: Option<String>,
     pub source: Option<String>,
     pub source_hash: String,
