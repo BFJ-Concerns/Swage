@@ -224,7 +224,7 @@ pub(crate) async fn discover_available_for_space(
         }
         None => None,
     };
-    Ok(SkillManager::discover_available(&root, &space_dir, agent_dir.as_deref()).0)
+    Ok(SkillManager::discover_available(root, &space_dir, agent_dir.as_deref()).0)
 }
 
 pub(crate) async fn discover_available_for_space_from_config(
