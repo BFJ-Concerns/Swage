@@ -25,8 +25,8 @@ use swage_storage::{
 };
 use swage_workflow::{
     AgentCallRequest, AgentCallResult, EffectPayload, EffectReceipt, EffectRecoveryHost,
-    EngineLimits, GateRequest, RunEventPost, ScriptCapabilities, WorkflowCallRequest,
-    WorkflowEngine, WorkflowHost, journal_args_hash, recover_started_effect,
+    EngineLimits, GateRequest, ResolvedWorkerPlacement, RunEventPost, ScriptCapabilities,
+    WorkflowCallRequest, WorkflowEngine, WorkflowHost, journal_args_hash, recover_started_effect,
 };
 use tokio::sync::{Mutex, Notify, Semaphore, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -37,6 +37,7 @@ use crate::{
     error::ApiError,
     state::AppState,
     subscription::SubscriptionState,
+    turn::resolve_authorised_worker_directory,
     websocket::ServerEvent,
     workflow_delivery::{DeliveryCapability, capability_from_grant},
 };
@@ -246,6 +247,7 @@ fn journal_wire(
     };
     let kind = match entry.kind.as_str() {
         "agent_call" => WorkflowJournalEntryKind::AgentCall,
+        "worker_placement" => WorkflowJournalEntryKind::WorkerPlacement,
         "effect" => WorkflowJournalEntryKind::Effect,
         "log" => WorkflowJournalEntryKind::Log,
         "phase" => WorkflowJournalEntryKind::Phase,
@@ -500,8 +502,26 @@ enum HostCommand {
     },
     Agent {
         request: AgentCallRequest,
+        resolved_working_directory: Option<ResolvedWorkerPlacement>,
         cancellation: CancellationToken,
         reply: oneshot::Sender<Result<AgentCallResult, String>>,
+    },
+    DispatchAgent {
+        request: AgentCallRequest,
+        cancellation: CancellationToken,
+        reply: oneshot::Sender<Result<AgentCallResult, String>>,
+    },
+    ProvisionWorker {
+        cwd: Option<String>,
+        isolation: swage_protocol::client::workflow::WorkerIsolation,
+        reply: oneshot::Sender<Result<Option<ResolvedWorkerPlacement>, String>>,
+    },
+    ResolveWorkerDirectory {
+        cwd: String,
+        reply: oneshot::Sender<Result<Option<ResolvedWorkerPlacement>, String>>,
+    },
+    ListWorkerPlacements {
+        reply: oneshot::Sender<Result<Value, String>>,
     },
     Deliver {
         payload: EffectPayload,
@@ -571,11 +591,31 @@ impl WorkflowHost for ChannelWorkflowHost {
     async fn run_agent_call(
         &self,
         request: AgentCallRequest,
+        resolved_working_directory: Option<ResolvedWorkerPlacement>,
         cancellation: CancellationToken,
     ) -> Result<AgentCallResult, String> {
         let (reply, receive) = oneshot::channel();
         self.tx
             .send(HostCommand::Agent {
+                request,
+                resolved_working_directory,
+                cancellation,
+                reply,
+            })
+            .map_err(|_| "workflow host stopped".to_string())?;
+        receive
+            .await
+            .map_err(|_| "workflow host dropped agent reply".to_string())?
+    }
+
+    async fn dispatch_agent_call(
+        &self,
+        request: AgentCallRequest,
+        cancellation: CancellationToken,
+    ) -> Result<AgentCallResult, String> {
+        let (reply, receive) = oneshot::channel();
+        self.tx
+            .send(HostCommand::DispatchAgent {
                 request,
                 cancellation,
                 reply,
@@ -584,6 +624,52 @@ impl WorkflowHost for ChannelWorkflowHost {
         receive
             .await
             .map_err(|_| "workflow host dropped agent reply".to_string())?
+    }
+
+    async fn resolve_worker_placement(
+        &self,
+        request: &AgentCallRequest,
+        _cancellation: CancellationToken,
+    ) -> Result<Option<ResolvedWorkerPlacement>, String> {
+        let Some(isolation) = request.isolation else {
+            let Some(cwd) = request.cwd.as_deref() else {
+                return Ok(None);
+            };
+            let (reply, receive) = oneshot::channel();
+            self.tx
+                .send(HostCommand::ResolveWorkerDirectory {
+                    cwd: cwd.to_string(),
+                    reply,
+                })
+                .map_err(|_| "workflow host stopped".to_string())?;
+            return receive
+                .await
+                .map_err(|_| "workflow host dropped placement reply".to_string())?;
+        };
+        let (reply, receive) = oneshot::channel();
+        self.tx
+            .send(HostCommand::ProvisionWorker {
+                cwd: request.cwd.clone(),
+                isolation,
+                reply,
+            })
+            .map_err(|_| "workflow host stopped".to_string())?;
+        receive
+            .await
+            .map_err(|_| "workflow host dropped placement reply".to_string())?
+    }
+
+    async fn list_worker_placements(
+        &self,
+        _cancellation: CancellationToken,
+    ) -> Result<Value, String> {
+        let (reply, receive) = oneshot::channel();
+        self.tx
+            .send(HostCommand::ListWorkerPlacements { reply })
+            .map_err(|_| "workflow host stopped".to_string())?;
+        receive
+            .await
+            .map_err(|_| "workflow host dropped placement-list reply".to_string())?
     }
 
     async fn deliver(
@@ -719,6 +805,7 @@ async fn run_ephemeral_agent_call(
     space_id: Uuid,
     dispatch_bound_agent_ids: &[String],
     request: AgentCallRequest,
+    resolved_working_directory: Option<ResolvedWorkerPlacement>,
     cancellation: CancellationToken,
 ) -> Result<AgentCallResult, String> {
     // This identity deliberately cannot name an agent definition: definition
@@ -790,13 +877,18 @@ async fn run_ephemeral_agent_call(
                 .agent
                 .clone()
                 .unwrap_or_else(|| BARE_WORKFLOW_AGENT_ID.to_string());
-            let metadata = crate::turn::dispatch_bound_metadata(dispatch_bound_agent_ids);
+            let mut metadata = crate::turn::dispatch_bound_metadata(dispatch_bound_agent_ids)
+                .unwrap_or_else(|| serde_json::json!({}));
+            if let Some(placement) = resolved_working_directory.as_ref() {
+                metadata["worker_placement_cwd"] = Value::String(placement.path.clone());
+                metadata["worker_placement_can_write"] = Value::Bool(placement.can_write);
+            }
             let session = state
                 .storage
                 .create_session(NewSession {
                     space_id,
                     agent_id: agent_id.clone(),
-                    metadata,
+                    metadata: Some(metadata),
                     active_workspace_attachment_id: None,
                 })
                 .await
@@ -958,6 +1050,202 @@ fn run_host_commands(
     ))
 }
 
+async fn provision_worker_command(
+    state: &AppState,
+    run_id: Uuid,
+    space_id: Uuid,
+    replay: &[WorkflowJournalRecord],
+    current_seq: u64,
+    cwd: Option<String>,
+    isolation: swage_protocol::client::workflow::WorkerIsolation,
+) -> Result<Option<ResolvedWorkerPlacement>, String> {
+    let request = serde_json::json!({"cwd": cwd, "isolation": isolation});
+    let hash = journal_args_hash(&request);
+    let existing = replay.get(current_seq as usize);
+    if let Some(entry) = existing {
+        if entry.kind != "worker_placement" || entry.args_hash != hash {
+            Err("NondeterministicReplayError".into())
+        } else if entry.status == "completed" {
+            let (path, can_write) = entry
+                .result
+                .as_ref()
+                .and_then(|result| {
+                    Some((
+                        result.get("path")?.as_str()?.to_string(),
+                        result.get("can_write")?.as_bool()?,
+                    ))
+                })
+                .ok_or_else(|| "completed worker placement has no path".to_string())?;
+            let repo = cwd.as_deref().ok_or_else(|| {
+                "WorkerPlacementError: isolation=worktree requires cwd to name the git repository"
+                    .to_string()
+            })?;
+            state
+                .worktree_host
+                .restore(
+                    run_id,
+                    current_seq,
+                    std::path::Path::new(repo),
+                    std::path::Path::new(&path),
+                )
+                .await
+                .map(|path| {
+                    Some(ResolvedWorkerPlacement {
+                        path: path.to_string_lossy().into_owned(),
+                        can_write,
+                    })
+                })
+        } else if entry.status == "failed" {
+            Err(entry
+                .error_message
+                .clone()
+                .unwrap_or_else(|| "recorded worker placement failure".into()))
+        } else {
+            complete_worker_placement(
+                state,
+                run_id,
+                space_id,
+                current_seq,
+                entry.id,
+                cwd.as_deref(),
+            )
+            .await
+        }
+    } else {
+        match state
+            .create_workflow_journal_intent(NewWorkflowJournalIntent {
+                run_id,
+                seq: current_seq,
+                kind: "worker_placement".into(),
+                args_hash: hash,
+                request,
+                effect_kind: None,
+                idempotency_key: None,
+                target_kind: None,
+            })
+            .await
+        {
+            Ok(intent) => {
+                complete_worker_placement(
+                    state,
+                    run_id,
+                    space_id,
+                    current_seq,
+                    intent.id,
+                    cwd.as_deref(),
+                )
+                .await
+            }
+            Err(error) => Err(error.to_string()),
+        }
+    }
+}
+
+async fn resolve_worker_directory_command(
+    state: &AppState,
+    run_id: Uuid,
+    space_id: Uuid,
+    replay: &[WorkflowJournalRecord],
+    current_seq: u64,
+    cwd: String,
+) -> Result<Option<ResolvedWorkerPlacement>, String> {
+    let request = serde_json::json!({"cwd": cwd, "isolation": null});
+    let hash = journal_args_hash(&request);
+    let existing = replay.get(current_seq as usize);
+    if let Some(entry) = existing {
+        if entry.kind != "worker_placement" || entry.args_hash != hash {
+            Err("NondeterministicReplayError".into())
+        } else if entry.status == "completed" {
+            entry
+                .result
+                .as_ref()
+                .and_then(|result| {
+                    Some(ResolvedWorkerPlacement {
+                        path: result.get("path")?.as_str()?.to_string(),
+                        can_write: result.get("can_write")?.as_bool()?,
+                    })
+                })
+                .map(Some)
+                .ok_or_else(|| "completed worker directory resolution has no result".into())
+        } else if entry.status == "failed" {
+            Err(entry
+                .error_message
+                .clone()
+                .unwrap_or_else(|| "recorded worker directory resolution failure".into()))
+        } else {
+            complete_worker_directory_resolution(state, space_id, run_id, entry.id, &cwd).await
+        }
+    } else {
+        match state
+            .create_workflow_journal_intent(NewWorkflowJournalIntent {
+                run_id,
+                seq: current_seq,
+                kind: "worker_placement".into(),
+                args_hash: hash,
+                request,
+                effect_kind: None,
+                idempotency_key: None,
+                target_kind: None,
+            })
+            .await
+        {
+            Ok(intent) => {
+                complete_worker_directory_resolution(state, space_id, run_id, intent.id, &cwd).await
+            }
+            Err(error) => Err(error.to_string()),
+        }
+    }
+}
+
+async fn resolve_agent_placement_command(
+    state: &AppState,
+    run_id: Uuid,
+    space_id: Uuid,
+    replay: &[WorkflowJournalRecord],
+    seq: &AtomicU64,
+    request: &AgentCallRequest,
+) -> Result<Option<ResolvedWorkerPlacement>, String> {
+    if request.session.is_some() && (request.cwd.is_some() || request.isolation.is_some()) {
+        return Err(
+            "WorkerPlacementError: a continued worker keeps its original placement; cwd and \
+             isolation cannot be supplied with session"
+                .into(),
+        );
+    }
+    match request.isolation {
+        Some(isolation) => {
+            let current_seq = seq.fetch_add(1, Ordering::SeqCst);
+            provision_worker_command(
+                state,
+                run_id,
+                space_id,
+                replay,
+                current_seq,
+                request.cwd.clone(),
+                isolation,
+            )
+            .await
+        }
+        None => match request.cwd.clone() {
+            Some(cwd) => {
+                let current_seq = seq.fetch_add(1, Ordering::SeqCst);
+                resolve_worker_directory_command(state, run_id, space_id, replay, current_seq, cwd)
+                    .await
+            }
+            None => Ok(None),
+        },
+    }
+}
+
+fn classify_agent_placement_error(error: String) -> String {
+    if error.starts_with("WorkerPlacementError") || error.starts_with("NondeterministicReplayError")
+    {
+        error
+    } else {
+        format!("WorkerPlacementError: {error}")
+    }
+}
+
 async fn run_host_commands_inner(
     state: AppState,
     run_id: Uuid,
@@ -1055,6 +1343,32 @@ async fn run_host_commands_inner(
     // call has settled and registered its failure reference.
     let mut agent_tasks = tokio::task::JoinSet::new();
     while let Some(command) = commands.recv().await {
+        let command = match command {
+            HostCommand::DispatchAgent {
+                request,
+                cancellation,
+                reply,
+            } => {
+                let resolved_working_directory = match resolve_agent_placement_command(
+                    &state, run_id, space_id, &replay, &seq, &request,
+                )
+                .await
+                {
+                    Ok(resolved) => resolved,
+                    Err(error) => {
+                        let _ = reply.send(Err(classify_agent_placement_error(error)));
+                        continue;
+                    }
+                };
+                HostCommand::Agent {
+                    request,
+                    resolved_working_directory,
+                    cancellation,
+                    reply,
+                }
+            }
+            command => command,
+        };
         match command {
             HostCommand::Record { kind, message } => {
                 let request = serde_json::json!({ "message": message });
@@ -1083,8 +1397,86 @@ async fn run_host_commands_inner(
                         .await;
                 }
             }
+            HostCommand::ProvisionWorker {
+                cwd,
+                isolation,
+                reply,
+            } => {
+                let current_seq = seq.fetch_add(1, Ordering::SeqCst);
+                let result = provision_worker_command(
+                    &state,
+                    run_id,
+                    space_id,
+                    &replay,
+                    current_seq,
+                    cwd,
+                    isolation,
+                )
+                .await;
+                let _ = reply.send(result);
+            }
+            HostCommand::ResolveWorkerDirectory { cwd, reply } => {
+                let current_seq = seq.fetch_add(1, Ordering::SeqCst);
+                let result = resolve_worker_directory_command(
+                    &state,
+                    run_id,
+                    space_id,
+                    &replay,
+                    current_seq,
+                    cwd,
+                )
+                .await;
+                let _ = reply.send(result);
+            }
+            HostCommand::ListWorkerPlacements { reply } => {
+                let current_seq = seq.fetch_add(1, Ordering::SeqCst);
+                let request = serde_json::json!({"action": "list"});
+                let hash = journal_args_hash(&request);
+                let existing = replay.get(current_seq as usize);
+                let result = if let Some(entry) = existing {
+                    if entry.kind != "worker_placement" || entry.args_hash != hash {
+                        Err("NondeterministicReplayError".into())
+                    } else if entry.status == "completed" {
+                        entry
+                            .result
+                            .clone()
+                            .ok_or_else(|| "completed placement listing has no result".into())
+                    } else if entry.status == "failed" {
+                        Err(entry
+                            .error_message
+                            .clone()
+                            .unwrap_or_else(|| "recorded placement listing failure".into()))
+                    } else {
+                        complete_worker_placement_listing(&state, run_id, entry.id).await
+                    }
+                } else {
+                    match state
+                        .create_workflow_journal_intent(NewWorkflowJournalIntent {
+                            run_id,
+                            seq: current_seq,
+                            kind: "worker_placement".into(),
+                            args_hash: hash,
+                            request,
+                            effect_kind: None,
+                            idempotency_key: None,
+                            target_kind: None,
+                        })
+                        .await
+                    {
+                        Ok(intent) => {
+                            complete_worker_placement_listing(&state, run_id, intent.id).await
+                        }
+                        Err(error) => Err(error.to_string()),
+                    }
+                };
+                let _ = reply.send(result);
+            }
+            HostCommand::DispatchAgent { .. } => {
+                unreachable!("dispatch commands are resolved before journal admission")
+            }
             HostCommand::Agent {
                 request,
+                resolved_working_directory,
                 cancellation,
                 reply,
             } => {
@@ -1365,6 +1757,7 @@ async fn run_host_commands_inner(
                                     &dispatch_bound_agent_ids,
                                     journal_entry_id,
                                     request,
+                                    resolved_working_directory,
                                     cancellation,
                                 )
                                 .await,
@@ -1395,6 +1788,7 @@ async fn run_host_commands_inner(
                                         &dispatch_bound_agent_ids,
                                         journal_entry_id,
                                         request,
+                                        resolved_working_directory,
                                         cancellation,
                                     )
                                     .await,
@@ -2127,6 +2521,119 @@ async fn run_host_commands_inner(
     while agent_tasks.join_next().await.is_some() {}
 }
 
+async fn complete_worker_placement(
+    state: &AppState,
+    run_id: Uuid,
+    space_id: Uuid,
+    seq: u64,
+    entry_id: Uuid,
+    cwd: Option<&str>,
+) -> Result<Option<ResolvedWorkerPlacement>, String> {
+    let repo = cwd.ok_or_else(|| {
+        "WorkerPlacementError: isolation=worktree requires cwd to name the git repository"
+            .to_string()
+    })?;
+    let repo = match resolve_authorised_worker_directory(state, space_id, run_id, None, None, repo)
+        .await
+    {
+        Ok(repo) => repo,
+        Err(error) => {
+            let error = format!("WorkerPlacementError: {error}");
+            let _ = state.fail_workflow_journal_entry(entry_id, &error).await;
+            return Err(error);
+        }
+    };
+    match state.worktree_host.provision(run_id, seq, &repo.path).await {
+        Ok(path) => {
+            let path = path.to_string_lossy().into_owned();
+            state
+                .complete_workflow_journal_entry(
+                    entry_id,
+                    serde_json::json!({
+                        "path": path,
+                        "can_write": repo.can_write,
+                    }),
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+            Ok(Some(ResolvedWorkerPlacement {
+                path,
+                can_write: repo.can_write,
+            }))
+        }
+        Err(error) => {
+            let _ = state.fail_workflow_journal_entry(entry_id, &error).await;
+            Err(error)
+        }
+    }
+}
+
+async fn complete_worker_directory_resolution(
+    state: &AppState,
+    space_id: Uuid,
+    context_id: Uuid,
+    entry_id: Uuid,
+    cwd: &str,
+) -> Result<Option<ResolvedWorkerPlacement>, String> {
+    match resolve_authorised_worker_directory(state, space_id, context_id, None, None, cwd).await {
+        Ok(directory) => {
+            let placement = ResolvedWorkerPlacement {
+                path: directory.path.to_string_lossy().into_owned(),
+                can_write: directory.can_write,
+            };
+            state
+                .complete_workflow_journal_entry(
+                    entry_id,
+                    serde_json::json!({
+                        "path": placement.path,
+                        "can_write": placement.can_write,
+                    }),
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+            Ok(Some(placement))
+        }
+        Err(error) => {
+            let error = format!("WorkerPlacementError: {error}");
+            let _ = state.fail_workflow_journal_entry(entry_id, &error).await;
+            Err(error)
+        }
+    }
+}
+
+async fn complete_worker_placement_listing(
+    state: &AppState,
+    run_id: Uuid,
+    entry_id: Uuid,
+) -> Result<Value, String> {
+    let journal = state
+        .storage
+        .list_workflow_journal(run_id)
+        .await
+        .map_err(|error| error.to_string())?;
+    let paths = journal
+        .into_iter()
+        .filter(|entry| {
+            entry.kind == "worker_placement"
+                && entry.status == "completed"
+                && entry.request.get("isolation").and_then(Value::as_str) == Some("worktree")
+        })
+        .filter_map(|entry| entry.result)
+        .filter_map(|result| {
+            result
+                .get("path")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .collect::<Vec<_>>();
+    let result = serde_json::json!({"paths": paths});
+    state
+        .complete_workflow_journal_entry(entry_id, result.clone())
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(result)
+}
+
 async fn await_replay_release(rank: u64, next: &AtomicU64, notify: &Notify) {
     loop {
         if next
@@ -2147,6 +2654,7 @@ async fn complete_agent_entry(
     dispatch_bound_agent_ids: &[String],
     entry_id: Uuid,
     request: AgentCallRequest,
+    resolved_working_directory: Option<ResolvedWorkerPlacement>,
     cancellation: CancellationToken,
 ) -> Result<AgentCallResult, String> {
     match run_ephemeral_agent_call(
@@ -2155,6 +2663,7 @@ async fn complete_agent_entry(
         space_id,
         dispatch_bound_agent_ids,
         request,
+        resolved_working_directory,
         cancellation,
     )
     .await
@@ -3045,6 +3554,7 @@ async fn launch_existing_run(
         .map_err(internal)?;
     let storage = Arc::clone(&state.storage);
     let active = Arc::clone(&state.active_workflow_runs);
+    let worktree_host = Arc::clone(&state.worktree_host);
     let run_id = record.id;
     let broadcast = state.broadcast.clone();
     tokio::spawn(async move {
@@ -3113,9 +3623,12 @@ async fn launch_existing_run(
         } else {
             None
         };
-        let _ = storage
+        let state_update = storage
             .update_workflow_run_state(run_id, run_state, output, handover, error.as_deref())
             .await;
+        if state_update.is_ok() && run_state == "completed" {
+            worktree_host.cleanup_owner(run_id).await;
+        }
         let _ = storage
             .create_audit_event(NewAuditEvent {
                 id: Uuid::new_v4().to_string(),
@@ -3443,7 +3956,8 @@ mod tests {
     use super::*;
     use swage_protocol::client::workflow::{WorkflowJournalEntryKind, WorkflowJournalEntryStatus};
     use swage_storage::{
-        SessionStore, SpaceStore, SqliteStorage, Storage, TurnState, TurnStore, WorkflowStore,
+        NewWorkspaceAttachment, SessionStore, SpaceStore, SqliteStorage, Storage, ToolCallStore,
+        TurnState, TurnStore, WorkflowStore, WorkspaceAttachmentStore,
     };
     use swage_workflow::AgentSessionRef;
 
@@ -3458,6 +3972,24 @@ mod tests {
             None,
         );
         (state, storage)
+    }
+
+    async fn grant_workspace(
+        storage: &SqliteStorage,
+        space_id: Uuid,
+        path: &std::path::Path,
+    ) -> Uuid {
+        storage
+            .create_workspace_attachment(NewWorkspaceAttachment {
+                space_id,
+                label: "test workspace".into(),
+                path: path.to_string_lossy().into_owned(),
+                permissions: vec!["read".into(), "write".into()],
+                is_trusted: true,
+            })
+            .await
+            .expect("grant test workspace")
+            .id
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -3712,6 +4244,8 @@ mod tests {
             space.id,
             &[],
             AgentCallRequest {
+                cwd: None,
+                isolation: None,
                 effort: None,
                 timeout_ms: None,
                 prompt: "Use echo".into(),
@@ -3722,6 +4256,7 @@ mod tests {
                 label: None,
                 session: None,
             },
+            None,
             CancellationToken::new(),
         )
         .await
@@ -3897,6 +4432,104 @@ mod tests {
     }
 
     struct StaggeredFailingProvider;
+
+    #[derive(Default)]
+    struct PlacementWritingProvider {
+        calls: std::sync::Mutex<std::collections::HashMap<&'static str, u32>>,
+    }
+
+    #[async_trait::async_trait]
+    impl swage_provider::LlmProvider for PlacementWritingProvider {
+        fn model_id(&self) -> &str {
+            "placement-writer"
+        }
+        async fn complete(
+            &self,
+            _: swage_core::CompletionRequest,
+        ) -> Result<swage_core::CompletionResponse, swage_core::ProviderError> {
+            unimplemented!()
+        }
+        async fn complete_with_tools(
+            &self,
+            _: swage_core::ToolCompletionRequest,
+        ) -> Result<swage_core::ToolCompletionResponse, swage_core::ProviderError> {
+            unimplemented!()
+        }
+        fn stream(
+            &self,
+            request: swage_core::CompletionRequest,
+        ) -> std::pin::Pin<Box<dyn futures::Stream<Item = swage_core::StreamChunk> + Send>>
+        {
+            let text = request
+                .messages
+                .iter()
+                .map(swage_core::ChatMessage::text_content)
+                .collect::<Vec<_>>()
+                .join("\n");
+            let file = if text.contains("first-marker") {
+                "first-marker"
+            } else {
+                "second-marker"
+            };
+            let mut calls = self.calls.lock().expect("placement calls");
+            let count = calls.entry(file).or_default();
+            *count += 1;
+            if *count > 1 {
+                return Box::pin(futures::stream::iter(scripted_text_output("written")));
+            }
+            Box::pin(futures::stream::iter(vec![
+                swage_core::StreamChunk::ToolUse {
+                    call_id: format!("write-{file}"),
+                    name: "placement_write".into(),
+                    arguments: serde_json::json!({"file": file}),
+                },
+                swage_core::StreamChunk::Done {
+                    finish_reason: None,
+                },
+            ]))
+        }
+    }
+
+    #[derive(Default)]
+    struct PlacementWriteTool {
+        writes: std::sync::Mutex<Vec<(String, std::path::PathBuf)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::tool::Tool for PlacementWriteTool {
+        fn name(&self) -> &str {
+            "placement_write"
+        }
+        fn description(&self) -> &str {
+            "Write a marker in the worker's working directory"
+        }
+        fn parameters(&self) -> Value {
+            serde_json::json!({"type":"object","properties":{"file":{"type":"string"}},"required":["file"]})
+        }
+        async fn execute(
+            &self,
+            arguments: Value,
+            ctx: &dyn swage_tool::context::ToolContext,
+        ) -> Result<Value, swage_core::ToolError> {
+            let file = arguments["file"].as_str().ok_or_else(|| {
+                swage_core::ToolError::InvalidParameters {
+                    name: self.name().into(),
+                    message: "file is required".into(),
+                }
+            })?;
+            std::fs::write(ctx.working_directory().join(file), file).map_err(|error| {
+                swage_core::ToolError::ExecutionFailed {
+                    name: self.name().into(),
+                    message: error.to_string(),
+                }
+            })?;
+            self.writes
+                .lock()
+                .expect("placement writes")
+                .push((file.to_string(), ctx.working_directory().to_path_buf()));
+            Ok(serde_json::json!({"written": file}))
+        }
+    }
 
     fn scripted_text_output(content: &str) -> Vec<swage_core::StreamChunk> {
         scripted_text_output_with_usage(content, 1, 1)
@@ -4568,6 +5201,8 @@ mod tests {
             rx,
         ));
         let request = AgentCallRequest {
+            cwd: None,
+            isolation: None,
             effort: None,
             timeout_ms: None,
             prompt: "hold capacity".into(),
@@ -4581,6 +5216,7 @@ mod tests {
         let first_cancellation = CancellationToken::new();
         let (first_reply, first_receive) = oneshot::channel();
         tx.send(HostCommand::Agent {
+            resolved_working_directory: None,
             request: request.clone(),
             cancellation: first_cancellation.clone(),
             reply: first_reply,
@@ -4589,6 +5225,7 @@ mod tests {
         let second_cancellation = CancellationToken::new();
         let (second_reply, second_receive) = oneshot::channel();
         tx.send(HostCommand::Agent {
+            resolved_working_directory: None,
             request: request.clone(),
             cancellation: second_cancellation.clone(),
             reply: second_reply,
@@ -4596,6 +5233,7 @@ mod tests {
         .expect("second call");
         let (third_reply, third_receive) = oneshot::channel();
         tx.send(HostCommand::Agent {
+            resolved_working_directory: None,
             request,
             cancellation: CancellationToken::new(),
             reply: third_reply,
@@ -4723,7 +5361,10 @@ mod tests {
 
         let (first_reply, first_receive) = oneshot::channel();
         tx.send(HostCommand::Agent {
+            resolved_working_directory: None,
             request: AgentCallRequest {
+                cwd: None,
+                isolation: None,
                 effort: None,
                 timeout_ms: None,
                 prompt: "restate the brief".into(),
@@ -4777,7 +5418,10 @@ mod tests {
 
         let (second_reply, second_receive) = oneshot::channel();
         tx.send(HostCommand::Agent {
+            resolved_working_directory: None,
             request: AgentCallRequest {
+                cwd: None,
+                isolation: None,
                 effort: None,
                 timeout_ms: None,
                 prompt: "now do the work".into(),
@@ -4796,6 +5440,42 @@ mod tests {
             .await
             .expect("second reply")
             .expect("second result");
+
+        let (replacement_reply, replacement_receive) = oneshot::channel();
+        tx.send(HostCommand::DispatchAgent {
+            request: AgentCallRequest {
+                cwd: Some("/unused-replacement".into()),
+                isolation: Some(swage_protocol::client::workflow::WorkerIsolation::Worktree),
+                effort: None,
+                timeout_ms: None,
+                prompt: "move the continued worker".into(),
+                agent: Some("worker".into()),
+                model: None,
+                schema: None,
+                max_attempts: 1,
+                label: None,
+                session: Some(token.clone()),
+            },
+            cancellation: CancellationToken::new(),
+            reply: replacement_reply,
+        })
+        .expect("replacement call");
+        assert_eq!(
+            replacement_receive
+                .await
+                .expect("replacement reply")
+                .expect_err("continued placement must be immutable"),
+            "WorkerPlacementError: a continued worker keeps its original placement; cwd and isolation cannot be supplied with session"
+        );
+        assert!(
+            storage
+                .list_workflow_journal(run.id)
+                .await
+                .expect("journal")
+                .iter()
+                .all(|entry| entry.kind != "worker_placement"),
+            "a rejected continuation must not provision or journal an unused worktree"
+        );
 
         // Same session, same thread: the restating worker IS the working one.
         assert_eq!(second.session_id, Some(token.session_id));
@@ -4946,6 +5626,687 @@ mod tests {
             Some(Value::String("bounded work completed".into()))
         );
         assert_eq!(provider.requests.lock().expect("requests").len(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn worktree_provisioning_journal_replays_lists_and_rejects_changed_arguments() {
+        let fixture = tempfile::tempdir().expect("scratch fixture");
+        let repo = fixture.path().join("repo");
+        std::fs::create_dir(&repo).expect("repo");
+        for args in [
+            &["init"][..],
+            &["config", "user.email", "test@example.invalid"][..],
+            &["config", "user.name", "Test"][..],
+        ] {
+            assert!(
+                std::process::Command::new("git")
+                    .arg("-C")
+                    .arg(&repo)
+                    .args(args)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        std::fs::write(repo.join("seed"), "seed").expect("seed");
+        assert!(
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(["add", "seed"])
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(["commit", "-m", "seed"])
+                .status()
+                .unwrap()
+                .success()
+        );
+
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let repo_grant = grant_workspace(storage.as_ref(), space.id, &repo).await;
+        let newly_allowed = fixture.path().join("newly-allowed");
+        std::fs::create_dir(&newly_allowed).expect("newly allowed fixture");
+        let run = storage
+            .create_workflow_run(NewWorkflowRun {
+                space_id: space.id,
+                parent_run_id: None,
+                parent_seq: None,
+                script_version_id: None,
+                source: Some("return null".into()),
+                source_hash: source_hash("return null"),
+                args: Value::Null,
+                budget: serde_json::json!({}),
+                engine_version: "test".into(),
+                dispatch_bound_agent_ids: vec![],
+            })
+            .await
+            .expect("run");
+        let make_state = || {
+            AppState::new(
+                Arc::clone(&storage) as Arc<dyn Storage>,
+                Arc::clone(&storage) as Arc<dyn SpaceStore>,
+                Arc::new(ScriptedRecordingProvider {
+                    outputs: std::sync::Mutex::new(Default::default()),
+                    requests: std::sync::Mutex::new(vec![]),
+                }),
+                swage_config::ResolvedConfig::default(),
+                crate::tool::ToolDispatcher::allow_all(vec![]),
+                None,
+            )
+            .with_worktree_root(fixture.path().join("worker-worktrees"))
+        };
+        let state = make_state();
+        let run_loop = |state: AppState, replay: Vec<WorkflowJournalRecord>| {
+            let (tx, rx) = mpsc::unbounded_channel();
+            let task = tokio::spawn(run_host_commands(
+                state,
+                run.id,
+                space.id,
+                vec![],
+                None,
+                WorkflowBudget::default(),
+                replay,
+                Arc::new(AtomicU32::new(0)),
+                Arc::new(AtomicU64::new(0)),
+                Arc::new(Mutex::new(std::collections::HashMap::new())),
+                CancellationToken::new(),
+                PARK_TIMER_THRESHOLD_MS,
+                rx,
+            ));
+            (tx, task)
+        };
+        let (tx, task) = run_loop(state.clone(), vec![]);
+        let (allowed_reply, allowed_receive) = oneshot::channel();
+        tx.send(HostCommand::ResolveWorkerDirectory {
+            cwd: repo.to_string_lossy().into_owned(),
+            reply: allowed_reply,
+        })
+        .unwrap();
+        let allowed = allowed_receive.await.unwrap().unwrap().unwrap();
+        assert_eq!(allowed.path, repo.to_string_lossy());
+        assert!(allowed.can_write);
+        let (denied_reply, denied_receive) = oneshot::channel();
+        tx.send(HostCommand::ResolveWorkerDirectory {
+            cwd: newly_allowed.to_string_lossy().into_owned(),
+            reply: denied_reply,
+        })
+        .unwrap();
+        assert!(
+            denied_receive
+                .await
+                .unwrap()
+                .unwrap_err()
+                .contains("outside the dispatching context's permitted workspace roots")
+        );
+        let (placement_reply, placement_receive) = oneshot::channel();
+        tx.send(HostCommand::ProvisionWorker {
+            cwd: Some(repo.to_string_lossy().into_owned()),
+            isolation: swage_protocol::client::workflow::WorkerIsolation::Worktree,
+            reply: placement_reply,
+        })
+        .unwrap();
+        let first_placement = placement_receive.await.unwrap().unwrap().unwrap();
+        let first_path = first_placement.path;
+        let (list_reply, list_receive) = oneshot::channel();
+        tx.send(HostCommand::ListWorkerPlacements { reply: list_reply })
+            .unwrap();
+        assert_eq!(
+            list_receive.await.unwrap().unwrap()["paths"],
+            serde_json::json!([first_path])
+        );
+        drop(tx);
+        task.await.unwrap();
+
+        let replay = storage.list_workflow_journal(run.id).await.unwrap();
+        assert_eq!(
+            replay
+                .iter()
+                .map(|entry| entry.kind.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "worker_placement",
+                "worker_placement",
+                "worker_placement",
+                "worker_placement"
+            ]
+        );
+        assert_eq!(replay[2].request["cwd"], repo.to_string_lossy().as_ref());
+        assert_eq!(replay[2].result.as_ref().unwrap()["path"], first_path);
+
+        assert!(
+            storage
+                .delete_workspace_attachment(repo_grant)
+                .await
+                .expect("revoke repository grant")
+        );
+        grant_workspace(storage.as_ref(), space.id, &newly_allowed).await;
+        let replay_state = make_state();
+        let (replay_tx, replay_task) = run_loop(replay_state.clone(), replay.clone());
+        let (reply, receive) = oneshot::channel();
+        replay_tx
+            .send(HostCommand::ResolveWorkerDirectory {
+                cwd: repo.to_string_lossy().into_owned(),
+                reply,
+            })
+            .unwrap();
+        assert_eq!(
+            receive.await.unwrap().unwrap().unwrap().path,
+            repo.to_string_lossy()
+        );
+        let (reply, receive) = oneshot::channel();
+        replay_tx
+            .send(HostCommand::ResolveWorkerDirectory {
+                cwd: newly_allowed.to_string_lossy().into_owned(),
+                reply,
+            })
+            .unwrap();
+        assert!(
+            receive
+                .await
+                .unwrap()
+                .unwrap_err()
+                .contains("outside the dispatching context's permitted workspace roots"),
+            "replay must return the journalled rejection after live policy changes"
+        );
+        let (reply, receive) = oneshot::channel();
+        replay_tx
+            .send(HostCommand::ProvisionWorker {
+                cwd: Some(repo.to_string_lossy().into_owned()),
+                isolation: swage_protocol::client::workflow::WorkerIsolation::Worktree,
+                reply,
+            })
+            .unwrap();
+        assert_eq!(
+            receive
+                .await
+                .unwrap()
+                .unwrap()
+                .as_ref()
+                .map(|placement| placement.path.as_str()),
+            Some(first_path.as_str())
+        );
+        let (reply, receive) = oneshot::channel();
+        replay_tx
+            .send(HostCommand::ListWorkerPlacements { reply })
+            .unwrap();
+        assert_eq!(
+            receive.await.unwrap().unwrap()["paths"],
+            serde_json::json!([first_path])
+        );
+        drop(replay_tx);
+        replay_task.await.unwrap();
+        assert_eq!(
+            storage.list_workflow_journal(run.id).await.unwrap().len(),
+            4,
+            "replay must not add a worktree journal entry"
+        );
+        assert_eq!(replay_state.worktree_host.list_owner(run.id).await.len(), 1);
+        replay_state.worktree_host.cleanup_owner(run.id).await;
+        assert!(
+            !std::path::Path::new(&first_path).exists(),
+            "the replay host must own the restored worktree for terminal cleanup"
+        );
+
+        let (changed_tx, changed_task) = run_loop(make_state(), replay);
+        let (reply, receive) = oneshot::channel();
+        changed_tx
+            .send(HostCommand::ResolveWorkerDirectory {
+                cwd: newly_allowed.to_string_lossy().into_owned(),
+                reply,
+            })
+            .unwrap();
+        assert_eq!(
+            receive.await.unwrap().unwrap_err(),
+            "NondeterministicReplayError"
+        );
+        drop(changed_tx);
+        changed_task.await.unwrap();
+        state.worktree_host.shutdown().await;
+        assert!(
+            !fixture
+                .path()
+                .join("worker-worktrees")
+                .join(run.id.to_string())
+                .exists()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn workflow_read_only_attachment_placement_stays_read_only() {
+        let fixture = tempfile::tempdir().expect("scratch fixture");
+        let attachment = fixture.path().join("read-only");
+        std::fs::create_dir(&attachment).unwrap();
+        std::fs::write(attachment.join("readable.txt"), "readable proof").unwrap();
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        storage
+            .create_workspace_attachment(NewWorkspaceAttachment {
+                space_id: space.id,
+                label: "read-only placement".into(),
+                path: attachment.to_string_lossy().into_owned(),
+                permissions: vec!["read".into()],
+                is_trusted: true,
+            })
+            .await
+            .unwrap();
+        let outputs = std::collections::VecDeque::from([
+            vec![
+                swage_core::StreamChunk::ToolUse {
+                    call_id: "read-placement".into(),
+                    name: "file_read".into(),
+                    arguments: serde_json::json!({"path": "readable.txt"}),
+                },
+                swage_core::StreamChunk::Done {
+                    finish_reason: None,
+                },
+            ],
+            vec![
+                swage_core::StreamChunk::ToolUse {
+                    call_id: "write-placement".into(),
+                    name: "file_write".into(),
+                    arguments: serde_json::json!({
+                        "path": "blocked.txt",
+                        "content": "must not be written",
+                    }),
+                },
+                swage_core::StreamChunk::Done {
+                    finish_reason: None,
+                },
+            ],
+            scripted_text_output("read succeeded and write was refused"),
+        ]);
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::new(ScriptedRecordingProvider {
+                outputs: std::sync::Mutex::new(outputs),
+                requests: std::sync::Mutex::new(vec![]),
+            }),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![
+                Arc::new(crate::turn::tests::SandboxedFileTool::new("file_read"))
+                    as Arc<dyn crate::tool::Tool>,
+                Arc::new(crate::turn::tests::SandboxedFileTool::new("file_write"))
+                    as Arc<dyn crate::tool::Tool>,
+            ]),
+            None,
+        )
+        .with_worktree_root(fixture.path().join("worker-worktrees"))
+        .with_test_sandbox();
+        let cwd = serde_json::to_string(&attachment.to_string_lossy()).unwrap();
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(space.id),
+            Json(StartInlineWorkflowRunRequest {
+                source: format!(
+                    r#"return await agent("exercise read-only placement", {{ cwd: {cwd}, maxAttempts: 1 }});"#
+                ),
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start read-only placement workflow");
+        wait_for_terminal(&state, started.id).await;
+        let run = storage.get_workflow_run(started.id).await.unwrap().unwrap();
+        assert_eq!(run.state, "completed", "run error: {:?}", run.error_message);
+        let turn_id = storage
+            .list_workflow_journal(started.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.kind == "agent_call")
+            .and_then(|entry| entry.result)
+            .and_then(|result| result["turn_id"].as_str().map(str::to_owned))
+            .and_then(|id| Uuid::parse_str(&id).ok())
+            .expect("workflow agent call turn id");
+        let calls = storage.list_tool_calls_by_turn(turn_id).await.unwrap();
+        assert_eq!(
+            calls.len(),
+            2,
+            "read and write calls should both be audited"
+        );
+        assert_eq!(calls[0].tool, "file_read");
+        assert_eq!(calls[0].status.as_deref(), Some("success"));
+        assert!(
+            calls[0]
+                .result
+                .as_deref()
+                .is_some_and(|result| result.contains("readable proof")),
+            "read should succeed inside the placed attachment: {calls:?}"
+        );
+        assert_eq!(calls[1].tool, "file_write");
+        assert_eq!(calls[1].status.as_deref(), Some("error"));
+        assert!(
+            !attachment.join("blocked.txt").exists(),
+            "read-only placement must reject the sandboxed write"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn live_workflow_workers_write_only_inside_their_own_worktrees() {
+        let fixture = tempfile::tempdir().expect("scratch fixture");
+        let repo = fixture.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        for args in [
+            &["init"][..],
+            &["config", "user.email", "test@example.invalid"][..],
+            &["config", "user.name", "Test"][..],
+        ] {
+            assert!(
+                std::process::Command::new("git")
+                    .arg("-C")
+                    .arg(&repo)
+                    .args(args)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        std::fs::write(repo.join("seed"), "seed").unwrap();
+        assert!(
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(["add", "seed"])
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(["commit", "-m", "seed"])
+                .status()
+                .unwrap()
+                .success()
+        );
+        let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+        let space = storage.get_or_create_default().await.unwrap();
+        grant_workspace(storage.as_ref(), space.id, &repo).await;
+        let placement_tool = Arc::new(PlacementWriteTool::default());
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::new(PlacementWritingProvider::default()),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![
+                Arc::clone(&placement_tool) as Arc<dyn crate::tool::Tool>
+            ]),
+            None,
+        )
+        .with_worktree_root(fixture.path().join("worker-worktrees"));
+        let cwd = serde_json::to_string(&repo.to_string_lossy()).unwrap();
+        let source = format!(
+            r#"
+            const calls = [
+                agent("write first-marker", {{ cwd: {cwd}, isolation: "worktree", maxAttempts: 1 }}),
+                agent("write second-marker", {{ cwd: {cwd}, isolation: "worktree", maxAttempts: 1 }})
+            ];
+            await Promise.all(calls);
+            return await workerPlacements();
+        "#
+        );
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(space.id),
+            Json(StartInlineWorkflowRunRequest {
+                source,
+                args: Value::Null,
+                budget: Some(WorkflowBudget {
+                    max_concurrent_agent_calls: Some(2),
+                    ..WorkflowBudget::default()
+                }),
+            }),
+        )
+        .await
+        .expect("start live placement run");
+        wait_for_terminal(&state, started.id).await;
+        let run = storage.get_workflow_run(started.id).await.unwrap().unwrap();
+        assert_eq!(run.state, "completed", "run error: {:?}", run.error_message);
+        let journal = storage.list_workflow_journal(started.id).await.unwrap();
+        let paths = journal
+            .iter()
+            .filter(|entry| entry.kind == "worker_placement")
+            .filter_map(|entry| entry.result.as_ref()?.get("path")?.as_str())
+            .map(std::path::PathBuf::from)
+            .collect::<Vec<_>>();
+        assert_eq!(paths.len(), 2);
+        let writes = placement_tool.writes.lock().expect("placement writes");
+        assert_eq!(writes.len(), 2);
+        assert!(
+            writes
+                .iter()
+                .any(|(file, path)| file == "first-marker" && paths.contains(path))
+        );
+        assert!(
+            writes
+                .iter()
+                .any(|(file, path)| file == "second-marker" && paths.contains(path))
+        );
+        assert_ne!(
+            writes[0].1, writes[1].1,
+            "workers must use distinct tool roots"
+        );
+        drop(writes);
+        assert!(!repo.join("first-marker").exists() && !repo.join("second-marker").exists());
+        for _ in 0..20 {
+            if paths.iter().all(|path| !path.exists()) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        assert!(
+            paths.iter().all(|path| !path.exists()),
+            "completed-run cleanup must remove every provisioned worktree: {paths:?}"
+        );
+        assert!(
+            !fixture
+                .path()
+                .join("worker-worktrees")
+                .join(started.id.to_string())
+                .exists(),
+            "completed-run cleanup must remove the empty per-run directory"
+        );
+
+        let failed_source = format!(
+            r#"
+            await agent("write retained marker", {{ cwd: {cwd}, isolation: "worktree", maxAttempts: 1 }});
+            throw new Error("retain failed run for inspection");
+        "#
+        );
+        let Json(failed) = start_inline_run(
+            State(state.clone()),
+            Path(space.id),
+            Json(StartInlineWorkflowRunRequest {
+                source: failed_source,
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start failed placement run");
+        wait_for_terminal(&state, failed.id).await;
+        let failed_record = storage.get_workflow_run(failed.id).await.unwrap().unwrap();
+        assert_eq!(failed_record.state, "failed");
+        let retained_path = storage
+            .list_workflow_journal(failed.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find_map(|entry| {
+                (entry.kind == "worker_placement")
+                    .then(|| entry.result?["path"].as_str().map(std::path::PathBuf::from))?
+            })
+            .expect("failed run should retain its worktree path");
+        assert!(
+            retained_path.exists(),
+            "failed-run worktree should remain available for inspection"
+        );
+
+        let cancelled_source = format!(
+            r#"
+            await agent("prepare cancelled run", {{ cwd: {cwd}, isolation: "worktree", maxAttempts: 1 }});
+            return await wait({{ timerMs: 120000 }});
+        "#
+        );
+        let Json(cancelled) = start_inline_run(
+            State(state.clone()),
+            Path(space.id),
+            Json(StartInlineWorkflowRunRequest {
+                source: cancelled_source,
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start cancellable placement run");
+        wait_for_run_state(&storage, cancelled.id, "parked").await;
+        wait_for_workflow_thread_exit(cancelled.id).await;
+        let cancelled_path = storage
+            .list_workflow_journal(cancelled.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find_map(|entry| {
+                (entry.kind == "worker_placement")
+                    .then(|| entry.result?["path"].as_str().map(std::path::PathBuf::from))?
+            })
+            .expect("cancelled run should have a worktree path");
+        let Json(cancelled_record) = cancel_run(State(state.clone()), Path(cancelled.id))
+            .await
+            .expect("cancel parked placement run");
+        assert_eq!(cancelled_record.state, WorkflowRunState::Cancelled);
+        assert!(
+            cancelled_path.exists(),
+            "cancelled-run worktree should remain available for inspection"
+        );
+
+        state.worktree_host.shutdown().await;
+        assert!(!retained_path.exists());
+        assert!(!cancelled_path.exists());
+        assert!(
+            !fixture
+                .path()
+                .join("worker-worktrees")
+                .join(failed.id.to_string())
+                .exists(),
+            "shutdown cleanup must remove the empty per-run directory"
+        );
+        assert!(
+            !fixture
+                .path()
+                .join("worker-worktrees")
+                .join(cancelled.id.to_string())
+                .exists(),
+            "shutdown cleanup must remove the cancelled run directory"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn parallel_cwd_placement_replays_in_dispatch_order() {
+        let fixture = tempfile::tempdir().expect("scratch fixture");
+        let workspace = fixture.path().join("workspace");
+        let first_cwd = workspace.join("first");
+        let second_cwd = workspace.join("second");
+        std::fs::create_dir_all(&first_cwd).unwrap();
+        std::fs::create_dir_all(&second_cwd).unwrap();
+        let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+        let space = storage.get_or_create_default().await.unwrap();
+        grant_workspace(storage.as_ref(), space.id, &workspace).await;
+        let provider = Arc::new(ScriptedRecordingProvider {
+            outputs: std::sync::Mutex::new(std::collections::VecDeque::from([
+                scripted_text_output("first result"),
+                scripted_text_output("second result"),
+            ])),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        )
+        .with_worktree_root(fixture.path().join("worker-worktrees"));
+        let first_json = serde_json::to_string(&first_cwd.to_string_lossy()).unwrap();
+        let second_json = serde_json::to_string(&second_cwd.to_string_lossy()).unwrap();
+        let source = format!(
+            r#"
+            return await Promise.all([
+                agent("first placed call", {{ cwd: {first_json}, maxAttempts: 1 }}),
+                agent("second placed call", {{ cwd: {second_json}, maxAttempts: 1 }})
+            ]);
+        "#
+        );
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(space.id),
+            Json(StartInlineWorkflowRunRequest {
+                source: source.clone(),
+                args: Value::Null,
+                budget: Some(WorkflowBudget {
+                    max_concurrent_agent_calls: Some(2),
+                    ..WorkflowBudget::default()
+                }),
+            }),
+        )
+        .await
+        .expect("start parallel cwd run");
+        wait_for_terminal(&state, started.id).await;
+        let first_record = storage.get_workflow_run(started.id).await.unwrap().unwrap();
+        assert_eq!(
+            first_record.state, "completed",
+            "{:?}",
+            first_record.error_message
+        );
+        let first_journal = storage.list_workflow_journal(started.id).await.unwrap();
+        assert_eq!(
+            first_journal
+                .iter()
+                .filter(|entry| entry.kind == "agent_call")
+                .map(|entry| entry.request["prompt"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["first placed call", "second placed call"]
+        );
+
+        storage
+            .update_workflow_run_state(started.id, "running", None, None, None)
+            .await
+            .unwrap();
+        let replay_record = storage.get_workflow_run(started.id).await.unwrap().unwrap();
+        launch_existing_run(state.clone(), replay_record, source, None)
+            .await
+            .expect("relaunch placed parallel run");
+        wait_for_terminal(&state, started.id).await;
+        let replayed = storage.get_workflow_run(started.id).await.unwrap().unwrap();
+        assert_eq!(replayed.state, "completed", "{:?}", replayed.error_message);
+        let replay_journal = storage.list_workflow_journal(started.id).await.unwrap();
+        assert_eq!(
+            replay_journal
+                .iter()
+                .map(|entry| (entry.id, entry.seq, entry.kind.clone()))
+                .collect::<Vec<_>>(),
+            first_journal
+                .iter()
+                .map(|entry| (entry.id, entry.seq, entry.kind.clone()))
+                .collect::<Vec<_>>(),
+            "parallel replay must consume the original entries without reordering or appending"
+        );
+        assert_eq!(
+            provider.requests.lock().unwrap().len(),
+            2,
+            "completed replay must not invoke either worker again"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -5178,7 +6539,10 @@ mod tests {
         ));
         let (reply, receive) = oneshot::channel();
         tx.send(HostCommand::Agent {
+            resolved_working_directory: None,
             request: AgentCallRequest {
+                cwd: None,
+                isolation: None,
                 effort: None,
                 timeout_ms: None,
                 prompt: "hijack".into(),
@@ -5546,7 +6910,7 @@ mod tests {
         run_id: Uuid,
         expected: &str,
     ) -> WorkflowRunRecord {
-        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
             loop {
                 let run = storage
                     .get_workflow_run(run_id)
@@ -6092,6 +7456,8 @@ mod tests {
             rx,
         ));
         let request = AgentCallRequest {
+            cwd: None,
+            isolation: None,
             effort: None,
             timeout_ms: None,
             prompt: "account usage".into(),
@@ -6104,6 +7470,7 @@ mod tests {
         };
         let (first_reply, first_receive) = oneshot::channel();
         tx.send(HostCommand::Agent {
+            resolved_working_directory: None,
             request: request.clone(),
             cancellation: CancellationToken::new(),
             reply: first_reply,
@@ -6119,6 +7486,7 @@ mod tests {
         let pending_cancellation = CancellationToken::new();
         let (second_reply, second_receive) = oneshot::channel();
         tx.send(HostCommand::Agent {
+            resolved_working_directory: None,
             request: request.clone(),
             cancellation: pending_cancellation.clone(),
             reply: second_reply,
@@ -6127,6 +7495,7 @@ mod tests {
         pending_call_started.notified().await;
         let (third_reply, third_receive) = oneshot::channel();
         tx.send(HostCommand::Agent {
+            resolved_working_directory: None,
             request,
             cancellation: CancellationToken::new(),
             reply: third_reply,
@@ -6199,6 +7568,8 @@ mod tests {
             rx,
         ));
         let request = |prompt: &str| AgentCallRequest {
+            cwd: None,
+            isolation: None,
             effort: None,
             timeout_ms: None,
             prompt: prompt.into(),
@@ -6212,6 +7583,7 @@ mod tests {
         let first_cancellation = CancellationToken::new();
         let (first_reply, first_receive) = oneshot::channel();
         tx.send(HostCommand::Agent {
+            resolved_working_directory: None,
             request: request("working one"),
             cancellation: first_cancellation.clone(),
             reply: first_reply,
@@ -6221,6 +7593,7 @@ mod tests {
         let second_cancellation = CancellationToken::new();
         let (second_reply, second_receive) = oneshot::channel();
         tx.send(HostCommand::Agent {
+            resolved_working_directory: None,
             request: request("working two"),
             cancellation: second_cancellation.clone(),
             reply: second_reply,
@@ -6230,6 +7603,7 @@ mod tests {
 
         let (transition_reply, transition_receive) = oneshot::channel();
         tx.send(HostCommand::Agent {
+            resolved_working_directory: None,
             request: request("cross working boundary"),
             cancellation: CancellationToken::new(),
             reply: transition_reply,
@@ -6245,6 +7619,7 @@ mod tests {
 
         let (closing_reply, closing_receive) = oneshot::channel();
         tx.send(HostCommand::Agent {
+            resolved_working_directory: None,
             request: request("closing report"),
             cancellation: CancellationToken::new(),
             reply: closing_reply,
@@ -6287,6 +7662,8 @@ mod tests {
             .await
             .expect("run");
         let request = |prompt: &str| AgentCallRequest {
+            cwd: None,
+            isolation: None,
             effort: None,
             timeout_ms: None,
             prompt: prompt.into(),
@@ -6383,6 +7760,7 @@ mod tests {
         let first_cancellation = CancellationToken::new();
         let (first_reply, first_receive) = oneshot::channel();
         tx.send(HostCommand::Agent {
+            resolved_working_directory: None,
             request: request("working one"),
             cancellation: first_cancellation.clone(),
             reply: first_reply,
@@ -6392,6 +7770,7 @@ mod tests {
         let second_cancellation = CancellationToken::new();
         let (second_reply, second_receive) = oneshot::channel();
         tx.send(HostCommand::Agent {
+            resolved_working_directory: None,
             request: request("working two"),
             cancellation: second_cancellation.clone(),
             reply: second_reply,
@@ -6401,6 +7780,7 @@ mod tests {
 
         let (transition_reply, transition_receive) = oneshot::channel();
         tx.send(HostCommand::Agent {
+            resolved_working_directory: None,
             request: transition_request,
             cancellation: CancellationToken::new(),
             reply: transition_reply,
@@ -6416,6 +7796,7 @@ mod tests {
 
         let (closing_reply, closing_receive) = oneshot::channel();
         tx.send(HostCommand::Agent {
+            resolved_working_directory: None,
             request: request("closing report"),
             cancellation: CancellationToken::new(),
             reply: closing_reply,
@@ -6458,6 +7839,8 @@ mod tests {
             .await
             .expect("run");
         let request = AgentCallRequest {
+            cwd: None,
+            isolation: None,
             effort: None,
             timeout_ms: None,
             prompt: "resume work".into(),
@@ -6520,6 +7903,7 @@ mod tests {
         let first_cancellation = CancellationToken::new();
         let (first_reply, first_receive) = oneshot::channel();
         tx.send(HostCommand::Agent {
+            resolved_working_directory: None,
             request: request.clone(),
             cancellation: first_cancellation.clone(),
             reply: first_reply,
@@ -6528,6 +7912,7 @@ mod tests {
         let second_cancellation = CancellationToken::new();
         let (second_reply, second_receive) = oneshot::channel();
         tx.send(HostCommand::Agent {
+            resolved_working_directory: None,
             request: request.clone(),
             cancellation: second_cancellation.clone(),
             reply: second_reply,
@@ -6535,6 +7920,7 @@ mod tests {
         .expect("second replay");
         let (third_reply, third_receive) = oneshot::channel();
         tx.send(HostCommand::Agent {
+            resolved_working_directory: None,
             request,
             cancellation: CancellationToken::new(),
             reply: third_reply,
@@ -6575,6 +7961,8 @@ mod tests {
             .await
             .expect("run");
         let working_request = AgentCallRequest {
+            cwd: None,
+            isolation: None,
             effort: None,
             timeout_ms: None,
             prompt: "resume working call".into(),
@@ -6668,6 +8056,7 @@ mod tests {
         ));
         let (work_reply, work_receive) = oneshot::channel();
         tx.send(HostCommand::Agent {
+            resolved_working_directory: None,
             request: working_request,
             cancellation: CancellationToken::new(),
             reply: work_reply,
@@ -6694,6 +8083,8 @@ mod tests {
             true
         );
         let closing_request = AgentCallRequest {
+            cwd: None,
+            isolation: None,
             effort: None,
             timeout_ms: None,
             prompt: "closing call".into(),
@@ -6706,6 +8097,7 @@ mod tests {
         };
         let (closing_reply, closing_receive) = oneshot::channel();
         tx.send(HostCommand::Agent {
+            resolved_working_directory: None,
             request: closing_request.clone(),
             cancellation: CancellationToken::new(),
             reply: closing_reply,
@@ -6721,6 +8113,7 @@ mod tests {
         );
         let (beyond_reply, beyond_receive) = oneshot::channel();
         tx.send(HostCommand::Agent {
+            resolved_working_directory: None,
             request: closing_request,
             cancellation: CancellationToken::new(),
             reply: beyond_reply,
@@ -6757,6 +8150,8 @@ mod tests {
             .await
             .expect("run");
         let request = |prompt: &str| AgentCallRequest {
+            cwd: None,
+            isolation: None,
             effort: None,
             timeout_ms: None,
             prompt: prompt.into(),
@@ -6872,6 +8267,7 @@ mod tests {
 
         let (work_reply, work_receive) = oneshot::channel();
         tx.send(HostCommand::Agent {
+            resolved_working_directory: None,
             request: work_request,
             cancellation: CancellationToken::new(),
             reply: work_reply,
@@ -6887,6 +8283,7 @@ mod tests {
         );
         let (transition_reply, transition_receive) = oneshot::channel();
         tx.send(HostCommand::Agent {
+            resolved_working_directory: None,
             request: transition_request,
             cancellation: CancellationToken::new(),
             reply: transition_reply,
@@ -6902,6 +8299,7 @@ mod tests {
         let closing_request = request("closing report");
         let (closing_reply, closing_receive) = oneshot::channel();
         tx.send(HostCommand::Agent {
+            resolved_working_directory: None,
             request: closing_request.clone(),
             cancellation: CancellationToken::new(),
             reply: closing_reply,
@@ -6917,6 +8315,7 @@ mod tests {
         );
         let (beyond_reply, beyond_receive) = oneshot::channel();
         tx.send(HostCommand::Agent {
+            resolved_working_directory: None,
             request: closing_request,
             cancellation: CancellationToken::new(),
             reply: beyond_reply,
@@ -6978,6 +8377,8 @@ mod tests {
             .await
             .expect("run");
         let request = |prompt: &str| AgentCallRequest {
+            cwd: None,
+            isolation: None,
             effort: None,
             timeout_ms: None,
             prompt: prompt.into(),
@@ -7101,6 +8502,7 @@ mod tests {
         ));
         let (work_reply, work_receive) = oneshot::channel();
         tx.send(HostCommand::Agent {
+            resolved_working_directory: None,
             request: work_request,
             cancellation: CancellationToken::new(),
             reply: work_reply,
@@ -7125,6 +8527,7 @@ mod tests {
             .expect("snapshot result");
         let (closing_reply, closing_receive) = oneshot::channel();
         tx.send(HostCommand::Agent {
+            resolved_working_directory: None,
             request: closing_request,
             cancellation: CancellationToken::new(),
             reply: closing_reply,
@@ -7140,6 +8543,7 @@ mod tests {
         );
         let (beyond_reply, beyond_receive) = oneshot::channel();
         tx.send(HostCommand::Agent {
+            resolved_working_directory: None,
             request: request("past closing partition"),
             cancellation: CancellationToken::new(),
             reply: beyond_reply,
@@ -7188,6 +8592,8 @@ mod tests {
             .await
             .expect("run");
         let request = AgentCallRequest {
+            cwd: None,
+            isolation: None,
             effort: None,
             timeout_ms: None,
             prompt: "must not execute".into(),
@@ -7689,6 +9095,8 @@ mod tests {
             .await
             .expect("run");
         let request = AgentCallRequest {
+            cwd: None,
+            isolation: None,
             effort: None,
             timeout_ms: None,
             prompt: "known failing call".into(),
