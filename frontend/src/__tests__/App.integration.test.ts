@@ -577,6 +577,7 @@ describe("App", () => {
       "proj-default",
       null,
       null,
+      null,
     );
     expect(websocketHarness.client.connect).toHaveBeenCalledTimes(2);
     expect(websocketHarness.client.connect).toHaveBeenLastCalledWith(
@@ -839,6 +840,7 @@ describe("App", () => {
       defaultSpace.id,
       undefined,
       null,
+      undefined,
     );
     expect(websocketHarness.client.connect).toHaveBeenCalledTimes(1);
     expect(websocketHarness.client.connect).toHaveBeenCalledWith("conv-new");
