@@ -218,6 +218,14 @@ pub fn build_router(state: AppState) -> Router {
             "/api/operator/agent-definitions/{agent_id}",
             put(handlers::update_agent_definition).delete(handlers::delete_agent_definition),
         )
+        .route(
+            "/api/operator/task-definitions",
+            get(handlers::list_task_definitions).post(handlers::create_task_definition),
+        )
+        .route(
+            "/api/operator/task-definitions/{id}",
+            put(handlers::update_task_definition).delete(handlers::delete_task_definition),
+        )
         .route("/api/operator/search", get(handlers::operator_search))
         .route("/api/operator/usage", get(handlers::operator_usage))
         .route(

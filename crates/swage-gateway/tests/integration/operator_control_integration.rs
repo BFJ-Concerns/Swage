@@ -256,6 +256,96 @@ async fn agent_definition_http_crud_records_every_mutation() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn task_definition_http_crud_records_whole_prior_and_new_states() {
+    let state = test_state();
+    let router = build_router(state.clone());
+    let invalid = json!({"id":"Bad Id","instructions":"Contract.","model_id":null,"tool_permissions":null,"output_schema":null,"output_max_retries":null});
+    assert_eq!(
+        post_json(&router, "/api/operator/task-definitions", invalid)
+            .await
+            .0,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    assert!(
+        state
+            .storage
+            .list_task_definitions()
+            .await
+            .unwrap()
+            .is_empty(),
+        "validation must precede storage writes"
+    );
+    let create = json!({"id":"review","instructions":"First contract.","model_id":null,"tool_permissions":{"allow":["file_read"],"deny":[],"bundles":{},"require_approval":[]},"output_schema":{"type":"object"},"output_max_retries":2});
+    assert_eq!(
+        post_json(&router, "/api/operator/task-definitions", create)
+            .await
+            .0,
+        StatusCode::OK
+    );
+    let update = json!({"instructions":"Edited contract.","model_id":null,"tool_permissions":null,"output_schema":{"type":"string"},"output_max_retries":1});
+    assert_eq!(
+        request_json(
+            &router,
+            "PUT",
+            "/api/operator/task-definitions/review",
+            Some(update)
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let changes: Vec<_> = state
+        .storage
+        .list_audit_events()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|event| event.entity_kind == "task_definition")
+        .collect();
+    assert_eq!(changes.len(), 2);
+    let edited = changes
+        .iter()
+        .find(|event| event.metadata["prior_state"]["instructions"] == "First contract.")
+        .expect("update audit");
+    assert_eq!(
+        edited.metadata["new_state"]["instructions"],
+        "Edited contract."
+    );
+    assert_eq!(
+        request_json(
+            &router,
+            "DELETE",
+            "/api/operator/task-definitions/review",
+            None
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert!(
+        state
+            .storage
+            .get_task_definition("review")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let deleted = state
+        .storage
+        .list_audit_events()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|event| event.metadata["action"] == "delete_task_definition")
+        .expect("delete audit");
+    assert_eq!(
+        deleted.metadata["prior_state"]["instructions"],
+        "Edited contract."
+    );
+    assert!(deleted.metadata["new_state"].is_null());
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn operator_overview_lists_sessions_jobs_approvals_channels_and_devices() {
     let _guard = with_secret_env();
     let state = test_state();

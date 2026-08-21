@@ -316,6 +316,53 @@ pub(crate) fn apply_agent_definition(
     config
 }
 
+/// Apply a resolved task definition as a final, narrowing child overlay.
+pub(crate) fn apply_task_definition(
+    mut config: swage_config::ResolvedConfig,
+    definition: &swage_storage::TaskDefinition,
+) -> Result<swage_config::ResolvedConfig, GatewayError> {
+    if !definition.instructions.trim().is_empty() {
+        config.instructions = if config.instructions.is_empty() {
+            definition.instructions.clone()
+        } else {
+            format!("{}\n\n{}", config.instructions, definition.instructions)
+        };
+    }
+    if let Some(model) = definition
+        .model_id
+        .as_deref()
+        .filter(|v| !v.trim().is_empty())
+    {
+        if !config.models.entries.contains_key(model) {
+            return Err(GatewayError::ValidationError(format!(
+                "task definition '{}' prefers unconfigured model '{model}'",
+                definition.id
+            )));
+        }
+        config.models.default = model.to_owned();
+    }
+    if let Some(value) = &definition.tool_permissions {
+        let permissions =
+            serde_json::from_value::<swage_config::model::ToolPermissionConfig>(value.clone())
+                .map_err(|e| {
+                    GatewayError::ValidationError(format!(
+                        "task definition '{}' has invalid permissions: {e}",
+                        definition.id
+                    ))
+                })?;
+        let mut bound = swage_config::ResolvedConfig::default();
+        bound.tools.permissions = permissions;
+        config = apply_dispatch_bound(config, &bound);
+    }
+    if let Some(schema) = &definition.output_schema {
+        config.output.schema = Some(schema.clone());
+    }
+    if let Some(retries) = definition.output_max_retries {
+        config.output.max_retries = retries;
+    }
+    Ok(config)
+}
+
 /// Intersection, never expansion: the effective allow is what both the
 /// resolved config and the overlay permit ("*" on either side defers to the
 /// other), and every deny from either side stands. Shared by the
@@ -683,6 +730,35 @@ mod tests {
                 .contains(&"browser_navigate".to_string()),
             "overlay denies are added"
         );
+    }
+
+    #[test]
+    fn task_definition_expands_bundles_and_carries_approval_without_expanding() {
+        let mut config = swage_config::ResolvedConfig::default();
+        config.tools.permissions.allow = vec!["file_read".into(), "shell".into()];
+        let definition = swage_storage::TaskDefinition {
+            id: "inspect".into(),
+            instructions: "Inspect only.".into(),
+            model_id: None,
+            tool_permissions: Some(
+                serde_json::json!({"allow":["readers"],"deny":[],"bundles":{"readers":["file_read","web_search"]},"require_approval":["readers"]}),
+            ),
+            output_schema: Some(serde_json::json!({"type":"object"})),
+            output_max_retries: Some(4),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        let applied = apply_task_definition(config, &definition).unwrap();
+        assert_eq!(applied.tools.permissions.allow, vec!["file_read"]);
+        assert_eq!(
+            applied.tools.permissions.require_approval,
+            vec![swage_config::model::RequireApprovalEntry::Simple(
+                "file_read".into()
+            )]
+        );
+        assert_eq!(applied.output.schema, definition.output_schema);
+        assert_eq!(applied.output.max_retries, 4);
+        assert!(applied.instructions.ends_with("Inspect only."));
     }
 
     #[test]

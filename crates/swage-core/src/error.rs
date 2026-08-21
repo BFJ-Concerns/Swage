@@ -341,6 +341,8 @@ pub enum ToolError {
         target_agent_id: String,
         /// Task description for the delegate agent.
         task: String,
+        /// Optional durable task definition resolved by the runtime.
+        task_definition: Option<String>,
         /// Optional context to transfer to the delegate agent.
         context: Option<serde_json::Value>,
         /// Caller-selected child working directory.

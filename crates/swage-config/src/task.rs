@@ -44,10 +44,7 @@ pub struct TaskDefinition {
     #[serde(default)]
     pub max_output_retries: Option<u32>,
 
-    /// Tool permission overrides. If any permission field is set, the task's
-    /// permission set replaces the agent's base permission set as a whole.
-    /// Unset task fields resolve to the default empty permission values rather
-    /// than inheriting the corresponding base field.
+    /// Tool permission overlay. It may only narrow the base permission set.
     #[serde(default)]
     pub tool_allow: Option<Vec<String>>,
     #[serde(default)]
@@ -120,14 +117,44 @@ impl TaskDefinition {
             || self.tool_deny.is_some()
             || self.tool_bundles.is_some()
             || self.tool_require_approval.is_some();
-        let mut resolved = crate::resolve::apply_overlay(base, self.to_partial_config());
+        let mut partial = self.to_partial_config();
+        // Permission authority is not an ordinary precedence overlay: retain
+        // the base here and apply intersection semantics below.
+        partial.tools = None;
+        let mut resolved = crate::resolve::apply_overlay(base, partial);
 
         if has_tool_permission_override {
-            resolved.tools.permissions.allow = self.tool_allow.clone().unwrap_or_default();
-            resolved.tools.permissions.deny = self.tool_deny.clone().unwrap_or_default();
-            resolved.tools.permissions.bundles = self.tool_bundles.clone().unwrap_or_default();
-            resolved.tools.permissions.require_approval =
-                self.tool_require_approval.clone().unwrap_or_default();
+            let overlay_allow = self.tool_allow.clone().unwrap_or_default();
+            let base_all = resolved.tools.permissions.allow.iter().any(|v| v == "*");
+            let overlay_all = overlay_allow.iter().any(|v| v == "*");
+            if !overlay_all {
+                resolved.tools.permissions.allow = if base_all {
+                    overlay_allow
+                } else {
+                    resolved
+                        .tools
+                        .permissions
+                        .allow
+                        .into_iter()
+                        .filter(|v| overlay_allow.contains(v))
+                        .collect()
+                };
+            }
+            for denied in self.tool_deny.clone().unwrap_or_default() {
+                if !resolved.tools.permissions.deny.contains(&denied) {
+                    resolved.tools.permissions.deny.push(denied);
+                }
+            }
+            for approval in self.tool_require_approval.clone().unwrap_or_default() {
+                if !resolved
+                    .tools
+                    .permissions
+                    .require_approval
+                    .contains(&approval)
+                {
+                    resolved.tools.permissions.require_approval.push(approval);
+                }
+            }
         }
 
         resolved.instructions = match (
@@ -318,7 +345,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_task_overlay_replaces_tool_permission_sets() {
+    fn apply_task_overlay_intersects_and_keeps_existing_restrictions() {
         let mut base = ResolvedConfig::default();
         base.tools.permissions.allow = vec!["*".into()];
         base.tools.permissions.deny = vec!["shell".into()];
@@ -341,19 +368,22 @@ mod tests {
 
         let result = task.apply_to(base);
         assert_eq!(result.tools.permissions.allow, vec!["file_read"]);
-        assert_eq!(result.tools.permissions.deny, vec!["web_search"]);
+        assert_eq!(result.tools.permissions.deny, vec!["shell", "web_search"]);
         assert_eq!(
             result.tools.permissions.bundles,
-            HashMap::from([("read-only".to_string(), vec!["file_read".to_string()])])
+            HashMap::from([("default".to_string(), vec!["file_read".to_string()])])
         );
         assert_eq!(
             result.tools.permissions.require_approval,
-            vec![RequireApprovalEntry::Simple("file_read".to_string())]
+            vec![
+                RequireApprovalEntry::Simple("web_search".to_string()),
+                RequireApprovalEntry::Simple("file_read".to_string())
+            ]
         );
     }
 
     #[test]
-    fn apply_task_overlay_replaces_whole_tool_permission_set_when_partially_specified() {
+    fn apply_task_overlay_never_clears_unspecified_base_restrictions() {
         let mut base = ResolvedConfig::default();
         base.tools.permissions.allow = vec!["*".into()];
         base.tools.permissions.deny = vec!["shell".into()];
@@ -370,17 +400,14 @@ mod tests {
 
         let result = task.apply_to(base);
         assert_eq!(result.tools.permissions.allow, vec!["file_read"]);
-        assert!(
-            result.tools.permissions.deny.is_empty(),
-            "unset task deny rules must not inherit from the base permission set"
+        assert_eq!(result.tools.permissions.deny, vec!["shell"]);
+        assert_eq!(
+            result.tools.permissions.bundles,
+            HashMap::from([("default".into(), vec!["file_read".into()])])
         );
-        assert!(
-            result.tools.permissions.bundles.is_empty(),
-            "unset task bundles must not inherit from the base permission set"
-        );
-        assert!(
-            result.tools.permissions.require_approval.is_empty(),
-            "unset task approval rules must not inherit from the base permission set"
+        assert_eq!(
+            result.tools.permissions.require_approval,
+            vec![RequireApprovalEntry::Simple("web_search".into())]
         );
     }
 

@@ -7,6 +7,56 @@ use serde_json::Value;
 use ts_rs::TS;
 use uuid::Uuid;
 
+/// Opaque continuation token for a workflow worker session.
+#[derive(Clone, Debug, Serialize, Deserialize, TS, JsonSchema, PartialEq, Eq)]
+pub struct AgentSessionRef {
+    pub session_id: Uuid,
+    pub thread_id: Uuid,
+}
+
+/// A journal-stable workflow child dispatch request.
+#[derive(Clone, Debug, Serialize, Deserialize, TS, JsonSchema)]
+pub struct AgentCallRequest {
+    pub prompt: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task: Option<String>,
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub isolation: Option<WorkerIsolation>,
+    #[ts(type = "unknown")]
+    pub schema: Option<Value>,
+    pub max_attempts: u32,
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<AgentSessionRef>,
+}
+
+/// Model-authored request accepted by the delegate tool.
+#[derive(Clone, Debug, Serialize, Deserialize, TS, JsonSchema)]
+pub struct DelegateRequest {
+    pub target_agent: String,
+    pub task: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_definition: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(type = "unknown")]
+    pub context: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub isolation: Option<WorkerIsolation>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
 pub struct WorkflowScript {
     pub id: Uuid,
@@ -222,4 +272,49 @@ pub struct WorkflowEntryEvent {
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
 pub struct WorkflowRunCompletedEvent {
     pub run: WorkflowRun,
+}
+
+#[cfg(test)]
+mod task_request_tests {
+    use super::*;
+    #[test]
+    fn absent_task_keeps_the_historical_serialised_shape() {
+        let request = AgentCallRequest {
+            prompt: "work".into(),
+            agent: None,
+            task: None,
+            model: None,
+            effort: None,
+            timeout_ms: None,
+            cwd: None,
+            isolation: None,
+            schema: None,
+            max_attempts: 1,
+            label: None,
+            session: None,
+        };
+        let value = serde_json::to_value(request).unwrap();
+        assert!(!value.as_object().unwrap().contains_key("task"));
+    }
+    #[test]
+    fn named_task_is_serialised_verbatim() {
+        let mut value = serde_json::to_value(AgentCallRequest {
+            prompt: "work".into(),
+            agent: None,
+            task: None,
+            model: None,
+            effort: None,
+            timeout_ms: None,
+            cwd: None,
+            isolation: None,
+            schema: None,
+            max_attempts: 1,
+            label: None,
+            session: None,
+        })
+        .unwrap();
+        value["task"] = Value::String("review".into());
+        let request: AgentCallRequest = serde_json::from_value(value).unwrap();
+        assert_eq!(request.task.as_deref(), Some("review"));
+    }
 }

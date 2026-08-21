@@ -682,6 +682,42 @@ pub(crate) async fn process_turn_with_existing_turn(
     )
     .await?;
 
+    // Task names ride child-session metadata, while the definition is
+    // resolved afresh for every execution. Missing or unreadable tasks fail
+    // closed: silently running a different contract would be false success.
+    let config = match session
+        .metadata
+        .as_ref()
+        .and_then(|m| m.get("task_definition"))
+        .and_then(serde_json::Value::as_str)
+    {
+        Some(task_id) => {
+            let definition =
+                crate::service::resolve_task_definition(state.storage.as_ref(), task_id).await?;
+            let decision = crate::experimentation::select_variant(
+                &config.experimentation,
+                crate::experimentation::LOCATION_TASK_PROMPT,
+                &[],
+                "definition",
+                session_id,
+            )
+            .map_err(|e| GatewayError::ConfigError(e.to_string()))?;
+            if let Err(error) = crate::experimentation::record_selection(
+                state,
+                crate::experimentation::LOCATION_TASK_PROMPT,
+                &decision,
+                Some(session_id),
+                None,
+            )
+            .await
+            {
+                tracing::warn!(%error, task_id, "task prompt variant record unavailable; serving the definition default");
+            }
+            apply_task_definition(config, &definition)?
+        }
+        None => config,
+    };
+
     ensure_selected_model_available(
         state,
         &config,
