@@ -60,6 +60,7 @@ describe("AgentDefinitionsPanel", () => {
       tool_permissions: { allow: ["web_search"] },
       skills: ["citations", "analysis"],
       output_schema: { type: "object", required: ["answer"] },
+      output_max_retries: 4,
     });
     const definitions = [
       definition("gateway", "built_in", { display_name: "Standard assistant" }),
@@ -87,6 +88,7 @@ describe("AgentDefinitionsPanel", () => {
     expect(detail?.textContent).toContain("web_search");
     expect(detail?.textContent).toContain("citations, analysis");
     expect(detail?.textContent).toContain('"required"');
+    expect(detail?.textContent).toContain("Output retries4");
     expect(detail?.querySelector("button, input, select, textarea")).toBeNull();
     expect(detail?.textContent).not.toContain("variant");
   });
@@ -101,7 +103,7 @@ describe("AgentDefinitionsPanel", () => {
     const detail = document.querySelector('[aria-label="Minimal configuration"]');
     expect(detail?.textContent).toContain("Use the configured default");
     expect(detail?.textContent).toContain("None");
-    expect(detail?.textContent?.match(/Not set/g)?.length).toBe(3);
+    expect(detail?.textContent?.match(/Not set/g)?.length).toBe(4);
   });
 
   it("does not fetch configuration without a selected space", () => {
