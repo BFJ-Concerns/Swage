@@ -29,6 +29,8 @@ pub(crate) struct TrustedWorkspacePolicy {
 pub(crate) struct ResolvedWorkerDirectory {
     pub(crate) path: PathBuf,
     pub(crate) can_write: bool,
+    pub(crate) authority_path: PathBuf,
+    pub(crate) authority_context_id: Uuid,
 }
 
 /// Inspect the space's workspace attachments and derive which permission
@@ -161,6 +163,8 @@ pub(crate) async fn resolve_authorised_worker_directory(
             return Ok(ResolvedWorkerDirectory {
                 path: candidate,
                 can_write: placement.can_write,
+                authority_path: placement.authority_path.clone(),
+                authority_context_id: placement.authority_context_id,
             });
         }
         return Err(format!(
@@ -176,14 +180,18 @@ pub(crate) async fn resolve_authorised_worker_directory(
         .find(|grant| within(&grant.path))
     {
         return Ok(ResolvedWorkerDirectory {
+            authority_path: candidate.clone(),
             path: candidate,
             can_write: grant.can_write,
+            authority_context_id: context_id,
         });
     }
     if policy.active_workspace.is_none() && within(&workspace_root) {
         return Ok(ResolvedWorkerDirectory {
+            authority_path: candidate.clone(),
             path: candidate,
             can_write: true,
+            authority_context_id: context_id,
         });
     }
 
@@ -195,10 +203,12 @@ pub(crate) async fn resolve_authorised_worker_directory(
         .collect::<Vec<_>>();
     if !matching_approval_grants.is_empty() {
         return Ok(ResolvedWorkerDirectory {
+            authority_path: candidate.clone(),
             path: candidate,
             can_write: matching_approval_grants
                 .iter()
                 .any(|grant| grant.access.as_deref() == Some("write")),
+            authority_context_id: context_id,
         });
     }
 
@@ -206,6 +216,81 @@ pub(crate) async fn resolve_authorised_worker_directory(
         "worker cwd {} is outside the dispatching context's permitted workspace roots and location grants",
         candidate.display()
     ))
+}
+
+/// Re-authorise a durable worker placement for this execution. The placement
+/// directory remains immutable, while its authority root and context are
+/// checked against the current attachment/location grants and its write bit is
+/// replaced in the in-memory session metadata used to build this turn.
+pub(crate) async fn reauthorise_worker_placement_for_turn(
+    state: &crate::state::AppState,
+    session: &mut swage_storage::Session,
+) -> Result<(), swage_core::GatewayError> {
+    if !super::worker_placement_metadata_present(session.metadata.as_ref()) {
+        return Ok(());
+    }
+    let metadata = session.metadata.as_mut().ok_or_else(|| {
+        swage_core::GatewayError::ConfigError("worker placement metadata is incomplete".to_string())
+    })?;
+    let placement_path = metadata
+        .get(super::WORKER_PLACEMENT_CWD_METADATA_KEY)
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            swage_core::GatewayError::ConfigError(
+                "worker placement is missing its immutable cwd".to_string(),
+            )
+        })?;
+    let placement_path = tokio::fs::canonicalize(placement_path)
+        .await
+        .map_err(|error| {
+            swage_core::GatewayError::ConfigError(format!(
+                "cannot resolve worker placement cwd: {error}"
+            ))
+        })?;
+    if !placement_path.is_dir() {
+        return Err(swage_core::GatewayError::ConfigError(format!(
+            "worker placement cwd is not a directory: {}",
+            placement_path.display()
+        )));
+    }
+    let authority_path = metadata
+        .get(super::WORKER_PLACEMENT_AUTHORITY_PATH_METADATA_KEY)
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            swage_core::GatewayError::ConfigError(
+                "worker placement is missing its authority path".to_string(),
+            )
+        })?;
+    let authority_context_id = metadata
+        .get(super::WORKER_PLACEMENT_AUTHORITY_CONTEXT_METADATA_KEY)
+        .and_then(serde_json::Value::as_str)
+        .and_then(|value| Uuid::parse_str(value).ok())
+        .ok_or_else(|| {
+            swage_core::GatewayError::ConfigError(
+                "worker placement is missing its authority context".to_string(),
+            )
+        })?;
+    let authorised = resolve_authorised_worker_directory(
+        state,
+        session.space_id,
+        authority_context_id,
+        session.active_workspace_attachment_id,
+        None,
+        authority_path,
+    )
+    .await
+    .map_err(|error| {
+        swage_core::GatewayError::ConfigError(format!(
+            "worker placement is no longer authorised: {error}"
+        ))
+    })?;
+    metadata[super::WORKER_PLACEMENT_CWD_METADATA_KEY] =
+        serde_json::Value::String(placement_path.to_string_lossy().into_owned());
+    metadata[super::WORKER_PLACEMENT_AUTHORITY_PATH_METADATA_KEY] =
+        serde_json::Value::String(authorised.path.to_string_lossy().into_owned());
+    metadata[super::WORKER_PLACEMENT_CAN_WRITE_METADATA_KEY] =
+        serde_json::Value::Bool(authorised.can_write);
+    Ok(())
 }
 
 pub(super) fn build_permission_config(

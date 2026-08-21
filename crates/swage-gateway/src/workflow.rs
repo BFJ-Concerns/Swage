@@ -1066,8 +1066,14 @@ async fn run_ephemeral_agent_call(
             let mut metadata = crate::turn::dispatch_bound_metadata(dispatch_bound_agent_ids)
                 .unwrap_or_else(|| serde_json::json!({}));
             if let Some(placement) = resolved_working_directory.as_ref() {
-                metadata["worker_placement_cwd"] = Value::String(placement.path.clone());
-                metadata["worker_placement_can_write"] = Value::Bool(placement.can_write);
+                metadata[crate::turn::WORKER_PLACEMENT_CWD_METADATA_KEY] =
+                    Value::String(placement.path.clone());
+                metadata[crate::turn::WORKER_PLACEMENT_CAN_WRITE_METADATA_KEY] =
+                    Value::Bool(placement.can_write);
+                metadata[crate::turn::WORKER_PLACEMENT_AUTHORITY_PATH_METADATA_KEY] =
+                    Value::String(placement.authority_path.clone());
+                metadata[crate::turn::WORKER_PLACEMENT_AUTHORITY_CONTEXT_METADATA_KEY] =
+                    Value::String(placement.authority_context_id.to_string());
             }
             if let Some(task) = request.task.as_ref() {
                 // Resolve now to fail the dispatch before creating a child,
@@ -1271,35 +1277,47 @@ async fn provision_worker_command(
         if entry.kind != "worker_placement" || entry.args_hash != hash {
             Err("NondeterministicReplayError".into())
         } else if entry.status == "completed" {
-            let (path, can_write) = entry
+            let (path, can_write, authority_path, authority_context_id) = entry
                 .result
                 .as_ref()
                 .and_then(|result| {
                     Some((
                         result.get("path")?.as_str()?.to_string(),
                         result.get("can_write")?.as_bool()?,
+                        result.get("authority_path")?.as_str()?.to_string(),
+                        Uuid::parse_str(result.get("authority_context_id")?.as_str()?).ok()?,
                     ))
                 })
                 .ok_or_else(|| "completed worker placement has no path".to_string())?;
-            let repo = cwd.as_deref().ok_or_else(|| {
+            cwd.as_deref().ok_or_else(|| {
                 "WorkerPlacementError: isolation=worktree requires cwd to name the git repository"
                     .to_string()
             })?;
-            state
+            let placement = reauthorise_recorded_worker_placement(
+                state,
+                space_id,
+                ResolvedWorkerPlacement {
+                    path,
+                    can_write,
+                    authority_path,
+                    authority_context_id,
+                },
+            )
+            .await?;
+            let restored_path = state
                 .worktree_host
                 .restore(
                     run_id,
                     current_seq,
-                    std::path::Path::new(repo),
-                    std::path::Path::new(&path),
+                    std::path::Path::new(&placement.authority_path),
+                    std::path::Path::new(&placement.path),
                 )
                 .await
-                .map(|path| {
-                    Some(ResolvedWorkerPlacement {
-                        path: path.to_string_lossy().into_owned(),
-                        can_write,
-                    })
-                })
+                .map_err(|error| error.to_string())?;
+            Ok(Some(ResolvedWorkerPlacement {
+                path: restored_path.to_string_lossy().into_owned(),
+                ..placement
+            }))
         } else if entry.status == "failed" {
             Err(entry
                 .error_message
@@ -1361,17 +1379,24 @@ async fn resolve_worker_directory_command(
         if entry.kind != "worker_placement" || entry.args_hash != hash {
             Err("NondeterministicReplayError".into())
         } else if entry.status == "completed" {
-            entry
+            let placement = entry
                 .result
                 .as_ref()
                 .and_then(|result| {
                     Some(ResolvedWorkerPlacement {
                         path: result.get("path")?.as_str()?.to_string(),
                         can_write: result.get("can_write")?.as_bool()?,
+                        authority_path: result.get("authority_path")?.as_str()?.to_string(),
+                        authority_context_id: Uuid::parse_str(
+                            result.get("authority_context_id")?.as_str()?,
+                        )
+                        .ok()?,
                     })
                 })
+                .ok_or_else(|| "completed worker directory resolution has no result".to_string())?;
+            reauthorise_recorded_worker_placement(state, space_id, placement)
+                .await
                 .map(Some)
-                .ok_or_else(|| "completed worker directory resolution has no result".into())
         } else if entry.status == "failed" {
             Err(entry
                 .error_message
@@ -2856,6 +2881,26 @@ async fn run_host_commands_inner(
     while agent_tasks.join_next().await.is_some() {}
 }
 
+async fn reauthorise_recorded_worker_placement(
+    state: &AppState,
+    space_id: Uuid,
+    mut placement: ResolvedWorkerPlacement,
+) -> Result<ResolvedWorkerPlacement, String> {
+    let authority = resolve_authorised_worker_directory(
+        state,
+        space_id,
+        placement.authority_context_id,
+        None,
+        None,
+        &placement.authority_path,
+    )
+    .await
+    .map_err(|error| format!("WorkerPlacementError: {error}"))?;
+    placement.authority_path = authority.path.to_string_lossy().into_owned();
+    placement.can_write = authority.can_write;
+    Ok(placement)
+}
+
 async fn complete_worker_placement(
     state: &AppState,
     run_id: Uuid,
@@ -2887,6 +2932,8 @@ async fn complete_worker_placement(
                     serde_json::json!({
                         "path": path,
                         "can_write": repo.can_write,
+                        "authority_path": repo.authority_path,
+                        "authority_context_id": repo.authority_context_id,
                     }),
                 )
                 .await
@@ -2894,6 +2941,8 @@ async fn complete_worker_placement(
             Ok(Some(ResolvedWorkerPlacement {
                 path,
                 can_write: repo.can_write,
+                authority_path: repo.authority_path.to_string_lossy().into_owned(),
+                authority_context_id: repo.authority_context_id,
             }))
         }
         Err(error) => {
@@ -2915,6 +2964,8 @@ async fn complete_worker_directory_resolution(
             let placement = ResolvedWorkerPlacement {
                 path: directory.path.to_string_lossy().into_owned(),
                 can_write: directory.can_write,
+                authority_path: directory.authority_path.to_string_lossy().into_owned(),
+                authority_context_id: directory.authority_context_id,
             };
             state
                 .complete_workflow_journal_entry(
@@ -2922,6 +2973,8 @@ async fn complete_worker_directory_resolution(
                     serde_json::json!({
                         "path": placement.path,
                         "can_write": placement.can_write,
+                        "authority_path": placement.authority_path,
+                        "authority_context_id": placement.authority_context_id,
                     }),
                 )
                 .await
@@ -7619,9 +7672,13 @@ mod tests {
                 reply,
             })
             .unwrap();
-        assert_eq!(
-            receive.await.unwrap().unwrap().unwrap().path,
-            repo.to_string_lossy()
+        assert!(
+            receive
+                .await
+                .unwrap()
+                .unwrap_err()
+                .contains("outside the dispatching context's permitted workspace roots"),
+            "a replayed directory resolution must re-authorise its recorded path"
         );
         let (reply, receive) = oneshot::channel();
         replay_tx
@@ -7646,14 +7703,13 @@ mod tests {
                 reply,
             })
             .unwrap();
-        assert_eq!(
+        assert!(
             receive
                 .await
                 .unwrap()
-                .unwrap()
-                .as_ref()
-                .map(|placement| placement.path.as_str()),
-            Some(first_path.as_str())
+                .unwrap_err()
+                .contains("outside the dispatching context's permitted workspace roots"),
+            "a replayed worktree must not be restored after its repository grant is revoked"
         );
         let (reply, receive) = oneshot::channel();
         replay_tx
@@ -7670,12 +7726,8 @@ mod tests {
             4,
             "replay must not add a worktree journal entry"
         );
-        assert_eq!(replay_state.worktree_host.list_owner(run.id).await.len(), 1);
+        assert_eq!(replay_state.worktree_host.list_owner(run.id).await.len(), 0);
         replay_state.worktree_host.cleanup_owner(run.id).await;
-        assert!(
-            !std::path::Path::new(&first_path).exists(),
-            "the replay host must own the restored worktree for terminal cleanup"
-        );
 
         let (changed_tx, changed_task) = run_loop(make_state(), replay);
         let (reply, receive) = oneshot::channel();

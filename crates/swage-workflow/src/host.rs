@@ -9,6 +9,8 @@ use uuid::Uuid;
 pub struct ResolvedWorkerPlacement {
     pub path: String,
     pub can_write: bool,
+    pub authority_path: String,
+    pub authority_context_id: Uuid,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -121,8 +123,10 @@ pub trait WorkflowHost: Send + Sync {
         _cancellation: CancellationToken,
     ) -> Result<Option<ResolvedWorkerPlacement>, String> {
         Ok(request.cwd.clone().map(|path| ResolvedWorkerPlacement {
+            authority_path: path.clone(),
             path,
             can_write: true,
+            authority_context_id: Uuid::nil(),
         }))
     }
 
