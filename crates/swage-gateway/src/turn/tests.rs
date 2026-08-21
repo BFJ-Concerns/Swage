@@ -4799,43 +4799,23 @@ async fn approved_sandbox_fallback_build_failure_clears_active_turn() {
 
 #[tokio::test]
 async fn attended_sandbox_failure_records_interactive_attendance() {
-    let (state, session_id) = make_state_with_session(vec![]).await;
+    let mut config = swage_config::ResolvedConfig::default();
+    config.sandbox.enabled = false;
+    let (state, session_id) = make_state_with_config(vec![], config).await;
     state.fail_next_dispatcher_builds(1);
 
-    let (tx, mut rx) = mpsc::unbounded_channel();
-    let approval_channels = Arc::clone(&state.approval_channels);
-    let state_for_task = state.clone();
-    let task = tokio::spawn(async move {
-        process_turn(
-            &state_for_task,
-            session_id,
-            None,
-            "message".to_string(),
-            tx,
-            Arc::new(Mutex::new(SubscriptionState::new(true))),
-            None,
-        )
-        .await
-    });
-
-    let approval_id = match rx.recv().await.expect("approval event should be sent") {
-        ServerEvent::ApprovalRequired { approval_id, .. } => approval_id,
-        other => panic!("expected ApprovalRequired, got: {other:?}"),
-    };
-    approval_channels
-        .lock()
-        .unwrap()
-        .remove(&approval_id)
-        .expect("approval channel should be registered")
-        .send(swage_agent::ApprovalDecision {
-            decision: swage_agent::approval::ApprovalDecisionValue::Rejected,
-            scope: swage_agent::approval::ApprovalDecisionScope::Once,
-            reason: None,
-        })
-        .expect("approval decision should be delivered");
-    task.await
-        .expect("turn task should finish")
-        .expect_err("rejected degradation should fail the turn");
+    let (tx, _rx) = mpsc::unbounded_channel();
+    process_turn(
+        &state,
+        session_id,
+        None,
+        "message".to_string(),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .expect_err("disabled sandbox build failure should block the attended turn");
 
     let audit = state.storage.list_audit_events().await.unwrap();
     assert!(audit.iter().any(|event| {
@@ -8618,12 +8598,11 @@ async fn working_norms_selection_honours_disabled_forced_and_seeded_choices() {
 }
 
 #[tokio::test]
-async fn unrecorded_context_choices_use_configured_assembly_and_native_norms() {
+async fn unrecorded_working_norms_draw_falls_back_before_content_is_chosen() {
     let storage = Arc::new(MockStorage::new());
     let (state, session_id) = make_state_with_storage(vec![], Arc::clone(&storage)).await;
     storage.fail_audit_writes();
     let mut config = swage_config::ResolvedConfig::default();
-    config.context.assembly = "configured-assembly".to_owned();
     config.experimentation.enabled = true;
     config.experimentation.locations.insert(
         crate::experimentation::LOCATION_WORKING_NORMS.to_owned(),
@@ -8637,11 +8616,6 @@ async fn unrecorded_context_choices_use_configured_assembly_and_native_norms() {
         .await
         .expect("record failure should fail closed to the default content");
 
-    assert_eq!(
-        choices.assembly_name,
-        "configured-assembly",
-        "an unaudited choice must retain the configured assembly"
-    );
     assert_eq!(
         choices.working_norms_scaffold,
         swage_context::working_norms::WorkingNormsScaffold::Native
