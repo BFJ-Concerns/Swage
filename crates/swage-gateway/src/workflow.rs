@@ -607,6 +607,15 @@ pub trait WorkflowLauncher: Send + Sync {
         budget: Option<WorkflowBudget>,
         wait: bool,
     ) -> Result<Value, String>;
+
+    async fn start_inline(
+        &self,
+        session_id: Uuid,
+        source: &str,
+        args: Value,
+        budget: Option<WorkflowBudget>,
+        wait: bool,
+    ) -> Result<Value, String>;
 }
 
 pub struct GatewayWorkflowLauncher {
@@ -641,6 +650,63 @@ impl WorkflowLauncher for GatewayWorkflowLauncher {
         let script = resolve_workflow_by_name(&self.state, session.space_id, name, &skills)
             .await?
             .ok_or_else(|| format!("workflow script {name:?} was not found"))?;
+        self.start_for_session(
+            session,
+            script.script_version_id,
+            script.inline_identity(),
+            script.source,
+            script.delivery_grant,
+            script.carrying_skill,
+            args,
+            budget,
+            wait,
+        )
+        .await
+    }
+
+    async fn start_inline(
+        &self,
+        session_id: Uuid,
+        source: &str,
+        args: Value,
+        budget: Option<WorkflowBudget>,
+        wait: bool,
+    ) -> Result<Value, String> {
+        let session = self
+            .state
+            .storage
+            .get_session(session_id)
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("session {session_id} was not found"))?;
+        self.start_for_session(
+            session,
+            None,
+            None,
+            source.to_owned(),
+            None,
+            None,
+            args,
+            budget,
+            wait,
+        )
+        .await
+    }
+}
+
+impl GatewayWorkflowLauncher {
+    async fn start_for_session(
+        &self,
+        session: swage_storage::Session,
+        script_version_id: Option<Uuid>,
+        inline_identity: Option<InlineWorkflowIdentity>,
+        source: String,
+        delivery_grant: Option<Value>,
+        carrying_skill: Option<String>,
+        args: Value,
+        budget: Option<WorkflowBudget>,
+        wait: bool,
+    ) -> Result<Value, String> {
         let mut dispatch_bound_agent_ids =
             crate::turn::dispatch_bound_agent_ids(session.metadata.as_ref())
                 .map_err(|error| error.to_string())?;
@@ -664,13 +730,13 @@ impl WorkflowLauncher for GatewayWorkflowLauncher {
         let run = start_run(
             self.state.clone(),
             session.space_id,
-            script.script_version_id,
-            script.inline_identity(),
-            script.source,
+            script_version_id,
+            inline_identity,
+            source,
             args,
             budget.unwrap_or_default(),
-            script.delivery_grant,
-            script.carrying_skill,
+            delivery_grant,
+            carrying_skill,
             // The run inherits every bound on the dispatching session, then
             // adds that session's own agent. Each worker turn re-resolves the
             // entire lineage before intersecting grants.
@@ -3935,6 +4001,8 @@ fn run_wire(record: WorkflowRunRecord) -> Result<WorkflowRun, ApiError> {
         script_name: record.script_name,
         script_version: record.script_version,
         carrying_skill: record.carrying_skill,
+        source: record.source,
+        source_hash: record.source_hash,
         state: run_state(&record.state)?,
         args: record.args,
         budget: budget_wire(&record.budget),

@@ -175,6 +175,7 @@ writing your own long-run shape.
 Save a script when it has earned reuse; it becomes a named, versioned
 space workflow, startable by name (and by other workflows via
 `workflow()`). Update appends a new version; runs record exactly which
-version (or inline source) ran. An agent-authored script must not carry
-a delivery grant it did not already hold — grants derive from the
-dispatching context, and saving a script is never a way to widen them.
+version (or inline source) ran. An agent-authored inline script carries no
+delivery grant. Saved workflows may carry an operator-configured grant, but
+saving or running inline source is never a way for an agent to acquire delivery
+capability.
