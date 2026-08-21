@@ -19,9 +19,12 @@ use swage_agent::{
 use swage_context::tokeniser::TiktokenTokeniser;
 use swage_core::DelegateCompletionMode;
 
-pub(crate) fn delegate_worktree_key(delegate_call_id: &str) -> u64 {
-    let digest = Sha256::digest(delegate_call_id.as_bytes());
-    u64::from_be_bytes(digest[..8].try_into().expect("SHA-256 prefix"))
+pub(crate) fn delegate_worktree_owner(sender_turn_id: Uuid, delegate_call_id: &str) -> Uuid {
+    let mut digest = Sha256::new();
+    digest.update(sender_turn_id.as_bytes());
+    digest.update(delegate_call_id.as_bytes());
+    let digest = digest.finalize();
+    Uuid::from_bytes(digest[..16].try_into().expect("SHA-256 prefix"))
 }
 
 struct GatewayDelegatedContextAssembler {
@@ -279,6 +282,7 @@ impl DelegationHandler for GatewayDelegationHandler {
             active_workspace_attachment_id,
         )
         .await;
+        let mut worktree_owner_id = None;
         let placement = match isolation {
             None => match cwd.as_deref() {
                 Some(cwd) => Some(
@@ -312,12 +316,13 @@ impl DelegationHandler for GatewayDelegationHandler {
                 )
                 .await
                 .map_err(AgentError::InvalidConfig)?;
-                let stable_key = delegate_worktree_key(delegate_call_id);
+                let owner_id = delegate_worktree_owner(sender_turn_id, delegate_call_id);
+                worktree_owner_id = Some(owner_id);
                 Some(ResolvedWorkerDirectory {
                     path: self
                         .state
                         .worktree_host
-                        .provision(sender_turn_id, stable_key, &repo.path)
+                        .provision(owner_id, 0, &repo.path)
                         .await
                         .map_err(AgentError::InvalidConfig)?,
                     can_write: repo.can_write,
@@ -401,6 +406,9 @@ impl DelegationHandler for GatewayDelegationHandler {
                 "isolation": isolation,
             },
         });
+        if let Some(owner_id) = worktree_owner_id {
+            payload["placement"]["owner_id"] = serde_json::json!(owner_id);
+        }
         if let Some(context) = context {
             payload["context"] = context;
         }
@@ -472,6 +480,12 @@ impl DelegationHandler for GatewayDelegationHandler {
                 )
                 .await;
 
+                if result_msg.payload.get("error").is_none()
+                    && let Some(owner_id) = worktree_owner_id
+                {
+                    self.state.worktree_host.cleanup_owner(owner_id).await;
+                }
+
                 if let Err(error) = router.deliver_message(&result_msg).await {
                     shutdown_sandbox_guard(
                         &target_sandbox_guard,
@@ -487,6 +501,7 @@ impl DelegationHandler for GatewayDelegationHandler {
                 let delegate_message_id = delegate_msg.id;
                 let (started_tx, started_rx) = tokio::sync::oneshot::channel();
                 let detached_router = router.clone();
+                let worktree_host = Arc::clone(&self.state.worktree_host);
 
                 tokio::spawn(async move {
                     let result = executor
@@ -514,7 +529,13 @@ impl DelegationHandler for GatewayDelegationHandler {
                         // execute_delegation has persisted the Result as Pending.
                         // The parent's next turn owns its delivery: Step 7 appends
                         // it to the parent thread before claiming it Delivered.
-                        Ok(_result_msg) => {}
+                        Ok(result_msg) => {
+                            if result_msg.payload.get("error").is_none()
+                                && let Some(owner_id) = worktree_owner_id
+                            {
+                                worktree_host.cleanup_owner(owner_id).await;
+                            }
+                        }
                         Err(error) => {
                             let _ = detached_router
                                 .fail_message(delegate_message_id, &error.to_string())
