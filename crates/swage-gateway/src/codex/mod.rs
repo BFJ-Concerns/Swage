@@ -391,10 +391,7 @@ async fn run_turn_inner(
                     "turn/completed" => {
                         let status = incoming.params.pointer("/turn/status").and_then(Value::as_str).unwrap_or("failed");
                         if status != "completed" {
-                            state.storage.update_turn_state(request.turn_id, TurnState::Failed).await?;
-                            state.storage.update_state(request.thread_id, ThreadState::Idle).await?;
                             let message = incoming.params.pointer("/turn/error/message").and_then(Value::as_str).unwrap_or("Codex turn failed");
-                            let _ = request.event_tx.send(AgentEvent::Error { message: message.to_string() });
                             return Err(AgentError::ProviderFailed(swage_core::ProviderError::InvalidResponse(message.to_string())));
                         }
                         break;
@@ -847,7 +844,11 @@ mod tests {
         scenario: Value,
         dispatcher: ToolDispatcher,
         permissions: PermissionConfig,
-    ) -> (Result<OutboundMessage, AgentError>, Vec<Value>) {
+    ) -> (
+        Result<OutboundMessage, AgentError>,
+        Vec<Value>,
+        Arc<crate::turn::tests::MockStorage>,
+    ) {
         run_scripted_turn_with_audit_failure(scenario, dispatcher, permissions, false).await
     }
 
@@ -856,7 +857,11 @@ mod tests {
         dispatcher: ToolDispatcher,
         permissions: PermissionConfig,
         fail_audit_writes: bool,
-    ) -> (Result<OutboundMessage, AgentError>, Vec<Value>) {
+    ) -> (
+        Result<OutboundMessage, AgentError>,
+        Vec<Value>,
+        Arc<crate::turn::tests::MockStorage>,
+    ) {
         let storage = Arc::new(crate::turn::tests::MockStorage::new());
         let (mut state, session_id) =
             crate::turn::tests::make_state_with_storage(Vec::new(), Arc::clone(&storage)).await;
@@ -931,7 +936,7 @@ mod tests {
                     panic!("scenario server did not finish ({elapsed}); turn result: {result:?}")
                 }
             };
-        (result, frames)
+        (result, frames, storage)
     }
 
     fn successful_turn_notifications() -> Vec<Value> {
@@ -961,7 +966,7 @@ mod tests {
         ]});
         let dispatcher = ToolDispatcher::allow_all(Vec::<Arc<dyn Tool>>::new());
 
-        let (result, _) = run_scripted_turn(scenario, dispatcher, permissions(&[], &[])).await;
+        let (result, _, _) = run_scripted_turn(scenario, dispatcher, permissions(&[], &[])).await;
         assert_eq!(
             result
                 .expect("valid frames after malformed input win")
@@ -988,12 +993,45 @@ mod tests {
         ]});
         let dispatcher = ToolDispatcher::allow_all(Vec::<Arc<dyn Tool>>::new());
 
-        let (result, _) = run_scripted_turn(scenario, dispatcher, permissions(&[], &[])).await;
+        let (result, _, _) = run_scripted_turn(scenario, dispatcher, permissions(&[], &[])).await;
         assert!(
             result
                 .expect_err("child death must fail the turn")
                 .to_string()
                 .contains("transport closed")
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_turn_completion_is_cleaned_up_once() {
+        let scenario = json!({"steps":[
+            {
+                "receive":{"method":"thread/start"},
+                "send":[{"jsonrpc":"2.0","id":"$request_id","result":{"thread":{"id":"fake-thread"}}}]
+            },
+            {
+                "receive":{"method":"turn/start"},
+                "send":[
+                    {"jsonrpc":"2.0","id":"$request_id","result":{"turn":{"id":"fake-turn"}}},
+                    {"jsonrpc":"2.0","method":"turn/completed","params":{"turn":{"id":"fake-turn","status":"failed","error":{"message":"scripted failure"}}}}
+                ]
+            }
+        ]});
+        let dispatcher = ToolDispatcher::allow_all(Vec::<Arc<dyn Tool>>::new());
+
+        let (result, _, storage) =
+            run_scripted_turn(scenario, dispatcher, permissions(&[], &[])).await;
+
+        assert!(
+            result
+                .expect_err("failed completion must fail the turn")
+                .to_string()
+                .contains("scripted failure")
+        );
+        assert_eq!(
+            storage.turn_state_write_calls(),
+            2,
+            "one processing write and one failed write must complete the lifecycle"
         );
     }
 
@@ -1027,7 +1065,7 @@ mod tests {
             }
         ]});
 
-        let (result, _) =
+        let (result, _, _) =
             run_scripted_turn(scenario, dispatcher, permissions(&["file_read"], &[])).await;
         let output = result.expect("scripted tool turn succeeds");
         assert_eq!(output.response, "done");
@@ -1075,7 +1113,7 @@ mod tests {
         ]});
         let dispatcher = ToolDispatcher::allow_all(Vec::<Arc<dyn Tool>>::new());
 
-        let (result, _) = run_scripted_turn(
+        let (result, _, _) = run_scripted_turn(
             scenario,
             dispatcher,
             permissions(&["shell", "file_edit"], &[]),
@@ -1107,7 +1145,7 @@ mod tests {
         ]});
         let dispatcher = ToolDispatcher::allow_all(Vec::<Arc<dyn Tool>>::new());
 
-        let (result, _) = run_scripted_turn_with_audit_failure(
+        let (result, _, _) = run_scripted_turn_with_audit_failure(
             scenario,
             dispatcher,
             permissions(&["shell"], &[]),

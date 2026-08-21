@@ -123,7 +123,7 @@ pub struct DelegationExecutor {
     pub active_delegations: ActiveDelegations,
     /// Caller-owned assembly path for the child session. The gateway uses this
     /// to apply the same context elements as every other session entry point.
-    pub context_assembler: Option<Arc<dyn DelegationContextAssembler>>,
+    pub context_assembler: Arc<dyn DelegationContextAssembler>,
     /// Optional caller-owned persistence policy for delegated context reports.
     /// The gateway supplies this because its audit durability contract and
     /// escalation machinery live above the agent runtime.
@@ -173,7 +173,6 @@ impl DelegationExecutor {
         sender_turn_id: Option<Uuid>,
         space_id: Uuid,
         target_config: AgentConfig,
-        target_instructions: String,
         target_context_transfer_config: swage_config::ContextTransferConfig,
         target_tool_dispatcher: Option<ToolDispatcher>,
         session_metadata: serde_json::Value,
@@ -268,29 +267,22 @@ impl DelegationExecutor {
             })
             .await?;
         let turn_id = turn.id;
-        let (assembled_context, assembly_report) = if let Some(assembler) = &self.context_assembler
+        let assembled = match self
+            .context_assembler
+            .assemble(&session, turn_id, delegated_history)
+            .await
         {
-            let assembled = match assembler
-                .assemble(&session, turn_id, delegated_history)
-                .await
-            {
-                Ok(assembled) => assembled,
-                Err(error) => {
-                    self.storage
-                        .update_turn_state(turn_id, TurnState::Failed)
-                        .await?;
-                    return Err(error);
-                }
-            };
-            (assembled.messages, Some(assembled.report))
-        } else {
-            (
-                build_delegated_context(&target_instructions, delegated_history),
-                None,
-            )
+            Ok(assembled) => assembled,
+            Err(error) => {
+                self.storage
+                    .update_turn_state(turn_id, TurnState::Failed)
+                    .await?;
+                return Err(error);
+            }
         };
 
-        if let Some(report) = assembly_report {
+        {
+            let report = assembled.report;
             if let Some(recorder) = &self.snapshot_recorder {
                 recorder.record(session.id, turn_id, &report).await?;
             } else if let Err(error) = self
@@ -301,6 +293,7 @@ impl DelegationExecutor {
                 tracing::warn!(%turn_id, %error, "failed to persist delegated context snapshot");
             }
         }
+        let assembled_context = assembled.messages;
 
         // 4. Build agent config with schema override.
         let mut agent_config = target_config;
@@ -502,25 +495,6 @@ fn build_delegated_history(
     context
 }
 
-fn build_delegated_context(
-    target_instructions: &str,
-    mut delegated_history: Vec<ChatMessage>,
-) -> Vec<ChatMessage> {
-    if !target_instructions.trim().is_empty() {
-        delegated_history.insert(
-            0,
-            ChatMessage::new(
-                Role::System,
-                format!(
-                    "Target Agent Instructions\n\n{}",
-                    target_instructions.trim()
-                ),
-            ),
-        );
-    }
-    delegated_history
-}
-
 // ---------------------------------------------------------------------------
 // DelegationHandler — trait for tool-as-delegation
 // ---------------------------------------------------------------------------
@@ -641,6 +615,23 @@ mod tests {
 
     struct NeverCalledProvider;
 
+    struct PassthroughAssembler;
+
+    #[async_trait::async_trait]
+    impl DelegationContextAssembler for PassthroughAssembler {
+        async fn assemble(
+            &self,
+            _session: &swage_storage::Session,
+            _turn_id: Uuid,
+            delegated_history: Vec<ChatMessage>,
+        ) -> Result<DelegatedAssembly, AgentError> {
+            Ok(DelegatedAssembly {
+                messages: delegated_history,
+                report: serde_json::json!({}),
+            })
+        }
+    }
+
     #[async_trait::async_trait]
     impl LlmProvider for NeverCalledProvider {
         fn model_id(&self) -> &str {
@@ -667,52 +658,6 @@ mod tests {
         ) -> Pin<Box<dyn Stream<Item = StreamChunk> + Send>> {
             Box::pin(stream::empty())
         }
-    }
-
-    #[test]
-    fn delegated_context_fences_instructions_background_and_task() {
-        let transferred = vec![
-            ChatMessage::new(Role::User, "Original user request"),
-            ChatMessage::new(Role::Assistant, "Caller analysis"),
-        ];
-
-        let history = build_delegated_history(&transferred, "Review the patch.");
-        let context = build_delegated_context("Act as the reviewer.", history);
-
-        assert_eq!(context.len(), 3);
-        assert_eq!(context[0].role(), Role::System);
-        assert!(
-            context[0]
-                .text_content()
-                .contains("Target Agent Instructions")
-        );
-        assert!(context[0].text_content().contains("Act as the reviewer."));
-
-        assert_eq!(context[1].role(), Role::User);
-        let inherited = context[1].text_content();
-        assert!(inherited.contains("Inherited Background Context"));
-        assert!(inherited.contains("Use it only as background"));
-        assert!(inherited.contains("[user] Original user request"));
-        assert!(inherited.contains("[assistant] Caller analysis"));
-
-        assert_eq!(context[2].role(), Role::User);
-        assert_eq!(
-            context[2].text_content(),
-            "Delegated Task\n\nReview the patch."
-        );
-    }
-
-    #[test]
-    fn delegated_context_omits_empty_instruction_and_background_sections() {
-        let history = build_delegated_history(&[], "Execute delegated work");
-        let context = build_delegated_context("", history);
-
-        assert_eq!(context.len(), 1);
-        assert_eq!(context[0].role(), Role::User);
-        assert_eq!(
-            context[0].text_content(),
-            "Delegated Task\n\nExecute delegated work"
-        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -746,7 +691,7 @@ mod tests {
             delegation_handler: None,
             router,
             active_delegations: ActiveDelegations::new(),
-            context_assembler: None,
+            context_assembler: Arc::new(PassthroughAssembler),
             snapshot_recorder: None,
         };
         let config = AgentConfig::new("agent-b").with_workspace(std::env::temp_dir(), vec![]);
@@ -757,7 +702,6 @@ mod tests {
                 None,
                 space.id,
                 config,
-                String::new(),
                 swage_config::ContextTransferConfig::default(),
                 None,
                 serde_json::json!({"dispatch_bound_agent_id": "agent-a"}),

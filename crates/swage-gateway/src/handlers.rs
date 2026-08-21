@@ -1654,12 +1654,6 @@ async fn execute_external_delegate_message(
     .await;
     target_agent_config.approval_prompts_enabled = false;
     let target_context_transfer_config = target_resolved.communication.context_transfer.clone();
-    let target_instructions = crate::turn::delegated_target_instructions_for_space(
-        &target_resolved.instructions,
-        &space.slug,
-        &delegate_msg.recipient_agent_id,
-    );
-
     // Delegated activity must not reach the parent WebSocket. Shared assembly
     // still emits ContextAssembled into this silent channel; the stored child-
     // turn snapshot is the delegated assembly's audit record.
@@ -1697,7 +1691,7 @@ async fn execute_external_delegate_message(
         ))),
         router: router.clone(),
         active_delegations: swage_agent::active_delegations(),
-        context_assembler: Some(crate::turn::delegated_context_assembler(
+        context_assembler: crate::turn::delegated_context_assembler(
             state.clone(),
             space.clone(),
             target_resolved.clone(),
@@ -1707,7 +1701,7 @@ async fn execute_external_delegate_message(
             crate::turn::effective_tool_permissions_record(&effective_target_resolved),
             crate::turn::DispatchContextComposition::from_payload(&delegate_msg.payload)
                 .map_err(|error| ApiError::validation(error.to_string()))?,
-        )),
+        ),
         snapshot_recorder: Some(crate::turn::delegation_snapshot_recorder(
             state.storage.clone(),
         )),
@@ -1719,7 +1713,6 @@ async fn execute_external_delegate_message(
             sender_turn_id,
             space_id,
             target_agent_config,
-            target_instructions,
             target_context_transfer_config,
             Some(dispatcher_build.dispatcher),
             session_metadata,
