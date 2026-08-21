@@ -7770,7 +7770,7 @@ async fn completed_detached_result_reaches_parent_next_turn() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn delegated_read_only_attachment_allows_read_and_refuses_write() {
-    let fixture = tempfile::tempdir_in("/tmp/scratch").expect("placement fixture");
+    let fixture = tempfile::tempdir().expect("placement fixture");
     let attachment = fixture.path().join("read-only");
     std::fs::create_dir(&attachment).expect("read-only attachment");
     std::fs::write(attachment.join("readable.txt"), "delegated readable proof")
@@ -7973,8 +7973,7 @@ async fn detached_delegate_can_be_cancelled_through_active_registry() {
         child_release,
         "Detached child answer".to_string(),
     );
-    let placement_fixture =
-        tempfile::tempdir_in("/tmp/scratch").expect("placement fixture");
+    let placement_fixture = tempfile::tempdir().expect("placement fixture");
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
@@ -7987,7 +7986,7 @@ async fn detached_delegate_can_be_cancelled_through_active_registry() {
     )
     .with_worktree_root(placement_fixture.path().join("worker-worktrees"));
     let handler = GatewayDelegationHandler::new(state.clone());
-    let delegated_cwd = tempfile::tempdir_in("/tmp/scratch").expect("delegated cwd");
+    let delegated_cwd = tempfile::tempdir().expect("delegated cwd");
     storage
         .create_workspace_attachment(NewWorkspaceAttachment {
             space_id: space.id,
@@ -8029,7 +8028,7 @@ async fn detached_delegate_can_be_cancelled_through_active_registry() {
         "placed"
     );
 
-    let denied_cwd = tempfile::tempdir_in("/tmp/scratch").expect("denied cwd");
+    let denied_cwd = tempfile::tempdir().expect("denied cwd");
     let denied = match handler
         .handle_delegation(
             "agent-b",

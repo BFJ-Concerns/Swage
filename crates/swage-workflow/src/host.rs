@@ -139,6 +139,30 @@ pub trait WorkflowHost: Send + Sync {
         cancellation: CancellationToken,
     ) -> Result<AgentCallResult, String>;
 
+    /// Resolve placement and admit one agent call through a single host
+    /// dispatch. Durable hosts override this to keep the two journal entries
+    /// adjacent even when several script promises begin together.
+    async fn dispatch_agent_call(
+        &self,
+        request: AgentCallRequest,
+        cancellation: CancellationToken,
+    ) -> Result<AgentCallResult, String> {
+        let resolved_placement = self
+            .resolve_worker_placement(&request, cancellation.clone())
+            .await
+            .map_err(|error| {
+                if error.starts_with("WorkerPlacementError")
+                    || error.starts_with("NondeterministicReplayError")
+                {
+                    error
+                } else {
+                    format!("WorkerPlacementError: {error}")
+                }
+            })?;
+        self.run_agent_call(request, resolved_placement, cancellation)
+            .await
+    }
+
     /// Resolve a caller placement without changing the caller's request.
     /// Hosts journal managed provisioning separately and return its durable
     /// resolved path; a plain cwd needs no host operation.
