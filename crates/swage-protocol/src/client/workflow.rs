@@ -271,7 +271,7 @@ pub enum WorkflowJournalEntryStatus {
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
 pub struct WorkflowAgentCallDetail {
-    pub agent_id: String,
+    pub agent_definition_id: Option<String>,
     pub session_id: Option<Uuid>,
     pub thread_id: Option<Uuid>,
     pub turn_id: Option<Uuid>,

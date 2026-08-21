@@ -24,7 +24,7 @@ use swage_storage::WorkflowJournalRecord;
 use swage_storage::{
     NewAuditEvent, NewSession, NewThread, NewWorkflowJournalIntent, NewWorkflowRun,
     NewWorkflowRunEvent, NewWorkflowScript, Storage, ThreadStore, WorkflowRunEventRecord,
-    WorkflowRunRecord, WorkflowScriptRecord,
+    WorkflowRunRecord, WorkflowRunWorkerPlacement, WorkflowScriptRecord,
 };
 use swage_workflow::{
     AgentCallRequest, AgentCallResult, AwaitEventRequest, EffectPayload, EffectReceipt,
@@ -41,12 +41,42 @@ use crate::{
     error::ApiError,
     state::AppState,
     subscription::SubscriptionState,
-    turn::resolve_authorised_worker_directory,
+    turn::{
+        ResolvedWorkerDirectory, reauthorise_session_worker_placement,
+        resolve_authorised_worker_directory,
+    },
     websocket::ServerEvent,
     workflow_delivery::{DeliveryCapability, capability_from_grant},
 };
 
 const CARRIED_WORKFLOW_ID_DOMAIN: &[u8] = b"swage skill carried workflow";
+
+fn store_worker_placement(placement: ResolvedWorkerDirectory) -> WorkflowRunWorkerPlacement {
+    WorkflowRunWorkerPlacement {
+        path: placement.path.to_string_lossy().into_owned(),
+        can_write: placement.can_write,
+        authority_path: placement.authority_path.to_string_lossy().into_owned(),
+        authority_context_id: placement.authority_context_id,
+    }
+}
+
+fn runtime_worker_placement(placement: &WorkflowRunWorkerPlacement) -> ResolvedWorkerPlacement {
+    ResolvedWorkerPlacement {
+        path: placement.path.clone(),
+        can_write: placement.can_write,
+        authority_path: placement.authority_path.clone(),
+        authority_context_id: placement.authority_context_id,
+    }
+}
+
+fn worker_placement_directory(placement: &ResolvedWorkerPlacement) -> ResolvedWorkerDirectory {
+    ResolvedWorkerDirectory {
+        path: placement.path.clone().into(),
+        can_write: placement.can_write,
+        authority_path: placement.authority_path.clone().into(),
+        authority_context_id: placement.authority_context_id,
+    }
+}
 
 #[derive(Clone)]
 struct EffectiveWorkflow {
@@ -434,12 +464,11 @@ fn journal_wire(
     let agent_call = (entry.kind == "agent_call").then(|| {
         let result = entry.result.as_ref();
         WorkflowAgentCallDetail {
-            agent_id: entry
+            agent_definition_id: entry
                 .request
                 .get("agent")
                 .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string(),
+                .map(str::to_string),
             session_id: result
                 .and_then(|v| v.get("session_id"))
                 .and_then(|v| serde_json::from_value(v.clone()).ok()),
@@ -615,7 +644,7 @@ impl WorkflowLauncher for GatewayWorkflowLauncher {
         let mut dispatch_bound_agent_ids =
             crate::turn::dispatch_bound_agent_ids(session.metadata.as_ref())
                 .map_err(|error| error.to_string())?;
-        dispatch_bound_agent_ids.push(session.agent_id);
+        dispatch_bound_agent_ids.push(session.agent_id.clone());
         let mut dispatch_bound_task_definition_ids =
             crate::turn::dispatch_bound_task_definition_ids(session.metadata.as_ref())
                 .map_err(|error| error.to_string())?;
@@ -627,6 +656,11 @@ impl WorkflowLauncher for GatewayWorkflowLauncher {
         {
             dispatch_bound_task_definition_ids.push(task_definition_id.to_string());
         }
+        let inherited_worker_placement =
+            reauthorise_session_worker_placement(&self.state, &session)
+                .await
+                .map_err(|error| error.to_string())?
+                .map(store_worker_placement);
         let run = start_run(
             self.state.clone(),
             session.space_id,
@@ -642,6 +676,7 @@ impl WorkflowLauncher for GatewayWorkflowLauncher {
             // entire lineage before intersecting grants.
             dispatch_bound_agent_ids,
             dispatch_bound_task_definition_ids,
+            inherited_worker_placement,
         )
         .await
         .map_err(|error| error.0.to_string())?;
@@ -1252,6 +1287,7 @@ fn run_host_commands(
     space_id: Uuid,
     dispatch_bound_agent_ids: Vec<String>,
     dispatch_bound_task_definition_ids: Vec<String>,
+    inherited_worker_placement: Option<ResolvedWorkerPlacement>,
     delivery_grant: Option<Value>,
     budget: WorkflowBudget,
     replay: Vec<WorkflowJournalRecord>,
@@ -1268,6 +1304,7 @@ fn run_host_commands(
         space_id,
         dispatch_bound_agent_ids,
         dispatch_bound_task_definition_ids,
+        inherited_worker_placement,
         delivery_grant,
         budget,
         replay,
@@ -1286,9 +1323,16 @@ async fn provision_worker_command(
     space_id: Uuid,
     replay: &[WorkflowJournalRecord],
     current_seq: u64,
+    inherited_worker_placement: Option<&ResolvedWorkerPlacement>,
     cwd: Option<String>,
     isolation: swage_protocol::client::workflow::WorkerIsolation,
 ) -> Result<Option<ResolvedWorkerPlacement>, String> {
+    let inherited_worker_placement = match inherited_worker_placement {
+        Some(placement) => {
+            Some(reauthorise_recorded_worker_placement(state, space_id, placement.clone()).await?)
+        }
+        None => None,
+    };
     let request = serde_json::json!({"cwd": cwd, "isolation": isolation});
     let hash = journal_args_hash(&request);
     let existing = replay.get(current_seq as usize);
@@ -1349,6 +1393,7 @@ async fn provision_worker_command(
                 space_id,
                 current_seq,
                 entry.id,
+                inherited_worker_placement.as_ref(),
                 cwd.as_deref(),
             )
             .await
@@ -1374,6 +1419,7 @@ async fn provision_worker_command(
                     space_id,
                     current_seq,
                     intent.id,
+                    inherited_worker_placement.as_ref(),
                     cwd.as_deref(),
                 )
                 .await
@@ -1389,8 +1435,15 @@ async fn resolve_worker_directory_command(
     space_id: Uuid,
     replay: &[WorkflowJournalRecord],
     current_seq: u64,
+    inherited_worker_placement: Option<&ResolvedWorkerPlacement>,
     cwd: String,
 ) -> Result<Option<ResolvedWorkerPlacement>, String> {
+    let inherited_worker_placement = match inherited_worker_placement {
+        Some(placement) => {
+            Some(reauthorise_recorded_worker_placement(state, space_id, placement.clone()).await?)
+        }
+        None => None,
+    };
     let request = serde_json::json!({"cwd": cwd, "isolation": null});
     let hash = journal_args_hash(&request);
     let existing = replay.get(current_seq as usize);
@@ -1422,7 +1475,15 @@ async fn resolve_worker_directory_command(
                 .clone()
                 .unwrap_or_else(|| "recorded worker directory resolution failure".into()))
         } else {
-            complete_worker_directory_resolution(state, space_id, run_id, entry.id, &cwd).await
+            complete_worker_directory_resolution(
+                state,
+                space_id,
+                run_id,
+                entry.id,
+                inherited_worker_placement.as_ref(),
+                &cwd,
+            )
+            .await
         }
     } else {
         match state
@@ -1439,7 +1500,15 @@ async fn resolve_worker_directory_command(
             .await
         {
             Ok(intent) => {
-                complete_worker_directory_resolution(state, space_id, run_id, intent.id, &cwd).await
+                complete_worker_directory_resolution(
+                    state,
+                    space_id,
+                    run_id,
+                    intent.id,
+                    inherited_worker_placement.as_ref(),
+                    &cwd,
+                )
+                .await
             }
             Err(error) => Err(error.to_string()),
         }
@@ -1452,6 +1521,7 @@ async fn resolve_agent_placement_command(
     space_id: Uuid,
     replay: &[WorkflowJournalRecord],
     seq: &AtomicU64,
+    inherited_worker_placement: Option<&ResolvedWorkerPlacement>,
     request: &AgentCallRequest,
 ) -> Result<Option<ResolvedWorkerPlacement>, String> {
     if request.session.is_some() && (request.cwd.is_some() || request.isolation.is_some()) {
@@ -1470,6 +1540,7 @@ async fn resolve_agent_placement_command(
                 space_id,
                 replay,
                 current_seq,
+                inherited_worker_placement,
                 request.cwd.clone(),
                 isolation,
             )
@@ -1478,10 +1549,26 @@ async fn resolve_agent_placement_command(
         None => match request.cwd.clone() {
             Some(cwd) => {
                 let current_seq = seq.fetch_add(1, Ordering::SeqCst);
-                resolve_worker_directory_command(state, run_id, space_id, replay, current_seq, cwd)
-                    .await
+                resolve_worker_directory_command(
+                    state,
+                    run_id,
+                    space_id,
+                    replay,
+                    current_seq,
+                    inherited_worker_placement,
+                    cwd,
+                )
+                .await
             }
-            None => Ok(None),
+            None if request.session.is_some() => Ok(None),
+            None => match inherited_worker_placement {
+                Some(placement) => {
+                    reauthorise_recorded_worker_placement(state, space_id, placement.clone())
+                        .await
+                        .map(Some)
+                }
+                None => Ok(None),
+            },
         },
     }
 }
@@ -1501,6 +1588,7 @@ async fn run_host_commands_inner(
     space_id: Uuid,
     dispatch_bound_agent_ids: Vec<String>,
     dispatch_bound_task_definition_ids: Vec<String>,
+    inherited_worker_placement: Option<ResolvedWorkerPlacement>,
     delivery_grant: Option<Value>,
     budget: WorkflowBudget,
     replay: Vec<WorkflowJournalRecord>,
@@ -1602,7 +1690,13 @@ async fn run_host_commands_inner(
                 reply,
             } => {
                 let resolved_working_directory = match resolve_agent_placement_command(
-                    &state, run_id, space_id, &replay, &seq, &request,
+                    &state,
+                    run_id,
+                    space_id,
+                    &replay,
+                    &seq,
+                    inherited_worker_placement.as_ref(),
+                    &request,
                 )
                 .await
                 {
@@ -1661,6 +1755,7 @@ async fn run_host_commands_inner(
                     space_id,
                     &replay,
                     current_seq,
+                    inherited_worker_placement.as_ref(),
                     cwd,
                     isolation,
                 )
@@ -1675,6 +1770,7 @@ async fn run_host_commands_inner(
                     space_id,
                     &replay,
                     current_seq,
+                    inherited_worker_placement.as_ref(),
                     cwd,
                 )
                 .await;
@@ -2930,14 +3026,23 @@ async fn complete_worker_placement(
     space_id: Uuid,
     seq: u64,
     entry_id: Uuid,
+    inherited_worker_placement: Option<&ResolvedWorkerPlacement>,
     cwd: Option<&str>,
 ) -> Result<Option<ResolvedWorkerPlacement>, String> {
     let repo = cwd.ok_or_else(|| {
         "WorkerPlacementError: isolation=worktree requires cwd to name the git repository"
             .to_string()
     })?;
-    let repo = match resolve_authorised_worker_directory(state, space_id, run_id, None, None, repo)
-        .await
+    let inherited_worker_placement = inherited_worker_placement.map(worker_placement_directory);
+    let repo = match resolve_authorised_worker_directory(
+        state,
+        space_id,
+        run_id,
+        None,
+        inherited_worker_placement.as_ref(),
+        repo,
+    )
+    .await
     {
         Ok(repo) => repo,
         Err(error) => {
@@ -2980,9 +3085,20 @@ async fn complete_worker_directory_resolution(
     space_id: Uuid,
     context_id: Uuid,
     entry_id: Uuid,
+    inherited_worker_placement: Option<&ResolvedWorkerPlacement>,
     cwd: &str,
 ) -> Result<Option<ResolvedWorkerPlacement>, String> {
-    match resolve_authorised_worker_directory(state, space_id, context_id, None, None, cwd).await {
+    let inherited_worker_placement = inherited_worker_placement.map(worker_placement_directory);
+    match resolve_authorised_worker_directory(
+        state,
+        space_id,
+        context_id,
+        None,
+        inherited_worker_placement.as_ref(),
+        cwd,
+    )
+    .await
+    {
         Ok(directory) => {
             let placement = ResolvedWorkerPlacement {
                 path: directory.path.to_string_lossy().into_owned(),
@@ -3590,8 +3706,11 @@ async fn complete_workflow_call_entry(
                         .map(|parent| parent.dispatch_bound_agent_ids.clone())
                         .unwrap_or_default(),
                     dispatch_bound_task_definition_ids: parent
-                        .map(|parent| parent.dispatch_bound_task_definition_ids)
+                        .as_ref()
+                        .map(|parent| parent.dispatch_bound_task_definition_ids.clone())
                         .unwrap_or_default(),
+                    inherited_worker_placement: parent
+                        .and_then(|parent| parent.inherited_worker_placement),
                 })
                 .await
                 .map_err(|error| error.to_string())?;
@@ -3947,6 +4066,7 @@ async fn start_run(
     carrying_skill: Option<String>,
     dispatch_bound_agent_ids: Vec<String>,
     dispatch_bound_task_definition_ids: Vec<String>,
+    inherited_worker_placement: Option<WorkflowRunWorkerPlacement>,
 ) -> Result<WorkflowRun, ApiError> {
     validate_budget(&budget)?;
     // Each run owns a QuickJS runtime and an OS thread. Keep the default bound
@@ -3976,6 +4096,7 @@ async fn start_run(
             engine_version: QUICKJS_ENGINE_VERSION.into(),
             dispatch_bound_agent_ids,
             dispatch_bound_task_definition_ids,
+            inherited_worker_placement,
         })
         .await
         .map_err(internal)?;
@@ -4183,6 +4304,10 @@ async fn launch_existing_run(
         space_id,
         record.dispatch_bound_agent_ids.clone(),
         record.dispatch_bound_task_definition_ids.clone(),
+        record
+            .inherited_worker_placement
+            .as_ref()
+            .map(runtime_worker_placement),
         delivery_grant.clone(),
         run_budget.clone(),
         replay,
@@ -4349,6 +4474,7 @@ pub async fn start_inline_run(
             // resolved config.
             vec![],
             vec![],
+            None,
         )
         .await?,
     ))
@@ -4379,6 +4505,7 @@ pub async fn start_saved_run(
             script.carrying_skill,
             query.agent_id.into_iter().collect(),
             vec![],
+            None,
         )
         .await?,
     ))
@@ -5658,6 +5785,7 @@ mod tests {
                 engine_version: "test".into(),
                 dispatch_bound_agent_ids: vec![],
                 dispatch_bound_task_definition_ids: vec![],
+                inherited_worker_placement: None,
             })
             .await
             .expect("run");
@@ -5804,6 +5932,7 @@ mod tests {
                 engine_version: "test".into(),
                 dispatch_bound_agent_ids: vec![],
                 dispatch_bound_task_definition_ids: vec![],
+                inherited_worker_placement: None,
             })
             .await
             .expect("run");
@@ -5829,6 +5958,7 @@ mod tests {
             space.id,
             vec![],
             vec![],
+            None,
             None,
             WorkflowBudget {
                 max_agent_calls: None,
@@ -6443,6 +6573,7 @@ mod tests {
                 engine_version: "test".into(),
                 dispatch_bound_agent_ids: vec![],
                 dispatch_bound_task_definition_ids: vec![],
+                inherited_worker_placement: None,
             })
             .await
             .expect("run");
@@ -6614,6 +6745,7 @@ mod tests {
             space.id,
             vec![],
             vec![],
+            None,
             None,
             WorkflowBudget {
                 max_agent_calls: None,
@@ -6851,6 +6983,7 @@ mod tests {
                 engine_version: "test".into(),
                 dispatch_bound_agent_ids: vec![],
                 dispatch_bound_task_definition_ids: vec![],
+                inherited_worker_placement: None,
             })
             .await
             .expect("run");
@@ -6869,6 +7002,7 @@ mod tests {
             space.id,
             vec![],
             vec![],
+            None,
             None,
             WorkflowBudget {
                 max_agent_calls: None,
@@ -6996,6 +7130,7 @@ mod tests {
                 engine_version: "test".into(),
                 dispatch_bound_agent_ids: vec!["lead".into()],
                 dispatch_bound_task_definition_ids: vec![],
+                inherited_worker_placement: None,
             })
             .await
             .expect("run");
@@ -7037,6 +7172,7 @@ mod tests {
             space.id,
             vec!["lead".into()],
             vec![],
+            None,
             None,
             WorkflowBudget {
                 max_agent_calls: None,
@@ -7254,6 +7390,7 @@ mod tests {
                 carrying_skill: None,
                 dispatch_bound_agent_ids: vec!["lead".into()],
                 dispatch_bound_task_definition_ids: vec![],
+                inherited_worker_placement: None,
             })
             .await
             .expect("run");
@@ -7290,6 +7427,15 @@ mod tests {
         assert_eq!(journal.len(), 1);
         assert_eq!(journal[0].status, "completed");
         assert!(journal[0].request.get("agent").is_none());
+        assert_eq!(
+            journal_wire(journal[0].clone())
+                .expect("journal wire projection")
+                .agent_call
+                .expect("agent-call detail")
+                .agent_definition_id,
+            None,
+            "a bare call must not project an invented agent definition identity"
+        );
         assert_eq!(journal[0].request["prompt"], "bounded work");
         assert_eq!(
             journal[0].result.as_ref().unwrap()["output"],
@@ -7337,6 +7483,118 @@ mod tests {
             Some(Value::String("bounded work completed".into()))
         );
         assert_eq!(provider.requests.lock().expect("requests").len(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn workflow_launched_by_a_placed_worker_keeps_its_exact_filesystem_authority() {
+        let fixture = tempfile::tempdir().expect("workspace fixture");
+        let workspace = fixture.path().join("workspace");
+        let placed = workspace.join("placed");
+        let sibling = workspace.join("sibling");
+        std::fs::create_dir_all(&placed).expect("create placed directory");
+        std::fs::create_dir_all(&sibling).expect("create sibling directory");
+
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let workspace_id = grant_workspace(storage.as_ref(), space.id, &placed).await;
+        grant_workspace(storage.as_ref(), space.id, &sibling).await;
+        storage
+            .create_workflow_script(NewWorkflowScript {
+                space_id: space.id,
+                name: "placed-launch".into(),
+                description: String::new(),
+                source: "return await agent('attempt sibling read', { maxAttempts: 1 });".into(),
+                delivery_grant: None,
+            })
+            .await
+            .expect("store workflow");
+        let authority_context_id = Uuid::new_v4();
+        let placed = std::fs::canonicalize(&placed).expect("canonical placed directory");
+        let session = storage
+            .create_session(NewSession {
+                space_id: space.id,
+                agent_id: "gateway".into(),
+                metadata: Some(serde_json::json!({
+                    "worker_placement_cwd": placed.to_string_lossy(),
+                    "worker_placement_can_write": true,
+                    "worker_placement_authority_path": placed.to_string_lossy(),
+                    "worker_placement_authority_context_id": authority_context_id,
+                })),
+                active_workspace_attachment_id: Some(workspace_id),
+            })
+            .await
+            .expect("placed session");
+        let outputs = std::collections::VecDeque::from([scripted_text_output("work complete")]);
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::new(ScriptedRecordingProvider {
+                outputs: std::sync::Mutex::new(outputs),
+                requests: std::sync::Mutex::new(vec![]),
+            }),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+
+        let started = GatewayWorkflowLauncher::new(state.clone())
+            .start_by_name(session.id, "placed-launch", Value::Null, None, false)
+            .await
+            .expect("start workflow from placed session");
+        let run_id: Uuid = serde_json::from_value(started["id"].clone()).expect("run id");
+        wait_for_terminal(&state, run_id).await;
+        let run = storage
+            .get_workflow_run(run_id)
+            .await
+            .expect("run query")
+            .expect("run");
+        assert_eq!(run.state, "completed", "run error: {:?}", run.error_message);
+        let inherited = run
+            .inherited_worker_placement
+            .expect("durable inherited placement");
+        assert_eq!(inherited.path, placed.to_string_lossy());
+        let worker_session_id = storage
+            .list_workflow_journal(run_id)
+            .await
+            .expect("journal")
+            .into_iter()
+            .find(|entry| entry.kind == "agent_call")
+            .and_then(|entry| entry.result)
+            .and_then(|result| result["session_id"].as_str().map(str::to_owned))
+            .and_then(|id| Uuid::parse_str(&id).ok())
+            .expect("worker session id");
+        let worker_session = storage
+            .get_session(worker_session_id)
+            .await
+            .expect("worker session query")
+            .expect("worker session");
+        assert_eq!(
+            worker_session
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("worker_placement_cwd"))
+                .and_then(Value::as_str),
+            Some(placed.to_string_lossy().as_ref()),
+            "the child session must carry the placed root so the shared turn path clears sibling attachments"
+        );
+
+        storage
+            .delete_workspace_attachment(workspace_id)
+            .await
+            .expect("revoke workspace");
+        let child_error = reauthorise_recorded_worker_placement(
+            &state,
+            space.id,
+            runtime_worker_placement(&inherited),
+        )
+        .await
+        .expect_err("each later child start must re-authorise the durable placement");
+        assert!(child_error.contains("permitted workspace roots"));
+        let error = GatewayWorkflowLauncher::new(state)
+            .start_by_name(session.id, "placed-launch", Value::Null, None, false)
+            .await
+            .expect_err("revoked placement must fail closed");
+        assert!(error.contains("worker placement is no longer authorised"));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -7746,6 +8004,7 @@ mod tests {
                 carrying_skill: None,
                 dispatch_bound_agent_ids: vec![],
                 dispatch_bound_task_definition_ids: vec![],
+                inherited_worker_placement: None,
             })
             .await
             .expect("run");
@@ -7772,6 +8031,7 @@ mod tests {
                 space.id,
                 vec![],
                 vec![],
+                None,
                 None,
                 WorkflowBudget::default(),
                 replay,
@@ -8394,6 +8654,7 @@ mod tests {
                 carrying_skill: None,
                 dispatch_bound_agent_ids: vec![],
                 dispatch_bound_task_definition_ids: vec![],
+                inherited_worker_placement: None,
             })
             .await
             .expect("run");
@@ -8502,6 +8763,7 @@ mod tests {
                 carrying_skill: None,
                 dispatch_bound_agent_ids: vec![],
                 dispatch_bound_task_definition_ids: vec![],
+                inherited_worker_placement: None,
             })
             .await
             .expect("run");
@@ -8570,6 +8832,7 @@ mod tests {
                 engine_version: "test".into(),
                 dispatch_bound_agent_ids: vec![],
                 dispatch_bound_task_definition_ids: vec![],
+                inherited_worker_placement: None,
             })
             .await
             .expect("run");
@@ -8599,6 +8862,7 @@ mod tests {
             space.id,
             vec![],
             vec![],
+            None,
             None,
             WorkflowBudget {
                 max_agent_calls: None,
@@ -8825,6 +9089,7 @@ mod tests {
                 engine_version: "test".into(),
                 dispatch_bound_agent_ids: vec![],
                 dispatch_bound_task_definition_ids: vec![],
+                inherited_worker_placement: None,
             })
             .await
             .expect("run");
@@ -8899,6 +9164,7 @@ mod tests {
                 engine_version: "test".into(),
                 dispatch_bound_agent_ids: vec![],
                 dispatch_bound_task_definition_ids: vec![],
+                inherited_worker_placement: None,
             })
             .await
             .expect("run");
@@ -9467,6 +9733,7 @@ mod tests {
             vec![],
             vec![],
             None,
+            None,
             WorkflowBudget {
                 max_agent_calls: None,
                 max_total_tokens: None,
@@ -9747,6 +10014,7 @@ mod tests {
             vec![],
             vec![],
             None,
+            None,
             WorkflowBudget {
                 max_agent_calls: None,
                 max_total_tokens: None,
@@ -9955,6 +10223,7 @@ mod tests {
             engine_version: "test".into(),
             dispatch_bound_agent_ids: vec![],
             dispatch_bound_task_definition_ids: vec![],
+            inherited_worker_placement: None,
         };
         let interrupted = storage
             .create_workflow_run(make_run(r#"return "a-done""#))
@@ -10040,6 +10309,7 @@ mod tests {
                 engine_version: "test".into(),
                 dispatch_bound_agent_ids: vec![],
                 dispatch_bound_task_definition_ids: vec![],
+                inherited_worker_placement: None,
             })
             .await
             .expect("run");
@@ -10063,6 +10333,7 @@ mod tests {
             space.id,
             vec![],
             vec![],
+            None,
             None,
             WorkflowBudget {
                 max_agent_calls: None,
@@ -10162,6 +10433,7 @@ mod tests {
                 engine_version: "test".into(),
                 dispatch_bound_agent_ids: vec![],
                 dispatch_bound_task_definition_ids: vec![],
+                inherited_worker_placement: None,
             })
             .await
             .expect("run");
@@ -10185,6 +10457,7 @@ mod tests {
             space.id,
             vec![],
             vec![],
+            None,
             None,
             WorkflowBudget {
                 max_agent_calls: Some(3),
@@ -10300,6 +10573,7 @@ mod tests {
                 engine_version: "test".into(),
                 dispatch_bound_agent_ids: vec![],
                 dispatch_bound_task_definition_ids: vec![],
+                inherited_worker_placement: None,
             })
             .await
             .expect("run");
@@ -10389,6 +10663,7 @@ mod tests {
             space.id,
             vec![],
             vec![],
+            None,
             None,
             WorkflowBudget {
                 max_agent_calls: Some(3),
@@ -10487,6 +10762,7 @@ mod tests {
                 engine_version: "test".into(),
                 dispatch_bound_agent_ids: vec![],
                 dispatch_bound_task_definition_ids: vec![],
+                inherited_worker_placement: None,
             })
             .await
             .expect("run");
@@ -10542,6 +10818,7 @@ mod tests {
             space.id,
             vec![],
             vec![],
+            None,
             None,
             WorkflowBudget {
                 max_agent_calls: None,
@@ -10619,6 +10896,7 @@ mod tests {
                 engine_version: "test".into(),
                 dispatch_bound_agent_ids: vec![],
                 dispatch_bound_task_definition_ids: vec![],
+                inherited_worker_placement: None,
             })
             .await
             .expect("run");
@@ -10706,6 +10984,7 @@ mod tests {
             space.id,
             vec![],
             vec![],
+            None,
             None,
             WorkflowBudget {
                 max_agent_calls: Some(3),
@@ -10822,6 +11101,7 @@ mod tests {
                 engine_version: "test".into(),
                 dispatch_bound_agent_ids: vec![],
                 dispatch_bound_task_definition_ids: vec![],
+                inherited_worker_placement: None,
             })
             .await
             .expect("run");
@@ -10930,6 +11210,7 @@ mod tests {
             space.id,
             vec![],
             vec![],
+            None,
             None,
             WorkflowBudget {
                 max_agent_calls: Some(3),
@@ -11059,6 +11340,7 @@ mod tests {
                 engine_version: "test".into(),
                 dispatch_bound_agent_ids: vec![],
                 dispatch_bound_task_definition_ids: vec![],
+                inherited_worker_placement: None,
             })
             .await
             .expect("run");
@@ -11177,6 +11459,7 @@ mod tests {
             vec![],
             vec![],
             None,
+            None,
             WorkflowBudget {
                 max_agent_calls: Some(3),
                 max_total_tokens: Some(6),
@@ -11284,6 +11567,7 @@ mod tests {
                 engine_version: "test".into(),
                 dispatch_bound_agent_ids: vec![],
                 dispatch_bound_task_definition_ids: vec![],
+                inherited_worker_placement: None,
             })
             .await
             .expect("run");
@@ -11796,6 +12080,7 @@ mod tests {
                 engine_version: "test".into(),
                 dispatch_bound_agent_ids: vec![],
                 dispatch_bound_task_definition_ids: vec![],
+                inherited_worker_placement: None,
             })
             .await
             .expect("run");
