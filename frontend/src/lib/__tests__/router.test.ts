@@ -174,6 +174,60 @@ describe("navigate", () => {
 // ---------------------------------------------------------------------------
 
 describe("popstate", () => {
+  it("does not restore an earlier route when its selection fails after newer navigation", async () => {
+    window.history.replaceState(null, "", "/conversations/active-conv");
+    let popstateHandler: EventListener | null = null;
+    vi.spyOn(window, "addEventListener").mockImplementation((type, listener) => {
+      if (type === "popstate") {
+        popstateHandler =
+          typeof listener === "function"
+            ? listener
+            : (event) => listener.handleEvent(event);
+      }
+    });
+    let rejectEarlierSelection: (error: Error) => void = () => {
+      throw new Error("earlier selection was not started");
+    };
+    let resolveNewerSelection: () => void = () => {
+      throw new Error("newer selection was not started");
+    };
+    const selectConversation = vi.fn((id: string) => {
+      if (id === "earlier-conv") {
+        return new Promise<void>((_resolve, reject) => {
+          rejectEarlierSelection = reject;
+        });
+      }
+      return new Promise<void>((resolve) => {
+        resolveNewerSelection = resolve;
+      });
+    });
+    const router = createRouter({
+      conversationStore: {
+        activeConversationId: "active-conv",
+        checkConversationExists: vi.fn().mockResolvedValue(undefined),
+        clearActiveConversation: vi.fn(),
+        selectConversation,
+      },
+    });
+    await router.init();
+    expect(popstateHandler).not.toBeNull();
+
+    window.history.replaceState(null, "", "/conversations/earlier-conv");
+    popstateHandler!(new PopStateEvent("popstate"));
+    await vi.waitFor(() => expect(selectConversation).toHaveBeenCalledWith("earlier-conv"));
+    window.history.replaceState(null, "", "/conversations/newer-conv");
+    popstateHandler!(new PopStateEvent("popstate"));
+    await vi.waitFor(() => expect(selectConversation).toHaveBeenCalledWith("newer-conv"));
+
+    rejectEarlierSelection(new Error("HTTP 503 gateway unavailable"));
+    await Promise.resolve();
+
+    expect(window.location.pathname).toBe("/conversations/newer-conv");
+    expect(router.currentRoute.conversationId).toBe("newer-conv");
+
+    resolveNewerSelection();
+  });
+
   it("restores the active route when selecting browser history fails", async () => {
     window.history.replaceState(null, "", "/conversations/active-conv");
     const onRouteChange = vi.fn();
@@ -233,6 +287,66 @@ describe("popstate", () => {
 // ---------------------------------------------------------------------------
 
 describe("init with conversation store", () => {
+  it("does not clear an active conversation when its stale check fails during route selection", async () => {
+    window.history.replaceState(null, "", "/conversations/active-conv");
+    let popstateHandler: EventListener | null = null;
+    vi.spyOn(window, "addEventListener").mockImplementation((type, listener) => {
+      if (type === "popstate") {
+        popstateHandler =
+          typeof listener === "function"
+            ? listener
+            : (event) => listener.handleEvent(event);
+      }
+    });
+    let rejectExistenceCheck: (error: Error) => void = () => {
+      throw new Error("existence check was not started");
+    };
+    let resolveSelection: () => void = () => {
+      throw new Error("selection was not started");
+    };
+    const clearActiveConversation = vi.fn();
+    const selectConversation = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveSelection = resolve;
+        }),
+    );
+    const router = createRouter({
+      conversationStore: {
+        activeConversationId: "active-conv",
+        checkConversationExists: vi.fn(
+          () =>
+            new Promise<void>((_resolve, reject) => {
+              rejectExistenceCheck = reject;
+            }),
+        ),
+        clearActiveConversation,
+        selectConversation,
+      },
+    });
+
+    const initialisation = router.init();
+    expect(popstateHandler).not.toBeNull();
+    window.history.replaceState(null, "", "/conversations/new-conv");
+    popstateHandler!(new PopStateEvent("popstate"));
+    await vi.waitFor(() => expect(selectConversation).toHaveBeenCalledWith("new-conv"));
+    rejectExistenceCheck(new Error("HTTP 404 from GET /api/conversations/active-conv"));
+    await initialisation;
+
+    expect(clearActiveConversation).not.toHaveBeenCalled();
+    expect(window.location.pathname).toBe("/conversations/new-conv");
+    expect(router.currentRoute).toEqual({
+      path: "/conversations/new-conv",
+      conversationId: "new-conv",
+      settingsTab: null,
+      settingsSpaceSlug: null,
+      settingsSpaceTab: null,
+      notFound: false,
+    });
+
+    resolveSelection();
+  });
+
   it("does not clear a newer selection when an existence check reports 404", async () => {
     window.history.replaceState(null, "", "/conversations/first-conv");
     let rejectExistenceCheck: (error: Error) => void = () => {
