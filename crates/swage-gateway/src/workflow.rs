@@ -4114,6 +4114,7 @@ mod tests {
             })
             .await
             .expect("session");
+        let _skill_root = crate::websocket::SessionSkillRootGuard::empty(session.id);
 
         let started = GatewayWorkflowLauncher::new(state.clone())
             .start_by_name(session.id, "research-sweep", Value::Null, None, false)
@@ -4140,6 +4141,7 @@ mod tests {
     async fn workflow_composition_resolves_a_builtin_child() {
         let (state, storage) = workflow_test_state();
         let space = storage.get_or_create_default().await.expect("space");
+        let _skill_root = crate::skill::SpaceSkillRootGuard::empty(space.id);
         let (parent, _) = storage
             .create_workflow_script(NewWorkflowScript {
                 space_id: space.id,
@@ -4379,6 +4381,7 @@ mod tests {
     async fn composed_shipped_workflow_retains_embedded_source_and_skill_attribution() {
         let (state, storage) = workflow_test_state();
         let space = storage.get_or_create_default().await.expect("space");
+        let _skill_root = crate::skill::SpaceSkillRootGuard::empty(space.id);
         let (parent, _) = storage
             .create_workflow_script(NewWorkflowScript {
                 space_id: space.id,
@@ -9649,6 +9652,7 @@ mod tests {
     async fn composed_run_executes_the_child_and_journals_its_output() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
         let space = storage.get_or_create_default().await.expect("space");
+        let _skill_root = crate::skill::SpaceSkillRootGuard::empty(space.id);
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn SpaceStore>,
@@ -9724,6 +9728,7 @@ mod tests {
     async fn a_child_run_cannot_compose_further() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
         let space = storage.get_or_create_default().await.expect("space");
+        let _skill_root = crate::skill::SpaceSkillRootGuard::empty(space.id);
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn SpaceStore>,
