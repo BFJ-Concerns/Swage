@@ -1004,6 +1004,10 @@ impl MockStorage {
         self.fail_turn_state_write_at.store(call, Ordering::SeqCst);
     }
 
+    pub(crate) fn turn_state_write_calls(&self) -> usize {
+        self.turn_state_write_calls.load(Ordering::SeqCst)
+    }
+
     fn fail_inbound_audit_writes(&self) {
         self.fail_inbound_audit_writes.store(true, Ordering::SeqCst);
     }
