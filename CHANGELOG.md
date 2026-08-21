@@ -6,6 +6,7 @@ All notable changes to Swage are documented in this file.
 
 ### Added
 
+- Skills can carry immediately runnable workflow scripts, with same-named authored workflows taking precedence.
 - Fresh installations discover and activate the shipped development-process skills, with same-named operator skills taking precedence.
 - Workflow runs can wait on external events, answered through operator or granted agent posts.
 - Session leads can save named values for their session and use them to fill parameterised context elements at composition time.

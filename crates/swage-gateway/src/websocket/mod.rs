@@ -13,7 +13,8 @@ use crate::state::AppState;
 #[cfg(test)]
 use axum::http::StatusCode;
 #[cfg(test)]
-use dispatch::TEST_SKILL_ROOTS;
+pub(crate) use dispatch::TEST_SKILL_ROOTS;
+pub(crate) use dispatch::discover_available_for_session;
 use dispatch::dispatch_client_message;
 #[cfg(test)]
 use tokio::sync::{Mutex, mpsc};

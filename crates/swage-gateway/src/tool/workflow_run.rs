@@ -19,7 +19,7 @@ impl Tool for WorkflowRunTool {
         "workflow_run"
     }
     fn description(&self) -> &str {
-        "Start a saved workflow by name. Workflows enforce their own agent and delivery capabilities; use wait=true only when this turn needs the final result."
+        "Start an available workflow by name. Workflows enforce their own agent and delivery capabilities; use wait=true only when this turn needs the final result."
     }
     fn parameters(&self) -> Value {
         json!({
@@ -27,7 +27,7 @@ impl Tool for WorkflowRunTool {
             "properties": {
                 "name": {
                     "type": "string",
-                    "description": "The saved workflow's name in this space."
+                    "description": "The available workflow's name in this space."
                 },
                 "args": {
                     "description": "Arguments handed to the script as `args`; any JSON value the workflow expects."

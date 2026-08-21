@@ -4896,6 +4896,12 @@
         "budget": {
           "$ref": "#/$defs/WorkflowBudget"
         },
+        "carrying_skill": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "completed_at": {
           "type": [
             "string",
