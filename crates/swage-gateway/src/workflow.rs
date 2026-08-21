@@ -5473,6 +5473,7 @@ mod tests {
                 timeout_ms: None,
                 prompt: "move the continued worker".into(),
                 agent: Some("worker".into()),
+                task: None,
                 model: None,
                 schema: None,
                 max_attempts: 1,
