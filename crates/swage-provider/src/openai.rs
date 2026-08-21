@@ -914,6 +914,24 @@ mod tests {
     }
 
     #[test]
+    fn completion_without_effort_omits_openai_reasoning_effort() {
+        let provider =
+            OpenAiProvider::from_config(ProviderConfig::new("key", "model", "http://localhost"));
+        let request = CompletionRequest {
+            effort: None,
+            messages: vec![],
+            model: None,
+            max_tokens: None,
+            temperature: None,
+            stop_sequences: None,
+            metadata: None,
+            tool_definitions: vec![],
+        };
+        let body = serde_json::to_value(provider.build_request(&request, false)).unwrap();
+        assert!(!body.as_object().unwrap().contains_key("reasoning_effort"));
+    }
+
+    #[test]
     fn build_request_falls_back_to_config_model() {
         let provider =
             OpenAiProvider::from_config(ProviderConfig::new("key", "gpt-4o", "http://localhost"));
