@@ -9374,21 +9374,23 @@ mod tests {
         run_id: Uuid,
         expected: &str,
     ) -> WorkflowRunRecord {
-        tokio::time::timeout(std::time::Duration::from_secs(10), async {
-            loop {
-                let run = storage
-                    .get_workflow_run(run_id)
-                    .await
-                    .expect("get workflow run")
-                    .expect("workflow run");
-                if run.state == expected {
-                    return run;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        loop {
+            let run = storage
+                .get_workflow_run(run_id)
+                .await
+                .expect("get workflow run")
+                .expect("workflow run");
+            if run.state == expected {
+                return run;
             }
-        })
-        .await
-        .unwrap_or_else(|_| panic!("run {run_id} did not reach {expected}"))
+            if matches!(run.state.as_str(), "completed" | "failed" | "cancelled") {
+                panic!(
+                    "run {run_id} reached {} instead of {expected}: {:?}",
+                    run.state, run.error_message
+                );
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]
