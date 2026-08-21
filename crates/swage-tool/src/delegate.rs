@@ -149,15 +149,17 @@ impl Tool for DelegateTool {
 
         // Signal the agent turn loop to handle delegation.
         Err(ToolError::RequiresDelegation {
-            name: DELEGATE_TOOL_NAME.to_string(),
-            target_agent_id,
-            task,
-            task_definition,
-            context,
-            cwd,
-            isolation,
-            composition: Box::new(composition),
-            completion_mode,
+            request: Box::new(swage_core::DelegationRequest {
+                name: DELEGATE_TOOL_NAME.to_string(),
+                target_agent_id,
+                task,
+                task_definition,
+                context,
+                cwd,
+                isolation,
+                composition: Box::new(composition),
+                completion_mode,
+            }),
         })
     }
 }
@@ -195,17 +197,11 @@ mod tests {
         assert!(result.is_err());
 
         match result.unwrap_err() {
-            ToolError::RequiresDelegation {
-                target_agent_id,
-                task,
-                context,
-                completion_mode,
-                ..
-            } => {
-                assert_eq!(target_agent_id, "reviewer");
-                assert_eq!(task, "Review this code for correctness");
-                assert!(context.is_none());
-                assert_eq!(completion_mode, DelegateCompletionMode::Wait);
+            ToolError::RequiresDelegation { request } => {
+                assert_eq!(request.target_agent_id, "reviewer");
+                assert_eq!(request.task, "Review this code for correctness");
+                assert!(request.context.is_none());
+                assert_eq!(request.completion_mode, DelegateCompletionMode::Wait);
             }
             other => panic!("expected RequiresDelegation, got: {other:?}"),
         }
@@ -224,10 +220,8 @@ mod tests {
         let result = tool.execute(params, &ctx).await;
 
         match result.unwrap_err() {
-            ToolError::RequiresDelegation {
-                completion_mode, ..
-            } => {
-                assert_eq!(completion_mode, DelegateCompletionMode::Detach);
+            ToolError::RequiresDelegation { request } => {
+                assert_eq!(request.completion_mode, DelegateCompletionMode::Detach);
             }
             other => panic!("expected RequiresDelegation, got: {other:?}"),
         }
@@ -247,10 +241,10 @@ mod tests {
             )
             .await;
         match result.unwrap_err() {
-            ToolError::RequiresDelegation { cwd, isolation, .. } => {
-                assert_eq!(cwd.as_deref(), Some("/repo"));
+            ToolError::RequiresDelegation { request } => {
+                assert_eq!(request.cwd.as_deref(), Some("/repo"));
                 assert_eq!(
-                    isolation,
+                    request.isolation,
                     Some(swage_protocol::client::workflow::WorkerIsolation::Worktree)
                 );
             }
@@ -276,16 +270,20 @@ mod tests {
             .await;
 
         match result.unwrap_err() {
-            ToolError::RequiresDelegation { composition, .. } => {
-                assert_eq!(composition.elements, Some(vec!["current-work".into()]));
+            ToolError::RequiresDelegation { request } => {
                 assert_eq!(
-                    composition
+                    request.composition.elements,
+                    Some(vec!["current-work".into()])
+                );
+                assert_eq!(
+                    request
+                        .composition
                         .variables
                         .as_ref()
                         .and_then(|values| values.get("owner")),
                     Some(&"delegate-owner".to_string())
                 );
-                assert_eq!(composition.assembly.as_deref(), Some("focused"));
+                assert_eq!(request.composition.assembly.as_deref(), Some("focused"));
             }
             other => panic!("expected RequiresDelegation, got: {other:?}"),
         }
@@ -325,8 +323,8 @@ mod tests {
 
         let result = tool.execute(params, &ctx).await;
         match result.unwrap_err() {
-            ToolError::RequiresDelegation { context, .. } => {
-                assert!(context.is_some());
+            ToolError::RequiresDelegation { request } => {
+                assert!(request.context.is_some());
             }
             other => panic!("expected RequiresDelegation, got: {other:?}"),
         }
@@ -346,9 +344,9 @@ mod tests {
             .await
             .unwrap_err();
         match result {
-            ToolError::RequiresDelegation {
-                task_definition, ..
-            } => assert_eq!(task_definition.as_deref(), Some("strict-review")),
+            ToolError::RequiresDelegation { request } => {
+                assert_eq!(request.task_definition.as_deref(), Some("strict-review"))
+            }
             other => panic!("expected delegation, got {other:?}"),
         }
     }

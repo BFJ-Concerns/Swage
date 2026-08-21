@@ -4989,6 +4989,8 @@ async fn unattended_sandbox_failure_records_unattended_attendance() {
         None,
         None,
         None,
+        None,
+        None,
         TurnAttendance::Unattended,
         DispatchContextComposition::default(),
     )

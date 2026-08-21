@@ -334,26 +334,35 @@ pub enum ToolError {
     /// suspend, run the target agent via the delegation handler, and return the
     /// result as this tool's output. Like `RequiresApproval`, this is control
     /// flow, not an error — the agent handles it by orchestrating delegation.
-    #[error("tool {name} requires delegation to {target_agent_id}")]
+    #[error("tool {} requires delegation to {}", request.name, request.target_agent_id)]
     RequiresDelegation {
-        name: String,
-        /// The agent to delegate work to.
-        target_agent_id: String,
-        /// Task description for the delegate agent.
-        task: String,
-        /// Optional durable task definition resolved by the runtime.
-        task_definition: Option<String>,
-        /// Optional context to transfer to the delegate agent.
-        context: Option<serde_json::Value>,
-        /// Caller-selected child working directory.
-        cwd: Option<String>,
-        /// Optional runtime-managed child isolation.
-        isolation: Option<swage_protocol::client::workflow::WorkerIsolation>,
-        /// Call-scoped inputs used to compose the child's context.
-        composition: Box<crate::DispatchContextComposition>,
-        /// Whether the parent turn should wait for the child result.
-        completion_mode: DelegateCompletionMode,
+        /// The delegation the tool asked for. Boxed so that this control-flow
+        /// variant does not widen every `Result<_, ToolError>` in the tree.
+        request: Box<DelegationRequest>,
     },
+}
+
+/// Everything the turn loop needs to run a delegated child agent.
+#[derive(Debug, Clone)]
+pub struct DelegationRequest {
+    /// The tool that asked for delegation.
+    pub name: String,
+    /// The agent to delegate work to.
+    pub target_agent_id: String,
+    /// Task description for the delegate agent.
+    pub task: String,
+    /// Optional durable task definition resolved by the runtime.
+    pub task_definition: Option<String>,
+    /// Optional context to transfer to the delegate agent.
+    pub context: Option<serde_json::Value>,
+    /// Caller-selected child working directory.
+    pub cwd: Option<String>,
+    /// Optional runtime-managed child isolation.
+    pub isolation: Option<swage_protocol::client::workflow::WorkerIsolation>,
+    /// Call-scoped inputs used to compose the child's context.
+    pub composition: Box<crate::DispatchContextComposition>,
+    /// Whether the parent turn should wait for the child result.
+    pub completion_mode: DelegateCompletionMode,
 }
 
 impl std::fmt::Display for PermissionDeniedReason {
