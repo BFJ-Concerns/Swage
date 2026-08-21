@@ -7,7 +7,7 @@ use swage_tool::context::ToolContext;
 
 pub struct TaskDefinitionTool;
 const NAME: &str = "task_definition";
-fn state<'a>(ctx: &'a dyn ToolContext) -> Result<&'a AppState, ToolError> {
+fn state(ctx: &dyn ToolContext) -> Result<&AppState, ToolError> {
     ctx.as_any()
         .downcast_ref::<GatewayToolContext>()
         .and_then(GatewayToolContext::app_state)
