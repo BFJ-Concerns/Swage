@@ -82,14 +82,49 @@ fn provider_response_witness_is_appended_without_content_fields() {
 
 #[test]
 fn delegate_worktree_identity_is_stable_per_tool_call() {
+    let sender_turn_id = Uuid::new_v4();
     assert_eq!(
-        delegate_worktree_key("delegate-call-17"),
-        delegate_worktree_key("delegate-call-17")
+        delegate_worktree_owner(sender_turn_id, "delegate-call-17"),
+        delegate_worktree_owner(sender_turn_id, "delegate-call-17")
     );
     assert_ne!(
-        delegate_worktree_key("delegate-call-17"),
-        delegate_worktree_key("delegate-call-18")
+        delegate_worktree_owner(sender_turn_id, "delegate-call-17"),
+        delegate_worktree_owner(sender_turn_id, "delegate-call-18")
     );
+    assert_ne!(
+        delegate_worktree_owner(sender_turn_id, "delegate-call-17"),
+        delegate_worktree_owner(Uuid::new_v4(), "delegate-call-17")
+    );
+}
+
+fn init_test_git_repository(repo: &std::path::Path) {
+    for args in [
+        &["init"][..],
+        &["config", "user.email", "test@example.invalid"][..],
+        &["config", "user.name", "Test"][..],
+    ] {
+        assert!(
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(repo)
+                .args(args)
+                .status()
+                .expect("run git repository setup")
+                .success()
+        );
+    }
+    std::fs::write(repo.join("seed"), "seed").expect("seed repository");
+    for args in [&["add", "seed"][..], &["commit", "-m", "seed"][..]] {
+        assert!(
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(repo)
+                .args(args)
+                .status()
+                .expect("commit repository")
+                .success()
+        );
+    }
 }
 
 fn provider_witness_chunks() -> Vec<StreamChunk> {
@@ -8103,33 +8138,7 @@ async fn delegate_worktree_provisions_isolated_cwd_and_records_resolved_placemen
     let fixture = tempfile::tempdir().expect("worktree fixture");
     let repo = fixture.path().join("repo");
     std::fs::create_dir(&repo).expect("repository directory");
-    for args in [
-        &["init"][..],
-        &["config", "user.email", "test@example.invalid"][..],
-        &["config", "user.name", "Test"][..],
-    ] {
-        assert!(
-            std::process::Command::new("git")
-                .arg("-C")
-                .arg(&repo)
-                .args(args)
-                .status()
-                .expect("run git setup")
-                .success()
-        );
-    }
-    std::fs::write(repo.join("seed"), "seed").expect("seed repository");
-    for args in [&["add", "seed"][..], &["commit", "-m", "seed"][..]] {
-        assert!(
-            std::process::Command::new("git")
-                .arg("-C")
-                .arg(&repo)
-                .args(args)
-                .status()
-                .expect("commit repository")
-                .success()
-        );
-    }
+    init_test_git_repository(&repo);
 
     let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
     let space = storage
@@ -8177,6 +8186,24 @@ async fn delegate_worktree_provisions_isolated_cwd_and_records_resolved_placemen
     let provider = MultiRoundMockProvider::new(vec![
         vec![
             StreamChunk::ToolUse {
+                call_id: "write-in-wait-worktree".into(),
+                name: "delegated_marker_write".into(),
+                arguments: serde_json::json!({}),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ],
+        vec![
+            StreamChunk::Delta {
+                content: "wait-mode isolated write complete".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ],
+        vec![
+            StreamChunk::ToolUse {
                 call_id: "write-in-worktree".into(),
                 name: "delegated_marker_write".into(),
                 arguments: serde_json::json!({}),
@@ -8194,6 +8221,7 @@ async fn delegate_worktree_provisions_isolated_cwd_and_records_resolved_placemen
             },
         ],
     ]);
+    let worktree_root = fixture.path().join("worker-worktrees");
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
@@ -8204,7 +8232,42 @@ async fn delegate_worktree_provisions_isolated_cwd_and_records_resolved_placemen
         ]),
         None,
     )
-    .with_worktree_root(fixture.path().join("worker-worktrees"));
+    .with_worktree_root(worktree_root.clone());
+
+    let wait_owner_id = delegate_worktree_owner(parent_turn.id, "wait-worktree-delegate-call");
+    let wait_worktree = worktree_root
+        .join(wait_owner_id.to_string())
+        .join("worker-0");
+    let wait_outcome = GatewayDelegationHandler::new(state.clone())
+        .handle_delegation(
+            "agent-b",
+            "Write only in an isolated worktree and wait",
+            None,
+            Some(repo.to_string_lossy().into_owned()),
+            Some(swage_protocol::client::workflow::WorkerIsolation::Worktree),
+            "wait-worktree-delegate-call",
+            "gateway",
+            parent_turn.id,
+            space.id,
+            CancellationToken::new(),
+            DelegateCompletionMode::Wait,
+        )
+        .await
+        .expect("wait-mode worktree delegation should complete");
+    assert!(matches!(wait_outcome, DelegationOutcome::Completed(_)));
+    assert!(
+        state
+            .worktree_host
+            .list_owner(wait_owner_id)
+            .await
+            .is_empty(),
+        "successful wait-mode delegation must release its worktree owner"
+    );
+    assert!(
+        !wait_worktree.exists(),
+        "successful wait-mode delegation must remove its worktree"
+    );
+
     let outcome = GatewayDelegationHandler::new(state.clone())
         .handle_delegation(
             "agent-b",
@@ -8226,30 +8289,17 @@ async fn delegate_worktree_provisions_isolated_cwd_and_records_resolved_placemen
         DelegationOutcome::Completed(_) => panic!("expected detached delegation"),
     };
 
-    let provisioned = state.worktree_host.list_run(parent_turn.id).await;
-    assert_eq!(provisioned.len(), 1, "one delegate worktree should exist");
-    let worktree = &provisioned[0].path;
-    for _ in 0..20 {
-        if worktree.join("delegated-marker").exists() {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-    }
-    assert_eq!(
-        std::fs::read_to_string(worktree.join("delegated-marker"))
-            .expect("marker should be written inside the worktree"),
-        "placed"
-    );
-    assert!(
-        !repo.join("delegated-marker").exists(),
-        "delegate writes must not touch the source repository"
-    );
-
     let delegate = storage
         .get_agent_message(detached.delegate_message_id)
         .await
         .expect("read delegate record")
         .expect("durable delegate record");
+    let owner_id = delegate_worktree_owner(parent_turn.id, "worktree-delegate-call");
+    let worktree = std::path::PathBuf::from(
+        delegate.payload["placement"]["cwd"]
+            .as_str()
+            .expect("resolved placement path"),
+    );
     assert_eq!(
         delegate.payload["placement"]["requested_cwd"],
         repo.to_string_lossy().as_ref()
@@ -8262,6 +8312,50 @@ async fn delegate_worktree_provisions_isolated_cwd_and_records_resolved_placemen
         delegate.payload["placement"]["isolation"],
         serde_json::to_value(swage_protocol::client::workflow::WorkerIsolation::Worktree)
             .expect("serialise isolation")
+    );
+    assert_eq!(
+        delegate.payload["placement"]["owner_id"],
+        owner_id.to_string()
+    );
+
+    let mut result_messages = Vec::new();
+    for _ in 0..20 {
+        result_messages = storage
+            .list_by_correlation(detached.delegate_message_id)
+            .await
+            .expect("list delegated result messages");
+        if result_messages
+            .iter()
+            .any(|message| message.kind == swage_core::MessageKind::Result)
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(
+        result_messages.iter().any(|message| {
+            message.kind == swage_core::MessageKind::Result
+                && message.payload.get("error").is_none()
+        }),
+        "the detached delegate should record a successful terminal result"
+    );
+    for _ in 0..20 {
+        if state.worktree_host.list_owner(owner_id).await.is_empty() && !worktree.exists() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(
+        state.worktree_host.list_owner(owner_id).await.is_empty(),
+        "successful detached delegation must release its worktree owner"
+    );
+    assert!(
+        !worktree.exists(),
+        "successful detached delegation must remove its worktree"
+    );
+    assert!(
+        !repo.join("delegated-marker").exists(),
+        "delegate writes must not touch the source repository"
     );
 }
 
@@ -8322,6 +8416,7 @@ async fn detached_delegate_can_be_cancelled_through_active_registry() {
     .with_worktree_root(placement_fixture.path().join("worker-worktrees"));
     let handler = GatewayDelegationHandler::new(state.clone());
     let delegated_cwd = tempfile::tempdir().expect("delegated cwd");
+    init_test_git_repository(delegated_cwd.path());
     storage
         .create_workspace_attachment(NewWorkspaceAttachment {
             space_id: space.id,
@@ -8339,7 +8434,7 @@ async fn detached_delegate_can_be_cancelled_through_active_registry() {
             "Summarise independently",
             None,
             Some(delegated_cwd.path().to_string_lossy().into_owned()),
-            None,
+            Some(swage_protocol::client::workflow::WorkerIsolation::Worktree),
             "detached-placement-delegate",
             "gateway",
             parent_turn.id,
@@ -8357,8 +8452,12 @@ async fn detached_delegate_can_be_cancelled_through_active_registry() {
     tokio::time::timeout(std::time::Duration::from_secs(1), child_started.notified())
         .await
         .expect("detached child should enter provider stream");
+    let worktree_owner_id = delegate_worktree_owner(parent_turn.id, "detached-placement-delegate");
+    let provisioned = state.worktree_host.list_owner(worktree_owner_id).await;
+    assert_eq!(provisioned.len(), 1, "cancelled delegate worktree owner");
+    let delegated_worktree = provisioned[0].path.clone();
     assert_eq!(
-        std::fs::read_to_string(delegated_cwd.path().join("delegated-marker"))
+        std::fs::read_to_string(delegated_worktree.join("delegated-marker"))
             .expect("delegated tool should write at the resolved placement"),
         "placed"
     );
@@ -8445,12 +8544,16 @@ async fn detached_delegate_can_be_cancelled_through_active_registry() {
     assert_eq!(delegate.status, MessageStatus::Delivered);
     assert_eq!(
         delegate.payload["placement"]["cwd"],
-        delegated_cwd.path().to_string_lossy().as_ref(),
+        delegated_worktree.to_string_lossy().as_ref(),
         "the child's durable delegate record must carry the resolved placement"
     );
     assert_eq!(
         delegate.payload["placement"]["requested_cwd"],
         delegated_cwd.path().to_string_lossy().as_ref()
+    );
+    assert_eq!(
+        delegate.payload["placement"]["owner_id"],
+        worktree_owner_id.to_string()
     );
 
     let mut result_messages = Vec::new();
@@ -8486,6 +8589,18 @@ async fn detached_delegate_can_be_cancelled_through_active_registry() {
             .await
             .is_none()
         {
+            assert_eq!(
+                state
+                    .worktree_host
+                    .list_owner(worktree_owner_id)
+                    .await
+                    .len(),
+                1,
+                "cancelled delegation must retain its worktree until shutdown"
+            );
+            assert!(delegated_worktree.exists());
+            state.worktree_host.shutdown().await;
+            assert!(!delegated_worktree.exists());
             return;
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;

@@ -3620,7 +3620,7 @@ async fn launch_existing_run(
             .update_workflow_run_state(run_id, run_state, output, handover, error.as_deref())
             .await;
         if state_update.is_ok() && run_state == "completed" {
-            worktree_host.cleanup_run(run_id).await;
+            worktree_host.cleanup_owner(run_id).await;
         }
         let _ = storage
             .create_audit_event(NewAuditEvent {
@@ -5804,8 +5804,8 @@ mod tests {
             4,
             "replay must not add a worktree journal entry"
         );
-        assert_eq!(replay_state.worktree_host.list_run(run.id).await.len(), 1);
-        replay_state.worktree_host.cleanup_run(run.id).await;
+        assert_eq!(replay_state.worktree_host.list_owner(run.id).await.len(), 1);
+        replay_state.worktree_host.cleanup_owner(run.id).await;
         assert!(
             !std::path::Path::new(&first_path).exists(),
             "the replay host must own the restored worktree for terminal cleanup"
