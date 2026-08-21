@@ -122,7 +122,7 @@ impl Tool for DelegateTool {
             target_agent_id,
             task,
             context,
-            composition,
+            composition: Box::new(composition),
             completion_mode,
         })
     }

@@ -1547,7 +1547,7 @@ impl Agent {
                         &target_agent_id,
                         &task,
                         transferred_context,
-                        composition,
+                        *composition,
                         &self.config.agent_id,
                         execution.turn_id,
                         space_id,
