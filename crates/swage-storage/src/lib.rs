@@ -27,8 +27,8 @@ pub use model::{
     ScheduleRunUpdate, ScheduleStatus, SecretRecord, Session, SessionPolicy, SessionVariable,
     SkipReason, SourceObservation, Space, SpaceSlug, TaskDefinition, Thread, ThreadBranch,
     ThreadState, ToolCallRecord, Turn, TurnState, UpdateSchedule, WorkflowJournalRecord,
-    WorkflowRunEventRecord, WorkflowRunRecord, WorkflowScriptRecord, WorkflowScriptVersion,
-    WorkspaceAttachment,
+    WorkflowRunEventRecord, WorkflowRunRecord, WorkflowRunWorkerPlacement, WorkflowScriptRecord,
+    WorkflowScriptVersion, WorkspaceAttachment,
 };
 pub use sqlite::SqliteStorage;
 pub use store::{

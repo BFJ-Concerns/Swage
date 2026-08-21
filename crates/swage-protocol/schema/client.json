@@ -4632,8 +4632,11 @@
     "WorkflowAgentCallDetail": {
       "type": "object",
       "properties": {
-        "agent_id": {
-          "type": "string"
+        "agent_definition_id": {
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "input_tokens": {
           "type": [
@@ -4672,10 +4675,7 @@
           ],
           "format": "uuid"
         }
-      },
-      "required": [
-        "agent_id"
-      ]
+      }
     },
     "WorkflowBudget": {
       "type": "object",

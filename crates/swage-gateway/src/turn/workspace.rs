@@ -218,18 +218,17 @@ pub(crate) async fn resolve_authorised_worker_directory(
     ))
 }
 
-/// Re-authorise a durable worker placement for this execution. The placement
-/// directory remains immutable, while its authority root and context are
-/// checked against the current attachment/location grants and its write bit is
-/// replaced in the in-memory session metadata used to build this turn.
-pub(crate) async fn reauthorise_worker_placement_for_turn(
+/// Re-authorise the durable placement carried by a session. Callers that
+/// dispatch more work use the returned exact directory as their complete
+/// filesystem authority; a partial or revoked placement fails closed.
+pub(crate) async fn reauthorise_session_worker_placement(
     state: &crate::state::AppState,
-    session: &mut swage_storage::Session,
-) -> Result<(), swage_core::GatewayError> {
+    session: &swage_storage::Session,
+) -> Result<Option<ResolvedWorkerDirectory>, swage_core::GatewayError> {
     if !super::worker_placement_metadata_present(session.metadata.as_ref()) {
-        return Ok(());
+        return Ok(None);
     }
-    let metadata = session.metadata.as_mut().ok_or_else(|| {
+    let metadata = session.metadata.as_ref().ok_or_else(|| {
         swage_core::GatewayError::ConfigError("worker placement metadata is incomplete".to_string())
     })?;
     let placement_path = metadata
@@ -284,12 +283,34 @@ pub(crate) async fn reauthorise_worker_placement_for_turn(
             "worker placement is no longer authorised: {error}"
         ))
     })?;
+    Ok(Some(ResolvedWorkerDirectory {
+        path: placement_path,
+        can_write: authorised.can_write,
+        authority_path: authorised.path,
+        authority_context_id,
+    }))
+}
+
+/// Re-authorise a durable worker placement for this execution. The placement
+/// directory remains immutable, while its authority root and context are
+/// checked against the current attachment/location grants and its write bit is
+/// replaced in the in-memory session metadata used to build this turn.
+pub(crate) async fn reauthorise_worker_placement_for_turn(
+    state: &crate::state::AppState,
+    session: &mut swage_storage::Session,
+) -> Result<(), swage_core::GatewayError> {
+    let Some(placement) = reauthorise_session_worker_placement(state, session).await? else {
+        return Ok(());
+    };
+    let metadata = session.metadata.as_mut().ok_or_else(|| {
+        swage_core::GatewayError::ConfigError("worker placement metadata is incomplete".to_string())
+    })?;
     metadata[super::WORKER_PLACEMENT_CWD_METADATA_KEY] =
-        serde_json::Value::String(placement_path.to_string_lossy().into_owned());
+        serde_json::Value::String(placement.path.to_string_lossy().into_owned());
     metadata[super::WORKER_PLACEMENT_AUTHORITY_PATH_METADATA_KEY] =
-        serde_json::Value::String(authorised.path.to_string_lossy().into_owned());
+        serde_json::Value::String(placement.authority_path.to_string_lossy().into_owned());
     metadata[super::WORKER_PLACEMENT_CAN_WRITE_METADATA_KEY] =
-        serde_json::Value::Bool(authorised.can_write);
+        serde_json::Value::Bool(placement.can_write);
     Ok(())
 }
 

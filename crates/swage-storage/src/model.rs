@@ -1868,6 +1868,17 @@ pub struct WorkflowScriptVersion {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WorkflowRunWorkerPlacement {
+    /// The exact directory that bounds every worker dispatched by the run.
+    pub path: String,
+    pub can_write: bool,
+    /// The durable grant provenance used to re-authorise `path` on every
+    /// worker start without widening back to the space's other attachments.
+    pub authority_path: String,
+    pub authority_context_id: Uuid,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WorkflowRunRecord {
     pub id: Uuid,
     pub space_id: Uuid,
@@ -1902,6 +1913,9 @@ pub struct WorkflowRunRecord {
     /// run. Worker sessions re-resolve and intersect every definition at
     /// each turn; a missing definition therefore fails closed.
     pub dispatch_bound_task_definition_ids: Vec<String>,
+    /// Filesystem authority inherited from the session that launched this
+    /// run. `None` means the run was not launched by a placed worker.
+    pub inherited_worker_placement: Option<WorkflowRunWorkerPlacement>,
     /// When a parked run is due to wake. Set only while `state` is
     /// `parked`; cleared on every other state transition.
     pub wake_at: Option<DateTime<Utc>>,
@@ -1930,6 +1944,8 @@ pub struct NewWorkflowRun {
     pub dispatch_bound_agent_ids: Vec<String>,
     /// See `WorkflowRunRecord::dispatch_bound_task_definition_ids`.
     pub dispatch_bound_task_definition_ids: Vec<String>,
+    /// See `WorkflowRunRecord::inherited_worker_placement`.
+    pub inherited_worker_placement: Option<WorkflowRunWorkerPlacement>,
 }
 
 /// One entry in a run's durable event queue. Events are namespaced data from
