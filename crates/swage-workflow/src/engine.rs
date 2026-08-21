@@ -1326,6 +1326,31 @@ mod tests {
         );
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn agent_call_rejects_an_explicitly_empty_agent() {
+        let host = Arc::new(SurfaceHost::new());
+        let output = WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                r#"try {
+                    await agent("inspect the unit", { agent: "" });
+                } catch (error) {
+                    return { name: error.name, message: error.message };
+                }"#,
+                "null",
+                CancellationToken::new(),
+                Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                ScriptCapabilities::default(),
+            )
+            .await
+            .expect("empty agent validation is catchable");
+
+        assert_eq!(
+            serde_json::from_str::<Value>(&output).unwrap(),
+            json!({"name": "AgentRequiredError", "message": "opts.agent is required"})
+        );
+        assert!(host.agent_requests.lock().unwrap().is_empty());
+    }
+
     #[tokio::test]
     async fn agent_call_projects_named_task_to_the_host() {
         let host = Arc::new(SurfaceHost::new());
