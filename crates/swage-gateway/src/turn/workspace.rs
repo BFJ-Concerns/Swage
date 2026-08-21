@@ -2,7 +2,7 @@ use super::{
     AgentConfig, Arc, GatewayToolAdvertisementFilter, Path, PathBuf, PermissionConfig, Tool,
     ToolRequireApprovalEntry, Uuid,
 };
-use crate::turn::{append_approved_location_paths, managed_scratch_workspace};
+use crate::turn::managed_scratch_workspace;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct WorkspacePermissionSummary {
@@ -123,6 +123,7 @@ pub(crate) async fn resolve_authorised_worker_directory(
     space_id: Uuid,
     context_id: Uuid,
     active_workspace_attachment_id: Option<Uuid>,
+    inherited_placement: Option<&ResolvedWorkerDirectory>,
     requested: &str,
 ) -> Result<ResolvedWorkerDirectory, String> {
     let candidate = tokio::fs::canonicalize(requested)
@@ -153,6 +154,21 @@ pub(crate) async fn resolve_authorised_worker_directory(
         path_within_device_workspace(&candidate, &[canonical_root])
     };
 
+    // A placed worker's exact directory is its complete filesystem authority.
+    // Do not let a nested dispatch fall back to the wider space policy.
+    if let Some(placement) = inherited_placement {
+        if within(&placement.path) {
+            return Ok(ResolvedWorkerDirectory {
+                path: candidate,
+                can_write: placement.can_write,
+            });
+        }
+        return Err(format!(
+            "worker cwd {} is outside the dispatching context's placed workspace root",
+            candidate.display()
+        ));
+    }
+
     if let Some(grant) = policy
         .active_workspace
         .iter()
@@ -171,12 +187,18 @@ pub(crate) async fn resolve_authorised_worker_directory(
         });
     }
 
-    let mut approved_paths = Vec::new();
-    append_approved_location_paths(&mut approved_paths, &approval_grants, space_id);
-    if approved_paths.iter().any(|root| within(root)) {
+    let matching_approval_grants = approval_grants
+        .iter()
+        .filter(|grant| grant.kind == swage_storage::model::ApprovalKind::Location)
+        .filter(|grant| grant.space_id.is_none() || grant.space_id == Some(space_id))
+        .filter(|grant| within(Path::new(&grant.name)))
+        .collect::<Vec<_>>();
+    if !matching_approval_grants.is_empty() {
         return Ok(ResolvedWorkerDirectory {
             path: candidate,
-            can_write: true,
+            can_write: matching_approval_grants
+                .iter()
+                .any(|grant| grant.access.as_deref() == Some("write")),
         });
     }
 

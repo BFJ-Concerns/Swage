@@ -506,6 +506,11 @@ enum HostCommand {
         cancellation: CancellationToken,
         reply: oneshot::Sender<Result<AgentCallResult, String>>,
     },
+    DispatchAgent {
+        request: AgentCallRequest,
+        cancellation: CancellationToken,
+        reply: oneshot::Sender<Result<AgentCallResult, String>>,
+    },
     ProvisionWorker {
         cwd: Option<String>,
         isolation: swage_protocol::client::workflow::WorkerIsolation,
@@ -594,6 +599,24 @@ impl WorkflowHost for ChannelWorkflowHost {
             .send(HostCommand::Agent {
                 request,
                 resolved_working_directory,
+                cancellation,
+                reply,
+            })
+            .map_err(|_| "workflow host stopped".to_string())?;
+        receive
+            .await
+            .map_err(|_| "workflow host dropped agent reply".to_string())?
+    }
+
+    async fn dispatch_agent_call(
+        &self,
+        request: AgentCallRequest,
+        cancellation: CancellationToken,
+    ) -> Result<AgentCallResult, String> {
+        let (reply, receive) = oneshot::channel();
+        self.tx
+            .send(HostCommand::DispatchAgent {
+                request,
                 cancellation,
                 reply,
             })
@@ -1045,6 +1068,195 @@ fn run_host_commands(
     ))
 }
 
+async fn provision_worker_command(
+    state: &AppState,
+    run_id: Uuid,
+    space_id: Uuid,
+    replay: &[WorkflowJournalRecord],
+    current_seq: u64,
+    cwd: Option<String>,
+    isolation: swage_protocol::client::workflow::WorkerIsolation,
+) -> Result<Option<ResolvedWorkerPlacement>, String> {
+    let request = serde_json::json!({"cwd": cwd, "isolation": isolation});
+    let hash = journal_args_hash(&request);
+    let existing = replay.get(current_seq as usize);
+    if let Some(entry) = existing {
+        if entry.kind != "worker_placement" || entry.args_hash != hash {
+            Err("NondeterministicReplayError".into())
+        } else if entry.status == "completed" {
+            let (path, can_write) = entry
+                .result
+                .as_ref()
+                .and_then(|result| {
+                    Some((
+                        result.get("path")?.as_str()?.to_string(),
+                        result.get("can_write")?.as_bool()?,
+                    ))
+                })
+                .ok_or_else(|| "completed worker placement has no path".to_string())?;
+            let repo = cwd.as_deref().ok_or_else(|| {
+                "WorkerPlacementError: isolation=worktree requires cwd to name the git repository"
+                    .to_string()
+            })?;
+            state
+                .worktree_host
+                .restore(
+                    run_id,
+                    current_seq,
+                    std::path::Path::new(repo),
+                    std::path::Path::new(&path),
+                )
+                .await
+                .map(|path| {
+                    Some(ResolvedWorkerPlacement {
+                        path: path.to_string_lossy().into_owned(),
+                        can_write,
+                    })
+                })
+        } else if entry.status == "failed" {
+            Err(entry
+                .error_message
+                .clone()
+                .unwrap_or_else(|| "recorded worker placement failure".into()))
+        } else {
+            complete_worker_placement(
+                state,
+                run_id,
+                space_id,
+                current_seq,
+                entry.id,
+                cwd.as_deref(),
+            )
+            .await
+        }
+    } else {
+        match state
+            .create_workflow_journal_intent(NewWorkflowJournalIntent {
+                run_id,
+                seq: current_seq,
+                kind: "worker_placement".into(),
+                args_hash: hash,
+                request,
+                effect_kind: None,
+                idempotency_key: None,
+                target_kind: None,
+            })
+            .await
+        {
+            Ok(intent) => {
+                complete_worker_placement(
+                    state,
+                    run_id,
+                    space_id,
+                    current_seq,
+                    intent.id,
+                    cwd.as_deref(),
+                )
+                .await
+            }
+            Err(error) => Err(error.to_string()),
+        }
+    }
+}
+
+async fn resolve_worker_directory_command(
+    state: &AppState,
+    run_id: Uuid,
+    space_id: Uuid,
+    replay: &[WorkflowJournalRecord],
+    current_seq: u64,
+    cwd: String,
+) -> Result<Option<ResolvedWorkerPlacement>, String> {
+    let request = serde_json::json!({"cwd": cwd, "isolation": null});
+    let hash = journal_args_hash(&request);
+    let existing = replay.get(current_seq as usize);
+    if let Some(entry) = existing {
+        if entry.kind != "worker_placement" || entry.args_hash != hash {
+            Err("NondeterministicReplayError".into())
+        } else if entry.status == "completed" {
+            entry
+                .result
+                .as_ref()
+                .and_then(|result| {
+                    Some(ResolvedWorkerPlacement {
+                        path: result.get("path")?.as_str()?.to_string(),
+                        can_write: result.get("can_write")?.as_bool()?,
+                    })
+                })
+                .map(Some)
+                .ok_or_else(|| "completed worker directory resolution has no result".into())
+        } else if entry.status == "failed" {
+            Err(entry
+                .error_message
+                .clone()
+                .unwrap_or_else(|| "recorded worker directory resolution failure".into()))
+        } else {
+            complete_worker_directory_resolution(state, space_id, run_id, entry.id, &cwd).await
+        }
+    } else {
+        match state
+            .create_workflow_journal_intent(NewWorkflowJournalIntent {
+                run_id,
+                seq: current_seq,
+                kind: "worker_placement".into(),
+                args_hash: hash,
+                request,
+                effect_kind: None,
+                idempotency_key: None,
+                target_kind: None,
+            })
+            .await
+        {
+            Ok(intent) => {
+                complete_worker_directory_resolution(state, space_id, run_id, intent.id, &cwd).await
+            }
+            Err(error) => Err(error.to_string()),
+        }
+    }
+}
+
+async fn resolve_agent_placement_command(
+    state: &AppState,
+    run_id: Uuid,
+    space_id: Uuid,
+    replay: &[WorkflowJournalRecord],
+    seq: &AtomicU64,
+    request: &AgentCallRequest,
+) -> Result<Option<ResolvedWorkerPlacement>, String> {
+    match request.isolation {
+        Some(isolation) => {
+            let current_seq = seq.fetch_add(1, Ordering::SeqCst);
+            provision_worker_command(
+                state,
+                run_id,
+                space_id,
+                replay,
+                current_seq,
+                request.cwd.clone(),
+                isolation,
+            )
+            .await
+        }
+        None => match request.cwd.clone() {
+            Some(cwd) => {
+                let current_seq = seq.fetch_add(1, Ordering::SeqCst);
+                resolve_worker_directory_command(state, run_id, space_id, replay, current_seq, cwd)
+                    .await
+            }
+            None => Ok(None),
+        },
+    }
+}
+
+fn classify_agent_placement_error(error: String) -> String {
+    if error.starts_with("WorkerPlacementError") || error.starts_with("NondeterministicReplayError")
+    {
+        error
+    } else {
+        format!("WorkerPlacementError: {error}")
+    }
+}
+
 async fn run_host_commands_inner(
     state: AppState,
     run_id: Uuid,
@@ -1142,6 +1354,32 @@ async fn run_host_commands_inner(
     // call has settled and registered its failure reference.
     let mut agent_tasks = tokio::task::JoinSet::new();
     while let Some(command) = commands.recv().await {
+        let command = match command {
+            HostCommand::DispatchAgent {
+                request,
+                cancellation,
+                reply,
+            } => {
+                let resolved_working_directory = match resolve_agent_placement_command(
+                    &state, run_id, space_id, &replay, &seq, &request,
+                )
+                .await
+                {
+                    Ok(resolved) => resolved,
+                    Err(error) => {
+                        let _ = reply.send(Err(classify_agent_placement_error(error)));
+                        continue;
+                    }
+                };
+                HostCommand::Agent {
+                    request,
+                    resolved_working_directory,
+                    cancellation,
+                    reply,
+                }
+            }
+            command => command,
+        };
         match command {
             HostCommand::Record { kind, message } => {
                 let request = serde_json::json!({ "message": message });
@@ -1176,126 +1414,29 @@ async fn run_host_commands_inner(
                 reply,
             } => {
                 let current_seq = seq.fetch_add(1, Ordering::SeqCst);
-                let request = serde_json::json!({"cwd": cwd, "isolation": isolation});
-                let hash = journal_args_hash(&request);
-                let existing = replay.get(current_seq as usize);
-                let result = if let Some(entry) = existing {
-                    if entry.kind != "worker_placement" || entry.args_hash != hash {
-                        Err("NondeterministicReplayError".into())
-                    } else if entry.status == "completed" {
-                        entry
-                            .result
-                            .as_ref()
-                            .and_then(|value| value.get("path"))
-                            .and_then(Value::as_str)
-                            .map(|path| {
-                                Some(ResolvedWorkerPlacement {
-                                    path: path.to_string(),
-                                    can_write: true,
-                                })
-                            })
-                            .ok_or_else(|| "completed worker placement has no path".to_string())
-                    } else if entry.status == "failed" {
-                        Err(entry
-                            .error_message
-                            .clone()
-                            .unwrap_or_else(|| "recorded worker placement failure".into()))
-                    } else {
-                        complete_worker_placement(
-                            &state,
-                            run_id,
-                            space_id,
-                            current_seq,
-                            entry.id,
-                            cwd.as_deref(),
-                        )
-                        .await
-                    }
-                } else {
-                    match state
-                        .create_workflow_journal_intent(NewWorkflowJournalIntent {
-                            run_id,
-                            seq: current_seq,
-                            kind: "worker_placement".into(),
-                            args_hash: hash,
-                            request,
-                            effect_kind: None,
-                            idempotency_key: None,
-                            target_kind: None,
-                        })
-                        .await
-                    {
-                        Ok(intent) => {
-                            complete_worker_placement(
-                                &state,
-                                run_id,
-                                space_id,
-                                current_seq,
-                                intent.id,
-                                cwd.as_deref(),
-                            )
-                            .await
-                        }
-                        Err(error) => Err(error.to_string()),
-                    }
-                };
+                let result = provision_worker_command(
+                    &state,
+                    run_id,
+                    space_id,
+                    &replay,
+                    current_seq,
+                    cwd,
+                    isolation,
+                )
+                .await;
                 let _ = reply.send(result);
             }
             HostCommand::ResolveWorkerDirectory { cwd, reply } => {
                 let current_seq = seq.fetch_add(1, Ordering::SeqCst);
-                let request = serde_json::json!({"cwd": cwd, "isolation": null});
-                let hash = journal_args_hash(&request);
-                let existing = replay.get(current_seq as usize);
-                let result = if let Some(entry) = existing {
-                    if entry.kind != "worker_placement" || entry.args_hash != hash {
-                        Err("NondeterministicReplayError".into())
-                    } else if entry.status == "completed" {
-                        entry
-                            .result
-                            .as_ref()
-                            .and_then(|result| {
-                                Some(ResolvedWorkerPlacement {
-                                    path: result.get("path")?.as_str()?.to_string(),
-                                    can_write: result.get("can_write")?.as_bool()?,
-                                })
-                            })
-                            .map(Some)
-                            .ok_or_else(|| {
-                                "completed worker directory resolution has no result".into()
-                            })
-                    } else if entry.status == "failed" {
-                        Err(entry.error_message.clone().unwrap_or_else(|| {
-                            "recorded worker directory resolution failure".into()
-                        }))
-                    } else {
-                        complete_worker_directory_resolution(
-                            &state, space_id, run_id, entry.id, &cwd,
-                        )
-                        .await
-                    }
-                } else {
-                    match state
-                        .create_workflow_journal_intent(NewWorkflowJournalIntent {
-                            run_id,
-                            seq: current_seq,
-                            kind: "worker_placement".into(),
-                            args_hash: hash,
-                            request,
-                            effect_kind: None,
-                            idempotency_key: None,
-                            target_kind: None,
-                        })
-                        .await
-                    {
-                        Ok(intent) => {
-                            complete_worker_directory_resolution(
-                                &state, space_id, run_id, intent.id, &cwd,
-                            )
-                            .await
-                        }
-                        Err(error) => Err(error.to_string()),
-                    }
-                };
+                let result = resolve_worker_directory_command(
+                    &state,
+                    run_id,
+                    space_id,
+                    &replay,
+                    current_seq,
+                    cwd,
+                )
+                .await;
                 let _ = reply.send(result);
             }
             HostCommand::ListWorkerPlacements { reply } => {
@@ -1340,6 +1481,9 @@ async fn run_host_commands_inner(
                     }
                 };
                 let _ = reply.send(result);
+            }
+            HostCommand::DispatchAgent { .. } => {
+                unreachable!("dispatch commands are resolved before journal admission")
             }
             HostCommand::Agent {
                 request,
@@ -2400,25 +2544,32 @@ async fn complete_worker_placement(
         "WorkerPlacementError: isolation=worktree requires cwd to name the git repository"
             .to_string()
     })?;
-    let repo = match resolve_authorised_worker_directory(state, space_id, run_id, None, repo).await
+    let repo = match resolve_authorised_worker_directory(state, space_id, run_id, None, None, repo)
+        .await
     {
-        Ok(repo) => repo.path,
+        Ok(repo) => repo,
         Err(error) => {
             let error = format!("WorkerPlacementError: {error}");
             let _ = state.fail_workflow_journal_entry(entry_id, &error).await;
             return Err(error);
         }
     };
-    match state.worktree_host.provision(run_id, seq, &repo).await {
+    match state.worktree_host.provision(run_id, seq, &repo.path).await {
         Ok(path) => {
             let path = path.to_string_lossy().into_owned();
             state
-                .complete_workflow_journal_entry(entry_id, serde_json::json!({"path": path}))
+                .complete_workflow_journal_entry(
+                    entry_id,
+                    serde_json::json!({
+                        "path": path,
+                        "can_write": repo.can_write,
+                    }),
+                )
                 .await
                 .map_err(|error| error.to_string())?;
             Ok(Some(ResolvedWorkerPlacement {
                 path,
-                can_write: true,
+                can_write: repo.can_write,
             }))
         }
         Err(error) => {
@@ -2435,7 +2586,7 @@ async fn complete_worker_directory_resolution(
     entry_id: Uuid,
     cwd: &str,
 ) -> Result<Option<ResolvedWorkerPlacement>, String> {
-    match resolve_authorised_worker_directory(state, space_id, context_id, None, cwd).await {
+    match resolve_authorised_worker_directory(state, space_id, context_id, None, None, cwd).await {
         Ok(directory) => {
             let placement = ResolvedWorkerPlacement {
                 path: directory.path.to_string_lossy().into_owned(),
@@ -5656,7 +5807,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn worktree_provisioning_journal_replays_lists_and_rejects_changed_arguments() {
-        let fixture = tempfile::tempdir_in("/tmp/scratch").expect("scratch fixture");
+        let fixture = tempfile::tempdir().expect("scratch fixture");
         let repo = fixture.path().join("repo");
         std::fs::create_dir(&repo).expect("repo");
         for args in [
@@ -5813,7 +5964,8 @@ mod tests {
                 .expect("revoke repository grant")
         );
         grant_workspace(storage.as_ref(), space.id, &newly_allowed).await;
-        let (replay_tx, replay_task) = run_loop(make_state(), replay.clone());
+        let replay_state = make_state();
+        let (replay_tx, replay_task) = run_loop(replay_state.clone(), replay.clone());
         let (reply, receive) = oneshot::channel();
         replay_tx
             .send(HostCommand::ResolveWorkerDirectory {
@@ -5872,6 +6024,12 @@ mod tests {
             4,
             "replay must not add a worktree journal entry"
         );
+        assert_eq!(replay_state.worktree_host.list_run(run.id).await.len(), 1);
+        replay_state.worktree_host.cleanup_run(run.id).await;
+        assert!(
+            !std::path::Path::new(&first_path).exists(),
+            "the replay host must own the restored worktree for terminal cleanup"
+        );
 
         let (changed_tx, changed_task) = run_loop(make_state(), replay);
         let (reply, receive) = oneshot::channel();
@@ -5899,7 +6057,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn workflow_read_only_attachment_placement_stays_read_only() {
-        let fixture = tempfile::tempdir_in("/tmp/scratch").expect("scratch fixture");
+        let fixture = tempfile::tempdir().expect("scratch fixture");
         let attachment = fixture.path().join("read-only");
         std::fs::create_dir(&attachment).unwrap();
         std::fs::write(attachment.join("readable.txt"), "readable proof").unwrap();
@@ -6011,7 +6169,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn live_workflow_workers_write_only_inside_their_own_worktrees() {
-        let fixture = tempfile::tempdir_in("/tmp/scratch").expect("scratch fixture");
+        let fixture = tempfile::tempdir().expect("scratch fixture");
         let repo = fixture.path().join("repo");
         std::fs::create_dir(&repo).unwrap();
         for args in [
@@ -6184,7 +6342,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn parallel_cwd_placement_replays_in_dispatch_order() {
-        let fixture = tempfile::tempdir_in("/tmp/scratch").expect("scratch fixture");
+        let fixture = tempfile::tempdir().expect("scratch fixture");
         let workspace = fixture.path().join("workspace");
         let first_cwd = workspace.join("first");
         let second_cwd = workspace.join("second");
