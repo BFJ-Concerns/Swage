@@ -55,9 +55,6 @@
     "create_workspace_attachment_request": {
       "$ref": "#/$defs/CreateWorkspaceAttachmentRequest"
     },
-    "delegate_request": {
-      "$ref": "#/$defs/DelegateRequest"
-    },
     "knowledge_search": {
       "$ref": "#/$defs/KnowledgeSearchResponse"
     },
@@ -256,8 +253,7 @@
     "workflow_entry_event",
     "workflow_run_completed_event",
     "worker_isolation",
-    "agent_call_request",
-    "delegate_request"
+    "agent_call_request"
   ],
   "$defs": {
     "AgentCallRequest": {
@@ -265,6 +261,7 @@
       "type": "object",
       "properties": {
         "agent": {
+          "description": "Omission is load-bearing: journal argument hashes are computed over\nthe serialised request, so an unset selector must serialise to nothing.",
           "type": [
             "string",
             "null"
@@ -314,6 +311,7 @@
         },
         "schema": true,
         "session": {
+          "description": "Omission is load-bearing: a fresh call and a continuation must retain\ndistinct journal argument hashes.",
           "anyOf": [
             {
               "$ref": "#/$defs/AgentSessionRef"
@@ -1453,51 +1451,6 @@
       },
       "required": [
         "path"
-      ]
-    },
-    "DelegateRequest": {
-      "description": "Model-authored request accepted by the delegate tool.",
-      "type": "object",
-      "properties": {
-        "completion_mode": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "context": true,
-        "cwd": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "isolation": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/WorkerIsolation"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "target_agent": {
-          "type": "string"
-        },
-        "task": {
-          "type": "string"
-        },
-        "task_definition": {
-          "type": [
-            "string",
-            "null"
-          ]
-        }
-      },
-      "required": [
-        "target_agent",
-        "task"
       ]
     },
     "DeliveryRoutingRequest": {

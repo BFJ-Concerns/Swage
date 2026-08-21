@@ -800,6 +800,11 @@ async fn run_ephemeral_agent_call(
         // metadata and is re-read by the turn path, so grants are
         // re-derived at this start like any other.
         Some(session_ref) => {
+            if let Some(task) = request.task.as_deref() {
+                return Err(format!(
+                    "AgentCallError: task {task:?} cannot be selected on a continued session; select it when creating the worker"
+                ));
+            }
             let created_here = state
                 .storage
                 .list_workflow_journal(run_id)
@@ -6340,6 +6345,41 @@ mod tests {
         assert_eq!(journal[0].status, "failed");
         drop(tx);
         task.await.expect("host loop");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_continuation_cannot_change_its_task_definition() {
+        let (state, storage) = workflow_test_state();
+        let space = storage.get_or_create_default().await.expect("space");
+        let error = run_ephemeral_agent_call(
+            &state,
+            Uuid::new_v4(),
+            space.id,
+            &[],
+            AgentCallRequest {
+                prompt: "continue".into(),
+                agent: None,
+                task: Some("review".into()),
+                model: None,
+                effort: None,
+                timeout_ms: None,
+                cwd: None,
+                isolation: None,
+                schema: None,
+                max_attempts: 1,
+                label: None,
+                session: Some(AgentSessionRef {
+                    session_id: Uuid::new_v4(),
+                    thread_id: Uuid::new_v4(),
+                }),
+            },
+            None,
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("continued calls must not silently ignore a task selector");
+
+        assert!(error.contains("cannot be selected on a continued session"));
     }
 
     /// Serves scripted gate verdicts through `complete` and counts calls, so

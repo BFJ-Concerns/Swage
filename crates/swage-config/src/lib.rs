@@ -11,7 +11,6 @@ pub mod model;
 pub mod prompt_rule;
 pub mod resolve;
 pub mod skill;
-pub mod task;
 pub mod validation;
 
 // ---------------------------------------------------------------------------
@@ -39,9 +38,6 @@ pub use discovery::{DiscoveredSpace, discover, effective_root_path, resolve_root
 
 // Merge types — PartialConfig for programmatic overlays (task definitions)
 pub use merge::PartialConfig;
-
-// Task definitions
-pub use task::TaskDefinition;
 
 // Resolution pipeline — primary public API
 pub use resolve::{apply_overlay, load_resolved_config, load_resolved_config_from, validate_files};

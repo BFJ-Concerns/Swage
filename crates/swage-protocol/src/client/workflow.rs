@@ -18,6 +18,8 @@ pub struct AgentSessionRef {
 #[derive(Clone, Debug, Serialize, Deserialize, TS, JsonSchema)]
 pub struct AgentCallRequest {
     pub prompt: String,
+    /// Omission is load-bearing: journal argument hashes are computed over
+    /// the serialised request, so an unset selector must serialise to nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -35,26 +37,10 @@ pub struct AgentCallRequest {
     pub schema: Option<Value>,
     pub max_attempts: u32,
     pub label: Option<String>,
+    /// Omission is load-bearing: a fresh call and a continuation must retain
+    /// distinct journal argument hashes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session: Option<AgentSessionRef>,
-}
-
-/// Model-authored request accepted by the delegate tool.
-#[derive(Clone, Debug, Serialize, Deserialize, TS, JsonSchema)]
-pub struct DelegateRequest {
-    pub target_agent: String,
-    pub task: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub task_definition: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(type = "unknown")]
-    pub context: Option<Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub completion_mode: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cwd: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub isolation: Option<WorkerIsolation>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
@@ -298,10 +284,10 @@ mod task_request_tests {
     }
     #[test]
     fn named_task_is_serialised_verbatim() {
-        let mut value = serde_json::to_value(AgentCallRequest {
+        let value = serde_json::to_value(AgentCallRequest {
             prompt: "work".into(),
             agent: None,
-            task: None,
+            task: Some("review".into()),
             model: None,
             effort: None,
             timeout_ms: None,
@@ -313,7 +299,7 @@ mod task_request_tests {
             session: None,
         })
         .unwrap();
-        value["task"] = Value::String("review".into());
+        assert_eq!(value["task"], "review");
         let request: AgentCallRequest = serde_json::from_value(value).unwrap();
         assert_eq!(request.task.as_deref(), Some("review"));
     }

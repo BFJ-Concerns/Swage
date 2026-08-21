@@ -5,4 +5,14 @@ import type { WorkerIsolation } from "./WorkerIsolation";
 /**
  * A journal-stable workflow child dispatch request.
  */
-export type AgentCallRequest = { prompt: string, agent?: string | null, task?: string | null, model: string | null, effort?: string | null, timeout_ms?: bigint | null, cwd?: string | null, isolation?: WorkerIsolation | null, schema: unknown, max_attempts: number, label: string | null, session?: AgentSessionRef | null, };
+export type AgentCallRequest = { prompt: string,
+/**
+ * Omission is load-bearing: journal argument hashes are computed over
+ * the serialised request, so an unset selector must serialise to nothing.
+ */
+agent?: string | null, task?: string | null, model: string | null, effort?: string | null, timeout_ms?: bigint | null, cwd?: string | null, isolation?: WorkerIsolation | null, schema: unknown, max_attempts: number, label: string | null,
+/**
+ * Omission is load-bearing: a fresh call and a continuation must retain
+ * distinct journal argument hashes.
+ */
+session?: AgentSessionRef | null, };
