@@ -382,7 +382,15 @@ impl OpenAiProvider {
 
         ChatCompletionsRequest {
             model,
-            reasoning_effort: request.effort.clone(),
+            reasoning_effort: request.effort.map(|effort| {
+                match effort {
+                    swage_core::Effort::Low => "low",
+                    swage_core::Effort::Medium => "medium",
+                    swage_core::Effort::High => "high",
+                    swage_core::Effort::Max => "xhigh",
+                }
+                .to_string()
+            }),
             messages: Self::convert_messages(&request.messages),
             max_tokens: request.max_tokens,
             temperature: request.temperature,
@@ -905,21 +913,28 @@ mod tests {
     }
 
     #[test]
-    fn completion_effort_maps_to_openai_reasoning_effort() {
+    fn every_completion_effort_maps_to_openai_reasoning_effort() {
         let provider =
             OpenAiProvider::from_config(ProviderConfig::new("key", "model", "http://localhost"));
-        let request = CompletionRequest {
-            effort: Some("high".into()),
-            messages: vec![],
-            model: None,
-            max_tokens: None,
-            temperature: None,
-            stop_sequences: None,
-            metadata: None,
-            tool_definitions: vec![],
-        };
-        let body = serde_json::to_value(provider.build_request(&request, false)).unwrap();
-        assert_eq!(body["reasoning_effort"], "high");
+        for (effort, expected) in [
+            (swage_core::Effort::Low, "low"),
+            (swage_core::Effort::Medium, "medium"),
+            (swage_core::Effort::High, "high"),
+            (swage_core::Effort::Max, "xhigh"),
+        ] {
+            let request = CompletionRequest {
+                effort: Some(effort),
+                messages: vec![],
+                model: None,
+                max_tokens: None,
+                temperature: None,
+                stop_sequences: None,
+                metadata: None,
+                tool_definitions: vec![],
+            };
+            let body = serde_json::to_value(provider.build_request(&request, false)).unwrap();
+            assert_eq!(body["reasoning_effort"], expected);
+        }
     }
 
     #[test]

@@ -184,6 +184,7 @@
       aliases: [],
       context_window: model.context_window,
       generation_preset: null,
+      default_effort: undefined,
     };
     settings.default_model ||= id;
     settings.default_provider ||= selectedProvider;
@@ -338,6 +339,7 @@
       aliases: [],
       context_window: null,
       generation_preset: null,
+      default_effort: undefined,
     };
     settings.default_model ||= id;
     settings.default_provider ||= providerId;
@@ -616,6 +618,16 @@
                       <div class="model-facts">
                         <span>{model.context_window ? `${model.context_window.toLocaleString()} ctx` : "context unknown"}</span>
                         <span>{model.generation_preset ?? "provider generation defaults"}</span>
+                        <label>
+                          <span class="sr-only">Default effort for {modelKey}</span>
+                          <select bind:value={model.default_effort}>
+                            <option value={undefined}>No effort</option>
+                            <option value="low">Low</option>
+                            <option value="medium">Medium</option>
+                            <option value="high">High</option>
+                            <option value="max">Maximum</option>
+                          </select>
+                        </label>
                         {#if settings.default_model === modelKey}
                           <span class="fact-strong">Default</span>
                         {/if}

@@ -729,6 +729,7 @@ pub fn resolve(partial: PartialConfig) -> ResolvedConfig {
                 aliases: Vec::new(),
                 context_window: None,
                 generation_preset: None,
+                default_effort: None,
                 capabilities: ModelCapabilitiesConfig::default(),
             });
         model.model_id = model_id;

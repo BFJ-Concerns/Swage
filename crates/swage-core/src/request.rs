@@ -214,7 +214,7 @@ pub struct CompletionRequest {
     pub model: Option<String>,
     /// Provider reasoning effort. Providers without a native mapping omit it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub effort: Option<String>,
+    pub effort: Option<crate::Effort>,
     /// Maximum number of tokens to generate.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,

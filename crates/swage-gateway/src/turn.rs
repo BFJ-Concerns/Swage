@@ -1331,6 +1331,27 @@ pub(crate) async fn process_turn_with_composition(
                 )));
             }
         };
+        let effort = match effort_override.as_deref() {
+            Some("low") => Some(swage_core::Effort::Low),
+            Some("medium") => Some(swage_core::Effort::Medium),
+            Some("high") => Some(swage_core::Effort::High),
+            Some("max" | "xhigh") => Some(swage_core::Effort::Max),
+            Some(value) => {
+                return Err(GatewayError::ConfigError(format!(
+                    "unsupported effort {value:?}; expected low, medium, high, or max"
+                )));
+            }
+            None => session
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("effort"))
+                .cloned()
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(|error| {
+                    GatewayError::ConfigError(format!("session effort is invalid: {error}"))
+                })?,
+        };
         let turn_request = TurnRequest {
             execution: swage_agent::context::TurnExecutionContext {
                 session_id,
@@ -1342,7 +1363,7 @@ pub(crate) async fn process_turn_with_composition(
             assembled_context: assembled_messages,
             parent_turn_id: None,
             existing_turn_id: Some(prepared_turn_id),
-            effort: effort_override,
+            effort,
             cancellation_token: cancel_token,
         };
         tokio::spawn(async move { agent.process_turn_streaming(turn_request, event_tx).await })
