@@ -4794,6 +4794,82 @@ async fn approved_sandbox_fallback_build_failure_clears_active_turn() {
 }
 
 #[tokio::test]
+async fn attended_sandbox_failure_records_interactive_attendance() {
+    let (state, session_id) = make_state_with_session(vec![]).await;
+    state.fail_next_dispatcher_builds(1);
+
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let approval_channels = Arc::clone(&state.approval_channels);
+    let state_for_task = state.clone();
+    let task = tokio::spawn(async move {
+        process_turn(
+            &state_for_task,
+            session_id,
+            None,
+            "message".to_string(),
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
+        )
+        .await
+    });
+
+    let approval_id = match rx.recv().await.expect("approval event should be sent") {
+        ServerEvent::ApprovalRequired { approval_id, .. } => approval_id,
+        other => panic!("expected ApprovalRequired, got: {other:?}"),
+    };
+    approval_channels
+        .lock()
+        .unwrap()
+        .remove(&approval_id)
+        .expect("approval channel should be registered")
+        .send(swage_agent::ApprovalDecision {
+            decision: swage_agent::approval::ApprovalDecisionValue::Rejected,
+            scope: swage_agent::approval::ApprovalDecisionScope::Once,
+            reason: None,
+        })
+        .expect("approval decision should be delivered");
+    task.await
+        .expect("turn task should finish")
+        .expect_err("rejected degradation should fail the turn");
+
+    let audit = state.storage.list_audit_events().await.unwrap();
+    assert!(audit.iter().any(|event| {
+        event.event_kind == "execution_isolation_degraded"
+            && event.metadata["execution_context"] == "interactive turn"
+    }));
+}
+
+#[tokio::test]
+async fn unattended_sandbox_failure_records_unattended_attendance() {
+    let (state, session_id) = make_state_with_session(vec![]).await;
+    state.fail_next_dispatcher_builds(1);
+    let (tx, _rx) = mpsc::unbounded_channel();
+
+    process_turn_with_composition(
+        &state,
+        session_id,
+        None,
+        "message".to_string(),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+        None,
+        None,
+        TurnAttendance::Unattended,
+        DispatchContextComposition::default(),
+    )
+    .await
+    .expect_err("unattended degradation should fail closed");
+
+    let audit = state.storage.list_audit_events().await.unwrap();
+    assert!(audit.iter().any(|event| {
+        event.event_kind == "execution_isolation_degraded"
+            && event.metadata["execution_context"] == "unattended turn"
+    }));
+}
+
+#[tokio::test]
 async fn degradation_audit_and_terminal_state_failure_clears_active_turn() {
     let storage = Arc::new(MockStorage::new());
     storage.fail_audit_writes();

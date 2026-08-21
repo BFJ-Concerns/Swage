@@ -1010,6 +1010,10 @@ pub(crate) async fn process_turn_with_composition(
     // enabled, this also spawns the per-turn sandbox and returns its cleanup
     // guard to this turn scope.
     let is_codex_turn = config.default_provider_protocol() == swage_config::Protocol::Codex;
+    let execution_context = match attendance {
+        TurnAttendance::Attended => "interactive turn",
+        TurnAttendance::Unattended => "unattended turn",
+    };
     let dispatcher_build = match build_gateway_dispatcher(
         state,
         &config,
@@ -1029,7 +1033,7 @@ pub(crate) async fn process_turn_with_composition(
             if let Err(audit_error) = record_degraded_execution(
                 state,
                 &detected_degradation,
-                "interactive turn",
+                execution_context,
                 Some(session_id),
                 Some(prepared_turn_id),
             )
@@ -1140,7 +1144,7 @@ pub(crate) async fn process_turn_with_composition(
             record_degraded_execution(
                 state,
                 &isolation,
-                "unattended turn",
+                execution_context,
                 Some(session_id),
                 Some(prepared_turn_id),
             )
@@ -1149,10 +1153,6 @@ pub(crate) async fn process_turn_with_composition(
                 "sandbox setup failed; execution was blocked: {error}"
             )));
         }
-    };
-    let execution_context = match attendance {
-        TurnAttendance::Attended => "interactive turn",
-        TurnAttendance::Unattended => "unattended turn",
     };
     if let Err(error) = record_degraded_execution(
         state,
