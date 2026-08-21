@@ -69,7 +69,7 @@ impl DelegationContextAssembler for GatewayDelegatedContextAssembler {
             &self.config.declared_skills,
         )
         .await;
-        let assembly_name = select_context_assembly(
+        let context_choices = select_context_assembly(
             &self.state,
             &self.config,
             session.id,
@@ -78,6 +78,7 @@ impl DelegationContextAssembler for GatewayDelegatedContextAssembler {
         )
         .await
         .map_err(|error| AgentError::InvalidConfig(error.to_string()))?;
+        let assembly_name = context_choices.assembly_name;
         let memory_content = load_memory_for_assembly(&assembly_name, || async {
             match self.swage_root.as_deref() {
                 Some(root) => load_space_memory(root, &self.space.slug).await,
@@ -127,6 +128,7 @@ impl DelegationContextAssembler for GatewayDelegatedContextAssembler {
             environment,
             available_skills,
             self.config.default_model_id(),
+            context_choices.working_norms_scaffold,
             &hierarchy,
             self.composition.elements.as_deref(),
         );
