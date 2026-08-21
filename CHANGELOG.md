@@ -6,6 +6,10 @@ All notable changes to Swage are documented in this file.
 
 ### Added
 
+- Durable named task definitions bundle instructions, an output contract, a model preference, and narrowing permissions for workflow and delegated child dispatches.
+- Workflow and delegation authors can place individual workers in a chosen working directory or a runtime-provisioned isolated git worktree.
+- Workflow agent calls now honour per-call reasoning effort and host-enforced timeout options.
+- Workflow scripts can now dispatch ephemeral workers by prompt and model options without naming an agent definition.
 - Skills can carry immediately runnable workflow scripts, with same-named authored workflows taking precedence.
 - Fresh installations discover and activate the shipped development-process skills, with same-named operator skills taking precedence.
 - Models now receive per-model native-harness scaffolds with family fallback, with each scaffold's divergence register recorded.

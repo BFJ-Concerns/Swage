@@ -8,6 +8,7 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+swage-protocol = { path = "../swage-protocol" }
 async-trait = { workspace = true }
 chrono = { workspace = true }
 serde = { workspace = true }

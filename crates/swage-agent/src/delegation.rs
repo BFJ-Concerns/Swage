@@ -373,6 +373,7 @@ impl DelegationExecutor {
         let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
 
         let turn_request = TurnRequest {
+            effort: None,
             execution: TurnExecutionContext {
                 session_id: session.id,
                 thread_id: thread.id,
@@ -555,8 +556,12 @@ pub trait DelegationHandler: Send + Sync {
         &self,
         target_agent_id: &str,
         task: &str,
+        task_definition: Option<&str>,
         context: Option<serde_json::Value>,
+        cwd: Option<String>,
+        isolation: Option<swage_protocol::client::workflow::WorkerIsolation>,
         composition: DispatchContextComposition,
+        delegate_call_id: &str,
         sender_agent_id: &str,
         sender_turn_id: Uuid,
         space_id: Uuid,

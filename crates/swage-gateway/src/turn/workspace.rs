@@ -2,6 +2,7 @@ use super::{
     AgentConfig, Arc, GatewayToolAdvertisementFilter, Path, PathBuf, PermissionConfig, Tool,
     ToolRequireApprovalEntry, Uuid,
 };
+use crate::turn::managed_scratch_workspace;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct WorkspacePermissionSummary {
@@ -22,6 +23,27 @@ pub(crate) struct TrustedWorkspacePolicy {
     pub(crate) permissions: WorkspacePermissionSummary,
     pub(crate) active_workspace: Option<TrustedWorkspacePath>,
     pub(crate) attachments: Vec<TrustedWorkspacePath>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ResolvedWorkerDirectory {
+    pub(crate) path: PathBuf,
+    pub(crate) can_write: bool,
+    pub(crate) authority_path: PathBuf,
+    pub(crate) authority_context_id: Uuid,
+}
+
+/// Inspect the space's workspace attachments and derive which permission
+/// grants are in force. Storage failures degrade to "no grants" so that a
+/// transient lookup error never silently widens the policy.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) async fn summarise_trusted_workspace_permissions(
+    storage: &Arc<dyn swage_storage::store::Storage>,
+    space_id: Uuid,
+) -> WorkspacePermissionSummary {
+    load_trusted_workspace_policy(storage, space_id, None)
+        .await
+        .permissions
 }
 
 pub(crate) async fn load_trusted_workspace_policy(
@@ -92,6 +114,204 @@ pub(crate) async fn load_trusted_workspace_policy(
         }
     }
     policy
+}
+
+/// Resolve a worker placement without widening the dispatching context's
+/// filesystem authority. A placement may select any directory already covered
+/// by the context's active workspace, trusted attachment grants, managed
+/// scratch root, or approved location grants.
+pub(crate) async fn resolve_authorised_worker_directory(
+    state: &crate::state::AppState,
+    space_id: Uuid,
+    context_id: Uuid,
+    active_workspace_attachment_id: Option<Uuid>,
+    inherited_placement: Option<&ResolvedWorkerDirectory>,
+    requested: &str,
+) -> Result<ResolvedWorkerDirectory, String> {
+    let candidate = tokio::fs::canonicalize(requested)
+        .await
+        .map_err(|error| format!("cannot resolve worker cwd {requested:?}: {error}"))?;
+    if !candidate.is_dir() {
+        return Err(format!(
+            "worker cwd is not a directory: {}",
+            candidate.display()
+        ));
+    }
+
+    let policy =
+        load_trusted_workspace_policy(&state.storage, space_id, active_workspace_attachment_id)
+            .await;
+    let workspace_root = policy
+        .active_workspace
+        .as_ref()
+        .map(|grant| grant.path.clone())
+        .unwrap_or_else(|| managed_scratch_workspace(space_id, context_id));
+    let approval_grants = state
+        .session_approval_grants
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone();
+    let within = |root: &Path| {
+        let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+        path_within_device_workspace(&candidate, &[canonical_root])
+    };
+
+    // A placed worker's exact directory is its complete filesystem authority.
+    // Do not let a nested dispatch fall back to the wider space policy.
+    if let Some(placement) = inherited_placement {
+        if within(&placement.path) {
+            return Ok(ResolvedWorkerDirectory {
+                path: candidate,
+                can_write: placement.can_write,
+                authority_path: placement.authority_path.clone(),
+                authority_context_id: placement.authority_context_id,
+            });
+        }
+        return Err(format!(
+            "worker cwd {} is outside the dispatching context's placed workspace root",
+            candidate.display()
+        ));
+    }
+
+    if let Some(grant) = policy
+        .active_workspace
+        .iter()
+        .chain(policy.attachments.iter())
+        .find(|grant| within(&grant.path))
+    {
+        return Ok(ResolvedWorkerDirectory {
+            authority_path: candidate.clone(),
+            path: candidate,
+            can_write: grant.can_write,
+            authority_context_id: context_id,
+        });
+    }
+    if policy.active_workspace.is_none() && within(&workspace_root) {
+        return Ok(ResolvedWorkerDirectory {
+            authority_path: candidate.clone(),
+            path: candidate,
+            can_write: true,
+            authority_context_id: context_id,
+        });
+    }
+
+    let matching_approval_grants = approval_grants
+        .iter()
+        .filter(|grant| grant.kind == swage_storage::model::ApprovalKind::Location)
+        .filter(|grant| grant.space_id.is_none() || grant.space_id == Some(space_id))
+        .filter(|grant| within(Path::new(&grant.name)))
+        .collect::<Vec<_>>();
+    if !matching_approval_grants.is_empty() {
+        return Ok(ResolvedWorkerDirectory {
+            authority_path: candidate.clone(),
+            path: candidate,
+            can_write: matching_approval_grants
+                .iter()
+                .any(|grant| grant.access.as_deref() == Some("write")),
+            authority_context_id: context_id,
+        });
+    }
+
+    Err(format!(
+        "worker cwd {} is outside the dispatching context's permitted workspace roots and location grants",
+        candidate.display()
+    ))
+}
+
+/// Re-authorise the durable placement carried by a session. Callers that
+/// dispatch more work use the returned exact directory as their complete
+/// filesystem authority; a partial or revoked placement fails closed.
+pub(crate) async fn reauthorise_session_worker_placement(
+    state: &crate::state::AppState,
+    session: &swage_storage::Session,
+) -> Result<Option<ResolvedWorkerDirectory>, swage_core::GatewayError> {
+    if !super::worker_placement_metadata_present(session.metadata.as_ref()) {
+        return Ok(None);
+    }
+    let metadata = session.metadata.as_ref().ok_or_else(|| {
+        swage_core::GatewayError::ConfigError("worker placement metadata is incomplete".to_string())
+    })?;
+    let placement_path = metadata
+        .get(super::WORKER_PLACEMENT_CWD_METADATA_KEY)
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            swage_core::GatewayError::ConfigError(
+                "worker placement is missing its immutable cwd".to_string(),
+            )
+        })?;
+    let placement_path = tokio::fs::canonicalize(placement_path)
+        .await
+        .map_err(|error| {
+            swage_core::GatewayError::ConfigError(format!(
+                "cannot resolve worker placement cwd: {error}"
+            ))
+        })?;
+    if !placement_path.is_dir() {
+        return Err(swage_core::GatewayError::ConfigError(format!(
+            "worker placement cwd is not a directory: {}",
+            placement_path.display()
+        )));
+    }
+    let authority_path = metadata
+        .get(super::WORKER_PLACEMENT_AUTHORITY_PATH_METADATA_KEY)
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            swage_core::GatewayError::ConfigError(
+                "worker placement is missing its authority path".to_string(),
+            )
+        })?;
+    let authority_context_id = metadata
+        .get(super::WORKER_PLACEMENT_AUTHORITY_CONTEXT_METADATA_KEY)
+        .and_then(serde_json::Value::as_str)
+        .and_then(|value| Uuid::parse_str(value).ok())
+        .ok_or_else(|| {
+            swage_core::GatewayError::ConfigError(
+                "worker placement is missing its authority context".to_string(),
+            )
+        })?;
+    let authorised = resolve_authorised_worker_directory(
+        state,
+        session.space_id,
+        authority_context_id,
+        session.active_workspace_attachment_id,
+        None,
+        authority_path,
+    )
+    .await
+    .map_err(|error| {
+        swage_core::GatewayError::ConfigError(format!(
+            "worker placement is no longer authorised: {error}"
+        ))
+    })?;
+    Ok(Some(ResolvedWorkerDirectory {
+        path: placement_path,
+        can_write: authorised.can_write,
+        authority_path: authorised.path,
+        authority_context_id,
+    }))
+}
+
+/// Re-authorise a durable worker placement for this execution. The placement
+/// directory remains immutable, while its authority root and context are
+/// checked against the current attachment/location grants and its write bit is
+/// replaced in the in-memory session metadata used to build this turn.
+pub(crate) async fn reauthorise_worker_placement_for_turn(
+    state: &crate::state::AppState,
+    session: &mut swage_storage::Session,
+) -> Result<(), swage_core::GatewayError> {
+    let Some(placement) = reauthorise_session_worker_placement(state, session).await? else {
+        return Ok(());
+    };
+    let metadata = session.metadata.as_mut().ok_or_else(|| {
+        swage_core::GatewayError::ConfigError("worker placement metadata is incomplete".to_string())
+    })?;
+    metadata[super::WORKER_PLACEMENT_CWD_METADATA_KEY] =
+        serde_json::Value::String(placement.path.to_string_lossy().into_owned());
+    metadata[super::WORKER_PLACEMENT_AUTHORITY_PATH_METADATA_KEY] =
+        serde_json::Value::String(placement.authority_path.to_string_lossy().into_owned());
+    metadata[super::WORKER_PLACEMENT_CAN_WRITE_METADATA_KEY] =
+        serde_json::Value::Bool(placement.can_write);
+    Ok(())
 }
 
 pub(super) fn build_permission_config(

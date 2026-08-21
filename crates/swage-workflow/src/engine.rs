@@ -14,13 +14,15 @@ use crate::{
 };
 
 fn named_host_error(error: &str, fallback: &str) -> (String, String) {
-    const NAMES: [(&str, &str); 11] = [
+    const NAMES: [(&str, &str); 13] = [
         ("AgentCallError", "AgentCallError"),
+        ("AgentCallTimeoutError", "AgentCallTimeoutError"),
         ("BudgetExceededError", "BudgetExceededError"),
         ("BudgetWindDownError", "BudgetWindDownError"),
         ("DeliveryNotGrantedError", "DeliveryNotGrantedError"),
         ("WorkflowCancelledError", "WorkflowCancelledError"),
         ("NondeterministicReplayError", "NondeterministicCallError"),
+        ("WorkerPlacementError", "WorkerPlacementError"),
         ("EmptyAgentOutputError", "EmptyAgentOutputError"),
         ("WorkflowCompositionError", "WorkflowCompositionError"),
         ("WaitTimerError", "WaitTimerError"),
@@ -310,7 +312,7 @@ impl WorkflowEngine {
                                 };
                                 let mut request = request;
                                 request.prompt = prompt;
-                                match host.run_agent_call(request.clone(), cancellation).await {
+                                match host.dispatch_agent_call(request.clone(), cancellation).await {
                                     Ok(result) => {
                                         if request.schema.is_none()
                                             && result.output.as_str().is_some_and(|value| value.trim().is_empty())
@@ -350,6 +352,23 @@ impl WorkflowEngine {
                         }),
                     ).map_err(|error| error.to_string())?;
                     ctx.globals().set("__agent", agent).map_err(|error| error.to_string())?;
+
+                    let placement_host = Arc::clone(&host);
+                    let placement_cancellation = host_cancellation.clone();
+                    let placements = Function::new(
+                        ctx.clone(),
+                        Async(move || {
+                            let host = Arc::clone(&placement_host);
+                            let cancellation = placement_cancellation.clone();
+                            async move {
+                                match host.list_worker_placements(cancellation).await {
+                                    Ok(value) => serde_json::json!({"ok": true, "value": value}).to_string(),
+                                    Err(error) => serde_json::json!({"ok": false, "error": error}).to_string(),
+                                }
+                            }
+                        }),
+                    ).map_err(|error| error.to_string())?;
+                    ctx.globals().set("__workerPlacements", placements).map_err(|error| error.to_string())?;
 
                     let log_host = Arc::clone(&host);
                     let log = Function::new(ctx.clone(), move |message: String| log_host.record("log", message)).map_err(|error| error.to_string())?;
@@ -664,15 +683,32 @@ impl WorkflowEngine {
                         };
                         const buildAgentRequest = (options) => {
                             const merged = mergeDefaults(options);
-                            if (!merged.agent) {
+                            if (merged.agent !== undefined && merged.agent !== null && !merged.agent) {
                                 const error = new Error("opts.agent is required");
                                 error.name = "AgentRequiredError";
                                 throw error;
                             }
                             return {
                                 prompt: "",
-                                agent: merged.agent,
+                                ...(merged.agent === undefined || merged.agent === null
+                                    ? {}
+                                    : { agent: merged.agent }),
+                                ...(merged.task === undefined || merged.task === null
+                                    ? {}
+                                    : { task: String(merged.task) }),
                                 model: merged.model ?? null,
+                                ...(merged.effort === undefined || merged.effort === null
+                                    ? {}
+                                    : { effort: String(merged.effort) }),
+                                ...(merged.timeoutMs === undefined || merged.timeoutMs === null
+                                    ? {}
+                                    : { timeout_ms: merged.timeoutMs }),
+                                ...(merged.cwd === undefined || merged.cwd === null
+                                    ? {}
+                                    : { cwd: String(merged.cwd) }),
+                                ...(merged.isolation === undefined || merged.isolation === null
+                                    ? {}
+                                    : { isolation: String(merged.isolation) }),
                                 schema: merged.schema ?? null,
                                 max_attempts: merged.maxAttempts ?? 3,
                                 label: merged.label ?? null,
@@ -685,6 +721,15 @@ impl WorkflowEngine {
                         globalThis.agent = async (prompt, options = {}) => {
                             const request = buildAgentRequest(options);
                             const response = unwrapAgentResponse(await __agent(String(prompt), JSON.stringify(request)));
+                            return response.value;
+                        };
+                        globalThis.workerPlacements = async () => {
+                            const response = JSON.parse(await __workerPlacements());
+                            if (!response.ok) {
+                                const error = new Error(response.error);
+                                error.name = "WorkerPlacementError";
+                                throw error;
+                            }
                             return response.value;
                         };
                         // Dispatch without awaiting: the returned handle
@@ -908,6 +953,7 @@ mod tests {
         async fn run_agent_call(
             &self,
             _: AgentCallRequest,
+            _: Option<crate::host::ResolvedWorkerPlacement>,
             _: CancellationToken,
         ) -> Result<AgentCallResult, String> {
             let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
@@ -952,6 +998,7 @@ mod tests {
         async fn run_agent_call(
             &self,
             _: AgentCallRequest,
+            _: Option<crate::host::ResolvedWorkerPlacement>,
             _: CancellationToken,
         ) -> Result<AgentCallResult, String> {
             Ok(AgentCallResult {
@@ -988,6 +1035,13 @@ mod tests {
     /// composition) is observable from the host side.
     struct SurfaceHost {
         agent_requests: Mutex<Vec<AgentCallRequest>>,
+        resolved_working_directories: Mutex<Vec<Option<String>>>,
+        placement_requests: Mutex<
+            Vec<(
+                Option<String>,
+                Option<swage_protocol::client::workflow::WorkerIsolation>,
+            )>,
+        >,
         agent_outputs: Mutex<VecDeque<Result<Value, String>>>,
         workflow_calls: Mutex<Vec<WorkflowCallRequest>>,
         workflow_output: Value,
@@ -1006,6 +1060,8 @@ mod tests {
         fn new() -> Self {
             Self {
                 agent_requests: Mutex::new(Vec::new()),
+                resolved_working_directories: Mutex::new(Vec::new()),
+                placement_requests: Mutex::new(Vec::new()),
                 agent_outputs: Mutex::new(VecDeque::new()),
                 workflow_calls: Mutex::new(Vec::new()),
                 workflow_output: Value::Null,
@@ -1033,9 +1089,14 @@ mod tests {
         async fn run_agent_call(
             &self,
             request: AgentCallRequest,
+            resolved_placement: Option<crate::host::ResolvedWorkerPlacement>,
             _: CancellationToken,
         ) -> Result<AgentCallResult, String> {
             self.agent_requests.lock().expect("requests").push(request);
+            self.resolved_working_directories
+                .lock()
+                .expect("resolved paths")
+                .push(resolved_placement.map(|placement| placement.path));
             if self.agent_delay_ms > 0 {
                 tokio::time::sleep(std::time::Duration::from_millis(self.agent_delay_ms)).await;
             }
@@ -1052,6 +1113,34 @@ mod tests {
                 session_id: Some(uuid::Uuid::from_u128(0xA)),
                 thread_id: Some(uuid::Uuid::from_u128(0xB)),
                 turn_id: None,
+            })
+        }
+
+        async fn resolve_worker_placement(
+            &self,
+            request: &AgentCallRequest,
+            _: CancellationToken,
+        ) -> Result<Option<crate::host::ResolvedWorkerPlacement>, String> {
+            self.placement_requests
+                .lock()
+                .expect("placements")
+                .push((request.cwd.clone(), request.isolation));
+            Ok(match request.isolation {
+                Some(_) => Some(crate::host::ResolvedWorkerPlacement {
+                    path: "/runtime/worktrees/worker-0".into(),
+                    can_write: true,
+                    authority_path: request.cwd.clone().unwrap_or_default(),
+                    authority_context_id: uuid::Uuid::nil(),
+                }),
+                None => request
+                    .cwd
+                    .clone()
+                    .map(|path| crate::host::ResolvedWorkerPlacement {
+                        authority_path: path.clone(),
+                        path,
+                        can_write: true,
+                        authority_context_id: uuid::Uuid::nil(),
+                    }),
             })
         }
 
@@ -1200,11 +1289,226 @@ mod tests {
             .await
             .expect("defaults run");
         let requests = host.agent_requests.lock().unwrap();
-        assert_eq!(requests[0].agent, "worker");
+        assert_eq!(requests[0].agent.as_deref(), Some("worker"));
         assert_eq!(requests[0].model.as_deref(), Some("cheap"));
         assert_eq!(requests[1].model.as_deref(), Some("strong"));
         // An explicit `undefined` must fall back, not erase the default.
-        assert_eq!(requests[1].agent, "worker");
+        assert_eq!(requests[1].agent.as_deref(), Some("worker"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn agent_call_without_a_definition_omits_agent_from_the_host_request() {
+        let host = Arc::new(SurfaceHost::new());
+        let output = WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                r#"return await agent("inspect the unit", { model: "cheap" });"#,
+                "null",
+                CancellationToken::new(),
+                Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                ScriptCapabilities::default(),
+            )
+            .await
+            .expect("bare agent call");
+        assert_eq!(serde_json::from_str::<Value>(&output).unwrap(), json!("ok"));
+
+        let requests = host.agent_requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].agent, None);
+        assert_eq!(requests[0].model.as_deref(), Some("cheap"));
+        let serialised = serde_json::to_value(&requests[0]).expect("serialise request");
+        assert!(
+            serialised.get("agent").is_none(),
+            "an unset agent must not perturb journal argument hashes: {serialised}"
+        );
+        assert!(
+            serialised.get("task").is_none()
+                && serialised.get("effort").is_none()
+                && serialised.get("timeout_ms").is_none()
+                && serialised.get("cwd").is_none()
+                && serialised.get("isolation").is_none(),
+            "unset call options must not perturb journal argument hashes: {serialised}"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn agent_call_rejects_an_explicitly_empty_agent() {
+        let host = Arc::new(SurfaceHost::new());
+        let output = WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                r#"try {
+                    await agent("inspect the unit", { agent: "" });
+                } catch (error) {
+                    return { name: error.name, message: error.message };
+                }"#,
+                "null",
+                CancellationToken::new(),
+                Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                ScriptCapabilities::default(),
+            )
+            .await
+            .expect("empty agent validation is catchable");
+
+        assert_eq!(
+            serde_json::from_str::<Value>(&output).unwrap(),
+            json!({"name": "AgentRequiredError", "message": "opts.agent is required"})
+        );
+        assert!(host.agent_requests.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn agent_call_projects_named_task_to_the_host() {
+        let host = Arc::new(SurfaceHost::new());
+        WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                r#"await agent("review", { task: "strict-review" }); return null;"#,
+                "null",
+                CancellationToken::new(),
+                Some(host.clone()),
+                ScriptCapabilities::default(),
+            )
+            .await
+            .expect("task call");
+        assert_eq!(
+            host.agent_requests.lock().unwrap()[0].task.as_deref(),
+            Some("strict-review")
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_call_keeps_requested_placement_and_passes_the_resolved_path_separately() {
+        let host = Arc::new(SurfaceHost::new());
+        WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                r#"await agent("isolated", { cwd: "/repo", isolation: "worktree" }); return null;"#,
+                "null",
+                CancellationToken::new(),
+                Some(host.clone()),
+                ScriptCapabilities::default(),
+            )
+            .await
+            .expect("placement call");
+        let requests = host.agent_requests.lock().unwrap();
+        assert_eq!(requests[0].cwd.as_deref(), Some("/repo"));
+        assert_eq!(
+            requests[0].isolation,
+            Some(swage_protocol::client::workflow::WorkerIsolation::Worktree)
+        );
+        let serialised = serde_json::to_value(&requests[0]).unwrap();
+        assert_eq!(serialised["cwd"], "/repo");
+        assert_eq!(serialised["isolation"], "worktree");
+        assert_eq!(
+            host.resolved_working_directories.lock().unwrap()[0].as_deref(),
+            Some("/runtime/worktrees/worker-0")
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn agent_call_projects_effort_and_timeout_options_to_the_host() {
+        let host = Arc::new(SurfaceHost::new());
+        WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                r#"await agent("bounded work", { effort: "high", timeoutMs: 75 }); return null;"#,
+                "null",
+                CancellationToken::new(),
+                Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                ScriptCapabilities::default(),
+            )
+            .await
+            .expect("agent call");
+        let requests = host.agent_requests.lock().unwrap();
+        let serialised = serde_json::to_value(&requests[0]).expect("serialise request");
+        assert_eq!(serialised["effort"], "high");
+        assert_eq!(serialised["timeout_ms"], 75);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn shipped_triage_workflow_runs_its_unchanged_agentless_calls() {
+        let host = Arc::new(SurfaceHost::new());
+        host.agent_outputs.lock().unwrap().extend([
+            Ok(json!({
+                "criteria": "surface",
+                "criteria_why": "clear boundary",
+                "obligations": [],
+                "queue_strikes": [],
+            })),
+            Ok(json!("proposal written")),
+        ]);
+        let output = WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                include_str!("../../../shipped/skills/assembly/workflows/triage-wave.js"),
+                r#"{
+                    "repo":".","commissionPath":"commission.md","spinePath":"spine.md",
+                    "retiredPath":"retired.md","ledgerPath":"ledger.md",
+                    "obligationsDir":"obligations","tasksPath":"TASKS.md",
+                    "outPath":"proposal.md","waves":1
+                }"#,
+                CancellationToken::new(),
+                Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                ScriptCapabilities::default(),
+            )
+            .await
+            .expect("unchanged shipped workflow");
+        assert_eq!(
+            serde_json::from_str::<Value>(&output).expect("workflow output"),
+            json!({"proposals": 1, "summary": "proposal written", "document": "proposal.md"})
+        );
+        let requests = host.agent_requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].agent, None);
+        assert_eq!(requests[0].label.as_deref(), Some("propose:0"));
+        assert_eq!(requests[0].effort.as_deref(), Some("low"));
+        assert_eq!(requests[1].agent, None);
+        assert_eq!(requests[1].label.as_deref(), Some("reduce"));
+        assert_eq!(requests[1].effort.as_deref(), Some("medium"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn shipped_estate_workflow_projects_its_build_timeout_pin() {
+        let host = Arc::new(SurfaceHost::new());
+        host.agent_outputs.lock().unwrap().extend([
+            Ok(json!({
+                "admission": "ok",
+                "restatement": "prove the estate",
+                "journeys": "exercise the real consumer",
+                "disputes": "",
+            })),
+            Ok(json!("estate built")),
+        ]);
+        let source = include_str!("../../../shipped/skills/assembly/workflows/estate-unit.js");
+        let hold_start = source
+            .find("const runHold = async")
+            .expect("shipped hold function");
+        let hold_end = source[hold_start..]
+            .find("\n\n// ---------------------------------------------------------------- restate")
+            .map(|offset| hold_start + offset)
+            .expect("end of shipped hold function");
+        let verify_start = source
+            .find("\n\n// ---------------------------------------------------------------- verify")
+            .expect("shipped verify stage");
+        let source = format!(
+            "{}const runHold = async () => ({{ verdict: 'accept' }});{}\nreturn report;",
+            &source[..hold_start],
+            &source[hold_end..verify_start]
+        );
+        WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                &source,
+                r#"{
+                    "briefPath":"brief.md","worktree":".",
+                    "commissionPath":"commission.md","verificationPath":"VERIFICATION.md",
+                    "unitDir":"unit","mergePolicy":"direct-merge",
+                    "annexeConfigPath":"config.toml","proofMode":"mutation"
+                }"#,
+                CancellationToken::new(),
+                Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                ScriptCapabilities::default(),
+            )
+            .await
+            .expect("shipped workflow through build stage");
+
+        let requests = host.agent_requests.lock().unwrap();
+        assert_eq!(requests[1].label.as_deref(), Some("build"));
+        assert_eq!(requests[1].timeout_ms, Some(14_400_000));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1771,6 +2075,7 @@ mod tests {
         async fn run_agent_call(
             &self,
             _: AgentCallRequest,
+            _: Option<crate::host::ResolvedWorkerPlacement>,
             _: CancellationToken,
         ) -> Result<AgentCallResult, String> {
             Err(self.0.to_string())
@@ -1803,6 +2108,27 @@ mod tests {
             serde_json::from_str::<Value>(&output).unwrap(),
             json!({"name":"BudgetExceededError","message":"agent call limit reached"})
         );
+
+        let host: Arc<dyn WorkflowHost> = Arc::new(ErrorHost(
+            "AgentCallTimeoutError: agent call exceeded its 75ms deadline",
+        ));
+        let output = WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                "try { await agent('x',{agent:'writer'}); } catch (error) { return {name:error.name,message:error.message}; }",
+                "null",
+                CancellationToken::new(),
+                Some(host),
+                ScriptCapabilities::default(),
+            )
+            .await
+            .expect("timeout error is catchable");
+        assert_eq!(
+            serde_json::from_str::<Value>(&output).unwrap(),
+            json!({
+                "name":"AgentCallTimeoutError",
+                "message":"agent call exceeded its 75ms deadline"
+            })
+        );
     }
 
     #[test]
@@ -1816,8 +2142,22 @@ mod tests {
             ("WorkflowCancelledError".into(), "stopped".into())
         );
         assert_eq!(
+            named_host_error(
+                "AgentCallTimeoutError: agent call exceeded its 75ms deadline",
+                "AgentCallError"
+            ),
+            (
+                "AgentCallTimeoutError".into(),
+                "agent call exceeded its 75ms deadline".into()
+            )
+        );
+        assert_eq!(
             named_host_error("NondeterministicReplayError", "AgentCallError"),
             ("NondeterministicCallError".into(), String::new())
+        );
+        assert_eq!(
+            named_host_error("WorkerPlacementError: denied", "AgentCallError"),
+            ("WorkerPlacementError".into(), "denied".into())
         );
         assert_eq!(
             named_host_error("provider unavailable", "AgentCallError"),

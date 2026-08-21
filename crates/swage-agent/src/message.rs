@@ -153,6 +153,8 @@ pub struct TurnRequest {
     /// Optional pre-created Pending turn to reuse instead of creating a fresh
     /// turn record inside the agent runtime.
     pub existing_turn_id: Option<Uuid>,
+    /// Per-turn provider reasoning effort override.
+    pub effort: Option<String>,
     /// Cooperative cancellation token — the gateway signals this when the client
     /// disconnects or a shutdown is requested.
     pub cancellation_token: CancellationToken,
@@ -176,6 +178,7 @@ mod turn_request_tests {
             assembled_context: vec![],
             parent_turn_id: None,
             existing_turn_id: None,
+            effort: None,
             cancellation_token: CancellationToken::new(),
         };
         assert_eq!(req.user_message, "hello");
@@ -185,6 +188,7 @@ mod turn_request_tests {
     #[test]
     fn test_execution_context_is_required() {
         let req = TurnRequest {
+            effort: None,
             execution: TurnExecutionContext {
                 session_id: uuid::Uuid::new_v4(),
                 thread_id: uuid::Uuid::new_v4(),
@@ -203,6 +207,7 @@ mod turn_request_tests {
     #[test]
     fn test_cloneable() {
         let req = TurnRequest {
+            effort: None,
             execution: TurnExecutionContext {
                 session_id: uuid::Uuid::new_v4(),
                 thread_id: uuid::Uuid::new_v4(),
@@ -226,6 +231,7 @@ mod turn_request_tests {
         // CancellationToken::clone() produces a linked token — both cancel together.
         let token = CancellationToken::new();
         let req = TurnRequest {
+            effort: None,
             execution: TurnExecutionContext {
                 session_id: uuid::Uuid::new_v4(),
                 thread_id: uuid::Uuid::new_v4(),
@@ -245,6 +251,7 @@ mod turn_request_tests {
     #[test]
     fn test_debug_format() {
         let req = TurnRequest {
+            effort: None,
             execution: TurnExecutionContext {
                 session_id: uuid::Uuid::new_v4(),
                 thread_id: uuid::Uuid::new_v4(),

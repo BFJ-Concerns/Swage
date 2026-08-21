@@ -168,6 +168,7 @@ mod tests {
 
         let response = provider
             .complete(CompletionRequest {
+                effort: None,
                 messages: vec![ChatMessage::new(Role::User, "Hi")],
                 model: None,
                 max_tokens: Some(50),
@@ -195,6 +196,7 @@ mod tests {
         let agent_handle = tokio::spawn(async move {
             provider
                 .complete(CompletionRequest {
+                    effort: None,
                     messages: vec![ChatMessage::new(Role::User, "test")],
                     model: Some("claude-3-opus".into()),
                     max_tokens: Some(512),
@@ -252,6 +254,7 @@ mod tests {
         let agent_handle = tokio::spawn(async move {
             provider
                 .complete(CompletionRequest {
+                    effort: None,
                     messages: vec![ChatMessage::new(Role::User, "hi")],
                     model: None,
                     max_tokens: None,

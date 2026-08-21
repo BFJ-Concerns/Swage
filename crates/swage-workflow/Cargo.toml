@@ -9,6 +9,7 @@ description = "Deterministic JavaScript orchestration and replay for Swage"
 workspace = true
 
 [dependencies]
+swage-protocol = { path = "../swage-protocol" }
 async-trait = { workspace = true }
 futures = { workspace = true }
 rquickjs = { workspace = true }
