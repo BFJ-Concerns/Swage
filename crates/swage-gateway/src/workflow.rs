@@ -616,6 +616,17 @@ impl WorkflowLauncher for GatewayWorkflowLauncher {
             crate::turn::dispatch_bound_agent_ids(session.metadata.as_ref())
                 .map_err(|error| error.to_string())?;
         dispatch_bound_agent_ids.push(session.agent_id);
+        let mut dispatch_bound_task_definition_ids =
+            crate::turn::dispatch_bound_task_definition_ids(session.metadata.as_ref())
+                .map_err(|error| error.to_string())?;
+        if let Some(task_definition_id) = session
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("task_definition"))
+            .and_then(Value::as_str)
+        {
+            dispatch_bound_task_definition_ids.push(task_definition_id.to_string());
+        }
         let run = start_run(
             self.state.clone(),
             session.space_id,
@@ -630,6 +641,7 @@ impl WorkflowLauncher for GatewayWorkflowLauncher {
             // adds that session's own agent. Each worker turn re-resolves the
             // entire lineage before intersecting grants.
             dispatch_bound_agent_ids,
+            dispatch_bound_task_definition_ids,
         )
         .await
         .map_err(|error| error.0.to_string())?;
@@ -985,6 +997,7 @@ async fn run_ephemeral_agent_call(
     run_id: Uuid,
     space_id: Uuid,
     dispatch_bound_agent_ids: &[String],
+    dispatch_bound_task_definition_ids: &[String],
     request: AgentCallRequest,
     resolved_working_directory: Option<ResolvedWorkerPlacement>,
     cancellation: CancellationToken,
@@ -1065,6 +1078,10 @@ async fn run_ephemeral_agent_call(
                 .unwrap_or_else(|| BARE_WORKFLOW_AGENT_ID.to_string());
             let mut metadata = crate::turn::dispatch_bound_metadata(dispatch_bound_agent_ids)
                 .unwrap_or_else(|| serde_json::json!({}));
+            crate::turn::add_dispatch_bound_task_definition_ids(
+                &mut metadata,
+                dispatch_bound_task_definition_ids,
+            );
             if let Some(placement) = resolved_working_directory.as_ref() {
                 metadata[crate::turn::WORKER_PLACEMENT_CWD_METADATA_KEY] =
                     Value::String(placement.path.clone());
@@ -1234,6 +1251,7 @@ fn run_host_commands(
     run_id: Uuid,
     space_id: Uuid,
     dispatch_bound_agent_ids: Vec<String>,
+    dispatch_bound_task_definition_ids: Vec<String>,
     delivery_grant: Option<Value>,
     budget: WorkflowBudget,
     replay: Vec<WorkflowJournalRecord>,
@@ -1249,6 +1267,7 @@ fn run_host_commands(
         run_id,
         space_id,
         dispatch_bound_agent_ids,
+        dispatch_bound_task_definition_ids,
         delivery_grant,
         budget,
         replay,
@@ -1481,6 +1500,7 @@ async fn run_host_commands_inner(
     run_id: Uuid,
     space_id: Uuid,
     dispatch_bound_agent_ids: Vec<String>,
+    dispatch_bound_task_definition_ids: Vec<String>,
     delivery_grant: Option<Value>,
     budget: WorkflowBudget,
     replay: Vec<WorkflowJournalRecord>,
@@ -1920,6 +1940,7 @@ async fn run_host_commands_inner(
                 let started_replay = existing_call.is_some_and(|entry| entry.status == "started");
                 let state = state.clone();
                 let dispatch_bound_agent_ids = dispatch_bound_agent_ids.clone();
+                let dispatch_bound_task_definition_ids = dispatch_bound_task_definition_ids.clone();
                 let replay = Arc::clone(&replay);
                 let spent = Arc::clone(&spent_tokens);
                 let token_budget = Arc::clone(&token_budget);
@@ -1987,6 +2008,7 @@ async fn run_host_commands_inner(
                                     run_id,
                                     space_id,
                                     &dispatch_bound_agent_ids,
+                                    &dispatch_bound_task_definition_ids,
                                     journal_entry_id,
                                     request,
                                     resolved_working_directory,
@@ -2018,6 +2040,7 @@ async fn run_host_commands_inner(
                                         run_id,
                                         space_id,
                                         &dispatch_bound_agent_ids,
+                                        &dispatch_bound_task_definition_ids,
                                         journal_entry_id,
                                         request,
                                         resolved_working_directory,
@@ -3040,6 +3063,7 @@ async fn complete_agent_entry(
     run_id: Uuid,
     space_id: Uuid,
     dispatch_bound_agent_ids: &[String],
+    dispatch_bound_task_definition_ids: &[String],
     entry_id: Uuid,
     request: AgentCallRequest,
     resolved_working_directory: Option<ResolvedWorkerPlacement>,
@@ -3050,6 +3074,7 @@ async fn complete_agent_entry(
         run_id,
         space_id,
         dispatch_bound_agent_ids,
+        dispatch_bound_task_definition_ids,
         request,
         resolved_working_directory,
         cancellation,
@@ -3561,7 +3586,11 @@ async fn complete_workflow_call_entry(
                     // Confinement flows down here too: the child's workers
                     // stay bounded by whatever context dispatched the parent.
                     dispatch_bound_agent_ids: parent
-                        .map(|parent| parent.dispatch_bound_agent_ids)
+                        .as_ref()
+                        .map(|parent| parent.dispatch_bound_agent_ids.clone())
+                        .unwrap_or_default(),
+                    dispatch_bound_task_definition_ids: parent
+                        .map(|parent| parent.dispatch_bound_task_definition_ids)
                         .unwrap_or_default(),
                 })
                 .await
@@ -3917,6 +3946,7 @@ async fn start_run(
     delivery_grant: Option<Value>,
     carrying_skill: Option<String>,
     dispatch_bound_agent_ids: Vec<String>,
+    dispatch_bound_task_definition_ids: Vec<String>,
 ) -> Result<WorkflowRun, ApiError> {
     validate_budget(&budget)?;
     // Each run owns a QuickJS runtime and an OS thread. Keep the default bound
@@ -3945,6 +3975,7 @@ async fn start_run(
             budget: serde_json::to_value(budget).map_err(internal)?,
             engine_version: QUICKJS_ENGINE_VERSION.into(),
             dispatch_bound_agent_ids,
+            dispatch_bound_task_definition_ids,
         })
         .await
         .map_err(internal)?;
@@ -4151,6 +4182,7 @@ async fn launch_existing_run(
         record.id,
         space_id,
         record.dispatch_bound_agent_ids.clone(),
+        record.dispatch_bound_task_definition_ids.clone(),
         delivery_grant.clone(),
         run_budget.clone(),
         replay,
@@ -4316,6 +4348,7 @@ pub async fn start_inline_run(
             // Operator-started: no dispatch bound beyond each worker's own
             // resolved config.
             vec![],
+            vec![],
         )
         .await?,
     ))
@@ -4345,6 +4378,7 @@ pub async fn start_saved_run(
             script.delivery_grant,
             script.carrying_skill,
             query.agent_id.into_iter().collect(),
+            vec![],
         )
         .await?,
     ))
@@ -5623,6 +5657,7 @@ mod tests {
                 budget: serde_json::to_value(WorkflowBudget::default()).expect("budget"),
                 engine_version: "test".into(),
                 dispatch_bound_agent_ids: vec![],
+                dispatch_bound_task_definition_ids: vec![],
             })
             .await
             .expect("run");
@@ -5681,6 +5716,7 @@ mod tests {
             &state,
             Uuid::new_v4(),
             space.id,
+            &[],
             &[],
             AgentCallRequest {
                 cwd: None,
@@ -5767,6 +5803,7 @@ mod tests {
                 budget: serde_json::json!({}),
                 engine_version: "test".into(),
                 dispatch_bound_agent_ids: vec![],
+                dispatch_bound_task_definition_ids: vec![],
             })
             .await
             .expect("run");
@@ -5790,6 +5827,7 @@ mod tests {
             state,
             run.id,
             space.id,
+            vec![],
             vec![],
             None,
             WorkflowBudget {
@@ -6404,6 +6442,7 @@ mod tests {
                 budget: serde_json::json!({}),
                 engine_version: "test".into(),
                 dispatch_bound_agent_ids: vec![],
+                dispatch_bound_task_definition_ids: vec![],
             })
             .await
             .expect("run");
@@ -6573,6 +6612,7 @@ mod tests {
             state,
             run_id,
             space.id,
+            vec![],
             vec![],
             None,
             WorkflowBudget {
@@ -6810,6 +6850,7 @@ mod tests {
                 budget: serde_json::json!({}),
                 engine_version: "test".into(),
                 dispatch_bound_agent_ids: vec![],
+                dispatch_bound_task_definition_ids: vec![],
             })
             .await
             .expect("run");
@@ -6826,6 +6867,7 @@ mod tests {
             state,
             run.id,
             space.id,
+            vec![],
             vec![],
             None,
             WorkflowBudget {
@@ -6953,6 +6995,7 @@ mod tests {
                 budget: serde_json::json!({}),
                 engine_version: "test".into(),
                 dispatch_bound_agent_ids: vec!["lead".into()],
+                dispatch_bound_task_definition_ids: vec![],
             })
             .await
             .expect("run");
@@ -6993,6 +7036,7 @@ mod tests {
             run.id,
             space.id,
             vec!["lead".into()],
+            vec![],
             None,
             WorkflowBudget {
                 max_agent_calls: None,
@@ -7209,6 +7253,7 @@ mod tests {
                 engine_version: "test".into(),
                 carrying_skill: None,
                 dispatch_bound_agent_ids: vec!["lead".into()],
+                dispatch_bound_task_definition_ids: vec![],
             })
             .await
             .expect("run");
@@ -7292,6 +7337,142 @@ mod tests {
             Some(Value::String("bounded work completed".into()))
         );
         assert_eq!(provider.requests.lock().expect("requests").len(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn workflow_launches_carry_task_bounds_and_fail_closed_when_the_task_disappears() {
+        let _guard = crate::test_support::SwageHomeGuard::new();
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        storage
+            .upsert_task_definition(swage_storage::NewTaskDefinition {
+                id: "restricted".into(),
+                instructions: "Remain within the restricted task.".into(),
+                model_id: None,
+                tool_permissions: Some(serde_json::json!({
+                    "allow": [], "deny": [], "bundles": {}, "require_approval": []
+                })),
+                output_schema: None,
+                output_max_retries: None,
+            })
+            .await
+            .expect("store task definition");
+        let source = "return await agent('bounded workflow work');";
+        storage
+            .create_workflow_script(NewWorkflowScript {
+                space_id: space.id,
+                name: "bounded-workflow".into(),
+                description: String::new(),
+                source: source.into(),
+                delivery_grant: None,
+            })
+            .await
+            .expect("store workflow");
+        let session = storage
+            .create_session(NewSession {
+                space_id: space.id,
+                agent_id: "gateway".into(),
+                metadata: Some(serde_json::json!({"task_definition": "restricted"})),
+                active_workspace_attachment_id: None,
+            })
+            .await
+            .expect("session");
+        let _skill_root = crate::websocket::SessionSkillRootGuard::empty(session.id);
+        let provider = Arc::new(ScriptedRecordingProvider {
+            outputs: std::sync::Mutex::new(std::collections::VecDeque::from([
+                scripted_text_output("bounded work completed"),
+            ])),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let config = swage_config::ResolvedConfig {
+            tools: swage_config::ToolConfig {
+                permissions: swage_config::ToolPermissionConfig {
+                    allow: vec!["shell".into()],
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
+            config,
+            crate::tool::ToolDispatcher::allow_all(vec![
+                Arc::new(WorkflowShellTool) as Arc<dyn crate::tool::Tool>
+            ]),
+            None,
+        );
+
+        let started = GatewayWorkflowLauncher::new(state.clone())
+            .start_by_name(session.id, "bounded-workflow", Value::Null, None, false)
+            .await
+            .expect("start task-bounded workflow");
+        let run_id: Uuid = serde_json::from_value(started["id"].clone()).expect("run id");
+        wait_for_terminal(&state, run_id).await;
+        let run = storage
+            .get_workflow_run(run_id)
+            .await
+            .expect("run query")
+            .expect("run");
+        assert_eq!(run.dispatch_bound_task_definition_ids, vec!["restricted"]);
+        assert_eq!(run.state, "completed");
+        let journal = storage
+            .list_workflow_journal(run_id)
+            .await
+            .expect("journal");
+        let worker_session_id = journal[0].result.as_ref().unwrap()["session_id"]
+            .as_str()
+            .and_then(|id| Uuid::parse_str(id).ok())
+            .expect("worker session id");
+        let worker_session = storage
+            .get_session(worker_session_id)
+            .await
+            .expect("worker session query")
+            .expect("worker session");
+        assert_eq!(
+            crate::turn::dispatch_bound_task_definition_ids(worker_session.metadata.as_ref())
+                .expect("worker task bounds"),
+            vec!["restricted"]
+        );
+        assert!(
+            provider.requests.lock().expect("requests")[0]
+                .tool_definitions
+                .is_empty(),
+            "the caller's task overlay must remove shell from the workflow worker"
+        );
+
+        assert!(
+            storage
+                .delete_task_definition("restricted")
+                .await
+                .expect("delete task definition")
+        );
+        let started = GatewayWorkflowLauncher::new(state.clone())
+            .start_by_name(session.id, "bounded-workflow", Value::Null, None, false)
+            .await
+            .expect("start workflow with stale task bound");
+        let stale_run_id: Uuid =
+            serde_json::from_value(started["id"].clone()).expect("stale run id");
+        wait_for_terminal(&state, stale_run_id).await;
+        let stale_run = storage
+            .get_workflow_run(stale_run_id)
+            .await
+            .expect("stale run query")
+            .expect("stale run");
+        assert_eq!(stale_run.state, "failed");
+        assert!(
+            stale_run
+                .error_message
+                .as_deref()
+                .is_some_and(|error| error.contains("no task definition 'restricted' exists"))
+        );
+        assert_eq!(
+            provider.requests.lock().expect("requests").len(),
+            1,
+            "a missing inherited task bound must fail before provider dispatch"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -7397,6 +7578,7 @@ mod tests {
             Uuid::new_v4(),
             space.id,
             &[],
+            &[],
             request(),
             None,
             CancellationToken::new(),
@@ -7458,6 +7640,7 @@ mod tests {
             Uuid::new_v4(),
             space.id,
             &[],
+            &[],
             request(),
             None,
             CancellationToken::new(),
@@ -7486,6 +7669,7 @@ mod tests {
             &state,
             Uuid::new_v4(),
             space.id,
+            &[],
             &[],
             missing,
             None,
@@ -7561,6 +7745,7 @@ mod tests {
                 engine_version: "test".into(),
                 carrying_skill: None,
                 dispatch_bound_agent_ids: vec![],
+                dispatch_bound_task_definition_ids: vec![],
             })
             .await
             .expect("run");
@@ -7585,6 +7770,7 @@ mod tests {
                 state,
                 run.id,
                 space.id,
+                vec![],
                 vec![],
                 None,
                 WorkflowBudget::default(),
@@ -8207,6 +8393,7 @@ mod tests {
                 engine_version: "test".into(),
                 carrying_skill: None,
                 dispatch_bound_agent_ids: vec![],
+                dispatch_bound_task_definition_ids: vec![],
             })
             .await
             .expect("run");
@@ -8314,6 +8501,7 @@ mod tests {
                 engine_version: "test".into(),
                 carrying_skill: None,
                 dispatch_bound_agent_ids: vec![],
+                dispatch_bound_task_definition_ids: vec![],
             })
             .await
             .expect("run");
@@ -8381,6 +8569,7 @@ mod tests {
                 budget: serde_json::json!({}),
                 engine_version: "test".into(),
                 dispatch_bound_agent_ids: vec![],
+                dispatch_bound_task_definition_ids: vec![],
             })
             .await
             .expect("run");
@@ -8408,6 +8597,7 @@ mod tests {
             state,
             run.id,
             space.id,
+            vec![],
             vec![],
             None,
             WorkflowBudget {
@@ -8476,6 +8666,7 @@ mod tests {
             &state,
             Uuid::new_v4(),
             space.id,
+            &[],
             &[],
             AgentCallRequest {
                 prompt: "continue".into(),
@@ -8633,6 +8824,7 @@ mod tests {
                 budget: serde_json::json!({}),
                 engine_version: "test".into(),
                 dispatch_bound_agent_ids: vec![],
+                dispatch_bound_task_definition_ids: vec![],
             })
             .await
             .expect("run");
@@ -8706,6 +8898,7 @@ mod tests {
                 budget: serde_json::json!({}),
                 engine_version: "test".into(),
                 dispatch_bound_agent_ids: vec![],
+                dispatch_bound_task_definition_ids: vec![],
             })
             .await
             .expect("run");
@@ -9272,6 +9465,7 @@ mod tests {
             run_id,
             space_id,
             vec![],
+            vec![],
             None,
             WorkflowBudget {
                 max_agent_calls: None,
@@ -9551,6 +9745,7 @@ mod tests {
             run.id,
             run.space_id,
             vec![],
+            vec![],
             None,
             WorkflowBudget {
                 max_agent_calls: None,
@@ -9759,6 +9954,7 @@ mod tests {
             budget: serde_json::json!({}),
             engine_version: "test".into(),
             dispatch_bound_agent_ids: vec![],
+            dispatch_bound_task_definition_ids: vec![],
         };
         let interrupted = storage
             .create_workflow_run(make_run(r#"return "a-done""#))
@@ -9843,6 +10039,7 @@ mod tests {
                 budget: serde_json::json!({}),
                 engine_version: "test".into(),
                 dispatch_bound_agent_ids: vec![],
+                dispatch_bound_task_definition_ids: vec![],
             })
             .await
             .expect("run");
@@ -9864,6 +10061,7 @@ mod tests {
             state,
             run.id,
             space.id,
+            vec![],
             vec![],
             None,
             WorkflowBudget {
@@ -9963,6 +10161,7 @@ mod tests {
                 budget: serde_json::json!({}),
                 engine_version: "test".into(),
                 dispatch_bound_agent_ids: vec![],
+                dispatch_bound_task_definition_ids: vec![],
             })
             .await
             .expect("run");
@@ -9984,6 +10183,7 @@ mod tests {
             state,
             run.id,
             space.id,
+            vec![],
             vec![],
             None,
             WorkflowBudget {
@@ -10099,6 +10299,7 @@ mod tests {
                 budget: serde_json::json!({}),
                 engine_version: "test".into(),
                 dispatch_bound_agent_ids: vec![],
+                dispatch_bound_task_definition_ids: vec![],
             })
             .await
             .expect("run");
@@ -10186,6 +10387,7 @@ mod tests {
             state,
             run.id,
             space.id,
+            vec![],
             vec![],
             None,
             WorkflowBudget {
@@ -10284,6 +10486,7 @@ mod tests {
                 budget: serde_json::json!({}),
                 engine_version: "test".into(),
                 dispatch_bound_agent_ids: vec![],
+                dispatch_bound_task_definition_ids: vec![],
             })
             .await
             .expect("run");
@@ -10337,6 +10540,7 @@ mod tests {
             state,
             run.id,
             space.id,
+            vec![],
             vec![],
             None,
             WorkflowBudget {
@@ -10414,6 +10618,7 @@ mod tests {
                 budget: serde_json::json!({}),
                 engine_version: "test".into(),
                 dispatch_bound_agent_ids: vec![],
+                dispatch_bound_task_definition_ids: vec![],
             })
             .await
             .expect("run");
@@ -10499,6 +10704,7 @@ mod tests {
             state,
             run.id,
             space.id,
+            vec![],
             vec![],
             None,
             WorkflowBudget {
@@ -10615,6 +10821,7 @@ mod tests {
                 budget: serde_json::json!({}),
                 engine_version: "test".into(),
                 dispatch_bound_agent_ids: vec![],
+                dispatch_bound_task_definition_ids: vec![],
             })
             .await
             .expect("run");
@@ -10721,6 +10928,7 @@ mod tests {
             state,
             run.id,
             space.id,
+            vec![],
             vec![],
             None,
             WorkflowBudget {
@@ -10850,6 +11058,7 @@ mod tests {
                 budget: serde_json::json!({}),
                 engine_version: "test".into(),
                 dispatch_bound_agent_ids: vec![],
+                dispatch_bound_task_definition_ids: vec![],
             })
             .await
             .expect("run");
@@ -10966,6 +11175,7 @@ mod tests {
             run.id,
             space.id,
             vec![],
+            vec![],
             None,
             WorkflowBudget {
                 max_agent_calls: Some(3),
@@ -11073,6 +11283,7 @@ mod tests {
                 budget: serde_json::to_value(&budget).expect("budget"),
                 engine_version: "test".into(),
                 dispatch_bound_agent_ids: vec![],
+                dispatch_bound_task_definition_ids: vec![],
             })
             .await
             .expect("run");
@@ -11584,6 +11795,7 @@ mod tests {
                 budget: serde_json::to_value(WorkflowBudget::default()).expect("budget"),
                 engine_version: "test".into(),
                 dispatch_bound_agent_ids: vec![],
+                dispatch_bound_task_definition_ids: vec![],
             })
             .await
             .expect("run");

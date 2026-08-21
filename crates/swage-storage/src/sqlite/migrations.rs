@@ -124,6 +124,7 @@ const ADD_WORKFLOW_RUN_PARKING: &str = "
         parent_run_id        TEXT REFERENCES workflow_runs(id),
         parent_seq           INTEGER,
         dispatch_bound_agent_ids_json TEXT NOT NULL,
+        dispatch_bound_task_definition_ids_json TEXT NOT NULL,
         wake_at              TEXT
     );
     INSERT INTO workflow_runs_parking_new (
@@ -132,7 +133,7 @@ const ADD_WORKFLOW_RUN_PARKING: &str = "
         source, source_hash, args_json,
         budget_json, state, final_output_json, handover_json, error_message, engine_version,
         created_at, completed_at, parent_run_id, parent_seq,
-        dispatch_bound_agent_ids_json
+        dispatch_bound_agent_ids_json, dispatch_bound_task_definition_ids_json
     )
     SELECT
         id, space_id, script_version_id, inline_workflow_id,
@@ -140,7 +141,7 @@ const ADD_WORKFLOW_RUN_PARKING: &str = "
         source, source_hash, args_json,
         budget_json, state, final_output_json, NULL, error_message, engine_version,
         created_at, completed_at, parent_run_id, parent_seq,
-        dispatch_bound_agent_ids_json
+        dispatch_bound_agent_ids_json, dispatch_bound_task_definition_ids_json
     FROM workflow_runs;
     DROP TABLE workflow_runs;
     ALTER TABLE workflow_runs_parking_new RENAME TO workflow_runs;
@@ -956,7 +957,8 @@ const COMPLETE_SCHEMA: &str = "
         engine_version      TEXT NOT NULL,
         created_at          TEXT NOT NULL,
         completed_at        TEXT,
-        dispatch_bound_agent_ids_json TEXT NOT NULL DEFAULT '[]'
+        dispatch_bound_agent_ids_json TEXT NOT NULL DEFAULT '[]',
+        dispatch_bound_task_definition_ids_json TEXT NOT NULL DEFAULT '[]'
     );
 
     CREATE INDEX IF NOT EXISTS idx_workflow_runs_space_created
