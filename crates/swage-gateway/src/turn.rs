@@ -873,7 +873,7 @@ pub(crate) async fn process_turn_with_composition(
     )
     .await?;
 
-    let assembly_name = match select_context_assembly(
+    let context_choices = match select_context_assembly(
         state,
         &config,
         session_id,
@@ -882,7 +882,7 @@ pub(crate) async fn process_turn_with_composition(
     )
     .await
     {
-        Ok(assembly_name) => assembly_name,
+        Ok(context_choices) => context_choices,
         Err(error) => {
             record_terminal_state_and_release(
                 state,
@@ -894,6 +894,7 @@ pub(crate) async fn process_turn_with_composition(
             return Err(error);
         }
     };
+    let assembly_name = context_choices.assembly_name;
     let memory_content = load_memory_for_assembly(&assembly_name, || async {
         match swage_root_opt.as_deref() {
             Some(root) => load_space_memory(root, &space_slug).await,
@@ -949,6 +950,7 @@ pub(crate) async fn process_turn_with_composition(
         environment,
         available_skills,
         config.default_model_id(),
+        context_choices.working_norms_scaffold,
         &hierarchy,
         composition.elements.as_deref(),
     );
@@ -1716,13 +1718,21 @@ pub(crate) async fn process_turn_with_composition(
     Ok(())
 }
 
+pub(super) struct ContextChoices {
+    assembly_name: String,
+    working_norms_scaffold: swage_context::working_norms::WorkingNormsScaffold,
+}
+
+const WORKING_NORMS_NATIVE: &str = "native";
+const WORKING_NORMS_FAMILY_FALLBACK: &str = "family-fallback";
+
 async fn select_context_assembly(
     state: &AppState,
     config: &swage_config::ResolvedConfig,
     session_id: Uuid,
     turn_id: Uuid,
     call_override: Option<&str>,
-) -> Result<String, GatewayError> {
+) -> Result<ContextChoices, GatewayError> {
     if let Some(call_override) = call_override {
         swage_core::validate_context_assembly_name(call_override)
             .map_err(GatewayError::ConfigError)?;
@@ -1770,19 +1780,18 @@ async fn select_context_assembly(
     };
 
     // The working-norms text is its own experiment location, drawn beside
-    // the assembly choice: no alternatives are registered yet, so the
-    // built-in text serves, but every turn's draw is already recorded and
-    // blinded — the seam variant texts will compete through.
-    let norms_variants: Vec<&str> = vec![];
+    // the assembly choice. The exact-model native scaffold is the default;
+    // the established family text remains a registered alternative.
+    let norms_variants = [WORKING_NORMS_FAMILY_FALLBACK];
     let norms_decision = crate::experimentation::select_variant(
         &config.experimentation,
         crate::experimentation::LOCATION_WORKING_NORMS,
         &norms_variants,
-        "built-in",
+        WORKING_NORMS_NATIVE,
         turn_id,
     )
     .map_err(|error| GatewayError::ConfigError(error.to_string()))?;
-    if let Err(error) = crate::experimentation::record_selection(
+    let norms_decision = match crate::experimentation::record_selection(
         state,
         crate::experimentation::LOCATION_WORKING_NORMS,
         &norms_decision,
@@ -1791,14 +1800,30 @@ async fn select_context_assembly(
     )
     .await
     {
-        tracing::error!(
-            %error,
-            variant = %norms_decision.variant,
-            "working-norms selection could not be recorded; serving the built-in text"
-        );
-    }
+        Ok(()) => norms_decision,
+        Err(error) => {
+            tracing::error!(
+                %error,
+                variant = %norms_decision.variant,
+                "working-norms selection could not be recorded; serving the native scaffold"
+            );
+            crate::experimentation::VariantDecision {
+                variant: WORKING_NORMS_NATIVE.to_owned(),
+                reason: crate::experimentation::SelectionReason::RecordUnavailable,
+            }
+        }
+    };
+    let working_norms_scaffold = match norms_decision.variant.as_str() {
+        WORKING_NORMS_FAMILY_FALLBACK => {
+            swage_context::working_norms::WorkingNormsScaffold::FamilyFallback
+        }
+        _ => swage_context::working_norms::WorkingNormsScaffold::Native,
+    };
 
-    Ok(decision.variant)
+    Ok(ContextChoices {
+        assembly_name: decision.variant,
+        working_norms_scaffold,
+    })
 }
 
 fn execute_context_assembly(

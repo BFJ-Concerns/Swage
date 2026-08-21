@@ -6,6 +6,7 @@ All notable changes to Swage are documented in this file.
 
 ### Added
 
+- Models now receive per-model native-harness scaffolds with family fallback, with each scaffold's divergence register recorded.
 - Dispatches can name context elements, variable bindings, and an assembly for the child.
 - Named reusable Markdown context elements now resolve through the global, space, and agent configuration hierarchy, with live session values rendered into each briefing at composition time.
 - Workflow runs can wait on external events, answered through operator or granted agent posts.
