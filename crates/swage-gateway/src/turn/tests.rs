@@ -8311,6 +8311,7 @@ async fn delegate_worktree_provisions_isolated_cwd_and_records_resolved_placemen
             "agent-b",
             "Write only in an isolated worktree and wait",
             None,
+            None,
             Some(repo.to_string_lossy().into_owned()),
             Some(swage_protocol::client::workflow::WorkerIsolation::Worktree),
             "wait-worktree-delegate-call",
