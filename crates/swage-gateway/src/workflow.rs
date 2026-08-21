@@ -3670,6 +3670,7 @@ pub async fn start_saved_run(
         .await
         .map_err(internal)?
         .ok_or_else(|| ApiError::not_found("workflow script", id))?;
+    validate_agent_scope_for_space(&state, script.space_id, query.agent_id.as_deref()).await?;
     Ok(Json(
         start_run(
             state,
@@ -4072,6 +4073,66 @@ mod tests {
             .expect("listed operator variant");
         assert_eq!(listed.id, authored.id);
         assert!(!listed.built_in);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn carried_workflow_shadows_the_same_named_builtin_when_listed_and_started() {
+        let root = tempfile::tempdir().expect("skill root");
+        let skill_dir = root.path().join("skills/research-shadow");
+        std::fs::create_dir_all(skill_dir.join("workflows")).expect("workflow directory");
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\ndescription: Carried built-in shadow proof.\n---\n\nInstructions.\n",
+        )
+        .expect("skill definition");
+        let carried_source = "return { source: 'carried-shadow' };\n";
+        std::fs::write(
+            skill_dir.join("workflows/research-sweep.js"),
+            carried_source,
+        )
+        .expect("carried workflow");
+
+        let (state, storage) = workflow_test_state();
+        let space = storage.get_or_create_default().await.expect("space");
+        let _skill_root = crate::skill::SpaceSkillRootGuard::at(space.id, root.path());
+
+        let Json(list) = list_scripts(
+            State(state.clone()),
+            Path(space.id),
+            Query(WorkflowScriptListQuery::default()),
+        )
+        .await
+        .expect("workflow list");
+        let listed = list
+            .scripts
+            .into_iter()
+            .find(|script| script.name == "research-sweep")
+            .expect("research sweep");
+        assert!(!listed.built_in);
+
+        let Json(started) = start_saved_run(
+            State(state.clone()),
+            Path(listed.id),
+            Query(WorkflowScriptListQuery::default()),
+            Json(StartWorkflowRunRequest {
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start carried built-in shadow");
+        wait_for_terminal(&state, started.id).await;
+        let run = storage
+            .get_workflow_run(started.id)
+            .await
+            .expect("run query")
+            .expect("run");
+        assert_eq!(
+            run.final_output,
+            Some(serde_json::json!({"source": "carried-shadow"}))
+        );
+        assert_eq!(run.source.as_deref(), Some(carried_source));
+        assert_eq!(run.carrying_skill.as_deref(), Some("research-shadow"));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -4511,6 +4572,24 @@ mod tests {
             })
         };
 
+        let started = GatewayWorkflowLauncher::new(state.clone())
+            .start_by_name(session.id, "agent-only", Value::Null, None, false)
+            .await
+            .expect("start agent-only workflow by name from its owning session");
+        let run_id: Uuid = serde_json::from_value(started["id"].clone()).expect("run id");
+        wait_for_terminal(&state, run_id).await;
+        let run = storage
+            .get_workflow_run(run_id)
+            .await
+            .expect("name-launched run query")
+            .expect("name-launched run");
+        assert_eq!(
+            run.final_output,
+            Some(serde_json::json!({"scope": "agent-only"}))
+        );
+        assert_eq!(run.carrying_skill.as_deref(), Some("scoped-proof"));
+        assert_eq!(run.dispatch_bound_agent_ids, vec![AGENT_ID]);
+
         let Json(read) = get_script(State(state.clone()), Path(agent_only.id), agent_scope())
             .await
             .expect("read agent-only workflow by scoped ID");
@@ -4615,6 +4694,60 @@ mod tests {
             Some(serde_json::json!({"scope": "agent-only"}))
         );
         assert_eq!(child.dispatch_bound_agent_ids, vec![AGENT_ID]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn saved_authored_run_rejects_an_agent_visible_only_in_another_space() {
+        const FOREIGN_AGENT_ID: &str = "foreign-workflow-agent";
+        let (state, storage) = workflow_test_state();
+        let workflow_space = storage
+            .get_or_create_default()
+            .await
+            .expect("workflow space");
+        let foreign_space = SpaceStore::create(
+            &*storage,
+            swage_storage::NewSpace {
+                name: "Foreign workflow agent space".into(),
+                slug: "foreign-workflow-agent-space".into(),
+            },
+        )
+        .await
+        .expect("foreign space");
+        store_test_agent(&storage, foreign_space.id, FOREIGN_AGENT_ID).await;
+        let (script, _) = storage
+            .create_workflow_script(NewWorkflowScript {
+                space_id: workflow_space.id,
+                name: "scope-validation-proof".into(),
+                description: String::new(),
+                source: "return { started: true };".into(),
+                delivery_grant: None,
+            })
+            .await
+            .expect("authored script");
+
+        let error = start_saved_run(
+            State(state),
+            Path(script.id),
+            Query(WorkflowScriptListQuery {
+                agent_id: Some(FOREIGN_AGENT_ID.into()),
+            }),
+            Json(StartWorkflowRunRequest {
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect_err("foreign agent scope must be rejected");
+        assert!(
+            matches!(error.0, swage_core::GatewayError::ValidationError(message) if message.contains(&workflow_space.id.to_string()))
+        );
+        assert!(
+            storage
+                .list_workflow_runs(workflow_space.id)
+                .await
+                .expect("workflow runs")
+                .is_empty()
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
