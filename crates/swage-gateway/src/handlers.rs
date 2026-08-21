@@ -2544,6 +2544,8 @@ mod tests {
         use swage_core::{FinishReason, StreamChunk};
         use swage_storage::store::{AgentMessageStore, ApprovalStore};
 
+        let _swage_home = SwageHomeGuard::new();
+
         struct CountingEchoTool(Arc<AtomicUsize>);
 
         #[async_trait::async_trait]

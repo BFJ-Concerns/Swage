@@ -26,6 +26,8 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- Sandbox startup no longer fails when `TMPDIR` has a long path.
+- Generated TypeScript turn-poll responses now expose token counts as numbers rather than bigints.
 - Fresh-session schedules created from Settings now use the currently selected space.
 - Streamed tool calls now remain attached to their assistant turn after completion and appear before the response both immediately and after reloading conversation history.
 

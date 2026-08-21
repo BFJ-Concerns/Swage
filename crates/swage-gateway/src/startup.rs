@@ -16,6 +16,8 @@ use swage_config::LogLevel;
 use swage_storage::{ChannelQueueStore, WorkflowStore};
 use tokio_util::sync::CancellationToken;
 
+const CODEX_COMPLETION_UNSUPPORTED_REASON: &str = "Codex turns run through the App Server harness";
+
 /// Run the gateway to completion.
 ///
 /// Loads configuration, initialises all subsystems, binds the TCP listener,
@@ -887,7 +889,6 @@ async fn create_provider_with_retry(
     }
 
     let mut providers = Vec::new();
-    let mut has_codex_provider = false;
     for model_id in ordered_runtime_model_ids(config) {
         let Some(model_endpoint) = config.models.entries.get(&model_id) else {
             continue;
@@ -905,7 +906,6 @@ async fn create_provider_with_retry(
         // Codex is thread/turn-shaped and runs below the provider-parity
         // selection surface. It must never enter the completion failover chain.
         if provider_endpoint.protocol == swage_config::Protocol::Codex {
-            has_codex_provider = true;
             continue;
         }
 
@@ -938,17 +938,8 @@ async fn create_provider_with_retry(
     }
 
     if providers.is_empty() {
-        if has_codex_provider {
-            return Arc::new(swage_provider::UnsupportedLlmProvider::new(
-                "Codex turns run through the App Server harness",
-            ));
-        }
-        tracing::warn!(
-            "No usable provider/model pairs are configured. \
-             Messaging will fail until configuration is fixed."
-        );
         return Arc::new(swage_provider::UnsupportedLlmProvider::new(
-            "no usable provider/model pairs are configured",
+            CODEX_COMPLETION_UNSUPPORTED_REASON,
         ));
     }
 
@@ -988,7 +979,7 @@ fn concrete_provider(
             swage_provider::google::GoogleProvider::from_config(provider_config),
         ),
         swage_config::Protocol::Codex => Box::new(swage_provider::UnsupportedLlmProvider::new(
-            "Codex turns run through the App Server harness",
+            CODEX_COMPLETION_UNSUPPORTED_REASON,
         )),
     }
 }
@@ -1001,11 +992,9 @@ fn build_provider_chain(
     use swage_provider::failover::FailoverConfig;
 
     let mut providers = providers.into_iter();
-    let Some(first) = providers.next() else {
-        return Arc::new(swage_provider::UnsupportedLlmProvider::new(
-            "no usable provider/model pairs are configured",
-        ));
-    };
+    let first = providers
+        .next()
+        .expect("provider chain is non-empty after default provider validation");
 
     let mut chain = ProviderChainBuilder::new()
         .provider_boxed(first)
@@ -1394,7 +1383,7 @@ mod tests {
         assert!(matches!(
             completion_error,
             swage_core::ProviderError::InvalidConfig { message }
-                if message == "Codex turns run through the App Server harness"
+                if message == CODEX_COMPLETION_UNSUPPORTED_REASON
         ));
     }
 
