@@ -89,6 +89,7 @@
           <div><dt>Tool permissions</dt><dd><pre>{selected.tool_permissions == null ? "Not set" : formatted(selected.tool_permissions)}</pre></dd></div>
           <div><dt>Skills</dt><dd>{selected.skills.length ? selected.skills.join(", ") : "None"}</dd></div>
           <div><dt>Output schema</dt><dd><pre>{selected.output_schema == null ? "Not set" : formatted(selected.output_schema)}</pre></dd></div>
+          <div><dt>Output retries</dt><dd>{selected.output_max_retries ?? "Not set"}</dd></div>
         </dl>
       </article>
     {/if}
