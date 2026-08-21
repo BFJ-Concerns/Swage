@@ -142,6 +142,12 @@ export function createRouter(options?: RouterOptions): Router {
         }
       } catch (error) {
         if (error instanceof Error && error.message.startsWith("HTTP 404 ")) {
+          if (
+            isActiveConversation &&
+            options.conversationStore.activeConversationId !== route.conversationId
+          ) {
+            return;
+          }
           if (isActiveConversation) {
             options.conversationStore.clearActiveConversation();
           }
