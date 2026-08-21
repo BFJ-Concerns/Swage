@@ -8170,6 +8170,172 @@ async fn delegated_read_only_location_approval_allows_read_and_refuses_write() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn task_scoped_delegate_keeps_its_permission_bound_when_delegating_again() {
+    let fixture = tempfile::tempdir().expect("delegation fixture");
+    let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
+    let space = storage
+        .get_or_create_default()
+        .await
+        .expect("default space");
+    storage
+        .upsert_task_definition(swage_storage::NewTaskDefinition {
+            id: "delegation-only".into(),
+            instructions: "Delegate the requested unit of work.".into(),
+            model_id: None,
+            tool_permissions: Some(serde_json::json!({
+                "allow": ["delegate"], "deny": [], "bundles": {}, "require_approval": []
+            })),
+            output_schema: None,
+            output_max_retries: None,
+        })
+        .await
+        .expect("store task permission overlay");
+    let session = storage
+        .create_session(NewSession {
+            space_id: space.id,
+            agent_id: "gateway".to_string(),
+            metadata: None,
+            active_workspace_attachment_id: None,
+        })
+        .await
+        .expect("create session");
+    let root_thread = ThreadStore::create(
+        &*storage,
+        NewThread {
+            session_id: session.id,
+            agent_id: "gateway".to_string(),
+        },
+    )
+    .await
+    .expect("create root thread");
+    let parent_turn = storage
+        .create_turn(NewTurn {
+            thread_id: root_thread.id,
+            agent_id: "gateway".to_string(),
+            state: TurnState::Processing,
+            user_input: Some("start task-scoped delegated work".to_string()),
+            parent_turn_id: None,
+        })
+        .await
+        .expect("create parent turn");
+    let provider = MultiRoundMockProvider::new(vec![
+        vec![
+            StreamChunk::ToolUse {
+                call_id: "nested-task-delegate".into(),
+                name: "delegate".into(),
+                arguments: serde_json::json!({
+                    "target_agent": "agent-c",
+                    "task": "Try a file write",
+                }),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ],
+        vec![
+            StreamChunk::ToolUse {
+                call_id: "task-bounded-write".into(),
+                name: "file_write".into(),
+                arguments: serde_json::json!({
+                    "path": "must-not-exist.txt",
+                    "content": "must not be written",
+                }),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ],
+        vec![
+            StreamChunk::Delta {
+                content: "write was refused".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ],
+        vec![
+            StreamChunk::Delta {
+                content: "nested delegation complete".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ],
+    ]);
+    let state = AppState::new(
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
+        Arc::new(provider) as Arc<dyn LlmProvider>,
+        swage_config::ResolvedConfig::default(),
+        crate::tool::ToolDispatcher::allow_all(vec![
+            Arc::new(swage_tool::delegate::DelegateTool) as Arc<dyn Tool>,
+            Arc::new(SandboxedFileTool::new("file_write")) as Arc<dyn Tool>,
+        ]),
+        None,
+    )
+    .with_worktree_root(fixture.path().join("worker-worktrees"))
+    .with_test_sandbox();
+
+    let outcome = GatewayDelegationHandler::new(state)
+        .handle_delegation(
+            "agent-b",
+            "Delegate once more",
+            Some("delegation-only"),
+            None,
+            None,
+            None,
+            DispatchContextComposition::default(),
+            "outer-task-delegate",
+            "gateway",
+            parent_turn.id,
+            space.id,
+            CancellationToken::new(),
+            DelegateCompletionMode::Wait,
+        )
+        .await
+        .expect("nested delegation should complete");
+    assert!(matches!(outcome, DelegationOutcome::Completed(_)));
+
+    let nested_session = storage
+        .list_sessions_by_agent_id("agent-c")
+        .await
+        .expect("list nested sessions")
+        .into_iter()
+        .next()
+        .expect("nested child session");
+    assert_eq!(
+        nested_session
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get(DISPATCH_BOUND_TASK_METADATA_KEY))
+            .and_then(serde_json::Value::as_array),
+        Some(&vec![serde_json::Value::String("delegation-only".into())]),
+        "the sender's task overlay must become a durable descendant bound"
+    );
+    let nested_thread = storage
+        .list_by_session(nested_session.id)
+        .await
+        .expect("list nested threads")
+        .into_iter()
+        .next()
+        .expect("nested thread");
+    let nested_turn = storage
+        .list_turns_by_thread(nested_thread.id)
+        .await
+        .expect("list nested turns")
+        .into_iter()
+        .next()
+        .expect("nested turn");
+    let calls = storage
+        .list_tool_calls_by_turn(nested_turn.id)
+        .await
+        .expect("list nested tool calls");
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].tool, "file_write");
+    assert_eq!(calls[0].status.as_deref(), Some("error"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn placed_delegate_keeps_exact_read_only_authority_when_delegating_again() {
     let fixture = tempfile::tempdir().expect("placement fixture");
     let default_workspace = fixture.path().join("default-workspace");
@@ -10307,6 +10473,83 @@ async fn workspace_summary_combines_grants_across_trusted_attachments() {
 
     assert!(summary.has_read);
     assert!(summary.has_write);
+}
+
+#[tokio::test]
+async fn durable_worker_placement_rederives_write_and_fails_closed_after_revocation() {
+    let placement = tempfile::tempdir().expect("placement");
+    let (state, session_id) = make_state_with_session(vec![]).await;
+    let mut session = state
+        .storage
+        .get_session(session_id)
+        .await
+        .expect("session query")
+        .expect("session");
+    let authority_context_id = Uuid::new_v4();
+    session.metadata = Some(serde_json::json!({
+        WORKER_PLACEMENT_CWD_METADATA_KEY: placement.path(),
+        WORKER_PLACEMENT_CAN_WRITE_METADATA_KEY: true,
+        WORKER_PLACEMENT_AUTHORITY_PATH_METADATA_KEY: placement.path(),
+        WORKER_PLACEMENT_AUTHORITY_CONTEXT_METADATA_KEY: authority_context_id,
+    }));
+    {
+        let mut grants = state
+            .session_approval_grants
+            .lock()
+            .expect("location grants");
+        grants.insert(crate::state::ApprovalGrantKey::location(
+            Some(session.space_id),
+            placement.path().to_string_lossy(),
+            "write",
+        ));
+    }
+
+    reauthorise_worker_placement_for_turn(&state, &mut session)
+        .await
+        .expect("write placement remains authorised");
+    assert_eq!(
+        session
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get(WORKER_PLACEMENT_CAN_WRITE_METADATA_KEY))
+            .and_then(serde_json::Value::as_bool),
+        Some(true)
+    );
+
+    {
+        let mut grants = state
+            .session_approval_grants
+            .lock()
+            .expect("location grants");
+        grants.clear();
+        grants.insert(crate::state::ApprovalGrantKey::location(
+            Some(session.space_id),
+            placement.path().to_string_lossy(),
+            "read",
+        ));
+    }
+    reauthorise_worker_placement_for_turn(&state, &mut session)
+        .await
+        .expect("read-only placement remains authorised");
+    assert_eq!(
+        session
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get(WORKER_PLACEMENT_CAN_WRITE_METADATA_KEY))
+            .and_then(serde_json::Value::as_bool),
+        Some(false),
+        "the recorded write bit must be replaced by current authority"
+    );
+
+    state
+        .session_approval_grants
+        .lock()
+        .expect("location grants")
+        .clear();
+    let error = reauthorise_worker_placement_for_turn(&state, &mut session)
+        .await
+        .expect_err("revoked placement must fail closed");
+    assert!(error.to_string().contains("no longer authorised"));
 }
 
 #[tokio::test]

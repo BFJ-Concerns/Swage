@@ -8,6 +8,13 @@ use super::{
 /// re-resolved at every turn, so nested dispatch cannot shed an inherited
 /// bound and suspension cannot freeze authority.
 pub(crate) const DISPATCH_BOUND_METADATA_KEY: &str = "dispatch_bound_agent_ids";
+pub(crate) const DISPATCH_BOUND_TASK_METADATA_KEY: &str = "dispatch_bound_task_definition_ids";
+pub(crate) const WORKER_PLACEMENT_CWD_METADATA_KEY: &str = "worker_placement_cwd";
+pub(crate) const WORKER_PLACEMENT_CAN_WRITE_METADATA_KEY: &str = "worker_placement_can_write";
+pub(crate) const WORKER_PLACEMENT_AUTHORITY_PATH_METADATA_KEY: &str =
+    "worker_placement_authority_path";
+pub(crate) const WORKER_PLACEMENT_AUTHORITY_CONTEXT_METADATA_KEY: &str =
+    "worker_placement_authority_context_id";
 
 pub(crate) fn dispatch_bound_agent_ids(
     metadata: Option<&serde_json::Value>,
@@ -41,6 +48,39 @@ pub(crate) fn dispatch_bound_metadata(agent_ids: &[String]) -> Option<serde_json
     })
 }
 
+pub(crate) fn dispatch_bound_task_definition_ids(
+    metadata: Option<&serde_json::Value>,
+) -> Result<Vec<String>, GatewayError> {
+    let Some(value) = metadata.and_then(|metadata| metadata.get(DISPATCH_BOUND_TASK_METADATA_KEY))
+    else {
+        return Ok(Vec::new());
+    };
+    let values = value.as_array().ok_or_else(|| {
+        GatewayError::ConfigError(format!(
+            "session metadata field {DISPATCH_BOUND_TASK_METADATA_KEY:?} must be an array"
+        ))
+    })?;
+    values
+        .iter()
+        .map(|value| {
+            value.as_str().map(str::to_string).ok_or_else(|| {
+                GatewayError::ConfigError(format!(
+                    "session metadata field {DISPATCH_BOUND_TASK_METADATA_KEY:?} must contain only task definition ids"
+                ))
+            })
+        })
+        .collect()
+}
+
+pub(crate) fn add_dispatch_bound_task_definition_ids(
+    metadata: &mut serde_json::Value,
+    task_definition_ids: &[String],
+) {
+    if !task_definition_ids.is_empty() {
+        metadata[DISPATCH_BOUND_TASK_METADATA_KEY] = serde_json::json!(task_definition_ids);
+    }
+}
+
 pub(crate) async fn dispatch_bound_agent_ids_for_turn(
     state: &AppState,
     turn_id: Uuid,
@@ -69,6 +109,49 @@ pub(crate) async fn dispatch_bound_agent_ids_for_turn(
             ))
         })?;
     dispatch_bound_agent_ids(session.metadata.as_ref())
+}
+
+/// Return every task permission overlay that bounds a child dispatched by
+/// this turn. The sender's own task joins the lineage inherited from its
+/// dispatchers; definitions themselves remain live and are resolved at the
+/// descendant's next start.
+pub(crate) async fn dispatch_bound_task_definition_ids_for_turn(
+    state: &AppState,
+    turn_id: Uuid,
+) -> Result<Vec<String>, GatewayError> {
+    let turn = state.storage.get_turn(turn_id).await?.ok_or_else(|| {
+        GatewayError::ConfigError(format!(
+            "cannot resolve dispatch bounds: sender turn {turn_id} was not found"
+        ))
+    })?;
+    let thread = swage_storage::store::ThreadStore::get(state.storage.as_ref(), turn.thread_id)
+        .await?
+        .ok_or_else(|| {
+            GatewayError::ConfigError(format!(
+                "cannot resolve dispatch bounds: sender thread {} was not found",
+                turn.thread_id
+            ))
+        })?;
+    let session = state
+        .storage
+        .get_session(thread.session_id)
+        .await?
+        .ok_or_else(|| {
+            GatewayError::ConfigError(format!(
+                "cannot resolve dispatch bounds: sender session {} was not found",
+                thread.session_id
+            ))
+        })?;
+    let mut task_definition_ids = dispatch_bound_task_definition_ids(session.metadata.as_ref())?;
+    if let Some(task_definition_id) = session
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("task_definition"))
+        .and_then(serde_json::Value::as_str)
+    {
+        task_definition_ids.push(task_definition_id.to_string());
+    }
+    Ok(task_definition_ids)
 }
 
 pub(crate) async fn apply_dispatch_bounds(
@@ -100,6 +183,40 @@ pub(crate) async fn apply_dispatch_bounds(
             }
         };
         config = apply_dispatch_bound(config, &bound);
+    }
+    Ok(config)
+}
+
+pub(crate) async fn apply_dispatch_task_bounds(
+    state: &AppState,
+    mut config: swage_config::ResolvedConfig,
+    bound_task_definition_ids: &[String],
+    subject: &str,
+) -> Result<swage_config::ResolvedConfig, GatewayError> {
+    for task_definition_id in bound_task_definition_ids {
+        let definition = crate::service::resolve_task_definition(
+            state.storage.as_ref(),
+            task_definition_id,
+        )
+        .await
+        .map_err(|error| {
+            GatewayError::ConfigError(format!(
+                "failed to resolve dispatch task bound {task_definition_id:?} for {subject}: {error}"
+            ))
+        })?;
+        if let Some(value) = definition.tool_permissions {
+            let permissions = serde_json::from_value::<
+                swage_config::model::ToolPermissionConfig,
+            >(value)
+            .map_err(|error| {
+                GatewayError::ConfigError(format!(
+                    "dispatch task bound {task_definition_id:?} for {subject} has invalid permissions: {error}"
+                ))
+            })?;
+            let mut bound = swage_config::ResolvedConfig::default();
+            bound.tools.permissions = permissions;
+            config = apply_dispatch_bound(config, &bound);
+        }
     }
     Ok(config)
 }
@@ -222,8 +339,16 @@ pub(crate) fn worker_placement_metadata_present(
     session_metadata: Option<&serde_json::Value>,
 ) -> bool {
     session_metadata.is_some_and(|metadata| {
-        metadata.get("worker_placement_cwd").is_some()
-            || metadata.get("worker_placement_can_write").is_some()
+        metadata.get(WORKER_PLACEMENT_CWD_METADATA_KEY).is_some()
+            || metadata
+                .get(WORKER_PLACEMENT_CAN_WRITE_METADATA_KEY)
+                .is_some()
+            || metadata
+                .get(WORKER_PLACEMENT_AUTHORITY_PATH_METADATA_KEY)
+                .is_some()
+            || metadata
+                .get(WORKER_PLACEMENT_AUTHORITY_CONTEXT_METADATA_KEY)
+                .is_some()
     })
 }
 

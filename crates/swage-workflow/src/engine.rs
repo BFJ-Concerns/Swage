@@ -1129,13 +1129,17 @@ mod tests {
                 Some(_) => Some(crate::host::ResolvedWorkerPlacement {
                     path: "/runtime/worktrees/worker-0".into(),
                     can_write: true,
+                    authority_path: request.cwd.clone().unwrap_or_default(),
+                    authority_context_id: uuid::Uuid::nil(),
                 }),
                 None => request
                     .cwd
                     .clone()
                     .map(|path| crate::host::ResolvedWorkerPlacement {
+                        authority_path: path.clone(),
                         path,
                         can_write: true,
+                        authority_context_id: uuid::Uuid::nil(),
                     }),
             })
         }

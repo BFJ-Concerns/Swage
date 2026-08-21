@@ -2,8 +2,9 @@ use super::{
     AgentConfig, AppState, Arc, GatewayExecutionStrategy, HostLlmHandler, LeakDetector, Mutex,
     Path, PathBuf, RateLimitConfig, RateLimiter, Sandbox, SandboxedExecutor, ServerEvent, Tool,
     ToolDispatcher, TrustedWorkspacePath, TrustedWorkspacePolicy, Uuid,
-    build_gateway_advertisement_filter, build_permission_config, load_trusted_workspace_policy,
-    mpsc, worker_placement_metadata_present,
+    WORKER_PLACEMENT_CAN_WRITE_METADATA_KEY, build_gateway_advertisement_filter,
+    build_permission_config, load_trusted_workspace_policy, mpsc,
+    worker_placement_metadata_present,
 };
 
 pub(super) type GatewayToolAdvertisementFilter = dyn Fn(&dyn Tool) -> bool + Send + Sync;
@@ -180,7 +181,7 @@ pub(crate) fn apply_worker_placement_permission(
         return;
     }
     let can_write = session_metadata
-        .and_then(|metadata| metadata.get("worker_placement_can_write"))
+        .and_then(|metadata| metadata.get(WORKER_PLACEMENT_CAN_WRITE_METADATA_KEY))
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
     policy.active_workspace = Some(TrustedWorkspacePath {

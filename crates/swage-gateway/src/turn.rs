@@ -631,7 +631,7 @@ pub(crate) async fn process_turn_with_composition(
     composition: DispatchContextComposition,
 ) -> Result<(), GatewayError> {
     // Step 1: Resolve the space and target thread for this session.
-    let session = state
+    let mut session = state
         .storage
         .get_session(session_id)
         .await?
@@ -674,6 +674,11 @@ pub(crate) async fn process_turn_with_composition(
         .ok_or(GatewayError::SpaceNotFound { id: space_id })?;
     let space_slug = space.slug.clone();
 
+    // Placement identity is durable, but filesystem authority is not. Check
+    // the recorded authority root against today's attachment/location grants
+    // and replace the cached write bit before assembly or sandbox creation.
+    reauthorise_worker_placement_for_turn(state, &mut session).await?;
+
     // Load space-specific config. Missing space config falls back to the
     // startup config, but present invalid config fails the turn before any
     // user message is written.
@@ -714,6 +719,14 @@ pub(crate) async fn process_turn_with_composition(
         space_id,
         config,
         &bound_agent_ids,
+        &format!("worker session {session_id}"),
+    )
+    .await?;
+    let bound_task_definition_ids = dispatch_bound_task_definition_ids(session.metadata.as_ref())?;
+    let config = apply_dispatch_task_bounds(
+        state,
+        config,
+        &bound_task_definition_ids,
         &format!("worker session {session_id}"),
     )
     .await?;

@@ -1,11 +1,15 @@
 use super::{
     AgentError, AppState, Arc, CancellationToken, DelegationExecutor, DelegationHandler,
     DispatchContextComposition, GatewayDispatcherRequest, MessageRouter, NewAgentMessage, Uuid,
-    apply_agent_definition, apply_dispatch_bounds, available_skills_for_agent,
-    build_agent_config_for_space_workspace, build_approval_registrar, build_assembly_elements,
+    WORKER_PLACEMENT_AUTHORITY_CONTEXT_METADATA_KEY, WORKER_PLACEMENT_AUTHORITY_PATH_METADATA_KEY,
+    WORKER_PLACEMENT_CAN_WRITE_METADATA_KEY, WORKER_PLACEMENT_CWD_METADATA_KEY,
+    add_dispatch_bound_task_definition_ids, apply_agent_definition, apply_dispatch_bounds,
+    apply_dispatch_task_bounds, available_skills_for_agent, build_agent_config_for_space_workspace,
+    build_approval_registrar, build_assembly_elements,
     build_gateway_dispatcher_for_unattended_execution, build_session_environment,
     configuration_hierarchy, delegated_target_instructions_for_space,
-    dispatch_bound_agent_ids_for_turn, dispatch_bound_metadata, effective_tool_permissions_record,
+    dispatch_bound_agent_ids_for_turn, dispatch_bound_metadata,
+    dispatch_bound_task_definition_ids_for_turn, effective_tool_permissions_record,
     execute_context_assembly, load_active_skills_for_agent, load_memory_for_assembly,
     load_session_config, load_space_memory, load_trusted_workspace_policy, mpsc,
     operator_guidance_rules, resolve_authorised_worker_directory, resolve_swage_root,
@@ -316,6 +320,10 @@ impl DelegationHandler for GatewayDelegationHandler {
             .await
             .map_err(|error| AgentError::InvalidConfig(error.to_string()))?;
         bound_agent_ids.push(sender_agent_id.to_string());
+        let bound_task_definition_ids =
+            dispatch_bound_task_definition_ids_for_turn(&self.state, sender_turn_id)
+                .await
+                .map_err(|error| AgentError::InvalidConfig(error.to_string()))?;
         let effective_target_resolved = apply_dispatch_bounds(
             &self.state,
             &space.slug,
@@ -326,8 +334,17 @@ impl DelegationHandler for GatewayDelegationHandler {
         )
         .await
         .map_err(|error| AgentError::InvalidConfig(error.to_string()))?;
+        let effective_target_resolved = apply_dispatch_task_bounds(
+            &self.state,
+            effective_target_resolved,
+            &bound_task_definition_ids,
+            &format!("delegated agent {target_agent_id:?}"),
+        )
+        .await
+        .map_err(|error| AgentError::InvalidConfig(error.to_string()))?;
         let mut session_metadata = dispatch_bound_metadata(&bound_agent_ids)
             .expect("a delegated session always has at least its sender bound");
+        add_dispatch_bound_task_definition_ids(&mut session_metadata, &bound_task_definition_ids);
         if let Some(task_definition) = task_definition {
             session_metadata["task_definition"] =
                 serde_json::Value::String(task_definition.to_string());
@@ -391,6 +408,8 @@ impl DelegationHandler for GatewayDelegationHandler {
                         .await
                         .map_err(AgentError::InvalidConfig)?,
                     can_write: repo.can_write,
+                    authority_path: repo.authority_path,
+                    authority_context_id: repo.authority_context_id,
                 })
             }
         };
@@ -413,10 +432,14 @@ impl DelegationHandler for GatewayDelegationHandler {
         // assembly's audit record.
         let (silent_ws_tx, _silent_ws_rx) = mpsc::unbounded_channel();
         if let Some(placement) = placement.as_ref() {
-            session_metadata["worker_placement_cwd"] =
+            session_metadata[WORKER_PLACEMENT_CWD_METADATA_KEY] =
                 serde_json::Value::String(placement.path.to_string_lossy().into_owned());
-            session_metadata["worker_placement_can_write"] =
+            session_metadata[WORKER_PLACEMENT_CAN_WRITE_METADATA_KEY] =
                 serde_json::Value::Bool(placement.can_write);
+            session_metadata[WORKER_PLACEMENT_AUTHORITY_PATH_METADATA_KEY] =
+                serde_json::Value::String(placement.authority_path.to_string_lossy().into_owned());
+            session_metadata[WORKER_PLACEMENT_AUTHORITY_CONTEXT_METADATA_KEY] =
+                serde_json::Value::String(placement.authority_context_id.to_string());
         }
         let target_dispatcher_build = build_gateway_dispatcher_for_unattended_execution(
             &self.state,
@@ -665,7 +688,7 @@ impl GatewayDelegationHandler {
         let placement = match session
             .metadata
             .as_ref()
-            .and_then(|metadata| metadata.get("worker_placement_cwd"))
+            .and_then(|metadata| metadata.get(WORKER_PLACEMENT_CWD_METADATA_KEY))
             .and_then(serde_json::Value::as_str)
         {
             Some(path) => {
@@ -674,17 +697,49 @@ impl GatewayDelegationHandler {
                         "cannot resolve dispatching worker placement {path:?}: {error}"
                     ))
                 })?;
-                let can_write = session
+                let authority_path = session
                     .metadata
                     .as_ref()
-                    .and_then(|metadata| metadata.get("worker_placement_can_write"))
-                    .and_then(serde_json::Value::as_bool)
+                    .and_then(|metadata| metadata.get(WORKER_PLACEMENT_AUTHORITY_PATH_METADATA_KEY))
+                    .and_then(serde_json::Value::as_str)
                     .ok_or_else(|| {
                         AgentError::InvalidConfig(
-                            "dispatching worker placement is missing its write authority".into(),
+                            "dispatching worker placement is missing its authority path".into(),
                         )
                     })?;
-                Some(ResolvedWorkerDirectory { path, can_write })
+                let authority_context_id = session
+                    .metadata
+                    .as_ref()
+                    .and_then(|metadata| {
+                        metadata.get(WORKER_PLACEMENT_AUTHORITY_CONTEXT_METADATA_KEY)
+                    })
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(|value| Uuid::parse_str(value).ok())
+                    .ok_or_else(|| {
+                        AgentError::InvalidConfig(
+                            "dispatching worker placement is missing its authority context".into(),
+                        )
+                    })?;
+                let authority = resolve_authorised_worker_directory(
+                    &self.state,
+                    session.space_id,
+                    authority_context_id,
+                    session.active_workspace_attachment_id,
+                    None,
+                    authority_path,
+                )
+                .await
+                .map_err(|error| {
+                    AgentError::InvalidConfig(format!(
+                        "dispatching worker placement is no longer authorised: {error}"
+                    ))
+                })?;
+                Some(ResolvedWorkerDirectory {
+                    path,
+                    can_write: authority.can_write,
+                    authority_path: authority.path,
+                    authority_context_id,
+                })
             }
             None => None,
         };
