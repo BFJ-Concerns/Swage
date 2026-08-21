@@ -19,6 +19,30 @@ use crate::provider::{LlmProvider, ProviderConfig, spawn_stream_forwarder};
 
 const ANTHROPIC_API_VERSION: &str = "2023-06-01";
 const ANTHROPIC_BASE_URL: &str = "https://api.anthropic.com";
+const ANTHROPIC_MESSAGES_PATH: &str = "/v1/messages?beta=true";
+
+/// Native-harness request material that Swage cannot reproduce honestly.
+///
+/// This is provider audit data, not model-facing context. The categories are
+/// the admitted Swage-supplied class and the two irreproducible classes.
+const ANTHROPIC_REQUEST_DIVERGENCES: &[(&str, &str)] = &[
+    (
+        "dynamic_vendor_context",
+        "thinking and output_config are selected by the vendor harness at request time",
+    ),
+    (
+        "dynamic_vendor_context",
+        "context_management is injected by the vendor harness at request time",
+    ),
+    (
+        "dynamic_vendor_context",
+        "native metadata identifiers are generated from vendor session and account state",
+    ),
+    (
+        "swage_supplied",
+        "max_tokens is caller supplied when present and otherwise uses Swage's 4096-token default",
+    ),
+];
 
 // ---------------------------------------------------------------------------
 // Anthropic wire types
@@ -36,6 +60,8 @@ struct MessagesRequest {
     stream: Option<bool>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<AnthropicTool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    metadata: Option<serde_json::Value>,
 }
 
 /// Wire representation of a tool definition for the Anthropic API.
@@ -582,6 +608,7 @@ impl AnthropicProvider {
             system: request.system_prompt.clone(),
             stream: if stream { Some(true) } else { None },
             tools,
+            metadata: None,
         }
     }
 
@@ -662,7 +689,7 @@ impl AnthropicProvider {
         let body = self.build_messages_request(request, false);
         let client = self.make_http_client();
 
-        let response: MessagesResponse = client.post_json("/v1/messages", &body).await?;
+        let response: MessagesResponse = client.post_json(ANTHROPIC_MESSAGES_PATH, &body).await?;
 
         let text = response
             .content
@@ -695,7 +722,7 @@ impl AnthropicProvider {
 
         spawn_stream_forwarder(move |tx| async move {
             let (metadata, sse_stream) = match client
-                .post_stream("/v1/messages", &body, HeaderMap::new())
+                .post_stream(ANTHROPIC_MESSAGES_PATH, &body, HeaderMap::new())
                 .await
             {
                 Ok(s) => s,
@@ -869,6 +896,7 @@ impl AnthropicProvider {
                     })
                 })
                 .collect(),
+            metadata: request.metadata.clone(),
         }
     }
 
@@ -915,6 +943,7 @@ impl AnthropicProvider {
             system,
             stream: if stream { Some(true) } else { None },
             tools,
+            metadata: request.metadata.clone(),
         }
     }
 }
@@ -937,6 +966,8 @@ impl LlmProvider for AnthropicProvider {
         serde_json::json!({
             "provider": "anthropic",
             "protocol": "messages",
+            "path": ANTHROPIC_MESSAGES_PATH,
+            "divergences": ANTHROPIC_REQUEST_DIVERGENCES,
             "stream": stream,
             "body": self.build_request_for_completion(request, stream),
         })
@@ -948,7 +979,7 @@ impl LlmProvider for AnthropicProvider {
     ) -> Result<CompletionResponse, ProviderError> {
         let body = self.build_request_for_completion(&request, false);
         let client = self.make_http_client();
-        let response: MessagesResponse = client.post_json("/v1/messages", &body).await?;
+        let response: MessagesResponse = client.post_json(ANTHROPIC_MESSAGES_PATH, &body).await?;
 
         // Collect all text blocks; ignore tool_use blocks (none expected here).
         let content = response
@@ -976,7 +1007,7 @@ impl LlmProvider for AnthropicProvider {
     ) -> Result<ToolCompletionResponse, ProviderError> {
         let body = self.build_request_for_tool_completion(&request, false);
         let client = self.make_http_client();
-        let response: MessagesResponse = client.post_json("/v1/messages", &body).await?;
+        let response: MessagesResponse = client.post_json(ANTHROPIC_MESSAGES_PATH, &body).await?;
 
         let mut content = String::new();
         let mut tool_calls = Vec::new();
@@ -1017,7 +1048,7 @@ impl LlmProvider for AnthropicProvider {
 
         spawn_stream_forwarder(move |tx| async move {
             let (metadata, sse_stream) = match client
-                .post_stream("/v1/messages", &body, HeaderMap::new())
+                .post_stream(ANTHROPIC_MESSAGES_PATH, &body, HeaderMap::new())
                 .await
             {
                 Ok(s) => s,
@@ -1376,6 +1407,72 @@ mod tests {
     }
 
     #[test]
+    fn request_paths_preserve_explicit_and_default_token_limits() {
+        let provider = AnthropicProvider::new("key", "model");
+        let legacy_default = LlmRequest {
+            max_tokens: None,
+            ..LlmRequest::builder("model").build()
+        };
+        let legacy_explicit = LlmRequest::builder("model").max_tokens(73).build();
+        assert_eq!(
+            provider
+                .build_messages_request(&legacy_default, false)
+                .max_tokens,
+            4096
+        );
+        assert_eq!(
+            provider
+                .build_messages_request(&legacy_explicit, false)
+                .max_tokens,
+            73
+        );
+
+        let completion = |max_tokens| CompletionRequest {
+            messages: vec![],
+            model: None,
+            max_tokens,
+            temperature: None,
+            stop_sequences: None,
+            metadata: None,
+            tool_definitions: vec![],
+        };
+        assert_eq!(
+            provider
+                .build_request_for_completion(&completion(None), false)
+                .max_tokens,
+            4096
+        );
+        assert_eq!(
+            provider
+                .build_request_for_completion(&completion(Some(91)), false)
+                .max_tokens,
+            91
+        );
+
+        let tool_completion = |max_tokens| ToolCompletionRequest {
+            messages: vec![],
+            model: None,
+            max_tokens,
+            temperature: None,
+            stop_sequences: None,
+            metadata: None,
+            tool_definitions: vec![],
+        };
+        assert_eq!(
+            provider
+                .build_request_for_tool_completion(&tool_completion(None), false)
+                .max_tokens,
+            4096
+        );
+        assert_eq!(
+            provider
+                .build_request_for_tool_completion(&tool_completion(Some(117)), false)
+                .max_tokens,
+            117
+        );
+    }
+
+    #[test]
     fn completion_request_hoists_output_requirements_to_system_field() {
         let provider = AnthropicProvider::new("key", "model");
         let declaration = "## Output Requirements\n\nReturn ONLY schema-compliant JSON.";
@@ -1600,7 +1697,7 @@ mod tests {
             max_tokens: Some(100),
             temperature: None,
             stop_sequences: None,
-            metadata: None,
+            metadata: Some(serde_json::json!({"trace_id": "caller-owned"})),
             tool_definitions: vec![serde_json::json!({
                 "name": "ping",
                 "description": "Echoes the input value",
@@ -1617,10 +1714,53 @@ mod tests {
 
         assert_eq!(snapshot["provider"], "anthropic");
         assert_eq!(snapshot["protocol"], "messages");
+        assert_eq!(snapshot["path"], "/v1/messages?beta=true");
         assert_eq!(snapshot["stream"], true);
+        assert_eq!(snapshot["body"]["metadata"]["trace_id"], "caller-owned");
         assert_eq!(snapshot["body"]["system"], "Be careful");
         assert_eq!(snapshot["body"]["messages"][0]["role"], "user");
         assert_eq!(snapshot["body"]["tools"][0]["name"], "ping");
+        assert_eq!(
+            snapshot["divergences"],
+            serde_json::json!([
+                [
+                    "dynamic_vendor_context",
+                    "thinking and output_config are selected by the vendor harness at request time"
+                ],
+                [
+                    "dynamic_vendor_context",
+                    "context_management is injected by the vendor harness at request time"
+                ],
+                [
+                    "dynamic_vendor_context",
+                    "native metadata identifiers are generated from vendor session and account state"
+                ],
+                [
+                    "swage_supplied",
+                    "max_tokens is caller supplied when present and otherwise uses Swage's 4096-token default"
+                ]
+            ])
+        );
+    }
+
+    #[test]
+    fn tool_completion_propagates_caller_metadata() {
+        let provider = AnthropicProvider::new("key", "model");
+        let request = ToolCompletionRequest {
+            messages: vec![],
+            model: None,
+            max_tokens: None,
+            temperature: None,
+            stop_sequences: None,
+            metadata: Some(serde_json::json!({"session": "swage-owned"})),
+            tool_definitions: vec![],
+        };
+
+        let body =
+            serde_json::to_value(provider.build_request_for_tool_completion(&request, false))
+                .unwrap();
+
+        assert_eq!(body["metadata"]["session"], "swage-owned");
     }
 
     #[test]
