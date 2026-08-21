@@ -10,6 +10,16 @@ use std::path::{Path, PathBuf};
 
 use swage_config::HierarchyLevel;
 
+/// Names owned by built-in context elements and their assembly bookkeeping.
+const RESERVED_ELEMENT_NAMES: &[&str] = &["history", "memory", "orientation", "prompts", "skills"];
+
+pub(crate) fn has_valid_element_name_shape(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+}
+
 /// A resolved Markdown context file, including its precise provenance.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedNamedElement {
@@ -21,13 +31,14 @@ pub struct ResolvedNamedElement {
 
 /// Validate the stable name used to address an element.
 pub fn validate_element_name(name: &str) -> Result<(), String> {
-    if name.is_empty()
-        || !name
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
-    {
+    if !has_valid_element_name_shape(name) {
         return Err(format!(
             "invalid context element name '{name}': use lowercase letters, digits, and hyphens"
+        ));
+    }
+    if RESERVED_ELEMENT_NAMES.contains(&name) {
+        return Err(format!(
+            "invalid context element name '{name}': the name is reserved for a built-in element"
         ));
     }
     Ok(())
@@ -136,6 +147,12 @@ mod tests {
         assert!(
             resolve_named_element("Uppercase", &[(HierarchyLevel::Global, root.path())]).is_err()
         );
+        for name in RESERVED_ELEMENT_NAMES {
+            assert!(
+                resolve_named_element(name, &[(HierarchyLevel::Global, root.path())]).is_err(),
+                "built-in element name '{name}' must stay reserved"
+            );
+        }
     }
 
     #[test]
@@ -189,6 +206,7 @@ mod tests {
         std::fs::write(space.join("elements/alpha.md"), "space alpha").unwrap();
         std::fs::write(agent.join("elements/zeta.md"), "agent zeta").unwrap();
         std::fs::write(agent.join("elements/Not-Valid.md"), "ignored").unwrap();
+        std::fs::write(agent.join("elements/memory.md"), "also ignored").unwrap();
 
         let resolved = discover_named_elements(&levels(global, &space, &agent)).unwrap();
         assert_eq!(
