@@ -4946,6 +4946,7 @@ mod tests {
                 parent_run_id: None,
                 parent_seq: None,
                 script_version_id: None,
+                carrying_skill: None,
                 source: Some("return null".into()),
                 source_hash: source_hash("return null"),
                 args: Value::Null,
