@@ -2,6 +2,7 @@ use super::{
     AgentConfig, Arc, GatewayToolAdvertisementFilter, Path, PathBuf, PermissionConfig, Tool,
     ToolRequireApprovalEntry, Uuid,
 };
+use crate::turn::managed_scratch_workspace;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct WorkspacePermissionSummary {
@@ -22,6 +23,12 @@ pub(crate) struct TrustedWorkspacePolicy {
     pub(crate) permissions: WorkspacePermissionSummary,
     pub(crate) active_workspace: Option<TrustedWorkspacePath>,
     pub(crate) attachments: Vec<TrustedWorkspacePath>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ResolvedWorkerDirectory {
+    pub(crate) path: PathBuf,
+    pub(crate) can_write: bool,
 }
 
 /// Inspect the space's workspace attachments and derive which permission
@@ -105,6 +112,100 @@ pub(crate) async fn load_trusted_workspace_policy(
         }
     }
     policy
+}
+
+/// Resolve a worker placement without widening the dispatching context's
+/// filesystem authority. A placement may select any directory already covered
+/// by the context's active workspace, trusted attachment grants, managed
+/// scratch root, or approved location grants.
+pub(crate) async fn resolve_authorised_worker_directory(
+    state: &crate::state::AppState,
+    space_id: Uuid,
+    context_id: Uuid,
+    active_workspace_attachment_id: Option<Uuid>,
+    inherited_placement: Option<&ResolvedWorkerDirectory>,
+    requested: &str,
+) -> Result<ResolvedWorkerDirectory, String> {
+    let candidate = tokio::fs::canonicalize(requested)
+        .await
+        .map_err(|error| format!("cannot resolve worker cwd {requested:?}: {error}"))?;
+    if !candidate.is_dir() {
+        return Err(format!(
+            "worker cwd is not a directory: {}",
+            candidate.display()
+        ));
+    }
+
+    let policy =
+        load_trusted_workspace_policy(&state.storage, space_id, active_workspace_attachment_id)
+            .await;
+    let workspace_root = policy
+        .active_workspace
+        .as_ref()
+        .map(|grant| grant.path.clone())
+        .unwrap_or_else(|| managed_scratch_workspace(space_id, context_id));
+    let approval_grants = state
+        .session_approval_grants
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone();
+    let within = |root: &Path| {
+        let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+        path_within_device_workspace(&candidate, &[canonical_root])
+    };
+
+    // A placed worker's exact directory is its complete filesystem authority.
+    // Do not let a nested dispatch fall back to the wider space policy.
+    if let Some(placement) = inherited_placement {
+        if within(&placement.path) {
+            return Ok(ResolvedWorkerDirectory {
+                path: candidate,
+                can_write: placement.can_write,
+            });
+        }
+        return Err(format!(
+            "worker cwd {} is outside the dispatching context's placed workspace root",
+            candidate.display()
+        ));
+    }
+
+    if let Some(grant) = policy
+        .active_workspace
+        .iter()
+        .chain(policy.attachments.iter())
+        .find(|grant| within(&grant.path))
+    {
+        return Ok(ResolvedWorkerDirectory {
+            path: candidate,
+            can_write: grant.can_write,
+        });
+    }
+    if policy.active_workspace.is_none() && within(&workspace_root) {
+        return Ok(ResolvedWorkerDirectory {
+            path: candidate,
+            can_write: true,
+        });
+    }
+
+    let matching_approval_grants = approval_grants
+        .iter()
+        .filter(|grant| grant.kind == swage_storage::model::ApprovalKind::Location)
+        .filter(|grant| grant.space_id.is_none() || grant.space_id == Some(space_id))
+        .filter(|grant| within(Path::new(&grant.name)))
+        .collect::<Vec<_>>();
+    if !matching_approval_grants.is_empty() {
+        return Ok(ResolvedWorkerDirectory {
+            path: candidate,
+            can_write: matching_approval_grants
+                .iter()
+                .any(|grant| grant.access.as_deref() == Some("write")),
+        });
+    }
+
+    Err(format!(
+        "worker cwd {} is outside the dispatching context's permitted workspace roots and location grants",
+        candidate.display()
+    ))
 }
 
 pub(super) fn build_permission_config(

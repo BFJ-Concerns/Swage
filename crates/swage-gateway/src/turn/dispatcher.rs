@@ -1,8 +1,9 @@
 use super::{
     AgentConfig, AppState, Arc, GatewayExecutionStrategy, HostLlmHandler, LeakDetector, Mutex,
     Path, PathBuf, RateLimitConfig, RateLimiter, Sandbox, SandboxedExecutor, ServerEvent, Tool,
-    ToolDispatcher, TrustedWorkspacePolicy, Uuid, build_gateway_advertisement_filter,
-    build_permission_config, load_trusted_workspace_policy, mpsc,
+    ToolDispatcher, TrustedWorkspacePath, TrustedWorkspacePolicy, Uuid,
+    build_gateway_advertisement_filter, build_permission_config, load_trusted_workspace_policy,
+    mpsc,
 };
 
 pub(super) type GatewayToolAdvertisementFilter = dyn Fn(&dyn Tool) -> bool + Send + Sync;
@@ -117,7 +118,7 @@ pub(super) fn sandbox_path(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
-pub(super) fn build_sandbox_config(
+pub(crate) fn build_sandbox_config(
     agent_config: &AgentConfig,
     workspace_policy: Option<&TrustedWorkspacePolicy>,
 ) -> Result<swage_sandbox::SandboxConfig, swage_sandbox::SandboxConfigError> {
@@ -170,6 +171,25 @@ pub(super) fn build_sandbox_config(
     builder.build()
 }
 
+pub(crate) fn apply_worker_placement_permission(
+    policy: &mut TrustedWorkspacePolicy,
+    agent_config: &AgentConfig,
+    session_metadata: Option<&serde_json::Value>,
+) {
+    let Some(can_write) = session_metadata
+        .and_then(|metadata| metadata.get("worker_placement_can_write"))
+        .and_then(serde_json::Value::as_bool)
+    else {
+        return;
+    };
+    policy.active_workspace = Some(TrustedWorkspacePath {
+        path: agent_config.working_directory.clone(),
+        is_trusted: true,
+        can_read: true,
+        can_write,
+    });
+}
+
 pub(super) async fn build_turn_sandbox(
     state: &AppState,
     config: &swage_config::ResolvedConfig,
@@ -184,6 +204,19 @@ pub(super) async fn build_turn_sandbox(
                 reason: "sandbox_disabled_by_configuration".into(),
             },
             backend: SandboxBackend::None,
+        });
+    }
+    #[cfg(test)]
+    if state.test_sandbox_enabled() {
+        let config = build_sandbox_config(agent_config, workspace_policy).map_err(|error| {
+            swage_core::SandboxError::SpawnFailed {
+                message: format!("failed to build test sandbox config: {error}"),
+            }
+        })?;
+        return Ok(TurnSandboxBuild {
+            sandbox: Some(Arc::new(PolicyEnforcingTestSandbox { config })),
+            isolation: ExecutionIsolation::Isolated,
+            backend: SandboxBackend::TestHarness,
         });
     }
     if std::env::current_exe().ok().is_some_and(|path| {
@@ -216,6 +249,69 @@ pub(super) async fn build_turn_sandbox(
         true,
     )
     .await
+}
+
+#[cfg(test)]
+struct PolicyEnforcingTestSandbox {
+    config: swage_sandbox::SandboxConfig,
+}
+
+#[cfg(test)]
+#[async_trait::async_trait]
+impl Sandbox for PolicyEnforcingTestSandbox {
+    async fn spawn_agent(&mut self) -> Result<(), swage_core::SandboxError> {
+        Ok(())
+    }
+
+    async fn execute_tool(
+        &self,
+        tool_name: &str,
+        params: serde_json::Value,
+    ) -> Result<swage_sandbox::ToolCallResult, swage_core::SandboxError> {
+        let path = params
+            .get("path")
+            .and_then(serde_json::Value::as_str)
+            .map(|path| self.config.working_directory.join(path));
+        let result = match (tool_name, path) {
+            ("file_read", Some(path)) => std::fs::read_to_string(path)
+                .map(|content| serde_json::json!({"output": content}))
+                .map_err(|error| error.to_string()),
+            ("file_write", Some(path)) => {
+                if !self
+                    .config
+                    .read_write_mounts
+                    .contains(&self.config.working_directory)
+                {
+                    Err("write refused by read-only sandbox mount".into())
+                } else {
+                    let content = params
+                        .get("content")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default();
+                    std::fs::write(path, content)
+                        .map(|()| serde_json::json!({"output": "write completed"}))
+                        .map_err(|error| error.to_string())
+                }
+            }
+            _ => Err(format!("unsupported test sandbox tool {tool_name}")),
+        };
+        Ok(match result {
+            Ok(output) => swage_sandbox::ToolCallResult {
+                output,
+                duration_ms: 0,
+                error: None,
+            },
+            Err(error) => swage_sandbox::ToolCallResult {
+                output: serde_json::Value::Null,
+                duration_ms: 0,
+                error: Some(error),
+            },
+        })
+    }
+
+    async fn shutdown(&self) -> Result<(), swage_core::SandboxError> {
+        Ok(())
+    }
 }
 
 async fn build_turn_sandbox_for_backend_selection(
@@ -313,12 +409,15 @@ pub(crate) async fn build_gateway_dispatcher(
         });
     }
 
-    let workspace_policy = match space_id {
+    let mut workspace_policy = match space_id {
         Some(id) => Some(
             load_trusted_workspace_policy(&state.storage, id, active_workspace_attachment_id).await,
         ),
         None => None,
     };
+    if let Some(policy) = workspace_policy.as_mut() {
+        apply_worker_placement_permission(policy, agent_config, session_metadata);
+    }
     let session_approval_grants = state
         .session_approval_grants
         .lock()

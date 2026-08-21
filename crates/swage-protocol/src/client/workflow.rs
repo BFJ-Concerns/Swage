@@ -109,6 +109,9 @@ pub struct WorkflowRun {
 #[serde(rename_all = "snake_case")]
 pub enum WorkflowJournalEntryKind {
     AgentCall,
+    /// Runtime provisioning of a worker execution location. Its result records
+    /// the resolved path so replay can reuse the same resource.
+    WorkerPlacement,
     Effect,
     Log,
     Phase,
@@ -126,6 +129,13 @@ pub enum WorkflowJournalEntryKind {
     /// The working allowance was exhausted. The triggering agent call was
     /// not started; replay returns the same wind-down signal at this point.
     WindDown,
+}
+
+/// Runtime-managed isolation requested for a dispatched worker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerIsolation {
+    Worktree,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]

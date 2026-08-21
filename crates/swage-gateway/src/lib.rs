@@ -87,6 +87,7 @@ pub mod voice;
 pub mod websocket;
 pub mod workflow;
 mod workflow_delivery;
+pub mod worktree;
 
 #[cfg(test)]
 pub(crate) mod test_support {

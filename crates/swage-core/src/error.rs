@@ -343,6 +343,10 @@ pub enum ToolError {
         task: String,
         /// Optional context to transfer to the delegate agent.
         context: Option<serde_json::Value>,
+        /// Caller-selected child working directory.
+        cwd: Option<String>,
+        /// Optional runtime-managed child isolation.
+        isolation: Option<swage_protocol::client::workflow::WorkerIsolation>,
         /// Whether the parent turn should wait for the child result.
         completion_mode: DelegateCompletionMode,
     },

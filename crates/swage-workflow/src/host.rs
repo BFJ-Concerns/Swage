@@ -1,8 +1,15 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use swage_protocol::client::workflow::WorkerIsolation;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedWorkerPlacement {
+    pub path: String,
+    pub can_write: bool,
+}
 
 /// An opaque continuation token naming a worker session a run already
 /// created. Scripts receive it on an `agentStart` handle after the call
@@ -35,6 +42,13 @@ pub struct AgentCallRequest {
     /// Host-enforced deadline for this call in milliseconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
+    /// Caller-selected working directory. This remains unresolved in the
+    /// journalled request so its argument hash is stable across hosts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    /// Optional runtime-managed isolation for the worker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub isolation: Option<WorkerIsolation>,
     pub schema: Option<Value>,
     pub max_attempts: u32,
     pub label: Option<String>,
@@ -121,8 +135,55 @@ pub trait WorkflowHost: Send + Sync {
     async fn run_agent_call(
         &self,
         request: AgentCallRequest,
+        resolved_placement: Option<ResolvedWorkerPlacement>,
         cancellation: CancellationToken,
     ) -> Result<AgentCallResult, String>;
+
+    /// Resolve placement and admit one agent call through a single host
+    /// dispatch. Durable hosts override this to keep the two journal entries
+    /// adjacent even when several script promises begin together.
+    async fn dispatch_agent_call(
+        &self,
+        request: AgentCallRequest,
+        cancellation: CancellationToken,
+    ) -> Result<AgentCallResult, String> {
+        let resolved_placement = self
+            .resolve_worker_placement(&request, cancellation.clone())
+            .await
+            .map_err(|error| {
+                if error.starts_with("WorkerPlacementError")
+                    || error.starts_with("NondeterministicReplayError")
+                {
+                    error
+                } else {
+                    format!("WorkerPlacementError: {error}")
+                }
+            })?;
+        self.run_agent_call(request, resolved_placement, cancellation)
+            .await
+    }
+
+    /// Resolve a caller placement without changing the caller's request.
+    /// Hosts journal managed provisioning separately and return its durable
+    /// resolved path; a plain cwd needs no host operation.
+    async fn resolve_worker_placement(
+        &self,
+        request: &AgentCallRequest,
+        _cancellation: CancellationToken,
+    ) -> Result<Option<ResolvedWorkerPlacement>, String> {
+        Ok(request.cwd.clone().map(|path| ResolvedWorkerPlacement {
+            path,
+            can_write: true,
+        }))
+    }
+
+    /// Return this run's provisioned worktrees through a journalled read.
+    async fn list_worker_placements(
+        &self,
+        _cancellation: CancellationToken,
+    ) -> Result<Value, String> {
+        Err("WorkerPlacementError: this host does not support placement listing".into())
+    }
 
     async fn deliver(
         &self,
