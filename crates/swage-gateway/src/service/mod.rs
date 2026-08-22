@@ -358,6 +358,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn conversation_inherits_and_persists_model_default_effort() {
+        let _swage_home = crate::test_support::SwageHomeGuard::new();
         let (svc, storage) = make_definition_service();
         let mut config = swage_config::ResolvedConfig::default();
         config.models.default = "model-a".to_string();
@@ -427,6 +428,7 @@ default_effort = "high"
 
     #[tokio::test(flavor = "multi_thread")]
     async fn conversation_inherits_selected_model_default_effort() {
+        let _swage_home = crate::test_support::SwageHomeGuard::new();
         let (svc, storage) = make_definition_service();
         let mut config = swage_config::ResolvedConfig::default();
         config.models.default = "model-a".to_string();
@@ -461,6 +463,7 @@ default_effort = "high"
 
     #[tokio::test(flavor = "multi_thread")]
     async fn conversation_inherits_agent_models_default_effort() {
+        let _swage_home = crate::test_support::SwageHomeGuard::new();
         let (svc, storage) = make_definition_service();
         let mut agent = definition("researcher", None);
         agent.model_id = Some("model-b".to_string());
