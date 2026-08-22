@@ -56,18 +56,44 @@ impl ConversationService {
         self
     }
 
-    fn resolved_effort(
+    async fn resolved_effort(
         &self,
+        space_id: Uuid,
+        space_slug: &str,
+        agent_id: &str,
         selected_model_id: Option<&str>,
         requested: Option<swage_protocol::client::settings::Effort>,
-    ) -> Option<swage_protocol::client::settings::Effort> {
-        requested.or_else(|| {
-            let config = self.config.as_ref()?;
-            let model_id = selected_model_id
-                .filter(|id| config.models.entries.contains_key(*id))
-                .unwrap_or(&config.models.default);
-            config.models.entries.get(model_id)?.default_effort
-        })
+    ) -> Result<Option<swage_protocol::client::settings::Effort>, GatewayError> {
+        if requested.is_some() {
+            return Ok(requested);
+        }
+        let Some(active_config) = self.config.clone() else {
+            return Ok(None);
+        };
+        let config =
+            crate::turn::load_session_config_from_active(active_config, space_slug, agent_id)?;
+        let config = match self
+            .storage
+            .resolve_agent_definition(agent_id, space_id)
+            .await
+        {
+            Ok(Some(definition)) => crate::turn::apply_agent_definition(config, &definition),
+            Ok(None) => config,
+            Err(error) => {
+                tracing::warn!(
+                    agent_id,
+                    %error,
+                    "failed to resolve the agent definition while selecting session effort; using file config alone"
+                );
+                config
+            }
+        };
+        let config = crate::turn::effective_session_config(config, selected_model_id);
+        Ok(config
+            .models
+            .entries
+            .get(&config.models.default)
+            .and_then(|model| model.default_effort))
     }
 
     fn effort_metadata(
@@ -104,7 +130,15 @@ impl ConversationService {
         let space = self.space_store.get_or_create_default().await?;
         let agent_id = self.validated_agent_id(space.id, request.agent_id).await?;
         let selected_model_id = normalise_selected_model_id(request.selected_model_id);
-        let effort = self.resolved_effort(selected_model_id.as_deref(), request.effort);
+        let effort = self
+            .resolved_effort(
+                space.id,
+                &space.slug,
+                &agent_id,
+                selected_model_id.as_deref(),
+                request.effort,
+            )
+            .await?;
         let active_workspace_attachment_id = self.default_workspace_for_space(space.id).await?;
         let mut session = self
             .storage
@@ -354,13 +388,22 @@ impl ConversationService {
         space_id: Uuid,
         request: CreateConversationRequest,
     ) -> Result<ConversationResponse, GatewayError> {
-        self.space_store
+        let space = self
+            .space_store
             .get(space_id)
             .await?
             .ok_or(GatewayError::SpaceNotFound { id: space_id })?;
         let agent_id = self.validated_agent_id(space_id, request.agent_id).await?;
         let selected_model_id = normalise_selected_model_id(request.selected_model_id);
-        let effort = self.resolved_effort(selected_model_id.as_deref(), request.effort);
+        let effort = self
+            .resolved_effort(
+                space_id,
+                &space.slug,
+                &agent_id,
+                selected_model_id.as_deref(),
+                request.effort,
+            )
+            .await?;
         self.create_session_in_space_for_agent_with_effort(
             space_id,
             &agent_id,
