@@ -905,6 +905,31 @@ mod tests {
     }
 
     #[test]
+    fn explicit_output_schema_overrides_the_resolved_task_schema() {
+        let mut config = swage_config::ResolvedConfig::default();
+        config.output.schema = Some(serde_json::json!({
+            "type": "object",
+            "required": ["task"]
+        }));
+        config.output.max_retries = 3;
+        let workflow_schema = serde_json::json!({
+            "type": "object",
+            "required": ["workflow"]
+        });
+
+        let agent = build_agent_config_with_workspace(
+            "gateway".into(),
+            &config,
+            Some(workflow_schema.clone()),
+            std::path::Path::new("/workspace"),
+            vec![],
+        );
+
+        assert_eq!(agent.output_schema, Some(workflow_schema));
+        assert_eq!(agent.max_output_retries, 3);
+    }
+
+    #[test]
     fn wildcard_config_narrows_to_the_overlay_allow() {
         let config = swage_config::ResolvedConfig::default();
         assert!(config.tools.permissions.allow.iter().any(|t| t == "*"));
