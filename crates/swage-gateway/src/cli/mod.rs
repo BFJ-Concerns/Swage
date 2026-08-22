@@ -156,9 +156,16 @@ pub struct StartArgs {
     #[arg(long)]
     pub config: Option<String>,
 
-    /// Run the gateway in the foreground rather than detaching to the background.
+    /// Run in the foreground, leaving output attached to this terminal.
     #[arg(long)]
     pub foreground: bool,
+
+    /// Write detached gateway output to this file.
+    ///
+    /// Defaults to `gateway.log` in the Swage data root. Has no effect with
+    /// `--foreground`, where output remains attached to the terminal.
+    #[arg(long, value_name = "PATH")]
+    pub log_file: Option<String>,
 }
 
 /// Arguments for `swage gateway install`.
@@ -195,6 +202,12 @@ pub struct RestartArgs {
     pub config: Option<String>,
     #[arg(long)]
     pub foreground: bool,
+    /// Write detached gateway output to this file.
+    ///
+    /// Defaults to `gateway.log` in the Swage data root. Has no effect with
+    /// `--foreground`, where output remains attached to the terminal.
+    #[arg(long, value_name = "PATH")]
+    pub log_file: Option<String>,
 }
 
 /// Arguments for `swage gateway uninstall`.
@@ -250,6 +263,7 @@ mod tests {
         assert!(args.host.is_none());
         assert!(args.config.is_none());
         assert!(!args.foreground);
+        assert!(args.log_file.is_none());
     }
 
     #[test]
@@ -310,6 +324,8 @@ mod tests {
             "--config",
             "/tmp/config.toml",
             "--foreground",
+            "--log-file",
+            "/var/log/swage-gateway.log",
         ])
         .unwrap();
         let Some(Command::Gateway(gw)) = cli.command else {
@@ -322,6 +338,7 @@ mod tests {
         assert_eq!(args.host.as_deref(), Some("0.0.0.0"));
         assert_eq!(args.config.as_deref(), Some("/tmp/config.toml"));
         assert!(args.foreground);
+        assert_eq!(args.log_file.as_deref(), Some("/var/log/swage-gateway.log"));
     }
 
     // `swage gateway stop` defaults to force=false.
