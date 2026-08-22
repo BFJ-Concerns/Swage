@@ -96,11 +96,19 @@ impl ConversationService {
                 config
             }
         };
-        let config = crate::turn::effective_session_config(config, selected_model_id);
+        let selected_model_id = selected_model_id.unwrap_or(&config.models.default);
         Ok(config
             .models
             .entries
-            .get(&config.models.default)
+            .get(selected_model_id)
+            .or_else(|| {
+                config.models.entries.values().find(|model| {
+                    model
+                        .aliases
+                        .iter()
+                        .any(|alias| alias == selected_model_id)
+                })
+            })
             .and_then(|model| model.default_effort))
     }
 
