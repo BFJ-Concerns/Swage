@@ -244,9 +244,11 @@ describe("AppLayout shell navigation", () => {
 
     layout.$set({ spaceStore: mockSpaceStore(true, "second-space") });
     flushSync();
-    (document.querySelector("button.new-btn") as HTMLButtonElement).click();
 
-    expect(createConversation).toHaveBeenCalledWith(undefined, undefined, null);
+    const cleared = document.querySelector('select[aria-label="Agent"]') as HTMLSelectElement;
+    expect(cleared.value).toBe("");
+    (document.querySelector("button.new-btn") as HTMLButtonElement).click();
+    expect(createConversation).not.toHaveBeenCalled();
     layout.$destroy();
   });
 
