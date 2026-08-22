@@ -8115,6 +8115,7 @@ async fn completed_detached_result_reaches_parent_next_turn() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn delegated_read_only_location_approval_allows_read_and_refuses_write() {
+    let _swage_home = SwageHomeGuard::isolate();
     let fixture = tempfile::tempdir().expect("placement fixture");
     let attachment = fixture.path().join("read-only");
     std::fs::create_dir(&attachment).expect("read-only attachment");
@@ -8278,6 +8279,7 @@ async fn delegated_read_only_location_approval_allows_read_and_refuses_write() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn task_scoped_delegate_keeps_its_permission_bound_when_delegating_again() {
+    let _swage_home = SwageHomeGuard::isolate();
     let fixture = tempfile::tempdir().expect("delegation fixture");
     let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
     let space = storage
@@ -8444,6 +8446,7 @@ async fn task_scoped_delegate_keeps_its_permission_bound_when_delegating_again()
 
 #[tokio::test(flavor = "multi_thread")]
 async fn placed_delegate_keeps_exact_read_only_authority_when_delegating_again() {
+    let _swage_home = SwageHomeGuard::isolate();
     let fixture = tempfile::tempdir().expect("placement fixture");
     let default_workspace = fixture.path().join("default-workspace");
     let placed_workspace = fixture.path().join("placed-read-only");
@@ -8615,6 +8618,7 @@ async fn placed_delegate_keeps_exact_read_only_authority_when_delegating_again()
 
 #[tokio::test(flavor = "multi_thread")]
 async fn delegate_worktree_provisions_isolated_cwd_and_records_resolved_placement() {
+    let _swage_home = SwageHomeGuard::isolate();
     let fixture = tempfile::tempdir().expect("worktree fixture");
     let repo = fixture.path().join("repo");
     std::fs::create_dir(&repo).expect("repository directory");
@@ -8845,6 +8849,7 @@ async fn delegate_worktree_provisions_isolated_cwd_and_records_resolved_placemen
 
 #[tokio::test(flavor = "multi_thread")]
 async fn detached_delegate_can_be_cancelled_through_active_registry() {
+    let _swage_home = SwageHomeGuard::isolate();
     let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
     let space = storage
         .get_or_create_default()
