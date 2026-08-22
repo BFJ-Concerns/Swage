@@ -19,6 +19,15 @@ async function textResponse(response, chunks, pause = 30) {
   response.end();
 }
 
+function hasSuccessfulApprovalResult(messages) {
+  return messages.some((message) => Array.isArray(message.content)
+    && message.content.some((block) => block.type === "tool_result"
+      && block.tool_use_id === "e2e-tool-call"
+      && block.is_error !== true
+      && typeof block.content === "string"
+      && block.content.includes("approval-ok")));
+}
+
 async function handle(request, response) {
   if (request.method !== "POST" || request.url !== "/v1/messages") {
     response.writeHead(404).end();
@@ -30,8 +39,10 @@ async function handle(request, response) {
   response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", "x-request-id": "e2e-provider" });
 
   const serialised = JSON.stringify(body.messages);
-  if (serialised.includes("tool_result")) {
+  if (hasSuccessfulApprovalResult(body.messages)) {
     await textResponse(response, ["Approval ", "completed through the gateway."]);
+  } else if (serialised.includes("tool_result")) {
+    await textResponse(response, ["Approval did not execute the tool."]);
   } else if (serialised.includes("approve a tool")) {
     event(response, "message_start", { type: "message_start", message: { usage: { input_tokens: 4, output_tokens: 0 } } });
     event(response, "content_block_start", { type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "e2e-tool-call", name: "shell", input: {} } });
