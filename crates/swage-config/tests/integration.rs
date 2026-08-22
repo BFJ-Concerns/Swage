@@ -6,7 +6,7 @@
 //! multiple internal modules.
 
 use std::fs;
-use swage_config::{discover, load_resolved_config_from};
+use swage_config::{RESERVED_WORKFLOW_AGENT_ID, discover, load_resolved_config_from};
 use tempfile::TempDir;
 
 // ---------------------------------------------------------------------------
@@ -538,7 +538,7 @@ fn discovery_finds_spaces_and_agents() {
     let proj_a = root.join("spaces/alpha/agents");
     fs::create_dir_all(proj_a.join("coder")).unwrap();
     fs::create_dir_all(proj_a.join("reviewer")).unwrap();
-    fs::create_dir_all(proj_a.join("__workflow_ephemeral__")).unwrap();
+    fs::create_dir_all(proj_a.join(RESERVED_WORKFLOW_AGENT_ID)).unwrap();
 
     let proj_b = root.join("spaces/beta/agents");
     fs::create_dir_all(proj_b.join("assistant")).unwrap();
@@ -558,7 +558,11 @@ fn discovery_finds_spaces_and_agents() {
     let alpha = spaces.iter().find(|p| p.name == "alpha").unwrap();
     assert!(alpha.agents.contains(&"coder".to_string()));
     assert!(alpha.agents.contains(&"reviewer".to_string()));
-    assert!(!alpha.agents.contains(&"__workflow_ephemeral__".to_string()));
+    assert!(
+        !alpha
+            .agents
+            .contains(&RESERVED_WORKFLOW_AGENT_ID.to_string())
+    );
 
     // Beta has one agent
     let beta = spaces.iter().find(|p| p.name == "beta").unwrap();
@@ -567,6 +571,34 @@ fn discovery_finds_spaces_and_agents() {
     // Gamma has no agents
     let gamma = spaces.iter().find(|p| p.name == "gamma").unwrap();
     assert!(gamma.agents.is_empty());
+}
+
+/// The bare workflow identity inherits global and space configuration only.
+#[test]
+fn reserved_workflow_agent_directory_does_not_feed_configuration() {
+    let tmp = build_skeleton(
+        Some("[server]\nport = 3000\n"),
+        "myspace",
+        None,
+        RESERVED_WORKFLOW_AGENT_ID,
+        Some("[server]\nport = 4321\n"),
+    );
+    let reserved_dir = tmp
+        .path()
+        .join("spaces/myspace/agents")
+        .join(RESERVED_WORKFLOW_AGENT_ID);
+    fs::create_dir_all(reserved_dir.join("instructions")).unwrap();
+    fs::write(
+        reserved_dir.join("instructions/01-authored.md"),
+        "This authored agent instruction must not be loaded.",
+    )
+    .unwrap();
+
+    let config = load_resolved_config_from(tmp.path(), "myspace", RESERVED_WORKFLOW_AGENT_ID)
+        .expect("the bare workflow identity should inherit ambient configuration");
+
+    assert_eq!(config.server.port, 3000);
+    assert!(!config.instructions.contains("authored agent instruction"));
 }
 
 /// A space with no config.toml is still discovered (it inherits global config).
