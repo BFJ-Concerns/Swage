@@ -334,7 +334,14 @@ mod tests {
         let config_root = tempfile::tempdir().expect("config root");
         let (svc, storage) = make_definition_service();
         let mut config = swage_config::ResolvedConfig::default();
-        config.models.default = "model-a".to_string();
+        config.models.default = "model-default".to_string();
+        config.models.entries.insert(
+            "model-default".to_string(),
+            swage_config::ModelEndpointConfig {
+                default_effort: Some(swage_protocol::client::settings::Effort::Low),
+                ..Default::default()
+            },
+        );
         config.models.entries.insert(
             "model-a".to_string(),
             swage_config::ModelEndpointConfig {

@@ -314,7 +314,10 @@ mod tests {
         );
         assert_eq!(edited.metadata["prior_state"]["output_max_retries"], 2);
         assert_eq!(edited.metadata["new_state"]["model_id"], Value::Null);
-        assert_eq!(edited.metadata["new_state"]["tool_permissions"], Value::Null);
+        assert_eq!(
+            edited.metadata["new_state"]["tool_permissions"],
+            Value::Null
+        );
         assert_eq!(edited.metadata["new_state"]["output_schema"], Value::Null);
         assert_eq!(
             edited.metadata["new_state"]["output_max_retries"],
@@ -342,8 +345,14 @@ mod tests {
             deleted.metadata["prior_state"]["instructions"],
             "Edited contract."
         );
-        assert_eq!(deleted.metadata["prior_state"]["tool_permissions"], Value::Null);
-        assert_eq!(deleted.metadata["prior_state"]["output_schema"], Value::Null);
+        assert_eq!(
+            deleted.metadata["prior_state"]["tool_permissions"],
+            Value::Null
+        );
+        assert_eq!(
+            deleted.metadata["prior_state"]["output_schema"],
+            Value::Null
+        );
         assert_eq!(
             deleted.metadata["prior_state"]["output_max_retries"],
             Value::Null

@@ -102,12 +102,11 @@ impl ConversationService {
             .entries
             .get(selected_model_id)
             .or_else(|| {
-                config.models.entries.values().find(|model| {
-                    model
-                        .aliases
-                        .iter()
-                        .any(|alias| alias == selected_model_id)
-                })
+                config
+                    .models
+                    .entries
+                    .values()
+                    .find(|model| model.aliases.iter().any(|alias| alias == selected_model_id))
             })
             .and_then(|model| model.default_effort))
     }
