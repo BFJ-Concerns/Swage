@@ -120,6 +120,7 @@ export function parseRoute(pathname: string): Route {
 export function createRouter(options?: RouterOptions): Router {
   // Seed from the current URL so the initial state is always consistent.
   let currentRoute: Route = parseRoute(window.location.pathname);
+  let navigationGeneration = 0;
 
   function updateRoute(route: Route): void {
     currentRoute = route;
@@ -127,7 +128,7 @@ export function createRouter(options?: RouterOptions): Router {
   }
 
   // Called on every URL change (pushState + popstate).
-  async function applyLocation(): Promise<void> {
+  async function applyLocation(generation: number): Promise<void> {
     const route = parseRoute(window.location.pathname);
     updateRoute(route);
 
@@ -141,6 +142,9 @@ export function createRouter(options?: RouterOptions): Router {
           await options.conversationStore.selectConversation(route.conversationId);
         }
       } catch (error) {
+        if (generation !== navigationGeneration) {
+          return;
+        }
         if (error instanceof Error && error.message.startsWith("HTTP 404 ")) {
           if (isActiveConversation) {
             options.conversationStore.clearActiveConversation();
@@ -174,6 +178,7 @@ export function createRouter(options?: RouterOptions): Router {
     },
 
     navigate(path: string): void {
+      navigationGeneration += 1;
       if (window.location.pathname !== path) {
         window.history.pushState(null, "", path);
       }
@@ -188,12 +193,23 @@ export function createRouter(options?: RouterOptions): Router {
       window.addEventListener("popstate", () => {
         // popstate is synchronous in terms of the URL update; async selection
         // runs in the background and updates currentRoute when it settles.
-        applyLocation();
+        const generation = ++navigationGeneration;
+        void applyLocation(generation).catch(() => {
+          if (generation !== navigationGeneration) {
+            return;
+          }
+          const activeConversationId = options?.conversationStore?.activeConversationId;
+          const fallbackPath = activeConversationId
+            ? `/conversations/${activeConversationId}`
+            : "/";
+          window.history.replaceState(null, "", fallbackPath);
+          updateRoute(parseRoute(fallbackPath));
+        });
       });
 
       // Apply the initial URL — this kicks off conversation selection if
       // the URL contains an ID (e.g. on page refresh or direct navigation).
-      await applyLocation();
+      await applyLocation(++navigationGeneration);
     },
   };
 }

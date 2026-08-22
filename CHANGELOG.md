@@ -7,6 +7,7 @@ All notable changes to Swage are documented in this file.
 ### Added
 
 - New conversations can choose a reasoning effort from the main composer, while each configured model can provide the inherited default.
+- Agents can now run newly authored workflow source directly without saving or registering it first.
 - Durable named task definitions bundle instructions, an output contract, a model preference, and narrowing permissions for workflow and delegated child dispatches.
 - Workflow and delegation authors can place individual workers in a chosen working directory or a runtime-provisioned isolated git worktree.
 - Workflow agent calls now honour per-call reasoning effort and host-enforced timeout options.
@@ -32,11 +33,16 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- A delayed not-found response for an earlier conversation no longer clears a conversation selected while that check was pending.
+- Browser back and forward navigation now restores the active conversation route when loading the destination fails.
 - Provider fallback catalogues are current, attendance audit records distinguish interactive turns, and the context inspector identifies per-element token counts as non-additive estimates.
 - Retained built-in workflow IDs now return not found after a same-named authored workflow shadows them, while the authored workflow remains readable and launchable by its own ID.
 - Sandbox startup no longer fails when `TMPDIR` has a long path.
 - Generated TypeScript turn-poll responses now expose token counts as numbers rather than bigints.
 - Fresh-session schedules created from Settings now use the currently selected space.
+- Agent definition details now show the configured maximum output retries.
+- Switching spaces no longer carries an unavailable agent into a new conversation.
+- A temporary agent-inventory failure at startup no longer hides the available gateway.
 - Streamed tool calls now remain attached to their assistant turn after completion and appear before the response both immediately and after reloading conversation history.
 
 ## 0.2.0 — 2026-08-13

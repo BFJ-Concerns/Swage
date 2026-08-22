@@ -10,6 +10,7 @@ pub mod google;
 pub mod http;
 pub mod openai;
 pub mod provider;
+pub mod responses;
 pub mod voice;
 
 // Reliability decorators
