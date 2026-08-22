@@ -253,6 +253,45 @@ describe("AppLayout shell navigation", () => {
     layout.$destroy();
   });
 
+  it("clears a selected agent when refreshed definitions remove it", () => {
+    const startTurn = vi.fn();
+    const researcher: import("../protocol/EffectiveAgentDefinitionResponse").EffectiveAgentDefinitionResponse = {
+      id: "researcher", display_name: "Researcher", description: "", instructions: "cite",
+      model_id: null, tool_permissions: null, skills: [], output_schema: null,
+      output_max_retries: null, is_builtin: false, source_scope: "global",
+    };
+    const layout = createClassComponent({
+      component: AppLayout,
+      target: document.body,
+      props: {
+        conversationStore: mockConversationStore(),
+        connectionStore: mockConnectionStore(),
+        streamingStore: { ...mockStreamingStore(), startTurn },
+        spaceStore: mockSpaceStore(),
+        onRetry: () => {},
+        activeSurface: "conversation",
+        onSelectSurface: () => {},
+        agentDefinitions: [researcher],
+      },
+    });
+    const picker = document.querySelector('select[aria-label="Agent"]') as HTMLSelectElement;
+    picker.value = researcher.id;
+    picker.dispatchEvent(new Event("change", { bubbles: true }));
+    flushSync();
+
+    layout.$set({ agentDefinitions: [] });
+    flushSync();
+
+    expect((document.querySelector('select[aria-label="Agent"]') as HTMLSelectElement).value).toBe("");
+    const message = document.querySelector('textarea[aria-label="Message"]') as HTMLTextAreaElement;
+    message.value = "Use the refreshed definitions";
+    message.dispatchEvent(new Event("input", { bubbles: true }));
+    flushSync();
+    (document.querySelector("button.send") as HTMLButtonElement).click();
+    expect(startTurn).toHaveBeenCalledWith("Use the refreshed definitions", null, null, null);
+    layout.$destroy();
+  });
+
   it("passes the selected agent when the first message creates a conversation", () => {
     const startTurn = vi.fn();
     component = mountLayout({
