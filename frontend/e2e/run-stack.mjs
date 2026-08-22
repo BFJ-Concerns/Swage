@@ -1,4 +1,5 @@
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { rmSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
@@ -70,6 +71,8 @@ process.on("SIGTERM", () => void stop());
 process.on("SIGINT", () => void stop(130));
 process.on("exit", () => {
   for (const child of children) child.kill("SIGTERM");
+  rmSync(swageRoot, { recursive: true, force: true });
+  rmSync(resultsDir, { recursive: true, force: true });
 });
 
 start(process.execPath, [join(frontendDir, "e2e/mock-provider.mjs")]);
