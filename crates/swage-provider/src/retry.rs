@@ -953,6 +953,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stream_retries_after_empty_delta_then_anomaly() {
+        let call_count = Arc::new(Mutex::new(0));
+        let retry = RetryProvider::new(
+            SequencedStreamProvider {
+                call_count: Arc::clone(&call_count),
+                attempts: Mutex::new(vec![
+                    vec![
+                        StreamChunk::Delta {
+                            content: String::new(),
+                        },
+                        StreamChunk::ProviderAnomaly {
+                            message: "empty response".into(),
+                        },
+                    ],
+                    vec![
+                        StreamChunk::Delta {
+                            content: "recovered".into(),
+                        },
+                        StreamChunk::Done {
+                            finish_reason: None,
+                        },
+                    ],
+                ]),
+            },
+            RetryConfig {
+                max_retries: 1,
+                initial_backoff: Duration::ZERO,
+                max_backoff: Duration::ZERO,
+            },
+        );
+
+        let chunks: Vec<_> = retry.stream(completion_req()).collect().await;
+
+        assert_eq!(*call_count.lock().unwrap(), 2);
+        assert!(chunks.iter().any(
+            |chunk| matches!(chunk, StreamChunk::Delta { content } if content == "recovered")
+        ));
+    }
+
+    #[tokio::test]
     async fn stream_returns_error_chunk_after_retries_exhausted() {
         // All attempts fail — after max_retries, an error chunk is emitted.
         let retry = RetryProvider::new(
