@@ -296,12 +296,26 @@
           "type": "string",
           "format": "date-time"
         },
+        "run_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
         "session_id": {
           "type": "string",
           "format": "uuid"
         },
         "target": {
           "$ref": "#/$defs/DeliveryTarget"
+        },
+        "turn_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
         }
       },
       "required": [
