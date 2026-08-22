@@ -7,6 +7,7 @@ All notable changes to Swage are documented in this file.
 ### Added
 
 - Detached gateway starts now accept `--log-file`, report the chosen output destination, and explain foreground output handling in command help.
+- Agents can route scheduled-run output to channels, local storage, and webhooks when creating or updating schedules.
 - New conversations can choose a reasoning effort from the main composer, while each configured model can provide the inherited default.
 - Agents can now run newly authored workflow source directly without saving or registering it first.
 - Durable named task definitions bundle instructions, an output contract, a model preference, and narrowing permissions for workflow and delegated child dispatches.
