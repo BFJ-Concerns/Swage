@@ -429,7 +429,7 @@ pub async fn discover_models(
     // Last-resort catalogues current for this fixes batch as of 2026-08-21.
     let mut models = match provider.protocol {
         swage_config::Protocol::OpenRouter => discover_openrouter_models().await?,
-        swage_config::Protocol::OpenAi => {
+        swage_config::Protocol::OpenAi | swage_config::Protocol::OpenAiResponses => {
             if let Some(base_url) = provider.base_url.as_deref() {
                 let api_key = match draft_api_key {
                     Some(key) => Some(key),

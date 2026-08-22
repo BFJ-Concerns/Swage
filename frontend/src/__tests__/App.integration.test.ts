@@ -454,6 +454,27 @@ describe("App", () => {
     expect(document.querySelector(".message-display")?.textContent).toContain("Restored from URL");
   });
 
+  it("keeps the gateway available when startup agent inventory loading fails", async () => {
+    const defaultSpace = makeSpace();
+    const linkedConversation = makeConversationSummary({ id: "conv-linked" });
+    vi.mocked(spacesApi.listSpaces).mockResolvedValueOnce([defaultSpace]);
+    vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([linkedConversation]);
+    vi.mocked(conversationsApi.getConversation).mockResolvedValue(
+      makeConversationDetail({ id: linkedConversation.id }),
+    );
+    vi.mocked(agentDefinitionsApi.listEffectiveAgentDefinitions).mockRejectedValueOnce(
+      new Error("agent inventory unavailable"),
+    );
+    window.history.replaceState(null, "", `/conversations/${linkedConversation.id}`);
+
+    component = mount(App, { target: document.body });
+    await settleUi();
+
+    expect(agentDefinitionsApi.listEffectiveAgentDefinitions).toHaveBeenCalledWith(defaultSpace.id);
+    expect(document.querySelector(".conversation-list")).not.toBeNull();
+    expect(document.querySelector(".error-screen")).toBeNull();
+  });
+
   it("falls back to the root with a notice for a stale deep link", async () => {
     vi.mocked(spacesApi.listSpaces).mockResolvedValueOnce([makeSpace()]);
     vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([]);
@@ -1104,6 +1125,8 @@ describe("App", () => {
       content: "Send with the newly saved model",
       selected_model_id: "local/new-model",
     });
+    websocketHarness.fireEvent({ type: "turn_complete", turn_id: "first-model-turn" });
+    await settleUi();
 
     flushSync(() => settingsButton!.click());
     await settleUi();
@@ -1115,6 +1138,29 @@ describe("App", () => {
     expect(document.body.textContent).not.toContain("transient catalogue failure");
     expect(settingsApi.saveSettings).toHaveBeenCalledTimes(2);
     expect(settingsApi.fetchSettings).toHaveBeenCalledTimes(5);
+
+    const retainedCloseButton = document.querySelector<HTMLButtonElement>(
+      'button[aria-label="Close settings"]',
+    );
+    flushSync(() => retainedCloseButton!.click());
+    await settleUi();
+    expect(document.body.textContent).toContain("local/new-model");
+
+    const retainedTextarea = document.querySelector<HTMLTextAreaElement>("textarea");
+    const retainedSendButton = document.querySelector<HTMLButtonElement>(".action.send");
+    flushSync(() => {
+      retainedTextarea!.value = "Send after the failed catalogue refresh";
+      retainedTextarea!.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    expect(retainedSendButton?.disabled).toBe(false);
+    flushSync(() => retainedSendButton!.click());
+    await settleUi();
+
+    expect(websocketHarness.client.send).toHaveBeenLastCalledWith({
+      type: "send_message",
+      content: "Send after the failed catalogue refresh",
+      selected_model_id: "local/new-model",
+    });
   });
 
   it("switches to the operator surface and renders the overview", async () => {

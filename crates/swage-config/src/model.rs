@@ -30,6 +30,11 @@ impl Default for ServerConfig {
 #[serde(rename_all = "lowercase")]
 pub enum Protocol {
     OpenAi,
+    /// The OpenAI Responses API (`POST /v1/responses`) — the envelope
+    /// GPT-family models are addressed with by their native harness. `OpenAi`
+    /// remains Chat Completions for generic OpenAI-compatible endpoints.
+    #[serde(rename = "openai-responses")]
+    OpenAiResponses,
     #[default]
     Anthropic,
     Google,

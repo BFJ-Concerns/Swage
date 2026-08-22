@@ -311,11 +311,11 @@ async fn run_turn_inner(
     let mut tool_tasks = JoinSet::new();
     loop {
         tokio::select! {
-            () = client.closed() => {
-                return Err(AgentError::ProviderFailed(swage_core::ProviderError::InvalidResponse(
-                    "Codex App Server transport closed mid-turn".to_string(),
-                )));
-            }
+            // Drain buffered requests and notifications before reporting
+            // transport closure: the server may deliver a turn's terminal
+            // notification and close in the same instant, and that outcome
+            // must win over the close.
+            biased;
             () = request.cancellation.cancelled() => {
                 if let Some(turn_id) = codex_turn_id.as_deref() {
                     let _ = client.request("turn/interrupt", json!({"threadId":codex_thread_id,"turnId":turn_id})).await;
@@ -326,7 +326,7 @@ async fn run_turn_inner(
             }
             incoming = server_requests.recv() => {
                 let incoming = incoming.map_err(|_| AgentError::ProviderFailed(swage_core::ProviderError::InvalidResponse(
-                    "Codex App Server request stream closed".to_string(),
+                    "Codex App Server transport closed mid-turn".to_string(),
                 )))?;
                 if incoming.method == "item/tool/call" {
                     tool_count += 1;
@@ -343,7 +343,7 @@ async fn run_turn_inner(
             }
             incoming = notifications.recv() => {
                 let incoming = incoming.map_err(|_| AgentError::ProviderFailed(swage_core::ProviderError::InvalidResponse(
-                    "Codex App Server notification stream closed".to_string(),
+                    "Codex App Server transport closed mid-turn".to_string(),
                 )))?;
                 match incoming.method.as_str() {
                     "item/started" | "item/updated" => {
@@ -398,6 +398,11 @@ async fn run_turn_inner(
                     }
                     _ => tracing::debug!(method = %incoming.method, "ignoring unsupported Codex notification"),
                 }
+            }
+            () = client.closed() => {
+                return Err(AgentError::ProviderFailed(swage_core::ProviderError::InvalidResponse(
+                    "Codex App Server transport closed mid-turn".to_string(),
+                )));
             }
         }
     }

@@ -170,7 +170,9 @@ impl
 
 fn default_base_url(protocol: swage_config::Protocol) -> &'static str {
     match protocol {
-        swage_config::Protocol::OpenAi => "https://api.openai.com/v1",
+        swage_config::Protocol::OpenAi | swage_config::Protocol::OpenAiResponses => {
+            "https://api.openai.com/v1"
+        }
         swage_config::Protocol::Anthropic => "https://api.anthropic.com",
         swage_config::Protocol::Google => "https://generativelanguage.googleapis.com",
         swage_config::Protocol::OpenRouter => "https://openrouter.ai/api/v1",

@@ -52,7 +52,6 @@ pub struct BackgroundJobResponse {
     pub completed_at: Option<DateTime<Utc>>,
 }
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
-#[ts(export)]
 pub struct QueuedAttachmentResponse {
     pub attachment: AttachmentResponse,
     pub job: BackgroundJobResponse,
@@ -94,7 +93,6 @@ pub struct MaterialResponse {
     pub archived_at: Option<DateTime<Utc>>,
 }
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
-#[ts(export)]
 pub struct MaterialListResponse {
     pub materials: Vec<MaterialResponse>,
 }

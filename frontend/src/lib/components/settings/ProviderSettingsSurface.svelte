@@ -37,6 +37,7 @@
 
   const PROVIDER_KINDS = [
     { id: "OpenAi", label: "OpenAI", protocol: "openai" },
+    { id: "OpenAiResponses", label: "OpenAI Responses", protocol: "openai-responses" },
     { id: "Anthropic", label: "Anthropic", protocol: "anthropic" },
     { id: "Google", label: "Google", protocol: "google" },
     { id: "OpenRouter", label: "OpenRouter", protocol: "openrouter" },
@@ -215,7 +216,7 @@
     protocol: ProviderProtocol;
   };
 
-  type ProviderKind = "OpenAi" | "Anthropic" | "Google" | "OpenRouter" | "OpenAiCompatible" | "Codex";
+  type ProviderKind = "OpenAi" | "OpenAiResponses" | "Anthropic" | "Google" | "OpenRouter" | "OpenAiCompatible" | "Codex";
 
   function slugifyProviderName(value: string): string {
     return value

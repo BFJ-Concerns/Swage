@@ -4818,6 +4818,51 @@ async fn initial_message_write_failure_clears_active_turn() {
 }
 
 #[tokio::test]
+async fn delegated_result_delivery_failure_clears_active_turn() {
+    let storage = Arc::new(MockStorage::new());
+    let (state, session_id) = make_state_with_storage(vec![], Arc::clone(&storage)).await;
+    let result = storage
+        .create_agent_message(NewAgentMessage {
+            sender_agent_id: "researcher".into(),
+            recipient_agent_id: "gateway".into(),
+            kind: swage_core::MessageKind::Result,
+            correlation_id: Some(Uuid::new_v4()),
+            payload: serde_json::json!({"response": "delegated answer"}),
+        })
+        .await
+        .expect("pending delegated result");
+    storage.fail_append_message_at(2);
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    process_turn(
+        &state,
+        session_id,
+        None,
+        "message".to_string(),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .expect_err("the injected delegated-result append must fail");
+
+    let thread = storage.list_by_session(session_id).await.unwrap().remove(0);
+    let turns = storage.list_turns_by_thread(thread.id).await.unwrap();
+    assert_eq!(turns[0].state, TurnState::Failed);
+    assert_eq!(
+        storage
+            .get_agent_message(result.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        MessageStatus::Pending,
+        "a result whose append failed must remain available for redelivery"
+    );
+    assert_subsequent_turn_is_not_blocked(&state, session_id).await;
+}
+
+#[tokio::test]
 async fn history_rebuild_failure_clears_active_turn() {
     let storage = Arc::new(MockStorage::new());
     storage.fail_message_lists();
@@ -8071,6 +8116,7 @@ async fn completed_detached_result_reaches_parent_next_turn() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn delegated_read_only_location_approval_allows_read_and_refuses_write() {
+    let _swage_home = SwageHomeGuard::isolate();
     let fixture = tempfile::tempdir().expect("placement fixture");
     let attachment = fixture.path().join("read-only");
     std::fs::create_dir(&attachment).expect("read-only attachment");
@@ -8234,6 +8280,7 @@ async fn delegated_read_only_location_approval_allows_read_and_refuses_write() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn task_scoped_delegate_keeps_its_permission_bound_when_delegating_again() {
+    let _swage_home = SwageHomeGuard::isolate();
     let fixture = tempfile::tempdir().expect("delegation fixture");
     let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
     let space = storage
@@ -8400,6 +8447,7 @@ async fn task_scoped_delegate_keeps_its_permission_bound_when_delegating_again()
 
 #[tokio::test(flavor = "multi_thread")]
 async fn placed_delegate_keeps_exact_read_only_authority_when_delegating_again() {
+    let _swage_home = SwageHomeGuard::isolate();
     let fixture = tempfile::tempdir().expect("placement fixture");
     let default_workspace = fixture.path().join("default-workspace");
     let placed_workspace = fixture.path().join("placed-read-only");
@@ -8571,6 +8619,7 @@ async fn placed_delegate_keeps_exact_read_only_authority_when_delegating_again()
 
 #[tokio::test(flavor = "multi_thread")]
 async fn delegate_worktree_provisions_isolated_cwd_and_records_resolved_placement() {
+    let _swage_home = SwageHomeGuard::isolate();
     let fixture = tempfile::tempdir().expect("worktree fixture");
     let repo = fixture.path().join("repo");
     std::fs::create_dir(&repo).expect("repository directory");
@@ -8801,6 +8850,7 @@ async fn delegate_worktree_provisions_isolated_cwd_and_records_resolved_placemen
 
 #[tokio::test(flavor = "multi_thread")]
 async fn detached_delegate_can_be_cancelled_through_active_registry() {
+    let _swage_home = SwageHomeGuard::isolate();
     let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
     let space = storage
         .get_or_create_default()

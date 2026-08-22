@@ -16,9 +16,11 @@ use swage_core::{ChatMessage, CompletionRequest, Role, StorageError};
 use swage_protocol::client::workflow::{
     CreateWorkflowScriptRequest, PostWorkflowRunEventRequest, PostWorkflowRunEventResponse,
     StartInlineWorkflowRunRequest, StartWorkflowRunRequest, UpdateWorkflowScriptRequest,
-    WorkflowBudget, WorkflowRun, WorkflowRunDetailResponse, WorkflowRunEvent,
-    WorkflowRunEventSource, WorkflowRunListResponse, WorkflowRunState, WorkflowScript,
-    WorkflowScriptListQuery, WorkflowScriptListResponse,
+    WorkflowBudget, WorkflowHandoverEvent, WorkflowHandoverEventDelivery,
+    WorkflowHandoverFailedCall, WorkflowHandoverFailedCallRef, WorkflowRun,
+    WorkflowRunDetailResponse, WorkflowRunEvent, WorkflowRunEventSource, WorkflowRunHandover,
+    WorkflowRunListResponse, WorkflowRunState, WorkflowScript, WorkflowScriptListQuery,
+    WorkflowScriptListResponse,
 };
 use swage_storage::WorkflowJournalRecord;
 use swage_storage::{
@@ -607,6 +609,15 @@ pub trait WorkflowLauncher: Send + Sync {
         budget: Option<WorkflowBudget>,
         wait: bool,
     ) -> Result<Value, String>;
+
+    async fn start_inline(
+        &self,
+        session_id: Uuid,
+        source: &str,
+        args: Value,
+        budget: Option<WorkflowBudget>,
+        wait: bool,
+    ) -> Result<Value, String>;
 }
 
 pub struct GatewayWorkflowLauncher {
@@ -641,6 +652,63 @@ impl WorkflowLauncher for GatewayWorkflowLauncher {
         let script = resolve_workflow_by_name(&self.state, session.space_id, name, &skills)
             .await?
             .ok_or_else(|| format!("workflow script {name:?} was not found"))?;
+        self.start_for_session(
+            session,
+            script.script_version_id,
+            script.inline_identity(),
+            script.source,
+            script.delivery_grant,
+            script.carrying_skill,
+            args,
+            budget,
+            wait,
+        )
+        .await
+    }
+
+    async fn start_inline(
+        &self,
+        session_id: Uuid,
+        source: &str,
+        args: Value,
+        budget: Option<WorkflowBudget>,
+        wait: bool,
+    ) -> Result<Value, String> {
+        let session = self
+            .state
+            .storage
+            .get_session(session_id)
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("session {session_id} was not found"))?;
+        self.start_for_session(
+            session,
+            None,
+            None,
+            source.to_owned(),
+            None,
+            None,
+            args,
+            budget,
+            wait,
+        )
+        .await
+    }
+}
+
+impl GatewayWorkflowLauncher {
+    async fn start_for_session(
+        &self,
+        session: swage_storage::Session,
+        script_version_id: Option<Uuid>,
+        inline_identity: Option<InlineWorkflowIdentity>,
+        source: String,
+        delivery_grant: Option<Value>,
+        carrying_skill: Option<String>,
+        args: Value,
+        budget: Option<WorkflowBudget>,
+        wait: bool,
+    ) -> Result<Value, String> {
         let mut dispatch_bound_agent_ids =
             crate::turn::dispatch_bound_agent_ids(session.metadata.as_ref())
                 .map_err(|error| error.to_string())?;
@@ -664,13 +732,13 @@ impl WorkflowLauncher for GatewayWorkflowLauncher {
         let run = start_run(
             self.state.clone(),
             session.space_id,
-            script.script_version_id,
-            script.inline_identity(),
-            script.source,
+            script_version_id,
+            inline_identity,
+            source,
             args,
             budget.unwrap_or_default(),
-            script.delivery_grant,
-            script.carrying_skill,
+            delivery_grant,
+            carrying_skill,
             // The run inherits every bound on the dispatching session, then
             // adds that session's own agent. Each worker turn re-resolves the
             // entire lineage before intersecting grants.
@@ -1196,7 +1264,19 @@ async fn run_ephemeral_agent_call(
     let timeout = request.timeout_ms.map(std::time::Duration::from_millis);
     tokio::select! {
         biased;
-        result = &mut processing => result.map_err(|error| error.to_string())?,
+        result = &mut processing => {
+            // Parent cancellation propagates through call_cancellation and can
+            // settle the turn before this select observes the cancelled arm.
+            // A turn interrupted that way is a cancellation outcome, not an
+            // agent-call failure.
+            if cancellation.is_cancelled() {
+                if let Err(error) = result {
+                    tracing::warn!(%error, "cancelled agent turn failed while settling cancellation");
+                }
+                return Err("WorkflowCancelledError".into());
+            }
+            result.map_err(|error| error.to_string())?
+        }
         () = cancellation.cancelled() => {
             call_cancellation.cancel();
             // The turn path owns the sandbox and active-turn registration.
@@ -3935,11 +4015,22 @@ fn run_wire(record: WorkflowRunRecord) -> Result<WorkflowRun, ApiError> {
         script_name: record.script_name,
         script_version: record.script_version,
         carrying_skill: record.carrying_skill,
+        source: record.source,
+        source_hash: record.source_hash,
         state: run_state(&record.state)?,
         args: record.args,
         budget: budget_wire(&record.budget),
         final_output: record.final_output,
-        handover: record.handover,
+        handover: record
+            .handover
+            .map(serde_json::from_value::<WorkflowRunHandover>)
+            .transpose()
+            .map_err(|error| {
+                internal(format!(
+                    "workflow run {} handover does not match the recorded contract: {error}",
+                    record.id
+                ))
+            })?,
         error_message: record.error_message,
         created_at: record.created_at,
         completed_at: record.completed_at,
@@ -4107,7 +4198,7 @@ async fn failed_agent_call_handover(
     storage: &Arc<dyn Storage>,
     run_id: Uuid,
     failed_call_ref: FailedAgentCallRef,
-) -> Option<Value> {
+) -> Option<WorkflowRunHandover> {
     let journal = storage.list_workflow_journal(run_id).await.ok()?;
     let failed_call = journal.iter().find(|entry| {
         entry.id == failed_call_ref.journal_entry_id
@@ -4136,66 +4227,66 @@ async fn failed_agent_call_handover(
                         && previous_agent_call_seq
                             .is_none_or(|previous| delivery_seq > previous) =>
                 {
-                    "delivered_to_failed_call"
+                    WorkflowHandoverEventDelivery::DeliveredToFailedCall
                 }
-                None => "pending",
+                None => WorkflowHandoverEventDelivery::Pending,
                 Some(_) => return None,
             };
-            Some(serde_json::json!({
-                "id": event.id,
-                "seq": event.seq,
-                "kind": event.kind,
-                "journal_entry_id": event.journal_entry_id,
-                "delivery": delivery,
-            }))
+            Some(WorkflowHandoverEvent {
+                id: event.id,
+                seq: event.seq,
+                kind: event.kind,
+                journal_entry_id: event.journal_entry_id,
+                delivery,
+            })
         })
         .collect::<Vec<_>>();
     let last_journal_seq = journal.iter().map(|entry| entry.seq).max()?;
     let events_delivered_to_failed_call = events
         .iter()
-        .filter(|event| event["delivery"] == "delivered_to_failed_call")
-        .count();
-    let events_pending = events.len().saturating_sub(events_delivered_to_failed_call);
-    Some(serde_json::json!({
-        "classification": "interrupted",
-        "failure": format!("Agent call {} failed: {call_error}", failed_call.id),
-        "failed_call": {
-            "journal_entry_id": failed_call.id,
-            "seq": failed_call.seq,
-            "kind": failed_call.kind,
-            "label": failed_call.request.get("label").cloned().unwrap_or(Value::Null),
-            "error": call_error,
+        .filter(|event| event.delivery == WorkflowHandoverEventDelivery::DeliveredToFailedCall)
+        .count() as u64;
+    let events_pending = (events.len() as u64).saturating_sub(events_delivered_to_failed_call);
+    Some(WorkflowRunHandover::Interrupted {
+        failure: format!("Agent call {} failed: {call_error}", failed_call.id),
+        failed_call: WorkflowHandoverFailedCall {
+            journal_entry_id: failed_call.id,
+            seq: failed_call.seq,
+            // The find above filters on kind == "agent_call".
+            kind: swage_protocol::client::workflow::WorkflowJournalEntryKind::AgentCall,
+            label: failed_call
+                .request
+                .get("label")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            error: call_error.to_string(),
         },
-        "last_journal_seq": last_journal_seq,
-        "events_delivered_to_failed_call": events_delivered_to_failed_call,
-        "events_pending": events_pending,
-        "events": events,
-    }))
+        last_journal_seq,
+        events_delivered_to_failed_call,
+        events_pending,
+        events,
+    })
 }
 
-fn degraded_failed_run_handover(terminal_error: Option<&str>) -> Value {
-    serde_json::json!({
-        "classification": "interrupted_unattributed",
-        "failure": "The workflow failed without an attributable agent-call identity.",
-        "failed_call": Value::Null,
-        "terminal_error": terminal_error,
-    })
+fn degraded_failed_run_handover(terminal_error: Option<&str>) -> WorkflowRunHandover {
+    WorkflowRunHandover::InterruptedUnattributed {
+        failure: "The workflow failed without an attributable agent-call identity.".to_string(),
+        terminal_error: terminal_error.map(str::to_string),
+    }
 }
 
 fn reconstruction_failed_handover(
     failed_call: FailedAgentCallRef,
     terminal_error: Option<&str>,
-) -> Value {
-    serde_json::json!({
-        "classification": "reconstruction_failed",
-        "failure": "The journal read-back failed for a known agent call.",
-        "failed_call": {
-            "journal_entry_id": failed_call.journal_entry_id,
-            "seq": failed_call.seq,
+) -> WorkflowRunHandover {
+    WorkflowRunHandover::ReconstructionFailed {
+        failure: "The journal read-back failed for a known agent call.".to_string(),
+        failed_call: WorkflowHandoverFailedCallRef {
+            journal_entry_id: failed_call.journal_entry_id,
+            seq: failed_call.seq,
         },
-        "terminal_error": terminal_error,
-        "reconstruction_failed": true,
-    })
+        terminal_error: terminal_error.map(str::to_string),
+    }
 }
 
 async fn durable_failed_agent_call_handover(
@@ -4203,7 +4294,7 @@ async fn durable_failed_agent_call_handover(
     run_id: Uuid,
     failed_call: FailedAgentCallRef,
     terminal_error: Option<&str>,
-) -> Value {
+) -> WorkflowRunHandover {
     failed_agent_call_handover(storage, run_id, failed_call)
         .await
         .unwrap_or_else(|| reconstruction_failed_handover(failed_call, terminal_error))
@@ -4419,6 +4510,11 @@ async fn launch_existing_run(
         } else {
             None
         };
+        // Serialisation of the typed handover cannot fail: every field is a
+        // JSON-safe scalar, string, or list of the same.
+        let handover = handover.map(|handover| {
+            serde_json::to_value(&handover).expect("workflow handover serialises to JSON")
+        });
         let state_update = storage
             .update_workflow_run_state(run_id, run_state, output, handover, error.as_deref())
             .await;
@@ -9111,8 +9207,22 @@ mod tests {
         Arc<RecordingGateProvider>,
         Arc<RecordingGateProvider>,
     ) {
-        let default = Arc::new(RecordingGateProvider::new("default-provider-model"));
-        let selected = Arc::new(RecordingGateProvider::new("provider-facing-model"));
+        configured_event_gate_fixture_with_models("default-provider-model", "provider-facing-model")
+            .await
+    }
+
+    async fn configured_event_gate_fixture_with_models(
+        default_provider_model: &'static str,
+        selected_provider_model: &'static str,
+    ) -> (
+        Arc<SqliteStorage>,
+        AppState,
+        swage_storage::WorkflowRunRecord,
+        Arc<RecordingGateProvider>,
+        Arc<RecordingGateProvider>,
+    ) {
+        let default = Arc::new(RecordingGateProvider::new(default_provider_model));
+        let selected = Arc::new(RecordingGateProvider::new(selected_provider_model));
         let provider = Arc::new(swage_provider::failover::FailoverProvider::with_defaults(
             vec![
                 Arc::clone(&default) as Arc<dyn swage_provider::LlmProvider>,
@@ -9127,7 +9237,7 @@ mod tests {
                         "default".into(),
                         swage_config::ModelEndpointConfig {
                             provider_id: "default-provider".into(),
-                            model_id: "default-provider-model".into(),
+                            model_id: default_provider_model.into(),
                             ..Default::default()
                         },
                     ),
@@ -9135,7 +9245,7 @@ mod tests {
                         "gate-alias".into(),
                         swage_config::ModelEndpointConfig {
                             provider_id: "selected-provider".into(),
-                            model_id: "provider-facing-model".into(),
+                            model_id: selected_provider_model.into(),
                             ..Default::default()
                         },
                     ),
@@ -9245,6 +9355,30 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn gate_provider_resolution_is_model_id_only_when_provider_models_collide() {
+        let (_storage, state, run, default, selected) =
+            configured_event_gate_fixture_with_models("shared-model", "shared-model").await;
+
+        evaluate_run_gate(
+            &state,
+            run.id,
+            &GateRequest {
+                criteria: "wake on completion".into(),
+                model: Some("gate-alias".into()),
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .expect("gate verdict");
+
+        // Gate evaluation passes only the catalogue entry's provider-facing
+        // model ID to the shared provider resolver. Provider IDs are not part
+        // of this contract, so a collision retains configured provider order.
+        assert_eq!(default.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(selected.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn gate_without_a_model_uses_the_default_model_and_provider() {
         let (_storage, state, run, default, selected) = configured_event_gate_fixture().await;
 
@@ -9306,21 +9440,23 @@ mod tests {
         run_id: Uuid,
         expected: &str,
     ) -> WorkflowRunRecord {
-        tokio::time::timeout(std::time::Duration::from_secs(10), async {
-            loop {
-                let run = storage
-                    .get_workflow_run(run_id)
-                    .await
-                    .expect("get workflow run")
-                    .expect("workflow run");
-                if run.state == expected {
-                    return run;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        loop {
+            let run = storage
+                .get_workflow_run(run_id)
+                .await
+                .expect("get workflow run")
+                .expect("workflow run");
+            if run.state == expected {
+                return run;
             }
-        })
-        .await
-        .unwrap_or_else(|_| panic!("run {run_id} did not reach {expected}"))
+            if matches!(run.state.as_str(), "completed" | "failed" | "cancelled") {
+                panic!(
+                    "run {run_id} reached {} instead of {expected}: {:?}",
+                    run.state, run.error_message
+                );
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -11878,7 +12014,18 @@ mod tests {
             .await
             .expect("run detail");
         assert_eq!(detail.run.final_output, None);
-        assert_eq!(detail.run.handover.as_ref(), Some(&handover));
+        let typed_handover = detail
+            .run
+            .handover
+            .expect("typed handover at the client surface");
+        assert!(matches!(
+            typed_handover,
+            WorkflowRunHandover::Interrupted { .. }
+        ));
+        assert_eq!(
+            serde_json::to_value(&typed_handover).expect("handover value"),
+            handover
+        );
         assert_eq!(detail.journal.len(), journal.len());
         assert_eq!(detail.wake_metrics.events_pending, 0);
 
@@ -12049,12 +12196,22 @@ mod tests {
         );
         let handover = run.handover.expect("degraded terminal handover");
         assert_eq!(handover["classification"], "interrupted_unattributed");
-        assert_eq!(handover["failed_call"], Value::Null);
+        assert!(
+            handover.get("failed_call").is_none(),
+            "the unattributed shape carries no failed-call identity"
+        );
         assert!(
             handover["terminal_error"]
                 .as_str()
                 .is_some_and(|error| error.contains("later unrelated script failure"))
         );
+        let Json(detail) = get_run(State(state.clone()), Path(started.id))
+            .await
+            .expect("run detail");
+        assert!(matches!(
+            detail.run.handover,
+            Some(WorkflowRunHandover::InterruptedUnattributed { .. })
+        ));
         assert_eq!(provider.requests.lock().expect("requests").len(), 1);
     }
 
@@ -12155,7 +12312,71 @@ mod tests {
                 .as_str()
                 .is_some_and(|error| error.contains("AgentCallError: terminal failure"))
         );
-        assert_eq!(handover["reconstruction_failed"], true);
+        let Json(detail) = get_run(State(state.clone()), Path(run.id))
+            .await
+            .expect("run detail");
+        assert!(matches!(
+            detail.run.handover,
+            Some(WorkflowRunHandover::ReconstructionFailed { .. })
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_handover_record_outside_the_contract_is_rejected_not_passed_through() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let source = "return 1;";
+        let run = storage
+            .create_workflow_run(NewWorkflowRun {
+                space_id: space.id,
+                parent_run_id: None,
+                parent_seq: None,
+                script_version_id: None,
+                inline_workflow_id: None,
+                inline_workflow_name: None,
+                inline_workflow_version: None,
+                carrying_skill: None,
+                source: Some(source.into()),
+                source_hash: source_hash(source),
+                args: Value::Null,
+                budget: serde_json::to_value(WorkflowBudget::default()).expect("budget"),
+                engine_version: "test".into(),
+                dispatch_bound_agent_ids: vec![],
+                dispatch_bound_task_definition_ids: vec![],
+                inherited_worker_placement: None,
+            })
+            .await
+            .expect("run");
+        storage
+            .update_workflow_run_state(
+                run.id,
+                "failed",
+                None,
+                Some(serde_json::json!({ "classification": "legacy_blob" })),
+                Some("stored before the typed contract"),
+            )
+            .await
+            .expect("stored blob");
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let error = get_run(State(state), Path(run.id))
+            .await
+            .expect_err("a handover outside the contract must not pass through untyped");
+        let message = format!("{error:?}");
+        assert!(
+            message.contains("does not match the recorded contract"),
+            "error names the contract violation: {message}"
+        );
+        assert!(
+            message.contains(&run.id.to_string()),
+            "error names the offending record: {message}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
