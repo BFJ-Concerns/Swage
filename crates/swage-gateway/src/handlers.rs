@@ -928,7 +928,8 @@ pub async fn create_conversation(
     payload: Option<Json<CreateConversationRequest>>,
 ) -> Result<impl IntoResponse, ApiError> {
     let config = state.active_config();
-    let svc = ConversationService::new(state.storage, state.space_store).with_config(config);
+    let svc = ConversationService::new(state.storage, state.space_store)
+        .with_config(config, state.config_root);
     let request = payload.map(|Json(request)| request).unwrap_or_default();
     let resp: ConversationResponse = svc.create_conversation_from_request(request).await?;
     Ok((StatusCode::CREATED, Json(resp)))
@@ -941,7 +942,8 @@ pub async fn list_conversations(
     State(state): State<AppState>,
 ) -> Result<Json<ConversationListResponse>, ApiError> {
     let config = state.active_config();
-    let svc = ConversationService::new(state.storage, state.space_store).with_config(config);
+    let svc = ConversationService::new(state.storage, state.space_store)
+        .with_config(config, state.config_root);
     let conversations = svc.list_conversations().await?;
     Ok(Json(ConversationListResponse { conversations }))
 }
@@ -979,7 +981,8 @@ pub async fn create_space_session(
     payload: Option<Json<CreateConversationRequest>>,
 ) -> Result<impl IntoResponse, ApiError> {
     let config = state.active_config();
-    let svc = ConversationService::new(state.storage, state.space_store).with_config(config);
+    let svc = ConversationService::new(state.storage, state.space_store)
+        .with_config(config, state.config_root);
     let request = payload.map(|Json(request)| request).unwrap_or_default();
     let resp = svc
         .create_session_in_space_from_request(space_id, request)
@@ -1010,7 +1013,7 @@ pub async fn create_space(
     State(state): State<AppState>,
     Json(req): Json<CreateSpaceRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let svc = SpaceService::new(state.space_store);
+    let svc = SpaceService::new(state.space_store, state.config_root);
     let resp = svc.create_space(req).await?;
     Ok((StatusCode::CREATED, Json(resp)))
 }
@@ -1021,7 +1024,7 @@ pub async fn create_space(
 pub async fn list_spaces(
     State(state): State<AppState>,
 ) -> Result<Json<SpaceListResponse>, ApiError> {
-    let svc = SpaceService::new(state.space_store);
+    let svc = SpaceService::new(state.space_store, state.config_root);
     let resp = svc.list_spaces().await?;
     Ok(Json(resp))
 }
@@ -1033,7 +1036,7 @@ pub async fn get_space(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<SpaceResponse>, ApiError> {
-    let svc = SpaceService::new(state.space_store);
+    let svc = SpaceService::new(state.space_store, state.config_root);
     let resp = svc.get_space(id).await?;
     Ok(Json(resp))
 }
@@ -1046,7 +1049,7 @@ pub async fn update_space(
     Path(id): Path<Uuid>,
     Json(req): Json<UpdateSpaceRequest>,
 ) -> Result<Json<SpaceResponse>, ApiError> {
-    let svc = SpaceService::new(state.space_store);
+    let svc = SpaceService::new(state.space_store, state.config_root);
     let resp = svc.update_space(id, req).await?;
     Ok(Json(resp))
 }
@@ -1059,7 +1062,7 @@ pub async fn delete_space(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
-    let svc = SpaceService::new(state.space_store);
+    let svc = SpaceService::new(state.space_store, state.config_root);
     svc.delete_space(id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -1168,7 +1171,7 @@ pub async fn list_skills(
     State(state): State<AppState>,
     Query(params): Query<SkillsQueryParams>,
 ) -> Result<Json<SkillListResponse>, ApiError> {
-    use swage_config::{HierarchyLevel, resolve_root};
+    use swage_config::HierarchyLevel;
 
     // Verify the space exists — return 404 for unknown IDs.
     let space = state
@@ -1182,12 +1185,8 @@ pub async fn list_skills(
             })
         })?;
 
-    // Resolve the config root. If it cannot be created, degrade gracefully by
-    // returning an empty list — skill discovery is a best-effort operation.
-    let root = match resolve_root() {
-        Ok(r) => r,
-        Err(_) => return Ok(Json(SkillListResponse { skills: vec![] })),
-    };
+    // Skill discovery is best-effort beneath the root retained by this gateway.
+    let root = state.config_root.clone();
 
     let space_dir = root.join("spaces").join(&space.slug);
     let agent_dir = params
@@ -3725,7 +3724,10 @@ mod tests {
 
         let (router, storage) = make_router();
         // Get the default space's ID.
-        let svc = SpaceService::new(Arc::clone(&storage) as Arc<dyn SpaceStore>);
+        let svc = SpaceService::new(
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            std::path::PathBuf::from(".swage"),
+        );
         let default_space = svc.space_store.get_or_create_default().await.unwrap();
         let id = default_space.id;
 
