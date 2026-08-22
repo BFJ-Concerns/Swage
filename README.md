@@ -117,8 +117,8 @@ Everything is under `~/.swage/` (or `$SWAGE_HOME`):
 - `spaces/<space>/` — each space's world: its own `instructions/`,
   `skills/`, `agents/<agent>/` (per-agent `instructions/` and `skills/`),
   memory, and knowledge-base bodies. The agent directory name
-  `__workflow_ephemeral__` is reserved for bare workflow workers and is not
-  loaded as an authored agent.
+  `__workflow_ephemeral__` is reserved for bare workflow workers and is excluded
+  from authored agent configuration and instructions.
 - `swage.db` — the SQLite store: conversations, turns, the audit trail,
   knowledge base, workflow runs. The one local record everything is
   reconstructable from.
