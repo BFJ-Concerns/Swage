@@ -68,18 +68,6 @@ impl Tool for WorkflowRunTool {
                 message: "provide exactly one of name or source".into(),
             });
         }
-        if params.get("name").is_some() && name.is_none() {
-            return Err(ToolError::InvalidParameters {
-                name: self.name().into(),
-                message: "'name' must be a string".into(),
-            });
-        }
-        if params.get("source").is_some() && source.is_none() {
-            return Err(ToolError::InvalidParameters {
-                name: self.name().into(),
-                message: "'source' must be a string".into(),
-            });
-        }
         let args = params.get("args").cloned().unwrap_or(Value::Null);
         let budget = params
             .get("budget")
