@@ -1126,7 +1126,7 @@ async fn run_body(
 
     // Delivery runs after a successful turn: a failure here still fails the
     // run, but the output the turn produced is preserved on the row.
-    deliver_run_output(state, schedule, session_id, &output)
+    deliver_run_output(state, schedule, run.id, session_id, turn_id, &output)
         .await
         .map_err(|error| RunFailure {
             message: format!("delivery failed: {error}"),
@@ -1226,7 +1226,9 @@ async fn fail_run(
 async fn deliver_run_output(
     state: &AppState,
     schedule: &Schedule,
+    run_id: Uuid,
     session_id: Uuid,
+    turn_id: Uuid,
     output_text: &str,
 ) -> Result<(), GatewayError> {
     let routing: DeliveryRoutingRequest = serde_json::from_value(schedule.delivery_routing.clone())
@@ -1234,7 +1236,17 @@ async fn deliver_run_output(
             GatewayError::ValidationError(format!("invalid stored delivery routing: {error}"))
         })?;
     let targets = resolve_delivery_targets(None, routing)?;
-    deliver_to_targets(state, session_id, &targets, output_text).await
+    deliver_to_targets(
+        state,
+        session_id,
+        crate::channel_gateway::DeliveryAttribution {
+            run_id: Some(run_id),
+            turn_id: Some(turn_id),
+        },
+        &targets,
+        output_text,
+    )
+    .await
 }
 
 async fn skip_run(
