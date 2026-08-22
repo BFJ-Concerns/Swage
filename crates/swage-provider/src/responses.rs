@@ -37,6 +37,13 @@ const RESPONSES_REQUEST_DIVERGENCES: &[(&str, &str)] = &[
         "include: [reasoning.encrypted_content] and reasoning.context serve the native \
          harness's encrypted reasoning replay, which Swage has no counterpart to consume",
     ),
+    (
+        "vendor_tool_material",
+        "the native harness declares its own tools inside an additional_tools input item \
+         and sends tool_choice unconditionally; Swage instead sends its own tools as the \
+         top-level tools array (Swage-supplied substance, outside parity scope) with \
+         tool_choice only when tools exist",
+    ),
 ];
 
 // ---------------------------------------------------------------------------
@@ -424,8 +431,11 @@ impl ResponsesProvider {
     }
 
     /// Collect visible text and complete function calls from response output
-    /// items, passing unknown item kinds through harmlessly.
-    fn extract_output(items: &[Value]) -> (String, Vec<ToolCall>) {
+    /// items. Unknown item kinds pass through harmlessly; a malformed
+    /// function_call item is an error — silently dropping a call would turn
+    /// a tool turn into an ordinary completion, and substituting arguments
+    /// would execute a tool with a payload the model never emitted.
+    fn extract_output(items: &[Value]) -> Result<(String, Vec<ToolCall>), String> {
         let mut text = String::new();
         let mut calls = Vec::new();
         for item in items {
@@ -441,26 +451,32 @@ impl ResponsesProvider {
                         }
                     }
                 }
-                Some("function_call") => {
-                    if let Some(call) = Self::parse_function_call_item(item) {
-                        calls.push(call);
-                    }
-                }
+                Some("function_call") => calls.push(Self::parse_function_call_item(item)?),
                 _ => {}
             }
         }
-        (text, calls)
+        Ok((text, calls))
     }
 
-    fn parse_function_call_item(item: &Value) -> Option<ToolCall> {
-        let name = item.get("name")?.as_str()?.to_string();
-        let call_id = item.get("call_id")?.as_str()?.to_string();
-        let arguments = item
+    fn parse_function_call_item(item: &Value) -> Result<ToolCall, String> {
+        let name = item
+            .get("name")
+            .and_then(Value::as_str)
+            .ok_or("function_call item without a tool name")?
+            .to_string();
+        let call_id = item
+            .get("call_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("function_call item for '{name}' without a call_id"))?
+            .to_string();
+        let raw_arguments = item
             .get("arguments")
             .and_then(Value::as_str)
-            .and_then(|raw| serde_json::from_str(raw).ok())
-            .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
-        Some(ToolCall {
+            .ok_or_else(|| format!("function_call '{name}' ({call_id}) without arguments"))?;
+        let arguments = serde_json::from_str(raw_arguments).map_err(|error| {
+            format!("function_call '{name}' ({call_id}) carries malformed arguments: {error}")
+        })?;
+        Ok(ToolCall {
             call_id,
             name,
             arguments,
@@ -532,7 +548,7 @@ impl ResponsesProvider {
                         return Vec::new();
                     }
                     match Self::parse_function_call_item(item) {
-                        Some(call) => {
+                        Ok(call) => {
                             *saw_tool_call = true;
                             vec![StreamChunk::ToolUse {
                                 call_id: call.call_id,
@@ -540,7 +556,7 @@ impl ResponsesProvider {
                                 arguments: call.arguments,
                             }]
                         }
-                        None => Vec::new(),
+                        Err(message) => vec![StreamChunk::Error { message }],
                     }
                 }
                 Err(error) => vec![Self::parse_error(error)],
@@ -643,7 +659,8 @@ impl LlmProvider for ResponsesProvider {
             return Err(ProviderError::InvalidResponse(error.message));
         }
 
-        let (content, calls) = Self::extract_output(&response.output);
+        let (content, calls) =
+            Self::extract_output(&response.output).map_err(ProviderError::InvalidResponse)?;
         let usage = response.usage.unwrap_or(ResponsesUsage {
             input_tokens: 0,
             output_tokens: 0,
@@ -677,7 +694,8 @@ impl LlmProvider for ResponsesProvider {
             return Err(ProviderError::InvalidResponse(error.message));
         }
 
-        let (content, tool_calls) = Self::extract_output(&response.output);
+        let (content, tool_calls) =
+            Self::extract_output(&response.output).map_err(ProviderError::InvalidResponse)?;
         let usage = response.usage.unwrap_or(ResponsesUsage {
             input_tokens: 0,
             output_tokens: 0,
@@ -950,11 +968,22 @@ mod tests {
         assert_eq!(snapshot["provider"], "openai");
         assert_eq!(snapshot["protocol"], "responses");
         assert_eq!(snapshot["stream"], true);
-        assert!(
-            snapshot["divergences"]
-                .as_array()
-                .is_some_and(|entries| !entries.is_empty())
-        );
+        let register = serde_json::to_string(&snapshot["divergences"]).unwrap();
+        // The register pins each omission from the native shape and its
+        // permitted category — a stale register must fail here, not pass on
+        // mere non-emptiness.
+        for cited in [
+            "client_metadata",
+            "prompt_cache_key",
+            "reasoning.encrypted_content",
+            "reasoning.context",
+            "additional_tools",
+        ] {
+            assert!(register.contains(cited), "register omits {cited}");
+        }
+        for category in ["vendor_dynamic_context", "vendor_tool_material"] {
+            assert!(register.contains(category), "register omits {category}");
+        }
     }
 
     // --- Output extraction ---
@@ -979,7 +1008,7 @@ mod tests {
             }),
             serde_json::json!({ "type": "web_search_call", "status": "completed" }),
         ];
-        let (text, calls) = ResponsesProvider::extract_output(&items);
+        let (text, calls) = ResponsesProvider::extract_output(&items).expect("valid output");
         assert_eq!(text, "Hello world");
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].call_id, "call_1");
@@ -987,15 +1016,29 @@ mod tests {
     }
 
     #[test]
-    fn extract_output_normalises_malformed_arguments_to_empty_object() {
+    fn extract_output_rejects_malformed_function_call_arguments() {
         let items = vec![serde_json::json!({
             "type": "function_call",
             "call_id": "call_bad",
             "name": "tool",
             "arguments": "not valid json"
         })];
-        let (_, calls) = ResponsesProvider::extract_output(&items);
-        assert!(calls[0].arguments.is_object());
+        let error = ResponsesProvider::extract_output(&items)
+            .expect_err("malformed arguments must not be substituted");
+        assert!(error.contains("malformed arguments"));
+        assert!(error.contains("call_bad"));
+    }
+
+    #[test]
+    fn extract_output_rejects_a_function_call_without_identity() {
+        let items = vec![serde_json::json!({
+            "type": "function_call",
+            "name": "tool",
+            "arguments": "{}"
+        })];
+        let error = ResponsesProvider::extract_output(&items)
+            .expect_err("a call without a call_id must not be dropped");
+        assert!(error.contains("without a call_id"));
     }
 
     // --- Finish reason ---
@@ -1076,6 +1119,23 @@ mod tests {
             chunks.as_slice(),
             [StreamChunk::ToolUse { call_id, name, arguments }]
                 if call_id == "call_1" && name == "search" && arguments["query"] == "rust"
+        ));
+    }
+
+    #[test]
+    fn parse_stream_malformed_function_call_item_reports_an_error() {
+        let mut saw = false;
+        let chunks = ResponsesProvider::parse_stream_event_chunks(
+            &event(
+                "response.output_item.done",
+                r#"{"item":{"type":"function_call","call_id":"call_1","name":"search","arguments":"{broken"}}"#,
+            ),
+            &mut saw,
+        );
+        assert!(!saw);
+        assert!(matches!(
+            chunks.as_slice(),
+            [StreamChunk::Error { message }] if message.contains("malformed arguments")
         ));
     }
 
@@ -1232,7 +1292,8 @@ mod tests {
             "usage": { "input_tokens": 10, "output_tokens": 5 }
         }"#;
         let response: ResponsesResponse = serde_json::from_str(json).unwrap();
-        let (text, calls) = ResponsesProvider::extract_output(&response.output);
+        let (text, calls) =
+            ResponsesProvider::extract_output(&response.output).expect("valid output");
         assert_eq!(text, "Hello!");
         assert!(calls.is_empty());
         assert_eq!(response.usage.unwrap().input_tokens, 10);
