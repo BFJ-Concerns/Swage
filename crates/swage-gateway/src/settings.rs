@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::json;
+use tokio::io::AsyncWriteExt;
 
 use crate::error::ApiError;
 use crate::secret::{CreateSecretRequest, RotateSecretRequest};
@@ -33,6 +34,39 @@ fn config_from_wire<C: DeserializeOwned, W: Serialize>(value: W) -> Result<C, Ap
             .map_err(|error| ApiError::validation(format!("invalid settings: {error}")))?,
     )
     .map_err(|error| ApiError::validation(format!("invalid settings: {error}")))
+}
+
+async fn write_config_atomically(path: &std::path::Path, body: &str) -> Result<(), ApiError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| ApiError::validation("config path has no parent directory".to_string()))?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| ApiError::validation("config path has no valid file name".to_string()))?;
+    let temporary_path = parent.join(format!(".{file_name}.{}.tmp", uuid::Uuid::new_v4()));
+
+    let write_result = async {
+        let mut temporary = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary_path)
+            .await?;
+        temporary.write_all(body.as_bytes()).await?;
+        temporary.flush().await?;
+        temporary.sync_all().await?;
+        drop(temporary);
+        tokio::fs::rename(&temporary_path, path).await
+    }
+    .await;
+
+    if let Err(error) = write_result {
+        let _ = tokio::fs::remove_file(&temporary_path).await;
+        return Err(ApiError::validation(format!(
+            "failed to write config: {error}"
+        )));
+    }
+    Ok(())
 }
 
 fn tool_runtime_from_config(
@@ -203,9 +237,7 @@ pub async fn save_settings(
     )?;
     let body = toml::to_string_pretty(&partial)
         .map_err(|error| ApiError::validation(format!("failed to serialise settings: {error}")))?;
-    tokio::fs::write(&path, body)
-        .await
-        .map_err(|error| ApiError::validation(format!("failed to write config: {error}")))?;
+    write_config_atomically(&path, &body).await?;
 
     let saved_providers = partial
         .providers
@@ -289,9 +321,7 @@ async fn persist_permanent_tool_approval_to_path(
 
     let body = toml::to_string_pretty(&partial)
         .map_err(|error| ApiError::validation(format!("failed to serialise settings: {error}")))?;
-    tokio::fs::write(&path, body)
-        .await
-        .map_err(|error| ApiError::validation(format!("failed to write config: {error}")))?;
+    write_config_atomically(&path, &body).await?;
 
     Ok(())
 }
@@ -1073,6 +1103,52 @@ async fn discover_openrouter_models() -> Result<Vec<DiscoveredModel>, ApiError> 
 #[cfg(test)]
 mod tests {
     use crate::test_support::SwageHomeGuard;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn atomic_config_write_never_exposes_partial_content() {
+        let directory = tempfile::TempDir::new().expect("temporary config directory");
+        let path = directory.path().join("config.toml");
+        let old = format!("value = \"{}\"\n", "a".repeat(512 * 1024));
+        let new = format!("value = \"{}\"\n", "b".repeat(512 * 1024));
+        std::fs::write(&path, &old).expect("seed old config");
+
+        let writer_path = path.clone();
+        let writer_old = old.clone();
+        let writer_new = new.clone();
+        let writer = tokio::spawn(async move {
+            for iteration in 0..32 {
+                let body = if iteration % 2 == 0 {
+                    &writer_new
+                } else {
+                    &writer_old
+                };
+                write_config_atomically(&writer_path, body)
+                    .await
+                    .expect("atomic config write");
+                tokio::task::yield_now().await;
+            }
+        });
+
+        while !writer.is_finished() {
+            let observed = tokio::fs::read_to_string(&path)
+                .await
+                .expect("read config during replacement");
+            assert!(
+                observed == old || observed == new,
+                "reader observed neither complete config ({} bytes)",
+                observed.len()
+            );
+            tokio::task::yield_now().await;
+        }
+        writer.await.expect("writer task");
+
+        let entries = std::fs::read_dir(directory.path())
+            .expect("list config directory")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("read config entries");
+        assert_eq!(entries.len(), 1, "temporary config files should be removed");
+        assert_eq!(entries[0].path(), path);
+    }
 
     use serde_json::json;
 
