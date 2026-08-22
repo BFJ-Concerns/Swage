@@ -330,6 +330,174 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn conversation_effort_override_wins_and_is_persisted() {
+        let (svc, storage) = make_definition_service();
+        let mut config = swage_config::ResolvedConfig::default();
+        config.models.default = "model-a".to_string();
+        config.models.entries.insert(
+            "model-a".to_string(),
+            swage_config::ModelEndpointConfig {
+                default_effort: Some(swage_protocol::client::settings::Effort::Low),
+                ..Default::default()
+            },
+        );
+
+        let response = svc
+            .with_config(config)
+            .create_conversation_from_request(CreateConversationRequest {
+                selected_model_id: Some("model-a".to_string()),
+                agent_id: None,
+                effort: Some(swage_protocol::client::settings::Effort::High),
+            })
+            .await
+            .unwrap();
+
+        let session = storage.get_session(response.id).await.unwrap().unwrap();
+        assert_eq!(session.metadata.unwrap()["effort"], "high");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn conversation_inherits_and_persists_model_default_effort() {
+        let (svc, storage) = make_definition_service();
+        let mut config = swage_config::ResolvedConfig::default();
+        config.models.default = "model-a".to_string();
+        config.models.entries.insert(
+            "model-a".to_string(),
+            swage_config::ModelEndpointConfig {
+                default_effort: Some(swage_protocol::client::settings::Effort::Medium),
+                ..Default::default()
+            },
+        );
+
+        let response = svc
+            .with_config(config)
+            .create_conversation_from_request(CreateConversationRequest::default())
+            .await
+            .unwrap();
+
+        let session = storage.get_session(response.id).await.unwrap().unwrap();
+        assert_eq!(session.metadata.unwrap()["effort"], "medium");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn conversation_inherits_space_models_default_effort() {
+        let swage_home = crate::test_support::SwageHomeGuard::new();
+        let space_dir = swage_home.path().join("spaces/default");
+        std::fs::create_dir_all(&space_dir).expect("create space config directory");
+        std::fs::write(
+            swage_home.path().join("config.toml"),
+            r#"
+[providers]
+default = "test"
+
+[providers.entries.test]
+protocol = "openai"
+
+[models]
+default = "model-a"
+
+[models.entries.model-a]
+provider_id = "test"
+model_id = "global-model"
+default_effort = "low"
+"#,
+        )
+        .expect("write global config");
+        std::fs::write(
+            space_dir.join("config.toml"),
+            r#"
+[models.entries.model-a]
+provider_id = "test"
+model_id = "space-model"
+default_effort = "high"
+"#,
+        )
+        .expect("write space config");
+
+        let (svc, storage) = make_definition_service();
+        let response = svc
+            .with_config(swage_config::ResolvedConfig::default())
+            .create_conversation_from_request(CreateConversationRequest::default())
+            .await
+            .unwrap();
+
+        let session = storage.get_session(response.id).await.unwrap().unwrap();
+        assert_eq!(session.metadata.unwrap()["effort"], "high");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn conversation_inherits_selected_model_default_effort() {
+        let (svc, storage) = make_definition_service();
+        let mut config = swage_config::ResolvedConfig::default();
+        config.models.default = "model-a".to_string();
+        config.models.entries.insert(
+            "model-a".to_string(),
+            swage_config::ModelEndpointConfig {
+                default_effort: Some(swage_protocol::client::settings::Effort::Low),
+                ..Default::default()
+            },
+        );
+        config.models.entries.insert(
+            "model-b".to_string(),
+            swage_config::ModelEndpointConfig {
+                default_effort: Some(swage_protocol::client::settings::Effort::High),
+                ..Default::default()
+            },
+        );
+
+        let response = svc
+            .with_config(config)
+            .create_conversation_from_request(CreateConversationRequest {
+                selected_model_id: Some("model-b".to_string()),
+                agent_id: None,
+                effort: None,
+            })
+            .await
+            .unwrap();
+
+        let session = storage.get_session(response.id).await.unwrap().unwrap();
+        assert_eq!(session.metadata.unwrap()["effort"], "high");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn conversation_inherits_agent_models_default_effort() {
+        let (svc, storage) = make_definition_service();
+        let mut agent = definition("researcher", None);
+        agent.model_id = Some("model-b".to_string());
+        storage.upsert_agent_definition(agent).await.unwrap();
+
+        let mut config = swage_config::ResolvedConfig::default();
+        config.models.default = "model-a".to_string();
+        config.models.entries.insert(
+            "model-a".to_string(),
+            swage_config::ModelEndpointConfig {
+                default_effort: Some(swage_protocol::client::settings::Effort::Low),
+                ..Default::default()
+            },
+        );
+        config.models.entries.insert(
+            "model-b".to_string(),
+            swage_config::ModelEndpointConfig {
+                default_effort: Some(swage_protocol::client::settings::Effort::High),
+                ..Default::default()
+            },
+        );
+
+        let response = svc
+            .with_config(config)
+            .create_conversation_from_request(CreateConversationRequest {
+                selected_model_id: None,
+                agent_id: Some("researcher".to_string()),
+                effort: None,
+            })
+            .await
+            .unwrap();
+
+        let session = storage.get_session(response.id).await.unwrap().unwrap();
+        assert_eq!(session.metadata.unwrap()["effort"], "high");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn create_conversation_for_named_agent_runs_under_that_definition() {
         let (svc, storage) = make_definition_service();
         storage
@@ -341,6 +509,7 @@ mod tests {
             .create_conversation_from_request(CreateConversationRequest {
                 selected_model_id: None,
                 agent_id: Some("researcher".to_string()),
+                effort: None,
             })
             .await
             .unwrap();
@@ -357,6 +526,7 @@ mod tests {
             .create_conversation_from_request(CreateConversationRequest {
                 selected_model_id: None,
                 agent_id: Some("nonexistent".to_string()),
+                effort: None,
             })
             .await
             .expect_err("an unbacked selector should be rejected");
@@ -379,6 +549,7 @@ mod tests {
                 CreateConversationRequest {
                     selected_model_id: None,
                     agent_id: Some("triage".to_string()),
+                    effort: None,
                 },
             )
             .await
@@ -413,6 +584,7 @@ mod tests {
                 CreateConversationRequest {
                     selected_model_id: None,
                     agent_id: Some("triage".to_string()),
+                    effort: None,
                 },
             )
             .await
@@ -431,6 +603,7 @@ mod tests {
                 CreateConversationRequest {
                     selected_model_id: None,
                     agent_id: Some("nonexistent".to_string()),
+                    effort: None,
                 },
             )
             .await
