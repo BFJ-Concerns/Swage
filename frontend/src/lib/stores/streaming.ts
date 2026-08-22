@@ -46,6 +46,7 @@ export interface StreamingStore {
   // matching the approval UI.
   readonly pendingApproval: PendingApproval | null;
   handleServerEvent(event: ServerEvent): void;
+  reconcileAfterReconnect(): void;
   startTurn(content: string, selectedModelId?: string | null, agentId?: string | null, effort?: import("../protocol/Effort").Effort | null): void;
   cancelTurn(): void;
 }
@@ -62,6 +63,7 @@ export interface StreamingStoreOptions {
   /** Receives messages pushed by the streaming store (user turns and settled
    *  assistant turns). */
   conversationStore?: {
+    readonly activeConversation?: { messages: MessageView[] } | null;
     appendOptimisticUserMessage(message: {
       content: string;
       timestamp: string;
@@ -406,6 +408,25 @@ export function createStreamingStore(
       }
     },
 
+    reconcileAfterReconnect(): void {
+      const lastMessage = options?.conversationStore?.activeConversation?.messages.at(-1);
+      if (
+        !get(isStreamingStore) ||
+        lastMessage?.role !== "assistant" ||
+        !["completed", "failed", "interrupted"].includes(lastMessage.turn_state ?? "")
+      ) return;
+
+      // The HTTP refresh recovered the terminal assistant message that the
+      // dropped socket could not deliver. Discard the stale live projection;
+      // the durable conversation is now authoritative.
+      streamedContentStore.set("");
+      isStreamingStore.set(false);
+      turnStartedAtStore.set(null);
+      activeToolCallsStore.set([]);
+      providerRetryStore.set(null);
+      pendingApprovalStore.set(null);
+    },
+
     startTurn(content: string, selectedModelId?: string | null): void {
       // Clear state from any previous turn.
       streamedContentStore.set("");
@@ -484,6 +505,7 @@ export function withConversationAutoCreate(
       return base.pendingApproval;
     },
     handleServerEvent: (event) => base.handleServerEvent(event),
+    reconcileAfterReconnect: () => base.reconcileAfterReconnect(),
     cancelTurn: () => base.cancelTurn(),
 
     startTurn(content: string, selectedModelId?: string | null, agentId?: string | null, effort?: import("../protocol/Effort").Effort | null): void {
