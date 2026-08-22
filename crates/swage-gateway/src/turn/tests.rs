@@ -6823,6 +6823,33 @@ fn complete_replay_record(call_id: &str) -> ToolCallRecord {
 }
 
 #[test]
+fn replay_omits_rejected_tool_calls_with_empty_names() {
+    let mut rejected = complete_replay_record("rejected-call");
+    rejected.tool.clear();
+    rejected.status = Some("error".into());
+    let accepted = complete_replay_record("accepted-call");
+
+    let replay = compact_tool_replay_messages(&[rejected, accepted])
+        .expect("a rejected provider call should not make history unreadable");
+    let replayed_call_ids: Vec<_> = replay
+        .iter()
+        .filter_map(ChatMessage::tool_replay)
+        .flatten()
+        .filter_map(|part| match part {
+            ToolReplayPart::ToolCall { call_id, .. }
+            | ToolReplayPart::ToolResult { call_id, .. } => Some(call_id.as_str()),
+            ToolReplayPart::Text { .. } | ToolReplayPart::Reasoning { .. } => None,
+        })
+        .collect();
+
+    assert_eq!(
+        replayed_call_ids,
+        vec!["accepted-call", "accepted-call"],
+        "the valid call and result should remain while the rejected pair stays out of provider replay"
+    );
+}
+
+#[test]
 fn replay_uses_valid_raw_arguments_when_compact_arguments_are_unreadable() {
     let mut record = complete_replay_record("legacy-call");
     record.model_arguments = "not-json".into();
