@@ -106,7 +106,7 @@ pub async fn run(args: &StartArgs) -> Result<(), ClientError> {
 
 /// Spawn the current binary as a detached background gateway process.
 ///
-/// Redirects stdout/stderr to the gateway log under the canonical Swage root.
+/// Redirects stdout/stderr to the selected log file, defaulting under the canonical Swage root.
 /// Sets the child process into its own process group so it survives the CLI
 /// process exiting without receiving SIGHUP from the terminal.
 fn spawn_background_gateway(
@@ -198,7 +198,7 @@ pub(crate) async fn poll_until_ready(timeout: Duration) -> Result<String, String
 // Path helpers (extracted for testability)
 // ---------------------------------------------------------------------------
 
-/// Returns the path to the gateway log file under the canonical Swage root.
+/// Returns the caller's log path, or the default under the canonical Swage root.
 pub(crate) fn gateway_log_path(log_file: Option<&str>) -> PathBuf {
     log_file.map(PathBuf::from).unwrap_or_else(|| {
         swage_config::discovery::resolve_root()

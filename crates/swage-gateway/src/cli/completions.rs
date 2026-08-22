@@ -77,7 +77,7 @@ mod tests {
             "fish completions should mention 'generate-completion'"
         );
         assert!(
-            !output.contains("'completions'"),
+            !output.contains("-a \"completions\""),
             "fish completions should not advertise the retired command"
         );
     }
