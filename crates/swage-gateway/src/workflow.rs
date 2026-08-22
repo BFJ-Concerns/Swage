@@ -607,6 +607,15 @@ pub trait WorkflowLauncher: Send + Sync {
         budget: Option<WorkflowBudget>,
         wait: bool,
     ) -> Result<Value, String>;
+
+    async fn start_inline(
+        &self,
+        session_id: Uuid,
+        source: &str,
+        args: Value,
+        budget: Option<WorkflowBudget>,
+        wait: bool,
+    ) -> Result<Value, String>;
 }
 
 pub struct GatewayWorkflowLauncher {
@@ -641,6 +650,63 @@ impl WorkflowLauncher for GatewayWorkflowLauncher {
         let script = resolve_workflow_by_name(&self.state, session.space_id, name, &skills)
             .await?
             .ok_or_else(|| format!("workflow script {name:?} was not found"))?;
+        self.start_for_session(
+            session,
+            script.script_version_id,
+            script.inline_identity(),
+            script.source,
+            script.delivery_grant,
+            script.carrying_skill,
+            args,
+            budget,
+            wait,
+        )
+        .await
+    }
+
+    async fn start_inline(
+        &self,
+        session_id: Uuid,
+        source: &str,
+        args: Value,
+        budget: Option<WorkflowBudget>,
+        wait: bool,
+    ) -> Result<Value, String> {
+        let session = self
+            .state
+            .storage
+            .get_session(session_id)
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("session {session_id} was not found"))?;
+        self.start_for_session(
+            session,
+            None,
+            None,
+            source.to_owned(),
+            None,
+            None,
+            args,
+            budget,
+            wait,
+        )
+        .await
+    }
+}
+
+impl GatewayWorkflowLauncher {
+    async fn start_for_session(
+        &self,
+        session: swage_storage::Session,
+        script_version_id: Option<Uuid>,
+        inline_identity: Option<InlineWorkflowIdentity>,
+        source: String,
+        delivery_grant: Option<Value>,
+        carrying_skill: Option<String>,
+        args: Value,
+        budget: Option<WorkflowBudget>,
+        wait: bool,
+    ) -> Result<Value, String> {
         let mut dispatch_bound_agent_ids =
             crate::turn::dispatch_bound_agent_ids(session.metadata.as_ref())
                 .map_err(|error| error.to_string())?;
@@ -664,13 +730,13 @@ impl WorkflowLauncher for GatewayWorkflowLauncher {
         let run = start_run(
             self.state.clone(),
             session.space_id,
-            script.script_version_id,
-            script.inline_identity(),
-            script.source,
+            script_version_id,
+            inline_identity,
+            source,
             args,
             budget.unwrap_or_default(),
-            script.delivery_grant,
-            script.carrying_skill,
+            delivery_grant,
+            carrying_skill,
             // The run inherits every bound on the dispatching session, then
             // adds that session's own agent. Each worker turn re-resolves the
             // entire lineage before intersecting grants.
@@ -1196,7 +1262,19 @@ async fn run_ephemeral_agent_call(
     let timeout = request.timeout_ms.map(std::time::Duration::from_millis);
     tokio::select! {
         biased;
-        result = &mut processing => result.map_err(|error| error.to_string())?,
+        result = &mut processing => {
+            // Parent cancellation propagates through call_cancellation and can
+            // settle the turn before this select observes the cancelled arm.
+            // A turn interrupted that way is a cancellation outcome, not an
+            // agent-call failure.
+            if cancellation.is_cancelled() {
+                if let Err(error) = result {
+                    tracing::warn!(%error, "cancelled agent turn failed while settling cancellation");
+                }
+                return Err("WorkflowCancelledError".into());
+            }
+            result.map_err(|error| error.to_string())?
+        }
         () = cancellation.cancelled() => {
             call_cancellation.cancel();
             // The turn path owns the sandbox and active-turn registration.
@@ -3935,6 +4013,8 @@ fn run_wire(record: WorkflowRunRecord) -> Result<WorkflowRun, ApiError> {
         script_name: record.script_name,
         script_version: record.script_version,
         carrying_skill: record.carrying_skill,
+        source: record.source,
+        source_hash: record.source_hash,
         state: run_state(&record.state)?,
         args: record.args,
         budget: budget_wire(&record.budget),
@@ -9344,21 +9424,23 @@ mod tests {
         run_id: Uuid,
         expected: &str,
     ) -> WorkflowRunRecord {
-        tokio::time::timeout(std::time::Duration::from_secs(10), async {
-            loop {
-                let run = storage
-                    .get_workflow_run(run_id)
-                    .await
-                    .expect("get workflow run")
-                    .expect("workflow run");
-                if run.state == expected {
-                    return run;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        loop {
+            let run = storage
+                .get_workflow_run(run_id)
+                .await
+                .expect("get workflow run")
+                .expect("workflow run");
+            if run.state == expected {
+                return run;
             }
-        })
-        .await
-        .unwrap_or_else(|_| panic!("run {run_id} did not reach {expected}"))
+            if matches!(run.state.as_str(), "completed" | "failed" | "cancelled") {
+                panic!(
+                    "run {run_id} reached {} instead of {expected}: {:?}",
+                    run.state, run.error_message
+                );
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]

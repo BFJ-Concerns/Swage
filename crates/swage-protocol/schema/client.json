@@ -4966,6 +4966,17 @@
           "format": "uint32",
           "minimum": 0
         },
+        "source": {
+          "description": "Source retained for runs whose workflow was not a saved script version.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source_hash": {
+          "description": "SHA-256 of the exact source executed by this run.",
+          "type": "string"
+        },
         "space_id": {
           "type": "string",
           "format": "uuid"
@@ -4977,6 +4988,7 @@
       "required": [
         "id",
         "space_id",
+        "source_hash",
         "state",
         "args",
         "budget",
