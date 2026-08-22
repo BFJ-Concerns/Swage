@@ -1395,6 +1395,10 @@ async fn completed_runs_deliver_to_local_and_channel_targets() {
             .iter()
             .all(|delivery| delivery["content"] == "scheduled reply")
     );
+    assert!(deliveries.iter().all(|delivery| {
+        delivery["run_id"] == runs[0].id.to_string()
+            && delivery["turn_id"] == runs[0].turn_id.unwrap().to_string()
+    }));
 }
 
 #[tokio::test(flavor = "multi_thread")]
