@@ -5,6 +5,7 @@ import { flushSync, mount, unmount } from "svelte";
 import OperatorDashboard from "../components/OperatorDashboard.svelte";
 import * as operatorApi from "../api/operator";
 import type { OperatorOverview } from "../types";
+import { makeSchedule } from "./fixtures/schedules";
 
 type MountedComponent = ReturnType<typeof mount>;
 
@@ -53,25 +54,16 @@ function makeOverview(overrides: Partial<OperatorOverview> = {}): OperatorOvervi
     ],
     schedules: {
       schedules: [
-        {
-          id: "schedule-1",
+        makeSchedule({
           message: "Daily digest",
-          status: "active",
           spec: { kind: "interval", every: "every 5 minutes" },
           session: { policy: "continuation", session_id: "conv-1" },
           creator: { kind: "agent", agent_id: "researcher" },
-          routing: {
-            deliver_to_origin: false,
-            home_target: null,
-            explicit_targets: [],
-            store_local_output: true,
-          },
           gate: { model: "cheap", criteria: null },
           next_run_at: null,
-          last_run_at: null,
           created_at: "2026-04-07T12:00:00Z",
           updated_at: "2026-04-07T12:00:00Z",
-        },
+        }),
       ],
     },
     channels: {

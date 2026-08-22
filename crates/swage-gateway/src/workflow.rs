@@ -52,6 +52,7 @@ use crate::{
 };
 
 const CARRIED_WORKFLOW_ID_DOMAIN: &[u8] = b"swage skill carried workflow";
+const BARE_WORKFLOW_AGENT_ID: &str = swage_config::RESERVED_WORKFLOW_AGENT_ID;
 
 fn store_worker_placement(placement: ResolvedWorkerDirectory) -> WorkflowRunWorkerPlacement {
     WorkflowRunWorkerPlacement {
@@ -1107,10 +1108,8 @@ async fn run_ephemeral_agent_call(
 ) -> Result<AgentCallResult, String> {
     // This identity deliberately cannot name an agent definition: definition
     // ids exclude underscores. Bare workflow workers therefore receive the
-    // ambient session configuration, bounded by their dispatch ancestry,
+    // inherited session configuration, bounded by their dispatch ancestry,
     // without inventing or resolving a default definition.
-    const BARE_WORKFLOW_AGENT_ID: &str = "__workflow_ephemeral__";
-
     let (session_id, thread_id) = match request.session.as_ref() {
         // Continuation: the next turn lands on a session this run already
         // created. The token must name one of the run's own journalled
@@ -3583,15 +3582,9 @@ async fn evaluate_run_gate(
     }
     let config = state.active_config();
     let model_id = match &request.model {
-        Some(model) => {
-            if let Some(entry) = config.models.entries.get(model) {
-                entry.model_id.clone()
-            } else {
-                return Err(format!(
-                    "RunEventError: gate model '{model}' is not in the configured model catalogue"
-                ));
-            }
-        }
+        Some(model) => crate::schedule::resolve_gate_model(&config, model).ok_or_else(|| {
+            format!("RunEventError: gate model '{model}' is not in the configured model catalogue")
+        })?,
         None => config.default_model_id().to_string(),
     };
     let prompt = build_run_gate_prompt(&request.criteria, &events);
@@ -4466,7 +4459,7 @@ async fn launch_existing_run(
                     metadata: serde_json::json!({}),
                 })
                 .await;
-            active.lock().await.remove(&run_id);
+            remove_active_workflow_generation(&active, run_id, &cancellation).await;
             return;
         }
         let terminal_failed_call_reference = match &engine_result {
@@ -4539,9 +4532,78 @@ async fn launch_existing_run(
                 event: swage_protocol::client::workflow::WorkflowRunCompletedEvent { run },
             });
         }
-        active.lock().await.remove(&run_id);
+        remove_active_workflow_generation(&active, run_id, &cancellation).await;
     });
     Ok(started)
+}
+
+async fn remove_active_workflow_generation(
+    active: &Mutex<std::collections::HashMap<Uuid, CancellationToken>>,
+    run_id: Uuid,
+    generation: &CancellationToken,
+) {
+    #[cfg(test)]
+    let cleanup_pause = workflow_cleanup_test_hook::pause_once(run_id).await;
+    let mut active = active.lock().await;
+    if active.get(&run_id) == Some(generation) {
+        active.remove(&run_id);
+    }
+    #[cfg(test)]
+    if let Some(pause) = cleanup_pause {
+        pause.finished.add_permits(1);
+    }
+}
+
+#[cfg(test)]
+mod workflow_cleanup_test_hook {
+    use std::{
+        collections::HashMap,
+        sync::{Arc, Mutex, OnceLock},
+    };
+
+    use tokio::sync::Semaphore;
+    use uuid::Uuid;
+
+    pub(super) struct Pause {
+        pub(super) entered: Semaphore,
+        pub(super) release: Semaphore,
+        pub(super) finished: Semaphore,
+    }
+
+    fn pauses() -> &'static Mutex<HashMap<Uuid, Arc<Pause>>> {
+        static PAUSES: OnceLock<Mutex<HashMap<Uuid, Arc<Pause>>>> = OnceLock::new();
+        PAUSES.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    pub(super) fn install(run_id: Uuid) -> Arc<Pause> {
+        let pause = Arc::new(Pause {
+            entered: Semaphore::new(0),
+            release: Semaphore::new(0),
+            finished: Semaphore::new(0),
+        });
+        pauses()
+            .lock()
+            .expect("workflow cleanup test-hook registry")
+            .insert(run_id, Arc::clone(&pause));
+        pause
+    }
+
+    pub(super) async fn pause_once(run_id: Uuid) -> Option<Arc<Pause>> {
+        let pause = pauses()
+            .lock()
+            .expect("workflow cleanup test-hook registry")
+            .remove(&run_id);
+        if let Some(pause) = &pause {
+            pause.entered.add_permits(1);
+            pause
+                .release
+                .acquire()
+                .await
+                .expect("workflow cleanup test hook remains open")
+                .forget();
+        }
+        pause
+    }
 }
 
 pub async fn start_inline_run(
@@ -5995,7 +6057,7 @@ mod tests {
             .expect("create elements directory");
         std::fs::write(
             swage_home.path().join("assemblies/focused.js"),
-            "for (const element of elements) add(element.render());",
+            "for (const element of elements) add(typeof element.render === 'function' ? element.render() : element);",
         )
         .expect("write named assembly");
         std::fs::write(
@@ -7546,7 +7608,7 @@ mod tests {
             .await
             .expect("session query")
             .expect("bare worker session");
-        assert_eq!(session.agent_id, "__workflow_ephemeral__");
+        assert_eq!(session.agent_id, BARE_WORKFLOW_AGENT_ID);
         let requests = provider.requests.lock().expect("requests");
         assert_eq!(requests.len(), 1);
         assert!(
@@ -9246,6 +9308,7 @@ mod tests {
                         swage_config::ModelEndpointConfig {
                             provider_id: "selected-provider".into(),
                             model_id: selected_provider_model.into(),
+                            aliases: vec!["cheap-gate".into()],
                             ..Default::default()
                         },
                     ),
@@ -9322,7 +9385,7 @@ mod tests {
             run.id,
             &GateRequest {
                 criteria: "wake on completion".into(),
-                model: Some("gate-alias".into()),
+                model: Some("cheap-gate".into()),
             },
             CancellationToken::new(),
         )
@@ -9440,18 +9503,26 @@ mod tests {
         run_id: Uuid,
         expected: &str,
     ) -> WorkflowRunRecord {
+        wait_for_run_state_in(storage, run_id, &[expected]).await
+    }
+
+    async fn wait_for_run_state_in(
+        storage: &SqliteStorage,
+        run_id: Uuid,
+        expected: &[&str],
+    ) -> WorkflowRunRecord {
         loop {
             let run = storage
                 .get_workflow_run(run_id)
                 .await
                 .expect("get workflow run")
                 .expect("workflow run");
-            if run.state == expected {
+            if expected.contains(&run.state.as_str()) {
                 return run;
             }
             if matches!(run.state.as_str(), "completed" | "failed" | "cancelled") {
                 panic!(
-                    "run {run_id} reached {} instead of {expected}: {:?}",
+                    "run {run_id} reached {} instead of one of {expected:?}: {:?}",
                     run.state, run.error_message
                 );
             }
@@ -10257,6 +10328,90 @@ mod tests {
             .expect("parked run after terminal task");
         assert_eq!(after_terminal_task.state, "parked");
         assert_eq!(after_terminal_task.wake_at, Some(wake_at));
+    }
+
+    #[tokio::test]
+    async fn completed_generation_does_not_remove_its_replacement_token() {
+        let run_id = Uuid::new_v4();
+        let completed = CancellationToken::new();
+        let replacement = CancellationToken::new();
+        let active = Mutex::new(std::collections::HashMap::from([(
+            run_id,
+            replacement.clone(),
+        )]));
+
+        remove_active_workflow_generation(&active, run_id, &completed).await;
+
+        assert_eq!(active.lock().await.get(&run_id), Some(&replacement));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn external_post_relaunch_keeps_the_replacement_cancellation_token() {
+        let provider = Arc::new(ScriptedGateProvider {
+            replies: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            calls: AtomicUsize::new(0),
+        });
+        let (storage, state, run) = event_gate_fixture(provider).await;
+        let source = r#"
+            const answer = awaitEvent({ kinds: ["operator.decision"] });
+            const resolved = await answer;
+            await wait({ timerMs: 5_000 });
+            return resolved.payload;
+        "#;
+        let cleanup_pause = workflow_cleanup_test_hook::install(run.id);
+        launch_existing_run(state.clone(), run.clone(), source.into(), None)
+            .await
+            .expect("start awaiting run");
+        cleanup_pause
+            .entered
+            .acquire()
+            .await
+            .expect("workflow cleanup test hook remains open")
+            .forget();
+        let original = state
+            .active_workflow_runs
+            .lock()
+            .await
+            .get(&run.id)
+            .cloned()
+            .expect("the original generation remains installed while cleanup is paused");
+
+        let Json(posted) = post_operator_run_event(
+            State(state.clone()),
+            Path(run.id),
+            Json(PostWorkflowRunEventRequest {
+                kind: "operator.decision".into(),
+                payload: serde_json::json!({"verdict": "accept"}),
+            }),
+        )
+        .await
+        .expect("post event and relaunch while the parked generation still owns its token");
+        assert!(posted.wake_provisioned);
+
+        let replacement = state
+            .active_workflow_runs
+            .lock()
+            .await
+            .get(&run.id)
+            .cloned()
+            .expect("the external post installs a replacement generation");
+        assert_ne!(replacement, original);
+
+        cleanup_pause.release.add_permits(1);
+        cleanup_pause
+            .finished
+            .acquire()
+            .await
+            .expect("workflow cleanup test hook remains open")
+            .forget();
+        assert_eq!(
+            state.active_workflow_runs.lock().await.get(&run.id),
+            Some(&replacement),
+            "the original generation must not remove the relaunched run's token"
+        );
+
+        replacement.cancel();
+        wait_for_run_state_in(&storage, run.id, &["cancelled", "completed"]).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -13554,7 +13709,7 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
             loop {
                 let sessions = storage
-                    .list_sessions_by_agent_id("__workflow_ephemeral__")
+                    .list_sessions_by_agent_id(BARE_WORKFLOW_AGENT_ID)
                     .await
                     .expect("worker sessions");
                 for session in sessions {

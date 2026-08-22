@@ -13,6 +13,11 @@ pub mod resolve;
 pub mod skill;
 pub mod validation;
 
+/// Reserved identity used for bare workflow workers.
+///
+/// It must never resolve an authored agent directory or appear in discovery.
+pub const RESERVED_WORKFLOW_AGENT_ID: &str = "__workflow_ephemeral__";
+
 // ---------------------------------------------------------------------------
 // Re-exports — public surface of the crate
 // ---------------------------------------------------------------------------
