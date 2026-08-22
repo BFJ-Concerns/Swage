@@ -11,6 +11,8 @@ use crate::client::delivery::{DeliveryRoutingRequest, DeliveryTarget};
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
 pub struct RecordedDelivery {
     pub session_id: Uuid,
+    pub run_id: Option<Uuid>,
+    pub turn_id: Option<Uuid>,
     pub target: DeliveryTarget,
     pub content: String,
     pub delivered_at: DateTime<Utc>,
