@@ -7126,6 +7126,58 @@ async fn approval_resumption_keeps_structured_tool_messages() {
     );
 }
 
+async fn assert_delegation_fails_before_child_creation(
+    state: &AppState,
+    root_turn_id: Uuid,
+    space_id: Uuid,
+    task_definition_id: Option<&str>,
+    request_id: &str,
+    expected_error: &str,
+    assertion_message: &str,
+) {
+    let child_count_before_failure = state
+        .storage
+        .list_sessions_by_agent_id("agent-b")
+        .await
+        .expect("list child sessions before delegation failure")
+        .len();
+    let error = match GatewayDelegationHandler::new(state.clone())
+        .handle_delegation(
+            "agent-b",
+            "This must not start",
+            task_definition_id,
+            None,
+            None,
+            None,
+            DispatchContextComposition::default(),
+            request_id,
+            "gateway",
+            root_turn_id,
+            space_id,
+            CancellationToken::new(),
+            DelegateCompletionMode::Wait,
+        )
+        .await
+    {
+        Ok(_) => panic!("delegation must fail before child creation"),
+        Err(error) => error,
+    };
+    assert!(
+        error.to_string().contains(expected_error),
+        "unexpected delegation failure: {error}"
+    );
+    assert_eq!(
+        state
+            .storage
+            .list_sessions_by_agent_id("agent-b")
+            .await
+            .expect("list child sessions after delegation failure")
+            .len(),
+        child_count_before_failure,
+        "{assertion_message}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
     let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
@@ -7737,93 +7789,31 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
     );
     drop(captured_requests);
 
-    let child_count_before_missing_definition = state
-        .storage
-        .list_sessions_by_agent_id("agent-b")
-        .await
-        .expect("list child sessions before missing-definition failure")
-        .len();
-    let error = match GatewayDelegationHandler::new(state.clone())
-        .handle_delegation(
-            "agent-b",
-            "This must not start",
-            Some("missing-task"),
-            None,
-            None,
-            None,
-            DispatchContextComposition::default(),
-            "missing-task-delegate",
-            "gateway",
-            root_turn.id,
-            space.id,
-            CancellationToken::new(),
-            DelegateCompletionMode::Wait,
-        )
-        .await
-    {
-        Ok(_) => panic!("a missing task definition must fail delegation closed"),
-        Err(error) => error,
-    };
-    assert!(
-        error.to_string().contains("no task definition 'missing-task' exists"),
-        "unexpected missing-definition failure: {error}"
-    );
-    assert_eq!(
-        state
-            .storage
-            .list_sessions_by_agent_id("agent-b")
-            .await
-            .expect("list child sessions after missing-definition failure")
-            .len(),
-        child_count_before_missing_definition,
-        "task-definition resolution failure must happen before child creation"
-    );
+    assert_delegation_fails_before_child_creation(
+        &state,
+        root_turn.id,
+        space.id,
+        Some("missing-task"),
+        "missing-task-delegate",
+        "no task definition 'missing-task' exists",
+        "task-definition resolution failure must happen before child creation",
+    )
+    .await;
 
     let sender_config_dir = swage_home.path().join("spaces/default/agents/gateway");
     std::fs::create_dir_all(&sender_config_dir).expect("create sender config directory");
     std::fs::write(sender_config_dir.join("config.toml"), "not valid toml =")
         .expect("write broken dispatch-bound config");
-    let child_count_before_failure = state
-        .storage
-        .list_sessions_by_agent_id("agent-b")
-        .await
-        .expect("list child sessions before closed failure")
-        .len();
-    let error = match GatewayDelegationHandler::new(state.clone())
-        .handle_delegation(
-            "agent-b",
-            "This must not start",
-            None,
-            None,
-            None,
-            None,
-            DispatchContextComposition::default(),
-            "missing-lineage-delegate",
-            "gateway",
-            root_turn.id,
-            space.id,
-            CancellationToken::new(),
-            DelegateCompletionMode::Wait,
-        )
-        .await
-    {
-        Ok(_) => panic!("an unresolved dispatch bound must fail delegation closed"),
-        Err(error) => error,
-    };
-    assert!(
-        error.to_string().contains("failed to load dispatch bound"),
-        "unexpected dispatch-bound failure: {error}"
-    );
-    assert_eq!(
-        state
-            .storage
-            .list_sessions_by_agent_id("agent-b")
-            .await
-            .expect("list child sessions after closed failure")
-            .len(),
-        child_count_before_failure,
-        "dispatch-bound resolution failure must prevent child execution"
-    );
+    assert_delegation_fails_before_child_creation(
+        &state,
+        root_turn.id,
+        space.id,
+        None,
+        "missing-lineage-delegate",
+        "failed to load dispatch bound",
+        "dispatch-bound resolution failure must prevent child execution",
+    )
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -9359,6 +9349,17 @@ async fn capture_provider_effort_for_session(
     metadata: Option<serde_json::Value>,
     config: swage_config::ResolvedConfig,
 ) -> Option<swage_core::Effort> {
+    Box::pin(capture_provider_effort_for_selected_model(
+        metadata, None, config,
+    ))
+    .await
+}
+
+async fn capture_provider_effort_for_selected_model(
+    metadata: Option<serde_json::Value>,
+    selected_model_id: Option<String>,
+    config: swage_config::ResolvedConfig,
+) -> Option<swage_core::Effort> {
     let chunks = vec![
         StreamChunk::Delta {
             content: "Hello".into(),
@@ -9369,6 +9370,12 @@ async fn capture_provider_effort_for_session(
     ];
     let (provider, captured_request) = CapturingProvider::new(chunks);
     let (storage, session_id) = make_storage_with_session_metadata(metadata).await;
+    if selected_model_id.is_some() {
+        storage
+            .set_session_selected_model(session_id, selected_model_id)
+            .await
+            .expect("select session model");
+    }
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
@@ -9430,6 +9437,29 @@ async fn process_turn_uses_effective_models_default_effort_without_session_metad
     assert_eq!(
         capture_provider_effort_for_session(None, config).await,
         Some(swage_core::Effort::Medium)
+    );
+}
+
+#[tokio::test]
+async fn process_turn_omits_default_effort_for_unknown_selected_model() {
+    let mut config = swage_config::ResolvedConfig::default();
+    config.models.default = "model-a".to_string();
+    config.models.entries.insert(
+        "model-a".to_string(),
+        swage_config::ModelEndpointConfig {
+            default_effort: Some(swage_core::Effort::Medium),
+            ..Default::default()
+        },
+    );
+
+    assert_eq!(
+        Box::pin(capture_provider_effort_for_selected_model(
+            None,
+            Some("unknown-model".to_string()),
+            config,
+        ))
+        .await,
+        None
     );
 }
 
