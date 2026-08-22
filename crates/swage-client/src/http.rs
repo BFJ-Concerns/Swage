@@ -497,6 +497,7 @@ impl GatewayClient {
             request = request.json(&CreateConversationRequest {
                 selected_model_id: selected_model_id.map(str::to_owned),
                 agent_id: agent_id.map(str::to_owned),
+                effort: None,
             });
         }
         let response = request
@@ -538,6 +539,7 @@ impl GatewayClient {
             request = request.json(&CreateConversationRequest {
                 selected_model_id: selected_model_id.map(str::to_owned),
                 agent_id: agent_id.map(str::to_owned),
+                effort: None,
             });
         }
         let response = request
