@@ -785,7 +785,7 @@ pub(crate) async fn process_turn_with_composition(
     // and assembly search-path construction all depend on it.
     //
     // Fail-open: a warning is logged and each consumer falls back gracefully.
-    let swage_root_opt = resolve_swage_root();
+    let swage_root_opt = resolve_swage_root(state);
 
     let active_skills = load_active_skills_for_agent(
         state,
@@ -999,7 +999,7 @@ pub(crate) async fn process_turn_with_composition(
         let path = std::path::PathBuf::from(path);
         (path.clone(), vec![path])
     } else {
-        agent_workspace_from_policy(&workspace_policy, space_id, session.id)
+        agent_workspace_from_policy(&state.config_root, &workspace_policy, space_id, session.id)
     };
 
     let environment =

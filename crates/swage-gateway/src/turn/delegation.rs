@@ -52,13 +52,14 @@ pub(crate) fn delegated_context_assembler(
     effective_tool_permissions: serde_json::Value,
     composition: DispatchContextComposition,
 ) -> Arc<dyn DelegationContextAssembler> {
+    let swage_root = resolve_swage_root(&state);
     Arc::new(GatewayDelegatedContextAssembler {
         state,
         space,
         config,
         agent_id,
         working_directory,
-        swage_root: resolve_swage_root(),
+        swage_root,
         context_event_tx,
         effective_tool_permissions,
         composition,

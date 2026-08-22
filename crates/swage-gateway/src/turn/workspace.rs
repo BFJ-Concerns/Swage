@@ -145,7 +145,7 @@ pub(crate) async fn resolve_authorised_worker_directory(
         .active_workspace
         .as_ref()
         .map(|grant| grant.path.clone())
-        .unwrap_or_else(|| managed_scratch_workspace(space_id, context_id));
+        .unwrap_or_else(|| managed_scratch_workspace(&state.config_root, space_id, context_id));
     let approval_grants = state
         .session_approval_grants
         .lock()
