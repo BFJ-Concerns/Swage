@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use uuid::Uuid;
 
@@ -39,7 +39,7 @@ fn turn_state_to_wire(state: &TurnState) -> WireTurnState {
 pub struct ConversationService {
     pub(crate) storage: Arc<dyn Storage>,
     pub(crate) space_store: Arc<dyn SpaceStore>,
-    config: Option<swage_config::ResolvedConfig>,
+    config: Option<(swage_config::ResolvedConfig, PathBuf)>,
 }
 
 impl ConversationService {
@@ -51,8 +51,12 @@ impl ConversationService {
         }
     }
 
-    pub fn with_config(mut self, config: swage_config::ResolvedConfig) -> Self {
-        self.config = Some(config);
+    pub fn with_config(
+        mut self,
+        config: swage_config::ResolvedConfig,
+        config_root: PathBuf,
+    ) -> Self {
+        self.config = Some((config, config_root));
         self
     }
 
@@ -67,11 +71,15 @@ impl ConversationService {
         if requested.is_some() {
             return Ok(requested);
         }
-        let Some(active_config) = self.config.clone() else {
+        let Some((active_config, config_root)) = &self.config else {
             return Ok(None);
         };
-        let config =
-            crate::turn::load_session_config_from_active(active_config, space_slug, agent_id)?;
+        let config = crate::turn::load_session_config_from_root(
+            config_root,
+            active_config.clone(),
+            space_slug,
+            agent_id,
+        )?;
         let config = match self
             .storage
             .resolve_agent_definition(agent_id, space_id)
