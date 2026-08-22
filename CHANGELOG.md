@@ -26,11 +26,13 @@ All notable changes to Swage are documented in this file.
 ### Changed
 
 - Client-facing settings, asynchronous turns, context assembly reports, materials, attachments, and recovery listings now use the shared Rust wire contract and its generated TypeScript and JSON Schema projections.
+- Delivery-log entries now identify the schedule run and turn that produced them when that attribution is available.
 - Unknown keys under `[generation.presets.*]` and `[models.entries.*.capabilities]` now fail configuration loading instead of being ignored. Most other sections already rejected unknown keys through validation and still do; per-model pricing entries remain lenient.
 - Tool approval prompting now defaults to disabled and remains available through explicit operator configuration.
 
 ### Fixed
 
+- Development-channel no-ops now appear as `not_sent` with an explanation instead of claiming successful delivery.
 - A delayed not-found response for an earlier conversation no longer clears a conversation selected while that check was pending.
 - Browser back and forward navigation now restores the active conversation route when loading the destination fails.
 - Provider fallback catalogues are current, attendance audit records distinguish interactive turns, and the context inspector identifies per-element token counts as non-additive estimates.
