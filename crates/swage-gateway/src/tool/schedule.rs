@@ -122,6 +122,21 @@ const SCHEDULE_TOOL: &str = "schedule";
 
 fn delivery_target_schema() -> Value {
     json!({
+        "type": "object",
+        "properties": {
+            "kind": {
+                "type": "string",
+                "enum": ["channel", "local_storage", "webhook"]
+            },
+            "integration": {
+                "type": "string",
+                "enum": ["dev_dm", "dev_thread", "telegram"]
+            },
+            "account": {"type": "string"},
+            "conversation": {"type": "string"},
+            "url": {"type": "string"}
+        },
+        "additionalProperties": false,
         "oneOf": [
             {
                 "type": "object",
@@ -156,6 +171,16 @@ fn delivery_target_schema() -> Value {
             }
         ]
     })
+}
+
+fn nullable_delivery_target_schema() -> Value {
+    let mut schema = delivery_target_schema();
+    schema["type"] = json!(["object", "null"]);
+    schema["oneOf"]
+        .as_array_mut()
+        .expect("delivery target variants are an array")
+        .insert(0, json!({"type": "null"}));
+    schema
 }
 
 #[async_trait]
@@ -291,30 +316,26 @@ impl Tool for ScheduleTool {
                     "description": "Where each completed run's output should go. Use channel for \
                                     a known conversation, local_storage to retain output locally, \
                                     or webhook to send it to an HTTPS endpoint. Schedules have no \
-                                    originating channel, so keep deliver_to_origin=false. \
+                                    originating channel, so deliver_to_origin defaults to false. \
                                     home_target names one primary destination; explicit_targets \
-                                    adds any other destinations; store_local_output also retains a \
-                                    local copy. On create, omit routing for the existing local-only \
-                                    default. On update, omit it to leave delivery unchanged.",
+                                    is an object whose freely chosen labels name additional \
+                                    destinations; store_local_output also retains a local copy. On \
+                                    create, omit routing for the existing local-only default. On \
+                                    update, omit it to leave delivery unchanged.",
                     "properties": {
                         "deliver_to_origin": {
                             "type": "boolean",
                             "description": "Whether to deliver back to the initiating channel. \
-                                            Always false for schedules because their runs have no \
-                                            channel origin."
+                                            Optional and defaults to false for schedules because \
+                                            their runs have no channel origin."
                         },
-                        "home_target": {
-                            "description": "Optional primary destination for each run's output.",
-                            "oneOf": [
-                                {"type": "null"},
-                                delivery_target_schema()
-                            ]
-                        },
+                        "home_target": nullable_delivery_target_schema(),
                         "explicit_targets": {
-                            "type": "array",
+                            "type": "object",
                             "description": "Additional destinations that should each receive the \
-                                            completed output.",
-                            "items": delivery_target_schema()
+                                            completed output, keyed by any short unique label. The \
+                                            labels identify entries only and are not persisted.",
+                            "additionalProperties": delivery_target_schema()
                         },
                         "store_local_output": {
                             "type": "boolean",
@@ -645,7 +666,27 @@ fn build_routing(params: &Value) -> Result<Option<DeliveryRoutingRequest>, ToolE
     params
         .get("routing")
         .cloned()
-        .map(|routing| {
+        .map(|mut routing| {
+            let object = routing.as_object_mut().ok_or_else(|| {
+                invalid(SCHEDULE_TOOL, "'routing' must be a delivery route object")
+            })?;
+            object
+                .entry("deliver_to_origin")
+                .or_insert(Value::Bool(false));
+            if let Some(explicit_targets) = object.get_mut("explicit_targets") {
+                let targets = explicit_targets
+                    .as_object()
+                    .ok_or_else(|| {
+                        invalid(
+                            SCHEDULE_TOOL,
+                            "'routing.explicit_targets' must be an object keyed by label",
+                        )
+                    })?
+                    .values()
+                    .cloned()
+                    .collect();
+                *explicit_targets = Value::Array(targets);
+            }
             serde_json::from_value(routing).map_err(|error| {
                 invalid(
                     SCHEDULE_TOOL,

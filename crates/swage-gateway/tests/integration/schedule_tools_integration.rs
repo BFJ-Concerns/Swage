@@ -25,7 +25,8 @@ use swage_gateway::tool::{Tool, ToolDispatcher, ToolRegistry};
 use swage_gateway::tool_executor::GatewayToolContext;
 use swage_gateway::{schedule, state::AppState};
 use swage_protocol::client::schedule::ScheduleStatus;
-use swage_provider::LlmProvider;
+use swage_provider::openai::OpenAiProvider;
+use swage_provider::{LlmProvider, ProviderConfig};
 use swage_storage::{ScheduleCreator, ScheduleRunState, SqliteStorage, UpdateSchedule};
 use swage_tool::context::MockToolContext;
 use swage_tool::permission::PermissionConfig;
@@ -135,38 +136,138 @@ async fn tool_session(state: &AppState, space_id: Uuid) -> Uuid {
         .id
 }
 
-fn routing_for(target: serde_json::Value) -> serde_json::Value {
-    json!({
-        "deliver_to_origin": false,
-        "home_target": null,
-        "explicit_targets": [target],
-        "store_local_output": false,
-    })
+fn routing_for(label: &str, target: serde_json::Value) -> (serde_json::Value, serde_json::Value) {
+    (
+        json!({
+            "home_target": null,
+            "explicit_targets": {(label): target.clone()},
+            "store_local_output": false,
+        }),
+        json!({
+            "deliver_to_origin": false,
+            "home_target": null,
+            "explicit_targets": [target],
+            "store_local_output": false,
+        }),
+    )
 }
 
-fn routing_cases() -> Vec<(&'static str, serde_json::Value)> {
+fn routing_cases() -> Vec<(&'static str, serde_json::Value, serde_json::Value)> {
     vec![
         (
             "channel",
-            routing_for(json!({
-                "kind": "channel",
-                "integration": "dev_thread",
-                "account": "workspace-a",
-                "conversation": "room-1/topic-9",
-            })),
+            routing_for(
+                "team_chat",
+                json!({
+                    "kind": "channel",
+                    "integration": "dev_thread",
+                    "account": "workspace-a",
+                    "conversation": "room-1/topic-9",
+                }),
+            ),
         ),
         (
             "local storage",
-            routing_for(json!({"kind": "local_storage"})),
+            routing_for("archive", json!({"kind": "local_storage"})),
         ),
         (
             "webhook",
-            routing_for(json!({
-                "kind": "webhook",
-                "url": "https://example.test/scheduled-output",
-            })),
+            routing_for(
+                "automation",
+                json!({
+                    "kind": "webhook",
+                    "url": "https://example.test/scheduled-output",
+                }),
+            ),
         ),
     ]
+    .into_iter()
+    .map(|(name, (input, persisted))| (name, input, persisted))
+    .collect()
+}
+
+#[test]
+fn provider_facing_schedule_schema_preserves_delivery_target_vocabulary() {
+    let provider =
+        OpenAiProvider::from_config(ProviderConfig::new("key", "model", "http://localhost"));
+    let request = CompletionRequest {
+        effort: None,
+        messages: vec![],
+        model: None,
+        max_tokens: None,
+        temperature: None,
+        stop_sequences: None,
+        metadata: None,
+        tool_definitions: vec![json!({
+            "name": ScheduleTool.name(),
+            "description": ScheduleTool.description(),
+            "parameters": ScheduleTool.parameters(),
+        })],
+    };
+
+    let snapshot = provider.provider_request_snapshot(&request, false);
+    let routing = &snapshot["body"]["tools"][0]["function"]["parameters"]["properties"]["routing"];
+    let home = &routing["properties"]["home_target"];
+    let additional = &routing["properties"]["explicit_targets"]["additionalProperties"];
+
+    for target in [home, additional] {
+        assert_eq!(
+            target["properties"]["kind"]["enum"],
+            json!(["channel", "local_storage", "webhook"])
+        );
+        assert_eq!(
+            target["properties"]["integration"]["enum"],
+            json!(["dev_dm", "dev_thread", "telegram"])
+        );
+        for field in ["account", "conversation", "url"] {
+            assert_eq!(target["properties"][field]["type"], "string");
+        }
+    }
+    assert!(
+        routing["properties"]["explicit_targets"]
+            .get("items")
+            .is_none()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn schedule_routing_keeps_strict_local_target_validation() {
+    let state = test_state();
+    let space = state.space_store.get_or_create_default().await.unwrap();
+    let dispatcher = dispatcher(permissions(&["scheduling"], &[]));
+    let ctx = host_context(&state, "researcher", tool_session(&state, space.id).await);
+
+    let rejected = dispatcher
+        .dispatch(
+            "schedule",
+            json!({
+                "action": "create",
+                "message": "deliver to an incomplete channel",
+                "timing": "every",
+                "every": "every 1 hours",
+                "session": "fresh",
+                "space_id": space.id,
+                "agent_id": "gateway",
+                "routing": {
+                    "explicit_targets": {
+                        "team_chat": {
+                            "kind": "channel",
+                            "integration": "dev_thread",
+                            "conversation": "room-1/topic-9"
+                        }
+                    }
+                }
+            }),
+            &ctx,
+            "researcher",
+        )
+        .await;
+
+    assert!(matches!(
+        rejected,
+        Err(swage_core::ToolError::InvalidParameters { .. })
+    ));
+    assert!(state.storage.list_schedules().await.unwrap().is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -176,7 +277,7 @@ async fn agent_can_create_schedules_with_each_delivery_route() {
     let dispatcher = dispatcher(permissions(&["scheduling"], &[]));
     let ctx = host_context(&state, "researcher", tool_session(&state, space.id).await);
 
-    for (name, routing) in routing_cases() {
+    for (name, routing, persisted_routing) in routing_cases() {
         let created = dispatcher
             .dispatch(
                 "schedule",
@@ -207,7 +308,7 @@ async fn agent_can_create_schedules_with_each_delivery_route() {
             .unwrap()
             .unwrap();
         assert_eq!(
-            stored.delivery_routing, routing,
+            stored.delivery_routing, persisted_routing,
             "the {name} route is persisted from the tool call"
         );
         assert!(matches!(
@@ -273,7 +374,7 @@ async fn agent_can_update_schedules_to_each_delivery_route() {
         .unwrap()
         .to_owned();
 
-    for (name, routing) in routing_cases() {
+    for (name, routing, persisted_routing) in routing_cases() {
         dispatcher
             .dispatch(
                 "schedule",
@@ -294,7 +395,7 @@ async fn agent_can_update_schedules_to_each_delivery_route() {
             .unwrap()
             .unwrap();
         assert_eq!(
-            stored.delivery_routing, routing,
+            stored.delivery_routing, persisted_routing,
             "the {name} route is persisted from the tool update"
         );
     }
