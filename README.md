@@ -22,9 +22,18 @@ cargo build --bin swage
 cd frontend && npm install && npm run dev
 ```
 
-The gateway daemonises and logs to `gateway.log` in its data root —
-`~/.swage/` by default, `$SWAGE_HOME` when set. Stop it with the same binary
-you started:
+The gateway detaches by default and prints its output destination when it
+starts. Output goes to `gateway.log` in its data root (`~/.swage/` by default,
+or `$SWAGE_HOME` when set). Choose another destination with `--log-file PATH`,
+or use `--foreground` to keep the process and its output attached to the
+terminal:
+
+```bash
+./target/debug/swage gateway start --log-file ./gateway-dev.log
+./target/debug/swage gateway start --foreground
+```
+
+Stop it with the same binary you started:
 
 ```bash
 ./target/debug/swage gateway stop
@@ -148,7 +157,13 @@ port = 3000
 ```
 
 The `--host` and `--port` flags are accepted by `gateway start`,
-`gateway restart`, and `gateway install`.
+`gateway restart`, and `gateway set-defaults`. Saved defaults are reused by
+`start`, `restart`, `status`, and `stop` until removed with
+`gateway clear-defaults`; an explicit lifecycle flag overrides its saved
+default.
+
+The terminal client is `swage chat`. Generate an installation script for
+shell completion with `swage generate-completion bash` (or `zsh`/`fish`).
 
 **Security boundary.** The gateway has no authentication. Binding to a
 private-network address is an explicit operator choice that trusts every host

@@ -1253,7 +1253,7 @@ async fn run_ephemeral_agent_call(
         Arc::new(Mutex::new(SubscriptionState::new(false))),
         request.schema,
         request_schema_retries,
-        request.effort.clone(),
+        request.effort,
         Some(call_cancellation.clone()),
         None,
         crate::turn::TurnAttendance::Unattended,
@@ -8857,7 +8857,7 @@ mod tests {
         {
             let requests = provider.requests.lock().expect("requests");
             assert_eq!(requests.len(), 1);
-            assert_eq!(requests[0].effort.as_deref(), Some("high"));
+            assert_eq!(requests[0].effort, Some(swage_core::Effort::High));
         }
         wait_for_worker_turn_interrupted(&storage).await;
         assert!(

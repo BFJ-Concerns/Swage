@@ -19,6 +19,7 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use swage_core::{GatewayError, ToolError};
+use swage_protocol::client::delivery::DeliveryRoutingRequest;
 use swage_protocol::client::schedule as wire;
 use swage_storage::{ScheduleCreator, Storage};
 use swage_tool::context::ToolContext;
@@ -118,6 +119,69 @@ fn parse_delay(tool: &str, text: &str) -> Result<Duration, ToolError> {
 pub struct ScheduleTool;
 
 const SCHEDULE_TOOL: &str = "schedule";
+
+fn delivery_target_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "kind": {
+                "type": "string",
+                "enum": ["channel", "local_storage", "webhook"]
+            },
+            "integration": {
+                "type": "string",
+                "enum": ["dev_dm", "dev_thread", "telegram"]
+            },
+            "account": {"type": "string"},
+            "conversation": {"type": "string"},
+            "url": {"type": "string"}
+        },
+        "additionalProperties": false,
+        "oneOf": [
+            {
+                "type": "object",
+                "properties": {
+                    "kind": {"type": "string", "const": "channel"},
+                    "integration": {
+                        "type": "string",
+                        "enum": ["dev_dm", "dev_thread", "telegram"]
+                    },
+                    "account": {"type": "string"},
+                    "conversation": {"type": "string"}
+                },
+                "required": ["kind", "integration", "account", "conversation"],
+                "additionalProperties": false
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "kind": {"type": "string", "const": "local_storage"}
+                },
+                "required": ["kind"],
+                "additionalProperties": false
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "kind": {"type": "string", "const": "webhook"},
+                    "url": {"type": "string"}
+                },
+                "required": ["kind", "url"],
+                "additionalProperties": false
+            }
+        ]
+    })
+}
+
+fn nullable_delivery_target_schema() -> Value {
+    let mut schema = delivery_target_schema();
+    schema["type"] = json!(["object", "null"]);
+    schema["oneOf"]
+        .as_array_mut()
+        .expect("delivery target variants are an array")
+        .insert(0, json!({"type": "null"}));
+    schema
+}
 
 #[async_trait]
 impl Tool for ScheduleTool {
@@ -246,6 +310,39 @@ impl Tool for ScheduleTool {
                     "description": "For update only: set installs or replaces the gate from \
                                     gate_model/gate_criteria; clear removes any existing gate. \
                                     Omit to leave the gate unchanged."
+                },
+                "routing": {
+                    "type": "object",
+                    "description": "Where each completed run's output should go. Use channel for \
+                                    a known conversation, local_storage to retain output locally, \
+                                    or webhook to send it to an HTTPS endpoint. Schedules have no \
+                                    originating channel, so deliver_to_origin defaults to false. \
+                                    home_target names one primary destination; explicit_targets \
+                                    is an object whose freely chosen labels name additional \
+                                    destinations; store_local_output also retains a local copy. On \
+                                    create, omit routing for the existing local-only default. On \
+                                    update, omit it to leave delivery unchanged.",
+                    "properties": {
+                        "deliver_to_origin": {
+                            "type": "boolean",
+                            "description": "Whether to deliver back to the initiating channel. \
+                                            Optional and defaults to false for schedules because \
+                                            their runs have no channel origin."
+                        },
+                        "home_target": nullable_delivery_target_schema(),
+                        "explicit_targets": {
+                            "type": "object",
+                            "description": "Additional destinations that should each receive the \
+                                            completed output, keyed by any short unique label. The \
+                                            labels identify entries only and are not persisted.",
+                            "additionalProperties": delivery_target_schema()
+                        },
+                        "store_local_output": {
+                            "type": "boolean",
+                            "description": "Also retain each completed output in local storage."
+                        }
+                    },
+                    "additionalProperties": false
                 }
             },
             "required": ["action"]
@@ -294,14 +391,13 @@ impl ScheduleTool {
         let spec = build_spec(params)?;
         let session = build_session(state.storage.as_ref(), params, session_id).await?;
         let gate = build_gate(params)?;
+        let routing = build_routing(params)?;
 
         let request = wire::CreateScheduleRequest {
             message,
             spec,
             session,
-            // Runs are recorded to the local run history; channel delivery is
-            // not part of the agent-facing surface.
-            routing: None,
+            routing,
             gate,
         };
         let creator = ScheduleCreator::Agent {
@@ -349,11 +445,12 @@ impl ScheduleTool {
             .filter(|value| !value.trim().is_empty())
             .map(str::to_owned);
         let gate = build_gate_update(params)?;
+        let routing = build_routing(params)?;
 
         let request = wire::UpdateScheduleRequest {
             message,
             spec,
-            routing: None,
+            routing,
             gate,
         };
         let schedule = crate::schedule::update_schedule_change(
@@ -560,6 +657,44 @@ fn build_gate_update(params: &Value) -> Result<Option<wire::ScheduleGateUpdate>,
             format!("unknown gate_action '{other}': use set or clear"),
         )),
     }
+}
+
+/// Parse the shared delivery-routing wire shape when supplied. Absence has
+/// action-specific meaning in the schedule service: create uses its local-only
+/// default, while update preserves the existing route.
+fn build_routing(params: &Value) -> Result<Option<DeliveryRoutingRequest>, ToolError> {
+    params
+        .get("routing")
+        .cloned()
+        .map(|mut routing| {
+            let object = routing.as_object_mut().ok_or_else(|| {
+                invalid(SCHEDULE_TOOL, "'routing' must be a delivery route object")
+            })?;
+            object
+                .entry("deliver_to_origin")
+                .or_insert(Value::Bool(false));
+            if let Some(explicit_targets) = object.get_mut("explicit_targets") {
+                let targets = explicit_targets
+                    .as_object()
+                    .ok_or_else(|| {
+                        invalid(
+                            SCHEDULE_TOOL,
+                            "'routing.explicit_targets' must be an object keyed by label",
+                        )
+                    })?
+                    .values()
+                    .cloned()
+                    .collect();
+                *explicit_targets = Value::Array(targets);
+            }
+            serde_json::from_value(routing).map_err(|error| {
+                invalid(
+                    SCHEDULE_TOOL,
+                    format!("'routing' must be a valid delivery route: {error}"),
+                )
+            })
+        })
+        .transpose()
 }
 
 // ---------------------------------------------------------------------------
