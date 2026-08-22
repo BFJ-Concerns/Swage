@@ -47,7 +47,6 @@ function mockConnectionStore(): ConnectionStore {
     disconnect: () => {},
     sendMessage: () => {},
     cancelTurn: () => {},
-    reconcileAfterReconnect: () => {},
     onServerEvent: () => {},
   };
 }
