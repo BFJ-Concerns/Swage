@@ -1094,6 +1094,8 @@ describe("App", () => {
       content: "Send with the newly saved model",
       selected_model_id: "local/new-model",
     });
+    websocketHarness.fireEvent({ type: "turn_complete", turn_id: "first-model-turn" });
+    await settleUi();
 
     flushSync(() => settingsButton!.click());
     await settleUi();
@@ -1105,6 +1107,29 @@ describe("App", () => {
     expect(document.body.textContent).not.toContain("transient catalogue failure");
     expect(settingsApi.saveSettings).toHaveBeenCalledTimes(2);
     expect(settingsApi.fetchSettings).toHaveBeenCalledTimes(5);
+
+    const retainedCloseButton = document.querySelector<HTMLButtonElement>(
+      'button[aria-label="Close settings"]',
+    );
+    flushSync(() => retainedCloseButton!.click());
+    await settleUi();
+    expect(document.body.textContent).toContain("local/new-model");
+
+    const retainedTextarea = document.querySelector<HTMLTextAreaElement>("textarea");
+    const retainedSendButton = document.querySelector<HTMLButtonElement>(".action.send");
+    flushSync(() => {
+      retainedTextarea!.value = "Send after the failed catalogue refresh";
+      retainedTextarea!.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    expect(retainedSendButton?.disabled).toBe(false);
+    flushSync(() => retainedSendButton!.click());
+    await settleUi();
+
+    expect(websocketHarness.client.send).toHaveBeenLastCalledWith({
+      type: "send_message",
+      content: "Send after the failed catalogue refresh",
+      selected_model_id: "local/new-model",
+    });
   });
 
   it("switches to the operator surface and renders the overview", async () => {

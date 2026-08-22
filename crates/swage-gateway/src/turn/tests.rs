@@ -4818,6 +4818,51 @@ async fn initial_message_write_failure_clears_active_turn() {
 }
 
 #[tokio::test]
+async fn delegated_result_delivery_failure_clears_active_turn() {
+    let storage = Arc::new(MockStorage::new());
+    let (state, session_id) = make_state_with_storage(vec![], Arc::clone(&storage)).await;
+    let result = storage
+        .create_agent_message(NewAgentMessage {
+            sender_agent_id: "researcher".into(),
+            recipient_agent_id: "gateway".into(),
+            kind: swage_core::MessageKind::Result,
+            correlation_id: Some(Uuid::new_v4()),
+            payload: serde_json::json!({"response": "delegated answer"}),
+        })
+        .await
+        .expect("pending delegated result");
+    storage.fail_append_message_at(2);
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    process_turn(
+        &state,
+        session_id,
+        None,
+        "message".to_string(),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .expect_err("the injected delegated-result append must fail");
+
+    let thread = storage.list_by_session(session_id).await.unwrap().remove(0);
+    let turns = storage.list_turns_by_thread(thread.id).await.unwrap();
+    assert_eq!(turns[0].state, TurnState::Failed);
+    assert_eq!(
+        storage
+            .get_agent_message(result.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        MessageStatus::Pending,
+        "a result whose append failed must remain available for redelivery"
+    );
+    assert_subsequent_turn_is_not_blocked(&state, session_id).await;
+}
+
+#[tokio::test]
 async fn history_rebuild_failure_clears_active_turn() {
     let storage = Arc::new(MockStorage::new());
     storage.fail_message_lists();
