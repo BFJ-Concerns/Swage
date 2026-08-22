@@ -85,10 +85,10 @@ pub fn load_resolved_config_from(
         }
     }
 
-    if let Some(agent_config) = &agent_config {
-        if let Some(partial) = try_load_file(agent_config, &mut all_problems) {
-            config_chain.push(partial);
-        }
+    if let Some(agent_config) = &agent_config
+        && let Some(partial) = try_load_file(agent_config, &mut all_problems)
+    {
+        config_chain.push(partial);
     }
 
     // Fail fast if any file had errors — report everything collected.
