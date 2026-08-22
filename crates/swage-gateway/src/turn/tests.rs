@@ -9215,6 +9215,7 @@ async fn make_storage_with_session_metadata(
 
 async fn capture_provider_effort_for_session(
     metadata: Option<serde_json::Value>,
+    config: swage_config::ResolvedConfig,
 ) -> Option<swage_core::Effort> {
     let chunks = vec![
         StreamChunk::Delta {
@@ -9230,7 +9231,7 @@ async fn capture_provider_effort_for_session(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
-        swage_config::ResolvedConfig::default(),
+        config,
         crate::tool::ToolDispatcher::allow_all(vec![]),
         None,
     );
@@ -9259,10 +9260,35 @@ async fn capture_provider_effort_for_session(
 #[tokio::test]
 async fn process_turn_forwards_persisted_session_effort_to_provider() {
     assert_eq!(
-        capture_provider_effort_for_session(Some(serde_json::json!({"effort": "high"}))).await,
+        capture_provider_effort_for_session(
+            Some(serde_json::json!({"effort": "high"})),
+            swage_config::ResolvedConfig::default(),
+        )
+        .await,
         Some(swage_core::Effort::High)
     );
-    assert_eq!(capture_provider_effort_for_session(None).await, None);
+    assert_eq!(
+        capture_provider_effort_for_session(None, swage_config::ResolvedConfig::default()).await,
+        None
+    );
+}
+
+#[tokio::test]
+async fn process_turn_uses_effective_models_default_effort_without_session_metadata() {
+    let mut config = swage_config::ResolvedConfig::default();
+    config.models.default = "model-a".to_string();
+    config.models.entries.insert(
+        "model-a".to_string(),
+        swage_config::ModelEndpointConfig {
+            default_effort: Some(swage_core::Effort::Medium),
+            ..Default::default()
+        },
+    );
+
+    assert_eq!(
+        capture_provider_effort_for_session(None, config).await,
+        Some(swage_core::Effort::Medium)
+    );
 }
 
 #[tokio::test]
