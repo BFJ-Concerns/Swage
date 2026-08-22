@@ -127,10 +127,10 @@ async fn main() {
     let result = match cli.command {
         Some(Command::Run(run_args)) => swage_gateway::cli::run::run(&run_args).await,
         Some(Command::Gateway(args)) => match args.command {
-            GatewayCommand::Install(install_args) => {
+            GatewayCommand::SetDefaults(install_args) => {
                 swage_gateway::cli::install::install(&install_args).await
             }
-            GatewayCommand::Uninstall(uninstall_args) => {
+            GatewayCommand::ClearDefaults(uninstall_args) => {
                 swage_gateway::cli::install::uninstall(&uninstall_args).await
             }
             GatewayCommand::Start(start_args) => swage_gateway::cli::start::run(&start_args).await,

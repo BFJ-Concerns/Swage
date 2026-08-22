@@ -123,11 +123,11 @@ pub struct GatewayArgs {
 /// Gateway lifecycle subcommands.
 #[derive(Debug, clap::Subcommand)]
 pub enum GatewayCommand {
-    /// Store default lifecycle configuration for this machine.
-    Install(InstallArgs),
-    /// Remove stored lifecycle configuration for this machine.
-    Uninstall(UninstallArgs),
-    /// Launch the gateway as a background process.
+    /// Save host, port, and configuration defaults for lifecycle commands.
+    SetDefaults(InstallArgs),
+    /// Remove saved lifecycle defaults.
+    ClearDefaults(UninstallArgs),
+    /// Start the gateway, detached by default.
     Start(StartArgs),
     /// Restart the gateway, optionally forcing the stop phase.
     Restart(RestartArgs),
@@ -168,7 +168,7 @@ pub struct StartArgs {
     pub log_file: Option<String>,
 }
 
-/// Arguments for `swage gateway install`.
+/// Arguments for `swage gateway set-defaults`.
 #[derive(Debug, clap::Args)]
 pub struct InstallArgs {
     #[arg(long)]
@@ -210,7 +210,7 @@ pub struct RestartArgs {
     pub log_file: Option<String>,
 }
 
-/// Arguments for `swage gateway uninstall`.
+/// Arguments for `swage gateway clear-defaults`.
 #[derive(Debug, clap::Args, Default)]
 pub struct UninstallArgs {}
 
@@ -355,13 +355,13 @@ mod tests {
     }
 
     #[test]
-    fn parse_gateway_install_defaults() {
-        let cli = Cli::try_parse_from(["swage", "gateway", "install"]).unwrap();
+    fn parse_gateway_set_defaults() {
+        let cli = Cli::try_parse_from(["swage", "gateway", "set-defaults"]).unwrap();
         let Some(Command::Gateway(gw)) = cli.command else {
             panic!("expected Gateway command");
         };
-        let GatewayCommand::Install(args) = gw.command else {
-            panic!("expected Install subcommand");
+        let GatewayCommand::SetDefaults(args) = gw.command else {
+            panic!("expected SetDefaults subcommand");
         };
         assert!(args.port.is_none());
         assert!(args.host.is_none());
