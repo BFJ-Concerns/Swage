@@ -927,7 +927,8 @@ pub async fn create_conversation(
     State(state): State<AppState>,
     payload: Option<Json<CreateConversationRequest>>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let svc = ConversationService::new(state.storage, state.space_store);
+    let config = state.active_config();
+    let svc = ConversationService::new(state.storage, state.space_store).with_config(config);
     let request = payload.map(|Json(request)| request).unwrap_or_default();
     let resp: ConversationResponse = svc.create_conversation_from_request(request).await?;
     Ok((StatusCode::CREATED, Json(resp)))
@@ -939,7 +940,8 @@ pub async fn create_conversation(
 pub async fn list_conversations(
     State(state): State<AppState>,
 ) -> Result<Json<ConversationListResponse>, ApiError> {
-    let svc = ConversationService::new(state.storage, state.space_store);
+    let config = state.active_config();
+    let svc = ConversationService::new(state.storage, state.space_store).with_config(config);
     let conversations = svc.list_conversations().await?;
     Ok(Json(ConversationListResponse { conversations }))
 }
@@ -976,7 +978,8 @@ pub async fn create_space_session(
     Path(space_id): Path<Uuid>,
     payload: Option<Json<CreateConversationRequest>>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let svc = ConversationService::new(state.storage, state.space_store);
+    let config = state.active_config();
+    let svc = ConversationService::new(state.storage, state.space_store).with_config(config);
     let request = payload.map(|Json(request)| request).unwrap_or_default();
     let resp = svc
         .create_session_in_space_from_request(space_id, request)
@@ -3213,6 +3216,28 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::CREATED);
         let body = body_json(resp).await;
         assert_eq!(body["selected_model_id"], "test-model");
+    }
+
+    #[tokio::test]
+    async fn post_conversations_rejects_unknown_effort_before_writes() {
+        let (router, storage) = make_router();
+
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/conversations")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(r#"{"effort":"extreme"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let db = storage.db.lock().await;
+        assert!(db.sessions.is_empty());
+        assert!(db.threads.is_empty());
     }
 
     #[tokio::test]

@@ -24,9 +24,11 @@ use swage_gateway::tool::schedule::{ScheduleTool, WakeMeLaterTool};
 use swage_gateway::tool::{Tool, ToolDispatcher, ToolRegistry};
 use swage_gateway::tool_executor::GatewayToolContext;
 use swage_gateway::{schedule, state::AppState};
+use swage_protocol::client::delivery::DeliveryRoutingRequest;
 use swage_protocol::client::schedule::ScheduleStatus;
-use swage_provider::LlmProvider;
-use swage_storage::{ScheduleRunState, SqliteStorage, UpdateSchedule};
+use swage_provider::openai::OpenAiProvider;
+use swage_provider::{LlmProvider, ProviderConfig};
+use swage_storage::{ScheduleCreator, ScheduleRunState, SqliteStorage, UpdateSchedule};
 use swage_tool::context::MockToolContext;
 use swage_tool::permission::PermissionConfig;
 use swage_tool::rate_limit::{RateLimitConfig, RateLimiter};
@@ -133,6 +135,310 @@ async fn tool_session(state: &AppState, space_id: Uuid) -> Uuid {
         .await
         .unwrap()
         .id
+}
+
+fn routing_for(label: &str, target: serde_json::Value) -> (serde_json::Value, serde_json::Value) {
+    (
+        json!({
+            "home_target": null,
+            "explicit_targets": {(label): target.clone()},
+            "store_local_output": false,
+        }),
+        json!({
+            "deliver_to_origin": false,
+            "home_target": null,
+            "explicit_targets": [target],
+            "store_local_output": false,
+        }),
+    )
+}
+
+fn routing_cases() -> Vec<(&'static str, serde_json::Value, serde_json::Value)> {
+    vec![
+        (
+            "channel",
+            routing_for(
+                "team_chat",
+                json!({
+                    "kind": "channel",
+                    "integration": "dev_thread",
+                    "account": "workspace-a",
+                    "conversation": "room-1/topic-9",
+                }),
+            ),
+        ),
+        (
+            "local storage",
+            routing_for("archive", json!({"kind": "local_storage"})),
+        ),
+        (
+            "webhook",
+            routing_for(
+                "automation",
+                json!({
+                    "kind": "webhook",
+                    "url": "https://example.test/scheduled-output",
+                }),
+            ),
+        ),
+    ]
+    .into_iter()
+    .map(|(name, (input, persisted))| (name, input, persisted))
+    .collect()
+}
+
+#[test]
+fn provider_facing_schedule_schema_preserves_delivery_target_vocabulary() {
+    let provider =
+        OpenAiProvider::from_config(ProviderConfig::new("key", "model", "http://localhost"));
+    let request = CompletionRequest {
+        effort: None,
+        messages: vec![],
+        model: None,
+        max_tokens: None,
+        temperature: None,
+        stop_sequences: None,
+        metadata: None,
+        tool_definitions: vec![json!({
+            "name": ScheduleTool.name(),
+            "description": ScheduleTool.description(),
+            "parameters": ScheduleTool.parameters(),
+        })],
+    };
+
+    let snapshot = provider.provider_request_snapshot(&request, false);
+    let routing = &snapshot["body"]["tools"][0]["function"]["parameters"]["properties"]["routing"];
+    let home = &routing["properties"]["home_target"];
+    let additional = &routing["properties"]["explicit_targets"]["additionalProperties"];
+
+    for target in [home, additional] {
+        assert_eq!(
+            target["properties"]["kind"]["enum"],
+            json!(["channel", "local_storage", "webhook"])
+        );
+        assert_eq!(
+            target["properties"]["integration"]["enum"],
+            json!(["dev_dm", "dev_thread", "telegram"])
+        );
+        for field in ["account", "conversation", "url"] {
+            assert_eq!(target["properties"][field]["type"], "string");
+        }
+    }
+    assert!(
+        routing["properties"]["explicit_targets"]
+            .get("items")
+            .is_none()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn schedule_routing_keeps_strict_local_target_validation() {
+    let state = test_state();
+    let space = state.space_store.get_or_create_default().await.unwrap();
+    let dispatcher = dispatcher(permissions(&["scheduling"], &[]));
+    let ctx = host_context(&state, "researcher", tool_session(&state, space.id).await);
+    let over_specified_webhook = json!({
+        "kind": "webhook",
+        "url": "https://example.test/scheduled-output",
+        "account": "ignored-by-serde"
+    });
+
+    serde_json::from_value::<DeliveryRoutingRequest>(json!({
+        "deliver_to_origin": false,
+        "explicit_targets": [over_specified_webhook.clone()]
+    }))
+    .expect("serde alone accepts fields that do not belong to the selected target variant");
+
+    let rejected = dispatcher
+        .dispatch(
+            "schedule",
+            json!({
+                "action": "create",
+                "message": "deliver to an over-specified webhook",
+                "timing": "every",
+                "every": "every 1 hours",
+                "session": "fresh",
+                "space_id": space.id,
+                "agent_id": "gateway",
+                "routing": {
+                    "explicit_targets": {
+                        "automation": over_specified_webhook
+                    }
+                }
+            }),
+            &ctx,
+            "researcher",
+        )
+        .await;
+
+    assert!(matches!(
+        rejected,
+        Err(swage_core::ToolError::InvalidParameters { .. })
+    ));
+    assert!(state.storage.list_schedules().await.unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn agent_can_create_schedules_with_each_delivery_route() {
+    let state = test_state();
+    let space = state.space_store.get_or_create_default().await.unwrap();
+    let dispatcher = dispatcher(permissions(&["scheduling"], &[]));
+    let ctx = host_context(&state, "researcher", tool_session(&state, space.id).await);
+
+    for (name, routing, persisted_routing) in routing_cases() {
+        let created = dispatcher
+            .dispatch(
+                "schedule",
+                json!({
+                    "action": "create",
+                    "message": format!("deliver through {name}"),
+                    "timing": "every",
+                    "every": "every 1 hours",
+                    "session": "fresh",
+                    "space_id": space.id,
+                    "agent_id": "gateway",
+                    "routing": routing,
+                }),
+                &ctx,
+                "researcher",
+            )
+            .await
+            .unwrap();
+        let schedule_id = created.result["schedule"]["id"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        let stored = state
+            .storage
+            .get_schedule(schedule_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            stored.delivery_routing, persisted_routing,
+            "the {name} route is persisted from the tool call"
+        );
+        assert!(matches!(
+            stored.creator,
+            ScheduleCreator::Agent { ref agent_id } if agent_id == "researcher"
+        ));
+    }
+
+    let omitted = dispatcher
+        .dispatch(
+            "schedule",
+            json!({
+                "action": "create",
+                "message": "keep the default route",
+                "timing": "every",
+                "every": "every 1 hours",
+                "session": "fresh",
+                "space_id": space.id,
+                "agent_id": "gateway",
+            }),
+            &ctx,
+            "researcher",
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        omitted.result["schedule"]["routing"],
+        json!({
+            "deliver_to_origin": false,
+            "home_target": null,
+            "explicit_targets": [],
+            "store_local_output": true,
+        }),
+        "omitting routing retains the service's local-only create default"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn agent_can_update_schedules_to_each_delivery_route() {
+    let state = test_state();
+    let space = state.space_store.get_or_create_default().await.unwrap();
+    let dispatcher = dispatcher(permissions(&["scheduling"], &[]));
+    let ctx = host_context(&state, "researcher", tool_session(&state, space.id).await);
+    let created = dispatcher
+        .dispatch(
+            "schedule",
+            json!({
+                "action": "create",
+                "message": "change my route",
+                "timing": "every",
+                "every": "every 1 hours",
+                "session": "fresh",
+                "space_id": space.id,
+                "agent_id": "gateway",
+            }),
+            &ctx,
+            "researcher",
+        )
+        .await
+        .unwrap();
+    let schedule_id = created.result["schedule"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    for (name, routing, persisted_routing) in routing_cases() {
+        dispatcher
+            .dispatch(
+                "schedule",
+                json!({
+                    "action": "update",
+                    "schedule_id": schedule_id,
+                    "routing": routing,
+                }),
+                &ctx,
+                "researcher",
+            )
+            .await
+            .unwrap();
+        let stored = state
+            .storage
+            .get_schedule(schedule_id.parse().unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            stored.delivery_routing, persisted_routing,
+            "the {name} route is persisted from the tool update"
+        );
+    }
+
+    let before_omission = state
+        .storage
+        .get_schedule(schedule_id.parse().unwrap())
+        .await
+        .unwrap()
+        .unwrap()
+        .delivery_routing;
+    dispatcher
+        .dispatch(
+            "schedule",
+            json!({
+                "action": "update",
+                "schedule_id": schedule_id,
+                "message": "route unchanged",
+            }),
+            &ctx,
+            "researcher",
+        )
+        .await
+        .unwrap();
+    let after_omission = state
+        .storage
+        .get_schedule(schedule_id.parse().unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(after_omission.delivery_routing, before_omission);
+    assert!(matches!(
+        after_omission.creator,
+        ScheduleCreator::Agent { ref agent_id } if agent_id == "researcher"
+    ));
 }
 
 #[tokio::test(flavor = "multi_thread")]

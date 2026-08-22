@@ -962,10 +962,10 @@ describe("withConversationAutoCreate", () => {
     const { store, connection, createConversation, settleCreate } =
       createWrappedStore(() => false);
 
-    store.startTurn("first message", "model-a", "researcher");
+    store.startTurn("first message", "model-a", "researcher", "high");
 
     // Dispatch must wait for the conversation to exist.
-    expect(createConversation).toHaveBeenCalledWith("model-a", "researcher");
+    expect(createConversation).toHaveBeenCalledWith("model-a", "researcher", "high");
     expect(connection.sendMessage).not.toHaveBeenCalled();
 
     settleCreate("conv-9");

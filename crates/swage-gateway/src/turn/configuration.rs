@@ -361,8 +361,41 @@ pub(crate) fn load_session_config(
     space_slug: &str,
     agent_id: &str,
 ) -> Result<swage_config::ResolvedConfig, GatewayError> {
-    let root = &state.config_root;
+    load_session_config_from_root(
+        &state.config_root,
+        state.active_config(),
+        space_slug,
+        agent_id,
+    )
+}
 
+pub(crate) fn load_session_config_from_active(
+    active_config: swage_config::ResolvedConfig,
+    space_slug: &str,
+    agent_id: &str,
+) -> Result<swage_config::ResolvedConfig, GatewayError> {
+    let root = match swage_config::discovery::resolve_root() {
+        Ok(root) => root,
+        Err(error) => {
+            tracing::warn!(
+                error = %error.kind,
+                space_slug,
+                agent_id,
+                "failed to resolve swage root; using active runtime configuration"
+            );
+            return Ok(active_config);
+        }
+    };
+
+    load_session_config_from_root(&root, active_config, space_slug, agent_id)
+}
+
+fn load_session_config_from_root(
+    root: &Path,
+    active_config: swage_config::ResolvedConfig,
+    space_slug: &str,
+    agent_id: &str,
+) -> Result<swage_config::ResolvedConfig, GatewayError> {
     let space_dir = root.join("spaces").join(space_slug);
     let space_config_exists = space_dir.join("config.toml").exists();
     let agent_config_exists = space_dir
@@ -372,7 +405,7 @@ pub(crate) fn load_session_config(
         .exists();
 
     if !space_config_exists && !agent_config_exists {
-        return Ok(state.active_config());
+        return Ok(active_config);
     }
 
     swage_config::load_resolved_config_from(root, space_slug, agent_id)
@@ -682,7 +715,7 @@ pub(crate) fn apply_dispatch_bound(
     config
 }
 
-pub(super) fn effective_session_config(
+pub(crate) fn effective_session_config(
     mut config: swage_config::ResolvedConfig,
     selected_model_id: Option<&str>,
 ) -> swage_config::ResolvedConfig {

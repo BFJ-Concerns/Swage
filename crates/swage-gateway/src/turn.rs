@@ -586,7 +586,7 @@ pub(crate) async fn process_turn_with_existing_turn(
     subscription: Arc<Mutex<SubscriptionState>>,
     output_schema_override: Option<serde_json::Value>,
     max_output_retries_override: Option<u32>,
-    effort_override: Option<String>,
+    effort_override: Option<swage_core::Effort>,
     cancellation_override: Option<CancellationToken>,
     existing_turn_id: Option<Uuid>,
     attendance: TurnAttendance,
@@ -624,7 +624,7 @@ pub(crate) async fn process_turn_with_composition(
     subscription: Arc<Mutex<SubscriptionState>>,
     output_schema_override: Option<serde_json::Value>,
     max_output_retries_override: Option<u32>,
-    effort_override: Option<String>,
+    effort_override: Option<swage_core::Effort>,
     cancellation_override: Option<CancellationToken>,
     existing_turn_id: Option<Uuid>,
     attendance: TurnAttendance,
@@ -1323,6 +1323,26 @@ pub(crate) async fn process_turn_with_composition(
                 )));
             }
         };
+        let effort = match effort_override {
+            Some(effort) => Some(effort),
+            None => session
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("effort"))
+                .cloned()
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(|error| {
+                    GatewayError::ConfigError(format!("session effort is invalid: {error}"))
+                })?
+                .or_else(|| {
+                    config
+                        .models
+                        .entries
+                        .get(&config.models.default)
+                        .and_then(|model| model.default_effort)
+                }),
+        };
         let turn_request = TurnRequest {
             execution: swage_agent::context::TurnExecutionContext {
                 session_id,
@@ -1334,7 +1354,7 @@ pub(crate) async fn process_turn_with_composition(
             assembled_context: assembled_messages,
             parent_turn_id: None,
             existing_turn_id: Some(prepared_turn_id),
-            effort: effort_override,
+            effort,
             cancellation_token: cancel_token,
         };
         tokio::spawn(async move { agent.process_turn_streaming(turn_request, event_tx).await })
