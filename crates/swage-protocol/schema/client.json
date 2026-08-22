@@ -2128,13 +2128,22 @@
       }
     },
     "ProviderProtocol": {
-      "type": "string",
-      "enum": [
-        "openai",
-        "anthropic",
-        "google",
-        "openrouter",
-        "codex"
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "openai",
+            "anthropic",
+            "google",
+            "openrouter",
+            "codex"
+          ]
+        },
+        {
+          "description": "The OpenAI Responses API — the envelope GPT-family models are\naddressed with by their native harness.",
+          "type": "string",
+          "const": "openai-responses"
+        }
       ]
     },
     "ProviderSettings": {
@@ -4779,6 +4788,98 @@
         "entry"
       ]
     },
+    "WorkflowHandoverEvent": {
+      "description": "One pending-queue event carried in the handover.",
+      "type": "object",
+      "properties": {
+        "delivery": {
+          "$ref": "#/$defs/WorkflowHandoverEventDelivery"
+        },
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "journal_entry_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "seq": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "id",
+        "seq",
+        "kind",
+        "journal_entry_id",
+        "delivery"
+      ]
+    },
+    "WorkflowHandoverEventDelivery": {
+      "description": "A queued run event's standing relative to the failed call.",
+      "type": "string",
+      "enum": [
+        "delivered_to_failed_call",
+        "pending"
+      ]
+    },
+    "WorkflowHandoverFailedCall": {
+      "description": "The failed call as the journal recorded it.",
+      "type": "object",
+      "properties": {
+        "error": {
+          "type": "string"
+        },
+        "journal_entry_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "kind": {
+          "$ref": "#/$defs/WorkflowJournalEntryKind"
+        },
+        "label": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "seq": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "journal_entry_id",
+        "seq",
+        "kind",
+        "error"
+      ]
+    },
+    "WorkflowHandoverFailedCallRef": {
+      "description": "The failed call's bare identity, for when the journal could not be read\nback.",
+      "type": "object",
+      "properties": {
+        "journal_entry_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "seq": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "journal_entry_id",
+        "seq"
+      ]
+    },
     "WorkflowJournalEntry": {
       "type": "object",
       "properties": {
@@ -4940,7 +5041,16 @@
           ]
         },
         "final_output": true,
-        "handover": true,
+        "handover": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkflowRunHandover"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "id": {
           "type": "string",
           "format": "uuid"
@@ -5082,6 +5192,108 @@
       },
       "required": [
         "surface"
+      ]
+    },
+    "WorkflowRunHandover": {
+      "description": "The durable account a failed run leaves behind: what stopped it, which\ncall failed, and where the pending event queue stood, so whoever picks\nthe work up starts from the record instead of a re-run.",
+      "oneOf": [
+        {
+          "description": "An attributed agent-call failure stopped the run.",
+          "type": "object",
+          "properties": {
+            "classification": {
+              "type": "string",
+              "const": "interrupted"
+            },
+            "events": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/WorkflowHandoverEvent"
+              }
+            },
+            "events_delivered_to_failed_call": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "events_pending": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "failed_call": {
+              "$ref": "#/$defs/WorkflowHandoverFailedCall"
+            },
+            "failure": {
+              "type": "string"
+            },
+            "last_journal_seq": {
+              "description": "Highest journal seq at interruption — where replay would resume.",
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "classification",
+            "failure",
+            "failed_call",
+            "last_journal_seq",
+            "events_delivered_to_failed_call",
+            "events_pending",
+            "events"
+          ]
+        },
+        {
+          "description": "The run failed without an attributable agent-call identity.",
+          "type": "object",
+          "properties": {
+            "classification": {
+              "type": "string",
+              "const": "interrupted_unattributed"
+            },
+            "failure": {
+              "type": "string"
+            },
+            "terminal_error": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "classification",
+            "failure"
+          ]
+        },
+        {
+          "description": "The journal read-back failed for a known agent call, so only its\nidentity could be recovered.",
+          "type": "object",
+          "properties": {
+            "classification": {
+              "type": "string",
+              "const": "reconstruction_failed"
+            },
+            "failed_call": {
+              "$ref": "#/$defs/WorkflowHandoverFailedCallRef"
+            },
+            "failure": {
+              "type": "string"
+            },
+            "terminal_error": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "classification",
+            "failure",
+            "failed_call"
+          ]
+        }
       ]
     },
     "WorkflowRunListResponse": {

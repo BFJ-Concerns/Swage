@@ -11,6 +11,10 @@ use ts_rs::TS;
 #[serde(rename_all = "lowercase")]
 pub enum ProviderProtocol {
     OpenAi,
+    /// The OpenAI Responses API — the envelope GPT-family models are
+    /// addressed with by their native harness.
+    #[serde(rename = "openai-responses")]
+    OpenAiResponses,
     Anthropic,
     Google,
     OpenRouter,

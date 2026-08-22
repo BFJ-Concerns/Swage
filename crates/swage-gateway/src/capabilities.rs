@@ -25,6 +25,7 @@ impl WorkflowCapabilities {
     pub fn for_protocol(protocol: swage_config::Protocol) -> Self {
         match protocol {
             swage_config::Protocol::OpenAi
+            | swage_config::Protocol::OpenAiResponses
             | swage_config::Protocol::OpenRouter
             | swage_config::Protocol::Anthropic
             | swage_config::Protocol::Google => Self {
