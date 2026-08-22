@@ -538,6 +538,7 @@ fn discovery_finds_spaces_and_agents() {
     let proj_a = root.join("spaces/alpha/agents");
     fs::create_dir_all(proj_a.join("coder")).unwrap();
     fs::create_dir_all(proj_a.join("reviewer")).unwrap();
+    fs::create_dir_all(proj_a.join("__workflow_ephemeral__")).unwrap();
 
     let proj_b = root.join("spaces/beta/agents");
     fs::create_dir_all(proj_b.join("assistant")).unwrap();
@@ -557,6 +558,7 @@ fn discovery_finds_spaces_and_agents() {
     let alpha = spaces.iter().find(|p| p.name == "alpha").unwrap();
     assert!(alpha.agents.contains(&"coder".to_string()));
     assert!(alpha.agents.contains(&"reviewer".to_string()));
+    assert!(!alpha.agents.contains(&"__workflow_ephemeral__".to_string()));
 
     // Beta has one agent
     let beta = spaces.iter().find(|p| p.name == "beta").unwrap();

@@ -1107,7 +1107,7 @@ async fn run_ephemeral_agent_call(
 ) -> Result<AgentCallResult, String> {
     // This identity deliberately cannot name an agent definition: definition
     // ids exclude underscores. Bare workflow workers therefore receive the
-    // ambient session configuration, bounded by their dispatch ancestry,
+    // inherited session configuration, bounded by their dispatch ancestry,
     // without inventing or resolving a default definition.
     const BARE_WORKFLOW_AGENT_ID: &str = "__workflow_ephemeral__";
 

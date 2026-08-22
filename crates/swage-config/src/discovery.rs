@@ -2,6 +2,8 @@ use crate::error::{ConfigProblem, ConfigProblemKind};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+const RESERVED_WORKFLOW_AGENT_DIRECTORY: &str = "__workflow_ephemeral__";
+
 /// A space discovered by scanning the Swage directory skeleton.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DiscoveredSpace {
@@ -71,6 +73,9 @@ fn subdirectory_names(dir: &Path) -> Vec<String> {
 /// Scan `{space_dir}/agents/` for subdirectories.
 pub fn discover_agents(space_dir: &Path) -> Vec<String> {
     subdirectory_names(&space_dir.join("agents"))
+        .into_iter()
+        .filter(|name| name != RESERVED_WORKFLOW_AGENT_DIRECTORY)
+        .collect()
 }
 
 /// Scan `{root}/spaces/` for subdirectories.
