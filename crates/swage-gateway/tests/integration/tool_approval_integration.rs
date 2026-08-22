@@ -414,7 +414,7 @@ async fn tool_approval_reject_delivers_feedback() {
     .await;
 
     let approval_event =
-        ws_wait_for_event(&mut stream, "approval_required", Duration::from_secs(5))
+        ws_wait_for_event(&mut stream, "approval_required", WEBSOCKET_EVENT_DEADLINE)
             .await
             .expect("should receive ApprovalRequired");
     let approval_id = approval_event["approval_id"].as_str().unwrap();
@@ -431,13 +431,13 @@ async fn tool_approval_reject_delivers_feedback() {
     )
     .await;
 
-    let confirmed = ws_wait_for_event(&mut stream, "approval_confirmed", Duration::from_secs(5))
+    let confirmed = ws_wait_for_event(&mut stream, "approval_confirmed", WEBSOCKET_EVENT_DEADLINE)
         .await
         .expect("should receive ApprovalConfirmed");
     assert_eq!(confirmed["decision"], "rejected");
 
     // Turn should still complete — agent adjusted after rejection feedback.
-    let complete = ws_wait_for_event(&mut stream, "turn_complete", Duration::from_secs(5))
+    let complete = ws_wait_for_event(&mut stream, "turn_complete", WEBSOCKET_EVENT_DEADLINE)
         .await
         .expect("turn should complete after rejection (agent adjusts)");
     assert!(complete["turn_id"].is_string());
@@ -488,18 +488,18 @@ async fn tool_approval_timeout_reject_policy() {
     .await;
 
     // Wait for ApprovalRequired...
-    let _approval = ws_wait_for_event(&mut stream, "approval_required", Duration::from_secs(5))
+    let _approval = ws_wait_for_event(&mut stream, "approval_required", WEBSOCKET_EVENT_DEADLINE)
         .await
         .expect("should receive ApprovalRequired");
 
     // Don't respond — let it timeout.
-    let expired = ws_wait_for_event(&mut stream, "approval_expired", Duration::from_secs(5))
+    let expired = ws_wait_for_event(&mut stream, "approval_expired", WEBSOCKET_EVENT_DEADLINE)
         .await
         .expect("should receive ApprovalExpired after timeout");
     assert_eq!(expired["timeout_policy"], "reject");
 
     // Turn should complete (reject policy = agent continues with feedback).
-    let complete = ws_wait_for_event(&mut stream, "turn_complete", Duration::from_secs(5))
+    let complete = ws_wait_for_event(&mut stream, "turn_complete", WEBSOCKET_EVENT_DEADLINE)
         .await
         .expect("turn should complete after timeout with reject policy");
     assert!(complete["turn_id"].is_string());
@@ -538,12 +538,12 @@ async fn tool_approval_timeout_interrupt_policy() {
     )
     .await;
 
-    let _approval = ws_wait_for_event(&mut stream, "approval_required", Duration::from_secs(5))
+    let _approval = ws_wait_for_event(&mut stream, "approval_required", WEBSOCKET_EVENT_DEADLINE)
         .await
         .expect("should receive ApprovalRequired");
 
     // Don't respond — let it timeout with interrupt policy.
-    let expired = ws_wait_for_event(&mut stream, "approval_expired", Duration::from_secs(5))
+    let expired = ws_wait_for_event(&mut stream, "approval_expired", WEBSOCKET_EVENT_DEADLINE)
         .await
         .expect("should receive ApprovalExpired");
     assert_eq!(expired["timeout_policy"], "interrupt");
@@ -606,9 +606,10 @@ async fn pending_approval_survives_reconnect() {
         )
         .await;
 
-        let _approval = ws_wait_for_event(&mut stream, "approval_required", Duration::from_secs(5))
-            .await
-            .expect("should receive ApprovalRequired");
+        let _approval =
+            ws_wait_for_event(&mut stream, "approval_required", WEBSOCKET_EVENT_DEADLINE)
+                .await
+                .expect("should receive ApprovalRequired");
 
         // Close the WebSocket without responding to the approval.
         drop(sink);
@@ -621,7 +622,7 @@ async fn pending_approval_survives_reconnect() {
     // Reconnect — the pending approval should be re-emitted.
     let (mut sink2, mut stream2) = connect_ws(addr, conversation_id).await;
 
-    let re_emitted = ws_wait_for_event(&mut stream2, "approval_required", Duration::from_secs(5))
+    let re_emitted = ws_wait_for_event(&mut stream2, "approval_required", WEBSOCKET_EVENT_DEADLINE)
         .await
         .expect("pending approval should be re-emitted on reconnect");
 
@@ -637,9 +638,10 @@ async fn pending_approval_survives_reconnect() {
     )
     .await;
 
-    let _confirmed = ws_wait_for_event(&mut stream2, "approval_confirmed", Duration::from_secs(5))
-        .await
-        .expect("should receive ApprovalConfirmed after reconnect approval");
+    let _confirmed =
+        ws_wait_for_event(&mut stream2, "approval_confirmed", WEBSOCKET_EVENT_DEADLINE)
+            .await
+            .expect("should receive ApprovalConfirmed after reconnect approval");
 }
 
 /// Journey: Hook returns RequestApproval → approval with hook's custom prompt.
