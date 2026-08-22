@@ -4542,9 +4542,67 @@ async fn remove_active_workflow_generation(
     run_id: Uuid,
     generation: &CancellationToken,
 ) {
+    #[cfg(test)]
+    let cleanup_pause = workflow_cleanup_test_hook::pause_once(run_id).await;
     let mut active = active.lock().await;
     if active.get(&run_id) == Some(generation) {
         active.remove(&run_id);
+    }
+    #[cfg(test)]
+    if let Some(pause) = cleanup_pause {
+        pause.finished.add_permits(1);
+    }
+}
+
+#[cfg(test)]
+mod workflow_cleanup_test_hook {
+    use std::{
+        collections::HashMap,
+        sync::{Arc, Mutex, OnceLock},
+    };
+
+    use tokio::sync::Semaphore;
+    use uuid::Uuid;
+
+    pub(super) struct Pause {
+        pub(super) entered: Semaphore,
+        pub(super) release: Semaphore,
+        pub(super) finished: Semaphore,
+    }
+
+    fn pauses() -> &'static Mutex<HashMap<Uuid, Arc<Pause>>> {
+        static PAUSES: OnceLock<Mutex<HashMap<Uuid, Arc<Pause>>>> = OnceLock::new();
+        PAUSES.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    pub(super) fn install(run_id: Uuid) -> Arc<Pause> {
+        let pause = Arc::new(Pause {
+            entered: Semaphore::new(0),
+            release: Semaphore::new(0),
+            finished: Semaphore::new(0),
+        });
+        pauses()
+            .lock()
+            .expect("workflow cleanup test-hook registry")
+            .insert(run_id, Arc::clone(&pause));
+        pause
+    }
+
+    pub(super) async fn pause_once(run_id: Uuid) -> Option<Arc<Pause>> {
+        let pause = pauses()
+            .lock()
+            .expect("workflow cleanup test-hook registry")
+            .remove(&run_id);
+        if let Some(pause) = &pause {
+            pause.entered.add_permits(1);
+            pause
+                .release
+                .acquire()
+                .await
+                .expect("workflow cleanup test hook remains open")
+                .forget();
+        }
+        pause
     }
 }
 
@@ -10281,106 +10339,71 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn external_post_relaunch_keeps_the_replacement_cancellation_token() {
-        let (state, storage) = workflow_test_state();
-        let space = storage.get_or_create_default().await.expect("space");
+        let provider = Arc::new(ScriptedGateProvider {
+            replies: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            calls: AtomicUsize::new(0),
+        });
+        let (storage, state, run) = event_gate_fixture(provider).await;
         let source = r#"
             const answer = awaitEvent({ kinds: ["operator.decision"] });
-            for (let index = 0; index < 256; index += 1) log(`queued-${index}`);
             const resolved = await answer;
             await wait({ timerMs: 5_000 });
             return resolved.payload;
         "#;
-        let Json(started) = start_inline_run(
-            State(state.clone()),
-            Path(space.id),
-            Json(StartInlineWorkflowRunRequest {
-                source: source.into(),
-                args: Value::Null,
-                budget: None,
-            }),
-        )
-        .await
-        .expect("start awaiting run");
-        let original = tokio::time::timeout(std::time::Duration::from_secs(2), async {
-            loop {
-                let run = storage
-                    .get_workflow_run(started.id)
-                    .await
-                    .expect("get awaiting run")
-                    .expect("awaiting run");
-                if run.state == "parked"
-                    && let Some(token) = state
-                        .active_workflow_runs
-                        .lock()
-                        .await
-                        .get(&started.id)
-                        .cloned()
-                {
-                    break token;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("observe the parked generation before its cleanup task runs");
+        let cleanup_pause = workflow_cleanup_test_hook::install(run.id);
+        launch_existing_run(state.clone(), run.clone(), source.into(), None)
+            .await
+            .expect("start awaiting run");
+        cleanup_pause
+            .entered
+            .acquire()
+            .await
+            .expect("workflow cleanup test hook remains open")
+            .forget();
+        let original = state
+            .active_workflow_runs
+            .lock()
+            .await
+            .get(&run.id)
+            .cloned()
+            .expect("the original generation remains installed while cleanup is paused");
 
         let Json(posted) = post_operator_run_event(
             State(state.clone()),
-            Path(started.id),
+            Path(run.id),
             Json(PostWorkflowRunEventRequest {
                 kind: "operator.decision".into(),
                 payload: serde_json::json!({"verdict": "accept"}),
             }),
         )
         .await
-        .expect("post event and relaunch parked run");
+        .expect("post event and relaunch while the parked generation still owns its token");
         assert!(posted.wake_provisioned);
 
-        let replacement = tokio::time::timeout(std::time::Duration::from_secs(2), async {
-            loop {
-                if let Some(token) = state
-                    .active_workflow_runs
-                    .lock()
-                    .await
-                    .get(&started.id)
-                    .cloned()
-                    && token != original
-                {
-                    break token;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("the external post installs a replacement generation");
+        let replacement = state
+            .active_workflow_runs
+            .lock()
+            .await
+            .get(&run.id)
+            .cloned()
+            .expect("the external post installs a replacement generation");
+        assert_ne!(replacement, original);
 
-        tokio::time::timeout(std::time::Duration::from_secs(2), async {
-            loop {
-                if storage
-                    .list_audit_events()
-                    .await
-                    .expect("list workflow audit events")
-                    .iter()
-                    .any(|event| {
-                        event.entity_id == started.id.to_string() && event.event_kind == "parked"
-                    })
-                {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("the original parked generation reaches its cleanup path");
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        cleanup_pause.release.add_permits(1);
+        cleanup_pause
+            .finished
+            .acquire()
+            .await
+            .expect("workflow cleanup test hook remains open")
+            .forget();
         assert_eq!(
-            state.active_workflow_runs.lock().await.get(&started.id),
+            state.active_workflow_runs.lock().await.get(&run.id),
             Some(&replacement),
             "the original generation must not remove the relaunched run's token"
         );
 
         replacement.cancel();
-        wait_for_run_state(&storage, started.id, "cancelled").await;
+        wait_for_run_state(&storage, run.id, "cancelled").await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
