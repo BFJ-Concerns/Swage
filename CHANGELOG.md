@@ -37,6 +37,7 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- Configured workflow token ceilings no longer prevent permitted parallel agent calls from sharing the working allowance while preserving the closing reserve.
 - A delayed not-found response for an earlier conversation no longer clears a conversation selected while that check was pending.
 - Browser back and forward navigation now restores the active conversation route when loading the destination fails.
 - Provider fallback catalogues are current, attendance audit records distinguish interactive turns, and the context inspector identifies per-element token counts as non-additive estimates.
