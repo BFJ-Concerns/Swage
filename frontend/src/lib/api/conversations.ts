@@ -9,6 +9,7 @@ import type {
   ConversationResponse,
 } from "../types";
 import type { CreateConversationRequest } from "../protocol/CreateConversationRequest";
+import type { Effort } from "../protocol/Effort";
 
 // Base URL prepended to every request. Defaults to "" so requests resolve to
 // the same origin — the Vite dev proxy then forwards /api/* to the gateway.
@@ -76,10 +77,12 @@ export async function createConversation(
   spaceId: string,
   selectedModelId?: string | null,
   agentId?: string | null,
+  effort?: Effort | null,
 ): Promise<ConversationResponse> {
   const body: CreateConversationRequest = {
     ...(selectedModelId ? { selected_model_id: selectedModelId } : {}),
     ...(agentId ? { agent_id: agentId } : {}),
+    ...(effort ? { effort } : {}),
   };
   const response = await request(
     `/api/spaces/${spaceId}/sessions`,
