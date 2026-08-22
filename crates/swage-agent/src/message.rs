@@ -154,7 +154,7 @@ pub struct TurnRequest {
     /// turn record inside the agent runtime.
     pub existing_turn_id: Option<Uuid>,
     /// Per-turn provider reasoning effort override.
-    pub effort: Option<String>,
+    pub effort: Option<swage_core::Effort>,
     /// Cooperative cancellation token — the gateway signals this when the client
     /// disconnects or a shutdown is requested.
     pub cancellation_token: CancellationToken,

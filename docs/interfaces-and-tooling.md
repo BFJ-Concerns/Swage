@@ -27,7 +27,13 @@ swage gateway start --host 192.0.2.30 --port 3000
 ```
 
 CLI flags take precedence over `config.toml`. Both `--host` and `--port` are
-accepted by `gateway start`, `gateway restart`, and `gateway install`.
+accepted by `gateway start`, `gateway restart`, and `gateway set-defaults`.
+The last command saves lifecycle defaults which `start`, `restart`, `status`,
+and `stop` reuse; `gateway clear-defaults` removes them.
+
+Detached starts write output to the data root's `gateway.log` and print that
+destination after startup. Pass `--log-file PATH` to choose another file, or
+`--foreground` to leave the process and output attached to the terminal.
 
 ### Bind address resolution
 

@@ -127,10 +127,10 @@ async fn main() {
     let result = match cli.command {
         Some(Command::Run(run_args)) => swage_gateway::cli::run::run(&run_args).await,
         Some(Command::Gateway(args)) => match args.command {
-            GatewayCommand::Install(install_args) => {
+            GatewayCommand::SetDefaults(install_args) => {
                 swage_gateway::cli::install::install(&install_args).await
             }
-            GatewayCommand::Uninstall(uninstall_args) => {
+            GatewayCommand::ClearDefaults(uninstall_args) => {
                 swage_gateway::cli::install::uninstall(&uninstall_args).await
             }
             GatewayCommand::Start(start_args) => swage_gateway::cli::start::run(&start_args).await,
@@ -140,8 +140,8 @@ async fn main() {
             GatewayCommand::Stop(stop_args) => swage_gateway::cli::stop::run(&stop_args).await,
             GatewayCommand::Status => swage_gateway::cli::status::run().await,
         },
-        Some(Command::Tui(tui_args)) => swage_gateway::cli::tui::run(&tui_args).await,
-        Some(Command::Completions(comp_args)) => {
+        Some(Command::Chat(tui_args)) => swage_gateway::cli::tui::run(&tui_args).await,
+        Some(Command::GenerateCompletion(comp_args)) => {
             swage_gateway::cli::completions::run(&comp_args);
             Ok(())
         }
@@ -285,8 +285,8 @@ mod tests {
 
     #[test]
     fn completions_dispatches_to_correct_variant() {
-        let cli = Cli::try_parse_from(["swage", "completions", "bash"]).unwrap();
-        assert!(matches!(cli.command, Some(Command::Completions(_))));
+        let cli = Cli::try_parse_from(["swage", "generate-completion", "bash"]).unwrap();
+        assert!(matches!(cli.command, Some(Command::GenerateCompletion(_))));
     }
 
     #[test]

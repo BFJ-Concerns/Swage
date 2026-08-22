@@ -357,6 +357,14 @@ pub(crate) fn load_session_config(
     space_slug: &str,
     agent_id: &str,
 ) -> Result<swage_config::ResolvedConfig, GatewayError> {
+    load_session_config_from_active(state.active_config(), space_slug, agent_id)
+}
+
+pub(crate) fn load_session_config_from_active(
+    active_config: swage_config::ResolvedConfig,
+    space_slug: &str,
+    agent_id: &str,
+) -> Result<swage_config::ResolvedConfig, GatewayError> {
     let root = match swage_config::discovery::resolve_root() {
         Ok(root) => root,
         Err(error) => {
@@ -366,7 +374,7 @@ pub(crate) fn load_session_config(
                 agent_id,
                 "failed to resolve swage root; using active runtime configuration"
             );
-            return Ok(state.active_config());
+            return Ok(active_config);
         }
     };
 
@@ -379,7 +387,7 @@ pub(crate) fn load_session_config(
         .exists();
 
     if !space_config_exists && !agent_config_exists {
-        return Ok(state.active_config());
+        return Ok(active_config);
     }
 
     swage_config::load_resolved_config_from(&root, space_slug, agent_id)
@@ -689,7 +697,7 @@ pub(crate) fn apply_dispatch_bound(
     config
 }
 
-pub(super) fn effective_session_config(
+pub(crate) fn effective_session_config(
     mut config: swage_config::ResolvedConfig,
     selected_model_id: Option<&str>,
 ) -> swage_config::ResolvedConfig {

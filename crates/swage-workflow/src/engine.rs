@@ -1456,10 +1456,16 @@ mod tests {
         assert_eq!(requests.len(), 2);
         assert_eq!(requests[0].agent, None);
         assert_eq!(requests[0].label.as_deref(), Some("propose:0"));
-        assert_eq!(requests[0].effort.as_deref(), Some("low"));
+        assert_eq!(
+            requests[0].effort,
+            Some(swage_protocol::client::settings::Effort::Low)
+        );
         assert_eq!(requests[1].agent, None);
         assert_eq!(requests[1].label.as_deref(), Some("reduce"));
-        assert_eq!(requests[1].effort.as_deref(), Some("medium"));
+        assert_eq!(
+            requests[1].effort,
+            Some(swage_protocol::client::settings::Effort::Medium)
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
