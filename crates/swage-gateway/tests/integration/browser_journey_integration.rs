@@ -977,6 +977,7 @@ async fn spawn_probe_browser(
         .arg("--headless=new")
         .arg(format!("--user-data-dir={}", profile.display()))
         .arg("--disable-gpu")
+        .arg("--password-store=basic")
         .arg("--force-renderer-accessibility")
         .arg("--no-first-run")
         .arg("--no-default-browser-check")

@@ -5,8 +5,14 @@ import path from "node:path";
 export default defineConfig({
   plugins: [svelte()],
   test: {
+    include: ["src/**/*.test.ts"],
     // Use jsdom so Svelte components can mount and query the DOM in tests.
     environment: "jsdom",
+    environmentOptions: {
+      jsdom: {
+        url: "http://localhost/",
+      },
+    },
     // Alias svelte to the browser client entry so mount() is available.
     // Without this, vitest resolves to index-server.js (the default export),
     // which throws lifecycle_function_unavailable on mount().

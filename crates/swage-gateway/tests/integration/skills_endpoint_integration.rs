@@ -14,8 +14,6 @@ use swage_gateway::state::AppState;
 use swage_storage::store::SpaceStore;
 use swage_storage::{SqliteStorage, model::NewSpace};
 
-use crate::support::ProcessEnvGuard;
-
 // ---------------------------------------------------------------------------
 // Stub provider — skills tests don't exercise LLM streaming
 // ---------------------------------------------------------------------------
@@ -55,15 +53,16 @@ impl swage_provider::LlmProvider for StubProvider {
 // ---------------------------------------------------------------------------
 
 /// Build a router backed by in-memory SQLite storage.
-fn make_router() -> (Router, Arc<SqliteStorage>) {
+fn make_router(config_root: &std::path::Path) -> (Router, Arc<SqliteStorage>) {
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-    let state = AppState::new(
+    let state = AppState::new_with_config_root(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
         Arc::new(StubProvider),
         swage_config::ResolvedConfig::default(),
         swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
         None,
+        config_root.to_path_buf(),
     );
     let router = build_router(state);
     (router, storage)
@@ -120,7 +119,8 @@ fn create_skill(base_dir: &std::path::Path, name: &str, description: &str, tools
 /// No file-system setup needed — this tests only the storage lookup path.
 #[tokio::test(flavor = "multi_thread")]
 async fn unknown_space_returns_404() {
-    let (router, _storage) = make_router();
+    let root = tempfile::TempDir::new().unwrap();
+    let (router, _storage) = make_router(root.path());
     let unknown_id = uuid::Uuid::new_v4();
 
     let (status, body) = get(&router, &format!("/api/skills?space_id={unknown_id}")).await;
@@ -131,11 +131,14 @@ async fn unknown_space_returns_404() {
 
 /// Known space and a fresh config root expose only the compiled catalogue.
 ///
-/// When `SWAGE_HOME` points at a fresh directory, the handler has no skills
-/// to discover and should degrade gracefully rather than returning an error.
+/// When application state retains a fresh directory, the handler has no
+/// authored skills to discover and should return the compiled catalogue.
 #[tokio::test(flavor = "multi_thread")]
 async fn known_space_fresh_config_root_returns_shipped_catalogue() {
-    let (router, storage) = make_router();
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("fresh-swage-root");
+    std::fs::create_dir(&root).unwrap();
+    let (router, storage) = make_router(&root);
 
     // Create a space in storage — it exists but has no config directory.
     let space = storage
@@ -146,10 +149,6 @@ async fn known_space_fresh_config_root_returns_shipped_catalogue() {
         .await
         .unwrap();
 
-    let tmp = tempfile::TempDir::new().unwrap();
-    let root = tmp.path().join("fresh-swage-root");
-    let mut env_guard = ProcessEnvGuard::new();
-    env_guard.set_swage_home(&root);
     let (status, body) = get(&router, &format!("/api/skills?space_id={}", space.id)).await;
 
     assert_eq!(status, StatusCode::OK);
@@ -173,16 +172,14 @@ async fn known_space_fresh_config_root_returns_shipped_catalogue() {
     );
     assert!(skills.iter().all(|skill| skill["shipped"] == true));
     assert!(skills.iter().all(|skill| skill["id"].as_str().is_some()));
-    assert!(root.is_dir(), "skill discovery should auto-create the root");
 }
 
 /// Skills at global level appear with level="global".
 #[tokio::test(flavor = "multi_thread")]
 async fn global_skills_appear_in_listing() {
-    let (router, storage) = make_router();
-
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path();
+    let (router, storage) = make_router(root);
 
     // Global skill: {root}/skills/formatter/SKILL.md
     create_skill(root, "formatter", "Format code according to standards", &[]);
@@ -195,8 +192,6 @@ async fn global_skills_appear_in_listing() {
         .await
         .unwrap();
 
-    let mut env_guard = ProcessEnvGuard::new();
-    env_guard.set_swage_home(root);
     let (status, body) = get(&router, &format!("/api/skills?space_id={}", space.id)).await;
 
     assert_eq!(status, StatusCode::OK, "response: {body}");
@@ -216,10 +211,9 @@ async fn global_skills_appear_in_listing() {
 /// Space-level skills appear with level="space".
 #[tokio::test(flavor = "multi_thread")]
 async fn space_skills_appear_in_listing() {
-    let (router, storage) = make_router();
-
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path();
+    let (router, storage) = make_router(root);
 
     let space = storage
         .create(NewSpace {
@@ -238,8 +232,6 @@ async fn space_skills_appear_in_listing() {
         &["read_file"],
     );
 
-    let mut env_guard = ProcessEnvGuard::new();
-    env_guard.set_swage_home(root);
     let (status, body) = get(&router, &format!("/api/skills?space_id={}", space.id)).await;
 
     assert_eq!(status, StatusCode::OK, "response: {body}");
@@ -260,10 +252,9 @@ async fn space_skills_appear_in_listing() {
 /// Agent-level skills have always_active=true.
 #[tokio::test(flavor = "multi_thread")]
 async fn agent_skills_have_always_active_true() {
-    let (router, storage) = make_router();
-
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path();
+    let (router, storage) = make_router(root);
 
     let space = storage
         .create(NewSpace {
@@ -281,8 +272,6 @@ async fn agent_skills_have_always_active_true() {
         .join("gateway");
     create_skill(&agent_dir, "persona", "Core personality and behaviour", &[]);
 
-    let mut env_guard = ProcessEnvGuard::new();
-    env_guard.set_swage_home(root);
     let (status, body) = get(
         &router,
         &format!("/api/skills?space_id={}&agent_id=gateway", space.id),
@@ -307,10 +296,9 @@ async fn agent_skills_have_always_active_true() {
 /// Only the space version should appear; the listing must not contain duplicates.
 #[tokio::test(flavor = "multi_thread")]
 async fn space_skill_shadows_global() {
-    let (router, storage) = make_router();
-
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path();
+    let (router, storage) = make_router(root);
 
     let space = storage
         .create(NewSpace {
@@ -332,8 +320,6 @@ async fn space_skill_shadows_global() {
         &["read_file", "search"],
     );
 
-    let mut env_guard = ProcessEnvGuard::new();
-    env_guard.set_swage_home(root);
     let (status, body) = get(&router, &format!("/api/skills?space_id={}", space.id)).await;
 
     assert_eq!(status, StatusCode::OK, "response: {body}");
@@ -357,9 +343,9 @@ async fn space_skill_shadows_global() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn authored_skill_shadows_same_named_shipped_entry() {
-    let (router, storage) = make_router();
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path();
+    let (router, storage) = make_router(root);
     let space = storage
         .create(NewSpace {
             name: "shadow-shipped".into(),
@@ -369,8 +355,6 @@ async fn authored_skill_shadows_same_named_shipped_entry() {
         .unwrap();
     create_skill(root, "commission", "Operator commission", &[]);
 
-    let mut env_guard = ProcessEnvGuard::new();
-    env_guard.set_swage_home(root);
     let (status, body) = get(&router, &format!("/api/skills?space_id={}", space.id)).await;
 
     assert_eq!(status, StatusCode::OK, "response: {body}");
@@ -389,10 +373,9 @@ async fn authored_skill_shadows_same_named_shipped_entry() {
 /// Sorting: agent skills appear first, then space, then global; within each level alphabetically.
 #[tokio::test(flavor = "multi_thread")]
 async fn skills_are_sorted_by_level_then_alphabetically() {
-    let (router, storage) = make_router();
-
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path();
+    let (router, storage) = make_router(root);
 
     let space = storage
         .create(NewSpace {
@@ -418,8 +401,6 @@ async fn skills_are_sorted_by_level_then_alphabetically() {
         .join("gw");
     create_skill(&agent_dir, "persona", "Agent persona skill", &[]);
 
-    let mut env_guard = ProcessEnvGuard::new();
-    env_guard.set_swage_home(root);
     let (status, body) = get(
         &router,
         &format!("/api/skills?space_id={}&agent_id=gw", space.id),

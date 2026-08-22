@@ -17,9 +17,9 @@
 //! The script body runs with three globals and communicates by calling `add`:
 //!
 //! - `elements` — the turn's elements, read-only:
-//!   `[{ name, priority, source, tokenCount, messages, render }]` where
-//!   `messages` is `[{ role, text }]`. Calling an element's non-enumerable
-//!   `render()` returns a copy of the element whose messages have every
+//!   `[{ name, priority, source, tokenCount, messages, render? }]` where
+//!   `messages` is `[{ role, text }]`. Template-backed elements expose a
+//!   non-enumerable `render()` that returns a copy whose messages have every
 //!   `{{name}}` slot replaced from the current session values; absent values
 //!   become `⟦unset:name⟧`.
 //! - `ctx` — read-only assembly context. `ctx.variable(name)` returns the
@@ -237,6 +237,7 @@ fn run_script(
                     "priority": element.priority(),
                     "source": element.source(),
                     "tokenCount": element.token_count(tokeniser),
+                    "rendersSessionValues": element.renders_session_values(),
                     "messages": element
                         .content()
                         .iter()
@@ -310,16 +311,19 @@ fn run_script(
             const renderedValueFor = name => valueFor(name) ?? `⟦unset:${name}⟧`;
             globalThis.ctx = Object.freeze({ variable: valueFor });
             for (const element of globalThis.elements) {
-                Object.defineProperty(element, "render", {
-                    enumerable: false,
-                    value: () => ({
-                        ...element,
-                        messages: element.messages.map(message => ({
-                            ...message,
-                            text: message.text.replace(slot, (_match, name) => renderedValueFor(name)),
-                        })),
-                    }),
-                });
+                if (element.rendersSessionValues) {
+                    Object.defineProperty(element, "render", {
+                        enumerable: false,
+                        value: () => ({
+                            ...element,
+                            messages: element.messages.map(message => ({
+                                ...message,
+                                text: message.text.replace(slot, (_match, name) => renderedValueFor(name)),
+                            })),
+                        }),
+                    });
+                }
+                delete element.rendersSessionValues;
                 Object.freeze(element.messages);
                 Object.freeze(element);
             }
@@ -444,12 +448,12 @@ mod tests {
     fn element_render_substitutes_current_values_and_marks_missing_slots() {
         let variables = BTreeMap::from([("task".to_string(), "audit storage".to_string())]);
         let elements: Vec<Box<dyn ContextElement>> =
-            vec![Box::new(PromptsElement::new(vec![PromptRule {
-                priority: 0,
+            vec![Box::new(BriefingElement::new(ResolvedNamedElement {
+                name: "current-work".into(),
+                level: HierarchyLevel::Global,
+                path: PathBuf::from("test"),
                 content: "Do {{task}} for {{owner}}; direct={{task}}".into(),
-                source_level: HierarchyLevel::Global,
-                file_path: PathBuf::from("test"),
-            }]))];
+            }))];
         let (messages, added) = run_script(
             r#"
             const rendered = elements[0].render();
@@ -471,9 +475,20 @@ mod tests {
         );
         assert_eq!(messages[1].text_content(), "audit storage|true");
         assert_eq!(
-            added[0].name, "prompts",
+            added[0].name, "current-work",
             "render() preserves element metadata"
         );
+    }
+
+    #[test]
+    fn literal_history_does_not_expose_render() {
+        let messages = run(r#"
+            const history = elements.find(element => element.name === "history");
+            add([{ role: "system", text: typeof history.render }]);
+            "#)
+        .unwrap();
+
+        assert_eq!(messages[0].text_content(), "undefined");
     }
 
     /// The report attributes each add() to what was actually added, so a

@@ -3,6 +3,7 @@
 //! Creates socket files in the user's runtime directory, detects stale sockets
 //! from previous crashes, and ensures cleanup on shutdown.
 
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
@@ -11,12 +12,38 @@ use tokio::net::UnixListener;
 
 const FALLBACK_SOCKET_ROOT: &str = "/tmp";
 
-fn socket_root() -> Result<PathBuf, SandboxError> {
+fn socket_path_fits(root: &Path, prefix: &str) -> bool {
+    let socket_address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    root.join(format!("{prefix}-{}.sock", "0".repeat(36)))
+        .as_os_str()
+        .as_bytes()
+        .len()
+        < socket_address.sun_path.len()
+}
+
+fn socket_root(prefix: &str) -> Result<PathBuf, SandboxError> {
+    let fallback = PathBuf::from(FALLBACK_SOCKET_ROOT);
     let Some(xdg_runtime_dir) = std::env::var_os("XDG_RUNTIME_DIR") else {
-        return Ok(PathBuf::from(FALLBACK_SOCKET_ROOT));
+        return socket_path_fits(&fallback, prefix).then_some(fallback).ok_or_else(|| {
+            SandboxError::SpawnFailed {
+                message: format!(
+                    "Unix socket path is too long under {FALLBACK_SOCKET_ROOT}; use a shorter socket prefix"
+                ),
+            }
+        });
     };
 
     let root = PathBuf::from(xdg_runtime_dir).join("swage");
+    if !socket_path_fits(&root, prefix) {
+        return socket_path_fits(&fallback, prefix).then_some(fallback).ok_or_else(|| {
+            SandboxError::SpawnFailed {
+                message: format!(
+                    "Unix socket paths are too long under both {} and {FALLBACK_SOCKET_ROOT}; set XDG_RUNTIME_DIR to a shorter path or use a shorter socket prefix",
+                    root.display()
+                ),
+            }
+        });
+    }
     std::fs::create_dir_all(&root).map_err(|error| SandboxError::SpawnFailed {
         message: format!(
             "failed to create Unix socket directory at {}: {error}",
@@ -51,7 +78,7 @@ impl SocketManager {
     /// can coexist without path collisions. Returns the manager (which owns
     /// cleanup) and the bound listener ready to accept connections.
     pub fn create(prefix: &str) -> Result<(Self, UnixListener), SandboxError> {
-        let path = socket_root()?.join(format!("{}-{}.sock", prefix, uuid::Uuid::new_v4()));
+        let path = socket_root(prefix)?.join(format!("{}-{}.sock", prefix, uuid::Uuid::new_v4()));
 
         let listener = UnixListener::bind(&path).map_err(|e| SandboxError::SpawnFailed {
             message: format!("failed to bind Unix socket at {}: {e}", path.display()),
@@ -113,7 +140,7 @@ impl SocketManager {
     /// active sockets from concurrently running sandboxes are left alone.
     #[cfg(test)]
     pub fn cleanup_stale(prefix: &str) {
-        let socket_root = match socket_root() {
+        let socket_root = match socket_root(prefix) {
             Ok(root) => root,
             Err(error) => {
                 tracing::warn!(%error, "failed to resolve stale socket directory");
@@ -166,7 +193,7 @@ mod tests {
     const TEST_PREFIX: &str = "swage-test-socket";
 
     fn test_socket_root() -> PathBuf {
-        socket_root().expect("socket root should resolve")
+        socket_root(TEST_PREFIX).expect("socket root should resolve")
     }
 
     fn wait_until_stale(path: &Path) {
@@ -229,8 +256,6 @@ mod tests {
     #[tokio::test]
     #[ignore = "run in an isolated child process by create_is_independent_of_long_tmpdir"]
     async fn create_is_independent_of_long_tmpdir_child() {
-        use std::os::unix::ffi::OsStrExt;
-
         let tmpdir = PathBuf::from(std::env::var_os("TMPDIR").expect("TMPDIR should be set"));
         let xdg_runtime_dir = PathBuf::from(
             std::env::var_os("XDG_RUNTIME_DIR").expect("XDG_RUNTIME_DIR should be set"),
@@ -251,6 +276,82 @@ mod tests {
                 .mode()
                 & 0o777,
             0o700
+        );
+    }
+
+    #[test]
+    fn overlong_xdg_runtime_dir_uses_short_fallback() {
+        let root = tempfile::tempdir_in(FALLBACK_SOCKET_ROOT).expect("temporary root");
+        let long_xdg = root.path().join("x".repeat(120));
+        let output = std::process::Command::new(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                "socket::tests::overlong_xdg_runtime_dir_uses_short_fallback_child",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("XDG_RUNTIME_DIR", &long_xdg)
+            .output()
+            .expect("isolated socket test");
+
+        assert!(
+            output.status.success(),
+            "isolated socket regression test failed:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "run in an isolated child process by overlong_xdg_runtime_dir_uses_short_fallback"]
+    async fn overlong_xdg_runtime_dir_uses_short_fallback_child() {
+        let configured = PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR").expect("XDG set"));
+        let (manager, _listener) = SocketManager::create(TEST_PREFIX).expect("fallback socket");
+        assert_eq!(
+            manager.path().parent(),
+            Some(Path::new(FALLBACK_SOCKET_ROOT))
+        );
+        assert!(!configured.join("swage").exists());
+    }
+
+    #[test]
+    fn unset_xdg_runtime_dir_uses_short_fallback() {
+        let output = std::process::Command::new(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                "socket::tests::unset_xdg_runtime_dir_uses_short_fallback_child",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env_remove("XDG_RUNTIME_DIR")
+            .output()
+            .expect("isolated socket test");
+
+        assert!(
+            output.status.success(),
+            "isolated socket regression test failed:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "run in an isolated child process by unset_xdg_runtime_dir_uses_short_fallback"]
+    async fn unset_xdg_runtime_dir_uses_short_fallback_child() {
+        assert!(std::env::var_os("XDG_RUNTIME_DIR").is_none());
+        let (manager, _listener) = SocketManager::create(TEST_PREFIX).expect("fallback socket");
+        assert_eq!(
+            manager.path().parent(),
+            Some(Path::new(FALLBACK_SOCKET_ROOT))
+        );
+    }
+
+    #[test]
+    fn impossible_socket_path_reports_how_to_shorten_it() {
+        let error = socket_root(&"p".repeat(200)).expect_err("prefix cannot fit");
+        assert!(
+            error.to_string().contains("shorter socket prefix"),
+            "path-length error should be actionable: {error}"
         );
     }
 

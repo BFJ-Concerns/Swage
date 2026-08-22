@@ -90,7 +90,10 @@ pub(crate) async fn apply_approval_scope(
                             access: None,
                         });
                     crate::settings::persist_permanent_tool_approval_for_space(
-                        &config, &space, tool_name,
+                        &state.config_root,
+                        &config,
+                        &space,
+                        tool_name,
                     )
                     .await
                 }
