@@ -8,7 +8,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "check": "svelte-check --tsconfig ./tsconfig.json",
-    "test:e2e": "playwright test",
+    "test:e2e": "node e2e/run-suite.mjs",
     "verify:hues": "node scripts/verify-status-hues.mjs",
     "test": "vitest run",
     "test:watch": "vitest"
