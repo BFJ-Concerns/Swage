@@ -60,6 +60,7 @@ function makeOverview(overrides: Partial<OperatorOverview> = {}): OperatorOvervi
           session: { policy: "continuation", session_id: "conv-1" },
           creator: { kind: "agent", agent_id: "researcher" },
           gate: { model: "cheap", criteria: null },
+          next_run_at: null,
           created_at: "2026-04-07T12:00:00Z",
           updated_at: "2026-04-07T12:00:00Z",
         }),
