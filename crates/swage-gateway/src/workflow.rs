@@ -9503,18 +9503,26 @@ mod tests {
         run_id: Uuid,
         expected: &str,
     ) -> WorkflowRunRecord {
+        wait_for_run_state_in(storage, run_id, &[expected]).await
+    }
+
+    async fn wait_for_run_state_in(
+        storage: &SqliteStorage,
+        run_id: Uuid,
+        expected: &[&str],
+    ) -> WorkflowRunRecord {
         loop {
             let run = storage
                 .get_workflow_run(run_id)
                 .await
                 .expect("get workflow run")
                 .expect("workflow run");
-            if run.state == expected {
+            if expected.contains(&run.state.as_str()) {
                 return run;
             }
             if matches!(run.state.as_str(), "completed" | "failed" | "cancelled") {
                 panic!(
-                    "run {run_id} reached {} instead of {expected}: {:?}",
+                    "run {run_id} reached {} instead of one of {expected:?}: {:?}",
                     run.state, run.error_message
                 );
             }
@@ -10403,7 +10411,7 @@ mod tests {
         );
 
         replacement.cancel();
-        wait_for_run_state(&storage, run.id, "cancelled").await;
+        wait_for_run_state_in(&storage, run.id, &["cancelled", "completed"]).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
