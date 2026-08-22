@@ -10,6 +10,7 @@ import * as agentDefinitionsApi from "../api/agent-definitions";
 import * as settingsApi from "../api/settings";
 import * as workflowApi from "../api/workflows";
 import * as operatorApi from "../api/operator";
+import { makeSchedule } from "./fixtures/schedules";
 
 vi.mock("../api/settings", () => ({
   discoverModels: vi.fn(),
@@ -148,25 +149,12 @@ function emptySettings(): SettingsResponse {
 }
 
 function createdSchedule(spaceId: string): Schedule {
-  return {
-    id: "schedule-1",
-    message: "Review the queue.",
-    status: "active",
-    spec: { kind: "interval", every: "every 1 hours" },
+  return makeSchedule({
     session: { policy: "fresh", space_id: spaceId, agent_id: "gateway" },
-    creator: { kind: "user" },
-    routing: {
-      deliver_to_origin: false,
-      home_target: null,
-      explicit_targets: [],
-      store_local_output: true,
-    },
-    gate: null,
     next_run_at: "2026-08-21T10:00:00Z",
-    last_run_at: null,
     created_at: "2026-08-20T10:00:00Z",
     updated_at: "2026-08-20T10:00:00Z",
-  };
+  });
 }
 
 describe("SettingsPage", () => {
