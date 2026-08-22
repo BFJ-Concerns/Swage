@@ -1,4 +1,4 @@
-//! Handler for the `swage tui` subcommand.
+//! Handler for the `swage chat` subcommand.
 //!
 //! Resolves the gateway URL from the `--url` flag, runtime metadata, or a
 //! sensible default, then launches the terminal user interface.
