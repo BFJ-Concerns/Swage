@@ -694,6 +694,23 @@ pub(crate) fn apply_dispatch_bound(
     config
 }
 
+pub(crate) fn resolve_model_catalogue_entry<'a>(
+    models: &'a swage_config::ModelCatalogConfig,
+    selected_model_id: &str,
+) -> Option<(&'a str, &'a swage_config::ModelEndpointConfig)> {
+    models
+        .entries
+        .get_key_value(selected_model_id)
+        .map(|(model_id, model)| (model_id.as_str(), model))
+        .or_else(|| {
+            models
+                .entries
+                .iter()
+                .find(|(_, model)| model.aliases.iter().any(|alias| alias == selected_model_id))
+                .map(|(model_id, model)| (model_id.as_str(), model))
+        })
+}
+
 pub(crate) fn effective_session_config(
     mut config: swage_config::ResolvedConfig,
     selected_model_id: Option<&str>,
@@ -703,8 +720,10 @@ pub(crate) fn effective_session_config(
         return config;
     };
 
-    if config.models.entries.contains_key(selected_model_id) {
-        config.models.default = selected_model_id.to_string();
+    if let Some(model_id) = resolve_model_catalogue_entry(&config.models, selected_model_id)
+        .map(|(model_id, _)| model_id.to_string())
+    {
+        config.models.default = model_id;
     } else {
         tracing::warn!(
             selected_model_id,
@@ -726,7 +745,7 @@ pub(super) fn ensure_selected_model_available(
         return Ok(());
     };
 
-    if config.models.entries.contains_key(selected_model_id) {
+    if resolve_model_catalogue_entry(&config.models, selected_model_id).is_some() {
         return Ok(());
     }
 

@@ -9464,6 +9464,64 @@ async fn process_turn_omits_default_effort_for_unknown_selected_model() {
 }
 
 #[tokio::test]
+async fn process_turn_uses_selected_model_default_effort_without_session_metadata() {
+    let mut config = swage_config::ResolvedConfig::default();
+    config.models.default = "model-a".to_string();
+    config.models.entries.insert(
+        "model-a".to_string(),
+        swage_config::ModelEndpointConfig::default(),
+    );
+    config.models.entries.insert(
+        "model-b".to_string(),
+        swage_config::ModelEndpointConfig {
+            default_effort: Some(swage_core::Effort::Medium),
+            ..Default::default()
+        },
+    );
+
+    assert_eq!(
+        Box::pin(capture_provider_effort_for_selected_model(
+            None,
+            Some("model-b".to_string()),
+            config,
+        ))
+        .await,
+        Some(swage_core::Effort::Medium)
+    );
+}
+
+#[tokio::test]
+async fn process_turn_uses_aliased_model_default_effort_without_session_metadata() {
+    let mut config = swage_config::ResolvedConfig::default();
+    config.models.default = "model-a".to_string();
+    config.models.entries.insert(
+        "model-a".to_string(),
+        swage_config::ModelEndpointConfig {
+            default_effort: Some(swage_core::Effort::Low),
+            ..Default::default()
+        },
+    );
+    config.models.entries.insert(
+        "model-b".to_string(),
+        swage_config::ModelEndpointConfig {
+            aliases: vec!["friendly-b".to_string()],
+            default_effort: Some(swage_core::Effort::Medium),
+            ..Default::default()
+        },
+    );
+
+    assert_eq!(
+        Box::pin(capture_provider_effort_for_selected_model(
+            None,
+            Some("friendly-b".to_string()),
+            config,
+        ))
+        .await,
+        Some(swage_core::Effort::Medium)
+    );
+}
+
+#[tokio::test]
 async fn process_turn_passes_tool_context_to_tools() {
     let captured = Arc::new(std::sync::Mutex::new(None));
     let capture_tool = Arc::new(ContextCaptureTool {
@@ -10103,6 +10161,32 @@ fn effective_session_config_uses_known_selected_model_as_default() {
     };
 
     let effective = effective_session_config(config, Some("conversation"));
+
+    assert_eq!(effective.models.default, "conversation");
+    assert_eq!(effective.default_model_id(), "conversation-wire");
+}
+
+#[test]
+fn effective_session_config_resolves_aliased_selected_model_as_default() {
+    let mut config = swage_config::ResolvedConfig::default();
+    config.models.default = "global".to_string();
+    config.models.entries.insert(
+        "global".to_string(),
+        swage_config::ModelEndpointConfig {
+            model_id: "global-wire".to_string(),
+            ..Default::default()
+        },
+    );
+    config.models.entries.insert(
+        "conversation".to_string(),
+        swage_config::ModelEndpointConfig {
+            model_id: "conversation-wire".to_string(),
+            aliases: vec!["friendly-conversation".to_string()],
+            ..Default::default()
+        },
+    );
+
+    let effective = effective_session_config(config, Some("friendly-conversation"));
 
     assert_eq!(effective.models.default, "conversation");
     assert_eq!(effective.default_model_id(), "conversation-wire");
