@@ -10280,6 +10280,110 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn external_post_relaunch_keeps_the_replacement_cancellation_token() {
+        let (state, storage) = workflow_test_state();
+        let space = storage.get_or_create_default().await.expect("space");
+        let source = r#"
+            const answer = awaitEvent({ kinds: ["operator.decision"] });
+            for (let index = 0; index < 256; index += 1) log(`queued-${index}`);
+            const resolved = await answer;
+            await wait({ timerMs: 5_000 });
+            return resolved.payload;
+        "#;
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(space.id),
+            Json(StartInlineWorkflowRunRequest {
+                source: source.into(),
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start awaiting run");
+        let original = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let run = storage
+                    .get_workflow_run(started.id)
+                    .await
+                    .expect("get awaiting run")
+                    .expect("awaiting run");
+                if run.state == "parked"
+                    && let Some(token) = state
+                        .active_workflow_runs
+                        .lock()
+                        .await
+                        .get(&started.id)
+                        .cloned()
+                {
+                    break token;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("observe the parked generation before its cleanup task runs");
+
+        let Json(posted) = post_operator_run_event(
+            State(state.clone()),
+            Path(started.id),
+            Json(PostWorkflowRunEventRequest {
+                kind: "operator.decision".into(),
+                payload: serde_json::json!({"verdict": "accept"}),
+            }),
+        )
+        .await
+        .expect("post event and relaunch parked run");
+        assert!(posted.wake_provisioned);
+
+        let replacement = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if let Some(token) = state
+                    .active_workflow_runs
+                    .lock()
+                    .await
+                    .get(&started.id)
+                    .cloned()
+                    && token != original
+                {
+                    break token;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the external post installs a replacement generation");
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if storage
+                    .list_audit_events()
+                    .await
+                    .expect("list workflow audit events")
+                    .iter()
+                    .any(|event| {
+                        event.entity_id == started.id.to_string() && event.event_kind == "parked"
+                    })
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the original parked generation reaches its cleanup path");
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert_eq!(
+            state.active_workflow_runs.lock().await.get(&started.id),
+            Some(&replacement),
+            "the original generation must not remove the relaunched run's token"
+        );
+
+        replacement.cancel();
+        wait_for_run_state(&storage, started.id, "cancelled").await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn a_completed_run_releases_its_workflow_thread() {
         let provider = Arc::new(ScriptedGateProvider {
             replies: std::sync::Mutex::new(std::collections::VecDeque::new()),

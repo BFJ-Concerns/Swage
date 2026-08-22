@@ -125,14 +125,13 @@ fn host_context(state: &AppState, session_id: Uuid) -> GatewayToolContext {
 }
 
 fn render(variables: BTreeMap<String, String>) -> Vec<ChatMessage> {
-    let elements: Vec<Box<dyn ContextElement>> = vec![Box::new(BriefingElement::new(
-        ResolvedNamedElement {
+    let elements: Vec<Box<dyn ContextElement>> =
+        vec![Box::new(BriefingElement::new(ResolvedNamedElement {
             name: "briefing".into(),
             level: HierarchyLevel::Global,
             path: "elements/briefing.md".into(),
             content: "Task: {{task}}; owner: {{owner}}".into(),
-        },
-    ))];
+        }))];
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("briefing.js");
     std::fs::write(&path, "add(elements[0].render());").unwrap();
