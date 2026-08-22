@@ -267,7 +267,7 @@ pub(crate) async fn build_agent_config_for_space_workspace(
         load_trusted_workspace_policy(&state.storage, space_id, active_workspace_attachment_id)
             .await;
     let (workspace_root, allowed_paths) =
-        agent_workspace_from_policy(&workspace_policy, space_id, session_id);
+        agent_workspace_from_policy(&state.config_root, &workspace_policy, space_id, session_id);
     build_agent_config_with_workspace(
         agent_id,
         config,
@@ -277,10 +277,13 @@ pub(crate) async fn build_agent_config_for_space_workspace(
     )
 }
 
-pub(super) fn managed_scratch_workspace(space_id: Uuid, session_id: Uuid) -> PathBuf {
-    let base = swage_config::discovery::resolve_root()
-        .unwrap_or_else(|_| swage_config::discovery::effective_root_path());
-    base.join("scratch")
+pub(super) fn managed_scratch_workspace(
+    config_root: &Path,
+    space_id: Uuid,
+    session_id: Uuid,
+) -> PathBuf {
+    config_root
+        .join("scratch")
         .join("spaces")
         .join(space_id.to_string())
         .join("sessions")
@@ -288,6 +291,7 @@ pub(super) fn managed_scratch_workspace(space_id: Uuid, session_id: Uuid) -> Pat
 }
 
 pub(super) fn agent_workspace_from_policy(
+    config_root: &Path,
     policy: &TrustedWorkspacePolicy,
     space_id: Uuid,
     session_id: Uuid,
@@ -296,7 +300,7 @@ pub(super) fn agent_workspace_from_policy(
         .active_workspace
         .as_ref()
         .map(|grant| grant.path.clone())
-        .unwrap_or_else(|| managed_scratch_workspace(space_id, session_id));
+        .unwrap_or_else(|| managed_scratch_workspace(config_root, space_id, session_id));
     if let Err(error) = std::fs::create_dir_all(&workspace_root) {
         tracing::warn!(
             path = %workspace_root.display(),
@@ -357,18 +361,7 @@ pub(crate) fn load_session_config(
     space_slug: &str,
     agent_id: &str,
 ) -> Result<swage_config::ResolvedConfig, GatewayError> {
-    let root = match swage_config::discovery::resolve_root() {
-        Ok(root) => root,
-        Err(error) => {
-            tracing::warn!(
-                error = %error.kind,
-                space_slug,
-                agent_id,
-                "failed to resolve swage root; using active runtime configuration"
-            );
-            return Ok(state.active_config());
-        }
-    };
+    let root = &state.config_root;
 
     let space_dir = root.join("spaces").join(space_slug);
     let space_config_exists = space_dir.join("config.toml").exists();
@@ -382,7 +375,7 @@ pub(crate) fn load_session_config(
         return Ok(state.active_config());
     }
 
-    swage_config::load_resolved_config_from(&root, space_slug, agent_id)
+    swage_config::load_resolved_config_from(root, space_slug, agent_id)
         .map_err(|error| GatewayError::ConfigError(error.to_string()))
 }
 

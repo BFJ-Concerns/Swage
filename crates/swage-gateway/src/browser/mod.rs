@@ -51,20 +51,16 @@ pub struct BrowserConfig {
 }
 
 impl BrowserConfig {
-    pub fn from_tool_config(config: &BrowserToolConfig) -> Result<Self, ToolError> {
-        let root = swage_config::resolve_root().map_err(|problem| ToolError::ExecutionFailed {
-            name: "browser".to_string(),
-            message: format!("failed to resolve Swage root for browser profile: {problem}"),
-        })?;
-        Ok(Self {
+    pub fn from_tool_config(config: &BrowserToolConfig, config_root: &std::path::Path) -> Self {
+        Self {
             binary_path: config.binary_path.clone(),
-            profile_root: root.join("browser").join("profiles"),
+            profile_root: config_root.join("browser").join("profiles"),
             page_idle: Duration::from_secs(config.page_idle_secs),
             process_idle: Duration::from_secs(config.process_idle_secs),
             max_snapshot_bytes: config.max_snapshot_bytes,
             screenshots: config.screenshots.clone(),
             allow_hosts: config.allow_hosts.clone(),
-        })
+        }
     }
 }
 

@@ -3779,6 +3779,31 @@ pub(crate) async fn make_state_with_session(provider_chunks: Vec<StreamChunk>) -
     make_state_with_storage(provider_chunks, storage).await
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn session_config_uses_root_retained_at_state_construction() {
+    let constructed_root = tempfile::tempdir().expect("constructed config root");
+    let redirected_root = tempfile::tempdir().expect("redirected config root");
+    for (root, ttl) in [(&constructed_root, 111_u64), (&redirected_root, 222_u64)] {
+        let space_dir = root.path().join("spaces/default");
+        std::fs::create_dir_all(&space_dir).expect("create space config directory");
+        std::fs::write(
+            space_dir.join("config.toml"),
+            format!("[communication]\nmessage_ttl_secs = {ttl}\n"),
+        )
+        .expect("write discriminating session config");
+    }
+
+    let state = {
+        let _root = SwageHomeGuard::set_to(constructed_root.path());
+        make_state_with_session(vec![]).await.0
+    };
+    let _redirect = SwageHomeGuard::set_to(redirected_root.path());
+
+    let loaded =
+        load_session_config(&state, "default", "gateway").expect("load config from retained root");
+    assert_eq!(loaded.communication.message_ttl_secs, 111);
+}
+
 pub(crate) async fn make_state_with_storage(
     provider_chunks: Vec<StreamChunk>,
     storage: Arc<MockStorage>,
@@ -8115,7 +8140,6 @@ async fn completed_detached_result_reaches_parent_next_turn() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn delegated_read_only_location_approval_allows_read_and_refuses_write() {
-    let _swage_home = SwageHomeGuard::isolate();
     let fixture = tempfile::tempdir().expect("placement fixture");
     let attachment = fixture.path().join("read-only");
     std::fs::create_dir(&attachment).expect("read-only attachment");
@@ -8279,7 +8303,6 @@ async fn delegated_read_only_location_approval_allows_read_and_refuses_write() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn task_scoped_delegate_keeps_its_permission_bound_when_delegating_again() {
-    let _swage_home = SwageHomeGuard::isolate();
     let fixture = tempfile::tempdir().expect("delegation fixture");
     let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
     let space = storage
@@ -8446,7 +8469,6 @@ async fn task_scoped_delegate_keeps_its_permission_bound_when_delegating_again()
 
 #[tokio::test(flavor = "multi_thread")]
 async fn placed_delegate_keeps_exact_read_only_authority_when_delegating_again() {
-    let _swage_home = SwageHomeGuard::isolate();
     let fixture = tempfile::tempdir().expect("placement fixture");
     let default_workspace = fixture.path().join("default-workspace");
     let placed_workspace = fixture.path().join("placed-read-only");
@@ -8618,7 +8640,6 @@ async fn placed_delegate_keeps_exact_read_only_authority_when_delegating_again()
 
 #[tokio::test(flavor = "multi_thread")]
 async fn delegate_worktree_provisions_isolated_cwd_and_records_resolved_placement() {
-    let _swage_home = SwageHomeGuard::isolate();
     let fixture = tempfile::tempdir().expect("worktree fixture");
     let repo = fixture.path().join("repo");
     std::fs::create_dir(&repo).expect("repository directory");
@@ -10849,8 +10870,12 @@ fn agent_workspace_uses_active_workspace_and_attachment_grants() {
         }],
     };
 
-    let (workspace_root, allowed_paths) =
-        agent_workspace_from_policy(&policy, Uuid::new_v4(), Uuid::new_v4());
+    let (workspace_root, allowed_paths) = agent_workspace_from_policy(
+        std::path::Path::new(".swage"),
+        &policy,
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+    );
 
     assert_eq!(workspace_root, active_workspace);
     assert_eq!(allowed_paths, vec![active_workspace, attachment_workspace]);

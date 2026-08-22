@@ -167,7 +167,7 @@ pub async fn save_settings(
         })
         .collect::<Result<_, _>>()?;
 
-    let path = global_config_path()?;
+    let path = global_config_path(&state.config_root);
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent).await.map_err(|error| {
             ApiError::validation(format!("failed to create config directory: {error}"))
@@ -248,19 +248,23 @@ pub async fn save_settings(
         communication.unwrap_or_else(|| runtime_config.communication.clone());
 
     let provider = crate::startup::create_provider(&runtime_config, &state.secret_manager).await;
-    let tool_dispatcher =
-        crate::startup::build_tool_dispatcher(&runtime_config, state.storage.clone());
+    let tool_dispatcher = crate::startup::build_tool_dispatcher(
+        &runtime_config,
+        state.storage.clone(),
+        &state.config_root,
+    );
     state.replace_runtime(runtime_config, provider, tool_dispatcher);
 
     load_settings(state).await
 }
 
 pub(crate) async fn persist_permanent_tool_approval_for_space(
+    config_root: &std::path::Path,
     config: &swage_config::ResolvedConfig,
     space: &swage_storage::model::Space,
     tool_name: &str,
 ) -> Result<(), ApiError> {
-    let path = space_config_path(&space.slug)?;
+    let path = space_config_path(config_root, &space.slug);
     persist_permanent_tool_approval_to_path(config, tool_name, path).await
 }
 
@@ -268,7 +272,7 @@ pub(crate) async fn persist_permanent_tool_approval_globally(
     state: &AppState,
     tool_name: &str,
 ) -> Result<(), ApiError> {
-    let path = global_config_path()?;
+    let path = global_config_path(&state.config_root);
     persist_permanent_tool_approval_to_path(&state.active_config(), tool_name, path).await
 }
 
@@ -296,10 +300,11 @@ async fn persist_permanent_tool_approval_to_path(
     Ok(())
 }
 
-fn space_config_path(space_slug: &str) -> Result<PathBuf, ApiError> {
-    let root = swage_config::discovery::resolve_root()
-        .map_err(|problem| ApiError::validation(problem.to_string()))?;
-    Ok(root.join("spaces").join(space_slug).join("config.toml"))
+fn space_config_path(config_root: &std::path::Path, space_slug: &str) -> PathBuf {
+    config_root
+        .join("spaces")
+        .join(space_slug)
+        .join("config.toml")
 }
 
 fn require_approval_entries_without_tool(
@@ -544,8 +549,8 @@ async fn provider_for_discovery(
         return Ok(provider.clone());
     }
 
-    if let Ok(path) = global_config_path() {
-        let partial = read_partial_config(&path).await?;
+    {
+        let partial = read_partial_config(&global_config_path(&state.config_root)).await?;
         if let Some(providers) = partial.providers
             && let Some(entries) = providers.entries
             && let Some(provider) = entries.get(provider_id)
@@ -894,10 +899,8 @@ async fn persist_provider_key(
     Ok(Some(secret.reference))
 }
 
-fn global_config_path() -> Result<PathBuf, ApiError> {
-    let root = swage_config::discovery::resolve_root()
-        .map_err(|problem| ApiError::validation(problem.to_string()))?;
-    Ok(root.join("config.toml"))
+fn global_config_path(config_root: &std::path::Path) -> PathBuf {
+    config_root.join("config.toml")
 }
 
 async fn read_partial_config(
