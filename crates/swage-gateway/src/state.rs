@@ -178,6 +178,31 @@ impl AppState {
     ) -> Self {
         let config_root = swage_config::discovery::resolve_root()
             .unwrap_or_else(|_| swage_config::discovery::effective_root_path());
+        Self::new_with_config_root(
+            storage,
+            space_store,
+            provider,
+            config,
+            tool_dispatcher,
+            hook_registry,
+            config_root,
+        )
+    }
+
+    /// Construct application state with a root already selected by the caller.
+    ///
+    /// Startup and root-sensitive tests use this entry point so state
+    /// construction cannot be redirected by a concurrent process-environment
+    /// change between root discovery and retention.
+    pub fn new_with_config_root(
+        storage: Arc<dyn Storage>,
+        space_store: Arc<dyn SpaceStore>,
+        provider: Arc<dyn LlmProvider>,
+        config: ResolvedConfig,
+        tool_dispatcher: ToolDispatcher,
+        hook_registry: Option<Arc<HookRegistry>>,
+        config_root: PathBuf,
+    ) -> Self {
         let (broadcast, _) = broadcast::channel(16);
         let workflow_capabilities =
             WorkflowCapabilities::for_protocol(config.default_provider_protocol());
