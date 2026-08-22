@@ -22,6 +22,7 @@
   import {
     createStreamingStore,
     withConversationAutoCreate,
+    type StreamingStore,
   } from "./lib/stores/streaming";
   import { createSpaceStore } from "./lib/stores/spaces";
   import { createRouter } from "./lib/router";
@@ -44,13 +45,17 @@
 
   // onReconnect re-fetches the active conversation over HTTP after a dropped
   // WebSocket successfully reconnects, reconciling any state drift during downtime.
+  let streamingStore: StreamingStore;
   const connectionStore = createConnectionStore({
-    onReconnect: () => conversationStore.refreshActiveConversation(),
+    onReconnect: async () => {
+      await conversationStore.refreshActiveConversation();
+      streamingStore.reconcileAfterReconnect();
+    },
   });
 
   // The streaming store needs both dependencies so it can push committed messages
   // to the conversation history and dispatch outgoing messages via the connection.
-  const streamingStore = createStreamingStore({
+  streamingStore = createStreamingStore({
     conversationStore,
     connectionStore,
   });

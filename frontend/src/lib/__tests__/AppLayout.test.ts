@@ -47,6 +47,7 @@ function mockConnectionStore(): ConnectionStore {
     disconnect: () => {},
     sendMessage: () => {},
     cancelTurn: () => {},
+    reconcileAfterReconnect: () => {},
     onServerEvent: () => {},
   };
 }
@@ -63,6 +64,7 @@ function mockStreamingStore(): StreamingStore {
     handleServerEvent: () => {},
     startTurn: () => {},
     cancelTurn: () => {},
+    reconcileAfterReconnect: () => {},
   };
 }
 

@@ -38,6 +38,10 @@ clippy:
 test:
     cargo run -p xtask -- test
 
+test-e2e:
+    cargo run -p xtask -- build-dev --embed-frontend
+    cd frontend && PLAYWRIGHT_HTML_OPEN=never npm run test:e2e
+
 test-lib package *filter:
     cargo run -p xtask -- test-lib {{ package }} {{ filter }}
 
