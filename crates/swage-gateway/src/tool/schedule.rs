@@ -19,6 +19,7 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use swage_core::{GatewayError, ToolError};
+use swage_protocol::client::delivery::DeliveryRoutingRequest;
 use swage_protocol::client::schedule as wire;
 use swage_storage::{ScheduleCreator, Storage};
 use swage_tool::context::ToolContext;
@@ -118,6 +119,44 @@ fn parse_delay(tool: &str, text: &str) -> Result<Duration, ToolError> {
 pub struct ScheduleTool;
 
 const SCHEDULE_TOOL: &str = "schedule";
+
+fn delivery_target_schema() -> Value {
+    json!({
+        "oneOf": [
+            {
+                "type": "object",
+                "properties": {
+                    "kind": {"type": "string", "const": "channel"},
+                    "integration": {
+                        "type": "string",
+                        "enum": ["dev_dm", "dev_thread", "telegram"]
+                    },
+                    "account": {"type": "string"},
+                    "conversation": {"type": "string"}
+                },
+                "required": ["kind", "integration", "account", "conversation"],
+                "additionalProperties": false
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "kind": {"type": "string", "const": "local_storage"}
+                },
+                "required": ["kind"],
+                "additionalProperties": false
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "kind": {"type": "string", "const": "webhook"},
+                    "url": {"type": "string"}
+                },
+                "required": ["kind", "url"],
+                "additionalProperties": false
+            }
+        ]
+    })
+}
 
 #[async_trait]
 impl Tool for ScheduleTool {
@@ -246,6 +285,43 @@ impl Tool for ScheduleTool {
                     "description": "For update only: set installs or replaces the gate from \
                                     gate_model/gate_criteria; clear removes any existing gate. \
                                     Omit to leave the gate unchanged."
+                },
+                "routing": {
+                    "type": "object",
+                    "description": "Where each completed run's output should go. Use channel for \
+                                    a known conversation, local_storage to retain output locally, \
+                                    or webhook to send it to an HTTPS endpoint. Schedules have no \
+                                    originating channel, so keep deliver_to_origin=false. \
+                                    home_target names one primary destination; explicit_targets \
+                                    adds any other destinations; store_local_output also retains a \
+                                    local copy. On create, omit routing for the existing local-only \
+                                    default. On update, omit it to leave delivery unchanged.",
+                    "properties": {
+                        "deliver_to_origin": {
+                            "type": "boolean",
+                            "description": "Whether to deliver back to the initiating channel. \
+                                            Always false for schedules because their runs have no \
+                                            channel origin."
+                        },
+                        "home_target": {
+                            "description": "Optional primary destination for each run's output.",
+                            "oneOf": [
+                                {"type": "null"},
+                                delivery_target_schema()
+                            ]
+                        },
+                        "explicit_targets": {
+                            "type": "array",
+                            "description": "Additional destinations that should each receive the \
+                                            completed output.",
+                            "items": delivery_target_schema()
+                        },
+                        "store_local_output": {
+                            "type": "boolean",
+                            "description": "Also retain each completed output in local storage."
+                        }
+                    },
+                    "additionalProperties": false
                 }
             },
             "required": ["action"]
@@ -294,14 +370,13 @@ impl ScheduleTool {
         let spec = build_spec(params)?;
         let session = build_session(state.storage.as_ref(), params, session_id).await?;
         let gate = build_gate(params)?;
+        let routing = build_routing(params)?;
 
         let request = wire::CreateScheduleRequest {
             message,
             spec,
             session,
-            // Runs are recorded to the local run history; channel delivery is
-            // not part of the agent-facing surface.
-            routing: None,
+            routing,
             gate,
         };
         let creator = ScheduleCreator::Agent {
@@ -349,11 +424,12 @@ impl ScheduleTool {
             .filter(|value| !value.trim().is_empty())
             .map(str::to_owned);
         let gate = build_gate_update(params)?;
+        let routing = build_routing(params)?;
 
         let request = wire::UpdateScheduleRequest {
             message,
             spec,
-            routing: None,
+            routing,
             gate,
         };
         let schedule = crate::schedule::update_schedule_change(
@@ -560,6 +636,24 @@ fn build_gate_update(params: &Value) -> Result<Option<wire::ScheduleGateUpdate>,
             format!("unknown gate_action '{other}': use set or clear"),
         )),
     }
+}
+
+/// Parse the shared delivery-routing wire shape when supplied. Absence has
+/// action-specific meaning in the schedule service: create uses its local-only
+/// default, while update preserves the existing route.
+fn build_routing(params: &Value) -> Result<Option<DeliveryRoutingRequest>, ToolError> {
+    params
+        .get("routing")
+        .cloned()
+        .map(|routing| {
+            serde_json::from_value(routing).map_err(|error| {
+                invalid(
+                    SCHEDULE_TOOL,
+                    format!("'routing' must be a valid delivery route: {error}"),
+                )
+            })
+        })
+        .transpose()
 }
 
 // ---------------------------------------------------------------------------
