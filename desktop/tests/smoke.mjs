@@ -335,11 +335,11 @@ async function createConversationAndWaitForReply(page, expectedRuntimeText) {
     .click();
   await defaultSpace.getByRole("button", { name: "Open", exact: true }).click();
   await page.getByRole("button", { name: /\+ new conversation/i }).click();
-  await page.waitForURL(/\/conversations\/conv-\d+$/);
   await page
     .getByPlaceholder("Send a message — Shift+Enter for a new line")
     .fill("Hello from smoke");
   await page.getByRole("button", { name: /send/i }).click();
+  await page.waitForURL(/\/conversations\/conv-\d+$/);
   await page
     .getByLabel("Conversation messages")
     .getByText("Desktop shell echoed: Hello from smoke")

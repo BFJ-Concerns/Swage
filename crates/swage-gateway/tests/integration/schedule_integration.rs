@@ -140,6 +140,7 @@ fn config_with_gate_model() -> swage_config::ResolvedConfig {
             aliases: vec!["cheap".into()],
             context_window: None,
             generation_preset: None,
+            default_effort: None,
             capabilities: Default::default(),
         },
     );

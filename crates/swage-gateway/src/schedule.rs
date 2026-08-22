@@ -737,7 +737,10 @@ fn validate_gate(state: &AppState, gate: &GateConfig) -> Result<(), GatewayError
 }
 
 /// Resolve a catalogue entry id or alias to the provider-facing model id.
-fn resolve_gate_model(config: &swage_config::ResolvedConfig, name: &str) -> Option<String> {
+pub(crate) fn resolve_gate_model(
+    config: &swage_config::ResolvedConfig,
+    name: &str,
+) -> Option<String> {
     if let Some(entry) = config.models.entries.get(name) {
         return Some(entry.model_id.clone());
     }
