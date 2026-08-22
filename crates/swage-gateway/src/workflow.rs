@@ -12373,6 +12373,10 @@ mod tests {
             message.contains("does not match the recorded contract"),
             "error names the contract violation: {message}"
         );
+        assert!(
+            message.contains(&run.id.to_string()),
+            "error names the offending record: {message}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
