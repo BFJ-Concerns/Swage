@@ -232,10 +232,7 @@ pub(crate) async fn discover_available_for_space_from_config(
     space_id: Uuid,
     agent_id: Option<&str>,
 ) -> Result<Vec<SkillDefinition>, String> {
-    let root = skill_root_for_space(space_id)
-        .map(Ok)
-        .unwrap_or_else(swage_config::discovery::resolve_root)
-        .map_err(|error| error.to_string())?;
+    let root = skill_root_for_space(space_id).unwrap_or_else(|| state.config_root.clone());
     discover_available_for_space(state, space_id, agent_id, &root).await
 }
 

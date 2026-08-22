@@ -331,6 +331,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn conversation_effort_override_wins_and_is_persisted() {
+        let config_root = tempfile::tempdir().expect("config root");
         let (svc, storage) = make_definition_service();
         let mut config = swage_config::ResolvedConfig::default();
         config.models.default = "model-a".to_string();
@@ -343,7 +344,7 @@ mod tests {
         );
 
         let response = svc
-            .with_config(config)
+            .with_config(config, config_root.path().to_path_buf())
             .create_conversation_from_request(CreateConversationRequest {
                 selected_model_id: Some("model-a".to_string()),
                 agent_id: None,
@@ -358,6 +359,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn conversation_inherits_and_persists_model_default_effort() {
+        let config_root = tempfile::tempdir().expect("config root");
         let (svc, storage) = make_definition_service();
         let mut config = swage_config::ResolvedConfig::default();
         config.models.default = "model-a".to_string();
@@ -370,7 +372,7 @@ mod tests {
         );
 
         let response = svc
-            .with_config(config)
+            .with_config(config, config_root.path().to_path_buf())
             .create_conversation_from_request(CreateConversationRequest::default())
             .await
             .unwrap();
@@ -380,12 +382,12 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn conversation_inherits_space_models_default_effort() {
-        let swage_home = crate::test_support::SwageHomeGuard::new();
-        let space_dir = swage_home.path().join("spaces/default");
+    async fn conversation_space_effort_uses_retained_config_root() {
+        let retained_root = tempfile::tempdir().expect("retained config root");
+        let space_dir = retained_root.path().join("spaces/default");
         std::fs::create_dir_all(&space_dir).expect("create space config directory");
         std::fs::write(
-            swage_home.path().join("config.toml"),
+            retained_root.path().join("config.toml"),
             r#"
 [providers]
 default = "test"
@@ -416,7 +418,10 @@ default_effort = "high"
 
         let (svc, storage) = make_definition_service();
         let response = svc
-            .with_config(swage_config::ResolvedConfig::default())
+            .with_config(
+                swage_config::ResolvedConfig::default(),
+                retained_root.path().to_path_buf(),
+            )
             .create_conversation_from_request(CreateConversationRequest::default())
             .await
             .unwrap();
@@ -427,6 +432,7 @@ default_effort = "high"
 
     #[tokio::test(flavor = "multi_thread")]
     async fn conversation_inherits_selected_model_default_effort() {
+        let config_root = tempfile::tempdir().expect("config root");
         let (svc, storage) = make_definition_service();
         let mut config = swage_config::ResolvedConfig::default();
         config.models.default = "model-a".to_string();
@@ -446,7 +452,7 @@ default_effort = "high"
         );
 
         let response = svc
-            .with_config(config)
+            .with_config(config, config_root.path().to_path_buf())
             .create_conversation_from_request(CreateConversationRequest {
                 selected_model_id: Some("model-b".to_string()),
                 agent_id: None,
@@ -461,6 +467,7 @@ default_effort = "high"
 
     #[tokio::test(flavor = "multi_thread")]
     async fn conversation_inherits_agent_models_default_effort() {
+        let config_root = tempfile::tempdir().expect("config root");
         let (svc, storage) = make_definition_service();
         let mut agent = definition("researcher", None);
         agent.model_id = Some("model-b".to_string());
@@ -484,7 +491,7 @@ default_effort = "high"
         );
 
         let response = svc
-            .with_config(config)
+            .with_config(config, config_root.path().to_path_buf())
             .create_conversation_from_request(CreateConversationRequest {
                 selected_model_id: None,
                 agent_id: Some("researcher".to_string()),

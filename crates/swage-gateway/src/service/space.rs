@@ -32,21 +32,19 @@ fn validate_space_slug(slug: &str) -> Result<SpaceSlug, GatewayError> {
 }
 
 /// Returns the base directory for all space data under the canonical Swage root.
-fn spaces_base_dir() -> Result<PathBuf, GatewayError> {
-    swage_config::discovery::resolve_root()
-        .map(|root| root.join("spaces"))
-        .map_err(|problem| GatewayError::ValidationError(problem.to_string()))
-}
-
 /// Mediates between HTTP space handlers and storage.
 #[derive(Clone)]
 pub struct SpaceService {
     pub(crate) space_store: Arc<dyn SpaceStore>,
+    config_root: PathBuf,
 }
 
 impl SpaceService {
-    pub fn new(space_store: Arc<dyn SpaceStore>) -> Self {
-        Self { space_store }
+    pub fn new(space_store: Arc<dyn SpaceStore>, config_root: PathBuf) -> Self {
+        Self {
+            space_store,
+            config_root,
+        }
     }
 
     /// Create a new space.
@@ -75,7 +73,7 @@ impl SpaceService {
         let slug = validate_space_slug(&slugify(&req.name))?;
 
         // Create the space directory under the canonical Swage root.
-        let base = spaces_base_dir()?;
+        let base = self.config_root.join("spaces");
         let space_dir = base.join(&slug);
         let memory_dir = space_dir.join("memory");
         // Non-fatal: best-effort directory creation.

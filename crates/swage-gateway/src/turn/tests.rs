@@ -3779,9 +3779,47 @@ pub(crate) async fn make_state_with_session(provider_chunks: Vec<StreamChunk>) -
     make_state_with_storage(provider_chunks, storage).await
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn session_config_uses_root_retained_at_state_construction() {
+    let constructed_root = tempfile::tempdir().expect("constructed config root");
+    let redirected_root = tempfile::tempdir().expect("redirected config root");
+    for (root, ttl) in [(&constructed_root, 111_u64), (&redirected_root, 222_u64)] {
+        let space_dir = root.path().join("spaces/default");
+        std::fs::create_dir_all(&space_dir).expect("create space config directory");
+        std::fs::write(
+            space_dir.join("config.toml"),
+            format!("[communication]\nmessage_ttl_secs = {ttl}\n"),
+        )
+        .expect("write discriminating session config");
+    }
+
+    let storage = Arc::new(MockStorage::new());
+    let state = make_state_with_storage_and_root(
+        vec![],
+        storage,
+        Some(constructed_root.path().to_path_buf()),
+    )
+    .await
+    .0;
+    assert_eq!(state.config_root, constructed_root.path());
+    let _redirect = SwageHomeGuard::set_to(redirected_root.path());
+
+    let loaded =
+        load_session_config(&state, "default", "gateway").expect("load config from retained root");
+    assert_eq!(loaded.communication.message_ttl_secs, 111);
+}
+
 pub(crate) async fn make_state_with_storage(
     provider_chunks: Vec<StreamChunk>,
     storage: Arc<MockStorage>,
+) -> (AppState, Uuid) {
+    make_state_with_storage_and_root(provider_chunks, storage, None).await
+}
+
+async fn make_state_with_storage_and_root(
+    provider_chunks: Vec<StreamChunk>,
+    storage: Arc<MockStorage>,
+    config_root: Option<std::path::PathBuf>,
 ) -> (AppState, Uuid) {
     // Create the default space via SpaceStore.
     let space = storage
@@ -3813,14 +3851,30 @@ pub(crate) async fn make_state_with_storage(
     .expect("create default thread");
 
     let provider = Arc::new(MockProvider::new(provider_chunks));
-    let state = AppState::new(
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
-        provider as Arc<dyn LlmProvider>,
-        swage_config::ResolvedConfig::default(),
-        crate::tool::ToolDispatcher::allow_all(vec![]),
-        None,
-    );
+    let storage_backend = Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>;
+    let space_store = Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>;
+    let provider = provider as Arc<dyn LlmProvider>;
+    let config = swage_config::ResolvedConfig::default();
+    let tool_dispatcher = crate::tool::ToolDispatcher::allow_all(vec![]);
+    let state = match config_root {
+        Some(config_root) => AppState::new_with_config_root(
+            storage_backend,
+            space_store,
+            provider,
+            config,
+            tool_dispatcher,
+            None,
+            config_root,
+        ),
+        None => AppState::new(
+            storage_backend,
+            space_store,
+            provider,
+            config,
+            tool_dispatcher,
+            None,
+        ),
+    };
     (state, session_id)
 }
 
@@ -8116,7 +8170,6 @@ async fn completed_detached_result_reaches_parent_next_turn() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn delegated_read_only_location_approval_allows_read_and_refuses_write() {
-    let _swage_home = SwageHomeGuard::isolate();
     let fixture = tempfile::tempdir().expect("placement fixture");
     let attachment = fixture.path().join("read-only");
     std::fs::create_dir(&attachment).expect("read-only attachment");
@@ -8188,7 +8241,7 @@ async fn delegated_read_only_location_approval_allows_read_and_refuses_write() {
             },
         ],
     ]);
-    let state = AppState::new(
+    let state = AppState::new_with_config_root(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
@@ -8198,6 +8251,7 @@ async fn delegated_read_only_location_approval_allows_read_and_refuses_write() {
             Arc::new(SandboxedFileTool::new("file_write")) as Arc<dyn Tool>,
         ]),
         None,
+        fixture.path().join("swage-home"),
     )
     .with_worktree_root(fixture.path().join("worker-worktrees"))
     .with_test_sandbox();
@@ -8280,7 +8334,6 @@ async fn delegated_read_only_location_approval_allows_read_and_refuses_write() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn task_scoped_delegate_keeps_its_permission_bound_when_delegating_again() {
-    let _swage_home = SwageHomeGuard::isolate();
     let fixture = tempfile::tempdir().expect("delegation fixture");
     let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
     let space = storage
@@ -8372,7 +8425,7 @@ async fn task_scoped_delegate_keeps_its_permission_bound_when_delegating_again()
             },
         ],
     ]);
-    let state = AppState::new(
+    let state = AppState::new_with_config_root(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
@@ -8382,6 +8435,7 @@ async fn task_scoped_delegate_keeps_its_permission_bound_when_delegating_again()
             Arc::new(SandboxedFileTool::new("file_write")) as Arc<dyn Tool>,
         ]),
         None,
+        fixture.path().join("swage-home"),
     )
     .with_worktree_root(fixture.path().join("worker-worktrees"))
     .with_test_sandbox();
@@ -8447,7 +8501,6 @@ async fn task_scoped_delegate_keeps_its_permission_bound_when_delegating_again()
 
 #[tokio::test(flavor = "multi_thread")]
 async fn placed_delegate_keeps_exact_read_only_authority_when_delegating_again() {
-    let _swage_home = SwageHomeGuard::isolate();
     let fixture = tempfile::tempdir().expect("placement fixture");
     let default_workspace = fixture.path().join("default-workspace");
     let placed_workspace = fixture.path().join("placed-read-only");
@@ -8550,7 +8603,7 @@ async fn placed_delegate_keeps_exact_read_only_authority_when_delegating_again()
             },
         ],
     ]);
-    let state = AppState::new(
+    let state = AppState::new_with_config_root(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
@@ -8560,6 +8613,7 @@ async fn placed_delegate_keeps_exact_read_only_authority_when_delegating_again()
             Arc::new(SandboxedFileTool::new("file_write")) as Arc<dyn Tool>,
         ]),
         None,
+        fixture.path().join("swage-home"),
     )
     .with_worktree_root(fixture.path().join("worker-worktrees"))
     .with_test_sandbox();
@@ -8619,7 +8673,6 @@ async fn placed_delegate_keeps_exact_read_only_authority_when_delegating_again()
 
 #[tokio::test(flavor = "multi_thread")]
 async fn delegate_worktree_provisions_isolated_cwd_and_records_resolved_placement() {
-    let _swage_home = SwageHomeGuard::isolate();
     let fixture = tempfile::tempdir().expect("worktree fixture");
     let repo = fixture.path().join("repo");
     std::fs::create_dir(&repo).expect("repository directory");
@@ -8707,7 +8760,7 @@ async fn delegate_worktree_provisions_isolated_cwd_and_records_resolved_placemen
         ],
     ]);
     let worktree_root = fixture.path().join("worker-worktrees");
-    let state = AppState::new(
+    let state = AppState::new_with_config_root(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
@@ -8716,6 +8769,7 @@ async fn delegate_worktree_provisions_isolated_cwd_and_records_resolved_placemen
             Arc::new(DelegatedMarkerWriteTool) as Arc<dyn Tool>
         ]),
         None,
+        fixture.path().join("swage-home"),
     )
     .with_worktree_root(worktree_root.clone());
 
@@ -8850,7 +8904,6 @@ async fn delegate_worktree_provisions_isolated_cwd_and_records_resolved_placemen
 
 #[tokio::test(flavor = "multi_thread")]
 async fn detached_delegate_can_be_cancelled_through_active_registry() {
-    let _swage_home = SwageHomeGuard::isolate();
     let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
     let space = storage
         .get_or_create_default()
@@ -8893,7 +8946,7 @@ async fn detached_delegate_can_be_cancelled_through_active_registry() {
         "Detached child answer".to_string(),
     );
     let placement_fixture = tempfile::tempdir().expect("placement fixture");
-    let state = AppState::new(
+    let state = AppState::new_with_config_root(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
@@ -8902,6 +8955,7 @@ async fn detached_delegate_can_be_cancelled_through_active_registry() {
             Arc::new(DelegatedMarkerWriteTool) as Arc<dyn Tool>
         ]),
         None,
+        placement_fixture.path().join("swage-home"),
     )
     .with_worktree_root(placement_fixture.path().join("worker-worktrees"));
     let handler = GatewayDelegationHandler::new(state.clone());
@@ -10937,8 +10991,12 @@ fn agent_workspace_uses_active_workspace_and_attachment_grants() {
         }],
     };
 
-    let (workspace_root, allowed_paths) =
-        agent_workspace_from_policy(&policy, Uuid::new_v4(), Uuid::new_v4());
+    let (workspace_root, allowed_paths) = agent_workspace_from_policy(
+        std::path::Path::new(".swage"),
+        &policy,
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+    );
 
     assert_eq!(workspace_root, active_workspace);
     assert_eq!(allowed_paths, vec![active_workspace, attachment_workspace]);
