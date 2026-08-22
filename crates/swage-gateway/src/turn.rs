@@ -1342,7 +1342,14 @@ pub(crate) async fn process_turn_with_composition(
                 .transpose()
                 .map_err(|error| {
                     GatewayError::ConfigError(format!("session effort is invalid: {error}"))
-                })?,
+                })?
+                .or_else(|| {
+                    config
+                        .models
+                        .entries
+                        .get(&config.models.default)
+                        .and_then(|model| model.default_effort)
+                }),
         };
         let turn_request = TurnRequest {
             execution: swage_agent::context::TurnExecutionContext {

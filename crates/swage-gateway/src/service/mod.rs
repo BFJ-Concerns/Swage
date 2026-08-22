@@ -380,6 +380,52 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn conversation_inherits_space_models_default_effort() {
+        let swage_home = crate::test_support::SwageHomeGuard::new();
+        let space_dir = swage_home.path().join("spaces/default");
+        std::fs::create_dir_all(&space_dir).expect("create space config directory");
+        std::fs::write(
+            swage_home.path().join("config.toml"),
+            r#"
+[providers]
+default = "test"
+
+[providers.entries.test]
+protocol = "openai"
+
+[models]
+default = "model-a"
+
+[models.entries.model-a]
+provider_id = "test"
+model_id = "global-model"
+default_effort = "low"
+"#,
+        )
+        .expect("write global config");
+        std::fs::write(
+            space_dir.join("config.toml"),
+            r#"
+[models.entries.model-a]
+provider_id = "test"
+model_id = "space-model"
+default_effort = "high"
+"#,
+        )
+        .expect("write space config");
+
+        let (svc, storage) = make_definition_service();
+        let response = svc
+            .with_config(swage_config::ResolvedConfig::default())
+            .create_conversation_from_request(CreateConversationRequest::default())
+            .await
+            .unwrap();
+
+        let session = storage.get_session(response.id).await.unwrap().unwrap();
+        assert_eq!(session.metadata.unwrap()["effort"], "high");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn conversation_inherits_selected_model_default_effort() {
         let (svc, storage) = make_definition_service();
         let mut config = swage_config::ResolvedConfig::default();
