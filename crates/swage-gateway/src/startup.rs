@@ -181,28 +181,38 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
         &config,
         Arc::clone(&raw_storage) as Arc<dyn swage_storage::store::Storage>,
         browser_host.clone(),
+        &root,
     );
 
     // Step 8: Assemble application state and build the router.
     let storage: Arc<dyn swage_storage::store::Storage> =
         Arc::clone(&raw_storage) as Arc<dyn swage_storage::store::Storage>;
     let space_store: Arc<dyn swage_storage::store::SpaceStore> = raw_storage;
-    let mut state = crate::state::AppState::new(
+    let mut state = crate::state::AppState::new_with_config_root(
         storage,
         space_store,
         provider,
         config.clone(),
         tool_dispatcher,
         None,
+        root,
     );
     let browser_host = Some(crate::browser::BrowserHost::new(
         crate::browser::BrowserConfig::from_tool_config(&config.tools.browser, &state.config_root),
     ));
-    let tool_dispatcher =
-        build_tool_dispatcher_with_browser(&config, state.storage.clone(), browser_host.clone());
+    let tool_dispatcher = build_tool_dispatcher_with_browser(
+        &config,
+        state.storage.clone(),
+        browser_host.clone(),
+        &state.config_root,
+    );
     state.tool_dispatcher = Arc::new(tool_dispatcher);
-    let tool_dispatcher =
-        build_tool_dispatcher_with_browser(&config, state.storage.clone(), browser_host.clone());
+    let tool_dispatcher = build_tool_dispatcher_with_browser(
+        &config,
+        state.storage.clone(),
+        browser_host.clone(),
+        &state.config_root,
+    );
     state.replace_runtime(config.clone(), state.provider.clone(), tool_dispatcher);
     state.voice_provider = voice_provider;
     state.telegram = telegram;
@@ -627,13 +637,14 @@ pub(crate) fn build_tool_dispatcher(
     let browser_host = Some(crate::browser::BrowserHost::new(
         crate::browser::BrowserConfig::from_tool_config(&config.tools.browser, config_root),
     ));
-    build_tool_dispatcher_with_browser(config, storage, browser_host)
+    build_tool_dispatcher_with_browser(config, storage, browser_host, config_root)
 }
 
 pub(crate) fn build_tool_dispatcher_with_browser(
     config: &swage_config::ResolvedConfig,
     storage: Arc<dyn swage_storage::store::Storage>,
     browser_host: Option<Arc<crate::browser::BrowserHost>>,
+    config_root: &std::path::Path,
 ) -> crate::tool::ToolDispatcher {
     use crate::tool::{
         Tool, agent_memory::AgentMemoryTool, browser::browser_tools, file_edit::FileEditTool,
@@ -704,7 +715,7 @@ pub(crate) fn build_tool_dispatcher_with_browser(
         base_tools
     };
 
-    let plugin_tools = resolve_plugin_directory(config)
+    let plugin_tools = resolve_plugin_directory(config, config_root)
         .map(|plugin_directory| discover_plugin_tools(&plugin_directory, shell_timeout))
         .unwrap_or_else(|| (vec![], vec![]));
     for warning in &plugin_tools.1 {
@@ -768,16 +779,16 @@ pub(crate) fn build_tool_dispatcher_with_browser(
     crate::tool::ToolDispatcher::allow_all(all_tools)
 }
 
-fn resolve_plugin_directory(config: &swage_config::ResolvedConfig) -> Option<PathBuf> {
+fn resolve_plugin_directory(
+    config: &swage_config::ResolvedConfig,
+    config_root: &std::path::Path,
+) -> Option<PathBuf> {
     let directory = config.tools.plugin_directory.as_ref()?;
     let path = PathBuf::from(directory);
     if path.is_absolute() {
         Some(path)
     } else {
-        swage_config::discovery::resolve_root()
-            .ok()
-            .map(|root| root.join(path.clone()))
-            .or(Some(path))
+        Some(config_root.join(path))
     }
 }
 
@@ -1658,12 +1669,12 @@ mod tests {
         let storage =
             Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
         let mut config = swage_config::ResolvedConfig::default();
-        config.tools.plugin_directory = Some(temp_dir.path().join("plugins").display().to_string());
+        config.tools.plugin_directory = Some("plugins".to_string());
 
         let dispatcher = build_tool_dispatcher(
             &config,
             storage as Arc<dyn swage_storage::store::Storage>,
-            std::path::Path::new(".swage"),
+            temp_dir.path(),
         );
 
         assert!(dispatcher.registry().get("echo_plugin").is_some());

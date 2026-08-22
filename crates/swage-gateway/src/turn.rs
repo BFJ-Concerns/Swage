@@ -781,18 +781,16 @@ pub(crate) async fn process_turn_with_composition(
     )?;
     let config = effective_session_config(config, session.selected_model_id.as_deref());
 
-    // Resolve the swage root once — skill discovery, space memory loading,
-    // and assembly search-path construction all depend on it.
-    //
-    // Fail-open: a warning is logged and each consumer falls back gracefully.
-    let swage_root_opt = resolve_swage_root(state);
+    // Skill discovery, space memory loading, and assembly search paths all use
+    // the root retained when this application state was constructed.
+    let swage_root = resolve_swage_root(state);
 
     let active_skills = load_active_skills_for_agent(
         state,
         session_id,
         &space_slug,
         &session.agent_id,
-        swage_root_opt.as_deref(),
+        Some(swage_root),
         true,
         &config.declared_skills,
     )
@@ -959,10 +957,7 @@ pub(crate) async fn process_turn_with_composition(
     };
     let assembly_name = context_choices.assembly_name;
     let memory_content = load_memory_for_assembly(&assembly_name, || async {
-        match swage_root_opt.as_deref() {
-            Some(root) => load_space_memory(root, &space_slug).await,
-            None => String::new(),
-        }
+        load_space_memory(swage_root, &space_slug).await
     })
     .await;
     let mut session_variables: std::collections::BTreeMap<String, String> =
@@ -1005,13 +1000,10 @@ pub(crate) async fn process_turn_with_composition(
     let environment =
         build_session_environment(&space, Some(workspace_root.display().to_string()), &session);
     let available_skills =
-        available_skills_for_agent(&space_slug, &session.agent_id, swage_root_opt.as_deref());
+        available_skills_for_agent(&space_slug, &session.agent_id, Some(swage_root));
 
-    let operator_guidance = operator_guidance_rules(swage_root_opt.as_deref(), &workspace_policy);
-    let hierarchy = swage_root_opt
-        .as_deref()
-        .map(|root| configuration_hierarchy(root, &space_slug, &session.agent_id))
-        .unwrap_or_default();
+    let operator_guidance = operator_guidance_rules(Some(swage_root), &workspace_policy);
+    let hierarchy = configuration_hierarchy(swage_root, &space_slug, &session.agent_id);
 
     let elements = build_assembly_elements(
         &config.instructions,
@@ -1037,7 +1029,7 @@ pub(crate) async fn process_turn_with_composition(
         &config,
         &elements,
         &tokeniser,
-        swage_root_opt.as_deref(),
+        Some(swage_root),
         &space_slug,
         &session.agent_id,
         &session_variables,

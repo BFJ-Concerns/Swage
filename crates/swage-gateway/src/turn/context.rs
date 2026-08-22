@@ -310,8 +310,8 @@ where
         .await
 }
 
-pub(crate) fn resolve_swage_root(state: &AppState) -> Option<PathBuf> {
-    Some(state.config_root.clone())
+pub(crate) fn resolve_swage_root(state: &AppState) -> &Path {
+    &state.config_root
 }
 
 pub(crate) async fn load_active_skills_for_agent(
