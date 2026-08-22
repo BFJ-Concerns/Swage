@@ -928,7 +928,8 @@ pub async fn create_conversation(
     payload: Option<Json<CreateConversationRequest>>,
 ) -> Result<impl IntoResponse, ApiError> {
     let config = state.active_config();
-    let svc = ConversationService::new(state.storage, state.space_store).with_config(config);
+    let svc = ConversationService::new(state.storage, state.space_store)
+        .with_config(config, state.config_root);
     let request = payload.map(|Json(request)| request).unwrap_or_default();
     let resp: ConversationResponse = svc.create_conversation_from_request(request).await?;
     Ok((StatusCode::CREATED, Json(resp)))
@@ -941,7 +942,8 @@ pub async fn list_conversations(
     State(state): State<AppState>,
 ) -> Result<Json<ConversationListResponse>, ApiError> {
     let config = state.active_config();
-    let svc = ConversationService::new(state.storage, state.space_store).with_config(config);
+    let svc = ConversationService::new(state.storage, state.space_store)
+        .with_config(config, state.config_root);
     let conversations = svc.list_conversations().await?;
     Ok(Json(ConversationListResponse { conversations }))
 }
@@ -979,7 +981,8 @@ pub async fn create_space_session(
     payload: Option<Json<CreateConversationRequest>>,
 ) -> Result<impl IntoResponse, ApiError> {
     let config = state.active_config();
-    let svc = ConversationService::new(state.storage, state.space_store).with_config(config);
+    let svc = ConversationService::new(state.storage, state.space_store)
+        .with_config(config, state.config_root);
     let request = payload.map(|Json(request)| request).unwrap_or_default();
     let resp = svc
         .create_session_in_space_from_request(space_id, request)

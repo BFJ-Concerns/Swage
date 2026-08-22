@@ -369,28 +369,7 @@ pub(crate) fn load_session_config(
     )
 }
 
-pub(crate) fn load_session_config_from_active(
-    active_config: swage_config::ResolvedConfig,
-    space_slug: &str,
-    agent_id: &str,
-) -> Result<swage_config::ResolvedConfig, GatewayError> {
-    let root = match swage_config::discovery::resolve_root() {
-        Ok(root) => root,
-        Err(error) => {
-            tracing::warn!(
-                error = %error.kind,
-                space_slug,
-                agent_id,
-                "failed to resolve swage root; using active runtime configuration"
-            );
-            return Ok(active_config);
-        }
-    };
-
-    load_session_config_from_root(&root, active_config, space_slug, agent_id)
-}
-
-fn load_session_config_from_root(
+pub(crate) fn load_session_config_from_root(
     root: &Path,
     active_config: swage_config::ResolvedConfig,
     space_slug: &str,
