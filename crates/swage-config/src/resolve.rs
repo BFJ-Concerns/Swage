@@ -1,3 +1,4 @@
+use crate::RESERVED_WORKFLOW_AGENT_ID;
 use crate::discovery;
 use crate::error::{ConfigError, ConfigProblem, ConfigProblemKind};
 use crate::instructions;
@@ -66,12 +67,13 @@ pub fn load_resolved_config_from(
     let global_config = root.join("config.toml");
     let space_dir = root.join("spaces").join(space);
     let space_config = space_dir.join("config.toml");
-    let agent_dir = space_dir.join("agents").join(agent);
-    let agent_config = agent_dir.join("config.toml");
+    let agent_dir =
+        (agent != RESERVED_WORKFLOW_AGENT_ID).then(|| space_dir.join("agents").join(agent));
 
     let global_instrs = root.join("instructions");
     let space_instrs = space_dir.join("instructions");
-    let agent_instrs = agent_dir.join("instructions");
+    let agent_config = agent_dir.as_ref().map(|dir| dir.join("config.toml"));
+    let agent_instrs = agent_dir.as_ref().map(|dir| dir.join("instructions"));
 
     let mut all_problems: Vec<ConfigProblem> = Vec::new();
 
@@ -83,8 +85,10 @@ pub fn load_resolved_config_from(
         }
     }
 
-    if let Some(partial) = try_load_file(&agent_config, &mut all_problems) {
-        config_chain.push(partial);
+    if let Some(agent_config) = &agent_config {
+        if let Some(partial) = try_load_file(agent_config, &mut all_problems) {
+            config_chain.push(partial);
+        }
     }
 
     // Fail fast if any file had errors — report everything collected.
@@ -101,11 +105,13 @@ pub fn load_resolved_config_from(
     }
 
     // Assemble instructions from the same active levels.
-    let levels: Vec<(HierarchyLevel, &Path)> = vec![
+    let mut levels: Vec<(HierarchyLevel, &Path)> = vec![
         (HierarchyLevel::Global, global_instrs.as_path()),
         (HierarchyLevel::Space, space_instrs.as_path()),
-        (HierarchyLevel::Agent, agent_instrs.as_path()),
     ];
+    if let Some(agent_instrs) = &agent_instrs {
+        levels.push((HierarchyLevel::Agent, agent_instrs.as_path()));
+    }
 
     match instructions::assemble_instructions(&levels) {
         Ok(text) => resolved.instructions = text,

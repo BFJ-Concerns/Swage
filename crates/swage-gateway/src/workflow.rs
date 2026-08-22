@@ -52,6 +52,7 @@ use crate::{
 };
 
 const CARRIED_WORKFLOW_ID_DOMAIN: &[u8] = b"swage skill carried workflow";
+const BARE_WORKFLOW_AGENT_ID: &str = swage_config::RESERVED_WORKFLOW_AGENT_ID;
 
 fn store_worker_placement(placement: ResolvedWorkerDirectory) -> WorkflowRunWorkerPlacement {
     WorkflowRunWorkerPlacement {
@@ -1109,8 +1110,6 @@ async fn run_ephemeral_agent_call(
     // ids exclude underscores. Bare workflow workers therefore receive the
     // inherited session configuration, bounded by their dispatch ancestry,
     // without inventing or resolving a default definition.
-    const BARE_WORKFLOW_AGENT_ID: &str = "__workflow_ephemeral__";
-
     let (session_id, thread_id) = match request.session.as_ref() {
         // Continuation: the next turn lands on a session this run already
         // created. The token must name one of the run's own journalled
@@ -7551,7 +7550,7 @@ mod tests {
             .await
             .expect("session query")
             .expect("bare worker session");
-        assert_eq!(session.agent_id, "__workflow_ephemeral__");
+        assert_eq!(session.agent_id, BARE_WORKFLOW_AGENT_ID);
         let requests = provider.requests.lock().expect("requests");
         assert_eq!(requests.len(), 1);
         assert!(
@@ -13575,7 +13574,7 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
             loop {
                 let sessions = storage
-                    .list_sessions_by_agent_id("__workflow_ephemeral__")
+                    .list_sessions_by_agent_id(BARE_WORKFLOW_AGENT_ID)
                     .await
                     .expect("worker sessions");
                 for session in sessions {
