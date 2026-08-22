@@ -7916,8 +7916,8 @@ mod tests {
         let provider = Arc::new(ScriptedRecordingProvider {
             outputs: std::sync::Mutex::new(std::collections::VecDeque::from([
                 scripted_text_output("not valid JSON"),
-                scripted_text_output(r#"{"result":"first"}"#),
-                scripted_text_output(r#"{"updated":true}"#),
+                scripted_text_output(r#"{"call_level_override":true}"#),
+                scripted_text_output(r#"{"call_level_override":true}"#),
             ])),
             requests: std::sync::Mutex::new(Vec::new()),
         });
@@ -7974,14 +7974,14 @@ mod tests {
             timeout_ms: None,
             cwd: None,
             isolation: None,
-            // A call can carry its own output settings alongside a named
-            // task, but the task's durable contract must govern the worker.
+            // A call-level schema governs this invocation, while the named
+            // task still supplies its configured retry count.
             schema: Some(serde_json::json!({
                 "type": "object",
                 "required": ["call_level_override"],
                 "properties": {"call_level_override": {"const": true}}
             })),
-            max_attempts: 5,
+            max_attempts: 1,
             label: None,
             session: None,
             elements: None,
@@ -8001,13 +8001,16 @@ mod tests {
         )
         .await
         .expect("first named dispatch");
-        assert_eq!(first.output, serde_json::json!({"result":"first"}));
+        assert_eq!(
+            first.output,
+            serde_json::json!({"call_level_override":true})
+        );
         {
             let requests = provider.requests.lock().expect("requests");
             assert_eq!(
                 requests.len(),
                 2,
-                "invalid output must consume the task retry"
+                "the task's one retry must apply even though the call requested one total attempt"
             );
             let text = requests[0]
                 .messages
@@ -8016,6 +8019,10 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join("\n");
             assert!(text.contains("First workflow task instruction."));
+            assert!(
+                text.contains("call_level_override"),
+                "the provider contract must contain the call-level schema: {text}"
+            );
             assert_eq!(requests[0].model.as_deref(), Some("first-wire"));
             assert!(
                 requests[0].tool_definitions.is_empty(),
@@ -8063,7 +8070,10 @@ mod tests {
         )
         .await
         .expect("redispatch edited definition");
-        assert_eq!(second.output, serde_json::json!({"updated":true}));
+        assert_eq!(
+            second.output,
+            serde_json::json!({"call_level_override":true})
+        );
         let requests = provider.requests.lock().expect("requests");
         let edited = &requests[2];
         let edited_text = edited

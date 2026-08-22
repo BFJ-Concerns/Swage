@@ -734,7 +734,7 @@ pub(crate) async fn process_turn_with_composition(
     // Task names ride child-session metadata, while the definition is
     // resolved afresh for every execution. Missing or unreadable tasks fail
     // closed: silently running a different contract would be false success.
-    let (config, task_defines_output_schema, task_defines_output_retries) = match session
+    let (config, task_defines_output_retries) = match session
         .metadata
         .as_ref()
         .and_then(|m| m.get("task_definition"))
@@ -762,15 +762,13 @@ pub(crate) async fn process_turn_with_composition(
             {
                 tracing::warn!(%error, task_id, "task prompt variant record unavailable; serving the definition default");
             }
-            let defines_output_schema = definition.output_schema.is_some();
             let defines_output_retries = definition.output_max_retries.is_some();
             (
                 apply_task_definition(config, &definition)?,
-                defines_output_schema,
                 defines_output_retries,
             )
         }
-        None => (config, false, false),
+        None => (config, false),
     };
 
     ensure_selected_model_available(
@@ -1065,11 +1063,7 @@ pub(crate) async fn process_turn_with_composition(
     let mut agent_config = build_agent_config_with_workspace(
         session.agent_id.clone(),
         &config,
-        if task_defines_output_schema {
-            None
-        } else {
-            output_schema_override
-        },
+        output_schema_override,
         &workspace_root,
         allowed_paths,
     );
