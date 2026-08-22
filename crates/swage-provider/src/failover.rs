@@ -1104,6 +1104,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stream_fails_over_after_empty_delta_then_anomaly() {
+        let secondary_calls = Arc::new(StdMutex::new(0));
+        let primary = SequencedStreamProvider {
+            name: "p1",
+            call_count: Arc::new(StdMutex::new(0)),
+            attempts: StdMutex::new(vec![vec![
+                StreamChunk::Delta {
+                    content: String::new(),
+                },
+                StreamChunk::ProviderAnomaly {
+                    message: "empty response".into(),
+                },
+            ]]),
+        };
+        let secondary = SequencedStreamProvider {
+            name: "p2",
+            call_count: Arc::clone(&secondary_calls),
+            attempts: StdMutex::new(vec![vec![
+                StreamChunk::Delta {
+                    content: "recovered".into(),
+                },
+                StreamChunk::Done {
+                    finish_reason: None,
+                },
+            ]]),
+        };
+        let failover =
+            FailoverProvider::with_defaults(vec![Arc::new(primary), Arc::new(secondary)]);
+
+        let chunks: Vec<_> = failover.stream(completion_req()).collect().await;
+
+        assert_eq!(*secondary_calls.lock().unwrap(), 1);
+        assert!(chunks.iter().any(
+            |chunk| matches!(chunk, StreamChunk::Delta { content } if content == "recovered")
+        ));
+    }
+
+    #[tokio::test]
     async fn stream_preserves_provider_anomaly_after_output_without_failover() {
         let primary = SequencedStreamProvider {
             name: "p1",

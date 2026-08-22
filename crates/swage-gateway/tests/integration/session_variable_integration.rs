@@ -12,9 +12,10 @@ use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite;
 use uuid::Uuid;
 
-use swage_config::{HierarchyLevel, prompt_rule::PromptRule};
+use swage_config::HierarchyLevel;
+use swage_context::briefing::BriefingElement;
 use swage_context::element::ContextElement;
-use swage_context::prompts::PromptsElement;
+use swage_context::named_element::ResolvedNamedElement;
 use swage_core::{
     ChatMessage, CompletionRequest, CompletionResponse, ProviderError, StreamChunk,
     ToolCompletionRequest, ToolCompletionResponse,
@@ -125,12 +126,12 @@ fn host_context(state: &AppState, session_id: Uuid) -> GatewayToolContext {
 
 fn render(variables: BTreeMap<String, String>) -> Vec<ChatMessage> {
     let elements: Vec<Box<dyn ContextElement>> =
-        vec![Box::new(PromptsElement::new(vec![PromptRule {
-            priority: 0,
+        vec![Box::new(BriefingElement::new(ResolvedNamedElement {
+            name: "briefing".into(),
+            level: HierarchyLevel::Global,
+            path: "elements/briefing.md".into(),
             content: "Task: {{task}}; owner: {{owner}}".into(),
-            source_level: HierarchyLevel::Global,
-            file_path: "briefing".into(),
-        }]))];
+        }))];
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("briefing.js");
     std::fs::write(&path, "add(elements[0].render());").unwrap();
@@ -400,7 +401,7 @@ async fn live_listener_turns_set_and_update_the_values_used_by_composition() {
     std::fs::create_dir_all(swage_home.path().join("assemblies")).unwrap();
     std::fs::write(
         swage_home.path().join("assemblies/briefing.js"),
-        "add(elements.find(element => element.name === 'prompts').render()); add(elements.find(element => element.name === 'current-work').render());",
+        "add(elements.find(element => element.name === 'prompts')); add(elements.find(element => element.name === 'current-work').render());",
     )
     .unwrap();
     let element_path = swage_home
@@ -506,8 +507,8 @@ async fn live_listener_turns_set_and_update_the_values_used_by_composition() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
-        first_context.contains("Task: ⟦unset:task⟧; owner: ⟦unset:owner⟧"),
-        "the first foreground assembly should expose explicit missing values: {first_context}"
+        first_context.contains("Task: {{task}}; owner: {{owner}}"),
+        "literal prompts should preserve brace-shaped text: {first_context}"
     );
     assert!(
         first_context.contains("Current work: ⟦unset:task⟧"),
@@ -520,8 +521,8 @@ async fn live_listener_turns_set_and_update_the_values_used_by_composition() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
-        second_turn_context.contains("Task: inspect storage; owner: ⟦unset:owner⟧"),
-        "the next foreground turn should assemble directly from saved session values: {second_turn_context}"
+        second_turn_context.contains("Task: {{task}}; owner: {{owner}}"),
+        "literal prompts should remain unchanged after session values are saved: {second_turn_context}"
     );
     assert!(
         second_turn_context.contains("Current work: inspect storage"),
@@ -564,7 +565,7 @@ async fn live_http_delegations_apply_call_scoped_context_composition() {
     std::fs::create_dir_all(assembly_path.parent().unwrap()).unwrap();
     std::fs::write(
         assembly_path,
-        "for (const element of elements) add(element.render());",
+        "for (const element of elements) add(typeof element.render === 'function' ? element.render() : element);",
     )
     .unwrap();
     let mut environment = crate::support::ProcessEnvGuard::new();
