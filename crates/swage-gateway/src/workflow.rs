@@ -9111,11 +9111,8 @@ mod tests {
         Arc<RecordingGateProvider>,
         Arc<RecordingGateProvider>,
     ) {
-        configured_event_gate_fixture_with_models(
-            "default-provider-model",
-            "provider-facing-model",
-        )
-        .await
+        configured_event_gate_fixture_with_models("default-provider-model", "provider-facing-model")
+            .await
     }
 
     async fn configured_event_gate_fixture_with_models(

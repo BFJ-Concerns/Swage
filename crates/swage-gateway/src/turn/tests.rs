@@ -4846,15 +4846,16 @@ async fn delegated_result_delivery_failure_clears_active_turn() {
     .await
     .expect_err("the injected delegated-result append must fail");
 
-    let thread = storage
-        .list_by_session(session_id)
-        .await
-        .unwrap()
-        .remove(0);
+    let thread = storage.list_by_session(session_id).await.unwrap().remove(0);
     let turns = storage.list_turns_by_thread(thread.id).await.unwrap();
     assert_eq!(turns[0].state, TurnState::Failed);
     assert_eq!(
-        storage.get_agent_message(result.id).await.unwrap().unwrap().status,
+        storage
+            .get_agent_message(result.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
         MessageStatus::Pending,
         "a result whose append failed must remain available for redelivery"
     );
