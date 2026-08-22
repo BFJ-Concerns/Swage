@@ -173,10 +173,10 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
     let voice_provider = create_voice_provider(&config, &startup_secret_manager).await;
     let telegram = create_telegram_client(&config, &startup_secret_manager).await;
 
-    // Step 7: Build the initial tool dispatch pipeline. Browser profiles need
-    // the root retained by AppState, so browser tools are attached immediately
-    // after state construction below.
-    let browser_host = None;
+    // Step 7: Build the tool dispatch pipeline from the root selected above.
+    let browser_host = Some(crate::browser::BrowserHost::new(
+        crate::browser::BrowserConfig::from_tool_config(&config.tools.browser, &root),
+    ));
     let tool_dispatcher = build_tool_dispatcher_with_browser(
         &config,
         Arc::clone(&raw_storage) as Arc<dyn swage_storage::store::Storage>,
@@ -197,23 +197,6 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
         None,
         root,
     );
-    let browser_host = Some(crate::browser::BrowserHost::new(
-        crate::browser::BrowserConfig::from_tool_config(&config.tools.browser, &state.config_root),
-    ));
-    let tool_dispatcher = build_tool_dispatcher_with_browser(
-        &config,
-        state.storage.clone(),
-        browser_host.clone(),
-        &state.config_root,
-    );
-    state.tool_dispatcher = Arc::new(tool_dispatcher);
-    let tool_dispatcher = build_tool_dispatcher_with_browser(
-        &config,
-        state.storage.clone(),
-        browser_host.clone(),
-        &state.config_root,
-    );
-    state.replace_runtime(config.clone(), state.provider.clone(), tool_dispatcher);
     state.voice_provider = voice_provider;
     state.telegram = telegram;
     state.start_agent_message_expiry();
