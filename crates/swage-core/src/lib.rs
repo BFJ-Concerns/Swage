@@ -36,6 +36,7 @@ pub use request::{
     ProviderContentBlockWitness, ProviderResponseWitness, StreamChunk, TokenUsage,
     ToolCompletionRequest, ToolCompletionResponse,
 };
+pub use swage_protocol::client::settings::Effort;
 pub use tool::{
     CompactToolReplay, ToolCall, ToolDefinition, ToolReplayReasoning, ToolResult,
     build_tool_round_messages, build_tool_round_messages_with_reasoning,
