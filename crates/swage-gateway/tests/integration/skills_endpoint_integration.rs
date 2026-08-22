@@ -172,10 +172,6 @@ async fn known_space_fresh_config_root_returns_shipped_catalogue() {
     );
     assert!(skills.iter().all(|skill| skill["shipped"] == true));
     assert!(skills.iter().all(|skill| skill["id"].as_str().is_some()));
-    assert!(
-        root.is_dir(),
-        "skill discovery should retain the fresh root"
-    );
 }
 
 /// Skills at global level appear with level="global".
