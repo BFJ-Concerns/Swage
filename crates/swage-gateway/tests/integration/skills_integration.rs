@@ -294,6 +294,30 @@ async fn ws_collect_events(stream: &mut WsStream, timeout: Duration) -> Vec<Valu
     events
 }
 
+/// Collect WebSocket events through the named terminal event.
+async fn ws_collect_until(
+    stream: &mut WsStream,
+    terminal_event: &str,
+    timeout: Duration,
+) -> Vec<Value> {
+    let mut events = Vec::new();
+    tokio::time::timeout(timeout, async {
+        loop {
+            let event = ws_recv_lenient(stream)
+                .await
+                .unwrap_or_else(|| panic!("websocket closed before {terminal_event}: {events:?}"));
+            let reached_terminal = event["type"] == terminal_event;
+            events.push(event);
+            if reached_terminal {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("timed out waiting for {terminal_event}: {events:?}"));
+    events
+}
+
 /// Wait for a specific event type, ignoring interleaved stream events.
 async fn ws_wait_for_event(stream: &mut WsStream, event_type: &str, timeout: Duration) -> Value {
     let deadline = tokio::time::Instant::now() + timeout;
@@ -392,7 +416,7 @@ async fn slash_command_activates_skill_and_appears_in_assembly_report() {
     .await;
 
     // Collect events — expecting SkillActivated, ContextAssembled, Token(s), TurnComplete.
-    let events = ws_collect_events(&mut stream, Duration::from_secs(5)).await;
+    let events = ws_collect_until(&mut stream, "turn_complete", WEBSOCKET_EVENT_DEADLINE).await;
 
     // Verify SkillActivated event was sent.
     let skill_activated = events
@@ -489,7 +513,7 @@ async fn agent_level_skill_appears_in_assembly_without_invocation() {
     )
     .await;
 
-    let events = ws_collect_events(&mut stream, Duration::from_secs(5)).await;
+    let events = ws_collect_until(&mut stream, "turn_complete", WEBSOCKET_EVENT_DEADLINE).await;
 
     // Assembly report should include the agent-level skill without explicit activation.
     let context_assembled = events
@@ -668,7 +692,7 @@ async fn deactivating_agent_level_skill_returns_error() {
     )
     .await;
 
-    let events = ws_collect_events(&mut stream, Duration::from_secs(3)).await;
+    let events = ws_collect_until(&mut stream, "error", WEBSOCKET_EVENT_DEADLINE).await;
     let error = events
         .iter()
         .find(|e| e["type"] == "error")
