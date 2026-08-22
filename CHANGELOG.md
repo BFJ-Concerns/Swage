@@ -28,6 +28,7 @@ All notable changes to Swage are documented in this file.
 
 ### Changed
 
+- JavaScript context assemblies now expose `render()` only on template-backed briefing elements; calling it on literal elements fails the script and records the fallback to the default assembly.
 - Gateway lifecycle defaults now use the descriptive `set-defaults` and `clear-defaults` commands; the terminal client is `chat`, and shell scripts are produced by `generate-completion`.
 - Anthropic requests now use the native beta endpoint.
 - Client-facing settings, asynchronous turns, context assembly reports, materials, attachments, and recovery listings now use the shared Rust wire contract and its generated TypeScript and JSON Schema projections.
@@ -41,6 +42,7 @@ All notable changes to Swage are documented in this file.
 - Provider fallback catalogues are current, attendance audit records distinguish interactive turns, and the context inspector identifies per-element token counts as non-additive estimates.
 - Retained built-in workflow IDs now return not found after a same-named authored workflow shadows them, while the authored workflow remains readable and launchable by its own ID.
 - Sandbox startup no longer fails when `TMPDIR` has a long path.
+- Sandbox startup now falls back from an overlong `XDG_RUNTIME_DIR` socket path and reports how to correct a path that cannot fit.
 - Generated TypeScript turn-poll responses now expose token counts as numbers rather than bigints.
 - Fresh-session schedules created from Settings now use the currently selected space.
 - Agent definition details now show the configured maximum output retries.
