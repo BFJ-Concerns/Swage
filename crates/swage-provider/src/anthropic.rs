@@ -345,10 +345,17 @@ async fn forward_anthropic_stream(
             return;
         }
 
-        if let Some(chunk) = AnthropicProvider::parse_sse_event(&event)
-            && tx.send(chunk).is_err()
-        {
-            return;
+        if let Some(chunk) = AnthropicProvider::parse_sse_event(&event) {
+            if matches!(chunk, StreamChunk::Error { .. }) {
+                if tx.send(witness.witness_chunk()).is_err() {
+                    return;
+                }
+                let _ = tx.send(chunk);
+                return;
+            }
+            if tx.send(chunk).is_err() {
+                return;
+            }
         }
     }
 
@@ -1303,6 +1310,33 @@ mod tests {
             StreamChunk::Error { message } if message.contains("connection lost")
         ));
         assert_eq!(chunks.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn error_event_forwards_witness_then_error_and_stops() {
+        let chunks = fixture_chunks(vec![
+            event(
+                "message_start",
+                r#"{"type":"message_start","message":{"usage":{"input_tokens":3,"output_tokens":0}}}"#,
+            ),
+            event(
+                "error",
+                r#"{"type":"error","error":{"type":"overloaded_error","message":"Server overloaded"}}"#,
+            ),
+            event(
+                "content_block_delta",
+                r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"must not escape"}}"#,
+            ),
+        ])
+        .await;
+
+        assert!(matches!(chunks[0], StreamChunk::ProviderResponseWitness(_)));
+        assert!(matches!(chunks[1], StreamChunk::Error { .. }));
+        assert_eq!(
+            chunks.len(),
+            2,
+            "forwarding must terminate at the error frame"
+        );
     }
 
     #[test]
