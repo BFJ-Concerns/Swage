@@ -16,9 +16,11 @@ use swage_core::{ChatMessage, CompletionRequest, Role, StorageError};
 use swage_protocol::client::workflow::{
     CreateWorkflowScriptRequest, PostWorkflowRunEventRequest, PostWorkflowRunEventResponse,
     StartInlineWorkflowRunRequest, StartWorkflowRunRequest, UpdateWorkflowScriptRequest,
-    WorkflowBudget, WorkflowRun, WorkflowRunDetailResponse, WorkflowRunEvent,
-    WorkflowRunEventSource, WorkflowRunListResponse, WorkflowRunState, WorkflowScript,
-    WorkflowScriptListQuery, WorkflowScriptListResponse,
+    WorkflowBudget, WorkflowHandoverEvent, WorkflowHandoverEventDelivery,
+    WorkflowHandoverFailedCall, WorkflowHandoverFailedCallRef, WorkflowRun,
+    WorkflowRunDetailResponse, WorkflowRunEvent, WorkflowRunEventSource, WorkflowRunHandover,
+    WorkflowRunListResponse, WorkflowRunState, WorkflowScript, WorkflowScriptListQuery,
+    WorkflowScriptListResponse,
 };
 use swage_storage::WorkflowJournalRecord;
 use swage_storage::{
@@ -4019,7 +4021,16 @@ fn run_wire(record: WorkflowRunRecord) -> Result<WorkflowRun, ApiError> {
         args: record.args,
         budget: budget_wire(&record.budget),
         final_output: record.final_output,
-        handover: record.handover,
+        handover: record
+            .handover
+            .map(serde_json::from_value::<WorkflowRunHandover>)
+            .transpose()
+            .map_err(|error| {
+                internal(format!(
+                    "workflow run {} handover does not match the recorded contract: {error}",
+                    record.id
+                ))
+            })?,
         error_message: record.error_message,
         created_at: record.created_at,
         completed_at: record.completed_at,
@@ -4187,7 +4198,7 @@ async fn failed_agent_call_handover(
     storage: &Arc<dyn Storage>,
     run_id: Uuid,
     failed_call_ref: FailedAgentCallRef,
-) -> Option<Value> {
+) -> Option<WorkflowRunHandover> {
     let journal = storage.list_workflow_journal(run_id).await.ok()?;
     let failed_call = journal.iter().find(|entry| {
         entry.id == failed_call_ref.journal_entry_id
@@ -4216,66 +4227,66 @@ async fn failed_agent_call_handover(
                         && previous_agent_call_seq
                             .is_none_or(|previous| delivery_seq > previous) =>
                 {
-                    "delivered_to_failed_call"
+                    WorkflowHandoverEventDelivery::DeliveredToFailedCall
                 }
-                None => "pending",
+                None => WorkflowHandoverEventDelivery::Pending,
                 Some(_) => return None,
             };
-            Some(serde_json::json!({
-                "id": event.id,
-                "seq": event.seq,
-                "kind": event.kind,
-                "journal_entry_id": event.journal_entry_id,
-                "delivery": delivery,
-            }))
+            Some(WorkflowHandoverEvent {
+                id: event.id,
+                seq: event.seq,
+                kind: event.kind,
+                journal_entry_id: event.journal_entry_id,
+                delivery,
+            })
         })
         .collect::<Vec<_>>();
     let last_journal_seq = journal.iter().map(|entry| entry.seq).max()?;
     let events_delivered_to_failed_call = events
         .iter()
-        .filter(|event| event["delivery"] == "delivered_to_failed_call")
-        .count();
-    let events_pending = events.len().saturating_sub(events_delivered_to_failed_call);
-    Some(serde_json::json!({
-        "classification": "interrupted",
-        "failure": format!("Agent call {} failed: {call_error}", failed_call.id),
-        "failed_call": {
-            "journal_entry_id": failed_call.id,
-            "seq": failed_call.seq,
-            "kind": failed_call.kind,
-            "label": failed_call.request.get("label").cloned().unwrap_or(Value::Null),
-            "error": call_error,
+        .filter(|event| event.delivery == WorkflowHandoverEventDelivery::DeliveredToFailedCall)
+        .count() as u64;
+    let events_pending = (events.len() as u64).saturating_sub(events_delivered_to_failed_call);
+    Some(WorkflowRunHandover::Interrupted {
+        failure: format!("Agent call {} failed: {call_error}", failed_call.id),
+        failed_call: WorkflowHandoverFailedCall {
+            journal_entry_id: failed_call.id,
+            seq: failed_call.seq,
+            // The find above filters on kind == "agent_call".
+            kind: swage_protocol::client::workflow::WorkflowJournalEntryKind::AgentCall,
+            label: failed_call
+                .request
+                .get("label")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            error: call_error.to_string(),
         },
-        "last_journal_seq": last_journal_seq,
-        "events_delivered_to_failed_call": events_delivered_to_failed_call,
-        "events_pending": events_pending,
-        "events": events,
-    }))
+        last_journal_seq,
+        events_delivered_to_failed_call,
+        events_pending,
+        events,
+    })
 }
 
-fn degraded_failed_run_handover(terminal_error: Option<&str>) -> Value {
-    serde_json::json!({
-        "classification": "interrupted_unattributed",
-        "failure": "The workflow failed without an attributable agent-call identity.",
-        "failed_call": Value::Null,
-        "terminal_error": terminal_error,
-    })
+fn degraded_failed_run_handover(terminal_error: Option<&str>) -> WorkflowRunHandover {
+    WorkflowRunHandover::InterruptedUnattributed {
+        failure: "The workflow failed without an attributable agent-call identity.".to_string(),
+        terminal_error: terminal_error.map(str::to_string),
+    }
 }
 
 fn reconstruction_failed_handover(
     failed_call: FailedAgentCallRef,
     terminal_error: Option<&str>,
-) -> Value {
-    serde_json::json!({
-        "classification": "reconstruction_failed",
-        "failure": "The journal read-back failed for a known agent call.",
-        "failed_call": {
-            "journal_entry_id": failed_call.journal_entry_id,
-            "seq": failed_call.seq,
+) -> WorkflowRunHandover {
+    WorkflowRunHandover::ReconstructionFailed {
+        failure: "The journal read-back failed for a known agent call.".to_string(),
+        failed_call: WorkflowHandoverFailedCallRef {
+            journal_entry_id: failed_call.journal_entry_id,
+            seq: failed_call.seq,
         },
-        "terminal_error": terminal_error,
-        "reconstruction_failed": true,
-    })
+        terminal_error: terminal_error.map(str::to_string),
+    }
 }
 
 async fn durable_failed_agent_call_handover(
@@ -4283,7 +4294,7 @@ async fn durable_failed_agent_call_handover(
     run_id: Uuid,
     failed_call: FailedAgentCallRef,
     terminal_error: Option<&str>,
-) -> Value {
+) -> WorkflowRunHandover {
     failed_agent_call_handover(storage, run_id, failed_call)
         .await
         .unwrap_or_else(|| reconstruction_failed_handover(failed_call, terminal_error))
@@ -4499,6 +4510,11 @@ async fn launch_existing_run(
         } else {
             None
         };
+        // Serialisation of the typed handover cannot fail: every field is a
+        // JSON-safe scalar, string, or list of the same.
+        let handover = handover.map(|handover| {
+            serde_json::to_value(&handover).expect("workflow handover serialises to JSON")
+        });
         let state_update = storage
             .update_workflow_run_state(run_id, run_state, output, handover, error.as_deref())
             .await;
@@ -11998,7 +12014,15 @@ mod tests {
             .await
             .expect("run detail");
         assert_eq!(detail.run.final_output, None);
-        assert_eq!(detail.run.handover.as_ref(), Some(&handover));
+        let typed_handover = detail.run.handover.expect("typed handover at the client surface");
+        assert!(matches!(
+            typed_handover,
+            WorkflowRunHandover::Interrupted { .. }
+        ));
+        assert_eq!(
+            serde_json::to_value(&typed_handover).expect("handover value"),
+            handover
+        );
         assert_eq!(detail.journal.len(), journal.len());
         assert_eq!(detail.wake_metrics.events_pending, 0);
 
@@ -12169,12 +12193,22 @@ mod tests {
         );
         let handover = run.handover.expect("degraded terminal handover");
         assert_eq!(handover["classification"], "interrupted_unattributed");
-        assert_eq!(handover["failed_call"], Value::Null);
+        assert!(
+            handover.get("failed_call").is_none(),
+            "the unattributed shape carries no failed-call identity"
+        );
         assert!(
             handover["terminal_error"]
                 .as_str()
                 .is_some_and(|error| error.contains("later unrelated script failure"))
         );
+        let Json(detail) = get_run(State(state.clone()), Path(started.id))
+            .await
+            .expect("run detail");
+        assert!(matches!(
+            detail.run.handover,
+            Some(WorkflowRunHandover::InterruptedUnattributed { .. })
+        ));
         assert_eq!(provider.requests.lock().expect("requests").len(), 1);
     }
 
@@ -12275,7 +12309,67 @@ mod tests {
                 .as_str()
                 .is_some_and(|error| error.contains("AgentCallError: terminal failure"))
         );
-        assert_eq!(handover["reconstruction_failed"], true);
+        let Json(detail) = get_run(State(state.clone()), Path(run.id))
+            .await
+            .expect("run detail");
+        assert!(matches!(
+            detail.run.handover,
+            Some(WorkflowRunHandover::ReconstructionFailed { .. })
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_handover_record_outside_the_contract_is_rejected_not_passed_through() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let source = "return 1;";
+        let run = storage
+            .create_workflow_run(NewWorkflowRun {
+                space_id: space.id,
+                parent_run_id: None,
+                parent_seq: None,
+                script_version_id: None,
+                inline_workflow_id: None,
+                inline_workflow_name: None,
+                inline_workflow_version: None,
+                carrying_skill: None,
+                source: Some(source.into()),
+                source_hash: source_hash(source),
+                args: Value::Null,
+                budget: serde_json::to_value(WorkflowBudget::default()).expect("budget"),
+                engine_version: "test".into(),
+                dispatch_bound_agent_ids: vec![],
+                dispatch_bound_task_definition_ids: vec![],
+                inherited_worker_placement: None,
+            })
+            .await
+            .expect("run");
+        storage
+            .update_workflow_run_state(
+                run.id,
+                "failed",
+                None,
+                Some(serde_json::json!({ "classification": "legacy_blob" })),
+                Some("stored before the typed contract"),
+            )
+            .await
+            .expect("stored blob");
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let error = get_run(State(state), Path(run.id))
+            .await
+            .expect_err("a handover outside the contract must not pass through untyped");
+        let message = format!("{error:?}");
+        assert!(
+            message.contains("does not match the recorded contract"),
+            "error names the contract violation: {message}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

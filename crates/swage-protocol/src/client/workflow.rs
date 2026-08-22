@@ -206,6 +206,78 @@ pub enum WorkflowRunState {
     Parked,
 }
 
+/// The durable account a failed run leaves behind: what stopped it, which
+/// call failed, and where the pending event queue stood, so whoever picks
+/// the work up starts from the record instead of a re-run.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS, JsonSchema)]
+#[serde(tag = "classification", rename_all = "snake_case")]
+pub enum WorkflowRunHandover {
+    /// An attributed agent-call failure stopped the run.
+    Interrupted {
+        failure: String,
+        failed_call: WorkflowHandoverFailedCall,
+        /// Highest journal seq at interruption — where replay would resume.
+        #[ts(type = "number")]
+        last_journal_seq: u64,
+        #[ts(type = "number")]
+        events_delivered_to_failed_call: u64,
+        #[ts(type = "number")]
+        events_pending: u64,
+        events: Vec<WorkflowHandoverEvent>,
+    },
+    /// The run failed without an attributable agent-call identity.
+    InterruptedUnattributed {
+        failure: String,
+        terminal_error: Option<String>,
+    },
+    /// The journal read-back failed for a known agent call, so only its
+    /// identity could be recovered.
+    ReconstructionFailed {
+        failure: String,
+        failed_call: WorkflowHandoverFailedCallRef,
+        terminal_error: Option<String>,
+    },
+}
+
+/// The failed call as the journal recorded it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS, JsonSchema)]
+pub struct WorkflowHandoverFailedCall {
+    pub journal_entry_id: Uuid,
+    #[ts(type = "number")]
+    pub seq: u64,
+    pub kind: WorkflowJournalEntryKind,
+    pub label: Option<String>,
+    pub error: String,
+}
+
+/// The failed call's bare identity, for when the journal could not be read
+/// back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
+pub struct WorkflowHandoverFailedCallRef {
+    pub journal_entry_id: Uuid,
+    #[ts(type = "number")]
+    pub seq: u64,
+}
+
+/// A queued run event's standing relative to the failed call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowHandoverEventDelivery {
+    DeliveredToFailedCall,
+    Pending,
+}
+
+/// One pending-queue event carried in the handover.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS, JsonSchema)]
+pub struct WorkflowHandoverEvent {
+    pub id: Uuid,
+    #[ts(type = "number")]
+    pub seq: u64,
+    pub kind: String,
+    pub journal_entry_id: Uuid,
+    pub delivery: WorkflowHandoverEventDelivery,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
 pub struct WorkflowRun {
     pub id: Uuid,
@@ -224,8 +296,7 @@ pub struct WorkflowRun {
     pub budget: WorkflowBudget,
     #[ts(type = "unknown")]
     pub final_output: Option<Value>,
-    #[ts(type = "unknown")]
-    pub handover: Option<Value>,
+    pub handover: Option<WorkflowRunHandover>,
     pub error_message: Option<String>,
     pub created_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
