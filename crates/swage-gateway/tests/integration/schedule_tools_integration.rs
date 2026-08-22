@@ -24,6 +24,7 @@ use swage_gateway::tool::schedule::{ScheduleTool, WakeMeLaterTool};
 use swage_gateway::tool::{Tool, ToolDispatcher, ToolRegistry};
 use swage_gateway::tool_executor::GatewayToolContext;
 use swage_gateway::{schedule, state::AppState};
+use swage_protocol::client::delivery::DeliveryRoutingRequest;
 use swage_protocol::client::schedule::ScheduleStatus;
 use swage_provider::openai::OpenAiProvider;
 use swage_provider::{LlmProvider, ProviderConfig};
@@ -236,13 +237,24 @@ async fn schedule_routing_keeps_strict_local_target_validation() {
     let space = state.space_store.get_or_create_default().await.unwrap();
     let dispatcher = dispatcher(permissions(&["scheduling"], &[]));
     let ctx = host_context(&state, "researcher", tool_session(&state, space.id).await);
+    let over_specified_webhook = json!({
+        "kind": "webhook",
+        "url": "https://example.test/scheduled-output",
+        "account": "ignored-by-serde"
+    });
+
+    serde_json::from_value::<DeliveryRoutingRequest>(json!({
+        "deliver_to_origin": false,
+        "explicit_targets": [over_specified_webhook.clone()]
+    }))
+    .expect("serde alone accepts fields that do not belong to the selected target variant");
 
     let rejected = dispatcher
         .dispatch(
             "schedule",
             json!({
                 "action": "create",
-                "message": "deliver to an incomplete channel",
+                "message": "deliver to an over-specified webhook",
                 "timing": "every",
                 "every": "every 1 hours",
                 "session": "fresh",
@@ -250,11 +262,7 @@ async fn schedule_routing_keeps_strict_local_target_validation() {
                 "agent_id": "gateway",
                 "routing": {
                     "explicit_targets": {
-                        "team_chat": {
-                            "kind": "channel",
-                            "integration": "dev_thread",
-                            "conversation": "room-1/topic-9"
-                        }
+                        "automation": over_specified_webhook
                     }
                 }
             }),
