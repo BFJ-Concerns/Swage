@@ -32,6 +32,7 @@ All notable changes to Swage are documented in this file.
 - Gateway lifecycle defaults now use the descriptive `set-defaults` and `clear-defaults` commands; the terminal client is `chat`, and shell scripts are produced by `generate-completion`.
 - Anthropic requests now use the native beta endpoint.
 - Client-facing settings, asynchronous turns, context assembly reports, materials, attachments, and recovery listings now use the shared Rust wire contract and its generated TypeScript and JSON Schema projections.
+- Delivery-log entries now identify the schedule run and turn that produced them when that attribution is available.
 - Unknown keys under `[generation.presets.*]` and `[models.entries.*.capabilities]` now fail configuration loading instead of being ignored. Most other sections already rejected unknown keys through validation and still do; per-model pricing entries remain lenient.
 - Tool approval prompting now defaults to disabled and remains available through explicit operator configuration.
 
@@ -39,6 +40,7 @@ All notable changes to Swage are documented in this file.
 
 - Conversations with unrecognised model selections no longer apply the configured default model's reasoning effort.
 - Rejected malformed tool calls no longer replay into provider history and prevent the conversation from continuing.
+- Development-channel no-ops now appear as `not_sent` with an explanation instead of claiming successful delivery.
 - A delayed not-found response for an earlier conversation no longer clears a conversation selected while that check was pending.
 - Browser back and forward navigation now restores the active conversation route when loading the destination fails.
 - Provider fallback catalogues are current, attendance audit records distinguish interactive turns, and the context inspector identifies per-element token counts as non-additive estimates.

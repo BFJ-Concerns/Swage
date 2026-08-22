@@ -17,7 +17,7 @@ use swage_core::{
     ToolCompletionRequest, ToolCompletionResponse,
 };
 use swage_gateway::{
-    channel_gateway::{DeliveryTarget, deliver_to_targets},
+    channel_gateway::{DeliveryAttribution, DeliveryTarget, deliver_to_targets},
     server::build_router,
     state::AppState,
 };
@@ -28,8 +28,8 @@ use swage_storage::{
     ScheduleRunTrigger, ScheduleRunUpdate, ScheduleStatus, SessionPolicy, SqliteStorage, TurnState,
     model::AppendMessage,
     store::{
-        AgentMemoryStore, ApprovalStore, MessageStore, ScheduleStore, SessionStore, SpaceStore,
-        Storage, ThreadStore, TurnStore,
+        AgentMemoryStore, ApprovalStore, DeliveryStore, MessageStore, ScheduleStore, SessionStore,
+        SpaceStore, Storage, ThreadStore, TurnStore,
     },
 };
 
@@ -140,6 +140,45 @@ async fn seed_session(storage: &Arc<SqliteStorage>) -> (Uuid, Uuid, Uuid) {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn delivery_record_write_failure_is_returned_without_masking_delivery_failure() {
+    let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+    let state = test_state(Arc::clone(&storage));
+    let missing_session = Uuid::new_v4();
+
+    let record_error = deliver_to_targets(
+        &state,
+        missing_session,
+        DeliveryAttribution::default(),
+        &[DeliveryTarget::LocalStorage],
+        "reply",
+    )
+    .await
+    .expect_err("a rejected delivery record must fail the operation");
+    assert!(
+        matches!(record_error, swage_core::GatewayError::Storage(_)),
+        "{record_error}"
+    );
+
+    let delivery_error = deliver_to_targets(
+        &state,
+        missing_session,
+        DeliveryAttribution::default(),
+        &[DeliveryTarget::Webhook {
+            url: "not a URL".into(),
+        }],
+        "reply",
+    )
+    .await
+    .expect_err("delivery and recording should both fail");
+    assert!(
+        delivery_error
+            .to_string()
+            .contains("invalid webhook target URL"),
+        "{delivery_error}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn operator_search_queries_sessions_messages_approvals_runs_and_deliveries() {
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
     let state = test_state(Arc::clone(&storage));
@@ -220,6 +259,7 @@ async fn operator_search_queries_sessions_messages_approvals_runs_and_deliveries
     deliver_to_targets(
         &state,
         session_id,
+        Default::default(),
         &[DeliveryTarget::LocalStorage],
         "delivery needle",
     )
@@ -418,6 +458,7 @@ async fn audit_trail_survives_restart_for_approvals_deliveries_and_runs() {
     deliver_to_targets(
         &state,
         session_id,
+        Default::default(),
         &[DeliveryTarget::Channel {
             integration: swage_gateway::channel_gateway::ExternalChannelIntegration::DevDm,
             account: "ops".into(),
@@ -427,6 +468,16 @@ async fn audit_trail_survives_restart_for_approvals_deliveries_and_runs() {
     )
     .await
     .unwrap();
+    let deliveries = storage
+        .list_delivery_records_by_session(session_id)
+        .await
+        .unwrap();
+    let delivery = deliveries.last().unwrap();
+    assert_eq!(delivery.status, "not_sent");
+    assert_eq!(
+        delivery.error.as_deref(),
+        Some("development channel target is a deliberate no-op")
+    );
 
     drop(router);
     drop(state);

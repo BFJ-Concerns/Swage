@@ -266,13 +266,27 @@ async fn ws_recv_lenient(stream: &mut WsStream) -> Option<Value> {
     }
 }
 
-/// Collect all WebSocket events within a timeout.
-async fn ws_collect_events(stream: &mut WsStream, timeout: Duration) -> Vec<Value> {
+/// Collect WebSocket events through the named terminal event.
+async fn ws_collect_until(
+    stream: &mut WsStream,
+    terminal_event: &str,
+    timeout: Duration,
+) -> Vec<Value> {
     let mut events = Vec::new();
-    let deadline = tokio::time::Instant::now() + timeout;
-    while let Ok(Some(event)) = tokio::time::timeout_at(deadline, ws_recv_lenient(stream)).await {
-        events.push(event);
-    }
+    tokio::time::timeout(timeout, async {
+        loop {
+            let event = ws_recv_lenient(stream)
+                .await
+                .unwrap_or_else(|| panic!("websocket closed before {terminal_event}: {events:?}"));
+            let reached_terminal = event["type"] == terminal_event;
+            events.push(event);
+            if reached_terminal {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("timed out waiting for {terminal_event}: {events:?}"));
     events
 }
 
@@ -341,7 +355,7 @@ async fn config_deny_list_blocks_tool_through_unified_turn_loop() {
     .await;
 
     // Collect all events
-    let events = ws_collect_events(&mut stream, Duration::from_secs(5)).await;
+    let events = ws_collect_until(&mut stream, "turn_complete", Duration::from_secs(5)).await;
 
     // After unification, the tool_end event should show the tool was denied
     // because config.tools.permissions.deny = ["echo"].
@@ -417,7 +431,7 @@ async fn default_permissions_allow_safe_tools_without_approval() {
     )
     .await;
 
-    let events = ws_collect_events(&mut stream, Duration::from_secs(5)).await;
+    let events = ws_collect_until(&mut stream, "turn_complete", Duration::from_secs(5)).await;
 
     // The echo tool should succeed — default policy still permits ordinary tools.
     let tool_end = events.iter().find(|e| e["type"] == "tool_end");
@@ -482,7 +496,7 @@ async fn hook_events_fire_for_gateway_initiated_turns() {
     )
     .await;
 
-    let events = ws_collect_events(&mut stream, Duration::from_secs(5)).await;
+    let events = ws_collect_until(&mut stream, "turn_complete", Duration::from_secs(5)).await;
 
     // Verify the turn completed.
     let turn_complete = events.iter().find(|e| e["type"] == "turn_complete");
@@ -544,7 +558,7 @@ async fn streaming_tokens_arrive_through_agent_delegation() {
 
     ws_send(&mut sink, json!({"type": "send_message", "content": "Hi"})).await;
 
-    let events = ws_collect_events(&mut stream, Duration::from_secs(5)).await;
+    let events = ws_collect_until(&mut stream, "turn_complete", Duration::from_secs(5)).await;
 
     // Verify token events arrived with correct content.
     let tokens: Vec<&str> = events
@@ -623,7 +637,7 @@ async fn multi_round_tool_dispatch_through_unified_path() {
     )
     .await;
 
-    let events = ws_collect_events(&mut stream, Duration::from_secs(5)).await;
+    let events = ws_collect_until(&mut stream, "turn_complete", Duration::from_secs(5)).await;
 
     // Verify tool_start and tool_end events
     let tool_start = events.iter().find(|e| e["type"] == "tool_start");
@@ -704,7 +718,7 @@ async fn missing_workspace_grants_inherit_global_permissions() {
     )
     .await;
 
-    let events = ws_collect_events(&mut stream, Duration::from_secs(5)).await;
+    let events = ws_collect_until(&mut stream, "turn_complete", Duration::from_secs(5)).await;
     let tool_end = events
         .iter()
         .find(|e| e["type"] == "tool_end")
@@ -776,7 +790,7 @@ async fn workspace_gate_allows_file_read_with_trusted_read_attachment() {
     )
     .await;
 
-    let events = ws_collect_events(&mut stream, Duration::from_secs(5)).await;
+    let events = ws_collect_until(&mut stream, "turn_complete", Duration::from_secs(5)).await;
     let tool_end = events
         .iter()
         .find(|e| e["type"] == "tool_end")

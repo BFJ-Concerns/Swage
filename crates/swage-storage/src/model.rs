@@ -269,6 +269,8 @@ pub struct ChannelLink {
 pub struct DeliveryRecord {
     pub id: Uuid,
     pub session_id: Uuid,
+    pub run_id: Option<Uuid>,
+    pub turn_id: Option<Uuid>,
     pub target: serde_json::Value,
     pub content: String,
     pub status: String,
@@ -1664,6 +1666,8 @@ pub struct NewChannelLink {
 #[derive(Debug, Clone)]
 pub struct NewDeliveryRecord {
     pub session_id: Uuid,
+    pub run_id: Option<Uuid>,
+    pub turn_id: Option<Uuid>,
     pub target: serde_json::Value,
     pub content: String,
     pub status: String,
