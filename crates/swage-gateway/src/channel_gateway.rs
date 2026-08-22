@@ -115,6 +115,8 @@ pub async fn read_delivery_log(state: &AppState, query: DeliveryLogQuery) -> Del
             .filter_map(|record| {
                 parse_delivery_target(record.target).map(|target| RecordedDelivery {
                     session_id: record.session_id,
+                    run_id: record.run_id,
+                    turn_id: record.turn_id,
                     target,
                     content: record.content,
                     delivered_at: record.delivered_at,
@@ -192,7 +194,15 @@ async fn handle_inbound(
         ensure_session_for_origin(state, &origin, SessionResolutionPolicy::AllowDefaultSpace)
             .await?;
     let response = run_channel_turn(state, session_id, text).await?;
-    let targets = deliver_channel_response(state, session_id, &origin, routing, &response).await?;
+    let targets = deliver_channel_response(
+        state,
+        session_id,
+        DeliveryAttribution::default(),
+        &origin,
+        routing,
+        &response,
+    )
+    .await?;
 
     Ok(ChannelInboundResponse {
         session_id,
@@ -367,6 +377,7 @@ async fn configured_home_target(
 async fn deliver_channel_response(
     state: &AppState,
     session_id: Uuid,
+    attribution: DeliveryAttribution,
     origin: &ChannelOrigin,
     routing: DeliveryRoutingRequest,
     response: &str,
@@ -379,7 +390,7 @@ async fn deliver_channel_response(
             ..routing
         },
     )?;
-    deliver_to_targets(state, session_id, &targets, response).await?;
+    deliver_to_targets(state, session_id, attribution, &targets, response).await?;
     Ok(targets)
 }
 
@@ -479,6 +490,10 @@ async fn drain_channel_origin(
     deliver_channel_response(
         state,
         session_id,
+        DeliveryAttribution {
+            run_id: None,
+            turn_id: Some(turn.id),
+        },
         &origin,
         DeliveryRoutingRequest::default(),
         &response,
@@ -579,46 +594,72 @@ fn push_unique_target(targets: &mut Vec<DeliveryTarget>, target: DeliveryTarget)
 pub async fn deliver_to_targets(
     state: &AppState,
     session_id: Uuid,
+    attribution: DeliveryAttribution,
     targets: &[DeliveryTarget],
     content: &str,
 ) -> Result<(), GatewayError> {
-    let mut first_error: Option<GatewayError> = None;
+    let mut delivery_failure: Option<GatewayError> = None;
+    let mut recording_failure: Option<GatewayError> = None;
     for target in targets {
-        match deliver_to_target(state, session_id, target, content).await {
-            Ok(()) => {
-                record_delivery(
-                    state,
-                    session_id,
-                    target.clone(),
-                    content.to_string(),
-                    "sent",
-                    None,
-                )
-                .await;
-            }
-            Err(error) => {
-                let error_text = error.to_string();
-                record_delivery(
-                    state,
-                    session_id,
-                    target.clone(),
-                    content.to_string(),
-                    "failed",
-                    Some(error_text),
-                )
-                .await;
-                if first_error.is_none() {
-                    first_error = Some(error);
+        let (status, delivery_error) =
+            match deliver_to_target(state, session_id, target, content).await {
+                Ok(DeliveryOutcome::Sent) => ("sent", None),
+                Ok(DeliveryOutcome::NotSent) => (
+                    "not_sent",
+                    Some("development channel target is a deliberate no-op".to_string()),
+                ),
+                Err(error) => {
+                    let error_text = error.to_string();
+                    if delivery_failure.is_none() {
+                        delivery_failure = Some(error);
+                    }
+                    ("failed", Some(error_text))
                 }
+            };
+
+        if let Err(record_error) = record_delivery(
+            state,
+            session_id,
+            attribution,
+            target.clone(),
+            content.to_string(),
+            status,
+            delivery_error,
+        )
+        .await
+        {
+            tracing::warn!(
+                %session_id,
+                run_id = ?attribution.run_id,
+                turn_id = ?attribution.turn_id,
+                ?target,
+                error = %record_error,
+                "failed to record delivery attempt"
+            );
+            if recording_failure.is_none() {
+                recording_failure = Some(record_error);
             }
         }
     }
 
-    if let Some(error) = first_error {
-        Err(error)
-    } else {
-        Ok(())
+    // A recording failure is returned rather than silently losing audit data.
+    // When both operations fail, the delivery failure wins because it is the
+    // operational cause; the recording failure is still emitted above.
+    match (delivery_failure, recording_failure) {
+        (Some(error), _) | (None, Some(error)) => Err(error),
+        (None, None) => Ok(()),
     }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DeliveryAttribution {
+    pub run_id: Option<Uuid>,
+    pub turn_id: Option<Uuid>,
+}
+
+enum DeliveryOutcome {
+    Sent,
+    NotSent,
 }
 
 async fn deliver_to_target(
@@ -626,13 +667,13 @@ async fn deliver_to_target(
     session_id: Uuid,
     target: &DeliveryTarget,
     content: &str,
-) -> Result<(), GatewayError> {
+) -> Result<DeliveryOutcome, GatewayError> {
     match target {
         DeliveryTarget::Channel {
             integration: ExternalChannelIntegration::DevDm | ExternalChannelIntegration::DevThread,
             ..
-        }
-        | DeliveryTarget::LocalStorage => Ok(()),
+        } => Ok(DeliveryOutcome::NotSent),
+        DeliveryTarget::LocalStorage => Ok(DeliveryOutcome::Sent),
         DeliveryTarget::Channel {
             integration: ExternalChannelIntegration::Telegram,
             conversation,
@@ -641,7 +682,10 @@ async fn deliver_to_target(
             let telegram = state.telegram.as_ref().ok_or_else(|| {
                 GatewayError::ValidationError("telegram channel is not configured".into())
             })?;
-            telegram.send_message(conversation, content).await
+            telegram
+                .send_message(conversation, content)
+                .await
+                .map(|()| DeliveryOutcome::Sent)
         }
         DeliveryTarget::Webhook { url } => {
             let parsed = reqwest::Url::parse(url).map_err(|error| {
@@ -666,7 +710,7 @@ async fn deliver_to_target(
                 )));
             }
 
-            Ok(())
+            Ok(DeliveryOutcome::Sent)
         }
     }
 }
@@ -674,24 +718,28 @@ async fn deliver_to_target(
 async fn record_delivery(
     state: &AppState,
     session_id: Uuid,
+    attribution: DeliveryAttribution,
     target: DeliveryTarget,
     content: String,
     status: &str,
     error: Option<String>,
-) {
-    if let Err(error) = state
+) -> Result<(), GatewayError> {
+    let target_json = serde_json::to_value(&target).map_err(|error| {
+        GatewayError::ValidationError(format!("failed to serialise delivery target: {error}"))
+    })?;
+    state
         .storage
         .create_delivery_record(NewDeliveryRecord {
             session_id,
-            target: serde_json::to_value(&target).unwrap_or(serde_json::Value::Null),
+            run_id: attribution.run_id,
+            turn_id: attribution.turn_id,
+            target: target_json,
             content,
             status: status.to_string(),
             error,
         })
-        .await
-    {
-        tracing::warn!("failed to record delivery attempt: {error}");
-    }
+        .await?;
+    Ok(())
 }
 
 fn parse_delivery_target(target: serde_json::Value) -> Option<DeliveryTarget> {

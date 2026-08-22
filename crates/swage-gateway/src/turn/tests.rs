@@ -3139,6 +3139,8 @@ impl swage_storage::store::DeliveryStore for MockStorage {
         Ok(swage_storage::DeliveryRecord {
             id: Uuid::new_v4(),
             session_id: delivery.session_id,
+            run_id: delivery.run_id,
+            turn_id: delivery.turn_id,
             target: delivery.target,
             content: delivery.content,
             status: delivery.status,
