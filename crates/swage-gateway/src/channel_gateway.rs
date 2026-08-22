@@ -604,7 +604,10 @@ pub async fn deliver_to_targets(
         let (status, delivery_error) =
             match deliver_to_target(state, session_id, target, content).await {
                 Ok(DeliveryOutcome::Sent) => ("sent", None),
-                Ok(DeliveryOutcome::NotSent) => ("not_sent", None),
+                Ok(DeliveryOutcome::NotSent) => (
+                    "not_sent",
+                    Some("development channel target is a deliberate no-op".to_string()),
+                ),
                 Err(error) => {
                     let error_text = error.to_string();
                     if delivery_failure.is_none() {
@@ -639,6 +642,9 @@ pub async fn deliver_to_targets(
         }
     }
 
+    // A recording failure is returned rather than silently losing audit data.
+    // When both operations fail, the delivery failure wins because it is the
+    // operational cause; the recording failure is still emitted above.
     match (delivery_failure, recording_failure) {
         (Some(error), _) | (None, Some(error)) => Err(error),
         (None, None) => Ok(()),

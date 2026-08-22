@@ -472,7 +472,12 @@ async fn audit_trail_survives_restart_for_approvals_deliveries_and_runs() {
         .list_delivery_records_by_session(session_id)
         .await
         .unwrap();
-    assert_eq!(deliveries.last().unwrap().status, "not_sent");
+    let delivery = deliveries.last().unwrap();
+    assert_eq!(delivery.status, "not_sent");
+    assert_eq!(
+        delivery.error.as_deref(),
+        Some("development channel target is a deliberate no-op")
+    );
 
     drop(router);
     drop(state);
