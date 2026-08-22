@@ -22,9 +22,18 @@ cargo build --bin swage
 cd frontend && npm install && npm run dev
 ```
 
-The gateway daemonises and logs to `gateway.log` in its data root —
-`~/.swage/` by default, `$SWAGE_HOME` when set. Stop it with the same binary
-you started:
+The gateway detaches by default and prints its output destination when it
+starts. Output goes to `gateway.log` in its data root (`~/.swage/` by default,
+or `$SWAGE_HOME` when set). Choose another destination with `--log-file PATH`,
+or use `--foreground` to keep the process and its output attached to the
+terminal:
+
+```bash
+./target/debug/swage gateway start --log-file ./gateway-dev.log
+./target/debug/swage gateway start --foreground
+```
+
+Stop it with the same binary you started:
 
 ```bash
 ./target/debug/swage gateway stop
