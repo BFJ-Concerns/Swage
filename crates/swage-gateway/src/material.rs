@@ -3,7 +3,6 @@ use std::path::{Path, PathBuf};
 use tokio::fs;
 use uuid::Uuid;
 
-use swage_config::discovery::resolve_root;
 use swage_core::{GatewayError, StorageError};
 use swage_storage::{Attachment, AttachmentScopeKind, Material, MaterialSourceKind, NewMaterial};
 
@@ -269,7 +268,7 @@ async fn resolve_scope(
                 .ok_or_else(|| {
                     GatewayError::ValidationError(format!("space {} not found", session.space_id))
                 })?;
-            let space_root = space_data_root(&space.slug)?;
+            let space_root = space_data_root(&state.config_root, &space.slug);
             Ok(MaterialScope {
                 scope_kind,
                 session_id: Some(session_id),
@@ -293,7 +292,7 @@ async fn resolve_scope(
             let space = state.space_store.get(space_id).await?.ok_or_else(|| {
                 GatewayError::ValidationError(format!("space {space_id} not found"))
             })?;
-            let space_root = space_data_root(&space.slug)?;
+            let space_root = space_data_root(&state.config_root, &space.slug);
             Ok(MaterialScope {
                 scope_kind,
                 session_id: None,
@@ -308,11 +307,8 @@ async fn resolve_scope(
     }
 }
 
-fn space_data_root(space_slug: &str) -> Result<PathBuf, GatewayError> {
-    Ok(resolve_root()
-        .map_err(|problem| GatewayError::ValidationError(problem.to_string()))?
-        .join("spaces")
-        .join(space_slug))
+fn space_data_root(config_root: &Path, space_slug: &str) -> PathBuf {
+    config_root.join("spaces").join(space_slug)
 }
 
 fn validate_material_relative_path(
@@ -398,7 +394,7 @@ async fn scope_root_for_material(
             let space = state.space_store.get(space_id).await?.ok_or_else(|| {
                 GatewayError::ValidationError(format!("space {space_id} not found"))
             })?;
-            Ok(space_data_root(&space.slug)?
+            Ok(space_data_root(&state.config_root, &space.slug)
                 .join(".swage")
                 .join("materials")
                 .join("sessions")
@@ -414,7 +410,7 @@ async fn scope_root_for_material(
             let space = state.space_store.get(space_id).await?.ok_or_else(|| {
                 GatewayError::ValidationError(format!("space {space_id} not found"))
             })?;
-            Ok(space_data_root(&space.slug)?
+            Ok(space_data_root(&state.config_root, &space.slug)
                 .join(".swage")
                 .join("materials")
                 .join("spaces")

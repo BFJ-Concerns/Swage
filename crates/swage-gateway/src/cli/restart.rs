@@ -17,6 +17,7 @@ pub async fn run(args: &RestartArgs) -> Result<(), ClientError> {
         host: args.host.clone(),
         config: args.config.clone(),
         foreground: args.foreground,
+        log_file: args.log_file.clone(),
     };
     super::start::run(&start_args).await
 }

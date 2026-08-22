@@ -98,6 +98,7 @@ interface MountOptions {
   agentDefinitions?: import("../protocol/EffectiveAgentDefinitionResponse").EffectiveAgentDefinitionResponse[];
   streamingStore?: StreamingStore;
   conversationStore?: ConversationStore;
+  onNewConversation?: () => void;
 }
 
 function mountLayout(options: MountOptions = {}): MountedComponent {
@@ -114,6 +115,7 @@ function mountLayout(options: MountOptions = {}): MountedComponent {
       onNavigate: options.onNavigate,
       route: options.routePath ? parseRoute(options.routePath) : undefined,
       agentDefinitions: options.agentDefinitions ?? [],
+      onNewConversation: options.onNewConversation,
     },
   });
 }
@@ -195,24 +197,23 @@ describe("AppLayout shell navigation", () => {
     expect(options).toEqual(["Built-in assistant", "Researcher"]);
   });
 
-  it("uses the selected agent when the sidebar starts a conversation", () => {
+  it("opens the creation surface without eagerly creating a conversation", () => {
     const conversationStore = mockConversationStore();
     const createConversation = vi.spyOn(conversationStore, "createConversation");
+    const onNewConversation = vi.fn();
     component = mountLayout({
       conversationStore,
+      onNewConversation,
       agentDefinitions: [{
         id: "researcher", display_name: "Researcher", description: "", instructions: "cite",
         model_id: null, tool_permissions: null, skills: [], output_schema: null,
         output_max_retries: null, is_builtin: false, source_scope: "global",
       }],
     });
-    const picker = document.querySelector('select[aria-label="Agent"]') as HTMLSelectElement;
-    picker.value = "researcher";
-    picker.dispatchEvent(new Event("change", { bubbles: true }));
-    flushSync();
     (document.querySelector("button.new-btn") as HTMLButtonElement).click();
 
-    expect(createConversation).toHaveBeenCalledWith(undefined, undefined, "researcher");
+    expect(onNewConversation).toHaveBeenCalledOnce();
+    expect(createConversation).not.toHaveBeenCalled();
   });
 
   it("does not retain an agent when the selected space changes", () => {
@@ -243,9 +244,11 @@ describe("AppLayout shell navigation", () => {
 
     layout.$set({ spaceStore: mockSpaceStore(true, "second-space") });
     flushSync();
-    (document.querySelector("button.new-btn") as HTMLButtonElement).click();
 
-    expect(createConversation).toHaveBeenCalledWith(undefined, undefined, null);
+    const cleared = document.querySelector('select[aria-label="Agent"]') as HTMLSelectElement;
+    expect(cleared.value).toBe("");
+    (document.querySelector("button.new-btn") as HTMLButtonElement).click();
+    expect(createConversation).not.toHaveBeenCalled();
     layout.$destroy();
   });
 
@@ -268,7 +271,7 @@ describe("AppLayout shell navigation", () => {
     flushSync();
     (document.querySelector("button.send") as HTMLButtonElement).click();
 
-    expect(startTurn).toHaveBeenCalledWith("Hello", null, "researcher");
+    expect(startTurn).toHaveBeenCalledWith("Hello", null, "researcher", null);
   });
 
   it("renders the space switcher in the shell", () => {

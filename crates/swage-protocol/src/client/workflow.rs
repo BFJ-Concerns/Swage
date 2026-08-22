@@ -9,6 +9,8 @@ use serde_json::Value;
 use ts_rs::TS;
 use uuid::Uuid;
 
+use super::settings::Effort;
+
 /// An opaque continuation token naming a worker session a run already
 /// created. Scripts receive it on an `agentStart` handle after the call
 /// completes and pass it back whole via the `session` option; its fields are
@@ -39,7 +41,7 @@ pub struct AgentCallRequest {
     /// Provider reasoning effort for this call. Absent preserves the ambient
     /// provider or model default and the historical journal request shape.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub effort: Option<String>,
+    pub effort: Option<Effort>,
     /// Host-enforced deadline for this call in milliseconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
@@ -470,5 +472,20 @@ mod task_request_tests {
         assert_eq!(value["task"], "review");
         let request: AgentCallRequest = serde_json::from_value(value).unwrap();
         assert_eq!(request.task.as_deref(), Some("review"));
+    }
+
+    #[test]
+    fn unknown_effort_is_rejected_at_the_dispatch_boundary() {
+        let error = serde_json::from_value::<AgentCallRequest>(serde_json::json!({
+            "prompt": "work",
+            "model": null,
+            "effort": "extreme",
+            "schema": null,
+            "max_attempts": 1,
+            "label": null
+        }))
+        .expect_err("workflow effort must use the shared vocabulary");
+
+        assert!(error.to_string().contains("unknown variant `extreme`"));
     }
 }

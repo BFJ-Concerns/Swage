@@ -1,4 +1,4 @@
-//! `swage gateway install` and `uninstall` support.
+//! `swage gateway set-defaults` and `clear-defaults` support.
 //!
 //! Stores operator-selected service defaults locally so lifecycle commands can
 //! reuse one canonical configuration.
@@ -58,7 +58,7 @@ async fn install_at_path(args: &InstallArgs, path: PathBuf) -> Result<(), Client
         source: std::io::Error::new(std::io::ErrorKind::InvalidData, source),
     })?;
     std::fs::write(&path, json).map_err(|source| ClientError::MetadataIo { source })?;
-    println!("Gateway service defaults installed at {}", path.display());
+    println!("Gateway lifecycle defaults saved at {}", path.display());
     Ok(())
 }
 
@@ -69,11 +69,11 @@ pub async fn uninstall(_args: &UninstallArgs) -> Result<(), ClientError> {
 async fn uninstall_at_path(path: PathBuf) -> Result<(), ClientError> {
     match std::fs::remove_file(&path) {
         Ok(()) => {
-            println!("Gateway service defaults removed");
+            println!("Gateway lifecycle defaults removed");
             Ok(())
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            println!("Gateway service defaults were not installed");
+            println!("Gateway lifecycle defaults were not set");
             Ok(())
         }
         Err(source) => Err(ClientError::MetadataIo { source }),

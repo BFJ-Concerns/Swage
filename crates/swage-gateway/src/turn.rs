@@ -586,7 +586,7 @@ pub(crate) async fn process_turn_with_existing_turn(
     subscription: Arc<Mutex<SubscriptionState>>,
     output_schema_override: Option<serde_json::Value>,
     max_output_retries_override: Option<u32>,
-    effort_override: Option<String>,
+    effort_override: Option<swage_core::Effort>,
     cancellation_override: Option<CancellationToken>,
     existing_turn_id: Option<Uuid>,
     attendance: TurnAttendance,
@@ -624,7 +624,7 @@ pub(crate) async fn process_turn_with_composition(
     subscription: Arc<Mutex<SubscriptionState>>,
     output_schema_override: Option<serde_json::Value>,
     max_output_retries_override: Option<u32>,
-    effort_override: Option<String>,
+    effort_override: Option<swage_core::Effort>,
     cancellation_override: Option<CancellationToken>,
     existing_turn_id: Option<Uuid>,
     attendance: TurnAttendance,
@@ -781,18 +781,16 @@ pub(crate) async fn process_turn_with_composition(
     )?;
     let config = effective_session_config(config, session.selected_model_id.as_deref());
 
-    // Resolve the swage root once — skill discovery, space memory loading,
-    // and assembly search-path construction all depend on it.
-    //
-    // Fail-open: a warning is logged and each consumer falls back gracefully.
-    let swage_root_opt = resolve_swage_root();
+    // Skill discovery, space memory loading, and assembly search paths all use
+    // the root retained when this application state was constructed.
+    let swage_root = resolve_swage_root(state);
 
     let active_skills = load_active_skills_for_agent(
         state,
         session_id,
         &space_slug,
         &session.agent_id,
-        swage_root_opt.as_deref(),
+        Some(swage_root),
         true,
         &config.declared_skills,
     )
@@ -959,10 +957,7 @@ pub(crate) async fn process_turn_with_composition(
     };
     let assembly_name = context_choices.assembly_name;
     let memory_content = load_memory_for_assembly(&assembly_name, || async {
-        match swage_root_opt.as_deref() {
-            Some(root) => load_space_memory(root, &space_slug).await,
-            None => String::new(),
-        }
+        load_space_memory(swage_root, &space_slug).await
     })
     .await;
     let mut session_variables: std::collections::BTreeMap<String, String> =
@@ -999,19 +994,16 @@ pub(crate) async fn process_turn_with_composition(
         let path = std::path::PathBuf::from(path);
         (path.clone(), vec![path])
     } else {
-        agent_workspace_from_policy(&workspace_policy, space_id, session.id)
+        agent_workspace_from_policy(&state.config_root, &workspace_policy, space_id, session.id)
     };
 
     let environment =
         build_session_environment(&space, Some(workspace_root.display().to_string()), &session);
     let available_skills =
-        available_skills_for_agent(&space_slug, &session.agent_id, swage_root_opt.as_deref());
+        available_skills_for_agent(&space_slug, &session.agent_id, Some(swage_root));
 
-    let operator_guidance = operator_guidance_rules(swage_root_opt.as_deref(), &workspace_policy);
-    let hierarchy = swage_root_opt
-        .as_deref()
-        .map(|root| configuration_hierarchy(root, &space_slug, &session.agent_id))
-        .unwrap_or_default();
+    let operator_guidance = operator_guidance_rules(Some(swage_root), &workspace_policy);
+    let hierarchy = configuration_hierarchy(swage_root, &space_slug, &session.agent_id);
 
     let elements = build_assembly_elements(
         &config.instructions,
@@ -1037,7 +1029,7 @@ pub(crate) async fn process_turn_with_composition(
         &config,
         &elements,
         &tokeniser,
-        swage_root_opt.as_deref(),
+        Some(swage_root),
         &space_slug,
         &session.agent_id,
         &session_variables,
@@ -1331,6 +1323,26 @@ pub(crate) async fn process_turn_with_composition(
                 )));
             }
         };
+        let effort = match effort_override {
+            Some(effort) => Some(effort),
+            None => session
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("effort"))
+                .cloned()
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(|error| {
+                    GatewayError::ConfigError(format!("session effort is invalid: {error}"))
+                })?
+                .or_else(|| {
+                    config
+                        .models
+                        .entries
+                        .get(&config.models.default)
+                        .and_then(|model| model.default_effort)
+                }),
+        };
         let turn_request = TurnRequest {
             execution: swage_agent::context::TurnExecutionContext {
                 session_id,
@@ -1342,7 +1354,7 @@ pub(crate) async fn process_turn_with_composition(
             assembled_context: assembled_messages,
             parent_turn_id: None,
             existing_turn_id: Some(prepared_turn_id),
-            effort: effort_override,
+            effort,
             cancellation_token: cancel_token,
         };
         tokio::spawn(async move { agent.process_turn_streaming(turn_request, event_tx).await })

@@ -1,3 +1,4 @@
+use crate::RESERVED_WORKFLOW_AGENT_ID;
 use crate::error::{ConfigProblem, ConfigProblemKind};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -71,6 +72,9 @@ fn subdirectory_names(dir: &Path) -> Vec<String> {
 /// Scan `{space_dir}/agents/` for subdirectories.
 pub fn discover_agents(space_dir: &Path) -> Vec<String> {
     subdirectory_names(&space_dir.join("agents"))
+        .into_iter()
+        .filter(|name| name != RESERVED_WORKFLOW_AGENT_ID)
+        .collect()
 }
 
 /// Scan `{root}/spaces/` for subdirectories.

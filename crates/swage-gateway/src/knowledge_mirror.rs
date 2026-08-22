@@ -23,7 +23,6 @@ use axum::{
     Json,
     extract::{Path, State},
 };
-use swage_config::discovery::resolve_root;
 use swage_core::GatewayError;
 use swage_protocol::hosting::KnowledgeMirrorRegenerateResponse;
 use swage_storage::{
@@ -52,13 +51,20 @@ pub async fn regenerate(
         .await
         .map_err(GatewayError::from)?
         .ok_or(GatewayError::SpaceNotFound { id: space_id })?;
-    let response = regenerate_for_space(state.storage.as_ref(), space_id, &space.slug).await?;
+    let response = regenerate_for_space(
+        state.storage.as_ref(),
+        &state.config_root,
+        space_id,
+        &space.slug,
+    )
+    .await?;
     Ok(Json(response))
 }
 
 /// Rebuild the mirror directory whole from the space's rows.
 pub async fn regenerate_for_space(
     storage: &dyn Storage,
+    config_root: &std::path::Path,
     space_id: Uuid,
     space_slug: &str,
 ) -> Result<KnowledgeMirrorRegenerateResponse, GatewayError> {
@@ -86,7 +92,7 @@ pub async fn regenerate_for_space(
     }
 
     let files = render_mirror(space_slug, &pages);
-    let root = mirror_root(space_slug)?;
+    let root = mirror_root(config_root, space_slug);
     let files_written = write_mirror(&root, &files).await?;
 
     Ok(KnowledgeMirrorRegenerateResponse {
@@ -102,14 +108,13 @@ struct ObservationPage {
     latest: Option<ExtractionDerivation>,
 }
 
-fn mirror_root(space_slug: &str) -> Result<PathBuf, GatewayError> {
-    Ok(resolve_root()
-        .map_err(|problem| GatewayError::ValidationError(problem.to_string()))?
+fn mirror_root(config_root: &std::path::Path, space_slug: &str) -> PathBuf {
+    config_root
         .join("spaces")
         .join(space_slug)
         .join(".swage")
         .join("knowledge")
-        .join("mirror"))
+        .join("mirror")
 }
 
 /// Render the whole mirror as relative path → content. Pure: everything in
@@ -370,10 +375,10 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn deleted_mirror_regenerates_byte_identically() {
-        let _root = pin_root();
+        let config_root = pin_root();
         let (storage, space_id) = seeded_storage().await;
 
-        let first = regenerate_for_space(&storage, space_id, "research")
+        let first = regenerate_for_space(&storage, config_root.path(), space_id, "research")
             .await
             .unwrap();
         let root = PathBuf::from(&first.mirror_root);
@@ -382,7 +387,7 @@ mod tests {
 
         std::fs::remove_dir_all(&root).expect("the mirror is disposable");
 
-        let second = regenerate_for_space(&storage, space_id, "research")
+        let second = regenerate_for_space(&storage, config_root.path(), space_id, "research")
             .await
             .unwrap();
         assert_eq!(second.mirror_root, first.mirror_root);
@@ -395,10 +400,10 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn regeneration_replaces_the_directory_whole() {
-        let _root = pin_root();
+        let config_root = pin_root();
         let (storage, space_id) = seeded_storage().await;
 
-        let report = regenerate_for_space(&storage, space_id, "research")
+        let report = regenerate_for_space(&storage, config_root.path(), space_id, "research")
             .await
             .unwrap();
         let root = PathBuf::from(&report.mirror_root);
@@ -407,7 +412,7 @@ mod tests {
         // from an observation since absorbed elsewhere.
         std::fs::write(root.join("stray.md"), "not from the database").unwrap();
 
-        regenerate_for_space(&storage, space_id, "research")
+        regenerate_for_space(&storage, config_root.path(), space_id, "research")
             .await
             .unwrap();
         assert!(
@@ -418,10 +423,10 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn mirror_names_curation_state_without_hiding_material() {
-        let _root = pin_root();
+        let config_root = pin_root();
         let (storage, space_id) = seeded_storage().await;
 
-        let report = regenerate_for_space(&storage, space_id, "research")
+        let report = regenerate_for_space(&storage, config_root.path(), space_id, "research")
             .await
             .unwrap();
         let root = PathBuf::from(&report.mirror_root);
