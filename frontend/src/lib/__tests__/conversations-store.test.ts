@@ -174,6 +174,7 @@ describe("createConversation", () => {
       "proj-1",
       undefined,
       undefined,
+      undefined,
     );
     expect(store.conversations).toHaveLength(1);
     expect(store.conversations[0].id).toBe("new-conv");
@@ -200,7 +201,7 @@ describe("createConversation", () => {
     expect(store.conversations[1].id).toBe("existing-conv");
   });
 
-  it("threads the selected agent to the creation API", async () => {
+  it("threads the selected agent and effort to the creation API", async () => {
     const store = createConversationStore();
     vi.mocked(api.createConversation).mockResolvedValueOnce({
       id: "new-conv",
@@ -209,12 +210,13 @@ describe("createConversation", () => {
       last_activity: "2026-01-05T00:00:00Z",
     });
 
-    await store.createConversation("proj-1", "small-model", "researcher");
+    await store.createConversation("proj-1", "small-model", "researcher", "high");
 
     expect(api.createConversation).toHaveBeenCalledWith(
       "proj-1",
       "small-model",
       "researcher",
+      "high",
     );
   });
 });
@@ -509,6 +511,7 @@ describe("createConversation (space-scoped)", () => {
 
     expect(api.createConversation).toHaveBeenCalledWith(
       "proj-1",
+      undefined,
       undefined,
       undefined,
     );
