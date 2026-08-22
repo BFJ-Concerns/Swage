@@ -22,9 +22,11 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, edited]
   # Direct pushes to main are allowed past the PR gate, so run the same
-  # job on them as a post-merge tripwire.
+  # job on them as a post-merge tripwire. Structural integration branches
+  # take direct pushes too (conditioning, direct fixes, hand-backs), so
+  # they get the same tripwire.
   push:
-    branches: [main]
+    branches: [main, "structural/**"]
 
 env:
   CARGO_TERM_COLOR: always
