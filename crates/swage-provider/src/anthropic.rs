@@ -19,6 +19,30 @@ use crate::provider::{LlmProvider, ProviderConfig, spawn_stream_forwarder};
 
 const ANTHROPIC_API_VERSION: &str = "2023-06-01";
 const ANTHROPIC_BASE_URL: &str = "https://api.anthropic.com";
+const ANTHROPIC_MESSAGES_PATH: &str = "/v1/messages?beta=true";
+
+/// Native-harness request material that Swage cannot reproduce honestly.
+///
+/// This is provider audit data, not model-facing context. An OPEN entry is an
+/// unpermitted mismatch, not an admitted harness-parity divergence.
+const ANTHROPIC_REQUEST_DIVERGENCES: &[(&str, &str)] = &[
+    (
+        "swage_supplied",
+        "thinking and output_config are jointly sourced from the resolved Swage effort choice",
+    ),
+    (
+        "dynamic_vendor_context",
+        "context_management is injected by the vendor harness at request time",
+    ),
+    (
+        "dynamic_vendor_context",
+        "native metadata identifiers are generated from vendor session and account state",
+    ),
+    (
+        "swage_supplied",
+        "max_tokens is caller supplied when present and otherwise uses Swage's 4096-token default",
+    ),
+];
 
 // ---------------------------------------------------------------------------
 // Anthropic wire types
@@ -30,6 +54,8 @@ struct MessagesRequest {
     model: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     output_config: Option<AnthropicOutputConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking: Option<AnthropicThinkingConfig>,
     messages: Vec<AnthropicMessage>,
     max_tokens: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -42,7 +68,14 @@ struct MessagesRequest {
 
 #[derive(Serialize)]
 struct AnthropicOutputConfig {
-    effort: String,
+    effort: &'static str,
+}
+
+#[derive(Serialize)]
+struct AnthropicThinkingConfig {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    display: &'static str,
 }
 
 /// Wire representation of a tool definition for the Anthropic API.
@@ -586,6 +619,7 @@ impl AnthropicProvider {
             model: self.config.model.clone(),
             // The legacy LlmRequest surface has no per-call effort option.
             output_config: None,
+            thinking: None,
             messages,
             max_tokens: request.max_tokens.unwrap_or(4096),
             system: request.system_prompt.clone(),
@@ -671,7 +705,7 @@ impl AnthropicProvider {
         let body = self.build_messages_request(request, false);
         let client = self.make_http_client();
 
-        let response: MessagesResponse = client.post_json("/v1/messages", &body).await?;
+        let response: MessagesResponse = client.post_json(ANTHROPIC_MESSAGES_PATH, &body).await?;
 
         let text = response
             .content
@@ -704,7 +738,7 @@ impl AnthropicProvider {
 
         spawn_stream_forwarder(move |tx| async move {
             let (metadata, sse_stream) = match client
-                .post_stream("/v1/messages", &body, HeaderMap::new())
+                .post_stream(ANTHROPIC_MESSAGES_PATH, &body, HeaderMap::new())
                 .await
             {
                 Ok(s) => s,
@@ -856,10 +890,18 @@ impl AnthropicProvider {
                 .model
                 .clone()
                 .unwrap_or_else(|| self.config.model.clone()),
-            output_config: request
-                .effort
-                .clone()
-                .map(|effort| AnthropicOutputConfig { effort }),
+            output_config: request.effort.map(|effort| AnthropicOutputConfig {
+                effort: match effort {
+                    swage_core::Effort::Low => "low",
+                    swage_core::Effort::Medium => "medium",
+                    swage_core::Effort::High => "high",
+                    swage_core::Effort::Max => "max",
+                },
+            }),
+            thinking: request.effort.map(|_| AnthropicThinkingConfig {
+                kind: "adaptive",
+                display: "omitted",
+            }),
             messages,
             max_tokens: request.max_tokens.unwrap_or(4096),
             system,
@@ -882,6 +924,8 @@ impl AnthropicProvider {
                     })
                 })
                 .collect(),
+            // Completion metadata is Swage/provider-specific free-form data,
+            // not Anthropic's narrowly defined user_id metadata object.
         }
     }
 
@@ -925,11 +969,14 @@ impl AnthropicProvider {
                 .unwrap_or_else(|| self.config.model.clone()),
             // ToolCompletionRequest has no per-call effort surface.
             output_config: None,
+            thinking: None,
             messages,
             max_tokens: request.max_tokens.unwrap_or(4096),
             system,
             stream: if stream { Some(true) } else { None },
             tools,
+            // Completion metadata is Swage/provider-specific free-form data,
+            // not Anthropic's narrowly defined user_id metadata object.
         }
     }
 }
@@ -952,6 +999,8 @@ impl LlmProvider for AnthropicProvider {
         serde_json::json!({
             "provider": "anthropic",
             "protocol": "messages",
+            "path": ANTHROPIC_MESSAGES_PATH,
+            "divergences": ANTHROPIC_REQUEST_DIVERGENCES,
             "stream": stream,
             "body": self.build_request_for_completion(request, stream),
         })
@@ -963,7 +1012,7 @@ impl LlmProvider for AnthropicProvider {
     ) -> Result<CompletionResponse, ProviderError> {
         let body = self.build_request_for_completion(&request, false);
         let client = self.make_http_client();
-        let response: MessagesResponse = client.post_json("/v1/messages", &body).await?;
+        let response: MessagesResponse = client.post_json(ANTHROPIC_MESSAGES_PATH, &body).await?;
 
         // Collect all text blocks; ignore tool_use blocks (none expected here).
         let content = response
@@ -991,7 +1040,7 @@ impl LlmProvider for AnthropicProvider {
     ) -> Result<ToolCompletionResponse, ProviderError> {
         let body = self.build_request_for_tool_completion(&request, false);
         let client = self.make_http_client();
-        let response: MessagesResponse = client.post_json("/v1/messages", &body).await?;
+        let response: MessagesResponse = client.post_json(ANTHROPIC_MESSAGES_PATH, &body).await?;
 
         let mut content = String::new();
         let mut tool_calls = Vec::new();
@@ -1032,7 +1081,7 @@ impl LlmProvider for AnthropicProvider {
 
         spawn_stream_forwarder(move |tx| async move {
             let (metadata, sse_stream) = match client
-                .post_stream("/v1/messages", &body, HeaderMap::new())
+                .post_stream(ANTHROPIC_MESSAGES_PATH, &body, HeaderMap::new())
                 .await
             {
                 Ok(s) => s,
@@ -1391,6 +1440,73 @@ mod tests {
     }
 
     #[test]
+    fn request_paths_preserve_explicit_and_default_token_limits() {
+        let provider = AnthropicProvider::new("key", "model");
+        let legacy_default = LlmRequest {
+            max_tokens: None,
+            ..LlmRequest::builder("model").build()
+        };
+        let legacy_explicit = LlmRequest::builder("model").max_tokens(73).build();
+        assert_eq!(
+            provider
+                .build_messages_request(&legacy_default, false)
+                .max_tokens,
+            4096
+        );
+        assert_eq!(
+            provider
+                .build_messages_request(&legacy_explicit, false)
+                .max_tokens,
+            73
+        );
+
+        let completion = |max_tokens| CompletionRequest {
+            effort: None,
+            messages: vec![],
+            model: None,
+            max_tokens,
+            temperature: None,
+            stop_sequences: None,
+            metadata: None,
+            tool_definitions: vec![],
+        };
+        assert_eq!(
+            provider
+                .build_request_for_completion(&completion(None), false)
+                .max_tokens,
+            4096
+        );
+        assert_eq!(
+            provider
+                .build_request_for_completion(&completion(Some(91)), false)
+                .max_tokens,
+            91
+        );
+
+        let tool_completion = |max_tokens| ToolCompletionRequest {
+            messages: vec![],
+            model: None,
+            max_tokens,
+            temperature: None,
+            stop_sequences: None,
+            metadata: None,
+            tool_definitions: vec![],
+        };
+        assert_eq!(
+            provider
+                .build_request_for_tool_completion(&tool_completion(None), false)
+                .max_tokens,
+            4096
+        );
+        assert_eq!(
+            provider
+                .build_request_for_tool_completion(&tool_completion(Some(117)), false)
+                .max_tokens,
+            117
+        );
+    }
+
+    #[test]
     fn completion_request_hoists_output_requirements_to_system_field() {
         let provider = AnthropicProvider::new("key", "model");
         let declaration = "## Output Requirements\n\nReturn ONLY schema-compliant JSON.";
@@ -1417,21 +1533,30 @@ mod tests {
     }
 
     #[test]
-    fn completion_effort_maps_to_anthropic_output_config() {
+    fn every_completion_effort_maps_to_both_anthropic_controls() {
         let provider = AnthropicProvider::new("key", "model");
-        let request = CompletionRequest {
-            effort: Some("medium".into()),
-            messages: vec![ChatMessage::new(Role::User, "Think carefully")],
-            model: None,
-            max_tokens: None,
-            temperature: None,
-            stop_sequences: None,
-            metadata: None,
-            tool_definitions: vec![],
-        };
-        let body =
-            serde_json::to_value(provider.build_request_for_completion(&request, false)).unwrap();
-        assert_eq!(body["output_config"]["effort"], "medium");
+        for (effort, expected) in [
+            (swage_core::Effort::Low, "low"),
+            (swage_core::Effort::Medium, "medium"),
+            (swage_core::Effort::High, "high"),
+            (swage_core::Effort::Max, "max"),
+        ] {
+            let request = CompletionRequest {
+                effort: Some(effort),
+                messages: vec![ChatMessage::new(Role::User, "Think carefully")],
+                model: None,
+                max_tokens: None,
+                temperature: None,
+                stop_sequences: None,
+                metadata: None,
+                tool_definitions: vec![],
+            };
+            let body = serde_json::to_value(provider.build_request_for_completion(&request, false))
+                .unwrap();
+            assert_eq!(body["output_config"]["effort"], expected);
+            assert_eq!(body["thinking"]["type"], "adaptive");
+            assert_eq!(body["thinking"]["display"], "omitted");
+        }
     }
 
     #[test]
@@ -1450,6 +1575,7 @@ mod tests {
         let body =
             serde_json::to_value(provider.build_request_for_completion(&request, false)).unwrap();
         assert!(!body.as_object().unwrap().contains_key("output_config"));
+        assert!(!body.as_object().unwrap().contains_key("thinking"));
     }
 
     // --- tool definitions in wire request ---
@@ -1653,7 +1779,7 @@ mod tests {
             max_tokens: Some(100),
             temperature: None,
             stop_sequences: None,
-            metadata: None,
+            metadata: Some(serde_json::json!({"trace_id": "caller-owned"})),
             tool_definitions: vec![serde_json::json!({
                 "name": "ping",
                 "description": "Echoes the input value",
@@ -1670,10 +1796,53 @@ mod tests {
 
         assert_eq!(snapshot["provider"], "anthropic");
         assert_eq!(snapshot["protocol"], "messages");
+        assert_eq!(snapshot["path"], "/v1/messages?beta=true");
         assert_eq!(snapshot["stream"], true);
+        assert!(snapshot["body"].get("metadata").is_none());
         assert_eq!(snapshot["body"]["system"], "Be careful");
         assert_eq!(snapshot["body"]["messages"][0]["role"], "user");
         assert_eq!(snapshot["body"]["tools"][0]["name"], "ping");
+        assert_eq!(
+            snapshot["divergences"],
+            serde_json::json!([
+                [
+                    "swage_supplied",
+                    "thinking and output_config are jointly sourced from the resolved Swage effort choice"
+                ],
+                [
+                    "dynamic_vendor_context",
+                    "context_management is injected by the vendor harness at request time"
+                ],
+                [
+                    "dynamic_vendor_context",
+                    "native metadata identifiers are generated from vendor session and account state"
+                ],
+                [
+                    "swage_supplied",
+                    "max_tokens is caller supplied when present and otherwise uses Swage's 4096-token default"
+                ]
+            ])
+        );
+    }
+
+    #[test]
+    fn tool_completion_does_not_guess_anthropic_metadata_mapping() {
+        let provider = AnthropicProvider::new("key", "model");
+        let request = ToolCompletionRequest {
+            messages: vec![],
+            model: None,
+            max_tokens: None,
+            temperature: None,
+            stop_sequences: None,
+            metadata: Some(serde_json::json!({"session": "swage-owned"})),
+            tool_definitions: vec![],
+        };
+
+        let body =
+            serde_json::to_value(provider.build_request_for_tool_completion(&request, false))
+                .unwrap();
+
+        assert!(body.get("metadata").is_none());
     }
 
     #[test]

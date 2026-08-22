@@ -1484,6 +1484,7 @@ mod tests {
             aliases: vec![],
             context_window: None,
             generation_preset: None,
+            default_effort: None,
             capabilities: swage_config::ModelCapabilitiesConfig::default(),
         }
     }
@@ -1674,6 +1675,7 @@ mod tests {
                 aliases: Vec::new(),
                 context_window: None,
                 generation_preset: None,
+                default_effort: None,
                 capabilities: swage_config::ModelCapabilitiesConfig::default(),
             },
         );
@@ -1739,6 +1741,7 @@ mod tests {
             aliases: Vec::new(),
             context_window: None,
             generation_preset: None,
+            default_effort: None,
             capabilities: swage_config::ModelCapabilitiesConfig::default(),
         };
 
