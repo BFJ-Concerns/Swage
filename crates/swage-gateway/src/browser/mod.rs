@@ -51,20 +51,16 @@ pub struct BrowserConfig {
 }
 
 impl BrowserConfig {
-    pub fn from_tool_config(config: &BrowserToolConfig) -> Result<Self, ToolError> {
-        let root = swage_config::resolve_root().map_err(|problem| ToolError::ExecutionFailed {
-            name: "browser".to_string(),
-            message: format!("failed to resolve Swage root for browser profile: {problem}"),
-        })?;
-        Ok(Self {
+    pub fn from_tool_config(config: &BrowserToolConfig, config_root: &std::path::Path) -> Self {
+        Self {
             binary_path: config.binary_path.clone(),
-            profile_root: root.join("browser").join("profiles"),
+            profile_root: config_root.join("browser").join("profiles"),
             page_idle: Duration::from_secs(config.page_idle_secs),
             process_idle: Duration::from_secs(config.process_idle_secs),
             max_snapshot_bytes: config.max_snapshot_bytes,
             screenshots: config.screenshots.clone(),
             allow_hosts: config.allow_hosts.clone(),
-        })
+        }
     }
 }
 
@@ -758,23 +754,7 @@ async fn spawn_browser(
     let active_port_file = profile.join("DevToolsActivePort");
     let _ = tokio::fs::remove_file(&active_port_file).await;
 
-    let mut command = tokio::process::Command::new(binary);
-    command
-        .arg("--headless=new")
-        .arg(format!("--user-data-dir={}", profile.display()))
-        .arg("--disable-gpu")
-        .arg("--force-renderer-accessibility")
-        .arg("--no-first-run")
-        .arg("--no-default-browser-check")
-        .arg("--remote-debugging-address=127.0.0.1")
-        .arg("--remote-debugging-port=0")
-        .arg("about:blank")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    if no_sandbox {
-        command.arg("--no-sandbox");
-    }
+    let command = chromium_command(&binary, &profile, no_sandbox);
     let child =
         ChildProcessManager::spawn(command).map_err(|error| ToolError::ExecutionFailed {
             name: "browser".to_string(),
@@ -820,6 +800,32 @@ async fn spawn_browser(
         handler,
         last_used: Instant::now(),
     })
+}
+
+fn chromium_command(
+    binary: &std::path::Path,
+    profile: &std::path::Path,
+    no_sandbox: bool,
+) -> tokio::process::Command {
+    let mut command = tokio::process::Command::new(binary);
+    command
+        .arg("--headless=new")
+        .arg(format!("--user-data-dir={}", profile.display()))
+        .arg("--password-store=basic")
+        .arg("--disable-gpu")
+        .arg("--force-renderer-accessibility")
+        .arg("--no-first-run")
+        .arg("--no-default-browser-check")
+        .arg("--remote-debugging-address=127.0.0.1")
+        .arg("--remote-debugging-port=0")
+        .arg("about:blank")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    if no_sandbox {
+        command.arg("--no-sandbox");
+    }
+    command
 }
 
 fn resolve_browser_binary(configured: Option<&str>) -> Result<PathBuf, ToolError> {
@@ -1204,5 +1210,30 @@ fn browser_error(
     move |error| ToolError::ExecutionFailed {
         name: tool_name.clone(),
         message: format!("{context}: {error}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::chromium_command;
+
+    #[test]
+    fn chromium_launch_does_not_depend_on_a_desktop_keyring() {
+        let command = chromium_command(
+            std::path::Path::new("/usr/bin/chromium"),
+            std::path::Path::new("/test/profile"),
+            false,
+        );
+        let arguments = command
+            .as_std()
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert!(
+            arguments
+                .iter()
+                .any(|argument| argument == "--password-store=basic")
+        );
     }
 }

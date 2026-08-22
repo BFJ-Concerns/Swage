@@ -173,32 +173,29 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
     let voice_provider = create_voice_provider(&config, &startup_secret_manager).await;
     let telegram = create_telegram_client(&config, &startup_secret_manager).await;
 
-    // Step 7: Build the tool dispatch pipeline.
-    let browser_host = match crate::browser::BrowserConfig::from_tool_config(&config.tools.browser)
-    {
-        Ok(browser_config) => Some(crate::browser::BrowserHost::new(browser_config)),
-        Err(error) => {
-            warn!("Browser tools disabled: {error}");
-            None
-        }
-    };
+    // Step 7: Build the tool dispatch pipeline from the root selected above.
+    let browser_host = Some(crate::browser::BrowserHost::new(
+        crate::browser::BrowserConfig::from_tool_config(&config.tools.browser, &root),
+    ));
     let tool_dispatcher = build_tool_dispatcher_with_browser(
         &config,
         Arc::clone(&raw_storage) as Arc<dyn swage_storage::store::Storage>,
         browser_host.clone(),
+        &root,
     );
 
     // Step 8: Assemble application state and build the router.
     let storage: Arc<dyn swage_storage::store::Storage> =
         Arc::clone(&raw_storage) as Arc<dyn swage_storage::store::Storage>;
     let space_store: Arc<dyn swage_storage::store::SpaceStore> = raw_storage;
-    let mut state = crate::state::AppState::new(
+    let mut state = crate::state::AppState::new_with_config_root(
         storage,
         space_store,
         provider,
         config.clone(),
         tool_dispatcher,
         None,
+        root,
     );
     state.voice_provider = voice_provider;
     state.telegram = telegram;
@@ -618,17 +615,19 @@ fn open_storage(path: &std::path::Path) -> Arc<swage_storage::SqliteStorage> {
 pub(crate) fn build_tool_dispatcher(
     config: &swage_config::ResolvedConfig,
     storage: Arc<dyn swage_storage::store::Storage>,
+    config_root: &std::path::Path,
 ) -> crate::tool::ToolDispatcher {
-    let browser_host = crate::browser::BrowserConfig::from_tool_config(&config.tools.browser)
-        .ok()
-        .map(crate::browser::BrowserHost::new);
-    build_tool_dispatcher_with_browser(config, storage, browser_host)
+    let browser_host = Some(crate::browser::BrowserHost::new(
+        crate::browser::BrowserConfig::from_tool_config(&config.tools.browser, config_root),
+    ));
+    build_tool_dispatcher_with_browser(config, storage, browser_host, config_root)
 }
 
 pub(crate) fn build_tool_dispatcher_with_browser(
     config: &swage_config::ResolvedConfig,
     storage: Arc<dyn swage_storage::store::Storage>,
     browser_host: Option<Arc<crate::browser::BrowserHost>>,
+    config_root: &std::path::Path,
 ) -> crate::tool::ToolDispatcher {
     use crate::tool::{
         Tool, agent_memory::AgentMemoryTool, browser::browser_tools, file_edit::FileEditTool,
@@ -699,7 +698,7 @@ pub(crate) fn build_tool_dispatcher_with_browser(
         base_tools
     };
 
-    let plugin_tools = resolve_plugin_directory(config)
+    let plugin_tools = resolve_plugin_directory(config, config_root)
         .map(|plugin_directory| discover_plugin_tools(&plugin_directory, shell_timeout))
         .unwrap_or_else(|| (vec![], vec![]));
     for warning in &plugin_tools.1 {
@@ -763,16 +762,16 @@ pub(crate) fn build_tool_dispatcher_with_browser(
     crate::tool::ToolDispatcher::allow_all(all_tools)
 }
 
-fn resolve_plugin_directory(config: &swage_config::ResolvedConfig) -> Option<PathBuf> {
+fn resolve_plugin_directory(
+    config: &swage_config::ResolvedConfig,
+    config_root: &std::path::Path,
+) -> Option<PathBuf> {
     let directory = config.tools.plugin_directory.as_ref()?;
     let path = PathBuf::from(directory);
     if path.is_absolute() {
         Some(path)
     } else {
-        swage_config::discovery::resolve_root()
-            .ok()
-            .map(|root| root.join(path.clone()))
-            .or(Some(path))
+        Some(config_root.join(path))
     }
 }
 
@@ -1484,6 +1483,7 @@ mod tests {
             aliases: vec![],
             context_window: None,
             generation_preset: None,
+            default_effort: None,
             capabilities: swage_config::ModelCapabilitiesConfig::default(),
         }
     }
@@ -1548,6 +1548,7 @@ mod tests {
         let dispatcher = build_tool_dispatcher(
             &swage_config::ResolvedConfig::default(),
             storage as Arc<dyn swage_storage::store::Storage>,
+            std::path::Path::new(".swage"),
         );
 
         assert!(
@@ -1567,8 +1568,11 @@ mod tests {
         config.tools.python_execute.enabled = false;
         config.tools.python_execute.runtime_path = Some("/definitely/missing/python".to_string());
 
-        let dispatcher =
-            build_tool_dispatcher(&config, storage as Arc<dyn swage_storage::store::Storage>);
+        let dispatcher = build_tool_dispatcher(
+            &config,
+            storage as Arc<dyn swage_storage::store::Storage>,
+            std::path::Path::new(".swage"),
+        );
 
         assert!(dispatcher.registry().get("python_execute").is_none());
     }
@@ -1580,6 +1584,7 @@ mod tests {
         let dispatcher = build_tool_dispatcher(
             &swage_config::ResolvedConfig::default(),
             storage as Arc<dyn swage_storage::store::Storage>,
+            std::path::Path::new(".swage"),
         );
 
         assert!(
@@ -1595,6 +1600,7 @@ mod tests {
         let dispatcher = build_tool_dispatcher(
             &swage_config::ResolvedConfig::default(),
             storage as Arc<dyn swage_storage::store::Storage>,
+            std::path::Path::new(".swage"),
         );
 
         assert!(
@@ -1647,10 +1653,13 @@ mod tests {
         let storage =
             Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
         let mut config = swage_config::ResolvedConfig::default();
-        config.tools.plugin_directory = Some(temp_dir.path().join("plugins").display().to_string());
+        config.tools.plugin_directory = Some("plugins".to_string());
 
-        let dispatcher =
-            build_tool_dispatcher(&config, storage as Arc<dyn swage_storage::store::Storage>);
+        let dispatcher = build_tool_dispatcher(
+            &config,
+            storage as Arc<dyn swage_storage::store::Storage>,
+            temp_dir.path(),
+        );
 
         assert!(dispatcher.registry().get("echo_plugin").is_some());
     }
@@ -1674,6 +1683,7 @@ mod tests {
                 aliases: Vec::new(),
                 context_window: None,
                 generation_preset: None,
+                default_effort: None,
                 capabilities: swage_config::ModelCapabilitiesConfig::default(),
             },
         );
@@ -1739,6 +1749,7 @@ mod tests {
             aliases: Vec::new(),
             context_window: None,
             generation_preset: None,
+            default_effort: None,
             capabilities: swage_config::ModelCapabilitiesConfig::default(),
         };
 

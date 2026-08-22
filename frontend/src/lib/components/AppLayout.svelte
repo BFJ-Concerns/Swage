@@ -42,6 +42,7 @@
     onNavigate?: (path: string) => void;
     onSettingsSaved?: () => void | Promise<void>;
     agentDefinitions?: EffectiveAgentDefinitionResponse[];
+    onNewConversation?: () => void;
   }
 
   let {
@@ -64,6 +65,7 @@
     onNavigate,
     onSettingsSaved,
     agentDefinitions = [],
+    onNewConversation,
   }: Props = $props();
 
   const currentSpace = $derived(spaceStore?.currentSpace ?? null);
@@ -137,7 +139,7 @@
   <main class="operator"><OperatorDashboard /></main>
 {:else}
   <main class="conversation">
-    <aside><ConversationList store={conversationStore} {selectedAgentId} /></aside>
+    <aside><ConversationList store={conversationStore} {onNewConversation} /></aside>
     <section aria-label="Conversation">
       {#if activeConversation}<ConnectionIndicator store={connectionStore} {onRetry} />{/if}
       <MessageDisplay store={conversationStore} {streamingStore} {displayPreferences} />

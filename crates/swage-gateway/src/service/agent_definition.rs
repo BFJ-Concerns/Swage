@@ -210,6 +210,11 @@ pub fn validate_definition(definition: &NewAgentDefinition) -> Result<(), Gatewa
             "agent ids are lowercase ASCII letters, digits, and hyphens".into(),
         ));
     }
+    if definition.id == "gateway" {
+        return Err(GatewayError::ValidationError(
+            "the gateway agent id is reserved".into(),
+        ));
+    }
     if definition.display_name.trim().is_empty() {
         return Err(GatewayError::ValidationError(
             "an agent definition needs a display name".into(),
@@ -306,6 +311,16 @@ mod validation_tests {
             result,
             Err(GatewayError::ValidationError(message))
                 if message.contains("lowercase")
+        ));
+    }
+
+    #[test]
+    fn rejects_the_reserved_gateway_agent_id() {
+        let result = validate_definition(&definition("gateway"));
+        assert!(matches!(
+            result,
+            Err(GatewayError::ValidationError(message))
+                if message.contains("reserved")
         ));
     }
 
