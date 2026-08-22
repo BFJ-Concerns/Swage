@@ -288,17 +288,27 @@ async fn ws_recv(stream: &mut WsStream) -> Value {
     }
 }
 
-/// Collect all WebSocket events within a timeout. Returns them in order.
-async fn ws_collect_events(stream: &mut WsStream, timeout: Duration) -> Vec<Value> {
+/// Collect WebSocket events through the named terminal event.
+async fn ws_collect_until(
+    stream: &mut WsStream,
+    terminal_event: &str,
+    timeout: Duration,
+) -> Vec<Value> {
     let mut events = Vec::new();
-    let deadline = tokio::time::Instant::now() + timeout;
-    loop {
-        match tokio::time::timeout_at(deadline, ws_recv_lenient(stream)).await {
-            Ok(Some(event)) => events.push(event),
-            Ok(None) => break, // Close frame
-            Err(_) => break,   // Timeout
+    tokio::time::timeout(timeout, async {
+        loop {
+            let event = ws_recv_lenient(stream)
+                .await
+                .unwrap_or_else(|| panic!("websocket closed before {terminal_event}: {events:?}"));
+            let reached_terminal = event["type"] == terminal_event;
+            events.push(event);
+            if reached_terminal {
+                break;
+            }
         }
-    }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("timed out waiting for {terminal_event}: {events:?}"));
     events
 }
 
@@ -352,7 +362,7 @@ async fn subscribed_client_receives_assembly_report_before_tokens() {
     .await;
 
     // Collect all events from the turn.
-    let events = ws_collect_events(&mut stream, Duration::from_secs(5)).await;
+    let events = ws_collect_until(&mut stream, "turn_complete", Duration::from_secs(5)).await;
 
     // Find the ContextAssembled event and the first Token event.
     let context_assembled_idx = events.iter().position(|e| e["type"] == "context_assembled");
@@ -413,7 +423,7 @@ async fn unsubscribed_client_receives_no_observability_events() {
     .await;
 
     // Collect all events.
-    let events = ws_collect_events(&mut stream, Duration::from_secs(5)).await;
+    let events = ws_collect_until(&mut stream, "turn_complete", Duration::from_secs(5)).await;
 
     // There should be no tool_start, tool_end, or context_assembled events.
     let observability_events: Vec<_> = events
@@ -465,7 +475,7 @@ async fn past_turn_report_matches_live_websocket_report() {
     .await;
 
     // Collect events.
-    let events = ws_collect_events(&mut stream, Duration::from_secs(5)).await;
+    let events = ws_collect_until(&mut stream, "turn_complete", Duration::from_secs(5)).await;
 
     // Extract the live ContextAssembled report and the turn_id.
     let context_event = events.iter().find(|e| e["type"] == "context_assembled");
@@ -534,7 +544,7 @@ async fn token_usage_persisted_and_in_turn_complete() {
     .await;
 
     // Collect events.
-    let events = ws_collect_events(&mut stream, Duration::from_secs(5)).await;
+    let events = ws_collect_until(&mut stream, "turn_complete", Duration::from_secs(5)).await;
 
     // Find the TurnComplete event.
     let turn_complete = events.iter().find(|e| e["type"] == "turn_complete");
@@ -604,7 +614,7 @@ async fn shutdown_endpoint_notifies_websocket_clients() {
     assert_eq!(body["status"], "shutting_down");
 
     // The WebSocket client should receive a Shutdown event.
-    let events = ws_collect_events(&mut stream, Duration::from_secs(3)).await;
+    let events = ws_collect_until(&mut stream, "shutdown", Duration::from_secs(3)).await;
     let shutdown_event = events.iter().find(|e| e["type"] == "shutdown");
     assert!(
         shutdown_event.is_some(),

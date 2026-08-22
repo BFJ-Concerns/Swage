@@ -198,12 +198,26 @@ async fn ws_recv_lenient(stream: &mut WsStream) -> Option<Value> {
     }
 }
 
-async fn ws_collect_events(stream: &mut WsStream, timeout: Duration) -> Vec<Value> {
+async fn ws_collect_until(
+    stream: &mut WsStream,
+    terminal_event: &str,
+    timeout: Duration,
+) -> Vec<Value> {
     let mut events = Vec::new();
-    let deadline = tokio::time::Instant::now() + timeout;
-    while let Ok(Some(event)) = tokio::time::timeout_at(deadline, ws_recv_lenient(stream)).await {
-        events.push(event);
-    }
+    tokio::time::timeout(timeout, async {
+        loop {
+            let event = ws_recv_lenient(stream)
+                .await
+                .unwrap_or_else(|| panic!("websocket closed before {terminal_event}: {events:?}"));
+            let reached_terminal = event["type"] == terminal_event;
+            events.push(event);
+            if reached_terminal {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("timed out waiting for {terminal_event}: {events:?}"));
     events
 }
 
@@ -275,7 +289,7 @@ async fn valid_output_delivers_structured_output_on_turn_complete() {
     )
     .await;
 
-    let events = ws_collect_events(&mut stream, Duration::from_secs(5)).await;
+    let events = ws_collect_until(&mut stream, "turn_complete", Duration::from_secs(5)).await;
 
     // TurnComplete should carry structured_output with the validated JSON.
     let turn_complete = events.iter().find(|e| e["type"] == "turn_complete");
@@ -384,7 +398,7 @@ async fn invalid_output_retries_with_visible_event_then_succeeds() {
     )
     .await;
 
-    let events = ws_collect_events(&mut stream, Duration::from_secs(5)).await;
+    let events = ws_collect_until(&mut stream, "turn_complete", Duration::from_secs(5)).await;
 
     // Should have received an OutputSchemaRetry event for the first failed attempt.
     let retry_event = events.iter().find(|e| e["type"] == "output_schema_retry");
@@ -470,7 +484,8 @@ async fn zero_retries_causes_immediate_failure() {
     )
     .await;
 
-    let events = ws_collect_events(&mut stream, Duration::from_secs(5)).await;
+    let events =
+        ws_collect_until(&mut stream, "output_schema_failed", Duration::from_secs(5)).await;
 
     // OutputSchemaFailed should be emitted immediately (no retries).
     let failed_event = events.iter().find(|e| e["type"] == "output_schema_failed");
@@ -547,7 +562,7 @@ async fn no_schema_preserves_existing_behaviour() {
     .await;
     ws_send(&mut sink, json!({"type": "send_message", "content": "Hi"})).await;
 
-    let events = ws_collect_events(&mut stream, Duration::from_secs(5)).await;
+    let events = ws_collect_until(&mut stream, "turn_complete", Duration::from_secs(5)).await;
 
     // Tokens should stream normally.
     let tokens: Vec<&str> = events
@@ -649,7 +664,7 @@ async fn tokens_stream_during_both_initial_and_retry_attempts() {
     )
     .await;
 
-    let events = ws_collect_events(&mut stream, Duration::from_secs(5)).await;
+    let events = ws_collect_until(&mut stream, "turn_complete", Duration::from_secs(5)).await;
 
     // Should have tokens from both attempts. The exact content depends on
     // whether the gateway forwards tokens during validation retries.
