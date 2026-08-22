@@ -63,6 +63,7 @@ function mockStreamingStore(): StreamingStore {
     handleServerEvent: () => {},
     startTurn: () => {},
     cancelTurn: () => {},
+    reconcileAfterReconnect: () => {},
   };
 }
 
