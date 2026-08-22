@@ -1,4 +1,4 @@
-//! `swage completions <shell>` — generate shell autocompletion scripts.
+//! `swage generate-completion <shell>` — generate shell autocompletion scripts.
 //!
 //! Uses clap_complete to generate completions from the command definition,
 //! ensuring they stay in sync with the actual CLI structure automatically.
@@ -66,15 +66,19 @@ mod tests {
         );
     }
 
-    // Fish completions should include the completions subcommand itself.
+    // Fish completions should include the generation command itself.
     #[test]
-    fn fish_completions_contain_completions_token() {
+    fn fish_completions_contain_generate_completion_command() {
         let mut buf = Vec::<u8>::new();
         generate_to_writer(clap_complete::Shell::Fish, &mut buf);
         let output = String::from_utf8(buf).unwrap();
         assert!(
-            output.contains("completions"),
-            "fish completions should mention 'completions'"
+            output.contains("generate-completion"),
+            "fish completions should mention 'generate-completion'"
+        );
+        assert!(
+            !output.contains("'completions'"),
+            "fish completions should not advertise the retired command"
         );
     }
 

@@ -1,7 +1,7 @@
 //! CLI subcommand definitions and dispatch for the combined `swage` binary.
 //!
 //! Uses clap v4 derive macros to define a grouped subcommand architecture.
-//! The `gateway` group contains lifecycle management; the `completions` command
+//! The `gateway` group contains lifecycle management; `generate-completion`
 //! generates shell autocompletion scripts. The structure accommodates future
 //! groups (e.g. `swage space ...`, `swage config ...`).
 
@@ -61,10 +61,10 @@ pub enum Command {
     Run(RunArgs),
     /// Manage the Swage gateway process.
     Gateway(GatewayArgs),
-    /// Launch the terminal user interface.
-    Tui(TuiArgs),
-    /// Generate shell autocompletion scripts.
-    Completions(CompletionsArgs),
+    /// Chat with the gateway in your terminal.
+    Chat(TuiArgs),
+    /// Generate a shell completion script.
+    GenerateCompletion(CompletionsArgs),
 }
 
 // ---------------------------------------------------------------------------
@@ -218,7 +218,7 @@ pub struct UninstallArgs {}
 // TUI argument struct
 // ---------------------------------------------------------------------------
 
-/// Arguments for `swage tui`.
+/// Arguments for `swage chat`.
 #[derive(Debug, clap::Args)]
 pub struct TuiArgs {
     /// Gateway URL to connect to (overrides runtime metadata discovery).
@@ -233,7 +233,7 @@ pub struct TuiArgs {
 // Completions argument struct
 // ---------------------------------------------------------------------------
 
-/// Arguments for `swage completions <shell>`.
+/// Arguments for `swage generate-completion <shell>`.
 #[derive(Debug, clap::Args)]
 pub struct CompletionsArgs {
     /// The target shell to generate completions for.
@@ -405,32 +405,70 @@ mod tests {
         assert!(matches!(gw.command, GatewayCommand::Status));
     }
 
-    // Shell completions with bash positional argument.
     #[test]
-    fn parse_completions_bash() {
-        let cli = Cli::try_parse_from(["swage", "completions", "bash"]).unwrap();
-        let Some(Command::Completions(args)) = cli.command else {
-            panic!("expected Completions command");
+    fn mechanism_facing_command_names_are_rejected() {
+        for args in [
+            ["swage", "tui"].as_slice(),
+            ["swage", "completions"].as_slice(),
+            ["swage", "gateway", "install"].as_slice(),
+            ["swage", "gateway", "uninstall"].as_slice(),
+        ] {
+            assert!(
+                Cli::try_parse_from(args).is_err(),
+                "old command parsed: {args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn lifecycle_help_explains_detached_output_and_saved_defaults() {
+        use clap::CommandFactory;
+
+        let mut command = Cli::command();
+        let gateway = command
+            .find_subcommand_mut("gateway")
+            .expect("gateway command");
+        let start = gateway.find_subcommand_mut("start").expect("start command");
+        let help = start.render_long_help().to_string();
+        assert!(help.contains("leaving output attached to this terminal"));
+        assert!(help.contains("`gateway.log` in the Swage data root"));
+
+        let mut command = Cli::command();
+        let gateway_help = command
+            .find_subcommand_mut("gateway")
+            .expect("gateway command")
+            .render_long_help()
+            .to_string();
+        assert!(gateway_help.contains("Save host, port, and configuration defaults"));
+        assert!(gateway_help.contains("Remove saved lifecycle defaults"));
+    }
+
+    // Shell completion generation with bash positional argument.
+    #[test]
+    fn parse_completion_bash() {
+        let cli = Cli::try_parse_from(["swage", "generate-completion", "bash"]).unwrap();
+        let Some(Command::GenerateCompletion(args)) = cli.command else {
+            panic!("expected GenerateCompletion command");
         };
         assert_eq!(args.shell, clap_complete::Shell::Bash);
     }
 
-    // Shell completions with zsh positional argument.
+    // Shell completion generation with zsh positional argument.
     #[test]
-    fn parse_completions_zsh() {
-        let cli = Cli::try_parse_from(["swage", "completions", "zsh"]).unwrap();
-        let Some(Command::Completions(args)) = cli.command else {
-            panic!("expected Completions command");
+    fn parse_completion_zsh() {
+        let cli = Cli::try_parse_from(["swage", "generate-completion", "zsh"]).unwrap();
+        let Some(Command::GenerateCompletion(args)) = cli.command else {
+            panic!("expected GenerateCompletion command");
         };
         assert_eq!(args.shell, clap_complete::Shell::Zsh);
     }
 
-    // Shell completions with fish positional argument.
+    // Shell completion generation with fish positional argument.
     #[test]
-    fn parse_completions_fish() {
-        let cli = Cli::try_parse_from(["swage", "completions", "fish"]).unwrap();
-        let Some(Command::Completions(args)) = cli.command else {
-            panic!("expected Completions command");
+    fn parse_completion_fish() {
+        let cli = Cli::try_parse_from(["swage", "generate-completion", "fish"]).unwrap();
+        let Some(Command::GenerateCompletion(args)) = cli.command else {
+            panic!("expected GenerateCompletion command");
         };
         assert_eq!(args.shell, clap_complete::Shell::Fish);
     }

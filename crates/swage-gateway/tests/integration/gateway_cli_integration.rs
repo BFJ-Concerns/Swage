@@ -294,7 +294,7 @@ async fn shell_completions_include_gateway_subcommands() {
         "completions should include 'status' subcommand"
     );
     assert!(
-        completions.contains("completions"),
-        "completions should include 'completions' command"
+        completions.contains("generate-completion"),
+        "completions should include 'generate-completion' command"
     );
 }

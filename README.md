@@ -155,7 +155,13 @@ port = 3000
 ```
 
 The `--host` and `--port` flags are accepted by `gateway start`,
-`gateway restart`, and `gateway install`.
+`gateway restart`, and `gateway set-defaults`. Saved defaults are reused by
+`start`, `restart`, `status`, and `stop` until removed with
+`gateway clear-defaults`; an explicit lifecycle flag overrides its saved
+default.
+
+The terminal client is `swage chat`. Generate an installation script for
+shell completion with `swage generate-completion bash` (or `zsh`/`fish`).
 
 **Security boundary.** The gateway has no authentication. Binding to a
 private-network address is an explicit operator choice that trusts every host
