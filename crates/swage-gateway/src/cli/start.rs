@@ -83,6 +83,7 @@ pub async fn run(args: &StartArgs) -> Result<(), ClientError> {
         effective_port,
         effective_host.as_deref(),
         effective_config.as_deref(),
+        args.log_file.as_deref(),
     )?;
 
     // Step 4: Poll until the gateway writes its metadata and passes a health check.
@@ -92,6 +93,10 @@ pub async fn run(args: &StartArgs) -> Result<(), ClientError> {
 
     // Step 5: Report success to the user.
     println!("Gateway started on {address}");
+    println!(
+        "Detached output: {}",
+        gateway_log_path(args.log_file.as_deref()).display()
+    );
     Ok(())
 }
 
@@ -101,30 +106,19 @@ pub async fn run(args: &StartArgs) -> Result<(), ClientError> {
 
 /// Spawn the current binary as a detached background gateway process.
 ///
-/// Redirects stdout/stderr to the gateway log under the canonical Swage root.
+/// Redirects stdout/stderr to the selected log file, defaulting under the canonical Swage root.
 /// Sets the child process into its own process group so it survives the CLI
 /// process exiting without receiving SIGHUP from the terminal.
 fn spawn_background_gateway(
     port: Option<u16>,
     host: Option<&str>,
     config: Option<&str>,
+    log_file: Option<&str>,
 ) -> Result<(), ClientError> {
     let binary = std::env::current_exe().map_err(|e| ClientError::MetadataIo { source: e })?;
 
-    let log_path = gateway_log_path();
-    if let Some(parent) = log_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| ClientError::MetadataIo { source: e })?;
-    }
-
-    let log_file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)
-        .map_err(|e| ClientError::MetadataIo { source: e })?;
-
-    let log_stderr = log_file
-        .try_clone()
-        .map_err(|e| ClientError::MetadataIo { source: e })?;
+    let log_path = gateway_log_path(log_file);
+    let (log_file, log_stderr) = open_detached_output(&log_path)?;
 
     let args = build_spawn_args(port, host.map(str::to_owned), config.map(str::to_owned));
 
@@ -145,6 +139,24 @@ fn spawn_background_gateway(
         .map_err(|e| ClientError::MetadataIo { source: e })?;
 
     Ok(())
+}
+
+fn open_detached_output(
+    log_path: &std::path::Path,
+) -> Result<(std::fs::File, std::fs::File), ClientError> {
+    if let Some(parent) = log_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| ClientError::MetadataIo { source: e })?;
+    }
+
+    let stdout = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)
+        .map_err(|e| ClientError::MetadataIo { source: e })?;
+    let stderr = stdout
+        .try_clone()
+        .map_err(|e| ClientError::MetadataIo { source: e })?;
+    Ok((stdout, stderr))
 }
 
 // ---------------------------------------------------------------------------
@@ -186,11 +198,13 @@ pub(crate) async fn poll_until_ready(timeout: Duration) -> Result<String, String
 // Path helpers (extracted for testability)
 // ---------------------------------------------------------------------------
 
-/// Returns the path to the gateway log file under the canonical Swage root.
-pub(crate) fn gateway_log_path() -> PathBuf {
-    swage_config::discovery::resolve_root()
-        .unwrap_or_else(|_| swage_config::discovery::effective_root_path())
-        .join("gateway.log")
+/// Returns the caller's log path, or the default under the canonical Swage root.
+pub(crate) fn gateway_log_path(log_file: Option<&str>) -> PathBuf {
+    log_file.map(PathBuf::from).unwrap_or_else(|| {
+        swage_config::discovery::resolve_root()
+            .unwrap_or_else(|_| swage_config::discovery::effective_root_path())
+            .join("gateway.log")
+    })
 }
 
 /// Builds the argument list for spawning the binary in server mode.
@@ -232,6 +246,8 @@ pub(crate) fn build_spawn_args(
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write;
+
     use crate::test_support::{SwageHomeGuard, XdgRuntimeDirGuard};
 
     use super::*;
@@ -239,8 +255,30 @@ mod tests {
     #[test]
     fn log_path_uses_swage_root() {
         let swage_home = SwageHomeGuard::new();
-        let path = gateway_log_path();
+        let path = gateway_log_path(None);
         assert_eq!(path, swage_home.path().join("gateway.log"));
+    }
+
+    #[test]
+    fn explicit_log_path_is_preserved() {
+        let path = gateway_log_path(Some("relative/logs/gateway.txt"));
+        assert_eq!(path, PathBuf::from("relative/logs/gateway.txt"));
+    }
+
+    #[test]
+    fn detached_stdout_and_stderr_share_the_selected_log() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let path = directory.path().join("nested/gateway.log");
+        let (mut stdout, mut stderr) = open_detached_output(&path).unwrap();
+
+        writeln!(stdout, "standard output").unwrap();
+        writeln!(stderr, "standard error").unwrap();
+        drop(stdout);
+        drop(stderr);
+
+        let output = std::fs::read_to_string(path).unwrap();
+        assert!(output.contains("standard output"));
+        assert!(output.contains("standard error"));
     }
 
     // When no flags are given, only --server-mode should appear.

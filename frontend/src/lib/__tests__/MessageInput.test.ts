@@ -53,6 +53,7 @@ describe("MessageInput", () => {
     props: {
       modelOptions?: string[];
       modelCatalogueReady?: boolean;
+      canSelectAgent?: boolean;
       onNavigate?: (path: string) => void;
     } = {},
   ): StreamingStore {
@@ -85,7 +86,7 @@ describe("MessageInput", () => {
       (document.querySelector(".action.send") as HTMLButtonElement).click();
     });
 
-    expect(store.startTurn).toHaveBeenCalledWith("Hello, Swage", null, null);
+    expect(store.startTurn).toHaveBeenCalledWith("Hello, Swage", null, null, null);
   });
 
   it("does not send whitespace-only input", () => {
@@ -115,7 +116,7 @@ describe("MessageInput", () => {
       );
     });
 
-    expect(store.startTurn).toHaveBeenCalledWith("Send via keyboard", null, null);
+    expect(store.startTurn).toHaveBeenCalledWith("Send via keyboard", null, null, null);
   });
 
   it("does not send on Shift+Enter", () => {
@@ -204,6 +205,38 @@ describe("MessageInput", () => {
       "Use the selected model",
       "provider/model-b",
       null,
+      null,
+    );
+  });
+
+  it("forwards the rendered effort selection when starting a conversation", () => {
+    const store = mountComponent(undefined, {
+      modelOptions: ["provider/model-a"],
+      modelCatalogueReady: true,
+      canSelectAgent: true,
+    });
+    setTextareaValue("Use maximum effort");
+
+    const picker = document.querySelector('[aria-label="Effort"]') as HTMLSelectElement;
+    expect(Array.from(picker.options, (option) => option.value)).toEqual([
+      "",
+      "low",
+      "medium",
+      "high",
+      "max",
+    ]);
+
+    flushSync(() => {
+      picker.value = "max";
+      picker.dispatchEvent(new Event("change", { bubbles: true }));
+      (document.querySelector(".action.send") as HTMLButtonElement).click();
+    });
+
+    expect(store.startTurn).toHaveBeenCalledWith(
+      "Use maximum effort",
+      "provider/model-a",
+      null,
+      "max",
     );
   });
 

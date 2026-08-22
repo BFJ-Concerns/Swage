@@ -16,9 +16,8 @@ use swage_core::{
 /// every new chunk kind must make the commitment decision deliberately.
 pub(crate) fn contains_user_visible_content(chunk: &StreamChunk) -> bool {
     match chunk {
-        StreamChunk::Delta { .. } | StreamChunk::Reasoning { .. } | StreamChunk::ToolUse { .. } => {
-            true
-        }
+        StreamChunk::Delta { content } => !content.is_empty(),
+        StreamChunk::Reasoning { .. } | StreamChunk::ToolUse { .. } => true,
         StreamChunk::Usage(_)
         | StreamChunk::ProviderResponseWitness(_)
         | StreamChunk::Done { .. }
@@ -451,6 +450,7 @@ mod tests {
             aliases: Vec::new(),
             context_window: None,
             generation_preset: None,
+            default_effort: None,
             capabilities: swage_config::ModelCapabilitiesConfig::default(),
         };
 
@@ -478,6 +478,7 @@ mod tests {
             aliases: Vec::new(),
             context_window: None,
             generation_preset: None,
+            default_effort: None,
             capabilities: swage_config::ModelCapabilitiesConfig::default(),
         };
 

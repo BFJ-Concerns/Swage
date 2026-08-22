@@ -310,17 +310,8 @@ where
         .await
 }
 
-pub(crate) fn resolve_swage_root() -> Option<PathBuf> {
-    match swage_config::discovery::resolve_root() {
-        Ok(root) => Some(root),
-        Err(error) => {
-            tracing::warn!(
-                error = %error.kind,
-                "failed to resolve swage root; proceeding without skills, memory, context elements, or custom assembly"
-            );
-            None
-        }
-    }
+pub(crate) fn resolve_swage_root(state: &AppState) -> &Path {
+    &state.config_root
 }
 
 pub(crate) async fn load_active_skills_for_agent(

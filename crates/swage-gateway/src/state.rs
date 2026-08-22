@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
+    path::PathBuf,
     sync::{
         Arc, Mutex, RwLock,
         atomic::{AtomicBool, Ordering},
@@ -40,6 +41,8 @@ use crate::{
 /// concurrent modification from multiple handler tasks.
 #[derive(Clone)]
 pub struct AppState {
+    /// Configuration root selected when this gateway instance was constructed.
+    pub config_root: PathBuf,
     /// Persistent storage backend (sessions, threads, turns, messages, tool calls).
     pub storage: Arc<dyn Storage>,
     /// Space storage backend. Separate from `storage` because `SpaceStore` is
@@ -173,6 +176,33 @@ impl AppState {
         tool_dispatcher: ToolDispatcher,
         hook_registry: Option<Arc<HookRegistry>>,
     ) -> Self {
+        let config_root = swage_config::discovery::resolve_root()
+            .unwrap_or_else(|_| swage_config::discovery::effective_root_path());
+        Self::new_with_config_root(
+            storage,
+            space_store,
+            provider,
+            config,
+            tool_dispatcher,
+            hook_registry,
+            config_root,
+        )
+    }
+
+    /// Construct application state with a root already selected by the caller.
+    ///
+    /// Startup and root-sensitive tests use this entry point so state
+    /// construction cannot be redirected by a concurrent process-environment
+    /// change between root discovery and retention.
+    pub fn new_with_config_root(
+        storage: Arc<dyn Storage>,
+        space_store: Arc<dyn SpaceStore>,
+        provider: Arc<dyn LlmProvider>,
+        config: ResolvedConfig,
+        tool_dispatcher: ToolDispatcher,
+        hook_registry: Option<Arc<HookRegistry>>,
+        config_root: PathBuf,
+    ) -> Self {
         let (broadcast, _) = broadcast::channel(16);
         let workflow_capabilities =
             WorkflowCapabilities::for_protocol(config.default_provider_protocol());
@@ -184,20 +214,14 @@ impl AppState {
             .find(|provider| provider.protocol == swage_config::Protocol::Codex);
         let codex_state_dir = codex_endpoint
             .and_then(|provider| provider.state_dir.clone())
-            .or_else(|| {
-                swage_config::discovery::resolve_root()
-                    .ok()
-                    .map(|root| root.join("codex"))
-            })
+            .or_else(|| Some(config_root.join("codex")))
             .unwrap_or_else(|| std::path::PathBuf::from(".swage/codex"));
         let mut codex_config = AppServerConfig::codex(codex_state_dir);
         if let Some(command) = codex_endpoint.and_then(|provider| provider.command.clone()) {
             codex_config.command = command;
         }
         let codex_supervisor = AppServerSupervisor::new(codex_config);
-        let worktree_root = swage_config::resolve_root()
-            .unwrap_or_else(|_| std::path::PathBuf::from(".swage"))
-            .join("worker-worktrees");
+        let worktree_root = config_root.join("worker-worktrees");
         let mut codex_runtime_events = codex_supervisor.subscribe_runtime();
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             let audit_storage = storage.clone();
@@ -210,6 +234,7 @@ impl AppState {
             });
         }
         Self {
+            config_root,
             storage: storage.clone(),
             space_store,
             provider: provider.clone(),

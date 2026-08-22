@@ -194,15 +194,20 @@ describe("ConversationList", () => {
     expect(newButton).not.toBeNull();
   });
 
-  it("calls store.createConversation when the new button is clicked", async () => {
+  it("opens the configured creation surface when the new button is clicked", async () => {
     const store = makeStore([]);
-    component = mount(ConversationList, { target: document.body, props: { store } });
+    const onNewConversation = vi.fn();
+    component = mount(ConversationList, {
+      target: document.body,
+      props: { store, onNewConversation },
+    });
 
     const newButton = document.querySelector("button.new-btn") as HTMLButtonElement;
     expect(newButton).not.toBeNull();
     newButton.click();
     await Promise.resolve();
-    expect(store.createConversation).toHaveBeenCalledOnce();
+    expect(onNewConversation).toHaveBeenCalledOnce();
+    expect(store.createConversation).not.toHaveBeenCalled();
   });
 
   // --- Delete with inline confirmation ---

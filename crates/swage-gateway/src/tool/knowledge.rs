@@ -291,7 +291,7 @@ impl Tool for KnowledgeRecordTool {
         let state = gateway_state(RECORD_TOOL, ctx)?;
         let (space_id, space_slug) = session_space(RECORD_TOOL, state, ctx).await?;
 
-        let body = knowledge::write_body(&space_slug, content.as_bytes())
+        let body = knowledge::write_body(&state.config_root, &space_slug, content.as_bytes())
             .await
             .map_err(|error| failed(RECORD_TOOL, error))?;
 

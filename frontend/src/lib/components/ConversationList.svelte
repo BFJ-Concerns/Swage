@@ -10,10 +10,10 @@
     // Injected by App.svelte once all stores are wired. Undefined during
     // scaffolding — the component renders a placeholder shell until connected.
     store?: ConversationStore;
-    selectedAgentId?: string;
+    onNewConversation?: () => void;
   }
 
-  let { store, selectedAgentId = "" }: Props = $props();
+  let { store, onNewConversation }: Props = $props();
 
   // Track which conversation is awaiting inline delete confirmation.
   // Only one can be pending at a time — clicking another collapses any open one.
@@ -46,7 +46,7 @@
     <!-- New conversation button anchored at the top of the sidebar. -->
     <button
       class="new-btn"
-      onclick={() => store!.createConversation(undefined, undefined, selectedAgentId || null)}
+      onclick={() => onNewConversation?.()}
       disabled={store.isLoading}
     >
       + New conversation

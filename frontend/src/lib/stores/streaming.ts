@@ -47,7 +47,7 @@ export interface StreamingStore {
   readonly pendingApproval: PendingApproval | null;
   handleServerEvent(event: ServerEvent): void;
   reconcileAfterReconnect(): void;
-  startTurn(content: string, selectedModelId?: string | null, agentId?: string | null): void;
+  startTurn(content: string, selectedModelId?: string | null, agentId?: string | null, effort?: import("../protocol/Effort").Effort | null): void;
   cancelTurn(): void;
 }
 
@@ -466,7 +466,7 @@ export interface ConversationAutoCreateOptions {
    * queues frames during the handshake, so the turn can be dispatched as soon
    * as this resolves without racing the connection.
    */
-  createConversation(selectedModelId?: string | null, agentId?: string | null): Promise<string | null>;
+  createConversation(selectedModelId?: string | null, agentId?: string | null, effort?: import("../protocol/Effort").Effort | null): Promise<string | null>;
 }
 
 // Wraps a streaming store so the composer works in a space with no
@@ -508,7 +508,7 @@ export function withConversationAutoCreate(
     reconcileAfterReconnect: () => base.reconcileAfterReconnect(),
     cancelTurn: () => base.cancelTurn(),
 
-    startTurn(content: string, selectedModelId?: string | null, agentId?: string | null): void {
+    startTurn(content: string, selectedModelId?: string | null, agentId?: string | null, effort?: import("../protocol/Effort").Effort | null): void {
       if (options.hasActiveConversation()) {
         base.startTurn(content, selectedModelId);
         return;
@@ -520,7 +520,7 @@ export function withConversationAutoCreate(
         try {
           // A rejection counts as a failed creation, same as a null id.
           const id = await options
-            .createConversation(selectedModelId, agentId)
+            .createConversation(selectedModelId, agentId, effort)
             .catch(() => null);
           if (id) {
             base.startTurn(content, selectedModelId);

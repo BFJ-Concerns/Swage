@@ -36,7 +36,7 @@ struct GatewayDelegatedContextAssembler {
     config: swage_config::ResolvedConfig,
     agent_id: String,
     working_directory: String,
-    swage_root: Option<std::path::PathBuf>,
+    swage_root: std::path::PathBuf,
     context_event_tx: mpsc::UnboundedSender<crate::websocket::ServerEvent>,
     effective_tool_permissions: serde_json::Value,
     composition: DispatchContextComposition,
@@ -52,13 +52,14 @@ pub(crate) fn delegated_context_assembler(
     effective_tool_permissions: serde_json::Value,
     composition: DispatchContextComposition,
 ) -> Arc<dyn DelegationContextAssembler> {
+    let swage_root = resolve_swage_root(&state).to_path_buf();
     Arc::new(GatewayDelegatedContextAssembler {
         state,
         space,
         config,
         agent_id,
         working_directory,
-        swage_root: resolve_swage_root(),
+        swage_root,
         context_event_tx,
         effective_tool_permissions,
         composition,
@@ -78,7 +79,7 @@ impl DelegationContextAssembler for GatewayDelegatedContextAssembler {
             session.id,
             &self.space.slug,
             &self.agent_id,
-            self.swage_root.as_deref(),
+            Some(&self.swage_root),
             false,
             &self.config.declared_skills,
         )
@@ -94,10 +95,7 @@ impl DelegationContextAssembler for GatewayDelegatedContextAssembler {
         .map_err(|error| AgentError::InvalidConfig(error.to_string()))?;
         let assembly_name = context_choices.assembly_name;
         let memory_content = load_memory_for_assembly(&assembly_name, || async {
-            match self.swage_root.as_deref() {
-                Some(root) => load_space_memory(root, &self.space.slug).await,
-                None => String::new(),
-            }
+            load_space_memory(&self.swage_root, &self.space.slug).await
         })
         .await;
         let mut session_variables: std::collections::BTreeMap<String, String> = self
@@ -112,11 +110,8 @@ impl DelegationContextAssembler for GatewayDelegatedContextAssembler {
         session_variables.extend(self.composition.variables.clone().unwrap_or_default());
         let environment =
             build_session_environment(&self.space, Some(self.working_directory.clone()), session);
-        let available_skills = available_skills_for_agent(
-            &self.space.slug,
-            &self.agent_id,
-            self.swage_root.as_deref(),
-        );
+        let available_skills =
+            available_skills_for_agent(&self.space.slug, &self.agent_id, Some(&self.swage_root));
         // Delegated children read the same operator-guidance sources as
         // foreground turns: the trust policy is re-derived here because the
         // assembler holds only the working directory, not the policy.
@@ -126,13 +121,8 @@ impl DelegationContextAssembler for GatewayDelegatedContextAssembler {
             session.active_workspace_attachment_id,
         )
         .await;
-        let operator_guidance =
-            operator_guidance_rules(self.swage_root.as_deref(), &workspace_policy);
-        let hierarchy = self
-            .swage_root
-            .as_deref()
-            .map(|root| configuration_hierarchy(root, &self.space.slug, &self.agent_id))
-            .unwrap_or_default();
+        let operator_guidance = operator_guidance_rules(Some(&self.swage_root), &workspace_policy);
+        let hierarchy = configuration_hierarchy(&self.swage_root, &self.space.slug, &self.agent_id);
         let elements = build_assembly_elements(
             &self.config.instructions,
             operator_guidance,
@@ -152,7 +142,7 @@ impl DelegationContextAssembler for GatewayDelegatedContextAssembler {
             &self.config,
             &elements,
             &tokeniser,
-            self.swage_root.as_deref(),
+            Some(&self.swage_root),
             &self.space.slug,
             &self.agent_id,
             &session_variables,
