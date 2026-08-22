@@ -6006,7 +6006,7 @@ mod tests {
             .expect("create elements directory");
         std::fs::write(
             swage_home.path().join("assemblies/focused.js"),
-            "for (const element of elements) add(element.render());",
+            "for (const element of elements) add(typeof element.render === 'function' ? element.render() : element);",
         )
         .expect("write named assembly");
         std::fs::write(
