@@ -270,9 +270,7 @@ mod tests {
             json!({
                 "action":"upsert",
                 "id":"review",
-                "instructions":"Edited contract.",
-                "output_schema":{"type":"string"},
-                "output_max_retries":1
+                "instructions":"Edited contract."
             }),
             &context,
         )
@@ -300,6 +298,28 @@ mod tests {
             edited.metadata["new_state"]["instructions"],
             "Edited contract."
         );
+        assert_eq!(edited.metadata["prior_state"]["model_id"], Value::Null);
+        assert_eq!(
+            edited.metadata["prior_state"]["tool_permissions"],
+            json!({
+                "allow":["file_read"],
+                "deny":[],
+                "bundles":{},
+                "require_approval":[]
+            })
+        );
+        assert_eq!(
+            edited.metadata["prior_state"]["output_schema"],
+            json!({"type":"object"})
+        );
+        assert_eq!(edited.metadata["prior_state"]["output_max_retries"], 2);
+        assert_eq!(edited.metadata["new_state"]["model_id"], Value::Null);
+        assert_eq!(edited.metadata["new_state"]["tool_permissions"], Value::Null);
+        assert_eq!(edited.metadata["new_state"]["output_schema"], Value::Null);
+        assert_eq!(
+            edited.metadata["new_state"]["output_max_retries"],
+            Value::Null
+        );
 
         tool.execute(json!({"action":"delete","id":"review"}), &context)
             .await
@@ -321,6 +341,12 @@ mod tests {
         assert_eq!(
             deleted.metadata["prior_state"]["instructions"],
             "Edited contract."
+        );
+        assert_eq!(deleted.metadata["prior_state"]["tool_permissions"], Value::Null);
+        assert_eq!(deleted.metadata["prior_state"]["output_schema"], Value::Null);
+        assert_eq!(
+            deleted.metadata["prior_state"]["output_max_retries"],
+            Value::Null
         );
         assert!(deleted.metadata["new_state"].is_null());
     }

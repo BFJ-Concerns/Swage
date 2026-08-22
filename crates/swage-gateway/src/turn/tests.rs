@@ -7542,6 +7542,24 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
     .await
     .expect("parent next turn should complete");
 
+    state
+        .storage
+        .upsert_task_definition(swage_storage::NewTaskDefinition {
+            id: "strict-review".into(),
+            instructions: "Edited task-defined delegated instruction.".into(),
+            model_id: Some("task-review-model".into()),
+            tool_permissions: Some(serde_json::json!({
+                "allow": ["shell"], "deny": [], "bundles": {}, "require_approval": []
+            })),
+            output_schema: Some(serde_json::json!({
+                "type": "object",
+                "required": ["result"],
+                "properties": { "result": { "type": "string" } }
+            })),
+            output_max_retries: Some(1),
+        })
+        .await
+        .expect("edit delegated task definition");
     let (tx, _rx) = mpsc::unbounded_channel();
     process_turn(
         &state,
@@ -7713,10 +7731,53 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
         .collect::<Vec<_>>()
         .join("\n\n");
     assert!(
-        next_child_request_text.contains("Task-defined delegated instruction."),
-        "a subsequent child turn must re-resolve its persisted task definition: {next_child_request_text}"
+        next_child_request_text.contains("Edited task-defined delegated instruction.")
+            && !next_child_request_text.contains("\n\nTask-defined delegated instruction."),
+        "a subsequent child turn must re-resolve the edited task definition: {next_child_request_text}"
     );
     drop(captured_requests);
+
+    let child_count_before_missing_definition = state
+        .storage
+        .list_sessions_by_agent_id("agent-b")
+        .await
+        .expect("list child sessions before missing-definition failure")
+        .len();
+    let error = match GatewayDelegationHandler::new(state.clone())
+        .handle_delegation(
+            "agent-b",
+            "This must not start",
+            Some("missing-task"),
+            None,
+            None,
+            None,
+            DispatchContextComposition::default(),
+            "missing-task-delegate",
+            "gateway",
+            root_turn.id,
+            space.id,
+            CancellationToken::new(),
+            DelegateCompletionMode::Wait,
+        )
+        .await
+    {
+        Ok(_) => panic!("a missing task definition must fail delegation closed"),
+        Err(error) => error,
+    };
+    assert!(
+        error.to_string().contains("no task definition 'missing-task' exists"),
+        "unexpected missing-definition failure: {error}"
+    );
+    assert_eq!(
+        state
+            .storage
+            .list_sessions_by_agent_id("agent-b")
+            .await
+            .expect("list child sessions after missing-definition failure")
+            .len(),
+        child_count_before_missing_definition,
+        "task-definition resolution failure must happen before child creation"
+    );
 
     let sender_config_dir = swage_home.path().join("spaces/default/agents/gateway");
     std::fs::create_dir_all(&sender_config_dir).expect("create sender config directory");
