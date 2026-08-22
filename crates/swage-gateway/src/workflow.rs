@@ -12014,7 +12014,10 @@ mod tests {
             .await
             .expect("run detail");
         assert_eq!(detail.run.final_output, None);
-        let typed_handover = detail.run.handover.expect("typed handover at the client surface");
+        let typed_handover = detail
+            .run
+            .handover
+            .expect("typed handover at the client surface");
         assert!(matches!(
             typed_handover,
             WorkflowRunHandover::Interrupted { .. }

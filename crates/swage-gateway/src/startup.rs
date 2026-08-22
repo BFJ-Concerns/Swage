@@ -365,7 +365,9 @@ async fn create_voice_provider(
         };
 
     match provider_endpoint.protocol {
-        swage_config::Protocol::OpenAi | swage_config::Protocol::OpenRouter => Arc::new(
+        swage_config::Protocol::OpenAi
+        | swage_config::Protocol::OpenAiResponses
+        | swage_config::Protocol::OpenRouter => Arc::new(
             swage_provider::OpenAiVoiceProvider::from_config(provider_config),
         ),
         swage_config::Protocol::Anthropic
@@ -381,7 +383,9 @@ async fn create_voice_provider(
 
 fn provider_base_url(config: &swage_config::ProviderEndpointConfig) -> &str {
     config.base_url.as_deref().unwrap_or(match config.protocol {
-        swage_config::Protocol::OpenAi => "https://api.openai.com/v1",
+        swage_config::Protocol::OpenAi | swage_config::Protocol::OpenAiResponses => {
+            "https://api.openai.com/v1"
+        }
         swage_config::Protocol::Anthropic => "https://api.anthropic.com",
         swage_config::Protocol::Google => "https://generativelanguage.googleapis.com",
         swage_config::Protocol::OpenRouter => "https://openrouter.ai/api/v1",
@@ -977,6 +981,9 @@ fn concrete_provider(
         ),
         swage_config::Protocol::OpenAi | swage_config::Protocol::OpenRouter => Box::new(
             swage_provider::openai::OpenAiProvider::from_config(provider_config),
+        ),
+        swage_config::Protocol::OpenAiResponses => Box::new(
+            swage_provider::responses::ResponsesProvider::from_config(provider_config),
         ),
         swage_config::Protocol::Google => Box::new(
             swage_provider::google::GoogleProvider::from_config(provider_config),
