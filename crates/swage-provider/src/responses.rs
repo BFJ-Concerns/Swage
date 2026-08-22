@@ -880,16 +880,23 @@ mod tests {
     }
 
     #[test]
-    fn build_request_maps_effort_into_reasoning() {
+    fn every_completion_effort_maps_to_responses_reasoning_effort() {
         let provider =
             ResponsesProvider::from_config(ProviderConfig::new("key", "model", "http://localhost"));
-        let request = CompletionRequest {
-            effort: Some(swage_core::Effort::High),
-            ..completion_request()
-        };
-        let body = serde_json::to_value(provider.build_request(&request, false)).unwrap();
-        assert_eq!(body["reasoning"]["effort"], "high");
-        assert!(body["reasoning"].get("context").is_none());
+        for (effort, expected) in [
+            (swage_core::Effort::Low, "low"),
+            (swage_core::Effort::Medium, "medium"),
+            (swage_core::Effort::High, "high"),
+            (swage_core::Effort::Max, "xhigh"),
+        ] {
+            let request = CompletionRequest {
+                effort: Some(effort),
+                ..completion_request()
+            };
+            let body = serde_json::to_value(provider.build_request(&request, false)).unwrap();
+            assert_eq!(body["reasoning"]["effort"], expected);
+            assert!(body["reasoning"].get("context").is_none());
+        }
     }
 
     #[test]
