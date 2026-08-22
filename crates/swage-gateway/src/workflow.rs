@@ -1262,7 +1262,19 @@ async fn run_ephemeral_agent_call(
     let timeout = request.timeout_ms.map(std::time::Duration::from_millis);
     tokio::select! {
         biased;
-        result = &mut processing => result.map_err(|error| error.to_string())?,
+        result = &mut processing => {
+            // Parent cancellation propagates through call_cancellation and can
+            // settle the turn before this select observes the cancelled arm.
+            // A turn interrupted that way is a cancellation outcome, not an
+            // agent-call failure.
+            if cancellation.is_cancelled() {
+                if let Err(error) = result {
+                    tracing::warn!(%error, "cancelled agent turn failed while settling cancellation");
+                }
+                return Err("WorkflowCancelledError".into());
+            }
+            result.map_err(|error| error.to_string())?
+        }
         () = cancellation.cancelled() => {
             call_cancellation.cancel();
             // The turn path owns the sandbox and active-turn registration.
