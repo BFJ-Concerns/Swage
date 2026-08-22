@@ -97,18 +97,10 @@ impl ConversationService {
             }
         };
         let selected_model_id = selected_model_id.unwrap_or(&config.models.default);
-        Ok(config
-            .models
-            .entries
-            .get(selected_model_id)
-            .or_else(|| {
-                config
-                    .models
-                    .entries
-                    .values()
-                    .find(|model| model.aliases.iter().any(|alias| alias == selected_model_id))
-            })
-            .and_then(|model| model.default_effort))
+        Ok(
+            crate::turn::resolve_model_catalogue_entry(&config.models, selected_model_id)
+                .and_then(|(_, model)| model.default_effort),
+        )
     }
 
     fn effort_metadata(

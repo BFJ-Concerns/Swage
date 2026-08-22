@@ -1335,13 +1335,20 @@ pub(crate) async fn process_turn_with_composition(
                 .map_err(|error| {
                     GatewayError::ConfigError(format!("session effort is invalid: {error}"))
                 })?
-                .or_else(|| match session.selected_model_id.as_deref() {
-                    Some(model_id) if !model_id.trim().is_empty() => None,
-                    _ => config
-                        .models
-                        .entries
-                        .get(&config.models.default)
-                        .and_then(|model| model.default_effort),
+                .or_else(|| {
+                    match session
+                        .selected_model_id
+                        .as_deref()
+                        .filter(|model_id| !model_id.trim().is_empty())
+                    {
+                        Some(model_id) => resolve_model_catalogue_entry(&config.models, model_id)
+                            .and_then(|(_, model)| model.default_effort),
+                        None => config
+                            .models
+                            .entries
+                            .get(&config.models.default)
+                            .and_then(|model| model.default_effort),
+                    }
                 }),
         };
         let turn_request = TurnRequest {
