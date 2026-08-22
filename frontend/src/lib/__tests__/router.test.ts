@@ -174,7 +174,7 @@ describe("navigate", () => {
 // ---------------------------------------------------------------------------
 
 describe("popstate", () => {
-  it("does not restore an earlier route when its selection fails after newer navigation", async () => {
+  it("ignores a stale 404 from an earlier non-active selection after newer navigation", async () => {
     window.history.replaceState(null, "", "/conversations/active-conv");
     let popstateHandler: EventListener | null = null;
     vi.spyOn(window, "addEventListener").mockImplementation((type, listener) => {
@@ -219,11 +219,14 @@ describe("popstate", () => {
     popstateHandler!(new PopStateEvent("popstate"));
     await vi.waitFor(() => expect(selectConversation).toHaveBeenCalledWith("newer-conv"));
 
-    rejectEarlierSelection(new Error("HTTP 503 gateway unavailable"));
+    rejectEarlierSelection(
+      new Error("HTTP 404 from GET /api/conversations/earlier-conv"),
+    );
     await Promise.resolve();
 
     expect(window.location.pathname).toBe("/conversations/newer-conv");
     expect(router.currentRoute.conversationId).toBe("newer-conv");
+    expect(router.currentRoute.notFound).toBe(false);
 
     resolveNewerSelection();
   });
