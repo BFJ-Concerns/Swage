@@ -4466,7 +4466,7 @@ async fn launch_existing_run(
                     metadata: serde_json::json!({}),
                 })
                 .await;
-            active.lock().await.remove(&run_id);
+            remove_active_workflow_generation(&active, run_id, &cancellation).await;
             return;
         }
         let terminal_failed_call_reference = match &engine_result {
@@ -4539,9 +4539,20 @@ async fn launch_existing_run(
                 event: swage_protocol::client::workflow::WorkflowRunCompletedEvent { run },
             });
         }
-        active.lock().await.remove(&run_id);
+        remove_active_workflow_generation(&active, run_id, &cancellation).await;
     });
     Ok(started)
+}
+
+async fn remove_active_workflow_generation(
+    active: &Mutex<std::collections::HashMap<Uuid, CancellationToken>>,
+    run_id: Uuid,
+    generation: &CancellationToken,
+) {
+    let mut active = active.lock().await;
+    if active.get(&run_id) == Some(generation) {
+        active.remove(&run_id);
+    }
 }
 
 pub async fn start_inline_run(
@@ -10257,6 +10268,21 @@ mod tests {
             .expect("parked run after terminal task");
         assert_eq!(after_terminal_task.state, "parked");
         assert_eq!(after_terminal_task.wake_at, Some(wake_at));
+    }
+
+    #[tokio::test]
+    async fn completed_generation_does_not_remove_its_replacement_token() {
+        let run_id = Uuid::new_v4();
+        let completed = CancellationToken::new();
+        let replacement = CancellationToken::new();
+        let active = Mutex::new(std::collections::HashMap::from([(
+            run_id,
+            replacement.clone(),
+        )]));
+
+        remove_active_workflow_generation(&active, run_id, &completed).await;
+
+        assert_eq!(active.lock().await.get(&run_id), Some(&replacement));
     }
 
     #[tokio::test(flavor = "multi_thread")]
