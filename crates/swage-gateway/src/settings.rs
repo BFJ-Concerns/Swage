@@ -69,6 +69,17 @@ async fn write_config_atomically(path: &std::path::Path, body: &str) -> Result<(
     Ok(())
 }
 
+fn settings_audit_snapshot(settings: &SettingsResponse) -> Result<serde_json::Value, ApiError> {
+    let mut snapshot = serde_json::to_value(settings)
+        .map_err(|error| ApiError::validation(format!("failed to snapshot settings: {error}")))?;
+    if let Some(api_key) = snapshot.pointer_mut("/tool_runtime/search/api_key")
+        && !api_key.is_null()
+    {
+        *api_key = serde_json::Value::String("[REDACTED]".to_string());
+    }
+    Ok(snapshot)
+}
+
 fn tool_runtime_from_config(
     config: &swage_config::ToolConfig,
 ) -> Result<ToolRuntimeSettings, ApiError> {
@@ -117,6 +128,7 @@ pub async fn load_settings(state: &AppState) -> Result<SettingsResponse, ApiErro
                     aliases: model.aliases.clone(),
                     context_window: model.context_window,
                     generation_preset: model.generation_preset.clone(),
+                    default_effort: model.default_effort,
                     capabilities: model.capabilities.clone(),
                 },
             ))
@@ -147,6 +159,7 @@ pub async fn save_settings(
     request: SaveSettingsRequest,
 ) -> Result<SettingsResponse, ApiError> {
     validate_settings_request(&request)?;
+    let prior_settings = settings_audit_snapshot(&load_settings(state).await?)?;
     let SaveSettingsRequest {
         default_provider,
         providers: requested_providers,
@@ -195,13 +208,14 @@ pub async fn save_settings(
                     aliases: model.aliases.clone(),
                     context_window: model.context_window,
                     generation_preset: model.generation_preset.clone(),
+                    default_effort: model.default_effort,
                     capabilities: model.capabilities.clone(),
                 },
             ))
         })
         .collect::<Result<_, _>>()?;
 
-    let path = global_config_path()?;
+    let path = global_config_path(&state.config_root);
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent).await.map_err(|error| {
             ApiError::validation(format!("failed to create config directory: {error}"))
@@ -259,6 +273,7 @@ pub async fn save_settings(
                     aliases: model.aliases,
                     context_window: model.context_window,
                     generation_preset: model.generation_preset,
+                    default_effort: model.default_effort,
                     capabilities: model.capabilities,
                 },
             ))
@@ -280,19 +295,40 @@ pub async fn save_settings(
         communication.unwrap_or_else(|| runtime_config.communication.clone());
 
     let provider = crate::startup::create_provider(&runtime_config, &state.secret_manager).await;
-    let tool_dispatcher =
-        crate::startup::build_tool_dispatcher(&runtime_config, state.storage.clone());
+    let tool_dispatcher = crate::startup::build_tool_dispatcher(
+        &runtime_config,
+        state.storage.clone(),
+        &state.config_root,
+    );
     state.replace_runtime(runtime_config, provider, tool_dispatcher);
+    let response = load_settings(state).await?;
+    let new_settings = settings_audit_snapshot(&response)?;
+    crate::config_change::record_config_change(
+        state,
+        crate::config_change::ConfigChange {
+            entity_kind: "settings",
+            entity_id: "global",
+            action: "save_settings",
+            source: "operator_http",
+            session_id: None,
+            summary: "saved settings",
+            prior_state: Some(prior_settings),
+            new_state: Some(new_settings),
+        },
+    )
+    .await
+    .map_err(ApiError::from)?;
 
-    load_settings(state).await
+    Ok(response)
 }
 
 pub(crate) async fn persist_permanent_tool_approval_for_space(
+    config_root: &std::path::Path,
     config: &swage_config::ResolvedConfig,
     space: &swage_storage::model::Space,
     tool_name: &str,
 ) -> Result<(), ApiError> {
-    let path = space_config_path(&space.slug)?;
+    let path = space_config_path(config_root, &space.slug);
     persist_permanent_tool_approval_to_path(config, tool_name, path).await
 }
 
@@ -300,7 +336,7 @@ pub(crate) async fn persist_permanent_tool_approval_globally(
     state: &AppState,
     tool_name: &str,
 ) -> Result<(), ApiError> {
-    let path = global_config_path()?;
+    let path = global_config_path(&state.config_root);
     persist_permanent_tool_approval_to_path(&state.active_config(), tool_name, path).await
 }
 
@@ -326,10 +362,11 @@ async fn persist_permanent_tool_approval_to_path(
     Ok(())
 }
 
-fn space_config_path(space_slug: &str) -> Result<PathBuf, ApiError> {
-    let root = swage_config::discovery::resolve_root()
-        .map_err(|problem| ApiError::validation(problem.to_string()))?;
-    Ok(root.join("spaces").join(space_slug).join("config.toml"))
+fn space_config_path(config_root: &std::path::Path, space_slug: &str) -> PathBuf {
+    config_root
+        .join("spaces")
+        .join(space_slug)
+        .join("config.toml")
 }
 
 fn require_approval_entries_without_tool(
@@ -574,8 +611,8 @@ async fn provider_for_discovery(
         return Ok(provider.clone());
     }
 
-    if let Ok(path) = global_config_path() {
-        let partial = read_partial_config(&path).await?;
+    {
+        let partial = read_partial_config(&global_config_path(&state.config_root)).await?;
         if let Some(providers) = partial.providers
             && let Some(entries) = providers.entries
             && let Some(provider) = entries.get(provider_id)
@@ -924,10 +961,8 @@ async fn persist_provider_key(
     Ok(Some(secret.reference))
 }
 
-fn global_config_path() -> Result<PathBuf, ApiError> {
-    let root = swage_config::discovery::resolve_root()
-        .map_err(|problem| ApiError::validation(problem.to_string()))?;
-    Ok(root.join("config.toml"))
+fn global_config_path(config_root: &std::path::Path) -> PathBuf {
+    config_root.join("config.toml")
 }
 
 async fn read_partial_config(
@@ -1318,15 +1353,31 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn save_settings_hot_applies_model_runtime_without_restart() {
-        let _swage_home = SwageHomeGuard::new();
+        let swage_home = SwageHomeGuard::new();
 
         let storage = std::sync::Arc::new(crate::turn::tests::MockStorage::new());
+        let mut initial_config = swage_config::ResolvedConfig::default();
+        initial_config.models.default = "local:fast".to_string();
+        initial_config.models.entries.insert(
+            "local:fast".to_string(),
+            swage_config::ModelEndpointConfig {
+                provider_id: "local".to_string(),
+                model_id: "fast-wire".to_string(),
+                aliases: vec![],
+                context_window: Some(4096),
+                generation_preset: Some("quick".to_string()),
+                default_effort: Some(swage_protocol::client::settings::Effort::Low),
+                capabilities: swage_config::ModelCapabilitiesConfig {
+                    reasoning_replay: true,
+                },
+            },
+        );
         let state = AppState::new(
             storage.clone() as std::sync::Arc<dyn swage_storage::store::Storage>,
             storage as std::sync::Arc<dyn swage_storage::store::SpaceStore>,
             std::sync::Arc::new(crate::turn::tests::MockProvider::new(vec![]))
                 as std::sync::Arc<dyn swage_provider::LlmProvider>,
-            swage_config::ResolvedConfig::default(),
+            initial_config,
             crate::tool::ToolDispatcher::allow_all(vec![]),
             None,
         );
@@ -1356,6 +1407,7 @@ mod tests {
                     aliases: vec![],
                     context_window: Some(4096),
                     generation_preset: Some("quick".to_string()),
+                    default_effort: Some(swage_protocol::client::settings::Effort::High),
                     capabilities: swage_protocol::client::settings::ModelCapabilitiesConfig {
                         reasoning_replay: true,
                     },
@@ -1411,6 +1463,40 @@ mod tests {
         assert_eq!(state.active_config().context.timeout, 7);
         assert_eq!(state.active_config().tools.permissions.deny, vec!["shell"]);
         assert!(!state.restart_required());
+        let events = state.storage.list_audit_events().await.unwrap();
+        let changes: Vec<_> = events
+            .iter()
+            .filter(|event| event.event_kind == "configuration_change")
+            .collect();
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].entity_kind, "settings");
+        assert_eq!(changes[0].metadata["action"], "save_settings");
+        assert_eq!(
+            changes[0].metadata["prior_state"]["models"]["local:fast"]["default_effort"],
+            "low"
+        );
+        assert_eq!(
+            changes[0].metadata["new_state"]["models"]["local:fast"]["default_effort"],
+            "high"
+        );
+        assert_ne!(
+            changes[0].metadata["prior_state"]["models"]["local:fast"]["default_effort"],
+            changes[0].metadata["new_state"]["models"]["local:fast"]["default_effort"]
+        );
+        assert_eq!(changes[0].metadata["new_state"]["context"]["timeout"], 7);
+        assert_eq!(
+            changes[0].metadata["new_state"]["tool_permissions"]["deny"][0],
+            "shell"
+        );
+        assert!(changes[0].metadata["prior_state"]["providers"].is_object());
+
+        let reloaded =
+            swage_config::load_resolved_config_from(swage_home.path(), "default", "default")
+                .expect("saved settings should reload from durable configuration");
+        assert_eq!(
+            reloaded.models.entries["local:fast"].default_effort,
+            Some(swage_protocol::client::settings::Effort::High)
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1450,12 +1536,18 @@ mod tests {
         }
 
         let storage = std::sync::Arc::new(crate::turn::tests::MockStorage::new());
+        let mut config = swage_config::ResolvedConfig::default();
+        config.tools.search = Some(swage_config::SearchProviderConfig {
+            provider_type: "searxng".to_string(),
+            base_url: "http://127.0.0.1:8080".to_string(),
+            api_key: Some("old-search-key".into()),
+        });
         let state = AppState::new(
             storage.clone() as std::sync::Arc<dyn swage_storage::store::Storage>,
             storage as std::sync::Arc<dyn swage_storage::store::SpaceStore>,
             std::sync::Arc::new(crate::turn::tests::MockProvider::new(vec![]))
                 as std::sync::Arc<dyn swage_provider::LlmProvider>,
-            swage_config::ResolvedConfig::default(),
+            config,
             crate::tool::ToolDispatcher::allow_all(vec![]),
             None,
         );
@@ -1496,6 +1588,7 @@ mod tests {
                     aliases: vec![],
                     context_window: None,
                     generation_preset: None,
+                    default_effort: None,
                     capabilities:
                         swage_protocol::client::settings::ModelCapabilitiesConfig::default(),
                 },
@@ -1511,7 +1604,7 @@ mod tests {
                 search: Some(swage_protocol::client::settings::SearchProviderConfig {
                     provider_type: "searxng".to_string(),
                     base_url: "http://127.0.0.1:8080".to_string(),
-                    api_key: None,
+                    api_key: Some("new-search-key".to_string()),
                 }),
             }),
             tool_permissions: None,
@@ -1544,6 +1637,22 @@ mod tests {
             "hot-rebuilt dispatcher should include tools from the saved plugin directory"
         );
         assert!(!state.restart_required());
+        let events = state.storage.list_audit_events().await.unwrap();
+        let change = events
+            .iter()
+            .find(|event| event.event_kind == "configuration_change")
+            .expect("settings configuration change");
+        assert_eq!(
+            change.metadata["prior_state"]["tool_runtime"]["search"]["api_key"],
+            "[REDACTED]"
+        );
+        assert_eq!(
+            change.metadata["new_state"]["tool_runtime"]["search"]["api_key"],
+            "[REDACTED]"
+        );
+        let audit_json = serde_json::to_string(&change.metadata).unwrap();
+        assert!(!audit_json.contains("old-search-key"));
+        assert!(!audit_json.contains("new-search-key"));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1610,6 +1719,7 @@ mod tests {
                     aliases: vec![],
                     context_window: None,
                     generation_preset: None,
+                    default_effort: None,
                     capabilities:
                         swage_protocol::client::settings::ModelCapabilitiesConfig::default(),
                 },

@@ -46,7 +46,8 @@ export interface StreamingStore {
   // matching the approval UI.
   readonly pendingApproval: PendingApproval | null;
   handleServerEvent(event: ServerEvent): void;
-  startTurn(content: string, selectedModelId?: string | null, agentId?: string | null): void;
+  reconcileAfterReconnect(): void;
+  startTurn(content: string, selectedModelId?: string | null, agentId?: string | null, effort?: import("../protocol/Effort").Effort | null): void;
   cancelTurn(): void;
 }
 
@@ -62,6 +63,7 @@ export interface StreamingStoreOptions {
   /** Receives messages pushed by the streaming store (user turns and settled
    *  assistant turns). */
   conversationStore?: {
+    readonly activeConversation?: { messages: MessageView[] } | null;
     appendOptimisticUserMessage(message: {
       content: string;
       timestamp: string;
@@ -406,6 +408,25 @@ export function createStreamingStore(
       }
     },
 
+    reconcileAfterReconnect(): void {
+      const lastMessage = options?.conversationStore?.activeConversation?.messages.at(-1);
+      if (
+        !get(isStreamingStore) ||
+        lastMessage?.role !== "assistant" ||
+        !["completed", "failed", "interrupted"].includes(lastMessage.turn_state ?? "")
+      ) return;
+
+      // The HTTP refresh recovered the terminal assistant message that the
+      // dropped socket could not deliver. Discard the stale live projection;
+      // the durable conversation is now authoritative.
+      streamedContentStore.set("");
+      isStreamingStore.set(false);
+      turnStartedAtStore.set(null);
+      activeToolCallsStore.set([]);
+      providerRetryStore.set(null);
+      pendingApprovalStore.set(null);
+    },
+
     startTurn(content: string, selectedModelId?: string | null): void {
       // Clear state from any previous turn.
       streamedContentStore.set("");
@@ -445,7 +466,7 @@ export interface ConversationAutoCreateOptions {
    * queues frames during the handshake, so the turn can be dispatched as soon
    * as this resolves without racing the connection.
    */
-  createConversation(selectedModelId?: string | null, agentId?: string | null): Promise<string | null>;
+  createConversation(selectedModelId?: string | null, agentId?: string | null, effort?: import("../protocol/Effort").Effort | null): Promise<string | null>;
 }
 
 // Wraps a streaming store so the composer works in a space with no
@@ -484,9 +505,10 @@ export function withConversationAutoCreate(
       return base.pendingApproval;
     },
     handleServerEvent: (event) => base.handleServerEvent(event),
+    reconcileAfterReconnect: () => base.reconcileAfterReconnect(),
     cancelTurn: () => base.cancelTurn(),
 
-    startTurn(content: string, selectedModelId?: string | null, agentId?: string | null): void {
+    startTurn(content: string, selectedModelId?: string | null, agentId?: string | null, effort?: import("../protocol/Effort").Effort | null): void {
       if (options.hasActiveConversation()) {
         base.startTurn(content, selectedModelId);
         return;
@@ -498,7 +520,7 @@ export function withConversationAutoCreate(
         try {
           // A rejection counts as a failed creation, same as a null id.
           const id = await options
-            .createConversation(selectedModelId, agentId)
+            .createConversation(selectedModelId, agentId, effort)
             .catch(() => null);
           if (id) {
             base.startTurn(content, selectedModelId);

@@ -185,6 +185,7 @@
       aliases: [],
       context_window: model.context_window,
       generation_preset: null,
+      default_effort: undefined,
     };
     settings.default_model ||= id;
     settings.default_provider ||= selectedProvider;
@@ -339,6 +340,7 @@
       aliases: [],
       context_window: null,
       generation_preset: null,
+      default_effort: undefined,
     };
     settings.default_model ||= id;
     settings.default_provider ||= providerId;
@@ -617,6 +619,16 @@
                       <div class="model-facts">
                         <span>{model.context_window ? `${model.context_window.toLocaleString()} ctx` : "context unknown"}</span>
                         <span>{model.generation_preset ?? "provider generation defaults"}</span>
+                        <label class="model-effort">
+                          <span aria-hidden="true">Default effort</span>
+                          <select aria-label={`Default effort for ${modelKey}`} bind:value={model.default_effort}>
+                            <option value={undefined}>No effort</option>
+                            <option value="low">Low</option>
+                            <option value="medium">Medium</option>
+                            <option value="high">High</option>
+                            <option value="max">Maximum</option>
+                          </select>
+                        </label>
                         {#if settings.default_model === modelKey}
                           <span class="fact-strong">Default</span>
                         {/if}
@@ -1339,6 +1351,18 @@
   .model-facts span {
     padding: 2px 6px;
     border: 1px solid var(--rule-soft);
+  }
+
+  .model-effort {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--ink);
+  }
+
+  .model-facts .model-effort span {
+    padding: 0;
+    border: 0;
   }
 
   .model-facts .fact-strong {

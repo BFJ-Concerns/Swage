@@ -40,10 +40,7 @@ pub(crate) async fn discover_available_for_session(
         }
     };
 
-    let root = skill_root_for_session(session_id)
-        .map(Ok)
-        .unwrap_or_else(swage_config::discovery::resolve_root)
-        .map_err(|error| format!("skill discovery failed for session {session_id}: {error}"))?;
+    let root = skill_root_for_session(session_id).unwrap_or_else(|| state.config_root.clone());
     crate::skill::discover_available_for_space(
         state,
         session.space_id,

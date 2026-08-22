@@ -22,6 +22,7 @@
   import {
     createStreamingStore,
     withConversationAutoCreate,
+    type StreamingStore,
   } from "./lib/stores/streaming";
   import { createSpaceStore } from "./lib/stores/spaces";
   import { createRouter } from "./lib/router";
@@ -44,13 +45,17 @@
 
   // onReconnect re-fetches the active conversation over HTTP after a dropped
   // WebSocket successfully reconnects, reconciling any state drift during downtime.
+  let streamingStore: StreamingStore;
   const connectionStore = createConnectionStore({
-    onReconnect: () => conversationStore.refreshActiveConversation(),
+    onReconnect: async () => {
+      await conversationStore.refreshActiveConversation();
+      streamingStore.reconcileAfterReconnect();
+    },
   });
 
   // The streaming store needs both dependencies so it can push committed messages
   // to the conversation history and dispatch outgoing messages via the connection.
-  const streamingStore = createStreamingStore({
+  streamingStore = createStreamingStore({
     conversationStore,
     connectionStore,
   });
@@ -101,12 +106,13 @@
   async function createAndNavigate(
     selectedModelId?: string | null,
     agentId?: string | null,
+    effort?: import("./lib/protocol/Effort").Effort | null,
   ): Promise<string | null> {
     try {
       activeSurface = "conversation";
       // Use the currently selected space — should always be set after startup.
       const spaceId = spaceStore.currentSpace?.id ?? "";
-      await conversationStore.createConversation(spaceId, selectedModelId, agentId);
+      await conversationStore.createConversation(spaceId, selectedModelId, agentId, effort);
       const id = conversationStore.activeConversation?.id;
       if (id) {
         connectionStore.connectTo(id);
@@ -118,6 +124,13 @@
       console.error("Failed to create conversation:", err);
       return null;
     }
+  }
+
+  function startNewConversation(): void {
+    activeSurface = "conversation";
+    connectionStore.disconnect();
+    conversationStore.clearActiveConversation();
+    router.navigate("/");
   }
 
   // Proxy that implements ConversationStore but overrides the two navigation-
@@ -137,8 +150,8 @@
     selectConversation: selectAndNavigate,
     // The proxy captures spaceId from spaceStore at call time so child
     // components don't need to know about spaces.
-    createConversation: async (_spaceId, selectedModelId, agentId) => {
-      await createAndNavigate(selectedModelId, agentId);
+    createConversation: async (_spaceId, selectedModelId, agentId, effort) => {
+      await createAndNavigate(selectedModelId, agentId, effort);
     },
     deleteConversation: (id) => conversationStore.deleteConversation(id),
     clearActiveConversation: () => conversationStore.clearActiveConversation(),
@@ -428,6 +441,7 @@
     {modelCatalogueReady}
     {defaultModelId}
     {agentDefinitions}
+    onNewConversation={startNewConversation}
     route={currentRoute}
     onNavigate={navigate}
     onSettingsSaved={refreshModelCatalogueAfterSave}
