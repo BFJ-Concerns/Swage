@@ -146,7 +146,7 @@
       {#if streamingStore.pendingApproval}
         <ApprovalCard approval={streamingStore.pendingApproval} />
       {:else}
-        <MessageInput store={streamingStore} {modelOptions} {modelCatalogueReady} selectedModelId={activeConversation?.selected_model_id ?? defaultModelId} {agentDefinitions} canSelectAgent={!activeConversation} bind:selectedAgentId {onNavigate} />
+        <MessageInput store={streamingStore} {modelOptions} {modelCatalogueReady} selectedModelId={activeConversation?.selected_model_id ?? defaultModelId} sessionId={activeConversation?.id ?? null} {agentDefinitions} canSelectAgent={!activeConversation} bind:selectedAgentId {onNavigate} />
       {/if}
     </section>
   </main>
