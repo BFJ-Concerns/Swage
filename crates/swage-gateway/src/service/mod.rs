@@ -466,6 +466,62 @@ default_effort = "high"
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn conversation_inherits_aliased_model_default_effort() {
+        let config_root = tempfile::tempdir().expect("config root");
+        let (svc, storage) = make_definition_service();
+        let mut config = swage_config::ResolvedConfig::default();
+        config.models.default = "model-default".to_string();
+        config.models.entries.insert(
+            "model-default".to_string(),
+            swage_config::ModelEndpointConfig {
+                default_effort: Some(swage_protocol::client::settings::Effort::Low),
+                ..Default::default()
+            },
+        );
+        config.models.entries.insert(
+            "model-a".to_string(),
+            swage_config::ModelEndpointConfig {
+                aliases: vec!["friendly-a".to_string()],
+                default_effort: Some(swage_protocol::client::settings::Effort::Medium),
+                ..Default::default()
+            },
+        );
+
+        let response = svc
+            .with_config(config, config_root.path().to_path_buf())
+            .create_conversation_with_model(Some("friendly-a".to_string()))
+            .await
+            .unwrap();
+
+        let session = storage.get_session(response.id).await.unwrap().unwrap();
+        assert_eq!(session.metadata.unwrap()["effort"], "medium");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn conversation_with_unknown_model_omits_effort() {
+        let config_root = tempfile::tempdir().expect("config root");
+        let (svc, storage) = make_definition_service();
+        let mut config = swage_config::ResolvedConfig::default();
+        config.models.default = "model-a".to_string();
+        config.models.entries.insert(
+            "model-a".to_string(),
+            swage_config::ModelEndpointConfig {
+                default_effort: Some(swage_protocol::client::settings::Effort::Low),
+                ..Default::default()
+            },
+        );
+
+        let response = svc
+            .with_config(config, config_root.path().to_path_buf())
+            .create_conversation_with_model(Some("unknown-model".to_string()))
+            .await
+            .unwrap();
+
+        let session = storage.get_session(response.id).await.unwrap().unwrap();
+        assert!(session.metadata.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn conversation_inherits_agent_models_default_effort() {
         let config_root = tempfile::tempdir().expect("config root");
         let (svc, storage) = make_definition_service();
