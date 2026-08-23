@@ -57,6 +57,7 @@ const spaceB = makeSpace("proj-b", "Space B");
 
 beforeEach(() => {
   vi.resetAllMocks();
+  localStorage.clear();
 });
 
 // ---------------------------------------------------------------------------
@@ -95,8 +96,9 @@ describe("loadSpaces", () => {
     expect(store.spaces[0].id).toBe("proj-a");
   });
 
-  it("does not auto-select any space — the user lands on the picker", async () => {
+  it("restores the active space after the available spaces load", async () => {
     const store = createSpaceStore();
+    localStorage.setItem("swage:active-space", "proj-b");
     vi.mocked(api.listSpaces).mockResolvedValueOnce([
       spaceA,
       defaultSpace,
@@ -105,18 +107,29 @@ describe("loadSpaces", () => {
 
     await store.loadSpaces();
 
-    // Even when a default space exists, leave currentSpace null so the
-    // space picker is shown on entry.
-    expect(store.currentSpace).toBeNull();
+    expect(store.currentSpace?.id).toBe("proj-b");
   });
 
-  it("leaves currentSpace null when no space is flagged as default", async () => {
+  it("clears a stale stored space and leaves the picker open", async () => {
     const store = createSpaceStore();
+    localStorage.setItem("swage:active-space", "proj-missing");
     vi.mocked(api.listSpaces).mockResolvedValueOnce([spaceA, spaceB]);
 
     await store.loadSpaces();
 
     expect(store.currentSpace).toBeNull();
+    expect(localStorage.getItem("swage:active-space")).toBeNull();
+  });
+
+  it("ignores and clears an empty stored space id", async () => {
+    const store = createSpaceStore();
+    localStorage.setItem("swage:active-space", "   ");
+    vi.mocked(api.listSpaces).mockResolvedValueOnce([spaceA]);
+
+    await store.loadSpaces();
+
+    expect(store.currentSpace).toBeNull();
+    expect(localStorage.getItem("swage:active-space")).toBeNull();
   });
 
   it("sets isLoading true during fetch and false after", async () => {
@@ -159,6 +172,7 @@ describe("selectSpace", () => {
 
     expect(store.currentSpace?.id).toBe("proj-b");
     expect(store.currentSpace?.name).toBe("Space B");
+    expect(localStorage.getItem("swage:active-space")).toBe("proj-b");
   });
 
   it("does not call the API — selection is from the local list", async () => {
@@ -201,6 +215,7 @@ describe("createSpace", () => {
     });
     expect(store.spaces).toHaveLength(2);
     expect(store.currentSpace?.id).toBe("proj-new");
+    expect(localStorage.getItem("swage:active-space")).toBe("proj-new");
   });
 
   it("adds the new space to an existing list", async () => {
@@ -258,6 +273,7 @@ describe("deleteSpace", () => {
     // Should automatically move to proj-b (the remaining space).
     expect(store.currentSpace?.id).toBe("proj-b");
     expect(store.spaces.map((p) => p.id)).toEqual(["proj-b"]);
+    expect(localStorage.getItem("swage:active-space")).toBe("proj-b");
   });
 
   it("sets currentSpace to null when the last space is deleted", async () => {
@@ -272,6 +288,7 @@ describe("deleteSpace", () => {
 
     expect(store.currentSpace).toBeNull();
     expect(store.spaces).toHaveLength(0);
+    expect(localStorage.getItem("swage:active-space")).toBeNull();
   });
 
   it("leaves currentSpace unchanged when a non-current space is deleted", async () => {
@@ -286,5 +303,19 @@ describe("deleteSpace", () => {
 
     expect(store.currentSpace?.id).toBe("proj-a");
     expect(store.spaces).toHaveLength(1);
+  });
+});
+
+describe("closeSpace", () => {
+  it("clears the persisted selection so reload returns to the picker", async () => {
+    const store = createSpaceStore();
+    vi.mocked(api.listSpaces).mockResolvedValueOnce([spaceA]);
+    await store.loadSpaces();
+    await store.selectSpace("proj-a");
+
+    store.closeSpace();
+
+    expect(store.currentSpace).toBeNull();
+    expect(localStorage.getItem("swage:active-space")).toBeNull();
   });
 });

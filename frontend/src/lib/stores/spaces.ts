@@ -23,6 +23,7 @@ export interface SpaceStore {
 
 export function createSpaceStore(): SpaceStore {
   const RECENT_SPACES_KEY = "swage:recent-spaces";
+  const ACTIVE_SPACE_KEY = "swage:active-space";
 
   // Back the custom API with real Svelte stores so space changes propagate
   // into mounted components after async actions complete.
@@ -49,6 +50,25 @@ export function createSpaceStore(): SpaceStore {
   function writeRecentSpaceIds(ids: string[]): void {
     if (typeof localStorage === "undefined") return;
     localStorage.setItem(RECENT_SPACES_KEY, JSON.stringify(ids));
+  }
+
+  function readActiveSpaceId(): string | null {
+    if (typeof localStorage === "undefined") return null;
+    const stored = localStorage.getItem(ACTIVE_SPACE_KEY);
+    if (stored === null) return null;
+    const id = stored.trim();
+    if (id) return id;
+    localStorage.removeItem(ACTIVE_SPACE_KEY);
+    return null;
+  }
+
+  function writeActiveSpaceId(id: string | null): void {
+    if (typeof localStorage === "undefined") return;
+    if (id) {
+      localStorage.setItem(ACTIVE_SPACE_KEY, id);
+    } else {
+      localStorage.removeItem(ACTIVE_SPACE_KEY);
+    }
   }
 
   function rememberSpaceOpen(id: string): void {
@@ -92,10 +112,10 @@ export function createSpaceStore(): SpaceStore {
       try {
         const spaces = await api.listSpaces();
         spacesStore.set(spaces);
-
-        // Deliberately leave currentSpace null. The user lands on the space
-        // picker and chooses where to work —
-        // auto-selecting a space would skip past it.
+        const activeSpaceId = readActiveSpaceId();
+        const activeSpace = spaces.find((space) => space.id === activeSpaceId) ?? null;
+        currentSpaceStore.set(activeSpace);
+        if (activeSpaceId && !activeSpace) writeActiveSpaceId(null);
       } finally {
         // Always clear loading — even on error, so the UI isn't stuck.
         isLoadingStore.set(false);
@@ -115,6 +135,7 @@ export function createSpaceStore(): SpaceStore {
         items.map((space) => (space.id === id ? opened : space)),
       );
       currentSpaceStore.set(opened);
+      writeActiveSpaceId(id);
       rememberSpaceOpen(id);
     },
 
@@ -123,6 +144,7 @@ export function createSpaceStore(): SpaceStore {
       // is instant; only the active selection is dropped. The caller is
       // responsible for navigating the URL to the picker route.
       currentSpaceStore.set(null);
+      writeActiveSpaceId(null);
     },
 
     async createSpace(name) {
@@ -132,6 +154,8 @@ export function createSpaceStore(): SpaceStore {
 
       spacesStore.update((spaces) => [...spaces, created]);
       currentSpaceStore.set(created);
+      writeActiveSpaceId(created.id);
+      rememberSpaceOpen(created.id);
     },
 
     async deleteSpace(id) {
@@ -152,7 +176,9 @@ export function createSpaceStore(): SpaceStore {
 
       // If the deleted space was current, move focus to the next one.
       if (get(currentSpaceStore)?.id === id) {
-        currentSpaceStore.set(remaining.length > 0 ? remaining[0] : null);
+        const next = remaining.length > 0 ? remaining[0] : null;
+        currentSpaceStore.set(next);
+        writeActiveSpaceId(next?.id ?? null);
       }
     },
   };

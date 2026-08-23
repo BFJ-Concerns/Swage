@@ -180,8 +180,8 @@
 
   function describeSession(session: SessionPolicy): string {
     return session.policy === "fresh"
-      ? `fresh · runs as ${session.agent_id}`
-      : "continues a conversation";
+      ? `fresh · space ${session.space_id} · agent ${session.agent_id}`
+      : `continues session ${session.session_id}`;
   }
 
   function describeCreator(creator: ScheduleCreator): string {
