@@ -210,6 +210,7 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/api/deliveries/log", get(handlers::delivery_log))
         .route("/api/operator/overview", get(handlers::operator_overview))
+        .route("/api/operator/history", get(handlers::operator_history))
         .route(
             "/api/spaces/{space_id}/agent-definitions",
             get(handlers::list_effective_agent_definitions),
