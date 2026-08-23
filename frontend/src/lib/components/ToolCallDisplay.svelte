@@ -217,8 +217,9 @@
   }
 
   .tool-call.error {
-    /* Solid orange rule signals failure. */
+    /* Trouble uses the error token rather than the action orange. */
     border-left-style: solid;
+    border-left-color: var(--error);
   }
 
   /* ---- Header row --------------------------------------------------------- */
@@ -260,7 +261,7 @@
   }
 
   .status-icon.error-icon {
-    color: var(--accent);
+    color: var(--error);
   }
 
   /* Pulsing pip for in-progress calls — square not round, in keeping with

@@ -365,13 +365,13 @@
     background: none;
     padding: 0;
     font-size: 0.75rem;
-    color: var(--muted-color, #888);
+    color: var(--ink-soft);
     cursor: pointer;
     text-decoration: underline dotted;
   }
 
   .context-link:hover {
-    color: var(--ink, #333);
+    color: var(--ink);
   }
 
   /*
@@ -479,7 +479,7 @@
   .message-content {
     padding: 10px 14px;
     border-left: 3px solid var(--ink);
-    background: rgba(14, 59, 102, 0.06);
+    background: color-mix(in srgb, var(--ink) 6%, transparent);
     font-family: var(--font-body);
     font-size: var(--font-body-sm);
     line-height: 1.55;
@@ -504,7 +504,7 @@
        even with colour off (UI audit f-23). */
     border-left: none;
     border-right: 3px solid var(--ink-orange);
-    background: rgba(240, 106, 58, 0.08);
+    background: color-mix(in srgb, var(--accent) 8%, transparent);
     /* User-written text preserves manual line breaks. */
     white-space: pre-wrap;
   }
@@ -606,7 +606,7 @@
     align-items: center;
     gap: 8px;
     padding: 8px 12px;
-    background: rgba(168, 50, 26, 0.1);
+    background: color-mix(in srgb, var(--error) 10%, transparent);
     border-left: 3px solid var(--error);
     font-family: var(--font-mono);
     font-weight: 500;

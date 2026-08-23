@@ -23,6 +23,8 @@
     --error          distinct warm red reserved for the error/warning family.
                      Orange owns action; errors read as trouble, not "another
                      orange thing".
+    --success        confirmation text and feedback, distinct from action and
+                     error states.
     --ink-soft       muted variant of ink for secondary text
     --rule-soft      hairline divider colour
 
@@ -97,6 +99,7 @@
   --ink-orange: #c54115;
   /* Distinct warm red for the error family. ~8:1 on cream paper. */
   --error: #a8321a;
+  --success: #166534;
 
   /* ---- Status registers (hue channel) ------------------------------------
      Six semantic registers name "what state is this thing in", and the status
@@ -141,6 +144,7 @@
      separation (matching the light scheme), while still light enough to carry
      deep-navy text on the trouble stamp. Gated by verify-status-hues.mjs. */
   --error: #f85d78;
+  --success: #6fc3ba;
 
   /* ---- Status registers (hue channel), re-lit for the deep navy -----------
      The spot hues brighten so their outline text/line holds AA on navy, and

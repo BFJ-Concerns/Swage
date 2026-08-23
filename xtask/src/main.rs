@@ -13,6 +13,7 @@ use sha2::{Digest, Sha256};
 const APP_PACKAGE: &str = "swage-gateway";
 const BINARY_NAME: &str = "swage";
 const FRONTEND_DIR: &str = "frontend";
+const FRONTEND_COMPONENTS_DIR: &str = "frontend/src/lib/components";
 const DESKTOP_DIR: &str = "desktop";
 const FRONTEND_DIST_INDEX: &str = "frontend/dist/index.html";
 const FRONTEND_DEPS_STAMP: &str = "target/xtask/frontend-deps.sha256";
@@ -47,6 +48,7 @@ fn run() -> Result<()> {
         Some("fmt") => fmt(),
         Some("fmt-check") => fmt_check(),
         Some("check") => check(),
+        Some("check-design-tokens") => check_frontend_design_tokens(),
         Some("clippy") => clippy(),
         Some("test") => test(),
         Some("test-lib") => test_lib(args),
@@ -452,6 +454,7 @@ fn verify() -> Result<()> {
         check_tracked_local_state()?;
         fmt_check()?;
         check()?;
+        check_frontend_design_tokens()?;
         clippy()?;
         let test_result = run_test_suite();
         let projection_result = check_projections_are_current();
@@ -464,6 +467,89 @@ fn verify() -> Result<()> {
             .into()),
         }
     })
+}
+
+/// Component colours must come from riso.css tokens. These sibling-held
+/// surfaces retain their current literal colours until their owning PR lands:
+/// #130 owns ScheduleAutomationPanel; #132 owns AppLayout.
+const DESIGN_TOKEN_DEFERRED_COMPONENTS: &[&str] = &[
+    "frontend/src/lib/components/ScheduleAutomationPanel.svelte",
+    "frontend/src/lib/components/AppLayout.svelte",
+];
+
+fn check_frontend_design_tokens() -> Result<()> {
+    let mut files = Vec::new();
+    collect_files(Path::new(FRONTEND_COMPONENTS_DIR), &mut files)?;
+    files.sort();
+
+    let mut violations = Vec::new();
+    for file in files {
+        if file.extension().and_then(|extension| extension.to_str()) != Some("svelte") {
+            continue;
+        }
+        let stable_path = file.to_string_lossy();
+        if DESIGN_TOKEN_DEFERRED_COMPONENTS.contains(&stable_path.as_ref()) {
+            continue;
+        }
+        let contents = fs::read_to_string(&file)?;
+        for (line_number, line) in component_style_lines(&contents) {
+            for column in hexadecimal_colour_columns(line) {
+                violations.push(format!("{}:{}:{}", file.display(), line_number, column + 1));
+            }
+        }
+    }
+
+    if violations.is_empty() {
+        println!("==> Component colour tokens are enforced");
+        Ok(())
+    } else {
+        Err(format!(
+            "off-palette hexadecimal colours found in frontend components:\n  {}\nUse riso.css semantic tokens instead.",
+            violations.join("\n  ")
+        )
+        .into())
+    }
+}
+
+fn component_style_lines(contents: &str) -> impl Iterator<Item = (usize, &str)> {
+    let mut in_style = false;
+    contents
+        .lines()
+        .enumerate()
+        .filter_map(move |(index, line)| {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("<style") {
+                in_style = true;
+                return None;
+            }
+            if trimmed.starts_with("</style") {
+                in_style = false;
+                return None;
+            }
+            in_style.then_some((index + 1, line))
+        })
+}
+
+fn hexadecimal_colour_columns(line: &str) -> Vec<usize> {
+    let bytes = line.as_bytes();
+    let mut columns = Vec::new();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != b'#' {
+            index += 1;
+            continue;
+        }
+        let start = index + 1;
+        let mut end = start;
+        while end < bytes.len() && bytes[end].is_ascii_hexdigit() {
+            end += 1;
+        }
+        if matches!(end - start, 3 | 4 | 6 | 8) {
+            columns.push(index);
+        }
+        index = end.max(index + 1);
+    }
+    columns
 }
 
 /// Local runtime state must not be tracked. Cheap, and it catches a class of
@@ -1145,6 +1231,6 @@ fn option_value(arg: &str) -> &str {
 
 fn print_help() {
     println!(
-        "Usage: cargo run -p xtask -- <command>\n\nCommands:\n  setup\n  build-dev [--embed-frontend]\n  dev [--gateway-port PORT] [--vite-host HOST] [--vite-port PORT]\n  fmt\n  fmt-check\n  check\n  clippy\n  test\n  test-lib <package> [filter...]\n  test-integration <package> <test-target> [filter...]\n  verify (alias: ci)\n  sweep\n  release [--force-frontend]\n  install [--prefix DIR] [--skip-frontend] [--lan]"
+        "Usage: cargo run -p xtask -- <command>\n\nCommands:\n  setup\n  build-dev [--embed-frontend]\n  dev [--gateway-port PORT] [--vite-host HOST] [--vite-port PORT]\n  fmt\n  fmt-check\n  check\n  check-design-tokens\n  clippy\n  test\n  test-lib <package> [filter...]\n  test-integration <package> <test-target> [filter...]\n  verify (alias: ci)\n  sweep\n  release [--force-frontend]\n  install [--prefix DIR] [--skip-frontend] [--lan]"
     );
 }
