@@ -120,6 +120,7 @@ fn typescript_bindings_are_regenerated() {
     hosting::ApprovalListResponse::export_all(&cfg).expect("export hosting approvals");
     hosting::ApprovalDecisionRequest::export_all(&cfg).expect("export hosting approval decision");
     hosting::OperatorOverviewResponse::export_all(&cfg).expect("export operator overview");
+    hosting::OperatorHistoryResponse::export_all(&cfg).expect("export operator history");
     hosting::AgentDefinitionScopeQuery::export_all(&cfg).expect("export agent definition query");
     hosting::CreateAgentDefinitionRequest::export_all(&cfg)
         .expect("export agent definition create");
