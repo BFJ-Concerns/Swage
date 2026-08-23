@@ -40,6 +40,7 @@ All notable changes to Swage are documented in this file.
 
 - Starting a new conversation now returns the composer reasoning effort to **Model default** instead of carrying over the previous conversation's choice.
 - Channel delivery totals and latest-delivery times now include only responses that were actually sent.
+- Configured workflow token ceilings no longer prevent permitted parallel agent calls from sharing the working allowance while preserving the closing reserve.
 - Development-channel no-ops now appear as `not_sent` with an explanation instead of claiming successful delivery.
 - A delayed not-found response for an earlier conversation no longer clears a conversation selected while that check was pending.
 - Browser back and forward navigation now restores the active conversation route when loading the destination fails.

@@ -141,9 +141,12 @@ to 4).
 
 ### Wind-down
 
-Wind-down triggers when a new agent call (or a journalled `budgetSnapshot()`)
-finds the working partition's remaining capacity has dropped below one per-call
-reservation estimate. At that point:
+Each new agent call reserves one equal share of the working partition per
+declared `max_agent_calls`, or per `max_concurrent_agent_calls` slot when no
+total call count is declared. The reservation is an admission estimate; the
+call's actual token usage replaces it at settlement. Wind-down triggers when a
+new agent call (or a journalled `budgetSnapshot()`) finds the working
+partition's remaining capacity has dropped below that estimate. At that point:
 
 1. A `wind_down` journal entry is written with a budget reading.
 2. The `closing_limit` latches to `spent + reserved_closing_tokens`.
