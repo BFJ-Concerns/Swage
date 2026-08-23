@@ -696,6 +696,9 @@ impl WorkflowEngine {
                                 ...(merged.task === undefined || merged.task === null
                                     ? {}
                                     : { task: String(merged.task) }),
+                                ...(merged.tools === undefined || merged.tools === null
+                                    ? {}
+                                    : { tools: merged.tools.map(String) }),
                                 model: merged.model ?? null,
                                 ...(merged.effort === undefined || merged.effort === null
                                     ? {}
@@ -1518,11 +1521,11 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn agent_call_projects_effort_and_timeout_options_to_the_host() {
+    async fn agent_call_projects_effort_timeout_and_tool_options_to_the_host() {
         let host = Arc::new(SurfaceHost::new());
         WorkflowEngine::new(EngineLimits::default())
             .execute_hosted(
-                r#"await agent("bounded work", { effort: "high", timeoutMs: 75 }); return null;"#,
+                r#"await agent("bounded work", { effort: "high", timeoutMs: 75, tools: ["web_search", "url_fetch"] }); return null;"#,
                 "null",
                 CancellationToken::new(),
                 Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
@@ -1534,6 +1537,10 @@ mod tests {
         let serialised = serde_json::to_value(&requests[0]).expect("serialise request");
         assert_eq!(serialised["effort"], "high");
         assert_eq!(serialised["timeout_ms"], 75);
+        assert_eq!(
+            serialised["tools"],
+            serde_json::json!(["web_search", "url_fetch"])
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

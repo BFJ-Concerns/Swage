@@ -750,6 +750,7 @@ pub(crate) async fn process_turn_with_composition(
         &format!("worker session {session_id}"),
     )
     .await?;
+    let config = apply_workflow_call_tools(config, session.metadata.as_ref())?;
 
     // Task names ride child-session metadata, while the definition is
     // resolved afresh for every execution. Missing or unreadable tasks fail

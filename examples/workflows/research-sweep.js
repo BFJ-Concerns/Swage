@@ -24,8 +24,8 @@ if (!topic || !purpose) {
 }
 
 phase("Scope: choose sources");
-// The scout is told to plan only; recording waits for the gather wave, so
-// a crash here costs nothing.
+// The scout's call-scoped grants exclude knowledge_record; recording waits
+// for the gather wave, so a crash here costs nothing.
 const plan = await agent(
   `You are scoping a research sweep.\n` +
     `Topic: ${topic}\n` +
@@ -38,6 +38,16 @@ const plan = await agent(
     `sources, not gathering them. Return your final answer as JSON only.`,
   {
     agent: "researcher",
+    tools: [
+      "web_search",
+      "url_fetch",
+      "browser_navigate",
+      "browser_snapshot",
+      "browser_click",
+      "browser_type",
+      "browser_select",
+      "browser_scroll",
+    ],
     label: "Scope sources",
     schema: {
       type: "object",
