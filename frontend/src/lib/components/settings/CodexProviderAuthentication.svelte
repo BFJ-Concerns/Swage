@@ -54,7 +54,7 @@
   .val { display: flex; gap: 10px; flex-wrap: wrap; }
   .val-stack { flex-direction: column; align-items: stretch; gap: 12px; }
   .credential-status { font-family: var(--font-mono); font-weight: 500; font-size: 10px; letter-spacing: 0.16em; text-transform: uppercase; padding: 3px 8px; border: 1px solid var(--ink-soft); color: var(--ink-soft); }
-  .credential-status.set { border-color: var(--accent); color: var(--accent); }
+  .credential-status.set { border-color: var(--ink); color: var(--ink); background: rgba(47, 122, 58, 0.14); }
   .sign-in-guidance { margin: 0; color: var(--ink-soft); }
   .sign-in-guidance.warning { color: var(--ink-orange); }
   .device-code-instruction { display: grid; gap: 8px; }

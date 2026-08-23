@@ -56,6 +56,24 @@
   </div>
 </div>
 
+<div class="field">
+  <div class="key">Discover<small>Fetch known models for this provider, then add the ones Swage should use.</small></div>
+  <div class="val val-stack">
+    <div class="search-row">
+      <input type="text" class="text search" value={selected ? query : ""} onfocus={() => onselect(providerId)} oninput={(event) => onquery(providerId, event.currentTarget.value)} placeholder="Search models" autocomplete="off" disabled={!codexUsable} />
+      <button type="button" class="opt" disabled={isPersisting || !codexUsable} onclick={() => onrefresh(providerId)}>Refresh</button>
+    </div>
+    {#if selected}
+      <div class="opt-grid">
+        {#each discoveredModels as model (model.id)}
+          {@const added = addedModelIds.has(model.id)}
+          <button type="button" class="opt" class:active={added} disabled={added || !codexUsable} onclick={() => ondiscoveradd(model)} title={added ? "Already added" : `Add ${model.name}`}><span class="opt-label">{model.name}</span><span class="opt-tag">{added ? "Added" : "Add"}</span></button>
+        {:else}<p class="empty">No discovered models to show.</p>{/each}
+      </div>
+    {/if}
+  </div>
+</div>
+
 <style>
   .field { display: grid; grid-template-columns: 220px 1fr; gap: 24px; border-top: 1px solid var(--rule-soft); padding: 14px 0; align-items: baseline; }
   .key { font-family: var(--font-mono); font-weight: 500; font-size: 11px; line-height: 1.5; letter-spacing: 0.18em; text-transform: uppercase; }
@@ -98,21 +116,3 @@
   .row-actions { justify-content: flex-end; }
   @media (max-width: 760px) { .field, .model-row { grid-template-columns: 1fr; } .field { gap: 10px; } }
 </style>
-
-<div class="field">
-  <div class="key">Discover<small>Fetch known models for this provider, then add the ones Swage should use.</small></div>
-  <div class="val val-stack">
-    <div class="search-row">
-      <input type="text" class="text search" value={selected ? query : ""} onfocus={() => onselect(providerId)} oninput={(event) => onquery(providerId, event.currentTarget.value)} placeholder="Search models" autocomplete="off" disabled={!codexUsable} />
-      <button type="button" class="opt" disabled={isPersisting || !codexUsable} onclick={() => onrefresh(providerId)}>Refresh</button>
-    </div>
-    {#if selected}
-      <div class="opt-grid">
-        {#each discoveredModels as model (model.id)}
-          {@const added = addedModelIds.has(model.id)}
-          <button type="button" class="opt" class:active={added} disabled={added || !codexUsable} onclick={() => ondiscoveradd(model)} title={added ? "Already added" : `Add ${model.name}`}><span class="opt-label">{model.name}</span><span class="opt-tag">{added ? "Added" : "Add"}</span></button>
-        {:else}<p class="empty">No discovered models to show.</p>{/each}
-      </div>
-    {/if}
-  </div>
-</div>
