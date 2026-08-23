@@ -21,6 +21,13 @@ use crate::cli::StartArgs;
 /// either runs the gateway in the foreground or spawns it as a detached
 /// background daemon and polls until it is ready.
 pub async fn run(args: &StartArgs) -> Result<(), ClientError> {
+    run_with_environment(args, None).await
+}
+
+pub(super) async fn run_with_environment(
+    args: &StartArgs,
+    environment: Option<&super::recovery::GatewayLifecycleEnvironment>,
+) -> Result<(), ClientError> {
     let installed = super::install::load_install_config()?;
     let effective_port = args
         .port
@@ -74,6 +81,9 @@ pub async fn run(args: &StartArgs) -> Result<(), ClientError> {
 
     // Step 2: Foreground mode — run the gateway inline, blocking until shutdown.
     if args.foreground {
+        if let Some(environment) = environment {
+            environment.apply_to_current_process();
+        }
         crate::startup::run_gateway(effective_port, effective_host, effective_config).await;
         return Ok(());
     }
@@ -84,6 +94,7 @@ pub async fn run(args: &StartArgs) -> Result<(), ClientError> {
         effective_host.as_deref(),
         effective_config.as_deref(),
         args.log_file.as_deref(),
+        environment,
     )?;
 
     // Step 4: Poll until the gateway writes its metadata and passes a health check.
@@ -114,6 +125,7 @@ fn spawn_background_gateway(
     host: Option<&str>,
     config: Option<&str>,
     log_file: Option<&str>,
+    environment: Option<&super::recovery::GatewayLifecycleEnvironment>,
 ) -> Result<(), ClientError> {
     let binary = std::env::current_exe().map_err(|e| ClientError::MetadataIo { source: e })?;
 
@@ -127,6 +139,9 @@ fn spawn_background_gateway(
     cmd.stdout(log_file);
     cmd.stderr(log_stderr);
     cmd.stdin(std::process::Stdio::null());
+    if let Some(environment) = environment {
+        environment.apply_to_command(&mut cmd);
+    }
 
     // Detach the child into its own process group so it outlives the CLI.
     #[cfg(unix)]
