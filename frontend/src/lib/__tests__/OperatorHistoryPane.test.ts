@@ -5,8 +5,12 @@ import { mount, unmount } from "svelte";
 vi.mock("../api/operator", () => ({
   fetchOperatorHistory: vi.fn(),
 }));
+vi.mock("../api/turns", () => ({
+  fetchTurnContext: vi.fn(),
+}));
 
 import { fetchOperatorHistory } from "../api/operator";
+import { fetchTurnContext } from "../api/turns";
 import OperatorHistoryPane from "../components/OperatorHistoryPane.svelte";
 
 let component: ReturnType<typeof mount> | undefined;
@@ -36,7 +40,8 @@ describe("OperatorHistoryPane", () => {
     expect(document.querySelector(".configuration-entry")).toBeNull();
   });
 
-  it("renders prior and new state, attribution, variants, assembly reports, and redaction markers", async () => {
+  it("renders recorded state and attribution, then opens assembly detail in the turn inspector", async () => {
+    const secretValue = "actual-secret";
     vi.mocked(fetchOperatorHistory).mockResolvedValue({
       configuration_changes: [{
         id: "change-1",
@@ -63,18 +68,28 @@ describe("OperatorHistoryPane", () => {
         session_id: "session-1",
         space_id: "space-1",
         recorded_at: "2026-08-23T10:02:00Z",
-        report: {
-          assembly_name: "balanced",
-          elements: [],
-          total_tokens: 321,
-          budget: null,
-          budget_remaining: null,
-          compaction_applied: [],
-          warnings: [],
-          errors: [],
-          duration: { secs: 0, nanos: 1 },
-        },
+        assembly_name: "balanced",
       }],
+    });
+    vi.mocked(fetchTurnContext).mockResolvedValue({
+      assembly_name: "balanced",
+      elements: [{
+        name: "provider request",
+        source: "recorded context",
+        token_count: 20,
+        preview: "[REDACTED]",
+        priority: 100,
+        named_assembly: null,
+      }],
+      total_tokens: 321,
+      budget: null,
+      budget_remaining: null,
+      compaction_applied: [],
+      warnings: [],
+      errors: [],
+      effective_tool_permissions: undefined,
+      provider_visible: { requests: [{ api_key: secretValue }] },
+      duration: { secs: 0, nanos: 1 },
     });
 
     component = mount(OperatorHistoryPane, { target: document.body });
@@ -87,9 +102,22 @@ describe("OperatorHistoryPane", () => {
     expect(text).toContain('"model": "old"');
     expect(text).toContain('"model": "new"');
     expect(text).toContain("[REDACTED]");
-    expect(text).not.toContain("actual-secret");
+    expect(text).not.toContain(secretValue);
     expect(text).toContain("context_assembly · compact");
     expect(text).toContain("balanced");
-    expect(text).toContain('"total_tokens": 321');
+    expect(text).not.toContain("request total:");
+
+    const inspectButton = Array.from(document.querySelectorAll("button")).find(
+      (button) => button.textContent?.includes("Inspect turn context"),
+    );
+    expect(inspectButton).toBeDefined();
+    inspectButton?.click();
+
+    await vi.waitFor(() => expect(fetchTurnContext).toHaveBeenCalledWith("turn-1"));
+    expect(document.querySelector(".summary")?.textContent?.replace(/\s+/g, " ")).toContain(
+      "request total: 321 tokens",
+    );
+    expect(document.body.textContent).toContain("[REDACTED]");
+    expect(document.body.textContent).not.toContain(secretValue);
   });
 });

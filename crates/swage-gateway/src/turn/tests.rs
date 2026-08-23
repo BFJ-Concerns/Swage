@@ -847,6 +847,7 @@ pub(crate) struct MockStorage {
     fail_secret_reads: AtomicBool,
     fail_audit_writes: AtomicBool,
     fail_snapshot_writes: AtomicBool,
+    last_snapshot_list_limit: AtomicUsize,
 }
 
 #[async_trait]
@@ -1118,6 +1119,7 @@ impl MockStorage {
             fail_secret_reads: AtomicBool::new(false),
             fail_audit_writes: AtomicBool::new(false),
             fail_snapshot_writes: AtomicBool::new(false),
+            last_snapshot_list_limit: AtomicUsize::new(0),
         }
     }
 
@@ -1160,6 +1162,10 @@ impl MockStorage {
 
     fn fail_snapshot_writes(&self) {
         self.fail_snapshot_writes.store(true, Ordering::SeqCst);
+    }
+
+    pub(crate) fn last_snapshot_list_limit(&self) -> usize {
+        self.last_snapshot_list_limit.load(Ordering::SeqCst)
     }
 }
 
@@ -2729,6 +2735,7 @@ impl ContextSnapshotStore for MockStorage {
         space_id: Uuid,
         limit: usize,
     ) -> Result<Vec<swage_storage::ContextSnapshotRecord>, StorageError> {
+        self.last_snapshot_list_limit.store(limit, Ordering::SeqCst);
         let db = self.db.lock().await;
         let mut records = Vec::new();
         for (turn_id, (report_json, created_at)) in &db.snapshots {

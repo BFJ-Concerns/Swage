@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use crate::{
     channel::ChannelStatusListResponse,
-    client::{approval, context::AssemblyReport, schedule},
+    client::{approval, schedule},
     device,
 };
 
@@ -164,14 +164,14 @@ pub struct VariantSelectionHistoryEvent {
     pub recorded_at: DateTime<Utc>,
 }
 
-/// The persisted assembly report for one turn.
+/// One turn whose persisted assembly report can be opened in the context inspector.
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
 pub struct AssemblyHistoryEntry {
     pub turn_id: Uuid,
     pub session_id: Uuid,
     pub space_id: Uuid,
     pub recorded_at: DateTime<Utc>,
-    pub report: AssemblyReport,
+    pub assembly_name: String,
 }
 
 /// Read-only history reconstructed from the local audit and context records.

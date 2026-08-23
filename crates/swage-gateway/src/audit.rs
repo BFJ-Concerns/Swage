@@ -16,6 +16,8 @@ use swage_storage::AgentMemoryRecord;
 
 use crate::state::AppState;
 
+const OPERATOR_HISTORY_SNAPSHOTS_PER_SPACE: usize = 100;
+
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct OperatorSearchQuery {
     pub q: Option<String>,
@@ -143,7 +145,7 @@ pub async fn operator_history(state: &AppState) -> Result<OperatorHistoryRespons
     for space in state.space_store.list_all().await? {
         for snapshot in state
             .storage
-            .list_snapshots_by_space(space.id, usize::MAX)
+            .list_snapshots_by_space(space.id, OPERATOR_HISTORY_SNAPSHOTS_PER_SPACE)
             .await?
         {
             let report: AssemblyReport =
@@ -158,7 +160,7 @@ pub async fn operator_history(state: &AppState) -> Result<OperatorHistoryRespons
                 session_id: snapshot.session_id,
                 space_id: snapshot.space_id,
                 recorded_at: snapshot.created_at,
-                report,
+                assembly_name: report.assembly_name,
             });
         }
     }

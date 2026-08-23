@@ -4303,11 +4303,9 @@ mod tests {
             turn.id.to_string()
         );
         assert_eq!(body["assembly_reports"][0]["turn_id"], turn.id.to_string());
-        assert_eq!(
-            body["assembly_reports"][0]["report"]["assembly_name"],
-            "balanced"
-        );
-        assert_eq!(body["assembly_reports"][0]["report"]["total_tokens"], 321);
+        assert_eq!(body["assembly_reports"][0]["assembly_name"], "balanced");
+        assert!(body["assembly_reports"][0].get("report").is_none());
+        assert_eq!(storage.last_snapshot_list_limit(), 100);
     }
 
     // -----------------------------------------------------------------------
