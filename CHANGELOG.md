@@ -39,6 +39,7 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- Workflow scripts now reject unrecognised `agent()` and `agentStart()` option keys before dispatch instead of silently dropping them.
 - Chat Completions streams now deliver every parallel tool call accumulated before completion.
 - Nullable object-valued tool parameters no longer fail nested required-field validation when set to null.
 - Gateway start and restart failures now describe already-running and restart-refusal states truthfully.
