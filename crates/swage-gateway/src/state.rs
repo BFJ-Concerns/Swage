@@ -527,6 +527,7 @@ mod codex_runtime_audit_tests {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ApprovalGrantKey {
+    pub session_id: Option<Uuid>,
     pub space_id: Option<Uuid>,
     pub kind: ApprovalKind,
     pub name: String,
@@ -534,7 +535,7 @@ pub struct ApprovalGrantKey {
 }
 
 impl ApprovalGrantKey {
-    pub fn from_approval(approval: &ApprovalRequest) -> Option<Self> {
+    pub fn from_approval(approval: &ApprovalRequest, session_id: Option<Uuid>) -> Option<Self> {
         let name = match approval.kind {
             ApprovalKind::Tool => approval.tool_name.clone(),
             ApprovalKind::Hook => approval.hook_name.clone(),
@@ -542,6 +543,7 @@ impl ApprovalGrantKey {
         }?;
 
         Some(Self {
+            session_id,
             space_id: None,
             kind: approval.kind.clone(),
             name,
@@ -552,11 +554,13 @@ impl ApprovalGrantKey {
 
 impl ApprovalGrantKey {
     pub fn location(
+        session_id: Option<Uuid>,
         space_id: Option<Uuid>,
         path: impl Into<String>,
         access: impl Into<String>,
     ) -> Self {
         Self {
+            session_id,
             space_id,
             kind: ApprovalKind::Location,
             name: path.into(),
