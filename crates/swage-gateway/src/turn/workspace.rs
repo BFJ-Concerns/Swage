@@ -124,6 +124,7 @@ pub(crate) async fn resolve_authorised_worker_directory(
     state: &crate::state::AppState,
     space_id: Uuid,
     context_id: Uuid,
+    session_id: Option<Uuid>,
     active_workspace_attachment_id: Option<Uuid>,
     inherited_placement: Option<&ResolvedWorkerDirectory>,
     requested: &str,
@@ -198,6 +199,7 @@ pub(crate) async fn resolve_authorised_worker_directory(
     let matching_approval_grants = approval_grants
         .iter()
         .filter(|grant| grant.kind == swage_storage::model::ApprovalKind::Location)
+        .filter(|grant| grant.session_id.is_none() || grant.session_id == session_id)
         .filter(|grant| grant.space_id.is_none() || grant.space_id == Some(space_id))
         .filter(|grant| within(Path::new(&grant.name)))
         .collect::<Vec<_>>();
@@ -273,6 +275,7 @@ pub(crate) async fn reauthorise_session_worker_placement(
         state,
         session.space_id,
         authority_context_id,
+        Some(session.id),
         session.active_workspace_attachment_id,
         None,
         authority_path,
@@ -318,6 +321,7 @@ pub(super) fn build_permission_config(
     config: &swage_config::ResolvedConfig,
     startup_config: &swage_config::ResolvedConfig,
     space_id: Option<Uuid>,
+    session_id: Option<Uuid>,
     session_approval_grants: &std::collections::HashSet<crate::state::ApprovalGrantKey>,
 ) -> PermissionConfig {
     // Top-level escape hatch: when permissions are disabled at the gateway,
@@ -347,12 +351,20 @@ pub(super) fn build_permission_config(
             .into_iter()
             .filter(|entry| {
                 !session_approval_grants.contains(&crate::state::ApprovalGrantKey {
+                    session_id,
+                    space_id: None,
+                    kind: swage_storage::model::ApprovalKind::Tool,
+                    name: entry.tool_name.clone(),
+                    access: None,
+                }) && !session_approval_grants.contains(&crate::state::ApprovalGrantKey {
+                    session_id: None,
                     space_id: None,
                     kind: swage_storage::model::ApprovalKind::Tool,
                     name: entry.tool_name.clone(),
                     access: None,
                 }) && !space_id.is_some_and(|space_id| {
                     session_approval_grants.contains(&crate::state::ApprovalGrantKey {
+                        session_id: None,
                         space_id: Some(space_id),
                         kind: swage_storage::model::ApprovalKind::Tool,
                         name: entry.tool_name.clone(),

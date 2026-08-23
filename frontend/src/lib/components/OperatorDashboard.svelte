@@ -10,6 +10,7 @@
   } from "../api/operator";
   import type { OperatorOverview } from "../types";
   import StatusBadge from "./StatusBadge.svelte";
+  import OperatorHistoryPane from "./OperatorHistoryPane.svelte";
   import type { Schedule } from "../protocol/Schedule";
   import type { ScheduleRun } from "../protocol/ScheduleRun";
 
@@ -19,6 +20,7 @@
   let activeActionKey = $state<string | null>(null);
   let openScheduleId = $state<string | null>(null);
   let scheduleRuns = $state<Record<string, ScheduleRun[]>>({});
+  let showHistory = $state(false);
 
   function describeSpec(schedule: Schedule): string {
     if (schedule.spec.kind === "interval") return schedule.spec.every;
@@ -127,10 +129,17 @@
         Sessions, approvals, automations, channels, and devices in one place.
       </p>
     </div>
-    <button class="refresh-btn" onclick={loadOverview} disabled={isLoading}>
-      {isLoading ? "Refreshing…" : "Refresh"}
-    </button>
+    <div class="header-actions">
+      <button class="refresh-btn history-btn" onclick={() => (showHistory = !showHistory)}>
+        {showHistory ? "Close history" : "View history"}
+      </button>
+      <button class="refresh-btn" onclick={loadOverview} disabled={isLoading}>
+        {isLoading ? "Refreshing…" : "Refresh"}
+      </button>
+    </div>
   </header>
+
+  {#if showHistory}<OperatorHistoryPane />{/if}
 
   {#if errorMessage}
     <div class="ops-alert" role="alert">{errorMessage}</div>
@@ -563,6 +572,8 @@
     gap: 12px;
     margin-bottom: 18px;
   }
+
+  .header-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 
   .metric-card {
     padding: 14px;

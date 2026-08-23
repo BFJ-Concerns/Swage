@@ -251,6 +251,13 @@ impl LlmProvider for ArcProvider {
         self.0.model_id()
     }
 
+    async fn count_tokens(
+        &self,
+        request: &CompletionRequest,
+    ) -> Result<Option<u64>, ProviderError> {
+        self.0.count_tokens(request).await
+    }
+
     async fn complete(
         &self,
         request: CompletionRequest,

@@ -217,6 +217,7 @@ pub(super) async fn dispatch_client_message(
                                     code: error_codes::SKILL_NOT_FOUND.to_string(),
                                     message: format!("skill '{n}' not found"),
                                 });
+                                return;
                             }
                             Err(e) => {
                                 tracing::warn!(%session_id, skill = %skill_name, error = ?e, "slash command skill activation failed");
@@ -224,6 +225,7 @@ pub(super) async fn dispatch_client_message(
                                     code: error_codes::INTERNAL_ERROR.to_string(),
                                     message: "skill activation failed".to_string(),
                                 });
+                                return;
                             }
                         }
 
