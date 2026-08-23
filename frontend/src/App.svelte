@@ -4,8 +4,8 @@
   Startup sequence:
     1. Create stores (synchronous, no IO).
     2. Wire cross-store events: connection → streaming, reconnect → refresh.
-    3. onMount: load spaces (auto-selects default), load conversations for
-       the selected space, then initialise router (reads URL, selects any
+    3. onMount: load spaces (restoring the last open space), load conversations
+       for the selected space, then initialise router (reads URL, selects any
        conversation referenced by the path).
     4. Render: loading splash → layout, or error screen if the gateway is unreachable.
 -->
@@ -359,9 +359,11 @@
 
   onMount(async () => {
     try {
-      // 1. Load the space list. We deliberately do not auto-select — the user
-      //    lands on the space picker and chooses where to work.
+      // 1. Load the space list and restore the last explicitly opened space.
       await spaceStore.loadSpaces();
+      if (spaceStore.currentSpace) {
+        await conversationStore.loadConversations(spaceStore.currentSpace.id);
+      }
 
       // 2. Fetch global model settings. Space-scoped data (conversations,
       //    scoped runtime state loads when a space is opened — either via the

@@ -12,13 +12,15 @@
   import type { ScheduleCreator } from "../protocol/ScheduleCreator";
   import type { ScheduleSpec } from "../protocol/ScheduleSpec";
   import type { SessionPolicy } from "../protocol/SessionPolicy";
+  import type { Space } from "../types";
 
   interface Props {
     spaceId: string | null;
     sessionId: string | null;
+    spaces?: Space[];
   }
 
-  let { spaceId, sessionId }: Props = $props();
+  let { spaceId, sessionId, spaces = [] }: Props = $props();
 
   // Creation form.
   let scheduleMessage = $state("");
@@ -179,9 +181,12 @@
   }
 
   function describeSession(session: SessionPolicy): string {
+    const targetSpace = session.policy === "fresh"
+      ? spaces.find((space) => space.id === session.space_id)
+      : null;
     return session.policy === "fresh"
-      ? `fresh · runs as ${session.agent_id}`
-      : "continues a conversation";
+      ? `fresh · space ${targetSpace?.name ?? session.space_id} · agent ${session.agent_id}`
+      : `continues session ${session.session_id}`;
   }
 
   function describeCreator(creator: ScheduleCreator): string {

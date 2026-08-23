@@ -16,11 +16,14 @@ pub(crate) async fn apply_approval_scope(
     match scope {
         ApprovalDecisionScope::Once => Ok(()),
         ApprovalDecisionScope::Session => {
+            let session_id = approval_session_id(state, approval).await?;
             let grant = if approval.kind == swage_storage::model::ApprovalKind::Location {
                 let (path, access) = location_context(approval)?;
-                crate::state::ApprovalGrantKey::location(None, path, access)
+                crate::state::ApprovalGrantKey::location(Some(session_id), None, path, access)
             } else {
-                let Some(grant) = crate::state::ApprovalGrantKey::from_approval(approval) else {
+                let Some(grant) =
+                    crate::state::ApprovalGrantKey::from_approval(approval, Some(session_id))
+                else {
                     return Err(ApiError::validation(
                         "session approval requires a permission target".to_string(),
                     ));
@@ -45,6 +48,7 @@ pub(crate) async fn apply_approval_scope(
                             .lock()
                             .unwrap_or_else(|e| e.into_inner())
                             .insert(crate::state::ApprovalGrantKey::location(
+                                None,
                                 Some(space.id),
                                 path.clone(),
                                 access.clone(),
@@ -57,6 +61,7 @@ pub(crate) async fn apply_approval_scope(
                             .lock()
                             .unwrap_or_else(|e| e.into_inner())
                             .insert(crate::state::ApprovalGrantKey::location(
+                                None,
                                 None,
                                 path.clone(),
                                 access.clone(),
@@ -84,6 +89,7 @@ pub(crate) async fn apply_approval_scope(
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
                         .insert(crate::state::ApprovalGrantKey {
+                            session_id: None,
                             space_id: Some(space.id),
                             kind: swage_storage::model::ApprovalKind::Tool,
                             name: tool_name.to_string(),
@@ -103,6 +109,7 @@ pub(crate) async fn apply_approval_scope(
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
                         .insert(crate::state::ApprovalGrantKey {
+                            session_id: None,
                             space_id: None,
                             kind: swage_storage::model::ApprovalKind::Tool,
                             name: tool_name.to_string(),
@@ -200,6 +207,26 @@ async fn persist_location_grant_globally(
 }
 
 async fn approval_space(state: &AppState, approval: &ApprovalRequest) -> Result<Space, ApiError> {
+    let session_id = approval_session_id(state, approval).await?;
+    let session = state
+        .storage
+        .get_session(session_id)
+        .await
+        .map_err(|error| ApiError::internal(error.to_string()))?
+        .ok_or_else(|| ApiError::not_found("session", session_id))?;
+
+    state
+        .space_store
+        .get(session.space_id)
+        .await
+        .map_err(|error| ApiError::internal(error.to_string()))?
+        .ok_or_else(|| ApiError::not_found("space", session.space_id))
+}
+
+async fn approval_session_id(
+    state: &AppState,
+    approval: &ApprovalRequest,
+) -> Result<uuid::Uuid, ApiError> {
     let turn = state
         .storage
         .get_turn(approval.turn_id)
@@ -212,17 +239,5 @@ async fn approval_space(state: &AppState, approval: &ApprovalRequest) -> Result<
         .await
         .map_err(|error| ApiError::internal(error.to_string()))?
         .ok_or_else(|| ApiError::not_found("thread", turn.thread_id))?;
-    let session = state
-        .storage
-        .get_session(thread.session_id)
-        .await
-        .map_err(|error| ApiError::internal(error.to_string()))?
-        .ok_or_else(|| ApiError::not_found("session", thread.session_id))?;
-
-    state
-        .space_store
-        .get(session.space_id)
-        .await
-        .map_err(|error| ApiError::internal(error.to_string()))?
-        .ok_or_else(|| ApiError::not_found("space", session.space_id))
+    Ok(thread.session_id)
 }
