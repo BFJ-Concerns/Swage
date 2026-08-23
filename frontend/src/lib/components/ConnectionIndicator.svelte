@@ -68,10 +68,8 @@
     color: var(--paper);
   }
 
-  /* Connectivity changes use orange; an actual connection error uses the
-     trouble token. The dot's animation still distinguishes reconnecting. */
-  .banner.disconnected,
-  .banner.reconnecting,
+  /* Connectivity churn keeps the default action-orange banner. Only a
+     connection error uses the trouble token. */
   .banner.error {
     background: var(--error);
     color: var(--paper);

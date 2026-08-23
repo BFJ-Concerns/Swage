@@ -144,7 +144,7 @@
      separation (matching the light scheme), while still light enough to carry
      deep-navy text on the trouble stamp. Gated by verify-status-hues.mjs. */
   --error: #f85d78;
-  --success: #6fc3ba;
+  --success: #75c47c;
 
   /* ---- Status registers (hue channel), re-lit for the deep navy -----------
      The spot hues brighten so their outline text/line holds AA on navy, and
