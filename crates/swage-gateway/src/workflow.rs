@@ -12128,7 +12128,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn invalid_inline_agent_prompt_fails_without_a_completed_call_journal_entry() {
+    async fn invalid_inline_agent_prompt_fails_after_journalling_valid_work() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
         let space = storage.get_or_create_default().await.expect("space");
         let provider = Arc::new(ScriptedRecordingProvider {
@@ -12150,10 +12150,8 @@ mod tests {
             State(state.clone()),
             Path(space.id),
             Json(StartInlineWorkflowRunRequest {
-                source: r#"await Promise.all([
-                    agent({ task: "First authored task" }),
-                    agent({ task: "Second authored task" }),
-                ]);"#
+                source: r#"await agent("Valid authored task");
+                await agent({ task: "Invalid authored task" });"#
                     .into(),
                 args: Value::Null,
                 budget: None,
@@ -12176,17 +12174,25 @@ mod tests {
             "unexpected terminal error: {:?}",
             run.error_message
         );
-        assert!(provider.requests.lock().expect("requests").is_empty());
+        assert_eq!(provider.requests.lock().expect("requests").len(), 1);
 
         let journal = storage
             .list_workflow_journal(started.id)
             .await
             .expect("journal");
-        assert!(
-            journal
-                .iter()
-                .all(|entry| entry.kind != "agent_call" || entry.status != "completed"),
-            "invalid prompt must not produce a completed agent call: {journal:?}"
+        let agent_calls = journal
+            .iter()
+            .filter(|entry| entry.kind == "agent_call")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            agent_calls.len(),
+            1,
+            "only the valid call should reach the journal: {journal:?}"
+        );
+        assert_eq!(agent_calls[0].status, "completed");
+        assert_eq!(
+            agent_calls[0].request["prompt"],
+            Value::String("Valid authored task".into())
         );
     }
 
