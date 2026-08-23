@@ -4,7 +4,9 @@ use std::{
     fs,
     net::TcpListener,
     path::{Path, PathBuf},
-    process::{Command, Output},
+    process::{Child, Command, Output},
+    thread,
+    time::{Duration, Instant},
 };
 
 use serde_json::Value;
@@ -94,6 +96,30 @@ fn process_environment(pid: u32) -> Vec<u8> {
         .expect("failed to read the replacement process environment")
 }
 
+fn wait_for_replacement_pid(probe: &GatewayProbe, previous_pid: u32, child: &mut Child) -> u32 {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Ok(bytes) = fs::read(probe.metadata_path())
+            && let Ok(metadata) = serde_json::from_slice::<Value>(&bytes)
+            && let Some(pid) = metadata["pid"].as_u64()
+            && pid as u32 != previous_pid
+        {
+            return pid as u32;
+        }
+        if let Some(status) = child
+            .try_wait()
+            .expect("failed to inspect the foreground restart process")
+        {
+            panic!("foreground restart exited before replacing the gateway: {status}");
+        }
+        assert!(
+            Instant::now() < deadline,
+            "foreground replacement did not publish runtime metadata"
+        );
+        thread::sleep(Duration::from_millis(25));
+    }
+}
+
 #[test]
 fn restart_preserves_running_environment_and_still_starts_when_nothing_is_running() {
     let probe = GatewayProbe::new();
@@ -151,4 +177,61 @@ fn restart_preserves_running_environment_and_still_starts_when_nothing_is_runnin
     let output = probe.run(&["gateway", "restart", "--force", "--port", &port]);
     probe.assert_success(output);
     assert!(probe.metadata_path().exists());
+}
+
+#[test]
+fn foreground_restart_preserves_running_environment() {
+    let probe = GatewayProbe::new();
+    probe.start();
+    let first_pid = probe.pid();
+
+    let invoking_runtime = tempfile::TempDir::new().expect("failed to create invoking runtime");
+    let invoking_home = tempfile::TempDir::new().expect("failed to create invoking home");
+    let invoking_metadata = invoking_runtime.path().join("swage/metadata.json");
+    fs::create_dir_all(invoking_metadata.parent().unwrap())
+        .expect("failed to create invoking metadata directory");
+    fs::hard_link(probe.metadata_path(), &invoking_metadata)
+        .expect("failed to expose runtime metadata to the restart command");
+
+    let port = probe.port.to_string();
+    let mut restart = probe
+        .command()
+        .env_remove("SWAGE_HOME")
+        .env("HOME", invoking_home.path())
+        .env("XDG_RUNTIME_DIR", invoking_runtime.path())
+        .args([
+            "gateway",
+            "restart",
+            "--force",
+            "--foreground",
+            "--port",
+            &port,
+        ])
+        .spawn()
+        .expect("failed to invoke foreground gateway restart");
+
+    let second_pid = wait_for_replacement_pid(&probe, first_pid, &mut restart);
+    let environment = process_environment(second_pid);
+    for (name, value) in [
+        ("SWAGE_HOME", probe.root.path()),
+        ("HOME", probe.home.path()),
+        ("XDG_RUNTIME_DIR", probe.runtime.path()),
+    ] {
+        let expected = format!("{name}={}", value.display());
+        assert!(
+            environment
+                .split(|byte| *byte == 0)
+                .any(|entry| entry == expected.as_bytes()),
+            "foreground replacement gateway did not receive recovered {name}"
+        );
+    }
+    assert!(!invoking_metadata.exists());
+
+    let stop_output = probe.run(&["gateway", "stop", "--force"]);
+    probe.assert_success(stop_output);
+    let status = restart
+        .wait()
+        .expect("failed to wait for foreground gateway restart");
+    assert!(status.success(), "foreground restart failed: {status}");
+    assert!(!probe.metadata_path().exists());
 }
