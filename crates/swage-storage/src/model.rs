@@ -780,7 +780,12 @@ pub struct NewSourceObservation {
     /// Stable identity for the unit of work making this capture (a
     /// workflow's journalled agent call), or `None` for one-off captures.
     /// Re-recording the same origin under the same scope deduplicates to
-    /// the first capture, so retried work cannot fork the evidence.
+    /// the first capture, so retried work cannot fork the evidence. Body
+    /// identity still wins: a capture whose bytes match existing evidence
+    /// returns that observation whatever its scope, so a scope binds only
+    /// rows it created — a retry whose first attempt landed on
+    /// body-identical foreign evidence records its changed bytes as a
+    /// distinct observation.
     pub capture_scope: Option<String>,
 }
 
