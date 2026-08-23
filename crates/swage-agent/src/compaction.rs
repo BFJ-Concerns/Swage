@@ -188,14 +188,16 @@ async fn try_summarise(
 }
 
 fn estimated_tokens(messages: &[ChatMessage]) -> usize {
-    messages
+    let character_count: usize = messages
         .iter()
         .flat_map(|message| message.content())
         .map(|part| match part {
-            ContentPart::Text { text } => text.len() / 4,
+            ContentPart::Text { text } => text.len(),
             ContentPart::ImageUrl { .. } => 0,
         })
-        .sum()
+        .sum();
+
+    character_count / 4
 }
 
 fn compaction_record(
@@ -459,6 +461,19 @@ mod tests {
         assert!(!exceeds_threshold(
             &messages,
             &CompactionThreshold::TokenCount(10)
+        ));
+
+        // The estimate sums all characters before dividing. Three short
+        // messages therefore contain an estimated two tokens (9/4), rather
+        // than zero tokens from flooring each message independently.
+        let short_messages = vec![
+            text_msg(Role::User, "abc"),
+            text_msg(Role::Assistant, "abc"),
+            text_msg(Role::User, "abc"),
+        ];
+        assert!(exceeds_threshold(
+            &short_messages,
+            &CompactionThreshold::TokenCount(1)
         ));
     }
 
