@@ -684,7 +684,7 @@ impl WorkflowEngine {
                         const buildAgentRequest = (options) => {
                             const merged = mergeDefaults(options);
                             const knownOptions = new Set([
-                                "agent", "task", "model", "effort", "timeoutMs",
+                                "agent", "task", "tools", "model", "effort", "timeoutMs",
                                 "cwd", "isolation", "schema", "maxAttempts", "label",
                                 "session", "elements", "variables", "assembly",
                             ]);
