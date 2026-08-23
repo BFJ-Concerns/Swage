@@ -1434,6 +1434,7 @@ pub async fn submit_turn(
     let bg_state = state.clone();
     let message = req.message;
     let output_schema = req.output_schema;
+    let compaction_focus = req.compaction_focus;
     let session_id = req.conversation_id;
     tokio::spawn(async move {
         use crate::subscription::SubscriptionState;
@@ -1448,7 +1449,7 @@ pub async fn submit_turn(
         // Drain events in background so the channel never fills.
         tokio::spawn(async move { while ws_rx.recv().await.is_some() {} });
 
-        let result = crate::turn::process_turn_with_existing_turn(
+        let result = crate::turn::process_turn_with_existing_turn_and_focus(
             &bg_state,
             session_id,
             Some(thread_id),
@@ -1461,6 +1462,7 @@ pub async fn submit_turn(
             None,
             Some(turn_id),
             crate::turn::TurnAttendance::Unattended,
+            compaction_focus,
         )
         .await;
 
@@ -2505,6 +2507,156 @@ mod tests {
             .expect("get approval turn")
             .expect("approval turn exists");
         assert_eq!(recovered_turn.state, TurnState::Interrupted);
+
+        server.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn async_turn_focus_reaches_compaction_prompt_and_snapshot() {
+        use std::pin::Pin;
+        use std::sync::Mutex as StdMutex;
+
+        use futures::{Stream, stream};
+        use swage_client::http::GatewayClient;
+        use swage_core::{
+            CompletionRequest, CompletionResponse, FinishReason, ProviderError, Role, StreamChunk,
+            ToolCompletionRequest, ToolCompletionResponse,
+        };
+        use swage_storage::model::AppendMessage;
+        use swage_storage::store::{MessageStore, ThreadStore};
+
+        struct CompactionCapturingProvider {
+            compaction_requests: StdMutex<Vec<CompletionRequest>>,
+        }
+
+        #[async_trait::async_trait]
+        impl LlmProvider for CompactionCapturingProvider {
+            fn model_id(&self) -> &str {
+                "compaction-capturing"
+            }
+
+            async fn complete(
+                &self,
+                request: CompletionRequest,
+            ) -> Result<CompletionResponse, ProviderError> {
+                self.compaction_requests
+                    .lock()
+                    .expect("compaction request lock")
+                    .push(request);
+                Ok(CompletionResponse {
+                    content: "Compacted history".to_string(),
+                    input_tokens: 10,
+                    output_tokens: 2,
+                    finish_reason: FinishReason::Stop,
+                    cost: None,
+                })
+            }
+
+            async fn complete_with_tools(
+                &self,
+                _request: ToolCompletionRequest,
+            ) -> Result<ToolCompletionResponse, ProviderError> {
+                unreachable!("focused turn uses streaming completion")
+            }
+
+            fn stream(
+                &self,
+                _request: CompletionRequest,
+            ) -> Pin<Box<dyn Stream<Item = StreamChunk> + Send>> {
+                Box::pin(stream::iter(vec![
+                    StreamChunk::Delta {
+                        content: "Focused reply".to_string(),
+                    },
+                    StreamChunk::Done {
+                        finish_reason: Some(FinishReason::Stop),
+                    },
+                ]))
+            }
+        }
+
+        let provider = Arc::new(CompactionCapturingProvider {
+            compaction_requests: StdMutex::new(Vec::new()),
+        });
+        let storage = Arc::new(MockStorage::new());
+        let (base_url, server, storage) =
+            spawn_live_server(Arc::clone(&provider) as Arc<dyn LlmProvider>, storage).await;
+        let client = GatewayClient::new(&base_url);
+        let conversation = client
+            .create_conversation()
+            .await
+            .expect("create conversation through live gateway");
+        let thread = storage
+            .list_by_session(conversation.id)
+            .await
+            .expect("list conversation threads")
+            .into_iter()
+            .next()
+            .expect("default thread exists");
+
+        for index in 0..101 {
+            storage
+                .append_message(AppendMessage {
+                    thread_id: thread.id,
+                    turn_id: None,
+                    role: if index % 2 == 0 {
+                        Role::User
+                    } else {
+                        Role::Assistant
+                    },
+                    content: format!("history message {index}"),
+                    agent_id: "gateway".to_string(),
+                })
+                .await
+                .expect("seed history message");
+        }
+
+        let focus = "Preserve dates and named decisions";
+        let turn_id = client
+            .submit_turn_with_compaction_focus(
+                conversation.id,
+                Some(thread.id),
+                "continue",
+                None,
+                Some(focus.to_string()),
+            )
+            .await
+            .expect("submit focused async turn");
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            let turn = client.poll_turn(turn_id).await.expect("poll focused turn");
+            if matches!(turn.state.as_str(), "completed" | "failed" | "interrupted") {
+                assert_eq!(turn.state, "completed");
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "focused turn should finish before the deadline"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+
+        let requests = provider
+            .compaction_requests
+            .lock()
+            .expect("compaction request lock");
+        assert_eq!(requests.len(), 1, "history should trigger one compaction");
+        assert!(requests[0].messages[0].text_content().contains(focus));
+        drop(requests);
+
+        let context = reqwest::get(format!("{base_url}/api/turns/{turn_id}/context"))
+            .await
+            .expect("fetch focused turn context")
+            .error_for_status()
+            .expect("focused context response succeeds")
+            .json::<swage_protocol::client::context::TurnContextResponse>()
+            .await
+            .expect("focused context matches protocol");
+        assert_eq!(context.report.compaction_applied.len(), 1);
+        assert_eq!(
+            context.report.compaction_applied[0].focus.as_deref(),
+            Some(focus)
+        );
 
         server.abort();
     }

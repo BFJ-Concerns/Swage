@@ -5,13 +5,17 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(deny_unknown_fields)]
 pub struct SubmitTurnRequest {
     pub conversation_id: Uuid,
     pub thread_id: Option<Uuid>,
     pub message: String,
     #[ts(type = "unknown")]
     pub output_schema: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub compaction_focus: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
@@ -50,4 +54,36 @@ pub struct SendMessageRequest {
 pub struct MessageResponse {
     pub id: Uuid,
     pub status: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SubmitTurnRequest;
+
+    #[test]
+    fn submit_turn_defaults_focus_when_omitted() {
+        let request: SubmitTurnRequest = serde_json::from_value(serde_json::json!({
+            "conversation_id": uuid::Uuid::new_v4(),
+            "thread_id": null,
+            "message": "hello",
+            "output_schema": null
+        }))
+        .expect("request without focus should remain valid");
+
+        assert!(request.compaction_focus.is_none());
+    }
+
+    #[test]
+    fn submit_turn_rejects_unknown_fields() {
+        let error = serde_json::from_value::<SubmitTurnRequest>(serde_json::json!({
+            "conversation_id": uuid::Uuid::new_v4(),
+            "thread_id": null,
+            "message": "hello",
+            "output_schema": null,
+            "focus_hint": "out of band"
+        }))
+        .expect_err("unknown request fields must be rejected");
+
+        assert!(error.to_string().contains("unknown field `focus_hint`"));
+    }
 }

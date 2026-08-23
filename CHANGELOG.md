@@ -9,6 +9,7 @@ All notable changes to Swage are documented in this file.
 - Fresh spaces now include immutable researcher, organiser, and synthesist agent definitions for the shipped research-sweep workflow, with same-named authored definitions taking precedence.
 - Knowledge captures made by workflow workers now carry their journalled call's identity, so a sweep interrupted mid-gather resumes without duplicating any source's observation.
 - Research sweeps now author evidence-backed orientation cards during the organising pass and report claims the synthesist withheld for lack of supporting evidence.
+- Asynchronous turn callers can provide optional focus instructions for context-compaction summaries, with the instructions retained in the compaction audit record.
 - Operators can inspect recorded configuration changes, assembly decisions, and variant selections in a read-only history pane.
 - Providers can now count prompt tokens under their own tokenizer where the vendor offers it (Anthropic), with decorated provider stacks forwarding the operation and estimate-based callers unaffected.
 - Detached gateway starts now accept `--log-file`, report the chosen output destination, and explain foreground output handling in command help.
@@ -33,6 +34,7 @@ All notable changes to Swage are documented in this file.
 
 ### Changed
 
+- Async turn submissions now reject unrecognised request fields instead of silently ignoring them.
 - JavaScript context assemblies now expose `render()` only on template-backed briefing elements; calling it on literal elements fails the script and records the fallback to the default assembly.
 - Gateway lifecycle defaults now use the descriptive `set-defaults` and `clear-defaults` commands; the terminal client is `chat`, and shell scripts are produced by `generate-completion`.
 - Anthropic requests now use the native beta endpoint.
@@ -43,6 +45,7 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- Workflow scripts now reject unrecognised `agent()` and `agentStart()` option keys before dispatch instead of silently dropping them.
 - Reloading the web UI now returns to the open space instead of the space picker.
 - Operator schedules now show their complete execution target from every space.
 - The space picker now describes only the space behaviour the product provides.

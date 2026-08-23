@@ -587,15 +587,6 @@ mod tests {
         }
     }
 
-    fn process_exists(pid: u32) -> bool {
-        std::process::Command::new("kill")
-            .args(["-0", &pid.to_string()])
-            .stderr(Stdio::null())
-            .status()
-            .map(|status| status.success())
-            .unwrap_or(false)
-    }
-
     #[test]
     fn worker_startup_args_keep_isolated_mode_without_runtime_python_env() {
         let runtime = ResolvedPythonRuntime {
@@ -757,11 +748,11 @@ mod tests {
     #[tokio::test]
     async fn startup_timeout_kills_startup_failed_worker_before_returning() {
         let temp_dir = TempDir::new().expect("temp dir");
-        let pid_file = temp_dir.path().join("worker.pid");
+        let termination_file = temp_dir.path().join("worker-terminated");
         let script_path = temp_dir.path().join("hung-worker.sh");
         fs::write(
             &script_path,
-            "#!/bin/sh\nprintf '%s' \"$$\" > \"$SWAGE_TEST_PID_FILE\"\nsleep 30\n",
+            "#!/bin/sh\nsleep 30 &\nchild=$!\ntrap 'kill \"$child\"; wait \"$child\"; printf terminated > \"$SWAGE_TEST_TERMINATION_FILE\"; exit 0' TERM\nwait \"$child\"\n",
         )
         .expect("script should be written");
         fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755))
@@ -771,27 +762,18 @@ mod tests {
             script_path,
             1,
             BTreeMap::from([(
-                "SWAGE_TEST_PID_FILE".to_string(),
-                pid_file.display().to_string(),
+                "SWAGE_TEST_TERMINATION_FILE".to_string(),
+                termination_file.display().to_string(),
             )]),
         );
 
         let result = runtime.spawn_ready_worker(false).await;
 
         assert!(matches!(result, Err(PythonWorkerError::StartupTimeout(1))));
-
-        let worker_pid: u32 = fs::read_to_string(&pid_file)
-            .expect("worker pid file should exist")
-            .trim()
-            .parse()
-            .expect("worker pid should parse");
-
-        tokio::time::timeout(Duration::from_secs(2), async {
-            while process_exists(worker_pid) {
-                tokio::time::sleep(Duration::from_millis(25)).await;
-            }
-        })
-        .await
-        .expect("startup-failed worker should be terminated promptly");
+        assert_eq!(
+            fs::read_to_string(&termination_file)
+                .expect("worker termination must complete before startup returns"),
+            "terminated"
+        );
     }
 }
