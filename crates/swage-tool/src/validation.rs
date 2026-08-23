@@ -88,7 +88,10 @@ fn validate_object(
             }
 
             // Recurse into nested objects.
-            if field_schema.get("properties").is_some() || field_schema.get("required").is_some() {
+            if field_value.is_object()
+                && (field_schema.get("properties").is_some()
+                    || field_schema.get("required").is_some())
+            {
                 validate_object(tool_name, field_schema, field_value, &field_path)?;
             }
         }
@@ -185,6 +188,23 @@ mod tests {
         ok(
             json!({"type": "object", "required": ["cmd"], "properties": {"cmd": {"type": "string"}}}),
             json!({"cmd": "ls"}),
+        );
+    }
+
+    #[test]
+    fn nullable_nested_object_accepts_null_without_applying_object_requirements() {
+        ok(
+            json!({
+                "type": "object",
+                "properties": {
+                    "options": {
+                        "type": ["object", "null"],
+                        "required": ["mode"],
+                        "properties": {"mode": {"type": "string"}}
+                    }
+                }
+            }),
+            json!({"options": null}),
         );
     }
 

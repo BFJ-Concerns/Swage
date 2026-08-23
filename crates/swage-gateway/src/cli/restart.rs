@@ -10,9 +10,9 @@ pub async fn run(args: &RestartArgs) -> Result<(), ClientError> {
         Some((metadata, metadata_path)) => {
             let environment =
                 super::recovery::recover_gateway_lifecycle_environment(metadata.pid).map_err(
-                    |reason| ClientError::GatewayNotRunning {
+                    |reason| ClientError::GatewayRestartRefused {
                         reason: format!(
-                            "cannot preserve the running gateway's data root and runtime directory; restart was not attempted: {reason}"
+                            "cannot preserve the running gateway's data root and runtime directory: {reason}"
                         ),
                     },
                 )?;
