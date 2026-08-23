@@ -68,12 +68,12 @@
     color: var(--paper);
   }
 
-  /* All three states share the same fluoro orange treatment — the dot's
-     animation distinguishes "reconnecting" from the static failure states. */
+  /* Connectivity changes use orange; an actual connection error uses the
+     trouble token. The dot's animation still distinguishes reconnecting. */
   .banner.disconnected,
   .banner.reconnecting,
   .banner.error {
-    background: var(--accent);
+    background: var(--error);
     color: var(--paper);
     border-bottom: 2px solid var(--ink);
   }

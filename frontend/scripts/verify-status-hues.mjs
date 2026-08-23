@@ -47,6 +47,9 @@ const WARN_DELTA_E_PAIR = 10; // pairwise register distance below this: warn onl
 /** "#rrggbb" → [r,g,b] in 0..255. */
 function hexToRgb(hex) {
   const h = hex.trim().replace(/^#/, "");
+  if (!/^(?:[\da-f]{3}|[\da-f]{6})$/i.test(h)) {
+    throw new Error(`expected a hex colour, received ${hex}`);
+  }
   const full = h.length === 3 ? h.split("").map((c) => c + c).join("") : h;
   return [0, 2, 4].map((i) => parseInt(full.slice(i, i + 2), 16));
 }
@@ -161,13 +164,13 @@ function stripComments(css) {
   return css.replace(/\/\*[\s\S]*?\*\//g, "");
 }
 
-/** Pull the declaration body of a single `selector { ... }` block. */
-function blockBody(css, selector) {
+/** Pull every declaration body for `selector { ... }` blocks, in source order. */
+function blockBodies(css, selector) {
   const re = new RegExp(
     selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\s*\\{([^}]*)\\}",
+    "g",
   );
-  const m = stripComments(css).match(re);
-  return m ? m[1] : "";
+  return Array.from(stripComments(css).matchAll(re), (match) => match[1]);
 }
 
 /** Parse `--name: value;` pairs from a block body into a Map. */
@@ -178,6 +181,11 @@ function parseDecls(body) {
     if (m) map.set(m[1].trim(), m[2].trim());
   }
   return map;
+}
+
+/** Later blocks override earlier blocks, matching CSS custom-property cascade. */
+function parseSelectorDecls(css, selector) {
+  return new Map(blockBodies(css, selector).flatMap((body) => [...parseDecls(body)]));
 }
 
 /**
@@ -191,8 +199,15 @@ function resolveHex(name, theme, root, seen = new Set()) {
   seen.add(name);
   const raw = theme.get(name) ?? root.get(name);
   if (raw === undefined) throw new Error(`token ${name} not found`);
-  const varMatch = raw.match(/^var\((--[\w-]+)\)$/);
-  if (varMatch) return resolveHex(varMatch[1], theme, root, seen);
+  const varMatch = raw.match(/^var\((--[\w-]+)(?:,\s*(.+))?\)$/);
+  if (varMatch) {
+    const [, reference, fallback] = varMatch;
+    if (theme.has(reference) || root.has(reference)) {
+      return resolveHex(reference, theme, root, seen);
+    }
+    if (fallback) return fallback.trim();
+    throw new Error(`token ${reference} not found while resolving ${name}`);
+  }
   return raw;
 }
 
@@ -218,10 +233,10 @@ const SPOT_KEYS = new Set(["in-motion", "wants-a-human", "not-yet", "elsewhere"]
  */
 export function measure(cssPath) {
   const css = readFileSync(cssPath, "utf8");
-  const root = parseDecls(blockBody(css, ":root"));
+  const root = parseSelectorDecls(css, ":root");
   const themes = {
-    light: parseDecls(blockBody(css, ".theme-riso")),
-    dark: parseDecls(blockBody(css, ".theme-cyanotype")),
+    light: parseSelectorDecls(css, ".theme-riso"),
+    dark: parseSelectorDecls(css, ".theme-cyanotype"),
   };
 
   const failures = [];
