@@ -33,10 +33,7 @@ impl GatewayLifecycleEnvironment {
     }
 
     pub fn metadata_path(&self) -> PathBuf {
-        match &self.xdg_runtime_dir {
-            Some(runtime_dir) => runtime_dir.join("swage").join("metadata.json"),
-            None => self.swage_home.join("run").join("metadata.json"),
-        }
+        self.swage_home.join("run").join("metadata.json")
     }
 
     pub fn apply_to_command(&self, command: &mut std::process::Command) {

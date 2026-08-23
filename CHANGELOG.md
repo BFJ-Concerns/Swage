@@ -38,6 +38,10 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- Session-scoped approval grants now apply only to the conversation session that granted them.
+- Explicitly disabling the sandbox no longer also requires the degraded-execution opt-in.
+- Gateways started with distinct explicit data roots now keep separate runtime metadata and report their own addresses.
+- Obsolete private-alpha data roots now receive a clear rebuild instruction instead of a raw missing-workflow-table error.
 - Bare skill commands now run as persisted conversation turns instead of leaving the composer waiting indefinitely after activation.
 - Restarting a gateway now preserves its effective data root and runtime directory, and leaves the running gateway untouched when those values cannot be recovered.
 - Workflow scripts now reject non-string `agent` and `agentStart` prompts before dispatch instead of silently sending coerced text such as `[object Object]` to workers.

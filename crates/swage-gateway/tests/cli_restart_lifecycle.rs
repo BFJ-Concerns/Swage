@@ -63,7 +63,7 @@ impl GatewayProbe {
     }
 
     fn metadata_path(&self) -> PathBuf {
-        self.runtime.path().join("swage/metadata.json")
+        self.root.path().join("run/metadata.json")
     }
 
     fn pid(&self) -> u32 {
