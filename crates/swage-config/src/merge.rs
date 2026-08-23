@@ -448,6 +448,77 @@ fn merge_section<S>(
     }
 }
 
+trait MergeOverlay {
+    fn merge_overlay(self, overlay: Self) -> Self;
+}
+
+macro_rules! impl_merge_overlay {
+    ($type:ty { $($field:ident),+ $(,)? }) => {
+        impl MergeOverlay for $type {
+            fn merge_overlay(self, overlay: Self) -> Self {
+                Self {
+                    $($field: overlay.$field.or(self.$field)),+
+                }
+            }
+        }
+    };
+}
+
+impl_merge_overlay!(PartialServerConfig { host, port });
+impl_merge_overlay!(PartialWorkspaceConfig { path });
+impl_merge_overlay!(PartialSandboxConfig {
+    enabled,
+    allow_degraded_execution,
+});
+impl_merge_overlay!(PartialLoggingConfig { level });
+impl_merge_overlay!(PartialContextConfig {
+    assembly,
+    timeout,
+    budget,
+});
+impl_merge_overlay!(PartialObservabilityConfig { force_on });
+impl_merge_overlay!(PartialPythonExecuteToolConfig {
+    enabled,
+    timeout_secs,
+    startup_timeout_secs,
+    idle_ttl_secs,
+    warm_target,
+    max_workers,
+    runtime_policy,
+    runtime_path,
+    require_sandbox,
+});
+impl_merge_overlay!(PartialBrowserToolConfig {
+    binary_path,
+    page_idle_secs,
+    process_idle_secs,
+    max_snapshot_bytes,
+    screenshots,
+    allow_hosts,
+});
+impl_merge_overlay!(PartialOutputConfig {
+    schema,
+    max_retries,
+});
+impl_merge_overlay!(PartialHitlConfig {
+    timeout,
+    timeout_policy,
+});
+impl_merge_overlay!(PartialSchedulingConfig {
+    run_history_max_age_days,
+    run_history_max_per_schedule,
+});
+impl_merge_overlay!(PartialTelegramChannelConfig {
+    bot_token_secret_ref,
+    bot_token_env,
+    api_base_url,
+    poll_timeout_secs,
+});
+
+fn merge_overlay_section<S: MergeOverlay>(base: Option<S>, overlay: Option<S>) -> Option<S> {
+    merge_section(base, overlay, MergeOverlay::merge_overlay)
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -460,10 +531,7 @@ fn merge_section<S>(
 /// value is kept.
 pub fn merge_partial(base: PartialConfig, overlay: PartialConfig) -> PartialConfig {
     PartialConfig {
-        server: merge_section(base.server, overlay.server, |b, o| PartialServerConfig {
-            host: o.host.or(b.host),
-            port: o.port.or(b.port),
-        }),
+        server: merge_overlay_section(base.server, overlay.server),
         providers: merge_section(base.providers, overlay.providers, |b, o| {
             let entries = match (b.entries, o.entries) {
                 (Some(mut base_entries), Some(overlay_entries)) => {
@@ -504,23 +572,10 @@ pub fn merge_partial(base: PartialConfig, overlay: PartialConfig) -> PartialConf
                 entries,
             }
         }),
-        workspace: merge_section(base.workspace, overlay.workspace, |b, o| {
-            PartialWorkspaceConfig {
-                path: o.path.or(b.path),
-            }
-        }),
-        sandbox: merge_section(base.sandbox, overlay.sandbox, |b, o| PartialSandboxConfig {
-            enabled: o.enabled.or(b.enabled),
-            allow_degraded_execution: o.allow_degraded_execution.or(b.allow_degraded_execution),
-        }),
-        logging: merge_section(base.logging, overlay.logging, |b, o| PartialLoggingConfig {
-            level: o.level.or(b.level),
-        }),
-        context: merge_section(base.context, overlay.context, |b, o| PartialContextConfig {
-            assembly: o.assembly.or(b.assembly),
-            timeout: o.timeout.or(b.timeout),
-            budget: o.budget.or(b.budget),
-        }),
+        workspace: merge_overlay_section(base.workspace, overlay.workspace),
+        sandbox: merge_overlay_section(base.sandbox, overlay.sandbox),
+        logging: merge_overlay_section(base.logging, overlay.logging),
+        context: merge_overlay_section(base.context, overlay.context),
         pricing: merge_section(base.pricing, overlay.pricing, |b, o| {
             // Overlay model entries win; base entries absent from the overlay survive.
             let mut merged = b.models.unwrap_or_default();
@@ -531,11 +586,7 @@ pub fn merge_partial(base: PartialConfig, overlay: PartialConfig) -> PartialConf
                 models: Some(merged),
             }
         }),
-        observability: merge_section(base.observability, overlay.observability, |b, o| {
-            PartialObservabilityConfig {
-                force_on: o.force_on.or(b.force_on),
-            }
-        }),
+        observability: merge_overlay_section(base.observability, overlay.observability),
         experimentation: merge_section(base.experimentation, overlay.experimentation, |b, o| {
             let locations = match (b.locations, o.locations) {
                 (Some(mut base_locations), Some(overlay_locations)) => {
@@ -577,30 +628,11 @@ pub fn merge_partial(base: PartialConfig, overlay: PartialConfig) -> PartialConf
             };
             PartialToolConfig {
                 shell_timeout_secs: o.shell_timeout_secs.or(b.shell_timeout_secs),
-                python_execute: merge_section(b.python_execute, o.python_execute, |b, o| {
-                    PartialPythonExecuteToolConfig {
-                        enabled: o.enabled.or(b.enabled),
-                        timeout_secs: o.timeout_secs.or(b.timeout_secs),
-                        startup_timeout_secs: o.startup_timeout_secs.or(b.startup_timeout_secs),
-                        idle_ttl_secs: o.idle_ttl_secs.or(b.idle_ttl_secs),
-                        warm_target: o.warm_target.or(b.warm_target),
-                        max_workers: o.max_workers.or(b.max_workers),
-                        runtime_policy: o.runtime_policy.or(b.runtime_policy),
-                        runtime_path: o.runtime_path.or(b.runtime_path),
-                        require_sandbox: o.require_sandbox.or(b.require_sandbox),
-                    }
-                }),
+                python_execute: merge_overlay_section(b.python_execute, o.python_execute),
                 max_output_bytes: o.max_output_bytes.or(b.max_output_bytes),
                 plugin_directory: o.plugin_directory.or(b.plugin_directory),
                 search: o.search.or(b.search),
-                browser: merge_section(b.browser, o.browser, |b, o| PartialBrowserToolConfig {
-                    binary_path: o.binary_path.or(b.binary_path),
-                    page_idle_secs: o.page_idle_secs.or(b.page_idle_secs),
-                    process_idle_secs: o.process_idle_secs.or(b.process_idle_secs),
-                    max_snapshot_bytes: o.max_snapshot_bytes.or(b.max_snapshot_bytes),
-                    screenshots: o.screenshots.or(b.screenshots),
-                    allow_hosts: o.allow_hosts.or(b.allow_hosts),
-                }),
+                browser: merge_overlay_section(b.browser, o.browser),
                 allow: o.allow.or(b.allow),
                 deny: o.deny.or(b.deny),
                 bundles,
@@ -608,16 +640,8 @@ pub fn merge_partial(base: PartialConfig, overlay: PartialConfig) -> PartialConf
                 require_approval: o.require_approval.or(b.require_approval),
             }
         }),
-        output: merge_section(base.output, overlay.output, |b, o| PartialOutputConfig {
-            // Both fields use overlay-wins semantics: if the overlay has a value,
-            // it wins; otherwise the base value is kept.
-            schema: o.schema.or(b.schema),
-            max_retries: o.max_retries.or(b.max_retries),
-        }),
-        hitl: merge_section(base.hitl, overlay.hitl, |b, o| PartialHitlConfig {
-            timeout: o.timeout.or(b.timeout),
-            timeout_policy: o.timeout_policy.or(b.timeout_policy),
-        }),
+        output: merge_overlay_section(base.output, overlay.output),
+        hitl: merge_overlay_section(base.hitl, overlay.hitl),
         communication: merge_section(base.communication, overlay.communication, |b, o| {
             let ct = merge_section(b.context_transfer, o.context_transfer, |bt, ot| {
                 // Targets merge map-style: overlay entry replaces base entry
@@ -643,14 +667,7 @@ pub fn merge_partial(base: PartialConfig, overlay: PartialConfig) -> PartialConf
                 expiry_interval_secs: o.expiry_interval_secs.or(b.expiry_interval_secs),
             }
         }),
-        scheduling: merge_section(base.scheduling, overlay.scheduling, |b, o| {
-            PartialSchedulingConfig {
-                run_history_max_age_days: o.run_history_max_age_days.or(b.run_history_max_age_days),
-                run_history_max_per_schedule: o
-                    .run_history_max_per_schedule
-                    .or(b.run_history_max_per_schedule),
-            }
-        }),
+        scheduling: merge_overlay_section(base.scheduling, overlay.scheduling),
         generation: merge_section(base.generation, overlay.generation, |b, o| {
             let mut presets = b.presets.unwrap_or_default();
             if let Some(overlay_presets) = o.presets {
@@ -662,14 +679,7 @@ pub fn merge_partial(base: PartialConfig, overlay: PartialConfig) -> PartialConf
         }),
         channels: merge_section(base.channels, overlay.channels, |b, o| {
             PartialChannelsConfig {
-                telegram: merge_section(b.telegram, o.telegram, |bt, ot| {
-                    PartialTelegramChannelConfig {
-                        bot_token_secret_ref: ot.bot_token_secret_ref.or(bt.bot_token_secret_ref),
-                        bot_token_env: ot.bot_token_env.or(bt.bot_token_env),
-                        api_base_url: ot.api_base_url.or(bt.api_base_url),
-                        poll_timeout_secs: ot.poll_timeout_secs.or(bt.poll_timeout_secs),
-                    }
-                }),
+                telegram: merge_overlay_section(b.telegram, o.telegram),
             }
         }),
         dangerously_skip_permissions: overlay
@@ -1929,5 +1939,167 @@ mod tests {
 
         assert_eq!(resolved.scheduling.run_history_max_age_days, 30);
         assert_eq!(resolved.scheduling.run_history_max_per_schedule, 50);
+    }
+
+    #[test]
+    fn special_map_merges_preserve_base_keys_and_replace_collisions() {
+        let mut base_providers = HashMap::new();
+        base_providers.insert("base".to_string(), ProviderEndpointConfig::default());
+        let mut overlay_providers = HashMap::new();
+        overlay_providers.insert("overlay".to_string(), ProviderEndpointConfig::default());
+        let mut base_pricing = HashMap::new();
+        base_pricing.insert(
+            "base".to_string(),
+            ModelPricing {
+                input_price_per_mtok: 1,
+                output_price_per_mtok: 2,
+            },
+        );
+        let mut overlay_pricing = HashMap::new();
+        overlay_pricing.insert(
+            "overlay".to_string(),
+            ModelPricing {
+                input_price_per_mtok: 3,
+                output_price_per_mtok: 4,
+            },
+        );
+        let mut base_presets = HashMap::new();
+        base_presets.insert(
+            "base".to_string(),
+            GenerationPresetConfig {
+                max_tokens: Some(100),
+                temperature: None,
+                stop_sequences: vec![],
+                metadata: None,
+            },
+        );
+        let mut overlay_presets = HashMap::new();
+        overlay_presets.insert(
+            "overlay".to_string(),
+            GenerationPresetConfig {
+                max_tokens: Some(200),
+                temperature: None,
+                stop_sequences: vec![],
+                metadata: None,
+            },
+        );
+
+        let merged = merge_partial(
+            PartialConfig {
+                providers: Some(PartialProviderCatalogConfig {
+                    entries: Some(base_providers),
+                    ..Default::default()
+                }),
+                pricing: Some(PartialPricingConfig {
+                    models: Some(base_pricing),
+                }),
+                generation: Some(PartialGenerationConfig {
+                    presets: Some(base_presets),
+                }),
+                ..Default::default()
+            },
+            PartialConfig {
+                providers: Some(PartialProviderCatalogConfig {
+                    entries: Some(overlay_providers),
+                    ..Default::default()
+                }),
+                pricing: Some(PartialPricingConfig {
+                    models: Some(overlay_pricing),
+                }),
+                generation: Some(PartialGenerationConfig {
+                    presets: Some(overlay_presets),
+                }),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(merged.providers.unwrap().entries.unwrap().len(), 2);
+        assert_eq!(merged.pricing.unwrap().models.unwrap().len(), 2);
+        assert_eq!(merged.generation.unwrap().presets.unwrap().len(), 2);
+    }
+
+    #[test]
+    fn experimentation_location_overlay_merges_fields_without_erasing_base() {
+        let merged = merge_partial(
+            PartialConfig {
+                experimentation: Some(PartialExperimentationConfig {
+                    enabled: Some(true),
+                    locations: Some(HashMap::from([(
+                        "compaction".to_string(),
+                        PartialExperimentLocationConfig {
+                            enabled: Some(false),
+                            forced_variant: Some(Some("base".to_string())),
+                        },
+                    )])),
+                }),
+                ..Default::default()
+            },
+            PartialConfig {
+                experimentation: Some(PartialExperimentationConfig {
+                    enabled: None,
+                    locations: Some(HashMap::from([(
+                        "compaction".to_string(),
+                        PartialExperimentLocationConfig {
+                            enabled: Some(true),
+                            forced_variant: None,
+                        },
+                    )])),
+                }),
+                ..Default::default()
+            },
+        );
+
+        let experimentation = merged.experimentation.unwrap();
+        let location = &experimentation.locations.unwrap()["compaction"];
+        assert_eq!(experimentation.enabled, Some(true));
+        assert_eq!(location.enabled, Some(true));
+        assert_eq!(location.forced_variant, Some(Some("base".to_string())));
+    }
+
+    #[test]
+    fn double_option_fields_can_explicitly_clear_inherited_values() {
+        let merged = merge_partial(
+            PartialConfig {
+                tools: Some(PartialToolConfig {
+                    plugin_directory: Some(Some("/plugins".to_string())),
+                    search: Some(Some(SearchProviderConfig {
+                        provider_type: "searxng".to_string(),
+                        base_url: "http://search.invalid".to_string(),
+                        api_key: None,
+                    })),
+                    ..Default::default()
+                }),
+                channels: Some(PartialChannelsConfig {
+                    telegram: Some(PartialTelegramChannelConfig {
+                        bot_token_secret_ref: Some(Some("secret-ref".to_string())),
+                        bot_token_env: Some(Some("TOKEN".to_string())),
+                        ..Default::default()
+                    }),
+                }),
+                ..Default::default()
+            },
+            PartialConfig {
+                tools: Some(PartialToolConfig {
+                    plugin_directory: Some(None),
+                    search: Some(None),
+                    ..Default::default()
+                }),
+                channels: Some(PartialChannelsConfig {
+                    telegram: Some(PartialTelegramChannelConfig {
+                        bot_token_secret_ref: Some(None),
+                        bot_token_env: Some(None),
+                        ..Default::default()
+                    }),
+                }),
+                ..Default::default()
+            },
+        );
+
+        let tools = merged.tools.unwrap();
+        assert_eq!(tools.plugin_directory, Some(None));
+        assert_eq!(tools.search, Some(None));
+        let telegram = merged.channels.unwrap().telegram.unwrap();
+        assert_eq!(telegram.bot_token_secret_ref, Some(None));
+        assert_eq!(telegram.bot_token_env, Some(None));
     }
 }

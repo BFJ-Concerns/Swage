@@ -147,6 +147,8 @@ pub struct TurnRequest {
     pub user_message: String,
     /// Pre-assembled message context from the context engine.
     pub assembled_context: Vec<ChatMessage>,
+    /// Optional caller guidance for agent-side summarisation compaction.
+    pub compaction_focus: Option<String>,
     /// Optional parent turn for delegation chain tracking. `None` for
     /// user-initiated turns; `Some(sender_turn_id)` for delegated turns.
     pub parent_turn_id: Option<Uuid>,
@@ -176,6 +178,7 @@ mod turn_request_tests {
             },
             user_message: "hello".to_string(),
             assembled_context: vec![],
+            compaction_focus: None,
             parent_turn_id: None,
             existing_turn_id: None,
             effort: None,
@@ -197,6 +200,7 @@ mod turn_request_tests {
             },
             user_message: "test".to_string(),
             assembled_context: vec![],
+            compaction_focus: None,
             parent_turn_id: None,
             existing_turn_id: None,
             cancellation_token: CancellationToken::new(),
@@ -216,6 +220,7 @@ mod turn_request_tests {
             },
             user_message: "clone me".to_string(),
             assembled_context: vec![],
+            compaction_focus: None,
             parent_turn_id: None,
             existing_turn_id: None,
             cancellation_token: CancellationToken::new(),
@@ -240,6 +245,7 @@ mod turn_request_tests {
             },
             user_message: "cancel test".to_string(),
             assembled_context: vec![],
+            compaction_focus: None,
             parent_turn_id: None,
             existing_turn_id: None,
             cancellation_token: token.clone(),
@@ -260,6 +266,7 @@ mod turn_request_tests {
             },
             user_message: "debug".to_string(),
             assembled_context: vec![],
+            compaction_focus: None,
             parent_turn_id: None,
             existing_turn_id: None,
             cancellation_token: CancellationToken::new(),
