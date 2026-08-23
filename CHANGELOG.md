@@ -7,6 +7,7 @@ All notable changes to Swage are documented in this file.
 ### Added
 
 - Asynchronous turn callers can provide optional focus instructions for context-compaction summaries, with the instructions retained in the compaction audit record.
+- Async turn submissions now reject unrecognised request fields instead of silently ignoring them.
 - Detached gateway starts now accept `--log-file`, report the chosen output destination, and explain foreground output handling in command help.
 - Agents can route scheduled-run output to channels, local storage, and webhooks when creating or updating schedules.
 - New conversations can choose a reasoning effort from the main composer, while each configured model can provide the inherited default.

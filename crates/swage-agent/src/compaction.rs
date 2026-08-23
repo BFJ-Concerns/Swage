@@ -28,18 +28,7 @@ use crate::error::AgentError;
 pub fn exceeds_threshold(messages: &[ChatMessage], threshold: &CompactionThreshold) -> bool {
     match threshold {
         CompactionThreshold::TokenCount(max_tokens) => {
-            let char_count: usize = messages
-                .iter()
-                .flat_map(|m| m.content().iter())
-                .map(|part| match part {
-                    ContentPart::Text { text } => text.len(),
-                    // Images are treated as zero for the purposes of this estimate.
-                    ContentPart::ImageUrl { .. } => 0,
-                })
-                .sum();
-            // Rough estimate: ~4 characters per token.
-            let estimated_tokens = (char_count / 4) as u64;
-            estimated_tokens > *max_tokens
+            estimated_tokens(messages) > *max_tokens as usize
         }
         CompactionThreshold::MessageCount(max_count) => messages.len() > *max_count as usize,
     }
@@ -66,15 +55,12 @@ pub async fn compact(
     _storage: &dyn Storage,
     _thread_id: Uuid,
     focus: Option<&str>,
-) -> Result<(Vec<ChatMessage>, CompactionRecord), AgentError> {
+) -> Result<(Vec<ChatMessage>, Option<CompactionRecord>), AgentError> {
     let messages_before = messages.len();
     let tokens_before = estimated_tokens(&messages);
     // Fast path: already within bounds.
     if !exceeds_threshold(&messages, threshold) {
-        return Ok((
-            messages,
-            compaction_record("none", 0, tokens_before, tokens_before, focus),
-        ));
+        return Ok((messages, None));
     }
 
     // Tier 1 — Summarise: condense older half via an LLM call. Falls back
@@ -85,13 +71,13 @@ pub async fn compact(
         let messages_removed = messages_before.saturating_sub(messages.len());
         return Ok((
             messages,
-            compaction_record(
+            Some(compaction_record(
                 "summarisation",
                 messages_removed,
                 tokens_before,
                 tokens_after,
                 focus,
-            ),
+            )),
         ));
     }
 
@@ -102,13 +88,13 @@ pub async fn compact(
         let messages_removed = messages_before.saturating_sub(messages.len());
         return Ok((
             messages,
-            compaction_record(
+            Some(compaction_record(
                 "truncation",
                 messages_removed,
                 tokens_before,
                 tokens_after,
                 focus,
-            ),
+            )),
         ));
     }
 
@@ -120,13 +106,13 @@ pub async fn compact(
         let messages_removed = messages_before.saturating_sub(messages.len());
         return Ok((
             messages,
-            compaction_record(
+            Some(compaction_record(
                 "aggressive_truncation",
                 messages_removed,
                 tokens_before,
                 tokens_after,
                 focus,
-            ),
+            )),
         ));
     }
 
@@ -502,6 +488,7 @@ mod tests {
         .expect("compact should succeed when below threshold");
 
         assert_eq!(result.0.len(), original_count);
+        assert!(result.1.is_none());
     }
 
     #[tokio::test]
@@ -527,6 +514,7 @@ mod tests {
         .await
         .expect("compact should succeed");
 
+        let record = record.expect("compaction should emit an audit record");
         assert!(record.focus.is_none());
         let requests = provider.requests.lock().expect("request lock");
         let prompt = match &requests[0].messages[0].content()[0] {
@@ -571,6 +559,7 @@ mod tests {
         .await
         .expect("focused compaction should succeed");
 
+        let record = record.expect("compaction should emit an audit record");
         let requests = provider.requests.lock().expect("request lock");
         let prompt = match &requests[0].messages[0].content()[0] {
             ContentPart::Text { text } => text,

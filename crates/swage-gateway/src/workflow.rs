@@ -2191,7 +2191,7 @@ async fn run_host_commands_inner(
                         } else {
                             (
                                 Some(journal_entry_id),
-                                complete_agent_entry(
+                                Box::pin(complete_agent_entry(
                                     &state,
                                     run_id,
                                     space_id,
@@ -2201,7 +2201,7 @@ async fn run_host_commands_inner(
                                     request,
                                     resolved_working_directory,
                                     cancellation,
-                                )
+                                ))
                                 .await,
                             )
                         }
@@ -2223,7 +2223,7 @@ async fn run_host_commands_inner(
                                 let journal_entry_id = intent.id;
                                 (
                                     Some(journal_entry_id),
-                                    complete_agent_entry(
+                                    Box::pin(complete_agent_entry(
                                         &state,
                                         run_id,
                                         space_id,
@@ -2233,7 +2233,7 @@ async fn run_host_commands_inner(
                                         request,
                                         resolved_working_directory,
                                         cancellation,
-                                    )
+                                    ))
                                     .await,
                                 )
                             }

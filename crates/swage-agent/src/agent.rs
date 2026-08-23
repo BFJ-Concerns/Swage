@@ -265,10 +265,12 @@ impl Agent {
             .await
             {
                 Ok((context, record)) => {
-                    let _ = event_tx.send(AgentEvent::CompactionApplied {
-                        turn_id: turn.id,
-                        record,
-                    });
+                    if let Some(record) = record {
+                        let _ = event_tx.send(AgentEvent::CompactionApplied {
+                            turn_id: turn.id,
+                            record,
+                        });
+                    }
                     context
                 }
                 Err(error) => {
