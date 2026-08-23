@@ -33,7 +33,7 @@
 //! ```js
 //! const byName = Object.fromEntries(elements.map(e => [e.name, e]));
 //! add(byName.orientation);
-//! add(byName.prompts.render());
+//! add(byName.prompts);
 //! add(byName.history);
 //! ```
 
@@ -401,6 +401,7 @@ mod tests {
     use crate::briefing::BriefingElement;
     use crate::history::HistoryElement;
     use crate::named_element::ResolvedNamedElement;
+    use crate::orientation::{OrientationElement, SessionEnvironment};
     use crate::prompts::PromptsElement;
     use swage_config::model::ContextConfig;
     use swage_config::prompt_rule::PromptRule;
@@ -554,6 +555,50 @@ mod tests {
         assert_eq!(messages.len(), 3);
         assert_eq!(messages[0].text_content(), "hello");
         assert_eq!(messages[2].text_content(), "operator instructions");
+    }
+
+    #[test]
+    fn documented_reordering_assembly_executes() {
+        let elements: Vec<Box<dyn ContextElement>> = vec![
+            Box::new(OrientationElement::new(
+                SessionEnvironment {
+                    space_name: String::new(),
+                    space_description: String::new(),
+                    working_directory: None,
+                    started_at: chrono::Utc::now(),
+                    channel: None,
+                },
+                vec![],
+            )),
+            Box::new(PromptsElement::new(vec![PromptRule {
+                priority: 0,
+                content: "operator instructions".into(),
+                source_level: HierarchyLevel::Global,
+                file_path: PathBuf::from("test"),
+            }])),
+            Box::new(HistoryElement::new(vec![ChatMessage::new(
+                Role::User,
+                "hello",
+            )])),
+        ];
+
+        let messages = run_script(
+            r#"
+            const byName = Object.fromEntries(elements.map(e => [e.name, e]));
+            add(byName.orientation);
+            add(byName.prompts);
+            add(byName.history);
+            "#,
+            &elements,
+            &WordTokeniser,
+            &BTreeMap::new(),
+            Duration::from_secs(5),
+        )
+        .expect("the documented assembly must run");
+
+        assert_eq!(messages.0.len(), 3);
+        assert_eq!(messages.0[1].text_content(), "operator instructions");
+        assert_eq!(messages.0[2].text_content(), "hello");
     }
 
     #[test]
