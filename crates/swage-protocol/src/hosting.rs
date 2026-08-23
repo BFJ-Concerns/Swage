@@ -6,7 +6,11 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 use uuid::Uuid;
 
-use crate::{channel::ChannelStatusListResponse, client::approval, client::schedule, device};
+use crate::{
+    channel::ChannelStatusListResponse,
+    client::{approval, context::AssemblyReport, schedule},
+    device,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
 pub struct PresenceGatewayResponse {
@@ -130,6 +134,52 @@ pub struct OperatorOverviewResponse {
     pub schedules: schedule::ScheduleListResponse,
     pub channels: ChannelStatusListResponse,
     pub devices: Vec<OperatorDeviceSummary>,
+}
+
+/// One durable configuration change as recorded at the mutation boundary.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+pub struct ConfigurationHistoryEvent {
+    pub id: String,
+    pub resource_kind: String,
+    pub resource_id: String,
+    pub action: String,
+    pub source: String,
+    pub session_id: Option<Uuid>,
+    #[ts(type = "unknown")]
+    pub prior_state: serde_json::Value,
+    #[ts(type = "unknown")]
+    pub new_state: serde_json::Value,
+    pub recorded_at: DateTime<Utc>,
+}
+
+/// One recorded experiment selection, exposed only in operator history.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+pub struct VariantSelectionHistoryEvent {
+    pub id: String,
+    pub location_id: String,
+    pub variant: String,
+    pub reason: String,
+    pub turn_id: Option<Uuid>,
+    pub session_id: Option<Uuid>,
+    pub recorded_at: DateTime<Utc>,
+}
+
+/// The persisted assembly report for one turn.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+pub struct AssemblyHistoryEntry {
+    pub turn_id: Uuid,
+    pub session_id: Uuid,
+    pub space_id: Uuid,
+    pub recorded_at: DateTime<Utc>,
+    pub report: AssemblyReport,
+}
+
+/// Read-only history reconstructed from the local audit and context records.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+pub struct OperatorHistoryResponse {
+    pub configuration_changes: Vec<ConfigurationHistoryEvent>,
+    pub variant_selections: Vec<VariantSelectionHistoryEvent>,
+    pub assembly_reports: Vec<AssemblyHistoryEntry>,
 }
 
 /// Scope filter for durable agent-definition reads and deletes.
@@ -264,6 +314,7 @@ pub struct HostingSurface {
     approvals: ApprovalListResponse,
     approval_decision: ApprovalDecisionRequest,
     operator_overview: OperatorOverviewResponse,
+    operator_history: OperatorHistoryResponse,
     agent_definition_scope: AgentDefinitionScopeQuery,
     agent_definition_list: AgentDefinitionListResponse,
     effective_agent_definition_list: EffectiveAgentDefinitionListResponse,

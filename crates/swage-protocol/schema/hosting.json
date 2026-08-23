@@ -36,6 +36,9 @@
     "knowledge_mirror": {
       "$ref": "#/$defs/KnowledgeMirrorRegenerateResponse"
     },
+    "operator_history": {
+      "$ref": "#/$defs/OperatorHistoryResponse"
+    },
     "operator_overview": {
       "$ref": "#/$defs/OperatorOverviewResponse"
     },
@@ -49,6 +52,7 @@
     "approvals",
     "approval_decision",
     "operator_overview",
+    "operator_history",
     "agent_definition_scope",
     "agent_definition_list",
     "effective_agent_definition_list",
@@ -266,6 +270,127 @@
         "prompt"
       ]
     },
+    "AssemblyError": {
+      "type": "object",
+      "properties": {
+        "assembly_name": {
+          "type": "string"
+        },
+        "error_kind": {
+          "type": "string"
+        },
+        "fallback_used": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "assembly_name",
+        "error_kind",
+        "message",
+        "fallback_used"
+      ]
+    },
+    "AssemblyHistoryEntry": {
+      "description": "The persisted assembly report for one turn.",
+      "type": "object",
+      "properties": {
+        "recorded_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "report": {
+          "$ref": "#/$defs/AssemblyReport"
+        },
+        "session_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "space_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "turn_id": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "required": [
+        "turn_id",
+        "session_id",
+        "space_id",
+        "recorded_at",
+        "report"
+      ]
+    },
+    "AssemblyReport": {
+      "type": "object",
+      "properties": {
+        "assembly_name": {
+          "type": "string"
+        },
+        "budget": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        },
+        "budget_remaining": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int"
+        },
+        "compaction_applied": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CompactionRecord"
+          }
+        },
+        "duration": {
+          "$ref": "#/$defs/Duration"
+        },
+        "effective_tool_permissions": true,
+        "elements": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ElementReport"
+          }
+        },
+        "errors": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AssemblyError"
+          }
+        },
+        "provider_visible": true,
+        "total_tokens": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "assembly_name",
+        "elements",
+        "total_tokens",
+        "compaction_applied",
+        "warnings",
+        "errors",
+        "duration"
+      ]
+    },
     "ChannelStatusListResponse": {
       "type": "object",
       "properties": {
@@ -349,6 +474,121 @@
       "required": [
         "session_id",
         "state"
+      ]
+    },
+    "CompactionRecord": {
+      "type": "object",
+      "properties": {
+        "actual_strategy": {
+          "type": "string"
+        },
+        "budget": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        },
+        "element": {
+          "type": "string"
+        },
+        "failure_reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "messages_removed": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "requested_strategy": {
+          "type": "string"
+        },
+        "source_message_range": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "maxItems": 2,
+          "minItems": 2,
+          "prefixItems": [
+            {
+              "type": "integer",
+              "format": "uint",
+              "minimum": 0
+            },
+            {
+              "type": "integer",
+              "format": "uint",
+              "minimum": 0
+            }
+          ]
+        },
+        "tokens_after": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "tokens_before": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "element",
+        "requested_strategy",
+        "actual_strategy",
+        "messages_removed",
+        "tokens_before",
+        "tokens_after"
+      ]
+    },
+    "ConfigurationHistoryEvent": {
+      "description": "One durable configuration change as recorded at the mutation boundary.",
+      "type": "object",
+      "properties": {
+        "action": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "new_state": true,
+        "prior_state": true,
+        "recorded_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "resource_id": {
+          "type": "string"
+        },
+        "resource_kind": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "source": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "resource_kind",
+        "resource_id",
+        "action",
+        "source",
+        "prior_state",
+        "new_state",
+        "recorded_at"
       ]
     },
     "CreateAgentDefinitionRequest": {
@@ -558,6 +798,25 @@
         "registered_at"
       ]
     },
+    "Duration": {
+      "type": "object",
+      "properties": {
+        "nanos": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "secs": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "secs",
+        "nanos"
+      ]
+    },
     "EffectiveAgentDefinitionListResponse": {
       "type": "object",
       "properties": {
@@ -634,6 +893,48 @@
         "built_in",
         "global",
         "space"
+      ]
+    },
+    "ElementReport": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "named_assembly": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NamedAssemblyReport"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "preview": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "priority": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "source": {
+          "type": "string"
+        },
+        "token_count": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "name",
+        "source",
+        "token_count",
+        "priority"
       ]
     },
     "ExternalChannelIntegration": {
@@ -751,6 +1052,28 @@
         "stale_after_secs"
       ]
     },
+    "NamedAssemblyReport": {
+      "type": "object",
+      "properties": {
+        "assembly_name": {
+          "type": "string"
+        },
+        "child_elements": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ElementReport"
+          }
+        },
+        "resolved_level": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "assembly_name",
+        "resolved_level",
+        "child_elements"
+      ]
+    },
     "OperatorDeviceSummary": {
       "type": "object",
       "properties": {
@@ -847,6 +1170,35 @@
         "seconds_since_activity",
         "active_turn_count",
         "active_connection_count"
+      ]
+    },
+    "OperatorHistoryResponse": {
+      "description": "Read-only history reconstructed from the local audit and context records.",
+      "type": "object",
+      "properties": {
+        "assembly_reports": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AssemblyHistoryEntry"
+          }
+        },
+        "configuration_changes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ConfigurationHistoryEvent"
+          }
+        },
+        "variant_selections": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/VariantSelectionHistoryEvent"
+          }
+        }
+      },
+      "required": [
+        "configuration_changes",
+        "variant_selections",
+        "assembly_reports"
       ]
     },
     "OperatorOverviewResponse": {
@@ -1278,6 +1630,49 @@
         "display_name",
         "description",
         "instructions"
+      ]
+    },
+    "VariantSelectionHistoryEvent": {
+      "description": "One recorded experiment selection, exposed only in operator history.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "location_id": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "recorded_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "session_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "turn_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "variant": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "location_id",
+        "variant",
+        "reason",
+        "recorded_at"
       ]
     }
   }
