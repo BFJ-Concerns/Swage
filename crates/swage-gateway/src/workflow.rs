@@ -1359,6 +1359,34 @@ async fn run_ephemeral_agent_call(
 /// join the resolved configuration model.
 const PARK_TIMER_THRESHOLD_MS: u64 = 60_000;
 
+async fn settle_cancelled_workflow_journal(storage: &dyn Storage, run_id: Uuid) {
+    match storage.list_workflow_journal(run_id).await {
+        Ok(entries) => {
+            for entry in entries
+                .into_iter()
+                .filter(|entry| entry.status == "started")
+            {
+                if let Err(error) = storage
+                    .fail_workflow_journal_entry(entry.id, "WorkflowCancelledError: run cancelled")
+                    .await
+                {
+                    tracing::warn!(
+                        %run_id,
+                        journal_entry_id = %entry.id,
+                        %error,
+                        "could not settle cancelled workflow journal entry"
+                    );
+                }
+            }
+        }
+        Err(error) => tracing::warn!(
+            %run_id,
+            %error,
+            "could not list workflow journal while settling cancellation"
+        ),
+    }
+}
+
 fn run_host_commands(
     state: AppState,
     run_id: Uuid,
@@ -4491,34 +4519,7 @@ async fn launch_existing_run(
             Err(problem) => ("failed", None, Some(problem.to_string())),
         };
         if run_state == "cancelled" {
-            match storage.list_workflow_journal(run_id).await {
-                Ok(entries) => {
-                    for entry in entries
-                        .into_iter()
-                        .filter(|entry| entry.status == "started")
-                    {
-                        if let Err(error) = storage
-                            .fail_workflow_journal_entry(
-                                entry.id,
-                                "WorkflowCancelledError: run cancelled",
-                            )
-                            .await
-                        {
-                            tracing::warn!(
-                                %run_id,
-                                journal_entry_id = %entry.id,
-                                %error,
-                                "could not settle cancelled workflow journal entry"
-                            );
-                        }
-                    }
-                }
-                Err(error) => tracing::warn!(
-                    %run_id,
-                    %error,
-                    "could not list workflow journal while settling cancellation"
-                ),
-            }
+            settle_cancelled_workflow_journal(storage.as_ref(), run_id).await;
         }
         let handover = if run_state == "failed" && output.is_none() {
             match terminal_failed_call_reference {
@@ -4804,6 +4805,7 @@ pub async fn cancel_run(
     // A parked run has no engine to signal: cancel it in the record so the
     // waker never relaunches it.
     if run.state == "parked" {
+        settle_cancelled_workflow_journal(state.storage.as_ref(), id).await;
         state
             .storage
             .update_workflow_run_state(id, "cancelled", None, None, None)
@@ -9139,10 +9141,13 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn cancelling_a_run_with_a_suspended_wait_settles_its_started_journal_entry() {
+    async fn cancelling_a_parked_run_settles_its_started_journal_entry() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
         let space = storage.get_or_create_default().await.expect("space");
-        let source = "return await wait({ timerMs: 5000 });";
+        let source = format!(
+            "return await wait({{ timerMs: {} }});",
+            PARK_TIMER_THRESHOLD_MS + 1
+        );
         let run = storage
             .create_workflow_run(NewWorkflowRun {
                 space_id: space.id,
@@ -9153,8 +9158,8 @@ mod tests {
                 inline_workflow_name: None,
                 inline_workflow_version: None,
                 carrying_skill: None,
-                source: Some(source.into()),
-                source_hash: source_hash(source),
+                source: Some(source.clone()),
+                source_hash: source_hash(&source),
                 args: Value::Null,
                 budget: serde_json::json!({}),
                 engine_version: "test".into(),
@@ -9172,7 +9177,7 @@ mod tests {
             crate::tool::ToolDispatcher::allow_all(vec![]),
             None,
         );
-        launch_existing_run(state.clone(), run.clone(), source.into(), None)
+        launch_existing_run(state.clone(), run.clone(), source, None)
             .await
             .expect("launch waiting run");
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
@@ -9192,6 +9197,7 @@ mod tests {
         })
         .await
         .expect("timer wait becomes suspended");
+        wait_for_run_state(&storage, run.id, "parked").await;
 
         let Json(cancel_requested) = cancel_run(State(state.clone()), Path(run.id))
             .await
