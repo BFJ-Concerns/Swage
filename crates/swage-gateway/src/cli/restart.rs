@@ -10,9 +10,9 @@ pub async fn run(args: &RestartArgs) -> Result<(), ClientError> {
         Some((metadata, metadata_path)) => {
             let environment =
                 super::recovery::recover_gateway_lifecycle_environment(metadata.pid).map_err(
-                    |reason| ClientError::GatewayNotRunning {
+                    |reason| ClientError::GatewayRestartRefused {
                         reason: format!(
-                            "cannot preserve the running gateway's data root and runtime directory; restart was not attempted: {reason}"
+                            "cannot preserve the running gateway's data root and runtime directory: {reason}"
                         ),
                     },
                 )?;
@@ -89,10 +89,14 @@ mod tests {
             log_file: None,
         };
 
-        let error = run(&args).await.unwrap_err().to_string();
+        let error = run(&args).await.unwrap_err();
 
-        assert!(error.contains("restart was not attempted"));
-        assert!(error.contains("exposes neither SWAGE_HOME nor HOME"));
+        match error {
+            ClientError::GatewayRestartRefused { reason } => {
+                assert!(reason.contains("exposes neither SWAGE_HOME nor HOME"));
+            }
+            other => panic!("expected GatewayRestartRefused, got: {other:?}"),
+        }
         assert!(gateway.try_wait().unwrap().is_none(), "gateway was stopped");
 
         gateway.kill().unwrap();

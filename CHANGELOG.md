@@ -6,6 +6,7 @@ All notable changes to Swage are documented in this file.
 
 ### Added
 
+- Providers can now count prompt tokens under their own tokenizer where the vendor offers it (Anthropic), with decorated provider stacks forwarding the operation and estimate-based callers unaffected.
 - Detached gateway starts now accept `--log-file`, report the chosen output destination, and explain foreground output handling in command help.
 - Agents can route scheduled-run output to channels, local storage, and webhooks when creating or updating schedules.
 - New conversations can choose a reasoning effort from the main composer, while each configured model can provide the inherited default.
@@ -41,6 +42,9 @@ All notable changes to Swage are documented in this file.
 - Reloading the web UI now returns to the open space instead of the space picker.
 - Operator schedules now show their complete execution target from every space.
 - The space picker now describes only the space behaviour the product provides.
+- Chat Completions streams now deliver every parallel tool call accumulated before completion.
+- Nullable object-valued tool parameters no longer fail nested required-field validation when set to null.
+- Gateway start and restart failures now describe already-running and restart-refusal states truthfully.
 - Bare skill commands now run as persisted conversation turns instead of leaving the composer waiting indefinitely after activation.
 - Restarting a gateway now preserves its effective data root and runtime directory, and leaves the running gateway untouched when those values cannot be recovered.
 - Workflow scripts now reject non-string `agent` and `agentStart` prompts before dispatch instead of silently sending coerced text such as `[object Object]` to workers.
