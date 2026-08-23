@@ -27,6 +27,17 @@ pub struct GatewayLifecycleEnvironment {
 }
 
 impl GatewayLifecycleEnvironment {
+    pub fn swage_home(&self) -> &Path {
+        &self.swage_home
+    }
+
+    pub fn metadata_path(&self) -> PathBuf {
+        match &self.xdg_runtime_dir {
+            Some(runtime_dir) => runtime_dir.join("swage").join("metadata.json"),
+            None => self.swage_home.join("run").join("metadata.json"),
+        }
+    }
+
     pub fn apply_to_command(&self, command: &mut std::process::Command) {
         command.env("SWAGE_HOME", &self.swage_home);
         match &self.xdg_runtime_dir {
@@ -35,18 +46,6 @@ impl GatewayLifecycleEnvironment {
             }
             None => {
                 command.env_remove("XDG_RUNTIME_DIR");
-            }
-        }
-    }
-
-    pub fn apply_to_current_process(&self) {
-        // SAFETY: restart applies the recovered environment before entering the
-        // foreground gateway, where it remains the process's lifecycle state.
-        unsafe {
-            std::env::set_var("SWAGE_HOME", &self.swage_home);
-            match &self.xdg_runtime_dir {
-                Some(runtime_dir) => std::env::set_var("XDG_RUNTIME_DIR", runtime_dir),
-                None => std::env::remove_var("XDG_RUNTIME_DIR"),
             }
         }
     }
@@ -77,6 +76,14 @@ pub async fn recover_configured_gateway_metadata(
     host: Option<&str>,
     port: Option<u16>,
 ) -> Option<RuntimeMetadata> {
+    recover_configured_gateway_metadata_at(host, port, &RuntimeMetadata::metadata_path()).await
+}
+
+pub async fn recover_configured_gateway_metadata_at(
+    host: Option<&str>,
+    port: Option<u16>,
+    metadata_path: &Path,
+) -> Option<RuntimeMetadata> {
     let host = host.unwrap_or(DEFAULT_HOST);
     let port = port.unwrap_or(DEFAULT_PORT);
     let health_host = health_host(host);
@@ -87,11 +94,11 @@ pub async fn recover_configured_gateway_metadata(
     }
 
     let pid = listener_pid(host, port)?;
-    if !pid_uses_current_metadata_path(pid) {
+    if process_metadata_path(pid).as_deref() != Some(metadata_path) {
         return None;
     }
     let metadata = RuntimeMetadata::new(pid, address);
-    if let Err(error) = metadata.save() {
+    if let Err(error) = metadata.save_to(metadata_path) {
         eprintln!("Gateway is running but runtime metadata could not be restored: {error}");
     }
     Some(metadata)
@@ -118,19 +125,6 @@ fn listener_pid(host: &str, port: u16) -> Option<u32> {
     {
         let _ = (host, port);
         None
-    }
-}
-
-fn pid_uses_current_metadata_path(pid: u32) -> bool {
-    #[cfg(target_os = "linux")]
-    {
-        process_metadata_path(pid).is_some_and(|path| path == RuntimeMetadata::metadata_path())
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = pid;
-        false
     }
 }
 
@@ -240,12 +234,18 @@ fn process_metadata_path(pid: u32) -> Option<PathBuf> {
     })
 }
 
+#[cfg(not(target_os = "linux"))]
+fn process_metadata_path(_pid: u32) -> Option<PathBuf> {
+    None
+}
+
 #[cfg(target_os = "linux")]
 fn lifecycle_environment_from_bytes(environ: &[u8]) -> Option<GatewayLifecycleEnvironment> {
     use std::os::unix::ffi::{OsStrExt, OsStringExt};
 
     let mut home = None;
     let mut swage_home = None;
+    let mut swage_home_was_present = false;
     let mut xdg_runtime_dir = None;
 
     for entry in environ.split(|byte| *byte == 0) {
@@ -254,18 +254,23 @@ fn lifecycle_environment_from_bytes(environ: &[u8]) -> Option<GatewayLifecycleEn
         };
         let key = OsStr::from_bytes(&entry[..separator]);
         let value = OsString::from_vec(entry[separator + 1..].to_vec());
-        if value.is_empty() {
-            continue;
-        }
         if key == "HOME" {
-            home = Some(PathBuf::from(value));
+            if !value.is_empty() {
+                home = Some(PathBuf::from(value));
+            }
         } else if key == "SWAGE_HOME" {
-            swage_home = Some(PathBuf::from(value));
-        } else if key == "XDG_RUNTIME_DIR" {
+            swage_home_was_present = true;
+            if !value.is_empty() {
+                swage_home = Some(PathBuf::from(value));
+            }
+        } else if key == "XDG_RUNTIME_DIR" && !value.is_empty() {
             xdg_runtime_dir = Some(PathBuf::from(value));
         }
     }
 
+    if swage_home_was_present && swage_home.is_none() {
+        return None;
+    }
     let root = swage_home.or_else(|| home.map(|home| home.join(".swage")))?;
     Some(GatewayLifecycleEnvironment {
         swage_home: root,
@@ -340,5 +345,14 @@ mod tests {
     #[test]
     fn lifecycle_environment_rejects_unknown_data_root() {
         assert_eq!(lifecycle_environment_from_bytes(b"PATH=/usr/bin\0"), None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn lifecycle_environment_rejects_empty_explicit_root() {
+        assert_eq!(
+            lifecycle_environment_from_bytes(b"HOME=/operator\0SWAGE_HOME=\0"),
+            None
+        );
     }
 }
