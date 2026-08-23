@@ -11,6 +11,7 @@
 use uuid::Uuid;
 
 use swage_core::{ChatMessage, CompletionRequest, ContentPart, Role};
+use swage_protocol::client::context::CompactionRecord;
 use swage_provider::LlmProvider;
 use swage_storage::Storage;
 
@@ -27,18 +28,7 @@ use crate::error::AgentError;
 pub fn exceeds_threshold(messages: &[ChatMessage], threshold: &CompactionThreshold) -> bool {
     match threshold {
         CompactionThreshold::TokenCount(max_tokens) => {
-            let char_count: usize = messages
-                .iter()
-                .flat_map(|m| m.content().iter())
-                .map(|part| match part {
-                    ContentPart::Text { text } => text.len(),
-                    // Images are treated as zero for the purposes of this estimate.
-                    ContentPart::ImageUrl { .. } => 0,
-                })
-                .sum();
-            // Rough estimate: ~4 characters per token.
-            let estimated_tokens = (char_count / 4) as u64;
-            estimated_tokens > *max_tokens
+            estimated_tokens(messages) > *max_tokens as usize
         }
         CompactionThreshold::MessageCount(max_count) => messages.len() > *max_count as usize,
     }
@@ -64,30 +54,66 @@ pub async fn compact(
     provider: &dyn LlmProvider,
     _storage: &dyn Storage,
     _thread_id: Uuid,
-) -> Result<Vec<ChatMessage>, AgentError> {
+    focus: Option<&str>,
+) -> Result<(Vec<ChatMessage>, Option<CompactionRecord>), AgentError> {
+    let messages_before = messages.len();
+    let tokens_before = estimated_tokens(&messages);
     // Fast path: already within bounds.
     if !exceeds_threshold(&messages, threshold) {
-        return Ok(messages);
+        return Ok((messages, None));
     }
 
     // Tier 1 — Summarise: condense older half via an LLM call. Falls back
     // gracefully if the provider call fails.
-    let messages = try_summarise(messages, provider).await;
+    let messages = try_summarise(messages, provider, focus).await;
     if !exceeds_threshold(&messages, threshold) {
-        return Ok(messages);
+        let tokens_after = estimated_tokens(&messages);
+        let messages_removed = messages_before.saturating_sub(messages.len());
+        return Ok((
+            messages,
+            Some(compaction_record(
+                "summarisation",
+                messages_removed,
+                tokens_before,
+                tokens_after,
+                focus,
+            )),
+        ));
     }
 
     // Tier 2 — Truncate: drop oldest non-system messages.
     let messages = truncate(messages, threshold);
     if !exceeds_threshold(&messages, threshold) {
-        return Ok(messages);
+        let tokens_after = estimated_tokens(&messages);
+        let messages_removed = messages_before.saturating_sub(messages.len());
+        return Ok((
+            messages,
+            Some(compaction_record(
+                "truncation",
+                messages_removed,
+                tokens_before,
+                tokens_after,
+                focus,
+            )),
+        ));
     }
 
     // Tier 3 — Aggressive truncate: keep system messages + single most recent
     // message. All dropped messages are already persisted to storage.
     let messages = aggressive_truncate(messages);
     if !exceeds_threshold(&messages, threshold) {
-        return Ok(messages);
+        let tokens_after = estimated_tokens(&messages);
+        let messages_removed = messages_before.saturating_sub(messages.len());
+        return Ok((
+            messages,
+            Some(compaction_record(
+                "aggressive_truncation",
+                messages_removed,
+                tokens_before,
+                tokens_after,
+                focus,
+            )),
+        ));
     }
 
     Err(AgentError::CompactionFailed(
@@ -103,7 +129,11 @@ pub async fn compact(
 ///
 /// Returns the compacted list on success, or the original unchanged list when
 /// the provider call fails (allowing tier 2 to handle it).
-async fn try_summarise(messages: Vec<ChatMessage>, provider: &dyn LlmProvider) -> Vec<ChatMessage> {
+async fn try_summarise(
+    messages: Vec<ChatMessage>,
+    provider: &dyn LlmProvider,
+    focus: Option<&str>,
+) -> Vec<ChatMessage> {
     if messages.len() < 2 {
         return messages;
     }
@@ -123,12 +153,15 @@ async fn try_summarise(messages: Vec<ChatMessage>, provider: &dyn LlmProvider) -
         .collect::<Vec<_>>()
         .join("\n");
 
+    let focus_instruction = focus
+        .map(|focus| format!("\n\nFocus instructions:\n{focus}"))
+        .unwrap_or_default();
     let summarise_request = CompletionRequest {
         effort: None,
         messages: vec![ChatMessage::new(
             Role::User,
             format!(
-                "Summarise the following conversation concisely, preserving key information:\n\n{old_text}"
+                "Summarise the following conversation concisely, preserving key information:{focus_instruction}\n\nConversation:\n{old_text}"
             ),
         )],
         model: None,
@@ -151,6 +184,40 @@ async fn try_summarise(messages: Vec<ChatMessage>, provider: &dyn LlmProvider) -
         }
         // Summarisation failed — return unchanged so tier 2 can take over.
         Err(_) => messages,
+    }
+}
+
+fn estimated_tokens(messages: &[ChatMessage]) -> usize {
+    let character_count: usize = messages
+        .iter()
+        .flat_map(|message| message.content())
+        .map(|part| match part {
+            ContentPart::Text { text } => text.len(),
+            ContentPart::ImageUrl { .. } => 0,
+        })
+        .sum();
+
+    character_count / 4
+}
+
+fn compaction_record(
+    actual_strategy: &str,
+    messages_removed: usize,
+    tokens_before: usize,
+    tokens_after: usize,
+    focus: Option<&str>,
+) -> CompactionRecord {
+    CompactionRecord {
+        element: "agent_history".to_string(),
+        requested_strategy: "summarisation".to_string(),
+        actual_strategy: actual_strategy.to_string(),
+        messages_removed,
+        tokens_before,
+        tokens_after,
+        source_message_range: None,
+        budget: None,
+        failure_reason: None,
+        focus: focus.map(str::to_owned),
     }
 }
 
@@ -224,7 +291,7 @@ fn aggressive_truncate(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
 #[cfg(test)]
 mod tests {
     use std::pin::Pin;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     use async_trait::async_trait;
     use futures::Stream;
@@ -247,12 +314,14 @@ mod tests {
     /// Provider that always returns a canned summary string.
     struct SummaryProvider {
         summary: String,
+        requests: Mutex<Vec<CompletionRequest>>,
     }
 
     impl SummaryProvider {
         fn new(summary: impl Into<String>) -> Arc<Self> {
             Arc::new(Self {
                 summary: summary.into(),
+                requests: Mutex::new(Vec::new()),
             })
         }
     }
@@ -265,8 +334,9 @@ mod tests {
 
         async fn complete(
             &self,
-            _request: CompletionRequest,
+            request: CompletionRequest,
         ) -> Result<CompletionResponse, ProviderError> {
+            self.requests.lock().expect("request lock").push(request);
             Ok(CompletionResponse {
                 content: self.summary.clone(),
                 input_tokens: 10,
@@ -392,6 +462,19 @@ mod tests {
             &messages,
             &CompactionThreshold::TokenCount(10)
         ));
+
+        // The estimate sums all characters before dividing. Three short
+        // messages therefore contain an estimated two tokens (9/4), rather
+        // than zero tokens from flooring each message independently.
+        let short_messages = vec![
+            text_msg(Role::User, "abc"),
+            text_msg(Role::Assistant, "abc"),
+            text_msg(Role::User, "abc"),
+        ];
+        assert!(exceeds_threshold(
+            &short_messages,
+            &CompactionThreshold::TokenCount(1)
+        ));
     }
 
     // -----------------------------------------------------------------------
@@ -414,11 +497,13 @@ mod tests {
             provider.as_ref(),
             storage.as_ref(),
             Uuid::new_v4(),
+            None,
         )
         .await
         .expect("compact should succeed when below threshold");
 
-        assert_eq!(result.len(), original_count);
+        assert_eq!(result.0.len(), original_count);
+        assert!(result.1.is_none());
     }
 
     #[tokio::test]
@@ -433,15 +518,25 @@ mod tests {
         let storage = stub_storage();
         let provider = SummaryProvider::new("Summary of the first two messages");
 
-        let result = compact(
+        let (result, record) = compact(
             messages,
             &CompactionThreshold::MessageCount(3),
             provider.as_ref(),
             storage.as_ref(),
             Uuid::new_v4(),
+            None,
         )
         .await
         .expect("compact should succeed");
+
+        let record = record.expect("compaction should emit an audit record");
+        assert!(record.focus.is_none());
+        let requests = provider.requests.lock().expect("request lock");
+        let prompt = match &requests[0].messages[0].content()[0] {
+            ContentPart::Text { text } => text,
+            _ => panic!("expected text summarisation prompt"),
+        };
+        assert!(!prompt.contains("Focus instructions:"));
 
         // Summary message (system) + the 2 recent messages = 3 total.
         assert_eq!(result.len(), 3);
@@ -458,6 +553,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn compaction_focus_shapes_prompt_and_record() {
+        let messages = vec![
+            text_msg(Role::User, "old user detail"),
+            text_msg(Role::Assistant, "old assistant detail"),
+            text_msg(Role::User, "recent user detail"),
+            text_msg(Role::Assistant, "recent assistant detail"),
+        ];
+        let storage = stub_storage();
+        let provider = SummaryProvider::new("focused summary");
+
+        let (_, record) = compact(
+            messages,
+            &CompactionThreshold::MessageCount(3),
+            provider.as_ref(),
+            storage.as_ref(),
+            Uuid::new_v4(),
+            Some("Preserve dates and named decisions"),
+        )
+        .await
+        .expect("focused compaction should succeed");
+
+        let record = record.expect("compaction should emit an audit record");
+        let requests = provider.requests.lock().expect("request lock");
+        let prompt = match &requests[0].messages[0].content()[0] {
+            ContentPart::Text { text } => text,
+            _ => panic!("expected text summarisation prompt"),
+        };
+        assert!(prompt.contains("Focus instructions:\nPreserve dates and named decisions"));
+        assert_eq!(
+            record.focus.as_deref(),
+            Some("Preserve dates and named decisions")
+        );
+    }
+
+    #[tokio::test]
     async fn summarise_failure_falls_through_to_truncate() {
         // 5 messages, threshold of 3, provider errors → tier 1 fails, tier 2 truncates.
         let messages = vec![
@@ -470,12 +600,13 @@ mod tests {
         let storage = stub_storage();
         let provider = Arc::new(ErrorProvider);
 
-        let result = compact(
+        let (result, _) = compact(
             messages,
             &CompactionThreshold::MessageCount(3),
             provider.as_ref(),
             storage.as_ref(),
             Uuid::new_v4(),
+            None,
         )
         .await
         .expect("compact should succeed via truncation fallback");
@@ -506,12 +637,13 @@ mod tests {
             provider.as_ref(),
             storage.as_ref(),
             Uuid::new_v4(),
+            None,
         )
         .await;
 
         match result {
             Err(AgentError::CompactionFailed(_)) => {}
-            Ok(msgs) => panic!(
+            Ok((msgs, _)) => panic!(
                 "expected CompactionFailed, got Ok with {} messages",
                 msgs.len()
             ),

@@ -20,6 +20,12 @@ pub enum AgentEvent {
     /// The turn record has been created and processing is beginning.
     TurnStarted { turn_id: Uuid },
 
+    /// Agent-side context compaction completed and its audit record is ready.
+    CompactionApplied {
+        turn_id: Uuid,
+        record: swage_protocol::client::context::CompactionRecord,
+    },
+
     /// A streaming token arrived from the LLM.
     Token { content: String },
 
