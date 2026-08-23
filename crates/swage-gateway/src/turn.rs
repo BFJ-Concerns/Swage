@@ -591,6 +591,40 @@ pub(crate) async fn process_turn_with_existing_turn(
     existing_turn_id: Option<Uuid>,
     attendance: TurnAttendance,
 ) -> Result<(), GatewayError> {
+    process_turn_with_existing_turn_and_focus(
+        state,
+        session_id,
+        target_thread_id,
+        content,
+        ws_tx,
+        subscription,
+        output_schema_override,
+        max_output_retries_override,
+        effort_override,
+        cancellation_override,
+        existing_turn_id,
+        attendance,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn process_turn_with_existing_turn_and_focus(
+    state: &AppState,
+    session_id: Uuid,
+    target_thread_id: Option<Uuid>,
+    content: String,
+    ws_tx: mpsc::UnboundedSender<ServerEvent>,
+    subscription: Arc<Mutex<SubscriptionState>>,
+    output_schema_override: Option<serde_json::Value>,
+    max_output_retries_override: Option<u32>,
+    effort_override: Option<swage_core::Effort>,
+    cancellation_override: Option<CancellationToken>,
+    existing_turn_id: Option<Uuid>,
+    attendance: TurnAttendance,
+    compaction_focus: Option<String>,
+) -> Result<(), GatewayError> {
     process_turn_with_composition(
         state,
         session_id,
@@ -605,6 +639,7 @@ pub(crate) async fn process_turn_with_existing_turn(
         existing_turn_id,
         attendance,
         DispatchContextComposition::default(),
+        compaction_focus,
     )
     .await
 }
@@ -629,6 +664,7 @@ pub(crate) async fn process_turn_with_composition(
     existing_turn_id: Option<Uuid>,
     attendance: TurnAttendance,
     composition: DispatchContextComposition,
+    compaction_focus: Option<String>,
 ) -> Result<(), GatewayError> {
     // Step 1: Resolve the space and target thread for this session.
     let mut session = state
@@ -1032,7 +1068,7 @@ pub(crate) async fn process_turn_with_composition(
         &session.agent_id,
         &session_variables,
     );
-    let (assembled_messages, assembly_report) = (output.messages, output.report);
+    let (assembled_messages, mut assembly_report) = (output.messages, output.report);
 
     tracing::debug!(
         total_tokens = assembly_report.total_tokens,
@@ -1354,6 +1390,7 @@ pub(crate) async fn process_turn_with_composition(
             },
             user_message: before_inbound.canonical_content.clone(),
             assembled_context: assembled_messages,
+            compaction_focus,
             parent_turn_id: None,
             existing_turn_id: Some(prepared_turn_id),
             effort,
@@ -1417,6 +1454,29 @@ pub(crate) async fn process_turn_with_composition(
                 };
                 if subscription.lock().await.should_deliver(&assembled_event) {
                     let _ = ws_tx.send(assembled_event);
+                }
+            }
+            AgentEvent::CompactionApplied {
+                turn_id: snapshot_turn_id,
+                record,
+            } => {
+                assembly_report.compaction_applied.push(record.clone());
+                if let Some(records) = report_json
+                    .get_mut("compaction_applied")
+                    .and_then(serde_json::Value::as_array_mut)
+                {
+                    records.push(
+                        serde_json::to_value(record).unwrap_or_else(
+                            |error| serde_json::json!({ "error": error.to_string() }),
+                        ),
+                    );
+                }
+                if let Err(error) = state
+                    .storage
+                    .store_snapshot(snapshot_turn_id, &report_json.to_string())
+                    .await
+                {
+                    tracing::warn!(%error, "failed to persist compaction record");
                 }
             }
             AgentEvent::Token { content } => {

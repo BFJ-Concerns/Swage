@@ -1427,6 +1427,7 @@ pub async fn submit_turn(
     let bg_state = state.clone();
     let message = req.message;
     let output_schema = req.output_schema;
+    let compaction_focus = req.compaction_focus;
     let session_id = req.conversation_id;
     tokio::spawn(async move {
         use crate::subscription::SubscriptionState;
@@ -1441,7 +1442,7 @@ pub async fn submit_turn(
         // Drain events in background so the channel never fills.
         tokio::spawn(async move { while ws_rx.recv().await.is_some() {} });
 
-        let result = crate::turn::process_turn_with_existing_turn(
+        let result = crate::turn::process_turn_with_existing_turn_and_focus(
             &bg_state,
             session_id,
             Some(thread_id),
@@ -1454,6 +1455,7 @@ pub async fn submit_turn(
             None,
             Some(turn_id),
             crate::turn::TurnAttendance::Unattended,
+            compaction_focus,
         )
         .await;
 

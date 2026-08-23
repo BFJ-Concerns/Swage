@@ -382,6 +382,7 @@ impl DelegationExecutor {
             },
             user_message: task_description.to_string(),
             assembled_context,
+            compaction_focus: None,
             parent_turn_id: sender_turn_id,
             existing_turn_id: Some(turn_id),
             cancellation_token: cancel_token.clone(),

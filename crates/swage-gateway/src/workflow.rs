@@ -1257,6 +1257,7 @@ async fn run_ephemeral_agent_call(
         None,
         crate::turn::TurnAttendance::Unattended,
         composition,
+        None,
     );
     tokio::pin!(processing);
     let timeout = request.timeout_ms.map(std::time::Duration::from_millis);
