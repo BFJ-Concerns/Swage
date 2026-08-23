@@ -23,6 +23,7 @@ const DEFAULT_PORT: u16 = 3000;
 #[derive(Debug, PartialEq, Eq)]
 pub struct GatewayLifecycleEnvironment {
     swage_home: PathBuf,
+    swage_home_was_explicit: bool,
     home: Option<PathBuf>,
     xdg_runtime_dir: Option<PathBuf>,
 }
@@ -33,14 +34,20 @@ impl GatewayLifecycleEnvironment {
     }
 
     pub fn metadata_path(&self) -> PathBuf {
-        match &self.xdg_runtime_dir {
-            Some(runtime_dir) => runtime_dir.join("swage").join("metadata.json"),
-            None => self.swage_home.join("run").join("metadata.json"),
-        }
+        RuntimeMetadata::metadata_path_for(
+            self.swage_home_was_explicit
+                .then_some(self.swage_home.as_path()),
+            self.xdg_runtime_dir.as_deref(),
+            &self.swage_home,
+        )
     }
 
     pub fn apply_to_command(&self, command: &mut std::process::Command) {
-        command.env("SWAGE_HOME", &self.swage_home);
+        if self.swage_home_was_explicit {
+            command.env("SWAGE_HOME", &self.swage_home);
+        } else {
+            command.env_remove("SWAGE_HOME");
+        }
         match &self.home {
             Some(home) => {
                 command.env("HOME", home);
@@ -237,10 +244,7 @@ fn process_metadata_path(pid: u32) -> Option<PathBuf> {
     let environ = fs::read(format!("/proc/{pid}/environ")).ok()?;
     let environment = lifecycle_environment_from_bytes(&environ)?;
 
-    Some(match environment.xdg_runtime_dir {
-        Some(xdg_runtime_dir) => xdg_runtime_dir.join("swage").join("metadata.json"),
-        None => environment.swage_home.join("run").join("metadata.json"),
-    })
+    Some(environment.metadata_path())
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -254,7 +258,7 @@ fn lifecycle_environment_from_bytes(environ: &[u8]) -> Option<GatewayLifecycleEn
 
     let mut home = None;
     let mut swage_home = None;
-    let mut swage_home_was_present = false;
+    let mut swage_home_was_explicit = false;
     let mut xdg_runtime_dir = None;
 
     for entry in environ.split(|byte| *byte == 0) {
@@ -266,7 +270,7 @@ fn lifecycle_environment_from_bytes(environ: &[u8]) -> Option<GatewayLifecycleEn
         if key == "HOME" {
             home = Some(PathBuf::from(value));
         } else if key == "SWAGE_HOME" {
-            swage_home_was_present = true;
+            swage_home_was_explicit = true;
             if !value.is_empty() {
                 swage_home = Some(PathBuf::from(value));
             }
@@ -275,7 +279,7 @@ fn lifecycle_environment_from_bytes(environ: &[u8]) -> Option<GatewayLifecycleEn
         }
     }
 
-    if swage_home_was_present && swage_home.is_none() {
+    if swage_home_was_explicit && swage_home.is_none() {
         return None;
     }
     let root = swage_home.or_else(|| {
@@ -285,6 +289,7 @@ fn lifecycle_environment_from_bytes(environ: &[u8]) -> Option<GatewayLifecycleEn
     })?;
     Some(GatewayLifecycleEnvironment {
         swage_home: root,
+        swage_home_was_explicit,
         home,
         xdg_runtime_dir,
     })
@@ -323,6 +328,10 @@ mod tests {
         assert_eq!(environment.swage_home, PathBuf::from("/data/swage"));
         assert_eq!(environment.home, Some(PathBuf::from("/operator")));
         assert_eq!(
+            environment.metadata_path(),
+            PathBuf::from("/data/swage/run/metadata.json")
+        );
+        assert_eq!(
             environment.xdg_runtime_dir,
             Some(PathBuf::from("/run/user/1000"))
         );
@@ -346,13 +355,44 @@ mod tests {
         assert_eq!(environment.swage_home, PathBuf::from("/operator/.swage"));
         assert_eq!(environment.home, Some(PathBuf::from("/operator")));
         assert_eq!(environment.xdg_runtime_dir, None);
+        assert_eq!(
+            environment.metadata_path(),
+            PathBuf::from("/operator/.swage/run/metadata.json")
+        );
 
         let mut command = std::process::Command::new("swage");
         environment.apply_to_command(&mut command);
         assert!(
             command
                 .get_envs()
+                .any(|entry| entry == (OsStr::new("SWAGE_HOME"), None))
+        );
+        assert!(
+            command
+                .get_envs()
                 .any(|entry| entry == (OsStr::new("XDG_RUNTIME_DIR"), None))
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn lifecycle_environment_uses_xdg_metadata_without_explicit_root() {
+        let environment =
+            lifecycle_environment_from_bytes(b"HOME=/operator\0XDG_RUNTIME_DIR=/run/user/1000\0")
+                .unwrap();
+
+        assert_eq!(environment.swage_home, PathBuf::from("/operator/.swage"));
+        assert_eq!(
+            environment.metadata_path(),
+            PathBuf::from("/run/user/1000/swage/metadata.json")
+        );
+
+        let mut command = std::process::Command::new("swage");
+        environment.apply_to_command(&mut command);
+        assert!(
+            command
+                .get_envs()
+                .any(|entry| entry == (OsStr::new("SWAGE_HOME"), None))
         );
     }
 

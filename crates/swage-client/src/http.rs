@@ -613,12 +613,32 @@ impl GatewayClient {
         message: &str,
         output_schema: Option<serde_json::Value>,
     ) -> Result<Uuid, ClientError> {
+        self.submit_turn_with_compaction_focus(
+            conversation_id,
+            thread_id,
+            message,
+            output_schema,
+            None,
+        )
+        .await
+    }
+
+    /// Submit a turn with optional guidance for context summarisation.
+    pub async fn submit_turn_with_compaction_focus(
+        &self,
+        conversation_id: Uuid,
+        thread_id: Option<Uuid>,
+        message: &str,
+        output_schema: Option<serde_json::Value>,
+        compaction_focus: Option<String>,
+    ) -> Result<Uuid, ClientError> {
         let url = format!("{}/api/turns", self.base_url);
         let body = SubmitTurnRequest {
             conversation_id,
             thread_id,
             message: message.to_owned(),
             output_schema,
+            compaction_focus,
         };
 
         let response = self

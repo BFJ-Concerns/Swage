@@ -61,6 +61,7 @@ impl TruncationCompactor {
                     source_message_range: None,
                     budget: Some(budget),
                     failure_reason: None,
+                    focus: None,
                 },
             );
         }
@@ -123,6 +124,7 @@ impl TruncationCompactor {
                 source_message_range: None,
                 budget: Some(budget),
                 failure_reason: None,
+                focus: None,
             },
         )
     }

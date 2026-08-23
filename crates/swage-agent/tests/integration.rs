@@ -318,6 +318,7 @@ fn test_request(
         },
         user_message: user_message.to_string(),
         assembled_context: vec![ChatMessage::new(Role::User, user_message)],
+        compaction_focus: None,
         parent_turn_id: None,
         existing_turn_id,
         cancellation_token: CancellationToken::new(),

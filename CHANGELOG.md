@@ -6,6 +6,8 @@ All notable changes to Swage are documented in this file.
 
 ### Added
 
+- Asynchronous turn callers can provide optional focus instructions for context-compaction summaries, with the instructions retained in the compaction audit record.
+- Operators can inspect recorded configuration changes, assembly decisions, and variant selections in a read-only history pane.
 - Providers can now count prompt tokens under their own tokenizer where the vendor offers it (Anthropic), with decorated provider stacks forwarding the operation and estimate-based callers unaffected.
 - Detached gateway starts now accept `--log-file`, report the chosen output destination, and explain foreground output handling in command help.
 - Agents can route scheduled-run output to channels, local storage, and webhooks when creating or updating schedules.
@@ -29,6 +31,7 @@ All notable changes to Swage are documented in this file.
 
 ### Changed
 
+- Async turn submissions now reject unrecognised request fields instead of silently ignoring them.
 - JavaScript context assemblies now expose `render()` only on template-backed briefing elements; calling it on literal elements fails the script and records the fallback to the default assembly.
 - Gateway lifecycle defaults now use the descriptive `set-defaults` and `clear-defaults` commands; the terminal client is `chat`, and shell scripts are produced by `generate-completion`.
 - Anthropic requests now use the native beta endpoint.
@@ -39,8 +42,16 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
-- Tool-call, connection-error, inline-turn, and approval failure states now use the shared error treatment instead of action orange; connection loss and reconnection keep their ordinary connectivity treatment.
-- Inline turn errors now use the error-token wash in both themes.
+- Tool-call and connection-error failure states now use the shared error treatment instead of action orange; connection loss and reconnection keep their ordinary connectivity treatment.
+- Inline-turn and approval errors now use the error-token wash in both themes.
+- Workflow scripts now reject unrecognised `agent()` and `agentStart()` option keys before dispatch instead of silently dropping them.
+- Reloading the web UI now returns to the open space instead of the space picker.
+- Operator schedules now show their complete execution target from every space.
+- The space picker now describes only the space behaviour the product provides.
+- Session-scoped approval grants now apply only to the conversation session that granted them.
+- Explicitly disabling the sandbox no longer also requires the degraded-execution opt-in.
+- Gateways started with distinct explicit data roots now keep separate runtime metadata and report their own addresses.
+- Obsolete private-alpha data roots now receive a clear rebuild instruction instead of a raw missing-workflow-table error.
 - Chat Completions streams now deliver every parallel tool call accumulated before completion.
 - Nullable object-valued tool parameters no longer fail nested required-field validation when set to null.
 - Gateway start and restart failures now describe already-running and restart-refusal states truthfully.
