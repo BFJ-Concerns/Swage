@@ -200,7 +200,6 @@ pub(super) async fn build_turn_sandbox(
     workspace_policy: Option<&TrustedWorkspacePolicy>,
 ) -> Result<TurnSandboxBuild, swage_core::SandboxError> {
     if !config.sandbox.enabled {
-        require_degraded_execution_opt_in(config)?;
         return Ok(TurnSandboxBuild {
             sandbox: None,
             isolation: ExecutionIsolation::Degraded {
@@ -398,13 +397,18 @@ async fn build_turn_sandbox_for_backend_selection(
 
 pub(crate) async fn build_gateway_dispatcher(
     state: &AppState,
-    config: &swage_config::ResolvedConfig,
-    agent_config: &AgentConfig,
-    session_metadata: Option<&serde_json::Value>,
-    space_id: Option<Uuid>,
-    active_workspace_attachment_id: Option<Uuid>,
-    ws_tx: mpsc::UnboundedSender<ServerEvent>,
+    request: GatewayDispatcherRequest<'_>,
 ) -> Result<GatewayDispatcherBuild, swage_core::SandboxError> {
+    let GatewayDispatcherRequest {
+        config,
+        agent_config,
+        session_metadata,
+        space_id,
+        active_workspace_attachment_id,
+        ws_tx,
+        session_id,
+        turn_id: _,
+    } = request;
     #[cfg(test)]
     if state.take_dispatcher_build_failure() {
         return Err(swage_core::SandboxError::SpawnFailed {
@@ -427,8 +431,13 @@ pub(crate) async fn build_gateway_dispatcher(
         .unwrap_or_else(|e| e.into_inner())
         .clone();
     let startup_config = &state.config;
-    let permissions =
-        build_permission_config(config, startup_config, space_id, &session_approval_grants);
+    let permissions = build_permission_config(
+        config,
+        startup_config,
+        space_id,
+        session_id,
+        &session_approval_grants,
+    );
 
     let base_dispatcher = state.active_tool_dispatcher();
     let dispatcher = ToolDispatcher::new(
@@ -516,28 +525,11 @@ pub(crate) async fn build_gateway_dispatcher_for_unattended_execution(
     request: GatewayDispatcherRequest<'_>,
     execution_context: &'static str,
 ) -> Result<GatewayDispatcherBuild, swage_core::GatewayError> {
-    let GatewayDispatcherRequest {
-        config,
-        agent_config,
-        session_metadata,
-        space_id,
-        active_workspace_attachment_id,
-        ws_tx,
-        session_id,
-        turn_id,
-    } = request;
-
-    let build = build_gateway_dispatcher(
-        state,
-        config,
-        agent_config,
-        session_metadata,
-        space_id,
-        active_workspace_attachment_id,
-        ws_tx.clone(),
-    )
-    .await
-    .map_err(|error| swage_core::GatewayError::ConfigError(error.to_string()))?;
+    let session_id = request.session_id;
+    let turn_id = request.turn_id;
+    let build = build_gateway_dispatcher(state, request)
+        .await
+        .map_err(|error| swage_core::GatewayError::ConfigError(error.to_string()))?;
     record_degraded_execution(
         state,
         &build.isolation,
@@ -727,7 +719,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gateway_runtime_codex_dispatcher_requires_degraded_execution_opt_in() {
+    async fn explicit_sandbox_disablement_constructs_dispatcher_without_degraded_opt_in() {
         let (state, session_id) = make_state_with_session(Vec::new()).await;
         let workspace = tempfile::tempdir().unwrap();
         let agent_config = AgentConfig::new("gateway")
@@ -753,14 +745,13 @@ mod tests {
         )
         .await;
 
-        let Err(error) = result else {
-            panic!("gateway-runtime Codex execution must not inherit the App Server policy bypass");
-        };
-        assert!(
-            error
-                .to_string()
-                .contains("allow_degraded_execution = true")
+        let build = result.expect("explicit sandbox disablement should construct a dispatcher");
+        assert_eq!(
+            build.isolation,
+            ExecutionIsolation::Degraded {
+                reason: "sandbox_disabled_by_configuration".into(),
+            }
         );
-        assert!(state.storage.list_audit_events().await.unwrap().is_empty());
+        assert_eq!(state.storage.list_audit_events().await.unwrap().len(), 1);
     }
 }

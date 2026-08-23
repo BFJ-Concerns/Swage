@@ -40,6 +40,10 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- Session-scoped approval grants now apply only to the conversation session that granted them.
+- Explicitly disabling the sandbox no longer also requires the degraded-execution opt-in.
+- Gateways started with distinct explicit data roots now keep separate runtime metadata and report their own addresses.
+- Obsolete private-alpha data roots now receive a clear rebuild instruction instead of a raw missing-workflow-table error.
 - Chat Completions streams now deliver every parallel tool call accumulated before completion.
 - Nullable object-valued tool parameters no longer fail nested required-field validation when set to null.
 - Gateway start and restart failures now describe already-running and restart-refusal states truthfully.
