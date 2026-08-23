@@ -227,28 +227,28 @@ pub(super) async fn dispatch_client_message(
                             }
                         }
 
-                        // If the slash command had trailing text, forward it as a turn message.
-                        if let Some(text) = remaining_text {
-                            let state = state.clone();
-                            let sub = Arc::clone(&subscription);
-                            tokio::spawn(async move {
-                                if let Err(e) = turn::process_turn(
-                                    &state,
-                                    session_id,
-                                    thread_id,
-                                    text,
-                                    tx.clone(),
-                                    sub,
-                                    None,
-                                )
-                                .await
-                                {
-                                    let (code, message) = classify_gateway_error(&e);
-                                    let _ = tx.send(ServerEvent::Error { code, message });
-                                }
-                            });
-                        }
-                        // Bare `/skill-name` (no trailing text) completes with activation only.
+                        // Start a turn after activation. Trailing text remains the user message;
+                        // a bare command is itself the message so it is persisted and settles
+                        // through the same terminal event path as every other submission.
+                        let turn_content = remaining_text.unwrap_or(content);
+                        let state = state.clone();
+                        let sub = Arc::clone(&subscription);
+                        tokio::spawn(async move {
+                            if let Err(e) = turn::process_turn(
+                                &state,
+                                session_id,
+                                thread_id,
+                                turn_content,
+                                tx.clone(),
+                                sub,
+                                None,
+                            )
+                            .await
+                            {
+                                let (code, message) = classify_gateway_error(&e);
+                                let _ = tx.send(ServerEvent::Error { code, message });
+                            }
+                        });
                     } else {
                         // Unknown skill — pass the original message through unchanged.
                         let state = state.clone();

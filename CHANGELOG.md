@@ -38,6 +38,7 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- Bare skill commands now run as persisted conversation turns instead of leaving the composer waiting indefinitely after activation.
 - Restarting a gateway now preserves its effective data root and runtime directory, and leaves the running gateway untouched when those values cannot be recovered.
 - Workflow scripts now reject non-string `agent` and `agentStart` prompts before dispatch instead of silently sending coerced text such as `[object Object]` to workers.
 - Starting a new conversation now returns the composer reasoning effort to **Model default** instead of carrying over the previous conversation's choice.

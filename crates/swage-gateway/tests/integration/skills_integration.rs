@@ -280,20 +280,6 @@ async fn ws_send(sink: &mut WsSink, payload: Value) {
         .expect("ws send should succeed");
 }
 
-/// Collect all WebSocket events within a timeout. Returns them in order.
-async fn ws_collect_events(stream: &mut WsStream, timeout: Duration) -> Vec<Value> {
-    let mut events = Vec::new();
-    let deadline = tokio::time::Instant::now() + timeout;
-    loop {
-        match tokio::time::timeout_at(deadline, ws_recv_lenient(stream)).await {
-            Ok(Some(event)) => events.push(event),
-            Ok(None) => break,
-            Err(_) => break,
-        }
-    }
-    events
-}
-
 /// Collect WebSocket events through the named terminal event.
 async fn ws_collect_until(
     stream: &mut WsStream,
@@ -567,8 +553,8 @@ async fn activated_skill_persists_across_multiple_turns() {
 
     let _env_guard = SwageHomeGuard::set(root);
     let config = swage_config::ResolvedConfig::default();
-    let (router, addr, _storage) =
-        start_test_server_with_config(FixedResponseProvider::new("Let me help."), config).await;
+    let (provider, requests) = FixedResponseProvider::with_capture("Let me help.");
+    let (router, addr, _storage) = start_test_server_with_config(provider, config).await;
 
     let (status, body) = http(&router, "POST", "/api/conversations").await;
     assert_eq!(status, StatusCode::CREATED);
@@ -581,7 +567,7 @@ async fn activated_skill_persists_across_multiple_turns() {
     )
     .await;
 
-    // Turn 1: activate via slash command (bare — no message forwarded).
+    // Turn 1: a bare command activates the skill and remains a real user turn.
     ws_send(
         &mut sink,
         json!({"type": "send_message", "content": "/debug-helper"}),
@@ -594,13 +580,27 @@ async fn activated_skill_persists_across_multiple_turns() {
         ws_wait_for_event(&mut stream, "skill_activated", WEBSOCKET_EVENT_DEADLINE).await;
     assert_eq!(activated["name"], "debug-helper");
 
-    // No turn_complete should appear — bare activation doesn't start a turn.
-    let activation_events = ws_collect_events(&mut stream, Duration::from_millis(200)).await;
+    ws_wait_for_event(&mut stream, "turn_complete", WEBSOCKET_EVENT_DEADLINE).await;
+
+    let (status, conversation) = http(
+        &router,
+        "GET",
+        &format!("/api/conversations/{conversation_id}"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
     assert!(
-        !activation_events
+        conversation["messages"]
+            .as_array()
+            .unwrap()
             .iter()
-            .any(|e| e["type"] == "turn_complete"),
-        "bare slash command should not create a turn"
+            .any(|message| { message["role"] == "user" && message["content"] == "/debug-helper" }),
+        "bare command should be persisted as a user message"
+    );
+    assert_eq!(
+        requests.lock().unwrap().len(),
+        1,
+        "bare command should reach the provider"
     );
 
     // Turns 2–4: send three regular messages. Skill should persist.
