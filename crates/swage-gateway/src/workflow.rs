@@ -9199,18 +9199,7 @@ mod tests {
         .expect("timer wait becomes suspended");
         wait_for_run_state(&storage, run.id, "parked").await;
         wait_for_workflow_thread_exit(run.id).await;
-        tokio::time::timeout(std::time::Duration::from_secs(1), async {
-            while state
-                .active_workflow_runs
-                .lock()
-                .await
-                .contains_key(&run.id)
-            {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("parked run releases its in-process generation");
+        wait_for_active_workflow_run_release(&state, run.id).await;
 
         let Json(cancel_requested) = cancel_run(State(state.clone()), Path(run.id))
             .await
@@ -10184,6 +10173,23 @@ mod tests {
         .unwrap_or_else(|_| panic!("workflow thread for run {run_id} remained alive"));
     }
 
+    async fn wait_for_active_workflow_run_release(state: &AppState, run_id: Uuid) {
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while state
+                .active_workflow_runs
+                .lock()
+                .await
+                .contains_key(&run_id)
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!("active workflow registration for run {run_id} remained installed")
+        });
+    }
+
     fn spawn_event_loop(
         state: AppState,
         run_id: Uuid,
@@ -10569,18 +10575,7 @@ mod tests {
         let parked = wait_for_run_state(&storage, run.id, "parked").await;
         let wake_at = parked.wake_at.expect("parked run records its wake time");
         wait_for_workflow_thread_exit(run.id).await;
-        tokio::time::timeout(std::time::Duration::from_secs(2), async {
-            while state
-                .active_workflow_runs
-                .lock()
-                .await
-                .contains_key(&run.id)
-            {
-                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-            }
-        })
-        .await
-        .expect("parked run terminal task completes");
+        wait_for_active_workflow_run_release(&state, run.id).await;
 
         let after_terminal_task = storage
             .get_workflow_run(run.id)
@@ -10694,6 +10689,7 @@ mod tests {
 
         wait_for_run_state(&storage, run.id, "completed").await;
         wait_for_workflow_thread_exit(run.id).await;
+        wait_for_active_workflow_run_release(&state, run.id).await;
         assert!(
             !state
                 .active_workflow_runs
