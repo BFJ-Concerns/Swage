@@ -20,6 +20,7 @@ use crate::provider::{LlmProvider, ProviderConfig, spawn_stream_forwarder};
 const ANTHROPIC_API_VERSION: &str = "2023-06-01";
 const ANTHROPIC_BASE_URL: &str = "https://api.anthropic.com";
 const ANTHROPIC_MESSAGES_PATH: &str = "/v1/messages?beta=true";
+const ANTHROPIC_COUNT_TOKENS_PATH: &str = "/v1/messages/count_tokens";
 
 /// Native-harness request material that Swage cannot reproduce honestly.
 ///
@@ -76,6 +77,26 @@ struct AnthropicThinkingConfig {
     #[serde(rename = "type")]
     kind: &'static str,
     display: &'static str,
+}
+
+/// Request body for POST /v1/messages/count_tokens — the messages-request
+/// material with no generation parameters: the endpoint counts what the
+/// model would read, so max_tokens, streaming, and effort have no meaning
+/// here and must not be sent.
+#[derive(Serialize)]
+struct CountTokensRequest {
+    model: String,
+    messages: Vec<AnthropicMessage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    system: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tools: Vec<AnthropicTool>,
+}
+
+/// Successful response body from POST /v1/messages/count_tokens.
+#[derive(Deserialize)]
+struct CountTokensResponse {
+    input_tokens: u64,
 }
 
 /// Wire representation of a tool definition for the Anthropic API.
@@ -986,6 +1007,19 @@ impl AnthropicProvider {
             // not Anthropic's narrowly defined user_id metadata object.
         }
     }
+
+    /// Build a `CountTokensRequest` from a `CompletionRequest` — the same
+    /// message and tool conversion as a completion, with the generation
+    /// parameters dropped rather than defaulted.
+    fn build_count_request(&self, request: &CompletionRequest) -> CountTokensRequest {
+        let body = self.build_request_for_completion(request, false);
+        CountTokensRequest {
+            model: body.model,
+            messages: body.messages,
+            system: body.system,
+            tools: body.tools,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1011,6 +1045,17 @@ impl LlmProvider for AnthropicProvider {
             "stream": stream,
             "body": self.build_request_for_completion(request, stream),
         })
+    }
+
+    async fn count_tokens(
+        &self,
+        request: &CompletionRequest,
+    ) -> Result<Option<u64>, ProviderError> {
+        let body = self.build_count_request(request);
+        let client = self.make_http_client();
+        let response: CountTokensResponse =
+            client.post_json(ANTHROPIC_COUNT_TOKENS_PATH, &body).await?;
+        Ok(Some(response.input_tokens))
     }
 
     async fn complete(
@@ -1538,6 +1583,46 @@ mod tests {
                 .max_tokens,
             117
         );
+    }
+
+    #[test]
+    fn count_request_carries_the_prompt_and_no_generation_parameters() {
+        let provider = AnthropicProvider::new("key", "configured-model");
+        let request = CompletionRequest {
+            effort: Some(swage_core::Effort::High),
+            messages: vec![
+                ChatMessage::new(Role::System, "You are terse."),
+                ChatMessage::new(Role::User, "How long is this?"),
+            ],
+            model: Some("override-model".into()),
+            max_tokens: Some(64),
+            temperature: None,
+            stop_sequences: None,
+            metadata: None,
+            tool_definitions: vec![],
+        };
+
+        let body = serde_json::to_value(provider.build_count_request(&request)).unwrap();
+
+        assert_eq!(body["model"], "override-model");
+        assert_eq!(body["system"], "You are terse.");
+        assert_eq!(body["messages"].as_array().unwrap().len(), 1);
+        assert_eq!(body["messages"][0]["role"], "user");
+        // Counting reads the prompt; generation parameters have no meaning
+        // at this endpoint and must not appear.
+        for absent in ["max_tokens", "stream", "output_config", "thinking"] {
+            assert!(
+                body.get(absent).is_none(),
+                "{absent} must not reach count_tokens"
+            );
+        }
+    }
+
+    #[test]
+    fn count_tokens_response_parses_the_input_token_figure() {
+        let response: CountTokensResponse =
+            serde_json::from_str(r#"{"input_tokens": 2095}"#).unwrap();
+        assert_eq!(response.input_tokens, 2095);
     }
 
     #[test]

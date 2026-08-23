@@ -230,6 +230,16 @@ impl LlmProvider for CircuitBreakerProvider {
         self.inner.model_id()
     }
 
+    async fn count_tokens(
+        &self,
+        request: &CompletionRequest,
+    ) -> Result<Option<u64>, ProviderError> {
+        // Advisory read, deliberately outside the breaker: it neither trips
+        // the circuit nor is blocked by it, and a failure simply returns the
+        // caller to its own estimate.
+        self.inner.count_tokens(request).await
+    }
+
     async fn complete(
         &self,
         request: CompletionRequest,
@@ -907,5 +917,58 @@ mod tests {
                 recovery_timeout: Duration::ZERO,
             },
         );
+    }
+
+    struct CountingProbe;
+
+    #[async_trait]
+    impl LlmProvider for CountingProbe {
+        fn model_id(&self) -> &str {
+            "counting-probe"
+        }
+
+        async fn count_tokens(&self, _: &CompletionRequest) -> Result<Option<u64>, ProviderError> {
+            Ok(Some(42))
+        }
+
+        async fn complete(
+            &self,
+            _: CompletionRequest,
+        ) -> Result<CompletionResponse, ProviderError> {
+            unreachable!("count-only probe")
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, ProviderError> {
+            unreachable!("count-only probe")
+        }
+
+        fn stream(&self, _: CompletionRequest) -> Pin<Box<dyn Stream<Item = StreamChunk> + Send>> {
+            unreachable!("count-only probe")
+        }
+    }
+
+    fn count_req() -> CompletionRequest {
+        CompletionRequest {
+            effort: None,
+            messages: vec![],
+            model: None,
+            max_tokens: None,
+            temperature: None,
+            stop_sequences: None,
+            metadata: None,
+            tool_definitions: vec![],
+        }
+    }
+
+    // A defaulted trait method is invisible to a wrapper, so delegation is
+    // asserted explicitly: an unforwarded count would report None here.
+    #[tokio::test]
+    async fn count_tokens_delegates_to_the_wrapped_provider() {
+        let provider =
+            CircuitBreakerProvider::new(Box::new(CountingProbe), CircuitBreakerConfig::default());
+        assert_eq!(provider.count_tokens(&count_req()).await.unwrap(), Some(42));
     }
 }
