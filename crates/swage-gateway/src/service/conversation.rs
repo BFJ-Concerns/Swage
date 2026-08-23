@@ -96,12 +96,11 @@ impl ConversationService {
                 config
             }
         };
-        let config = crate::turn::effective_session_config(config, selected_model_id);
-        Ok(config
-            .models
-            .entries
-            .get(&config.models.default)
-            .and_then(|model| model.default_effort))
+        let selected_model_id = selected_model_id.unwrap_or(&config.models.default);
+        Ok(
+            crate::turn::resolve_model_catalogue_entry(&config.models, selected_model_id)
+                .and_then(|(_, model)| model.default_effort),
+        )
     }
 
     fn effort_metadata(
