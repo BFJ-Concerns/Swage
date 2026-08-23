@@ -17,10 +17,19 @@ struct GatewayProbe {
     runtime: tempfile::TempDir,
     home: tempfile::TempDir,
     port: u16,
+    explicit_root: bool,
 }
 
 impl GatewayProbe {
     fn new() -> Self {
+        Self::with_explicit_root(true)
+    }
+
+    fn without_explicit_root() -> Self {
+        Self::with_explicit_root(false)
+    }
+
+    fn with_explicit_root(explicit_root: bool) -> Self {
         let listener = TcpListener::bind(("127.0.0.1", 0))
             .expect("failed to reserve a loopback port for the gateway probe");
         let port = listener
@@ -34,15 +43,20 @@ impl GatewayProbe {
             runtime: tempfile::TempDir::new().expect("failed to create the probe runtime dir"),
             home: tempfile::TempDir::new().expect("failed to create the probe home"),
             port,
+            explicit_root,
         }
     }
 
     fn command(&self) -> Command {
         let mut command = Command::new(&self.binary);
         command
-            .env("SWAGE_HOME", self.root.path())
             .env("XDG_RUNTIME_DIR", self.runtime.path())
             .env("HOME", self.home.path());
+        if self.explicit_root {
+            command.env("SWAGE_HOME", self.root.path());
+        } else {
+            command.env_remove("SWAGE_HOME");
+        }
         command
     }
 
@@ -63,7 +77,11 @@ impl GatewayProbe {
     }
 
     fn metadata_path(&self) -> PathBuf {
-        self.root.path().join("run/metadata.json")
+        if self.explicit_root {
+            self.root.path().join("run/metadata.json")
+        } else {
+            self.runtime.path().join("swage/metadata.json")
+        }
     }
 
     fn pid(&self) -> u32 {
@@ -88,6 +106,40 @@ impl GatewayProbe {
 impl Drop for GatewayProbe {
     fn drop(&mut self) {
         self.stop();
+    }
+}
+
+#[test]
+fn restart_recovers_xdg_metadata_without_swage_home() {
+    let probe = GatewayProbe::without_explicit_root();
+    probe.start();
+    let first_pid = probe.pid();
+    fs::remove_file(probe.metadata_path()).expect("failed to remove live runtime metadata");
+
+    let port = probe.port.to_string();
+    let output = probe.run(&["gateway", "restart", "--force", "--port", &port]);
+    probe.assert_success(output);
+
+    let second_pid = probe.pid();
+    assert_ne!(first_pid, second_pid);
+    let environment = process_environment(second_pid);
+    assert!(
+        !environment
+            .split(|byte| *byte == 0)
+            .any(|entry| entry.starts_with(b"SWAGE_HOME=")),
+        "replacement gateway gained an explicit SWAGE_HOME"
+    );
+    for (name, value) in [
+        ("HOME", probe.home.path()),
+        ("XDG_RUNTIME_DIR", probe.runtime.path()),
+    ] {
+        let expected = format!("{name}={}", value.display());
+        assert!(
+            environment
+                .split(|byte| *byte == 0)
+                .any(|entry| entry == expected.as_bytes()),
+            "replacement gateway did not receive recovered {name}"
+        );
     }
 }
 
