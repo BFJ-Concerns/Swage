@@ -1238,6 +1238,35 @@ mod tests {
     fn settings_wire_shapes_reject_unknown_nested_fields() {
         use swage_protocol::client::settings as wire;
 
+        let python_execute = json!({
+            "enabled": true,
+            "timeout_secs": 30,
+            "startup_timeout_secs": 10,
+            "idle_ttl_secs": 60,
+            "warm_target": 1,
+            "max_workers": 2,
+            "runtime_policy": "bundled_then_system",
+            "runtime_path": null,
+            "require_sandbox": true,
+            "timeout_second": 30
+        });
+        assert!(serde_json::from_value::<wire::PythonExecuteToolConfig>(python_execute).is_err());
+
+        let search = json!({
+            "provider_type": "searxng",
+            "base_url": "https://search.invalid",
+            "api_key": null,
+            "endpoint": "https://ignored.invalid"
+        });
+        assert!(serde_json::from_value::<wire::SearchProviderConfig>(search).is_err());
+
+        let hitl = json!({
+            "timeout": 300,
+            "timeout_policy": "reject",
+            "auto_approve": true
+        });
+        assert!(serde_json::from_value::<wire::HitlConfig>(hitl).is_err());
+
         let approval = json!({
             "allow": [],
             "deny": [],
