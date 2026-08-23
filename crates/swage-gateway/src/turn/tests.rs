@@ -8988,24 +8988,25 @@ async fn delegate_worktree_provisions_isolated_cwd_and_records_resolved_placemen
             .list_by_correlation(detached.delegate_message_id)
             .await
             .expect("list delegated result messages");
-        if result_messages
-            .iter()
-            .any(|message| message.kind == swage_core::MessageKind::Result)
+        if !storage.list_approvals().await.unwrap().is_empty()
+            || result_messages
+                .iter()
+                .any(|message| message.kind == swage_core::MessageKind::Result)
         {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
     assert!(
+        storage.list_approvals().await.unwrap().is_empty(),
+        "the detached delegated turn must use its enforced grant without parking"
+    );
+    assert!(
         result_messages.iter().any(|message| {
             message.kind == swage_core::MessageKind::Result
                 && message.payload.get("error").is_none()
         }),
         "the detached delegate should record a successful terminal result"
-    );
-    assert!(
-        storage.list_approvals().await.unwrap().is_empty(),
-        "the detached delegated turn must use its enforced grant without parking"
     );
     for _ in 0..20 {
         if state.worktree_host.list_owner(owner_id).await.is_empty() && !worktree.exists() {
