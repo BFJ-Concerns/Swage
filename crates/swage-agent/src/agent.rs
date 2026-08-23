@@ -178,6 +178,7 @@ impl Agent {
         let parent_turn_id = request.parent_turn_id;
         let existing_turn_id = request.existing_turn_id;
         let cancel_token = request.cancellation_token;
+        let compaction_focus = request.compaction_focus;
 
         // 1. Create a Pending turn (or reuse a pre-created placeholder) before
         // any work begins so the lifecycle is recorded durably.
@@ -259,10 +260,19 @@ impl Agent {
                 self.provider.as_ref(),
                 self.storage.as_ref(),
                 thread_id,
+                compaction_focus.as_deref(),
             )
             .await
             {
-                Ok(context) => context,
+                Ok((context, record)) => {
+                    if let Some(record) = record {
+                        let _ = event_tx.send(AgentEvent::CompactionApplied {
+                            turn_id: turn.id,
+                            record,
+                        });
+                    }
+                    context
+                }
                 Err(error) => {
                     self.fail_turn_and_idle(turn.id, thread_id).await;
                     let _ = event_tx.send(AgentEvent::Error {
