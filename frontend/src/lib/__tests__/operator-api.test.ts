@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   approvePendingAction,
   fetchOperatorOverview,
+  fetchOperatorHistory,
   fetchScheduleRuns,
   pauseSchedule,
   rejectPendingAction,
@@ -52,6 +53,23 @@ describe("fetchOperatorOverview", () => {
 
     expect(fetch).toHaveBeenCalledWith("/api/operator/overview", { method: "GET" });
     expect(overview.gateway.health).toBe("healthy");
+  });
+});
+
+describe("fetchOperatorHistory", () => {
+  it("sends GET /api/operator/history and returns recorded history", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      mockResponse({
+        configuration_changes: [{ id: "change-1" }],
+        variant_selections: [],
+        assembly_reports: [],
+      }),
+    );
+
+    const history = await fetchOperatorHistory();
+
+    expect(fetch).toHaveBeenCalledWith("/api/operator/history", { method: "GET" });
+    expect(history.configuration_changes[0]?.id).toBe("change-1");
   });
 });
 
