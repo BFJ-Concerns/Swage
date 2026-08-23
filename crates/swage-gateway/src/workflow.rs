@@ -9198,6 +9198,19 @@ mod tests {
         .await
         .expect("timer wait becomes suspended");
         wait_for_run_state(&storage, run.id, "parked").await;
+        wait_for_workflow_thread_exit(run.id).await;
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while state
+                .active_workflow_runs
+                .lock()
+                .await
+                .contains_key(&run.id)
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("parked run releases its in-process generation");
 
         let Json(cancel_requested) = cancel_run(State(state.clone()), Path(run.id))
             .await
