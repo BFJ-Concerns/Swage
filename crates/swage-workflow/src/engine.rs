@@ -718,9 +718,15 @@ impl WorkflowEngine {
                                 assembly: merged.assembly ?? null,
                             };
                         };
+                        const validateAgentPrompt = (prompt, caller) => {
+                            if (typeof prompt !== "string") {
+                                throw new TypeError(`${caller} prompt must be a string`);
+                            }
+                        };
                         globalThis.agent = async (prompt, options = {}) => {
+                            validateAgentPrompt(prompt, "agent");
                             const request = buildAgentRequest(options);
-                            const response = unwrapAgentResponse(await __agent(String(prompt), JSON.stringify(request)));
+                            const response = unwrapAgentResponse(await __agent(prompt, JSON.stringify(request)));
                             return response.value;
                         };
                         globalThis.workerPlacements = async () => {
@@ -741,13 +747,14 @@ impl WorkflowEngine {
                         // the same session: worker restates, worker proceeds,
                         // one session.
                         globalThis.agentStart = (prompt, options = {}) => {
+                            validateAgentPrompt(prompt, "agentStart");
                             const request = buildAgentRequest(options);
                             const handle = {
                                 label: request.label,
                                 done: false,
                                 session: request.session ?? null,
                             };
-                            handle.result = __agent(String(prompt), JSON.stringify(request))
+                            handle.result = __agent(prompt, JSON.stringify(request))
                                 .then((json) => {
                                     const response = unwrapAgentResponse(json);
                                     handle.done = true;
@@ -1372,6 +1379,114 @@ mod tests {
             host.agent_requests.lock().unwrap()[0].task.as_deref(),
             Some("strict-review")
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn concurrent_agent_calls_preserve_authored_string_prompts() {
+        let host = Arc::new(SurfaceHost::new());
+        WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                r#"
+                await Promise.all([
+                    agent("First worker: preserve punctuation — and spacing.\nSecond line.", {
+                        task: "strict-review"
+                    }),
+                    agent("  Second worker keeps surrounding spaces & symbols: <>&  ", {
+                        task: "strict-review"
+                    }),
+                ]);
+                return null;
+                "#,
+                "null",
+                CancellationToken::new(),
+                Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                ScriptCapabilities::default(),
+            )
+            .await
+            .expect("concurrent prompt dispatch");
+
+        let mut prompts = host
+            .agent_requests
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|request| request.prompt.clone())
+            .collect::<Vec<_>>();
+        prompts.sort();
+        assert_eq!(
+            prompts,
+            vec![
+                "  Second worker keeps surrounding spaces & symbols: <>&  ".to_string(),
+                "First worker: preserve punctuation — and spacing.\nSecond line.".to_string(),
+            ]
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn object_prompts_are_catchably_rejected_before_concurrent_dispatch() {
+        let host = Arc::new(SurfaceHost::new());
+        let output = WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                r#"
+                try {
+                    await Promise.all([
+                        agent({ task: "First authored task" }),
+                        agent({ task: "Second authored task" }),
+                    ]);
+                } catch (error) {
+                    return { name: error.name, message: error.message };
+                }
+                return "unexpected";
+                "#,
+                "null",
+                CancellationToken::new(),
+                Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                ScriptCapabilities::default(),
+            )
+            .await
+            .expect("invalid prompt rejection is catchable");
+
+        assert_eq!(
+            serde_json::from_str::<Value>(&output).unwrap(),
+            json!({
+                "name": "TypeError",
+                "message": "agent prompt must be a string",
+            }),
+            "host received invalid prompts: {:?}",
+            host.agent_requests.lock().unwrap()
+        );
+        assert!(host.agent_requests.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn agent_start_rejects_an_undefined_prompt_before_dispatch() {
+        let host = Arc::new(SurfaceHost::new());
+        let output = WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                r#"
+                try {
+                    agentStart(undefined, { task: "strict-review" });
+                } catch (error) {
+                    return { name: error.name, message: error.message };
+                }
+                return "unexpected";
+                "#,
+                "null",
+                CancellationToken::new(),
+                Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                ScriptCapabilities::default(),
+            )
+            .await
+            .expect("invalid agentStart prompt rejection is catchable");
+
+        assert_eq!(
+            serde_json::from_str::<Value>(&output).unwrap(),
+            json!({
+                "name": "TypeError",
+                "message": "agentStart prompt must be a string",
+            })
+        );
+        assert!(host.agent_requests.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
