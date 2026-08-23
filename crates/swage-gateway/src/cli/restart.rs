@@ -89,10 +89,14 @@ mod tests {
             log_file: None,
         };
 
-        let error = run(&args).await.unwrap_err().to_string();
+        let error = run(&args).await.unwrap_err();
 
-        assert!(error.contains("restart was not attempted"));
-        assert!(error.contains("exposes neither SWAGE_HOME nor HOME"));
+        match error {
+            ClientError::GatewayRestartRefused { reason } => {
+                assert!(reason.contains("exposes neither SWAGE_HOME nor HOME"));
+            }
+            other => panic!("expected GatewayRestartRefused, got: {other:?}"),
+        }
         assert!(gateway.try_wait().unwrap().is_none(), "gateway was stopped");
 
         gateway.kill().unwrap();

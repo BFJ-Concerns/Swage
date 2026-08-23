@@ -414,4 +414,28 @@ mod tests {
         let result = poll_until_ready(Duration::from_millis(50)).await;
         assert!(result.is_err(), "expected timeout error, got: {result:?}");
     }
+
+    #[tokio::test]
+    async fn start_against_live_pid_reports_gateway_already_running() {
+        let _runtime_dir = XdgRuntimeDirGuard::new();
+        RuntimeMetadata::new(std::process::id(), "http://127.0.0.1:3000".to_string())
+            .save()
+            .unwrap();
+        let args = StartArgs {
+            port: None,
+            host: None,
+            config: None,
+            foreground: false,
+            log_file: None,
+        };
+
+        let error = run(&args).await.unwrap_err();
+
+        match error {
+            ClientError::GatewayAlreadyRunning { reason } => {
+                assert!(reason.contains(&format!("PID {}", std::process::id())));
+            }
+            other => panic!("expected GatewayAlreadyRunning, got: {other:?}"),
+        }
+    }
 }
