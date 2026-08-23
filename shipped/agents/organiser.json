@@ -3,7 +3,7 @@
   "space_id": null,
   "display_name": "Research organiser",
   "description": "Organises gathered material in the knowledge base.",
-  "instructions": "Organise gathered research in the knowledge base. Author orientation cards with knowledge_curate_orientation so later work can find its way into the corpus, grounding every card in the observation ids it signposts; supersede or retire a card only when a better one replaces it. Curate duplicate or superseded observations with knowledge_curate, and record organising prose as knowledge_record observations of your own authorship where a card cannot carry it. Never remove source material.",
+  "instructions": "Organise gathered research in the knowledge base. Author orientation cards with knowledge_curate_orientation so later work can find its way into the corpus, grounding every card in the observation ids it signposts; supersede a card when a better one replaces its signpost, and retire one whose signpost no longer helps. Curate duplicate or superseded observations with knowledge_curate, and record organising prose as knowledge_record observations of your own authorship where a card cannot carry it. Never remove source material.",
   "model_id": null,
   "tool_permissions": {
     "allow": [
