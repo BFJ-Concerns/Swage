@@ -1829,7 +1829,7 @@ pub(super) struct ContextChoices {
     working_norms_scaffold: swage_context::working_norms::WorkingNormsScaffold,
 }
 
-const WORKING_NORMS_NATIVE: &str = "native";
+const WORKING_NORMS_AUTHORED_V1: &str = "authored-v1";
 const WORKING_NORMS_FAMILY_FALLBACK: &str = "family-fallback";
 
 async fn select_context_assembly(
@@ -1893,7 +1893,7 @@ async fn select_context_assembly(
         &config.experimentation,
         crate::experimentation::LOCATION_WORKING_NORMS,
         &norms_variants,
-        WORKING_NORMS_NATIVE,
+        WORKING_NORMS_AUTHORED_V1,
         turn_id,
     )
     .map_err(|error| GatewayError::ConfigError(error.to_string()))?;
@@ -1914,7 +1914,7 @@ async fn select_context_assembly(
                 "working-norms selection could not be recorded; serving the native scaffold"
             );
             crate::experimentation::VariantDecision {
-                variant: WORKING_NORMS_NATIVE.to_owned(),
+                variant: WORKING_NORMS_AUTHORED_V1.to_owned(),
                 reason: crate::experimentation::SelectionReason::RecordUnavailable,
             }
         }

@@ -845,6 +845,7 @@ pub(crate) struct MockStorage {
     fail_message_lists: AtomicBool,
     fail_session_variable_lists: AtomicBool,
     fail_secret_reads: AtomicBool,
+    fail_skill_activations: AtomicBool,
     fail_audit_writes: AtomicBool,
     fail_snapshot_writes: AtomicBool,
 }
@@ -1116,9 +1117,14 @@ impl MockStorage {
             fail_message_lists: AtomicBool::new(false),
             fail_session_variable_lists: AtomicBool::new(false),
             fail_secret_reads: AtomicBool::new(false),
+            fail_skill_activations: AtomicBool::new(false),
             fail_audit_writes: AtomicBool::new(false),
             fail_snapshot_writes: AtomicBool::new(false),
         }
+    }
+
+    pub(crate) fn fail_skill_activations(&self) {
+        self.fail_skill_activations.store(true, Ordering::SeqCst);
     }
 
     fn fail_turn_state_writes(&self) {
@@ -2968,6 +2974,11 @@ impl SkillActivationStore for MockStorage {
         _session_id: Uuid,
         _skill_name: &str,
     ) -> Result<(), StorageError> {
+        if self.fail_skill_activations.load(Ordering::SeqCst) {
+            return Err(StorageError::QueryFailed(
+                "injected skill activation failure".to_owned(),
+            ));
+        }
         Ok(())
     }
     async fn deactivate_skill(
@@ -9995,6 +10006,10 @@ async fn working_norms_selection_honours_disabled_forced_and_seeded_choices() {
     assert!(audit.iter().any(|event| {
         event.entity_id == crate::experimentation::LOCATION_WORKING_NORMS
             && event.metadata["reason"] == serde_json::json!("forced")
+    }));
+    assert!(audit.iter().any(|event| {
+        event.entity_id == crate::experimentation::LOCATION_WORKING_NORMS
+            && event.metadata["variant"] == serde_json::json!("authored-v1")
     }));
 }
 
