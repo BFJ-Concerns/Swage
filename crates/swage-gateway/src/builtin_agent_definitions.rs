@@ -111,7 +111,12 @@ mod tests {
         );
         assert_eq!(
             grants["organiser"],
-            ["knowledge_search", "knowledge_record", "knowledge_curate"]
+            [
+                "knowledge_search",
+                "knowledge_record",
+                "knowledge_curate",
+                "knowledge_curate_orientation",
+            ]
         );
         assert_eq!(grants["synthesist"], ["knowledge_search"]);
         assert!(grants.values().flatten().all(|tool| {

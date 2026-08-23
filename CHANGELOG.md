@@ -8,6 +8,7 @@ All notable changes to Swage are documented in this file.
 
 - Fresh spaces now include immutable researcher, organiser, and synthesist agent definitions for the shipped research-sweep workflow, with same-named authored definitions taking precedence.
 - Knowledge captures made by workflow workers now carry their journalled call's identity, so a sweep interrupted mid-gather resumes without duplicating any source's observation.
+- Research sweeps now author evidence-backed orientation cards during the organising pass and report claims the synthesist withheld for lack of supporting evidence.
 - Detached gateway starts now accept `--log-file`, report the chosen output destination, and explain foreground output handling in command help.
 - Agents can route scheduled-run output to channels, local storage, and webhooks when creating or updating schedules.
 - New conversations can choose a reasoning effort from the main composer, while each configured model can provide the inherited default.

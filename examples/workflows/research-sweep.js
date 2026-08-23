@@ -6,11 +6,14 @@
 // named here are agent definitions in the dispatching space: "researcher"
 // needs web reach (search where configured, url fetch, browser) plus
 // knowledge_record; "organiser" needs knowledge_search, knowledge_record,
-// and knowledge_curate; "synthesist" needs knowledge_search only. None of
-// them holds config-apply or schedule tools. Knowledge-base writes happen
-// inside agent turns, so each is journalled as the agent call that made it,
-// and the store's hash-dedup means a resumed sweep re-running a gather turn
-// cannot duplicate an observation.
+// knowledge_curate, and knowledge_curate_orientation; "synthesist" needs
+// knowledge_search only. None of them holds config-apply or schedule tools.
+// Knowledge-base writes happen inside agent turns, so each is journalled as
+// the agent call that made it, and every capture carries that call's scope:
+// a resumed sweep re-running an interrupted gather turn re-records under
+// the same scope and gets the first attempt's observation back, so no
+// observation duplicates even when the live page's bytes changed between
+// attempts.
 export const defaults = { maxAttempts: 3 };
 
 const topic = args.topic;
@@ -119,14 +122,18 @@ const organised = await agent(
       .map((entry) => `- ${entry.observation_id} (${entry.url})`)
       .join("\n") +
     `\n\nOrganise them into the space's knowledge base. Search the corpus ` +
-    `to see what already exists. Record orientation notes (as knowledge_record ` +
-    `observations of your own authorship) that summarise what this material ` +
-    `covers and cite the observation ids they derive from. Where a new ` +
-    `observation duplicates or supersedes existing material, assert that ` +
-    `with knowledge_curate - never delete anything. Zero notes or zero ` +
-    `assertions is a valid outcome when nothing warrants them.\n\n` +
+    `to see what already exists. Author orientation cards with ` +
+    `knowledge_curate_orientation - a short signpost titled by what it ` +
+    `orients, its content saying what the material covers and where to ` +
+    `look, grounded in the observation ids it points to; supersede an ` +
+    `existing card only when your new one replaces its signpost. Where ` +
+    `organising prose does not fit a card, record it as a knowledge_record ` +
+    `observation of your own authorship. Where a new observation duplicates ` +
+    `or supersedes existing material, assert that with knowledge_curate - ` +
+    `never delete anything. Zero cards or zero assertions is a valid ` +
+    `outcome when nothing warrants them.\n\n` +
     `Return JSON only, exactly this shape:\n` +
-    `{"orientation_notes": <count of orientation notes you recorded>, ` +
+    `{"orientation_cards": <count of orientation cards you authored>, ` +
     `"assertions": <count of curation assertions you made>, ` +
     `"note": "one or two sentences on what you did and anything that ` +
     `needs a human eye"}`,
@@ -139,10 +146,10 @@ const organised = await agent(
     maxAttempts: 5,
     schema: {
       type: "object",
-      required: ["orientation_notes", "assertions", "note"],
+      required: ["orientation_cards", "assertions", "note"],
       additionalProperties: false,
       properties: {
-        orientation_notes: { type: "number" },
+        orientation_cards: { type: "number" },
         assertions: { type: "number" },
         note: { type: "string" },
       },
@@ -161,14 +168,17 @@ const findings = await agent(
     `fetching, no memory of this conversation. Every claim must be ` +
     `traceable: cite the observation id and quote the supporting text for ` +
     `each - verbatim from the stored extraction, kept to the shortest span ` +
-    `that supports the claim. A claim you cannot pin to an observation ` +
-    `does not go in the findings. Return JSON only.`,
+    `that supports the claim. A claim the purpose needs that you cannot ` +
+    `pin to an observation does not go in the findings - it goes in ` +
+    `"withheld", with the reason it could not be supported (nothing in the ` +
+    `corpus, evidence conflicts, the evidence is too thin). Never drop an ` +
+    `unsupported claim silently. Return JSON only.`,
   {
     agent: "synthesist",
     label: "Synthesise findings",
     schema: {
       type: "object",
-      required: ["findings"],
+      required: ["findings", "withheld"],
       additionalProperties: false,
       properties: {
         findings: {
@@ -184,15 +194,28 @@ const findings = await agent(
             },
           },
         },
+        withheld: {
+          type: "array",
+          items: {
+            type: "object",
+            required: ["claim", "reason"],
+            additionalProperties: false,
+            properties: {
+              claim: { type: "string" },
+              reason: { type: "string" },
+            },
+          },
+        },
       },
     },
   },
 );
 
-// The terminal report names what failed or was omitted - the commission's
-// requirement that a sweep never pretends completeness.
+// The terminal report names what failed, was omitted, or was withheld -
+// the commission's requirement that a sweep never pretends completeness.
 // agent() throws on failure, so reaching here means synthesis validated;
-// the terminal report still names what failed or was omitted upstream.
+// the report still names what failed upstream and what the synthesist
+// could not support.
 return {
   topic,
   purpose,
@@ -203,4 +226,5 @@ return {
   failed_sources: failed,
   organised,
   findings: findings.findings,
+  withheld_claims: findings.withheld,
 };
