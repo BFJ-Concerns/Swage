@@ -3131,6 +3131,7 @@ async fn reauthorise_recorded_worker_placement(
         placement.authority_context_id,
         None,
         None,
+        None,
         &placement.authority_path,
     )
     .await
@@ -3158,6 +3159,7 @@ async fn complete_worker_placement(
         state,
         space_id,
         run_id,
+        None,
         None,
         inherited_worker_placement.as_ref(),
         repo,
@@ -3213,6 +3215,7 @@ async fn complete_worker_directory_resolution(
         state,
         space_id,
         context_id,
+        None,
         None,
         inherited_worker_placement.as_ref(),
         cwd,
