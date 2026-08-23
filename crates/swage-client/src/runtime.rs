@@ -84,7 +84,7 @@ impl RuntimeMetadata {
 
     // --- Path-parameterised helpers (enable test isolation without env mutation) ---
 
-    fn save_to(&self, path: &Path) -> io::Result<()> {
+    pub fn save_to(&self, path: &Path) -> io::Result<()> {
         // Create parent directories if they don't exist yet.
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
@@ -94,12 +94,12 @@ impl RuntimeMetadata {
         std::fs::write(path, json)
     }
 
-    fn load_from(path: &Path) -> io::Result<Self> {
+    pub fn load_from(path: &Path) -> io::Result<Self> {
         let content = std::fs::read_to_string(path)?;
         serde_json::from_str(&content).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
     }
 
-    fn remove_at(path: &Path) -> io::Result<()> {
+    pub fn remove_at(path: &Path) -> io::Result<()> {
         match std::fs::remove_file(path) {
             Ok(()) => Ok(()),
             // Missing file is not an error — removal is idempotent.
