@@ -37,6 +37,12 @@ fn load_install_config_at_path(path: PathBuf) -> Result<Option<ServiceInstallCon
     }
 }
 
+pub(super) fn load_install_config_for_root(
+    root: &std::path::Path,
+) -> Result<Option<ServiceInstallConfig>, ClientError> {
+    load_install_config_at_path(root.join("service.json"))
+}
+
 pub fn load_install_config() -> Result<Option<ServiceInstallConfig>, ClientError> {
     load_install_config_at_path(install_config_path())
 }

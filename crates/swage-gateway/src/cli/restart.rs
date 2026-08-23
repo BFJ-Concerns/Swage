@@ -5,33 +5,29 @@ use swage_client::{error::ClientError, runtime::RuntimeMetadata};
 use crate::cli::{RestartArgs, StartArgs, StopArgs};
 
 pub async fn run(args: &RestartArgs) -> Result<(), ClientError> {
-    let metadata = RuntimeMetadata::load().map_err(|error| ClientError::GatewayNotRunning {
-        reason: format!(
-            "cannot determine the running gateway before restart: failed to read {}: {error}",
-            RuntimeMetadata::metadata_path().display()
-        ),
-    })?;
-    if metadata.is_stale() {
-        return Err(ClientError::GatewayNotRunning {
-            reason: format!(
-                "cannot determine the running gateway before restart: PID {} is no longer running",
-                metadata.pid
-            ),
-        });
-    }
-    let environment = super::recovery::recover_gateway_lifecycle_environment(metadata.pid)
-        .map_err(|reason| ClientError::GatewayNotRunning {
-            reason: format!(
-                "cannot preserve the running gateway's data root and runtime directory; restart was not attempted: {reason}"
-            ),
-        })?;
-
     let stop_args = StopArgs { force: args.force };
-    if let Err(error) = super::stop::run(&stop_args).await
-        && !matches!(error, ClientError::GatewayNotRunning { .. })
-    {
-        return Err(error);
-    }
+    let environment = match running_gateway_metadata(args).await? {
+        Some((metadata, metadata_path)) => {
+            let environment =
+                super::recovery::recover_gateway_lifecycle_environment(metadata.pid).map_err(
+                    |reason| ClientError::GatewayNotRunning {
+                        reason: format!(
+                            "cannot preserve the running gateway's data root and runtime directory; restart was not attempted: {reason}"
+                        ),
+                    },
+                )?;
+            super::stop::run_with_metadata(&stop_args, &metadata, &metadata_path).await?;
+            Some(environment)
+        }
+        None => {
+            if let Err(error) = super::stop::run(&stop_args).await
+                && !matches!(error, ClientError::GatewayNotRunning { .. })
+            {
+                return Err(error);
+            }
+            None
+        }
+    };
 
     let start_args = StartArgs {
         port: args.port,
@@ -40,18 +36,52 @@ pub async fn run(args: &RestartArgs) -> Result<(), ClientError> {
         foreground: args.foreground,
         log_file: args.log_file.clone(),
     };
-    super::start::run_with_environment(&start_args, Some(&environment)).await
+    super::start::run_with_environment(&start_args, environment.as_ref()).await
+}
+
+async fn running_gateway_metadata(
+    args: &RestartArgs,
+) -> Result<Option<(RuntimeMetadata, std::path::PathBuf)>, ClientError> {
+    let metadata_path = RuntimeMetadata::metadata_path();
+    match RuntimeMetadata::load_from(&metadata_path) {
+        Ok(metadata) if !metadata.is_stale() => Ok(Some((metadata, metadata_path))),
+        Ok(_) => Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let installed = super::install::load_install_config()?;
+            Ok(super::recovery::recover_configured_gateway_metadata(
+                args.host
+                    .as_deref()
+                    .or_else(|| installed.as_ref().and_then(|config| config.host.as_deref())),
+                args.port
+                    .or_else(|| installed.as_ref().and_then(|config| config.port)),
+            )
+            .await
+            .map(|metadata| (metadata, metadata_path)))
+        }
+        Err(source) => Err(ClientError::MetadataIo { source }),
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::process::Command;
+
     use super::*;
 
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn restart_fails_before_stop_when_gateway_provenance_is_unavailable() {
         let _runtime_dir = crate::test_support::XdgRuntimeDirGuard::new();
+        let mut gateway = Command::new("/bin/sleep")
+            .arg("60")
+            .env_clear()
+            .spawn()
+            .unwrap();
+        RuntimeMetadata::new(gateway.id(), "http://127.0.0.1:9".to_string())
+            .save()
+            .unwrap();
         let args = RestartArgs {
-            force: false,
+            force: true,
             port: None,
             host: None,
             config: None,
@@ -61,7 +91,12 @@ mod tests {
 
         let error = run(&args).await.unwrap_err().to_string();
 
-        assert!(error.contains("cannot determine the running gateway before restart"));
-        assert!(error.contains("restart was not attempted") || error.contains("failed to read"));
+        assert!(error.contains("restart was not attempted"));
+        assert!(error.contains("exposes neither SWAGE_HOME nor HOME"));
+        assert!(gateway.try_wait().unwrap().is_none(), "gateway was stopped");
+
+        gateway.kill().unwrap();
+        gateway.wait().unwrap();
+        RuntimeMetadata::remove().unwrap();
     }
 }

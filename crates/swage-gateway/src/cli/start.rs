@@ -28,11 +28,12 @@ pub(super) async fn run_with_environment(
     args: &StartArgs,
     environment: Option<&super::recovery::GatewayLifecycleEnvironment>,
 ) -> Result<(), ClientError> {
-    if let Some(environment) = environment {
-        environment.apply_to_current_process();
-    }
-
-    let installed = super::install::load_install_config()?;
+    let installed = match environment {
+        Some(environment) => {
+            super::install::load_install_config_for_root(environment.swage_home())?
+        }
+        None => super::install::load_install_config()?,
+    };
     let effective_port = args
         .port
         .or_else(|| installed.as_ref().and_then(|cfg| cfg.port));
@@ -46,11 +47,15 @@ pub(super) async fn run_with_environment(
         .or_else(|| installed.as_ref().and_then(|cfg| cfg.config.clone()));
 
     // Step 1: Check runtime metadata to detect an existing gateway.
-    match RuntimeMetadata::load() {
+    let metadata_path = environment
+        .map(|environment| environment.metadata_path())
+        .unwrap_or_else(RuntimeMetadata::metadata_path);
+    match RuntimeMetadata::load_from(&metadata_path) {
         Ok(meta) if meta.is_stale() => {
             // Metadata file exists but the recorded PID is dead — crashed gateway.
             eprintln!("Cleaning up stale metadata...");
-            RuntimeMetadata::remove().map_err(|e| ClientError::MetadataIo { source: e })?;
+            RuntimeMetadata::remove_at(&metadata_path)
+                .map_err(|e| ClientError::MetadataIo { source: e })?;
         }
         Ok(meta) => {
             // PID is alive — the gateway is already running.
@@ -65,9 +70,10 @@ pub(super) async fn run_with_environment(
         // No metadata file. Before spawning, recover a daemon that is already
         // serving at the configured address but lost its runtime metadata.
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            if let Some(meta) = super::recovery::recover_configured_gateway_metadata(
+            if let Some(meta) = super::recovery::recover_configured_gateway_metadata_at(
                 effective_host.as_deref(),
                 effective_port,
+                &metadata_path,
             )
             .await
             {
@@ -85,6 +91,14 @@ pub(super) async fn run_with_environment(
 
     // Step 2: Foreground mode — run the gateway inline, blocking until shutdown.
     if args.foreground {
+        if let Some(environment) = environment {
+            return run_foreground_gateway(
+                effective_port,
+                effective_host.as_deref(),
+                effective_config.as_deref(),
+                environment,
+            );
+        }
         crate::startup::run_gateway(effective_port, effective_host, effective_config).await;
         return Ok(());
     }
@@ -99,7 +113,7 @@ pub(super) async fn run_with_environment(
     )?;
 
     // Step 4: Poll until the gateway writes its metadata and passes a health check.
-    let address = poll_until_ready(Duration::from_secs(5))
+    let address = poll_until_ready_at(Duration::from_secs(5), &metadata_path)
         .await
         .map_err(|reason| ClientError::GatewayNotRunning { reason })?;
 
@@ -107,7 +121,7 @@ pub(super) async fn run_with_environment(
     println!("Gateway started on {address}");
     println!(
         "Detached output: {}",
-        gateway_log_path(args.log_file.as_deref()).display()
+        gateway_log_path(args.log_file.as_deref(), environment).display()
     );
     Ok(())
 }
@@ -130,7 +144,7 @@ fn spawn_background_gateway(
 ) -> Result<(), ClientError> {
     let binary = std::env::current_exe().map_err(|e| ClientError::MetadataIo { source: e })?;
 
-    let log_path = gateway_log_path(log_file);
+    let log_path = gateway_log_path(log_file, environment);
     let (log_file, log_stderr) = open_detached_output(&log_path)?;
 
     let args = build_spawn_args(port, host.map(str::to_owned), config.map(str::to_owned));
@@ -155,6 +169,32 @@ fn spawn_background_gateway(
         .map_err(|e| ClientError::MetadataIo { source: e })?;
 
     Ok(())
+}
+
+fn run_foreground_gateway(
+    port: Option<u16>,
+    host: Option<&str>,
+    config: Option<&str>,
+    environment: &super::recovery::GatewayLifecycleEnvironment,
+) -> Result<(), ClientError> {
+    let binary = std::env::current_exe().map_err(|source| ClientError::MetadataIo { source })?;
+    let mut command = std::process::Command::new(binary);
+    command.args(build_spawn_args(
+        port,
+        host.map(str::to_owned),
+        config.map(str::to_owned),
+    ));
+    environment.apply_to_command(&mut command);
+    let status = command
+        .status()
+        .map_err(|source| ClientError::MetadataIo { source })?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(ClientError::GatewayNotRunning {
+            reason: format!("foreground gateway exited with status {status}"),
+        })
+    }
 }
 
 fn open_detached_output(
@@ -184,7 +224,15 @@ fn open_detached_output(
 /// Reads the runtime metadata file to discover the address, then calls the
 /// health endpoint. Returns the address on success or an error string on
 /// timeout.
+#[cfg(test)]
 pub(crate) async fn poll_until_ready(timeout: Duration) -> Result<String, String> {
+    poll_until_ready_at(timeout, &RuntimeMetadata::metadata_path()).await
+}
+
+async fn poll_until_ready_at(
+    timeout: Duration,
+    metadata_path: &std::path::Path,
+) -> Result<String, String> {
     let deadline = Instant::now() + timeout;
     let mut delay = Duration::from_millis(100);
 
@@ -197,7 +245,7 @@ pub(crate) async fn poll_until_ready(timeout: Duration) -> Result<String, String
         }
 
         // Check for the metadata file — the gateway writes it after binding.
-        if let Ok(meta) = RuntimeMetadata::load() {
+        if let Ok(meta) = RuntimeMetadata::load_from(metadata_path) {
             let client = GatewayClient::new(&meta.address);
             if client.health().await.is_ok() {
                 return Ok(meta.address);
@@ -215,12 +263,18 @@ pub(crate) async fn poll_until_ready(timeout: Duration) -> Result<String, String
 // ---------------------------------------------------------------------------
 
 /// Returns the caller's log path, or the default under the canonical Swage root.
-pub(crate) fn gateway_log_path(log_file: Option<&str>) -> PathBuf {
-    log_file.map(PathBuf::from).unwrap_or_else(|| {
-        swage_config::discovery::resolve_root()
-            .unwrap_or_else(|_| swage_config::discovery::effective_root_path())
-            .join("gateway.log")
-    })
+pub(crate) fn gateway_log_path(
+    log_file: Option<&str>,
+    environment: Option<&super::recovery::GatewayLifecycleEnvironment>,
+) -> PathBuf {
+    log_file
+        .map(PathBuf::from)
+        .unwrap_or_else(|| match environment {
+            Some(environment) => environment.swage_home().join("gateway.log"),
+            None => swage_config::discovery::resolve_root()
+                .unwrap_or_else(|_| swage_config::discovery::effective_root_path())
+                .join("gateway.log"),
+        })
 }
 
 /// Builds the argument list for spawning the binary in server mode.
@@ -271,13 +325,13 @@ mod tests {
     #[test]
     fn log_path_uses_swage_root() {
         let swage_home = SwageHomeGuard::new();
-        let path = gateway_log_path(None);
+        let path = gateway_log_path(None, None);
         assert_eq!(path, swage_home.path().join("gateway.log"));
     }
 
     #[test]
     fn explicit_log_path_is_preserved() {
-        let path = gateway_log_path(Some("relative/logs/gateway.txt"));
+        let path = gateway_log_path(Some("relative/logs/gateway.txt"), None);
         assert_eq!(path, PathBuf::from("relative/logs/gateway.txt"));
     }
 
