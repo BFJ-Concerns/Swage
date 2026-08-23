@@ -12445,7 +12445,7 @@ mod tests {
         let space = storage.get_or_create_default().await.expect("space");
         let provider = Arc::new(ScriptedRecordingProvider {
             outputs: std::sync::Mutex::new(std::collections::VecDeque::from([
-                scripted_text_output("must not be requested"),
+                scripted_text_output("valid task result"),
             ])),
             requests: std::sync::Mutex::new(Vec::new()),
         });

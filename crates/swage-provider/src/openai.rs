@@ -544,17 +544,18 @@ impl OpenAiProvider {
 
                 // Emit any accumulated tool calls before Done.
                 let tool_calls = tool_acc.take();
-                if !tool_calls.is_empty() {
-                    return vec![StreamChunk::ToolUse {
-                        call_id: tool_calls[0].call_id.clone(),
-                        name: tool_calls[0].name.clone(),
-                        arguments: tool_calls[0].arguments.clone(),
-                    }];
-                }
-
-                return vec![StreamChunk::Done {
+                let mut chunks = tool_calls
+                    .into_iter()
+                    .map(|tool_call| StreamChunk::ToolUse {
+                        call_id: tool_call.call_id,
+                        name: tool_call.name,
+                        arguments: tool_call.arguments,
+                    })
+                    .collect::<Vec<_>>();
+                chunks.push(StreamChunk::Done {
                     finish_reason: Some(finish),
-                }];
+                });
+                return chunks;
             }
 
             let mut chunks = Vec::new();
@@ -1557,6 +1558,39 @@ mod tests {
                 finish_reason: Some(FinishReason::Stop)
             })
         ));
+    }
+
+    #[test]
+    fn parse_stream_event_emits_all_accumulated_tool_calls_before_done() {
+        let mut acc = ToolCallAccumulator::new();
+        let calls = SseEvent {
+            event_type: None,
+            data: r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-a","function":{"name":"first","arguments":"{\"a\":"}},{"index":1,"id":"call-b","function":{"name":"second","arguments":"{\"b\":"}}]},"finish_reason":null}]}"#.into(),
+        };
+        assert!(OpenAiProvider::parse_stream_event_chunks(&calls, &mut acc).is_empty());
+
+        let completed = SseEvent {
+            event_type: None,
+            data: r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"1}"}},{"index":1,"function":{"arguments":"2}"}}]},"finish_reason":"tool_calls"}]}"#.into(),
+        };
+        let chunks = OpenAiProvider::parse_stream_event_chunks(&completed, &mut acc);
+
+        assert!(
+            matches!(
+                chunks.as_slice(),
+                [
+                    StreamChunk::ToolUse { call_id: first_id, name: first_name, arguments: first_args },
+                    StreamChunk::ToolUse { call_id: second_id, name: second_name, arguments: second_args },
+                    StreamChunk::Done { finish_reason: Some(FinishReason::ToolUse) }
+                ] if first_id == "call-a"
+                    && first_name == "first"
+                && first_args == &serde_json::json!({"a": 1})
+                    && second_id == "call-b"
+                    && second_name == "second"
+                && second_args == &serde_json::json!({"b": 2})
+            ),
+            "unexpected chunks: {chunks:?}"
+        );
     }
 
     #[test]
