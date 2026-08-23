@@ -5,6 +5,13 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use swage_core::GatewayError;
+use swage_protocol::{
+    client::context::AssemblyReport,
+    hosting::{
+        AssemblyHistoryEntry, ConfigurationHistoryEvent, OperatorHistoryResponse,
+        VariantSelectionHistoryEvent,
+    },
+};
 use swage_storage::AgentMemoryRecord;
 
 use crate::state::AppState;
@@ -80,6 +87,106 @@ pub struct AgentMemoryListQuery {
 #[derive(Debug, Clone, Serialize)]
 pub struct AgentMemoryListResponse {
     pub memories: Vec<AgentMemoryRecord>,
+}
+
+pub async fn operator_history(state: &AppState) -> Result<OperatorHistoryResponse, GatewayError> {
+    let events = state.storage.list_audit_events().await?;
+    let mut configuration_changes = Vec::new();
+    let mut variant_selections = Vec::new();
+
+    for event in events {
+        match event.event_kind.as_str() {
+            "configuration_change" => {
+                configuration_changes.push(ConfigurationHistoryEvent {
+                    id: event.id,
+                    resource_kind: event.entity_kind,
+                    resource_id: event.entity_id,
+                    action: metadata_string(&event.metadata, "action")?,
+                    source: metadata_string(&event.metadata, "source")?,
+                    session_id: event.session_id,
+                    prior_state: metadata_value(&event.metadata, "prior_state")?,
+                    new_state: metadata_value(&event.metadata, "new_state")?,
+                    recorded_at: event.created_at,
+                });
+            }
+            "variant_selected" => {
+                let turn_id = event
+                    .metadata
+                    .get("turn_id")
+                    .and_then(serde_json::Value::as_str)
+                    .map(Uuid::parse_str)
+                    .transpose()
+                    .map_err(|error| {
+                        GatewayError::ConfigError(format!(
+                            "audit event {} has an invalid turn_id: {error}",
+                            event.id
+                        ))
+                    })?;
+                variant_selections.push(VariantSelectionHistoryEvent {
+                    id: event.id,
+                    location_id: event.entity_id,
+                    variant: metadata_string(&event.metadata, "variant")?,
+                    reason: metadata_string(&event.metadata, "reason")?,
+                    turn_id,
+                    session_id: event.session_id,
+                    recorded_at: event.created_at,
+                });
+            }
+            _ => {}
+        }
+    }
+
+    configuration_changes.sort_by(|left, right| right.recorded_at.cmp(&left.recorded_at));
+    variant_selections.sort_by(|left, right| right.recorded_at.cmp(&left.recorded_at));
+
+    let mut assembly_reports = Vec::new();
+    for space in state.space_store.list_all().await? {
+        for snapshot in state
+            .storage
+            .list_snapshots_by_space(space.id, usize::MAX)
+            .await?
+        {
+            let report: AssemblyReport =
+                serde_json::from_str(&snapshot.report_json).map_err(|error| {
+                    GatewayError::ConfigError(format!(
+                        "context snapshot for turn {} is invalid: {error}",
+                        snapshot.turn_id
+                    ))
+                })?;
+            assembly_reports.push(AssemblyHistoryEntry {
+                turn_id: snapshot.turn_id,
+                session_id: snapshot.session_id,
+                space_id: snapshot.space_id,
+                recorded_at: snapshot.created_at,
+                report,
+            });
+        }
+    }
+    assembly_reports.sort_by(|left, right| right.recorded_at.cmp(&left.recorded_at));
+
+    Ok(OperatorHistoryResponse {
+        configuration_changes,
+        variant_selections,
+        assembly_reports,
+    })
+}
+
+fn metadata_string(metadata: &serde_json::Value, field: &str) -> Result<String, GatewayError> {
+    metadata
+        .get(field)
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| GatewayError::ConfigError(format!("audit event is missing {field}")))
+}
+
+fn metadata_value(
+    metadata: &serde_json::Value,
+    field: &str,
+) -> Result<serde_json::Value, GatewayError> {
+    metadata
+        .get(field)
+        .cloned()
+        .ok_or_else(|| GatewayError::ConfigError(format!("audit event is missing {field}")))
 }
 
 pub async fn operator_search(
