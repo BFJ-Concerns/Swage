@@ -38,6 +38,9 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- Reloading the web UI now returns to the open space instead of the space picker.
+- Operator schedules now show their complete execution target from every space.
+- The space picker now describes only the space behaviour the product provides.
 - Bare skill commands now run as persisted conversation turns instead of leaving the composer waiting indefinitely after activation.
 - Restarting a gateway now preserves its effective data root and runtime directory, and leaves the running gateway untouched when those values cannot be recovered.
 - Workflow scripts now reject non-string `agent` and `agentStart` prompts before dispatch instead of silently sending coerced text such as `[object Object]` to workers.

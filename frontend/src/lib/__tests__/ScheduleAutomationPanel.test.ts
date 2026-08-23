@@ -124,27 +124,45 @@ describe("ScheduleAutomationPanel", () => {
     expect(document.body.textContent).toContain("by agent researcher");
   });
 
-  it("distinguishes the target agent from the creator when they differ", async () => {
+  it("shows the complete fresh-session target from another selected space", async () => {
     // Agent `gateway` creates a schedule that runs as a different agent.
     vi.mocked(operatorApi.listSchedules).mockResolvedValue({
       schedules: [
         {
           ...SCHEDULE,
-          session: { policy: "fresh", space_id: "space-1", agent_id: "researcher" },
+          session: { policy: "fresh", space_id: "target-space", agent_id: "researcher" },
           creator: { kind: "agent", agent_id: "gateway" },
         },
       ],
     });
     component = mount(ScheduleAutomationPanel, {
       target: document.body,
-      props: { spaceId: "space-1", sessionId: "session-1" },
+      props: { spaceId: "viewing-space", sessionId: "viewing-session" },
     });
     await flushUi();
 
-    // The target reads "runs as researcher"; the creator reads "by agent
-    // gateway" — the two agent names are labelled, not adjacent bare text.
-    expect(document.body.textContent).toContain("runs as researcher");
+    // The execution target and creator are both explicit, even though this
+    // operator-level schedule is being viewed from a different space.
+    expect(document.body.textContent).toContain("space target-space · agent researcher");
     expect(document.body.textContent).toContain("by agent gateway");
+  });
+
+  it("shows the specific continuation-session target", async () => {
+    vi.mocked(operatorApi.listSchedules).mockResolvedValue({
+      schedules: [
+        {
+          ...SCHEDULE,
+          session: { policy: "continuation", session_id: "session-target" },
+        },
+      ],
+    });
+    component = mount(ScheduleAutomationPanel, {
+      target: document.body,
+      props: { spaceId: "viewing-space", sessionId: "viewing-session" },
+    });
+    await flushUi();
+
+    expect(document.body.textContent).toContain("continues session session-target");
   });
 
   it("shows empty successful runs as a visible non-outcome", async () => {
