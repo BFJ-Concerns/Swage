@@ -375,13 +375,14 @@ describe("AppLayout shell navigation", () => {
     const agents = Array.from(settingsNavigation?.querySelectorAll("button") ?? []).find(
       (button) => button.textContent?.trim() === "Agents",
     );
+    expect(agents).toBeInstanceOf(HTMLButtonElement);
 
-    flushSync(() => agents?.click());
+    flushSync(() => (agents as HTMLButtonElement).click());
 
     expect(onNavigate).toHaveBeenCalledWith("/settings/agents");
   });
 
-  it("opens global settings without a selected space", () => {
+  it("opens and renders global settings without a selected space", () => {
     const onNavigate = vi.fn();
     component = mountLayout({
       hasCurrentSpace: false,
@@ -396,9 +397,7 @@ describe("AppLayout shell navigation", () => {
     flushSync(() => settingsButton?.click());
 
     expect(onNavigate).toHaveBeenCalledWith("/settings/providers");
-  });
-
-  it("renders global settings without a selected space", () => {
+    unmount(component);
     component = mountLayout({
       hasCurrentSpace: false,
       routePath: "/settings/providers",
