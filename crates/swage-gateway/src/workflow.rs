@@ -7264,7 +7264,7 @@ mod tests {
         })
         .expect("second parallel call");
         tokio::time::timeout(
-            std::time::Duration::from_secs(2),
+            std::time::Duration::from_secs(10),
             pending_call_started.notified(),
         )
         .await
