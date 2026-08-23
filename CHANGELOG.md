@@ -40,6 +40,9 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- Reloading the web UI now returns to the open space instead of the space picker.
+- Operator schedules now show their complete execution target from every space.
+- The space picker now describes only the space behaviour the product provides.
 - Session-scoped approval grants now apply only to the conversation session that granted them.
 - Explicitly disabling the sandbox no longer also requires the degraded-execution opt-in.
 - Gateways started with distinct explicit data roots now keep separate runtime metadata and report their own addresses.
