@@ -845,8 +845,10 @@ pub(crate) struct MockStorage {
     fail_message_lists: AtomicBool,
     fail_session_variable_lists: AtomicBool,
     fail_secret_reads: AtomicBool,
+    fail_skill_activations: AtomicBool,
     fail_audit_writes: AtomicBool,
     fail_snapshot_writes: AtomicBool,
+    last_snapshot_list_limit: AtomicUsize,
 }
 
 #[async_trait]
@@ -1116,9 +1118,15 @@ impl MockStorage {
             fail_message_lists: AtomicBool::new(false),
             fail_session_variable_lists: AtomicBool::new(false),
             fail_secret_reads: AtomicBool::new(false),
+            fail_skill_activations: AtomicBool::new(false),
             fail_audit_writes: AtomicBool::new(false),
             fail_snapshot_writes: AtomicBool::new(false),
+            last_snapshot_list_limit: AtomicUsize::new(0),
         }
+    }
+
+    pub(crate) fn fail_skill_activations(&self) {
+        self.fail_skill_activations.store(true, Ordering::SeqCst);
     }
 
     fn fail_turn_state_writes(&self) {
@@ -1160,6 +1168,10 @@ impl MockStorage {
 
     fn fail_snapshot_writes(&self) {
         self.fail_snapshot_writes.store(true, Ordering::SeqCst);
+    }
+
+    pub(crate) fn last_snapshot_list_limit(&self) -> usize {
+        self.last_snapshot_list_limit.load(Ordering::SeqCst)
     }
 }
 
@@ -2729,6 +2741,7 @@ impl ContextSnapshotStore for MockStorage {
         space_id: Uuid,
         limit: usize,
     ) -> Result<Vec<swage_storage::ContextSnapshotRecord>, StorageError> {
+        self.last_snapshot_list_limit.store(limit, Ordering::SeqCst);
         let db = self.db.lock().await;
         let mut records = Vec::new();
         for (turn_id, (report_json, created_at)) in &db.snapshots {
@@ -2968,6 +2981,11 @@ impl SkillActivationStore for MockStorage {
         _session_id: Uuid,
         _skill_name: &str,
     ) -> Result<(), StorageError> {
+        if self.fail_skill_activations.load(Ordering::SeqCst) {
+            return Err(StorageError::QueryFailed(
+                "injected skill activation failure".to_owned(),
+            ));
+        }
         Ok(())
     }
     async fn deactivate_skill(
@@ -8340,6 +8358,7 @@ async fn delegated_read_only_location_approval_allows_read_and_refuses_write() {
         .lock()
         .expect("location approval grants")
         .insert(crate::state::ApprovalGrantKey::location(
+            None,
             Some(space.id),
             attachment.to_string_lossy(),
             "read",
@@ -9995,6 +10014,10 @@ async fn working_norms_selection_honours_disabled_forced_and_seeded_choices() {
         event.entity_id == crate::experimentation::LOCATION_WORKING_NORMS
             && event.metadata["reason"] == serde_json::json!("forced")
     }));
+    assert!(audit.iter().any(|event| {
+        event.entity_id == crate::experimentation::LOCATION_WORKING_NORMS
+            && event.metadata["variant"] == serde_json::json!("authored-v1")
+    }));
 }
 
 #[tokio::test]
@@ -10834,7 +10857,13 @@ fn prompt_rule_from_instructions_string_matches_flat_prepend() {
 /// Convenience for invoking the private build_permission_config from tests
 /// without having to repeat the full ResolvedConfig wiring.
 fn build_permission_config_for_test(config: &swage_config::ResolvedConfig) -> PermissionConfig {
-    super::build_permission_config(config, config, None, &std::collections::HashSet::new())
+    super::build_permission_config(
+        config,
+        config,
+        None,
+        None,
+        &std::collections::HashSet::new(),
+    )
 }
 
 #[test]
@@ -10848,6 +10877,7 @@ fn space_scoped_approval_grant_only_removes_gate_for_matching_space() {
         )];
 
     let grants = std::collections::HashSet::from([crate::state::ApprovalGrantKey {
+        session_id: None,
         space_id: Some(matching_space_id),
         kind: swage_storage::model::ApprovalKind::Tool,
         name: "file_write".into(),
@@ -10855,13 +10885,89 @@ fn space_scoped_approval_grant_only_removes_gate_for_matching_space() {
     }]);
 
     let matching =
-        super::build_permission_config(&config, &config, Some(matching_space_id), &grants);
-    let other = super::build_permission_config(&config, &config, Some(other_space_id), &grants);
-    let no_space = super::build_permission_config(&config, &config, None, &grants);
+        super::build_permission_config(&config, &config, Some(matching_space_id), None, &grants);
+    let other =
+        super::build_permission_config(&config, &config, Some(other_space_id), None, &grants);
+    let no_space = super::build_permission_config(&config, &config, None, None, &grants);
 
     assert!(matching.require_approval.is_empty());
     assert_eq!(other.require_approval.len(), 1);
     assert_eq!(no_space.require_approval.len(), 1);
+}
+
+#[test]
+fn session_scoped_approval_grant_only_removes_gate_for_granting_session() {
+    let granting_session_id = Uuid::new_v4();
+    let other_session_id = Uuid::new_v4();
+    let mut config = swage_config::ResolvedConfig::default();
+    config.tools.permissions.require_approval =
+        vec![swage_config::model::RequireApprovalEntry::Simple(
+            "file_write".into(),
+        )];
+    let grants = std::collections::HashSet::from([crate::state::ApprovalGrantKey {
+        session_id: Some(granting_session_id),
+        space_id: None,
+        kind: swage_storage::model::ApprovalKind::Tool,
+        name: "file_write".into(),
+        access: None,
+    }]);
+
+    let granting =
+        super::build_permission_config(&config, &config, None, Some(granting_session_id), &grants);
+    let other =
+        super::build_permission_config(&config, &config, None, Some(other_session_id), &grants);
+
+    assert!(granting.require_approval.is_empty());
+    assert_eq!(other.require_approval.len(), 1);
+}
+
+#[tokio::test]
+async fn session_scoped_location_grant_only_authorises_granting_sessions_workers() {
+    let location = tempfile::tempdir().expect("approved location");
+    let (state, granting_session_id) = make_state_with_session(vec![]).await;
+    let granting_session = state
+        .storage
+        .get_session(granting_session_id)
+        .await
+        .expect("session query")
+        .expect("granting session");
+    let other_session_id = Uuid::new_v4();
+    state
+        .session_approval_grants
+        .lock()
+        .expect("location grants")
+        .insert(crate::state::ApprovalGrantKey::location(
+            Some(granting_session_id),
+            None,
+            location.path().to_string_lossy(),
+            "write",
+        ));
+
+    let authorised = resolve_authorised_worker_directory(
+        &state,
+        granting_session.space_id,
+        Uuid::new_v4(),
+        Some(granting_session_id),
+        None,
+        None,
+        &location.path().to_string_lossy(),
+    )
+    .await
+    .expect("granting session should retain its worker location authority");
+    assert!(authorised.can_write);
+
+    let error = resolve_authorised_worker_directory(
+        &state,
+        granting_session.space_id,
+        Uuid::new_v4(),
+        Some(other_session_id),
+        None,
+        None,
+        &location.path().to_string_lossy(),
+    )
+    .await
+    .expect_err("another session must not inherit the location grant");
+    assert!(error.contains("outside the dispatching context"));
 }
 
 #[tokio::test]
@@ -10956,6 +11062,7 @@ async fn durable_worker_placement_rederives_write_and_fails_closed_after_revocat
             .lock()
             .expect("location grants");
         grants.insert(crate::state::ApprovalGrantKey::location(
+            None,
             Some(session.space_id),
             placement.path().to_string_lossy(),
             "write",
@@ -10981,6 +11088,7 @@ async fn durable_worker_placement_rederives_write_and_fails_closed_after_revocat
             .expect("location grants");
         grants.clear();
         grants.insert(crate::state::ApprovalGrantKey::location(
+            None,
             Some(session.space_id),
             placement.path().to_string_lossy(),
             "read",
@@ -11160,11 +11268,18 @@ fn worker_placement_replaces_other_filesystem_authority() {
 
     let grants = std::collections::HashSet::from([crate::state::ApprovalGrantKey::location(
         None,
+        None,
         approved_location.to_string_lossy(),
         "write",
     )]);
     let mut allowed_paths = vec![placement.clone()];
-    append_approved_location_paths(&mut allowed_paths, &grants, Uuid::new_v4(), Some(&metadata));
+    append_approved_location_paths(
+        &mut allowed_paths,
+        &grants,
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        Some(&metadata),
+    );
     assert_eq!(allowed_paths, vec![placement]);
 }
 

@@ -27,7 +27,7 @@ use crate::state::AppState;
 pub const LOCATION_CONTEXT_ASSEMBLY: &str = "context.assembly";
 
 /// The working-norms choice point: which norms text a bare-proxy model's
-/// session receives for its family. The built-in text serves until
+/// session receives for its family. The authored default serves until
 /// alternatives register; every draw is recorded like any location's.
 pub const LOCATION_WORKING_NORMS: &str = "context.working_norms";
 pub const LOCATION_TASK_PROMPT: &str = "task.prompt";

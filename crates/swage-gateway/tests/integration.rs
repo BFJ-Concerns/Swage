@@ -5,6 +5,8 @@ mod support;
 mod attachment_ingestion_integration;
 #[path = "integration/browser_journey_integration.rs"]
 mod browser_journey_integration;
+#[path = "integration/cli_restart_lifecycle.rs"]
+mod cli_restart_lifecycle;
 #[path = "integration/cli_run_integration.rs"]
 mod cli_run_integration;
 #[path = "integration/credential_governance_integration.rs"]

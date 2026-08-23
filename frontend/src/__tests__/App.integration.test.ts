@@ -339,6 +339,7 @@ describe("App", () => {
     vi.clearAllMocks();
     setPath("/");
     delete window.swageDesktop;
+    localStorage.clear();
     vi.mocked(materialsApi.listSpaceMaterials).mockResolvedValue([]);
     vi.mocked(materialsApi.listSessionMaterials).mockResolvedValue([]);
     vi.mocked(agentDefinitionsApi.listEffectiveAgentDefinitions).mockResolvedValue([]);
@@ -364,6 +365,22 @@ describe("App", () => {
     }
 
     setPath("/");
+    localStorage.clear();
+  });
+
+  it("opens the persisted space and loads its conversations on reload", async () => {
+    const restoredSpace = makeSpace({ id: "proj-restored", name: "Restored" });
+    localStorage.setItem("swage:active-space", restoredSpace.id);
+    vi.mocked(spacesApi.listSpaces).mockResolvedValueOnce([makeSpace(), restoredSpace]);
+    vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([
+      makeConversationSummary({ id: "conv-restored", message_preview: "Restored work" }),
+    ]);
+
+    component = mount(App, { target: document.body });
+    await waitForText("Restored work");
+
+    expect(conversationsApi.listConversations).toHaveBeenCalledWith("proj-restored");
+    expect(document.body.textContent).not.toContain("Choose where to work");
   });
 
   it("connects exactly once when popstate selects a different conversation", async () => {

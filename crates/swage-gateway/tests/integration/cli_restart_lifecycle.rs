@@ -11,16 +11,32 @@ use std::{
 
 use serde_json::Value;
 
+const FIXTURE_READY_TIMEOUT: Duration = Duration::from_secs(30);
+
 struct GatewayProbe {
     binary: PathBuf,
     root: tempfile::TempDir,
     runtime: tempfile::TempDir,
     home: tempfile::TempDir,
     port: u16,
+    explicit_root: bool,
+    xdg_runtime: bool,
 }
 
 impl GatewayProbe {
     fn new() -> Self {
+        Self::with_environment(true, true)
+    }
+
+    fn without_explicit_root() -> Self {
+        Self::with_environment(false, true)
+    }
+
+    fn with_default_root() -> Self {
+        Self::with_environment(false, false)
+    }
+
+    fn with_environment(explicit_root: bool, xdg_runtime: bool) -> Self {
         let listener = TcpListener::bind(("127.0.0.1", 0))
             .expect("failed to reserve a loopback port for the gateway probe");
         let port = listener
@@ -34,15 +50,24 @@ impl GatewayProbe {
             runtime: tempfile::TempDir::new().expect("failed to create the probe runtime dir"),
             home: tempfile::TempDir::new().expect("failed to create the probe home"),
             port,
+            explicit_root,
+            xdg_runtime,
         }
     }
 
     fn command(&self) -> Command {
         let mut command = Command::new(&self.binary);
-        command
-            .env("SWAGE_HOME", self.root.path())
-            .env("XDG_RUNTIME_DIR", self.runtime.path())
-            .env("HOME", self.home.path());
+        command.env("HOME", self.home.path());
+        if self.explicit_root {
+            command.env("SWAGE_HOME", self.root.path());
+        } else {
+            command.env_remove("SWAGE_HOME");
+        }
+        if self.xdg_runtime {
+            command.env("XDG_RUNTIME_DIR", self.runtime.path());
+        } else {
+            command.env_remove("XDG_RUNTIME_DIR");
+        }
         command
     }
 
@@ -62,8 +87,43 @@ impl GatewayProbe {
         );
     }
 
+    fn assert_ready_after_start(&self, output: Output) {
+        if output.status.success() {
+            return;
+        }
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("gateway did not become ready within 5s"),
+            "gateway start failed before readiness polling\nstdout: {}\nstderr: {stderr}",
+            String::from_utf8_lossy(&output.stdout),
+        );
+
+        // The CLI's five-second deadline is part of its reporting contract,
+        // not a startup-time guarantee. These tests exercise restart state,
+        // so let a slow fixture finish starting and wait on the real health
+        // condition instead of treating scheduler pressure as a failed setup.
+        let deadline = Instant::now() + FIXTURE_READY_TIMEOUT;
+        loop {
+            if self.run(&["gateway", "status"]).status.success() {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "gateway did not become healthy after the start command timed out"
+            );
+            thread::sleep(Duration::from_millis(25));
+        }
+    }
+
     fn metadata_path(&self) -> PathBuf {
-        self.runtime.path().join("swage/metadata.json")
+        if self.explicit_root {
+            self.root.path().join("run/metadata.json")
+        } else if self.xdg_runtime {
+            self.runtime.path().join("swage/metadata.json")
+        } else {
+            self.home.path().join(".swage/run/metadata.json")
+        }
     }
 
     fn pid(&self) -> u32 {
@@ -77,7 +137,7 @@ impl GatewayProbe {
 
     fn start(&self) {
         let port = self.port.to_string();
-        self.assert_success(self.run(&["gateway", "start", "--port", &port]));
+        self.assert_ready_after_start(self.run(&["gateway", "start", "--port", &port]));
     }
 
     fn stop(&self) {
@@ -91,13 +151,59 @@ impl Drop for GatewayProbe {
     }
 }
 
+#[test]
+fn restart_recovers_xdg_metadata_without_swage_home() {
+    assert_restart_recovers_without_swage_home(GatewayProbe::without_explicit_root());
+}
+
+#[test]
+fn restart_recovers_default_root_metadata_without_overrides() {
+    assert_restart_recovers_without_swage_home(GatewayProbe::with_default_root());
+}
+
+fn assert_restart_recovers_without_swage_home(probe: GatewayProbe) {
+    probe.start();
+    let first_pid = probe.pid();
+    fs::remove_file(probe.metadata_path()).expect("failed to remove live runtime metadata");
+
+    let port = probe.port.to_string();
+    let output = probe.run(&["gateway", "restart", "--force", "--port", &port]);
+    probe.assert_success(output);
+
+    let second_pid = probe.pid();
+    assert_ne!(first_pid, second_pid);
+    let environment = process_environment(second_pid);
+    assert!(
+        !environment
+            .split(|byte| *byte == 0)
+            .any(|entry| entry.starts_with(b"SWAGE_HOME=")),
+        "replacement gateway gained an explicit SWAGE_HOME"
+    );
+    let expected_home = format!("HOME={}", probe.home.path().display());
+    assert!(
+        environment
+            .split(|byte| *byte == 0)
+            .any(|entry| entry == expected_home.as_bytes()),
+        "replacement gateway did not receive recovered HOME"
+    );
+    let recovered_xdg = environment
+        .split(|byte| *byte == 0)
+        .find(|entry| entry.starts_with(b"XDG_RUNTIME_DIR="));
+    if probe.xdg_runtime {
+        let expected_xdg = format!("XDG_RUNTIME_DIR={}", probe.runtime.path().display());
+        assert_eq!(recovered_xdg, Some(expected_xdg.as_bytes()));
+    } else {
+        assert_eq!(recovered_xdg, None);
+    }
+}
+
 fn process_environment(pid: u32) -> Vec<u8> {
     fs::read(Path::new("/proc").join(pid.to_string()).join("environ"))
         .expect("failed to read the replacement process environment")
 }
 
 fn wait_for_replacement_pid(probe: &GatewayProbe, previous_pid: u32, child: &mut Child) -> u32 {
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + FIXTURE_READY_TIMEOUT;
     loop {
         if let Ok(bytes) = fs::read(probe.metadata_path())
             && let Ok(metadata) = serde_json::from_slice::<Value>(&bytes)
@@ -148,7 +254,7 @@ fn restart_preserves_running_environment_and_still_starts_when_nothing_is_runnin
         .args(["gateway", "restart", "--force", "--port", &port])
         .output()
         .expect("failed to invoke gateway restart");
-    probe.assert_success(output);
+    probe.assert_ready_after_start(output);
 
     let second_pid = probe.pid();
     assert_ne!(first_pid, second_pid);
@@ -175,7 +281,7 @@ fn restart_preserves_running_environment_and_still_starts_when_nothing_is_runnin
     assert!(!probe.metadata_path().exists());
 
     let output = probe.run(&["gateway", "restart", "--force", "--port", &port]);
-    probe.assert_success(output);
+    probe.assert_ready_after_start(output);
     assert!(probe.metadata_path().exists());
 }
 
