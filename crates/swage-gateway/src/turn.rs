@@ -1058,6 +1058,7 @@ pub(crate) async fn process_turn_with_composition(
         &mut allowed_paths,
         &session_approval_grants,
         space_id,
+        session_id,
         session.metadata.as_ref(),
     );
     let mut agent_config = build_agent_config_with_workspace(
@@ -1088,6 +1089,7 @@ pub(crate) async fn process_turn_with_composition(
         session.metadata.as_ref(),
         Some(space_id),
         session.active_workspace_attachment_id,
+        Some(session_id),
         ws_tx.clone(),
     )
     .await
@@ -1186,6 +1188,7 @@ pub(crate) async fn process_turn_with_composition(
                     session.metadata.as_ref(),
                     Some(space_id),
                     session.active_workspace_attachment_id,
+                    Some(session_id),
                     ws_tx.clone(),
                 )
                 .await
@@ -1257,6 +1260,7 @@ pub(crate) async fn process_turn_with_composition(
             &config,
             &state.config,
             Some(space_id),
+            Some(session_id),
             &session_approval_grants,
         );
         let codex_request = crate::codex::CodexTurnRequest {
