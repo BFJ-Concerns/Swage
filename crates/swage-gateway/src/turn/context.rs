@@ -208,7 +208,6 @@ pub(crate) fn available_skills_for_agent(
         .map(|skill| AvailableSkill {
             name: skill.name,
             trigger: skill.description,
-            shipped: skill.shipped,
         })
         .collect()
 }
@@ -410,7 +409,6 @@ mod shipped_skill_tests {
         let root = tempfile::tempdir().expect("temporary root");
         let available = available_skills_for_agent("default", "gateway", Some(root.path()));
         assert_eq!(available.len(), 5);
-        assert!(available.iter().all(|skill| skill.shipped));
         assert_eq!(
             available
                 .iter()
