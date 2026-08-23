@@ -33,16 +33,31 @@ impl RuntimeMetadata {
 
     /// Resolves the path to the metadata file.
     ///
-    /// Prefers `$XDG_RUNTIME_DIR/swage/metadata.json`; falls back to
-    /// `$SWAGE_HOME/run/metadata.json` or `~/.swage/run/metadata.json` when the
-    /// XDG variable is absent.
+    /// Uses `$SWAGE_HOME/run/metadata.json` when an explicit data root is set,
+    /// otherwise prefers `$XDG_RUNTIME_DIR/swage/metadata.json` and falls back
+    /// to `~/.swage/run/metadata.json`.
     pub fn metadata_path() -> PathBuf {
-        if let Ok(xdg) = std::env::var("XDG_RUNTIME_DIR") {
-            PathBuf::from(xdg).join("swage").join("metadata.json")
+        let explicit_data_root = std::env::var("SWAGE_HOME").ok().map(PathBuf::from);
+        let runtime_dir = std::env::var("XDG_RUNTIME_DIR").ok().map(PathBuf::from);
+        Self::metadata_path_for(
+            explicit_data_root.as_deref(),
+            runtime_dir.as_deref(),
+            &effective_swage_root_path(),
+        )
+    }
+
+    /// Resolves runtime metadata from an already-resolved process environment.
+    pub fn metadata_path_for(
+        explicit_data_root: Option<&Path>,
+        runtime_dir: Option<&Path>,
+        data_root: &Path,
+    ) -> PathBuf {
+        if let Some(data_root) = explicit_data_root {
+            data_root.join("run").join("metadata.json")
+        } else if let Some(runtime_dir) = runtime_dir {
+            runtime_dir.join("swage").join("metadata.json")
         } else {
-            effective_swage_root_path()
-                .join("run")
-                .join("metadata.json")
+            data_root.join("run").join("metadata.json")
         }
     }
 
@@ -157,6 +172,32 @@ mod tests {
             let path = RuntimeMetadata::metadata_path();
             assert_eq!(path, dir.path().join("swage").join("metadata.json"));
         });
+    }
+
+    #[test]
+    fn explicit_swage_root_owns_its_runtime_metadata() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let root = TempDir::new().unwrap();
+        let runtime = TempDir::new().unwrap();
+        let original_home = std::env::var("SWAGE_HOME").ok();
+        let original_runtime = std::env::var("XDG_RUNTIME_DIR").ok();
+        // SAFETY: all environment mutation in this crate is serialised by ENV_LOCK.
+        unsafe {
+            std::env::set_var("SWAGE_HOME", root.path());
+            std::env::set_var("XDG_RUNTIME_DIR", runtime.path());
+        }
+
+        let path = RuntimeMetadata::metadata_path();
+
+        match original_home {
+            Some(value) => unsafe { std::env::set_var("SWAGE_HOME", value) },
+            None => unsafe { std::env::remove_var("SWAGE_HOME") },
+        }
+        match original_runtime {
+            Some(value) => unsafe { std::env::set_var("XDG_RUNTIME_DIR", value) },
+            None => unsafe { std::env::remove_var("XDG_RUNTIME_DIR") },
+        }
+        assert_eq!(path, root.path().join("run").join("metadata.json"));
     }
 
     #[test]

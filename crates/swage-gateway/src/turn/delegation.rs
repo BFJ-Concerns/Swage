@@ -344,6 +344,7 @@ impl DelegationHandler for GatewayDelegationHandler {
             self.filesystem_authority_for_turn(sender_turn_id).await?;
         let active_workspace_attachment_id =
             sender_filesystem_authority.active_workspace_attachment_id;
+        let sender_session_id = sender_filesystem_authority.session_id;
         let mut target_agent_config = build_agent_config_for_space_workspace(
             &self.state,
             target_agent_id.to_string(),
@@ -362,6 +363,7 @@ impl DelegationHandler for GatewayDelegationHandler {
                         &self.state,
                         space_id,
                         sender_turn_id,
+                        Some(sender_session_id),
                         active_workspace_attachment_id,
                         sender_filesystem_authority.placement.as_ref(),
                         cwd,
@@ -382,6 +384,7 @@ impl DelegationHandler for GatewayDelegationHandler {
                     &self.state,
                     space_id,
                     sender_turn_id,
+                    Some(sender_session_id),
                     active_workspace_attachment_id,
                     sender_filesystem_authority.placement.as_ref(),
                     repo,
@@ -707,6 +710,7 @@ impl GatewayDelegationHandler {
                     &self.state,
                     session.space_id,
                     authority_context_id,
+                    Some(session.id),
                     session.active_workspace_attachment_id,
                     None,
                     authority_path,
@@ -727,6 +731,7 @@ impl GatewayDelegationHandler {
             None => None,
         };
         Ok(DispatchFilesystemAuthority {
+            session_id: session.id,
             active_workspace_attachment_id: session.active_workspace_attachment_id,
             placement,
         })
@@ -734,6 +739,7 @@ impl GatewayDelegationHandler {
 }
 
 struct DispatchFilesystemAuthority {
+    session_id: Uuid,
     active_workspace_attachment_id: Option<Uuid>,
     placement: Option<ResolvedWorkerDirectory>,
 }
