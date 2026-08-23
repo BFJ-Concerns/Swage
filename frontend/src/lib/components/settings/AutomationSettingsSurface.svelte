@@ -1,8 +1,8 @@
 <script lang="ts">
   import ScheduleAutomationPanel from "../ScheduleAutomationPanel.svelte";
-  import type { RequireApprovalEntry, SettingsResponse } from "../../types";
-  interface Props { settings: SettingsResponse; spaceId: string | null; sessionId: string | null; onValidation?: (bundlesInvalid: boolean, approvalsInvalid: boolean, message: string | null) => void; }
-  let { settings = $bindable(), spaceId, sessionId, onValidation }: Props = $props();
+  import type { RequireApprovalEntry, SettingsResponse, Space } from "../../types";
+  interface Props { settings: SettingsResponse; spaceId: string | null; sessionId: string | null; spaces?: Space[]; onValidation?: (bundlesInvalid: boolean, approvalsInvalid: boolean, message: string | null) => void; }
+  let { settings = $bindable(), spaceId, sessionId, spaces = [], onValidation }: Props = $props();
   let bundlesInvalid = false;
   let approvalsInvalid = false;
   function changed(): void { settings = { ...settings }; }
@@ -24,7 +24,7 @@
   }
 </script>
 
-<div class="field"><div class="key">Schedules<small>Create and operate durable scheduled agent work.</small></div><div class="val"><ScheduleAutomationPanel {spaceId} {sessionId} /></div></div>
+<div class="field"><div class="key">Schedules<small>Create and operate durable scheduled agent work.</small></div><div class="val"><ScheduleAutomationPanel {spaceId} {sessionId} {spaces} /></div></div>
 <div class="field"><div class="key">Sandbox<small>Global sandbox policy written to config.toml. Saved changes require a gateway restart.</small></div><div class="val"><button type="button" class="opt" class:active={settings.sandbox.enabled} onclick={() => {settings.sandbox.enabled=true;changed();}}>Enabled</button><button type="button" class="opt" class:active={!settings.sandbox.enabled} onclick={() => {settings.sandbox.enabled=false;changed();}}>Disabled</button></div></div>
 <div class="field"><div class="key">Approval defaults<small>Timeout and timeout policy for human approval requests without a per-tool override.</small></div><div class="val val-stack"><div class="search-row"><input type="number" class="text small" bind:value={settings.hitl.timeout} oninput={changed} min="1" placeholder="300"/><button type="button" class="opt" class:active={settings.hitl.timeout_policy === "reject"} onclick={() => {settings.hitl.timeout_policy="reject";changed();}}>Reject</button><button type="button" class="opt" class:active={settings.hitl.timeout_policy === "interrupt"} onclick={() => {settings.hitl.timeout_policy="interrupt";changed();}}>Interrupt</button></div></div></div>
 <div class="field"><div class="key">Context assembly<small>Assembly strategy, assembly timeout, and optional token budget.</small></div><div class="val val-stack"><div class="search-row"><input type="text" class="text" bind:value={settings.context.assembly} oninput={changed} placeholder="default" autocomplete="off"/><input type="number" class="text small" bind:value={settings.context.timeout} oninput={changed} min="1" max="60" placeholder="5"/><input type="number" class="text small" value={settings.context.budget ?? ""} min="1" placeholder="model limit" oninput={(event)=>{settings.context.budget=event.currentTarget.value?Number(event.currentTarget.value):null;changed();}}/></div></div></div>
