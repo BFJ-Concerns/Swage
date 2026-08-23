@@ -95,15 +95,30 @@ fn process_environment(pid: u32) -> Vec<u8> {
 }
 
 #[test]
-fn restart_preserves_running_root_and_still_starts_when_nothing_is_running() {
+fn restart_preserves_running_environment_and_still_starts_when_nothing_is_running() {
     let probe = GatewayProbe::new();
     probe.start();
     let first_pid = probe.pid();
+
+    let invoking_runtime = tempfile::TempDir::new().expect("failed to create invoking runtime");
+    let invoking_home = tempfile::TempDir::new().expect("failed to create invoking home");
+    let invoking_metadata = invoking_runtime.path().join("swage/metadata.json");
+    fs::create_dir_all(invoking_metadata.parent().unwrap())
+        .expect("failed to create invoking metadata directory");
+    // Keep the live metadata discoverable while giving the restart process a
+    // conflicting runtime directory whose inherited value would fail below.
+    fs::hard_link(probe.metadata_path(), &invoking_metadata)
+        .expect("failed to expose runtime metadata to the restart command");
+
+    let live_log = probe.root.path().join("gateway.log");
+    fs::remove_file(&live_log).expect("failed to remove the initial gateway log");
 
     let port = probe.port.to_string();
     let mut restart = probe.command();
     let output = restart
         .env_remove("SWAGE_HOME")
+        .env("HOME", invoking_home.path())
+        .env("XDG_RUNTIME_DIR", invoking_runtime.path())
         .args(["gateway", "restart", "--force", "--port", &port])
         .output()
         .expect("failed to invoke gateway restart");
@@ -111,14 +126,24 @@ fn restart_preserves_running_root_and_still_starts_when_nothing_is_running() {
 
     let second_pid = probe.pid();
     assert_ne!(first_pid, second_pid);
-    let expected = format!("SWAGE_HOME={}", probe.root.path().display());
-    assert!(
-        process_environment(second_pid)
-            .split(|byte| *byte == 0)
-            .any(|entry| entry == expected.as_bytes()),
-        "replacement gateway did not receive the recovered root"
-    );
-    assert!(!probe.home.path().join(".swage/swage.db").exists());
+    let environment = process_environment(second_pid);
+    for (name, value) in [
+        ("SWAGE_HOME", probe.root.path()),
+        ("HOME", probe.home.path()),
+        ("XDG_RUNTIME_DIR", probe.runtime.path()),
+    ] {
+        let expected = format!("{name}={}", value.display());
+        assert!(
+            environment
+                .split(|byte| *byte == 0)
+                .any(|entry| entry == expected.as_bytes()),
+            "replacement gateway did not receive recovered {name}"
+        );
+    }
+    assert!(live_log.exists());
+    assert!(!invoking_metadata.exists());
+    assert!(!invoking_home.path().join(".swage/gateway.log").exists());
+    assert!(!invoking_home.path().join(".swage/swage.db").exists());
 
     probe.stop();
     assert!(!probe.metadata_path().exists());
