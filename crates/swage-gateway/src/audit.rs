@@ -138,8 +138,8 @@ pub async fn operator_history(state: &AppState) -> Result<OperatorHistoryRespons
         }
     }
 
-    configuration_changes.sort_by(|left, right| right.recorded_at.cmp(&left.recorded_at));
-    variant_selections.sort_by(|left, right| right.recorded_at.cmp(&left.recorded_at));
+    configuration_changes.sort_by_key(|entry| std::cmp::Reverse(entry.recorded_at));
+    variant_selections.sort_by_key(|entry| std::cmp::Reverse(entry.recorded_at));
 
     let mut assembly_reports = Vec::new();
     for space in state.space_store.list_all().await? {
@@ -164,7 +164,7 @@ pub async fn operator_history(state: &AppState) -> Result<OperatorHistoryRespons
             });
         }
     }
-    assembly_reports.sort_by(|left, right| right.recorded_at.cmp(&left.recorded_at));
+    assembly_reports.sort_by_key(|entry| std::cmp::Reverse(entry.recorded_at));
 
     Ok(OperatorHistoryResponse {
         configuration_changes,
