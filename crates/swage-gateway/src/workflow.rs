@@ -1154,6 +1154,27 @@ async fn run_ephemeral_agent_call(
                         session_ref.session_id
                     )
                 })?;
+            if let Some(requested_tools) = request.tools.as_ref() {
+                let persisted_tools = session
+                    .metadata
+                    .as_ref()
+                    .and_then(|metadata| {
+                        metadata.get(crate::turn::WORKFLOW_CALL_TOOLS_METADATA_KEY)
+                    })
+                    .map(|tools| serde_json::from_value::<Vec<String>>(tools.clone()))
+                    .transpose()
+                    .map_err(|error| {
+                        format!(
+                            "AgentCallError: continued session has invalid call-scoped tools: {error}"
+                        )
+                    })?;
+                if persisted_tools.as_ref() != Some(requested_tools) {
+                    return Err(
+                        "AgentCallError: tools cannot be changed on a continued session; select them when creating the worker"
+                            .into(),
+                    );
+                }
+            }
             let thread = ThreadStore::get(state.storage.as_ref(), session_ref.thread_id)
                 .await
                 .map_err(|error| error.to_string())?
@@ -1207,6 +1228,9 @@ async fn run_ephemeral_agent_call(
                     .await
                     .map_err(|error| error.to_string())?;
                 metadata["task_definition"] = Value::String(task.clone());
+            }
+            if let Some(tools) = request.tools.as_ref() {
+                metadata[crate::turn::WORKFLOW_CALL_TOOLS_METADATA_KEY] = serde_json::json!(tools);
             }
             let session = state
                 .storage
@@ -6066,6 +6090,7 @@ mod tests {
                 prompt: "Use echo".into(),
                 agent: Some("gateway".into()),
                 task: None,
+                tools: None,
                 model: None,
                 schema: None,
                 max_attempts: 1,
@@ -6109,6 +6134,7 @@ mod tests {
         let provider = Arc::new(ScriptedRecordingProvider {
             outputs: std::sync::Mutex::new(std::collections::VecDeque::from([
                 scripted_text_output("gathered"),
+                scripted_text_output("scoped"),
             ])),
             requests: std::sync::Mutex::new(Vec::new()),
         });
@@ -6119,6 +6145,7 @@ mod tests {
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all([
                 Arc::new(WorkflowNamedTool("knowledge_record")) as Arc<dyn crate::tool::Tool>,
+                Arc::new(WorkflowNamedTool("web_search")) as Arc<dyn crate::tool::Tool>,
                 Arc::new(WorkflowNamedTool("shell")) as Arc<dyn crate::tool::Tool>,
                 Arc::new(WorkflowNamedTool("config_apply")) as Arc<dyn crate::tool::Tool>,
             ]),
@@ -6141,6 +6168,7 @@ mod tests {
                 prompt: "Gather the selected source".into(),
                 agent: Some("researcher".into()),
                 task: None,
+                tools: None,
                 model: None,
                 schema: None,
                 max_attempts: 1,
@@ -6170,7 +6198,7 @@ mod tests {
             .iter()
             .map(|definition| definition["name"].as_str().expect("tool name"))
             .collect::<Vec<_>>();
-        assert_eq!(advertised_tools, vec!["knowledge_record"]);
+        assert_eq!(advertised_tools, vec!["knowledge_record", "web_search"]);
         let context = requests[0]
             .messages
             .iter()
@@ -6178,6 +6206,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(context.contains("Record gathered source material in the knowledge base"));
+        drop(requests);
 
         // The worker session carries its journalled call's identity, so its
         // knowledge captures dedup across an interrupted call's re-run.
@@ -6192,6 +6221,45 @@ mod tests {
             crate::turn::agent_call_scope(session.metadata.as_ref()).as_deref(),
             Some(journal_entry_id.to_string().as_str())
         );
+
+        let scoped = run_ephemeral_agent_call(
+            &state,
+            Uuid::new_v4(),
+            space.id,
+            &[],
+            &[],
+            Uuid::new_v4(),
+            AgentCallRequest {
+                cwd: None,
+                isolation: None,
+                effort: None,
+                timeout_ms: None,
+                prompt: "Scope sources without recording".into(),
+                agent: Some("researcher".into()),
+                task: None,
+                tools: Some(vec!["web_search".into()]),
+                model: None,
+                schema: None,
+                max_attempts: 1,
+                label: None,
+                session: None,
+                elements: None,
+                variables: None,
+                assembly: None,
+            },
+            None,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("call-scoped researcher workflow call");
+        assert_eq!(scoped.output, Value::String("scoped".into()));
+        let requests = provider.requests.lock().expect("requests");
+        let advertised_tools = requests[1]
+            .tool_definitions
+            .iter()
+            .map(|definition| definition["name"].as_str().expect("tool name"))
+            .collect::<Vec<_>>();
+        assert_eq!(advertised_tools, vec!["web_search"]);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -6282,6 +6350,7 @@ mod tests {
             prompt: "Use the briefing".into(),
             agent: Some("default".into()),
             task: None,
+            tools: None,
             model: None,
             effort: None,
             timeout_ms: None,
@@ -7335,6 +7404,7 @@ mod tests {
             prompt: prompt.into(),
             agent: Some("default".into()),
             task: None,
+            tools: None,
             model: None,
             schema: None,
             max_attempts: 1,
@@ -7443,6 +7513,7 @@ mod tests {
             prompt: "hold capacity".into(),
             agent: Some("default".into()),
             task: None,
+            tools: None,
             model: None,
             schema: None,
             max_attempts: 1,
@@ -7617,6 +7688,7 @@ mod tests {
                 prompt: "restate the brief".into(),
                 agent: Some("worker".into()),
                 task: None,
+                tools: None,
                 model: None,
                 schema: None,
                 max_attempts: 1,
@@ -7678,6 +7750,7 @@ mod tests {
                 prompt: "now do the work".into(),
                 agent: Some("worker".into()),
                 task: None,
+                tools: None,
                 model: None,
                 schema: None,
                 max_attempts: 1,
@@ -7726,6 +7799,7 @@ mod tests {
                 prompt: "move the continued worker".into(),
                 agent: Some("worker".into()),
                 task: None,
+                tools: None,
                 model: None,
                 schema: None,
                 max_attempts: 1,
@@ -8248,6 +8322,7 @@ mod tests {
             prompt: "Use the current review contract".into(),
             agent: None,
             task: Some("review".into()),
+            tools: None,
             model: None,
             effort: None,
             timeout_ms: None,
@@ -9421,6 +9496,7 @@ mod tests {
                 prompt: "hijack".into(),
                 agent: Some("worker".into()),
                 task: None,
+                tools: None,
                 model: None,
                 schema: None,
                 max_attempts: 1,
@@ -9469,6 +9545,7 @@ mod tests {
                 prompt: "continue".into(),
                 agent: None,
                 task: Some("review".into()),
+                tools: None,
                 model: None,
                 effort: None,
                 timeout_ms: None,
@@ -11040,6 +11117,7 @@ mod tests {
             prompt: "restate".into(),
             agent: Some("worker".into()),
             task: None,
+            tools: None,
             model: None,
             schema: None,
             max_attempts: 3,
@@ -11086,6 +11164,7 @@ mod tests {
             prompt: "continue".into(),
             agent: Some("worker".into()),
             task: None,
+            tools: None,
             model: None,
             schema: None,
             session: Some(AgentSessionRef {
@@ -11217,6 +11296,7 @@ mod tests {
             prompt: "account usage".into(),
             agent: Some("default".into()),
             task: None,
+            tools: None,
             model: None,
             schema: None,
             max_attempts: 1,
@@ -11341,6 +11421,7 @@ mod tests {
             prompt: prompt.into(),
             agent: Some("default".into()),
             task: None,
+            tools: None,
             model: None,
             schema: None,
             max_attempts: 1,
@@ -11445,6 +11526,7 @@ mod tests {
             prompt: prompt.into(),
             agent: Some("default".into()),
             task: None,
+            tools: None,
             model: None,
             schema: None,
             max_attempts: 1,
@@ -11634,6 +11716,7 @@ mod tests {
             prompt: "resume work".into(),
             agent: Some("default".into()),
             task: None,
+            tools: None,
             model: None,
             schema: None,
             max_attempts: 1,
@@ -11768,6 +11851,7 @@ mod tests {
             prompt: "resume working call".into(),
             agent: Some("default".into()),
             task: None,
+            tools: None,
             model: None,
             schema: None,
             max_attempts: 1,
@@ -11896,6 +11980,7 @@ mod tests {
             prompt: "closing call".into(),
             agent: Some("default".into()),
             task: None,
+            tools: None,
             model: None,
             schema: None,
             max_attempts: 1,
@@ -11973,6 +12058,7 @@ mod tests {
             prompt: prompt.into(),
             agent: Some("default".into()),
             task: None,
+            tools: None,
             model: None,
             schema: None,
             max_attempts: 1,
@@ -12212,6 +12298,7 @@ mod tests {
             prompt: prompt.into(),
             agent: Some("default".into()),
             task: None,
+            tools: None,
             model: None,
             schema: None,
             max_attempts: 1,
@@ -12439,6 +12526,7 @@ mod tests {
             prompt: "must not execute".into(),
             agent: Some("default".into()),
             task: None,
+            tools: None,
             model: None,
             schema: None,
             max_attempts: 1,
@@ -13042,6 +13130,7 @@ mod tests {
             prompt: "known failing call".into(),
             agent: Some("default".into()),
             task: None,
+            tools: None,
             model: None,
             schema: None,
             max_attempts: 1,

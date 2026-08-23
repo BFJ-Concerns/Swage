@@ -9,6 +9,7 @@ use super::{
 /// bound and suspension cannot freeze authority.
 pub(crate) const DISPATCH_BOUND_METADATA_KEY: &str = "dispatch_bound_agent_ids";
 pub(crate) const DISPATCH_BOUND_TASK_METADATA_KEY: &str = "dispatch_bound_task_definition_ids";
+pub(crate) const WORKFLOW_CALL_TOOLS_METADATA_KEY: &str = "workflow_call_tools";
 pub(crate) const WORKER_PLACEMENT_CWD_METADATA_KEY: &str = "worker_placement_cwd";
 pub(crate) const WORKER_PLACEMENT_CAN_WRITE_METADATA_KEY: &str = "worker_placement_can_write";
 pub(crate) const WORKER_PLACEMENT_AUTHORITY_PATH_METADATA_KEY: &str =
@@ -94,6 +95,26 @@ pub(crate) fn add_dispatch_bound_task_definition_ids(
     if !task_definition_ids.is_empty() {
         metadata[DISPATCH_BOUND_TASK_METADATA_KEY] = serde_json::json!(task_definition_ids);
     }
+}
+
+/// Apply a workflow call's journalled tool allow-list as a final narrowing
+/// overlay. The list rides the worker session so continuations retain the
+/// same authority and every turn recomputes the intersection.
+pub(crate) fn apply_workflow_call_tools(
+    mut config: swage_config::ResolvedConfig,
+    metadata: Option<&serde_json::Value>,
+) -> Result<swage_config::ResolvedConfig, GatewayError> {
+    let Some(value) = metadata.and_then(|metadata| metadata.get(WORKFLOW_CALL_TOOLS_METADATA_KEY))
+    else {
+        return Ok(config);
+    };
+    let tools = serde_json::from_value::<Vec<String>>(value.clone()).map_err(|error| {
+        GatewayError::ConfigError(format!(
+            "session metadata field {WORKFLOW_CALL_TOOLS_METADATA_KEY:?} must be an array of tool names: {error}"
+        ))
+    })?;
+    intersect_tool_permissions(&mut config, &tools, Vec::new());
+    Ok(config)
 }
 
 pub(crate) async fn dispatch_bound_agent_ids_for_turn(

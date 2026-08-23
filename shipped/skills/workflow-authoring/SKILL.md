@@ -59,7 +59,9 @@ return { reply };
   model family), `effort` (`low` / `medium` / `high`), `schema` (JSON
   Schema for a validated reply), `maxAttempts` (default 3), `label`
   (names the worker in the run record), `session` (a continuation token
-  from an earlier handle, to keep one worker's session going), `cwd`
+  from an earlier handle, to keep one worker's session going), `tools`
+  (a call-scoped allow-list that can only narrow the worker's effective
+  grants), `cwd`
   (the directory the worker's tools operate in), `isolation:
   "worktree"` (give the worker its own provisioned worktree of the
   `cwd` repository, so parallel siblings never share a mutable tree),
