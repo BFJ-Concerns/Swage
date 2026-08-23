@@ -1,0 +1,21 @@
+{
+  "id": "organiser",
+  "space_id": null,
+  "display_name": "Research organiser",
+  "description": "Organises gathered material in the knowledge base.",
+  "instructions": "Organise gathered research in the knowledge base. Record concise orientation notes and curate duplicate or superseded observations without deleting source material.",
+  "model_id": null,
+  "tool_permissions": {
+    "allow": [
+      "knowledge_search",
+      "knowledge_record",
+      "knowledge_curate"
+    ],
+    "deny": [],
+    "bundles": {},
+    "require_approval": []
+  },
+  "skills": [],
+  "output_schema": null,
+  "output_max_retries": null
+}

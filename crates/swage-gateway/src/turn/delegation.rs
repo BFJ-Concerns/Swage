@@ -257,13 +257,14 @@ impl DelegationHandler for GatewayDelegationHandler {
                     space.slug
                 ))
             })?;
-        let target_resolved = match self
-            .state
-            .storage
-            .resolve_agent_definition(target_agent_id, space_id)
-            .await
+        let target_resolved = match crate::service::resolve_effective_agent_definition(
+            self.state.storage.as_ref(),
+            target_agent_id,
+            space_id,
+        )
+        .await
         {
-            Ok(Some(definition)) => apply_agent_definition(target_resolved, &definition),
+            Ok(Some(definition)) => apply_agent_definition(target_resolved, &definition.definition),
             Ok(None) => target_resolved,
             Err(error) => {
                 tracing::warn!(

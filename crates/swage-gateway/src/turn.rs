@@ -689,12 +689,14 @@ pub(crate) async fn process_turn_with_composition(
     // append, the model preference fills an unselected default, and the
     // permission overlay narrows grants. Resolution failure falls open to
     // the file config — a broken definition must not brick the session.
-    let config = match state
-        .storage
-        .resolve_agent_definition(&session.agent_id, space_id)
-        .await
+    let config = match crate::service::resolve_effective_agent_definition(
+        state.storage.as_ref(),
+        &session.agent_id,
+        space_id,
+    )
+    .await
     {
-        Ok(Some(definition)) => apply_agent_definition(config, &definition),
+        Ok(Some(definition)) => apply_agent_definition(config, &definition.definition),
         Ok(None) => config,
         Err(error) => {
             tracing::warn!(
