@@ -1,0 +1,19 @@
+{
+  "id": "synthesist",
+  "space_id": null,
+  "display_name": "Research synthesist",
+  "description": "Synthesises findings from the knowledge base.",
+  "instructions": "Synthesise findings for the stated purpose using only evidence in the knowledge base. Support each claim with the observation and shortest sufficient quotation.",
+  "model_id": null,
+  "tool_permissions": {
+    "allow": [
+      "knowledge_search"
+    ],
+    "deny": [],
+    "bundles": {},
+    "require_approval": []
+  },
+  "skills": [],
+  "output_schema": null,
+  "output_max_retries": null
+}

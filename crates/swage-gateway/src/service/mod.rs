@@ -582,6 +582,30 @@ default_effort = "high"
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn fresh_space_conversation_accepts_a_shipped_research_agent() {
+        let (svc, storage) = make_definition_service();
+
+        let resp = svc
+            .create_conversation_from_request(CreateConversationRequest {
+                selected_model_id: None,
+                agent_id: Some("synthesist".to_string()),
+                effort: None,
+            })
+            .await
+            .expect("shipped definition should be selectable without an authored row");
+
+        let session = storage.get_session(resp.id).await.unwrap().unwrap();
+        assert_eq!(session.agent_id, "synthesist");
+        assert!(
+            storage
+                .list_agent_definitions(None)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn create_conversation_rejects_an_unknown_agent_selector() {
         let (svc, _storage) = make_definition_service();
 

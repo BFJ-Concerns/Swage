@@ -169,12 +169,14 @@ pub(crate) async fn apply_dispatch_bounds(
                     "failed to load dispatch bound {bound_agent_id:?} for {subject}: {error}"
                 ))
             })?;
-        let bound = match state
-            .storage
-            .resolve_agent_definition(bound_agent_id, space_id)
-            .await
+        let bound = match crate::service::resolve_effective_agent_definition(
+            state.storage.as_ref(),
+            bound_agent_id,
+            space_id,
+        )
+        .await
         {
-            Ok(Some(definition)) => super::apply_agent_definition(bound, &definition),
+            Ok(Some(definition)) => super::apply_agent_definition(bound, &definition.definition),
             Ok(None) => bound,
             Err(error) => {
                 return Err(GatewayError::ConfigError(format!(
@@ -391,7 +393,7 @@ pub(crate) fn load_session_config_from_root(
         .map_err(|error| GatewayError::ConfigError(error.to_string()))
 }
 
-/// Overlay a durable agent definition onto the session's resolved config.
+/// Overlay an effective agent definition onto the session's resolved config.
 ///
 /// The definition is the agent's character; the file hierarchy is ambient
 /// operator configuration. Its instructions append after the operator's, its
@@ -400,7 +402,7 @@ pub(crate) fn load_session_config_from_root(
 /// grants — a definition can narrow what an agent may do, never widen it.
 pub(crate) fn apply_agent_definition(
     mut config: swage_config::ResolvedConfig,
-    definition: &swage_storage::AgentDefinition,
+    definition: &swage_storage::NewAgentDefinition,
 ) -> swage_config::ResolvedConfig {
     if !definition.instructions.trim().is_empty() {
         if config.instructions.is_empty() {
@@ -793,8 +795,8 @@ mod tests {
         instructions: &str,
         model_id: Option<&str>,
         tool_permissions: Option<serde_json::Value>,
-    ) -> swage_storage::AgentDefinition {
-        swage_storage::AgentDefinition {
+    ) -> swage_storage::NewAgentDefinition {
+        swage_storage::NewAgentDefinition {
             id: "researcher".into(),
             space_id: None,
             display_name: "Researcher".into(),
@@ -805,8 +807,6 @@ mod tests {
             skills: vec![],
             output_schema: None,
             output_max_retries: None,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
         }
     }
 

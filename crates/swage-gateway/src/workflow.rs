@@ -6062,6 +6062,72 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn fresh_space_workflow_call_applies_the_shipped_researcher_definition() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let provider = Arc::new(ScriptedRecordingProvider {
+            outputs: std::sync::Mutex::new(std::collections::VecDeque::from([
+                scripted_text_output("gathered"),
+            ])),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+
+        let result = run_ephemeral_agent_call(
+            &state,
+            Uuid::new_v4(),
+            space.id,
+            &[],
+            &[],
+            AgentCallRequest {
+                cwd: None,
+                isolation: None,
+                effort: None,
+                timeout_ms: None,
+                prompt: "Gather the selected source".into(),
+                agent: Some("researcher".into()),
+                task: None,
+                model: None,
+                schema: None,
+                max_attempts: 1,
+                label: None,
+                session: None,
+                elements: None,
+                variables: None,
+                assembly: None,
+            },
+            None,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("shipped researcher workflow call");
+
+        assert_eq!(result.output, Value::String("gathered".into()));
+        assert!(
+            storage
+                .list_agent_definitions(None)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let requests = provider.requests.lock().expect("requests");
+        let context = requests[0]
+            .messages
+            .iter()
+            .map(swage_core::ChatMessage::text_content)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(context.contains("Record gathered source material in the knowledge base"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn workflow_journal_preserves_and_recomposes_call_scoped_context() {
         let swage_home = crate::test_support::SwageHomeGuard::new();
         std::fs::create_dir_all(swage_home.path().join("assemblies"))
