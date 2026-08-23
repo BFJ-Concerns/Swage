@@ -7,7 +7,6 @@ All notable changes to Swage are documented in this file.
 ### Added
 
 - Asynchronous turn callers can provide optional focus instructions for context-compaction summaries, with the instructions retained in the compaction audit record.
-- Async turn submissions now reject unrecognised request fields instead of silently ignoring them.
 - Detached gateway starts now accept `--log-file`, report the chosen output destination, and explain foreground output handling in command help.
 - Agents can route scheduled-run output to channels, local storage, and webhooks when creating or updating schedules.
 - New conversations can choose a reasoning effort from the main composer, while each configured model can provide the inherited default.
@@ -30,6 +29,7 @@ All notable changes to Swage are documented in this file.
 
 ### Changed
 
+- Async turn submissions now reject unrecognised request fields instead of silently ignoring them.
 - JavaScript context assemblies now expose `render()` only on template-backed briefing elements; calling it on literal elements fails the script and records the fallback to the default assembly.
 - Gateway lifecycle defaults now use the descriptive `set-defaults` and `clear-defaults` commands; the terminal client is `chat`, and shell scripts are produced by `generate-completion`.
 - Anthropic requests now use the native beta endpoint.
