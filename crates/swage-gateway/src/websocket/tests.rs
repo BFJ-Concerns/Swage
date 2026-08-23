@@ -426,6 +426,51 @@ async fn slash_command_with_missing_session_surfaces_discovery_error() {
     }
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn failed_bare_skill_activation_emits_only_the_activation_error() {
+    let (state, session_id, storage) = make_state_with_session_and_storage().await;
+    let skill_root = tempfile::TempDir::new().expect("skill root");
+    let skill_dir = skill_root.path().join("skills/code-review");
+    std::fs::create_dir_all(&skill_dir).expect("create skill directory");
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\ndescription: Review code\n---\n\nReview the code.",
+    )
+    .expect("write skill");
+    let _skill_root = SessionSkillRootGuard::at(session_id, skill_root.path());
+    storage.fail_skill_activations();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ServerEvent>();
+    let keepalive = tx.clone();
+    let sub = Arc::new(Mutex::new(crate::subscription::SubscriptionState::new(
+        false,
+    )));
+
+    dispatch_client_message(
+        r#"{"type":"send_message","content":"/code-review"}"#,
+        &state,
+        session_id,
+        tx,
+        sub,
+    )
+    .await;
+
+    let event = rx.recv().await.expect("activation error");
+    assert!(matches!(
+        event,
+        ServerEvent::Error { code, message }
+            if code == error_codes::INTERNAL_ERROR && message == "skill activation failed"
+    ));
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert!(
+        matches!(
+            rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ),
+        "failed activation must not also start a turn and emit a second signal"
+    );
+    drop(keepalive);
+}
+
 /// ActivateSkill for an unknown skill name sends a skill_not_found error event.
 ///
 /// The mock storage has no skill root on disk, so discover_available returns
@@ -532,6 +577,11 @@ fn make_empty_state() -> AppState {
 
 /// Build an AppState with a pre-inserted session.
 async fn make_state_with_session() -> (AppState, Uuid) {
+    let (state, session_id, _) = make_state_with_session_and_storage().await;
+    (state, session_id)
+}
+
+async fn make_state_with_session_and_storage() -> (AppState, Uuid, Arc<MockStorage>) {
     use swage_storage::store::SpaceStore;
 
     let storage = Arc::new(MockStorage::new());
@@ -559,7 +609,7 @@ async fn make_state_with_session() -> (AppState, Uuid) {
     let storage_arc: Arc<dyn swage_storage::store::Storage> =
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>;
     let space_store: Arc<dyn swage_storage::store::SpaceStore> =
-        storage as Arc<dyn swage_storage::store::SpaceStore>;
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>;
     let state = AppState::new(
         storage_arc,
         space_store,
@@ -569,7 +619,7 @@ async fn make_state_with_session() -> (AppState, Uuid) {
         None,
     );
 
-    (state, session_id)
+    (state, session_id, storage)
 }
 
 #[tokio::test]

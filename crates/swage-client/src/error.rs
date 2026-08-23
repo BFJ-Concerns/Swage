@@ -56,6 +56,14 @@ pub enum ClientError {
     /// No metadata file was found, or the recorded PID is no longer alive.
     #[error("Gateway is not running: {reason}")]
     GatewayNotRunning { reason: String },
+
+    /// A start was requested while a live gateway already owned the runtime.
+    #[error("Gateway is already running: {reason}")]
+    GatewayAlreadyRunning { reason: String },
+
+    /// A restart was refused before stopping the live gateway.
+    #[error("Gateway restart was not attempted: {reason}")]
+    GatewayRestartRefused { reason: String },
 }
 
 #[cfg(test)]
@@ -191,6 +199,28 @@ mod tests {
         assert!(
             msg.contains("no metadata file found"),
             "display should include reason, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn gateway_already_running_display() {
+        let err = ClientError::GatewayAlreadyRunning {
+            reason: "PID 42 is serving http://127.0.0.1:3000".to_string(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "Gateway is already running: PID 42 is serving http://127.0.0.1:3000"
+        );
+    }
+
+    #[test]
+    fn gateway_restart_refused_display() {
+        let err = ClientError::GatewayRestartRefused {
+            reason: "the running gateway's data root is unavailable".to_string(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "Gateway restart was not attempted: the running gateway's data root is unavailable"
         );
     }
 
