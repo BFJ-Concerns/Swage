@@ -218,6 +218,25 @@ pub trait LlmProvider: Send + Sync {
         })
     }
 
+    /// Count the tokens `request` occupies under this provider's own
+    /// tokenizer, generating nothing.
+    ///
+    /// `Ok(None)` means the provider has no native counting operation — the
+    /// honest default for a surface most vendors do not expose — and the
+    /// caller falls back to its own estimate. Every decorating or forwarding
+    /// impl (retry, failover, circuit breaker, the `Arc<dyn LlmProvider>`
+    /// forwarder below, the builder's `ArcProvider`) must delegate
+    /// explicitly: a default method is invisible to a wrapper, so an
+    /// unforwarded operation silently reports `None` even when the wrapped
+    /// provider counts natively.
+    async fn count_tokens(
+        &self,
+        request: &CompletionRequest,
+    ) -> Result<Option<u64>, ProviderError> {
+        let _ = request;
+        Ok(None)
+    }
+
     /// Send a completion request and collect the full response.
     async fn complete(
         &self,
@@ -311,6 +330,13 @@ use std::sync::Arc;
 impl LlmProvider for Arc<dyn LlmProvider> {
     fn model_id(&self) -> &str {
         (**self).model_id()
+    }
+
+    async fn count_tokens(
+        &self,
+        request: &CompletionRequest,
+    ) -> Result<Option<u64>, ProviderError> {
+        (**self).count_tokens(request).await
     }
 
     async fn complete(
