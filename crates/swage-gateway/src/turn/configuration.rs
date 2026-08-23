@@ -322,6 +322,7 @@ pub(super) fn append_approved_location_paths(
     allowed_paths: &mut Vec<PathBuf>,
     grants: &std::collections::HashSet<crate::state::ApprovalGrantKey>,
     space_id: Uuid,
+    session_id: Uuid,
     session_metadata: Option<&serde_json::Value>,
 ) {
     if worker_placement_metadata_present(session_metadata) {
@@ -330,6 +331,7 @@ pub(super) fn append_approved_location_paths(
     for grant in grants
         .iter()
         .filter(|grant| grant.kind == swage_storage::model::ApprovalKind::Location)
+        .filter(|grant| grant.session_id.is_none() || grant.session_id == Some(session_id))
         .filter(|grant| grant.space_id.is_none() || grant.space_id == Some(space_id))
     {
         let path = PathBuf::from(&grant.name);

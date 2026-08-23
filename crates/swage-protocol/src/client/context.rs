@@ -78,6 +78,9 @@ pub struct CompactionRecord {
     pub source_message_range: Option<(usize, usize)>,
     pub budget: Option<usize>,
     pub failure_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub focus: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]

@@ -11,6 +11,7 @@ type MountedComponent = ReturnType<typeof mount>;
 
 vi.mock("../api/operator", () => ({
   fetchOperatorOverview: vi.fn(),
+  fetchOperatorHistory: vi.fn(),
   fetchScheduleRuns: vi.fn(),
   approvePendingAction: vi.fn(),
   rejectPendingAction: vi.fn(),
@@ -133,6 +134,28 @@ describe("OperatorDashboard", () => {
     expect(document.body.textContent).toContain("Allow shell command");
     expect(document.body.textContent).toContain("Build device");
     expect(document.body.textContent).toContain("dev_dm");
+  });
+
+  it("opens the read-only history pane on demand", async () => {
+    vi.mocked(operatorApi.fetchOperatorOverview).mockResolvedValueOnce(makeOverview());
+    vi.mocked(operatorApi.fetchOperatorHistory).mockResolvedValueOnce({
+      configuration_changes: [],
+      variant_selections: [],
+      assembly_reports: [],
+    });
+    component = mount(OperatorDashboard, { target: document.body });
+    await settleUi();
+
+    const button = Array.from(document.querySelectorAll("button")).find(
+      (candidate) => candidate.textContent?.includes("View history"),
+    );
+    expect(button).toBeDefined();
+    button?.click();
+    await settleUi();
+
+    expect(operatorApi.fetchOperatorHistory).toHaveBeenCalledOnce();
+    expect(document.querySelector('[aria-label="Operator history"]')).not.toBeNull();
+    expect(document.body.textContent).toContain("No configuration changes recorded");
   });
 
   it("runs approval and schedule actions from the operator deck", async () => {

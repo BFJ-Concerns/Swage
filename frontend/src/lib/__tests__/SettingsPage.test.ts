@@ -381,6 +381,42 @@ describe("SettingsPage", () => {
     expect(collapse.getAttribute("aria-expanded")).toBe("false");
   });
 
+  it("preserves a manual model draft while its provider is collapsed", async () => {
+    vi.mocked(settingsApi.fetchSettings).mockResolvedValue({
+      ...emptySettings(),
+      providers: {
+        openai: {
+          protocol: "openai",
+          base_url: null,
+          api_key_secret_ref: null,
+          api_key_env: null,
+          has_credential: false,
+          api_key: "",
+        },
+      },
+      default_provider: "openai",
+    });
+    component = mount(SettingsPage, {
+      target: document.body,
+      props: { tab: "providers" },
+    });
+    await flushUi();
+
+    const draft = document.querySelector<HTMLInputElement>('input[aria-label="Add model by id for OpenAI"]');
+    const collapse = document.querySelector<HTMLButtonElement>(".provider-collapse");
+    if (!draft || !collapse) throw new Error("Provider model draft controls not found");
+    draft.value = "half-typed-model";
+    draft.dispatchEvent(new Event("input", { bubbles: true }));
+    collapse.click();
+    await flushUi();
+    collapse.click();
+    await flushUi();
+
+    expect(document.querySelector<HTMLInputElement>('input[aria-label="Add model by id for OpenAI"]')?.value).toBe(
+      "half-typed-model",
+    );
+  });
+
   it("persists display preferences locally", async () => {
     const preferenceEvents: Event[] = [];
     const onPreferenceChange = (event: Event) => {

@@ -591,7 +591,41 @@ pub(crate) async fn process_turn_with_existing_turn(
     existing_turn_id: Option<Uuid>,
     attendance: TurnAttendance,
 ) -> Result<(), GatewayError> {
-    process_turn_with_composition(
+    process_turn_with_existing_turn_and_focus(
+        state,
+        session_id,
+        target_thread_id,
+        content,
+        ws_tx,
+        subscription,
+        output_schema_override,
+        max_output_retries_override,
+        effort_override,
+        cancellation_override,
+        existing_turn_id,
+        attendance,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn process_turn_with_existing_turn_and_focus(
+    state: &AppState,
+    session_id: Uuid,
+    target_thread_id: Option<Uuid>,
+    content: String,
+    ws_tx: mpsc::UnboundedSender<ServerEvent>,
+    subscription: Arc<Mutex<SubscriptionState>>,
+    output_schema_override: Option<serde_json::Value>,
+    max_output_retries_override: Option<u32>,
+    effort_override: Option<swage_core::Effort>,
+    cancellation_override: Option<CancellationToken>,
+    existing_turn_id: Option<Uuid>,
+    attendance: TurnAttendance,
+    compaction_focus: Option<String>,
+) -> Result<(), GatewayError> {
+    process_turn_with_composition_and_focus(
         state,
         session_id,
         target_thread_id,
@@ -605,15 +639,11 @@ pub(crate) async fn process_turn_with_existing_turn(
         existing_turn_id,
         attendance,
         DispatchContextComposition::default(),
+        compaction_focus,
     )
     .await
 }
 
-#[tracing::instrument(
-    name = "turn",
-    skip(state, content, ws_tx, subscription, composition),
-    fields(turn_id = tracing::field::Empty),
-)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn process_turn_with_composition(
     state: &AppState,
@@ -629,6 +659,47 @@ pub(crate) async fn process_turn_with_composition(
     existing_turn_id: Option<Uuid>,
     attendance: TurnAttendance,
     composition: DispatchContextComposition,
+) -> Result<(), GatewayError> {
+    process_turn_with_composition_and_focus(
+        state,
+        session_id,
+        target_thread_id,
+        content,
+        ws_tx,
+        subscription,
+        output_schema_override,
+        max_output_retries_override,
+        effort_override,
+        cancellation_override,
+        existing_turn_id,
+        attendance,
+        composition,
+        None,
+    )
+    .await
+}
+
+#[tracing::instrument(
+    name = "turn",
+    skip(state, content, ws_tx, subscription, composition, compaction_focus),
+    fields(turn_id = tracing::field::Empty),
+)]
+#[allow(clippy::too_many_arguments)]
+async fn process_turn_with_composition_and_focus(
+    state: &AppState,
+    session_id: Uuid,
+    target_thread_id: Option<Uuid>,
+    content: String,
+    ws_tx: mpsc::UnboundedSender<ServerEvent>,
+    subscription: Arc<Mutex<SubscriptionState>>,
+    output_schema_override: Option<serde_json::Value>,
+    max_output_retries_override: Option<u32>,
+    effort_override: Option<swage_core::Effort>,
+    cancellation_override: Option<CancellationToken>,
+    existing_turn_id: Option<Uuid>,
+    attendance: TurnAttendance,
+    composition: DispatchContextComposition,
+    compaction_focus: Option<String>,
 ) -> Result<(), GatewayError> {
     // Step 1: Resolve the space and target thread for this session.
     let mut session = state
@@ -1058,6 +1129,7 @@ pub(crate) async fn process_turn_with_composition(
         &mut allowed_paths,
         &session_approval_grants,
         space_id,
+        session_id,
         session.metadata.as_ref(),
     );
     let mut agent_config = build_agent_config_with_workspace(
@@ -1083,12 +1155,16 @@ pub(crate) async fn process_turn_with_composition(
     };
     let dispatcher_build = match build_gateway_dispatcher(
         state,
-        &config,
-        &agent_config,
-        session.metadata.as_ref(),
-        Some(space_id),
-        session.active_workspace_attachment_id,
-        ws_tx.clone(),
+        GatewayDispatcherRequest {
+            config: &config,
+            agent_config: &agent_config,
+            session_metadata: session.metadata.as_ref(),
+            space_id: Some(space_id),
+            active_workspace_attachment_id: session.active_workspace_attachment_id,
+            ws_tx: ws_tx.clone(),
+            session_id: Some(session_id),
+            turn_id: Some(prepared_turn_id),
+        },
     )
     .await
     {
@@ -1181,12 +1257,16 @@ pub(crate) async fn process_turn_with_composition(
                 prepared_turn_id,
                 build_gateway_dispatcher(
                     state,
-                    &unsandboxed_config,
-                    &agent_config,
-                    session.metadata.as_ref(),
-                    Some(space_id),
-                    session.active_workspace_attachment_id,
-                    ws_tx.clone(),
+                    GatewayDispatcherRequest {
+                        config: &unsandboxed_config,
+                        agent_config: &agent_config,
+                        session_metadata: session.metadata.as_ref(),
+                        space_id: Some(space_id),
+                        active_workspace_attachment_id: session.active_workspace_attachment_id,
+                        ws_tx: ws_tx.clone(),
+                        session_id: Some(session_id),
+                        turn_id: Some(prepared_turn_id),
+                    },
                 )
                 .await
                 .map_err(|fallback_error| GatewayError::WebSocketError(fallback_error.to_string())),
@@ -1257,6 +1337,7 @@ pub(crate) async fn process_turn_with_composition(
             &config,
             &state.config,
             Some(space_id),
+            Some(session_id),
             &session_approval_grants,
         );
         let codex_request = crate::codex::CodexTurnRequest {
@@ -1354,6 +1435,7 @@ pub(crate) async fn process_turn_with_composition(
             },
             user_message: before_inbound.canonical_content.clone(),
             assembled_context: assembled_messages,
+            compaction_focus,
             parent_turn_id: None,
             existing_turn_id: Some(prepared_turn_id),
             effort,
@@ -1417,6 +1499,28 @@ pub(crate) async fn process_turn_with_composition(
                 };
                 if subscription.lock().await.should_deliver(&assembled_event) {
                     let _ = ws_tx.send(assembled_event);
+                }
+            }
+            AgentEvent::CompactionApplied {
+                turn_id: snapshot_turn_id,
+                record,
+            } => {
+                if let Some(records) = report_json
+                    .get_mut("compaction_applied")
+                    .and_then(serde_json::Value::as_array_mut)
+                {
+                    records.push(
+                        serde_json::to_value(record).unwrap_or_else(
+                            |error| serde_json::json!({ "error": error.to_string() }),
+                        ),
+                    );
+                }
+                if let Err(error) = state
+                    .storage
+                    .store_snapshot(snapshot_turn_id, &report_json.to_string())
+                    .await
+                {
+                    tracing::warn!(%error, "failed to persist compaction record");
                 }
             }
             AgentEvent::Token { content } => {

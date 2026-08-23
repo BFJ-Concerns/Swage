@@ -194,6 +194,7 @@ mod tests {
             source_message_range: None,
             budget: None,
             failure_reason: None,
+            focus: None,
         };
         let json = serde_json::to_string(&record).unwrap();
         let decoded: CompactionRecord = serde_json::from_str(&json).unwrap();
@@ -236,6 +237,7 @@ mod tests {
             source_message_range: Some((2, 8)),
             budget: Some(700),
             failure_reason: Some("LLM timeout".to_string()),
+            focus: None,
         };
         let json = serde_json::to_string(&record).unwrap();
         let decoded: CompactionRecord = serde_json::from_str(&json).unwrap();
@@ -260,12 +262,37 @@ mod tests {
             source_message_range: None,
             budget: None,
             failure_reason: None,
+            focus: None,
         };
         let json = serde_json::to_string(&record).unwrap();
         let decoded: CompactionRecord = serde_json::from_str(&json).unwrap();
         assert!(decoded.source_message_range.is_none());
         assert!(decoded.budget.is_none());
         assert!(decoded.failure_reason.is_none());
+    }
+
+    #[test]
+    fn compaction_focus_round_trips_in_persisted_record() {
+        let record = CompactionRecord {
+            element: "agent_history".to_string(),
+            requested_strategy: "summarisation".to_string(),
+            actual_strategy: "summarisation".to_string(),
+            messages_removed: 2,
+            tokens_before: 800,
+            tokens_after: 300,
+            source_message_range: None,
+            budget: None,
+            failure_reason: None,
+            focus: Some("Preserve dates and named decisions".to_string()),
+        };
+
+        let persisted = serde_json::to_string(&record).expect("record should serialise");
+        let decoded: CompactionRecord =
+            serde_json::from_str(&persisted).expect("record should deserialise");
+        assert_eq!(
+            decoded.focus.as_deref(),
+            Some("Preserve dates and named decisions")
+        );
     }
 
     // ── NamedAssemblyReport in ElementReport ─────────────────────────────────

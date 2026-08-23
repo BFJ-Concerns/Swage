@@ -23,7 +23,7 @@ use swage_protocol::{
         AgentDefinitionListResponse, AgentDefinitionMutationResponse, AgentDefinitionResponse,
         AgentDefinitionScopeQuery, CreateAgentDefinitionRequest,
         EffectiveAgentDefinitionListResponse, EffectiveAgentDefinitionResponse,
-        EffectiveAgentDefinitionSourceScope, UpdateAgentDefinitionRequest,
+        EffectiveAgentDefinitionSourceScope, OperatorHistoryResponse, UpdateAgentDefinitionRequest,
     },
 };
 
@@ -261,6 +261,13 @@ pub async fn operator_overview(
     State(state): State<AppState>,
 ) -> Result<Json<OperatorOverviewResponse>, ApiError> {
     Ok(Json(crate::operator::operator_overview(&state).await?))
+}
+
+/// `GET /api/operator/history` — reconstruct configuration and experiment history.
+pub async fn operator_history(
+    State(state): State<AppState>,
+) -> Result<Json<OperatorHistoryResponse>, ApiError> {
+    Ok(Json(crate::audit::operator_history(&state).await?))
 }
 
 fn agent_definition_response(
@@ -1427,6 +1434,7 @@ pub async fn submit_turn(
     let bg_state = state.clone();
     let message = req.message;
     let output_schema = req.output_schema;
+    let compaction_focus = req.compaction_focus;
     let session_id = req.conversation_id;
     tokio::spawn(async move {
         use crate::subscription::SubscriptionState;
@@ -1441,7 +1449,7 @@ pub async fn submit_turn(
         // Drain events in background so the channel never fills.
         tokio::spawn(async move { while ws_rx.recv().await.is_some() {} });
 
-        let result = crate::turn::process_turn_with_existing_turn(
+        let result = crate::turn::process_turn_with_existing_turn_and_focus(
             &bg_state,
             session_id,
             Some(thread_id),
@@ -1454,6 +1462,7 @@ pub async fn submit_turn(
             None,
             Some(turn_id),
             crate::turn::TurnAttendance::Unattended,
+            compaction_focus,
         )
         .await;
 
@@ -1656,6 +1665,8 @@ async fn execute_external_delegate_message(
     .await;
     target_agent_config.approval_prompts_enabled = false;
     let target_context_transfer_config = target_resolved.communication.context_transfer.clone();
+    let composition = crate::turn::DispatchContextComposition::from_payload(&delegate_msg.payload)
+        .map_err(|error| ApiError::validation(error.to_string()))?;
     // Delegated activity must not reach the parent WebSocket. Shared assembly
     // still emits ContextAssembled into this silent channel; the stored child-
     // turn snapshot is the delegated assembly's audit record.
@@ -1701,8 +1712,7 @@ async fn execute_external_delegate_message(
             target_agent_config.working_directory.display().to_string(),
             silent_ws_tx,
             crate::turn::effective_tool_permissions_record(&effective_target_resolved),
-            crate::turn::DispatchContextComposition::from_payload(&delegate_msg.payload)
-                .map_err(|error| ApiError::validation(error.to_string()))?,
+            composition,
         ),
         snapshot_recorder: Some(crate::turn::delegation_snapshot_recorder(
             state.storage.clone(),
@@ -2502,6 +2512,156 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn async_turn_focus_reaches_compaction_prompt_and_snapshot() {
+        use std::pin::Pin;
+        use std::sync::Mutex as StdMutex;
+
+        use futures::{Stream, stream};
+        use swage_client::http::GatewayClient;
+        use swage_core::{
+            CompletionRequest, CompletionResponse, FinishReason, ProviderError, Role, StreamChunk,
+            ToolCompletionRequest, ToolCompletionResponse,
+        };
+        use swage_storage::model::AppendMessage;
+        use swage_storage::store::{MessageStore, ThreadStore};
+
+        struct CompactionCapturingProvider {
+            compaction_requests: StdMutex<Vec<CompletionRequest>>,
+        }
+
+        #[async_trait::async_trait]
+        impl LlmProvider for CompactionCapturingProvider {
+            fn model_id(&self) -> &str {
+                "compaction-capturing"
+            }
+
+            async fn complete(
+                &self,
+                request: CompletionRequest,
+            ) -> Result<CompletionResponse, ProviderError> {
+                self.compaction_requests
+                    .lock()
+                    .expect("compaction request lock")
+                    .push(request);
+                Ok(CompletionResponse {
+                    content: "Compacted history".to_string(),
+                    input_tokens: 10,
+                    output_tokens: 2,
+                    finish_reason: FinishReason::Stop,
+                    cost: None,
+                })
+            }
+
+            async fn complete_with_tools(
+                &self,
+                _request: ToolCompletionRequest,
+            ) -> Result<ToolCompletionResponse, ProviderError> {
+                unreachable!("focused turn uses streaming completion")
+            }
+
+            fn stream(
+                &self,
+                _request: CompletionRequest,
+            ) -> Pin<Box<dyn Stream<Item = StreamChunk> + Send>> {
+                Box::pin(stream::iter(vec![
+                    StreamChunk::Delta {
+                        content: "Focused reply".to_string(),
+                    },
+                    StreamChunk::Done {
+                        finish_reason: Some(FinishReason::Stop),
+                    },
+                ]))
+            }
+        }
+
+        let provider = Arc::new(CompactionCapturingProvider {
+            compaction_requests: StdMutex::new(Vec::new()),
+        });
+        let storage = Arc::new(MockStorage::new());
+        let (base_url, server, storage) =
+            spawn_live_server(Arc::clone(&provider) as Arc<dyn LlmProvider>, storage).await;
+        let client = GatewayClient::new(&base_url);
+        let conversation = client
+            .create_conversation()
+            .await
+            .expect("create conversation through live gateway");
+        let thread = storage
+            .list_by_session(conversation.id)
+            .await
+            .expect("list conversation threads")
+            .into_iter()
+            .next()
+            .expect("default thread exists");
+
+        for index in 0..101 {
+            storage
+                .append_message(AppendMessage {
+                    thread_id: thread.id,
+                    turn_id: None,
+                    role: if index % 2 == 0 {
+                        Role::User
+                    } else {
+                        Role::Assistant
+                    },
+                    content: format!("history message {index}"),
+                    agent_id: "gateway".to_string(),
+                })
+                .await
+                .expect("seed history message");
+        }
+
+        let focus = "Preserve dates and named decisions";
+        let turn_id = client
+            .submit_turn_with_compaction_focus(
+                conversation.id,
+                Some(thread.id),
+                "continue",
+                None,
+                Some(focus.to_string()),
+            )
+            .await
+            .expect("submit focused async turn");
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            let turn = client.poll_turn(turn_id).await.expect("poll focused turn");
+            if matches!(turn.state.as_str(), "completed" | "failed" | "interrupted") {
+                assert_eq!(turn.state, "completed");
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "focused turn should finish before the deadline"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+
+        let requests = provider
+            .compaction_requests
+            .lock()
+            .expect("compaction request lock");
+        assert_eq!(requests.len(), 1, "history should trigger one compaction");
+        assert!(requests[0].messages[0].text_content().contains(focus));
+        drop(requests);
+
+        let context = reqwest::get(format!("{base_url}/api/turns/{turn_id}/context"))
+            .await
+            .expect("fetch focused turn context")
+            .error_for_status()
+            .expect("focused context response succeeds")
+            .json::<swage_protocol::client::context::TurnContextResponse>()
+            .await
+            .expect("focused context matches protocol");
+        assert_eq!(context.report.compaction_applied.len(), 1);
+        assert_eq!(
+            context.report.compaction_applied[0].focus.as_deref(),
+            Some(focus)
+        );
+
+        server.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn external_delegate_stream_error_fails_original_message() {
         use swage_client::http::GatewayClient;
         use swage_core::StreamChunk;
@@ -2550,6 +2710,70 @@ mod tests {
         );
 
         server.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn malformed_external_delegate_composition_is_rejected_before_dispatcher_provisioning() {
+        use swage_agent::MessageRouter;
+        use swage_core::MessageKind;
+        use swage_storage::Storage;
+
+        let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn swage_storage::SpaceStore>,
+            Arc::new(MockProvider::new(vec![])) as Arc<dyn LlmProvider>,
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        // The injected failure is consumed at build_gateway_dispatcher entry.
+        // Non-consumption therefore proves the builder was never entered.
+        state.fail_next_dispatcher_builds(1);
+        let router = MessageRouter::new(state.storage.clone(), None);
+        let malformed = router
+            .send_message(swage_storage::NewAgentMessage {
+                sender_agent_id: "agent-a".into(),
+                recipient_agent_id: "agent-b".into(),
+                kind: MessageKind::Delegate,
+                correlation_id: None,
+                payload: serde_json::json!({"task": "inspect", "assembly": ["invalid"]}),
+            })
+            .await
+            .expect("malformed delegate message");
+
+        let error = Box::pin(execute_external_delegate_message(
+            state.clone(),
+            malformed,
+            space.id,
+            None,
+        ))
+        .await
+        .expect_err("malformed composition must be rejected");
+        assert!(matches!(error.0, GatewayError::ValidationError(_)));
+
+        let valid = router
+            .send_message(swage_storage::NewAgentMessage {
+                sender_agent_id: "agent-a".into(),
+                recipient_agent_id: "agent-b".into(),
+                kind: MessageKind::Delegate,
+                correlation_id: None,
+                payload: serde_json::json!({"task": "inspect", "assembly": "focused"}),
+            })
+            .await
+            .expect("valid delegate message");
+        let error = Box::pin(execute_external_delegate_message(
+            state, valid, space.id, None,
+        ))
+        .await
+        .expect_err("unconsumed dispatcher failure proves malformed input provisioned nothing");
+        assert!(
+            error
+                .0
+                .to_string()
+                .contains("injected dispatcher build failure")
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -4144,6 +4368,161 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
         let body = body_json(resp).await;
         assert_eq!(body["code"].as_str().unwrap(), "not_found");
+    }
+
+    // -----------------------------------------------------------------------
+    // GET /api/operator/history
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn operator_history_reconstructs_only_configuration_and_experiment_records() {
+        use swage_storage::model::{NewAuditEvent, NewSession, NewTurn, TurnState};
+        use swage_storage::store::{AuditStore, ContextSnapshotStore, TurnStore};
+
+        let (router, storage) = make_router();
+        let space = storage.get_or_create_default().await.unwrap();
+        let session = storage
+            .create_session(NewSession {
+                space_id: space.id,
+                agent_id: "operator".into(),
+                metadata: None,
+                active_workspace_attachment_id: None,
+            })
+            .await
+            .unwrap();
+        let thread = swage_storage::ThreadStore::create(
+            storage.as_ref(),
+            swage_storage::model::NewThread {
+                session_id: session.id,
+                agent_id: "operator".into(),
+            },
+        )
+        .await
+        .unwrap();
+        let turn = storage
+            .create_turn(NewTurn {
+                thread_id: thread.id,
+                agent_id: "operator".into(),
+                state: TurnState::Completed,
+                user_input: Some("inspect history".into()),
+                parent_turn_id: None,
+            })
+            .await
+            .unwrap();
+
+        storage
+            .create_audit_event(NewAuditEvent {
+                id: "config-1".into(),
+                session_id: Some(session.id),
+                entity_kind: "provider".into(),
+                entity_id: "openai".into(),
+                event_kind: "configuration_change".into(),
+                summary: "updated provider".into(),
+                metadata: serde_json::json!({
+                    "action": "updated",
+                    "source": "settings_ui",
+                    "prior_state": {"model": "old", "api_key": "[REDACTED]"},
+                    "new_state": {"model": "new", "api_key": "[REDACTED]"}
+                }),
+            })
+            .await
+            .unwrap();
+        storage
+            .create_audit_event(NewAuditEvent {
+                id: "config-2".into(),
+                session_id: None,
+                entity_kind: "schedule".into(),
+                entity_id: "daily".into(),
+                event_kind: "configuration_change".into(),
+                summary: "created schedule".into(),
+                metadata: serde_json::json!({
+                    "action": "created",
+                    "source": "operator_http",
+                    "prior_state": null,
+                    "new_state": {"message": "Daily report", "status": "active"}
+                }),
+            })
+            .await
+            .unwrap();
+        storage
+            .create_audit_event(NewAuditEvent {
+                id: "ignored".into(),
+                session_id: Some(session.id),
+                entity_kind: "turn".into(),
+                entity_id: turn.id.to_string(),
+                event_kind: "turn_completed".into(),
+                summary: "completed".into(),
+                metadata: serde_json::json!({"secret": "must not leak"}),
+            })
+            .await
+            .unwrap();
+        storage
+            .create_audit_event(NewAuditEvent {
+                id: "variant-1".into(),
+                session_id: Some(session.id),
+                entity_kind: "experiment_location".into(),
+                entity_id: "context_assembly".into(),
+                event_kind: "variant_selected".into(),
+                summary: "selected variant".into(),
+                metadata: serde_json::json!({
+                    "variant": "compact",
+                    "reason": "drawn",
+                    "turn_id": turn.id
+                }),
+            })
+            .await
+            .unwrap();
+        let report = swage_protocol::client::context::AssemblyReport {
+            assembly_name: "balanced".into(),
+            total_tokens: 321,
+            ..Default::default()
+        };
+        storage
+            .store_snapshot(turn.id, &serde_json::to_string(&report).unwrap())
+            .await
+            .unwrap();
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri("/api/operator/history")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = body_json(response).await;
+        let changes = body["configuration_changes"].as_array().unwrap();
+        assert_eq!(
+            changes.len(),
+            2,
+            "unrelated audit events must be filtered out"
+        );
+        assert_eq!(changes[0]["resource_kind"], "schedule", "newest first");
+        assert_eq!(changes[0]["prior_state"], serde_json::Value::Null);
+        assert_eq!(changes[0]["new_state"]["message"], "Daily report");
+        assert_eq!(changes[1]["resource_kind"], "provider");
+        assert_eq!(changes[1]["resource_id"], "openai");
+        assert_eq!(changes[1]["action"], "updated");
+        assert_eq!(changes[1]["source"], "settings_ui");
+        assert_eq!(changes[1]["session_id"], session.id.to_string());
+        assert_eq!(changes[1]["prior_state"]["model"], "old");
+        assert_eq!(changes[1]["new_state"]["model"], "new");
+        assert_eq!(changes[1]["prior_state"]["api_key"], "[REDACTED]");
+        assert!(!body.to_string().contains("must not leak"));
+
+        assert_eq!(body["variant_selections"][0]["variant"], "compact");
+        assert_eq!(body["variant_selections"][0]["reason"], "drawn");
+        assert_eq!(
+            body["variant_selections"][0]["turn_id"],
+            turn.id.to_string()
+        );
+        assert_eq!(body["assembly_reports"][0]["turn_id"], turn.id.to_string());
+        assert_eq!(body["assembly_reports"][0]["assembly_name"], "balanced");
+        assert!(body["assembly_reports"][0].get("report").is_none());
+        assert_eq!(storage.last_snapshot_list_limit(), 100);
     }
 
     // -----------------------------------------------------------------------

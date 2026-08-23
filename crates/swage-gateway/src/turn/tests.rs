@@ -848,6 +848,7 @@ pub(crate) struct MockStorage {
     fail_skill_activations: AtomicBool,
     fail_audit_writes: AtomicBool,
     fail_snapshot_writes: AtomicBool,
+    last_snapshot_list_limit: AtomicUsize,
 }
 
 #[async_trait]
@@ -1120,6 +1121,7 @@ impl MockStorage {
             fail_skill_activations: AtomicBool::new(false),
             fail_audit_writes: AtomicBool::new(false),
             fail_snapshot_writes: AtomicBool::new(false),
+            last_snapshot_list_limit: AtomicUsize::new(0),
         }
     }
 
@@ -1166,6 +1168,10 @@ impl MockStorage {
 
     fn fail_snapshot_writes(&self) {
         self.fail_snapshot_writes.store(true, Ordering::SeqCst);
+    }
+
+    pub(crate) fn last_snapshot_list_limit(&self) -> usize {
+        self.last_snapshot_list_limit.load(Ordering::SeqCst)
     }
 }
 
@@ -2735,6 +2741,7 @@ impl ContextSnapshotStore for MockStorage {
         space_id: Uuid,
         limit: usize,
     ) -> Result<Vec<swage_storage::ContextSnapshotRecord>, StorageError> {
+        self.last_snapshot_list_limit.store(limit, Ordering::SeqCst);
         let db = self.db.lock().await;
         let mut records = Vec::new();
         for (turn_id, (report_json, created_at)) in &db.snapshots {
@@ -5858,9 +5865,17 @@ async fn second_tool_round_request_keeps_structured_tool_messages() {
                 })
         })
         .expect("assistant tool-use message should retain the structured echo call");
-    assert!(
-        assistant_replay.tool_replay().is_some(),
-        "assistant tool-use message should retain canonical replay"
+    assert_eq!(
+        assistant_replay
+            .tool_replay()
+            .expect("assistant replay")
+            .iter()
+            .filter(
+                |part| matches!(part, ToolReplayPart::ToolCall { call_id, .. } if call_id == "c1")
+            )
+            .count(),
+        1,
+        "the structured tool call must be replayed exactly once"
     );
     let user_replay = second
         .messages
@@ -5878,9 +5893,17 @@ async fn second_tool_round_request_keeps_structured_tool_messages() {
                 })
         })
         .expect("user tool-result message should retain the structured echo result");
-    assert!(
-        user_replay.tool_replay().is_some(),
-        "tool-result message should retain canonical replay"
+    assert_eq!(
+        user_replay
+            .tool_replay()
+            .expect("tool-result replay")
+            .iter()
+            .filter(
+                |part| matches!(part, ToolReplayPart::ToolResult { call_id, .. } if call_id == "c1")
+            )
+            .count(),
+        1,
+        "the structured tool result must be replayed exactly once"
     );
 }
 
@@ -7113,9 +7136,17 @@ async fn approval_resumption_keeps_structured_tool_messages() {
                 })
         })
         .expect("assistant tool-use message should retain the structured echo call after approval");
-    assert!(
-        assistant_replay.tool_replay().is_some(),
-        "assistant tool-use message should retain canonical replay after approval"
+    assert_eq!(
+        assistant_replay
+            .tool_replay()
+            .expect("assistant replay after approval")
+            .iter()
+            .filter(
+                |part| matches!(part, ToolReplayPart::ToolCall { call_id, .. } if call_id == "c1")
+            )
+            .count(),
+        1,
+        "the approved tool call must be replayed exactly once"
     );
     let user_replay = second
         .messages
@@ -7133,9 +7164,17 @@ async fn approval_resumption_keeps_structured_tool_messages() {
                 })
         })
         .expect("user tool-result message should retain the structured echo result after approval");
-    assert!(
-        user_replay.tool_replay().is_some(),
-        "tool-result message should retain canonical replay after approval"
+    assert_eq!(
+        user_replay
+            .tool_replay()
+            .expect("tool-result replay after approval")
+            .iter()
+            .filter(
+                |part| matches!(part, ToolReplayPart::ToolResult { call_id, .. } if call_id == "c1")
+            )
+            .count(),
+        1,
+        "the approved tool result must be replayed exactly once"
     );
 }
 
@@ -8351,6 +8390,7 @@ async fn delegated_read_only_location_approval_allows_read_and_refuses_write() {
         .lock()
         .expect("location approval grants")
         .insert(crate::state::ApprovalGrantKey::location(
+            None,
             Some(space.id),
             attachment.to_string_lossy(),
             "read",
@@ -8851,11 +8891,16 @@ async fn delegate_worktree_provisions_isolated_cwd_and_records_resolved_placemen
         ],
     ]);
     let worktree_root = fixture.path().join("worker-worktrees");
+    let mut config = swage_config::ResolvedConfig::default();
+    config.tools.permissions.require_approval =
+        vec![swage_config::model::RequireApprovalEntry::Simple(
+            "delegated_marker_write".into(),
+        )];
     let state = AppState::new_with_config_root(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
-        swage_config::ResolvedConfig::default(),
+        config,
         crate::tool::ToolDispatcher::allow_all(vec![
             Arc::new(DelegatedMarkerWriteTool) as Arc<dyn Tool>
         ]),
@@ -8887,6 +8932,10 @@ async fn delegate_worktree_provisions_isolated_cwd_and_records_resolved_placemen
         .await
         .expect("wait-mode worktree delegation should complete");
     assert!(matches!(wait_outcome, DelegationOutcome::Completed(_)));
+    assert!(
+        storage.list_approvals().await.unwrap().is_empty(),
+        "the waiting delegated turn must use its enforced grant without parking"
+    );
     assert!(
         state
             .worktree_host
@@ -8958,14 +9007,19 @@ async fn delegate_worktree_provisions_isolated_cwd_and_records_resolved_placemen
             .list_by_correlation(detached.delegate_message_id)
             .await
             .expect("list delegated result messages");
-        if result_messages
-            .iter()
-            .any(|message| message.kind == swage_core::MessageKind::Result)
+        if !storage.list_approvals().await.unwrap().is_empty()
+            || result_messages
+                .iter()
+                .any(|message| message.kind == swage_core::MessageKind::Result)
         {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
+    assert!(
+        storage.list_approvals().await.unwrap().is_empty(),
+        "the detached delegated turn must use its enforced grant without parking"
+    );
     assert!(
         result_messages.iter().any(|message| {
             message.kind == swage_core::MessageKind::Result
@@ -10849,7 +10903,13 @@ fn prompt_rule_from_instructions_string_matches_flat_prepend() {
 /// Convenience for invoking the private build_permission_config from tests
 /// without having to repeat the full ResolvedConfig wiring.
 fn build_permission_config_for_test(config: &swage_config::ResolvedConfig) -> PermissionConfig {
-    super::build_permission_config(config, config, None, &std::collections::HashSet::new())
+    super::build_permission_config(
+        config,
+        config,
+        None,
+        None,
+        &std::collections::HashSet::new(),
+    )
 }
 
 #[test]
@@ -10863,6 +10923,7 @@ fn space_scoped_approval_grant_only_removes_gate_for_matching_space() {
         )];
 
     let grants = std::collections::HashSet::from([crate::state::ApprovalGrantKey {
+        session_id: None,
         space_id: Some(matching_space_id),
         kind: swage_storage::model::ApprovalKind::Tool,
         name: "file_write".into(),
@@ -10870,13 +10931,89 @@ fn space_scoped_approval_grant_only_removes_gate_for_matching_space() {
     }]);
 
     let matching =
-        super::build_permission_config(&config, &config, Some(matching_space_id), &grants);
-    let other = super::build_permission_config(&config, &config, Some(other_space_id), &grants);
-    let no_space = super::build_permission_config(&config, &config, None, &grants);
+        super::build_permission_config(&config, &config, Some(matching_space_id), None, &grants);
+    let other =
+        super::build_permission_config(&config, &config, Some(other_space_id), None, &grants);
+    let no_space = super::build_permission_config(&config, &config, None, None, &grants);
 
     assert!(matching.require_approval.is_empty());
     assert_eq!(other.require_approval.len(), 1);
     assert_eq!(no_space.require_approval.len(), 1);
+}
+
+#[test]
+fn session_scoped_approval_grant_only_removes_gate_for_granting_session() {
+    let granting_session_id = Uuid::new_v4();
+    let other_session_id = Uuid::new_v4();
+    let mut config = swage_config::ResolvedConfig::default();
+    config.tools.permissions.require_approval =
+        vec![swage_config::model::RequireApprovalEntry::Simple(
+            "file_write".into(),
+        )];
+    let grants = std::collections::HashSet::from([crate::state::ApprovalGrantKey {
+        session_id: Some(granting_session_id),
+        space_id: None,
+        kind: swage_storage::model::ApprovalKind::Tool,
+        name: "file_write".into(),
+        access: None,
+    }]);
+
+    let granting =
+        super::build_permission_config(&config, &config, None, Some(granting_session_id), &grants);
+    let other =
+        super::build_permission_config(&config, &config, None, Some(other_session_id), &grants);
+
+    assert!(granting.require_approval.is_empty());
+    assert_eq!(other.require_approval.len(), 1);
+}
+
+#[tokio::test]
+async fn session_scoped_location_grant_only_authorises_granting_sessions_workers() {
+    let location = tempfile::tempdir().expect("approved location");
+    let (state, granting_session_id) = make_state_with_session(vec![]).await;
+    let granting_session = state
+        .storage
+        .get_session(granting_session_id)
+        .await
+        .expect("session query")
+        .expect("granting session");
+    let other_session_id = Uuid::new_v4();
+    state
+        .session_approval_grants
+        .lock()
+        .expect("location grants")
+        .insert(crate::state::ApprovalGrantKey::location(
+            Some(granting_session_id),
+            None,
+            location.path().to_string_lossy(),
+            "write",
+        ));
+
+    let authorised = resolve_authorised_worker_directory(
+        &state,
+        granting_session.space_id,
+        Uuid::new_v4(),
+        Some(granting_session_id),
+        None,
+        None,
+        &location.path().to_string_lossy(),
+    )
+    .await
+    .expect("granting session should retain its worker location authority");
+    assert!(authorised.can_write);
+
+    let error = resolve_authorised_worker_directory(
+        &state,
+        granting_session.space_id,
+        Uuid::new_v4(),
+        Some(other_session_id),
+        None,
+        None,
+        &location.path().to_string_lossy(),
+    )
+    .await
+    .expect_err("another session must not inherit the location grant");
+    assert!(error.contains("outside the dispatching context"));
 }
 
 #[tokio::test]
@@ -10971,6 +11108,7 @@ async fn durable_worker_placement_rederives_write_and_fails_closed_after_revocat
             .lock()
             .expect("location grants");
         grants.insert(crate::state::ApprovalGrantKey::location(
+            None,
             Some(session.space_id),
             placement.path().to_string_lossy(),
             "write",
@@ -10996,6 +11134,7 @@ async fn durable_worker_placement_rederives_write_and_fails_closed_after_revocat
             .expect("location grants");
         grants.clear();
         grants.insert(crate::state::ApprovalGrantKey::location(
+            None,
             Some(session.space_id),
             placement.path().to_string_lossy(),
             "read",
@@ -11175,11 +11314,18 @@ fn worker_placement_replaces_other_filesystem_authority() {
 
     let grants = std::collections::HashSet::from([crate::state::ApprovalGrantKey::location(
         None,
+        None,
         approved_location.to_string_lossy(),
         "write",
     )]);
     let mut allowed_paths = vec![placement.clone()];
-    append_approved_location_paths(&mut allowed_paths, &grants, Uuid::new_v4(), Some(&metadata));
+    append_approved_location_paths(
+        &mut allowed_paths,
+        &grants,
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        Some(&metadata),
+    );
     assert_eq!(allowed_paths, vec![placement]);
 }
 

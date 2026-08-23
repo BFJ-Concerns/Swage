@@ -99,7 +99,8 @@ pub(crate) mod test_support {
         path::{Path, PathBuf},
     };
 
-    static PROCESS_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    static SWAGE_HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    static XDG_RUNTIME_DIR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// Serialises tests that mutate `SWAGE_HOME`, which is process-wide state.
     pub(crate) struct SwageHomeGuard {
@@ -110,7 +111,7 @@ pub(crate) mod test_support {
 
     impl SwageHomeGuard {
         pub(crate) fn new() -> Self {
-            let lock = PROCESS_ENV_LOCK
+            let lock = SWAGE_HOME_LOCK
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
             let temp_dir = tempfile::TempDir::new().expect("temporary swage home");
@@ -124,7 +125,7 @@ pub(crate) mod test_support {
         }
 
         pub(crate) fn set_to(path: impl AsRef<Path>) -> Self {
-            let lock = PROCESS_ENV_LOCK
+            let lock = SWAGE_HOME_LOCK
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
             let root = path.as_ref().to_path_buf();
@@ -161,7 +162,7 @@ pub(crate) mod test_support {
 
     impl XdgRuntimeDirGuard {
         pub(crate) fn new() -> Self {
-            let lock = PROCESS_ENV_LOCK
+            let lock = XDG_RUNTIME_DIR_LOCK
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
             let temp_dir = tempfile::TempDir::new().expect("temporary runtime dir");
