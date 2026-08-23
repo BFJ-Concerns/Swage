@@ -230,14 +230,6 @@ async fn reliability_stack_retries_then_fails_over_to_secondary() {
         "Expected response from secondary provider, got: {}",
         response.content
     );
-    // Primary was called (initial + 2 retries = 3 calls).
-    assert_eq!(primary.calls(), 3, "Primary should have been tried 3 times");
-    // Secondary was called once.
-    assert_eq!(
-        secondary.calls(),
-        1,
-        "Secondary should have been tried once"
-    );
     assert_eq!(
         *call_order.lock().expect("call-order lock"),
         ["primary", "primary", "primary", "secondary"],
