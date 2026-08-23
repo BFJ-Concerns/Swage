@@ -53,7 +53,6 @@ pub struct ChannelOrientation {
 pub struct AvailableSkill {
     pub name: String,
     pub trigger: String,
-    pub shipped: bool,
 }
 
 // ── Element ───────────────────────────────────────────────────────────────────
@@ -259,7 +258,6 @@ mod tests {
             vec![AvailableSkill {
                 name: "release-notes".into(),
                 trigger: "drafting release notes for a tagged build".into(),
-                shipped: false,
             }],
         );
 
@@ -274,7 +272,6 @@ mod tests {
             vec![AvailableSkill {
                 name: "commission".into(),
                 trigger: "shape project intent".into(),
-                shipped: true,
             }],
         );
 
