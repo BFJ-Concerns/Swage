@@ -90,12 +90,14 @@ fn required_str<'p>(tool: &str, params: &'p Value, key: &str) -> Result<&'p str,
 }
 
 /// Resolve the calling session's space: the knowledge base is per space, and
-/// the session the tool call belongs to says which one.
+/// the session the tool call belongs to says which one. The third element is
+/// the session's journalled-call scope — retry identity for idempotent
+/// writes — absent on anything but a workflow agent-call worker.
 async fn session_space(
     tool: &str,
     state: &AppState,
     ctx: &dyn ToolContext,
-) -> Result<(Uuid, String), ToolError> {
+) -> Result<(Uuid, String, Option<String>), ToolError> {
     let session_id = ctx
         .session_id()
         .parse::<Uuid>()
@@ -112,7 +114,8 @@ async fn session_space(
         .await
         .map_err(|error| failed(tool, error))?
         .ok_or_else(|| failed(tool, "the session's space no longer exists"))?;
-    Ok((space.id, space.slug.to_string()))
+    let capture_scope = crate::turn::agent_call_scope(session.metadata.as_ref());
+    Ok((space.id, space.slug.to_string(), capture_scope))
 }
 
 // ---------------------------------------------------------------------------
@@ -170,7 +173,7 @@ impl Tool for KnowledgeSearchTool {
             .and_then(Value::as_u64)
             .map_or(10, |n| n.clamp(1, 50) as usize);
 
-        let (space_id, _slug) = session_space(SEARCH_TOOL, state, ctx).await?;
+        let (space_id, _slug, _scope) = session_space(SEARCH_TOOL, state, ctx).await?;
 
         let hits = state
             .storage
@@ -289,12 +292,18 @@ impl Tool for KnowledgeRecordTool {
             .unwrap_or("text/plain");
 
         let state = gateway_state(RECORD_TOOL, ctx)?;
-        let (space_id, space_slug) = session_space(RECORD_TOOL, state, ctx).await?;
+        let (space_id, space_slug, capture_scope) =
+            session_space(RECORD_TOOL, state, ctx).await?;
 
         let body = knowledge::write_body(&state.config_root, &space_slug, content.as_bytes())
             .await
             .map_err(|error| failed(RECORD_TOOL, error))?;
 
+        // A workflow worker records under its journalled call's scope, so a
+        // call re-executed after an interruption returns the first attempt's
+        // observation instead of forking the evidence. (The retried body
+        // file, if its bytes differ, stays as an unreferenced
+        // content-addressed file — write-once, harmless.)
         let observation = state
             .storage
             .record_observation(NewSourceObservation {
@@ -307,6 +316,7 @@ impl Tool for KnowledgeRecordTool {
                 body_sha256: body.sha256,
                 body_bytes: body.byte_count,
                 media_type: media_type.to_owned(),
+                capture_scope,
             })
             .await
             .map_err(|error| failed(RECORD_TOOL, error))?;
@@ -418,7 +428,7 @@ impl Tool for KnowledgeCurateTool {
         }
 
         let state = gateway_state(CURATE_TOOL, ctx)?;
-        let (space_id, _slug) = session_space(CURATE_TOOL, state, ctx).await?;
+        let (space_id, _slug, _scope) = session_space(CURATE_TOOL, state, ctx).await?;
         let assertion = state
             .storage
             .add_curation_assertion(NewCurationAssertion {
@@ -498,7 +508,7 @@ impl Tool for KnowledgeCiteTool {
         let quoted_text = required_str(CITE_TOOL, &params, "quote")?.to_owned();
 
         let state = gateway_state(CITE_TOOL, ctx)?;
-        let (space_id, _slug) = session_space(CITE_TOOL, state, ctx).await?;
+        let (space_id, _slug, _scope) = session_space(CITE_TOOL, state, ctx).await?;
         let citation = state
             .storage
             .add_citation(NewKnowledgeCitation {
@@ -555,7 +565,7 @@ impl Tool for KnowledgeOrientTool {
 
     async fn execute(&self, params: Value, ctx: &dyn ToolContext) -> Result<Value, ToolError> {
         let state = gateway_state(ORIENT_TOOL, ctx)?;
-        let (space_id, _) = session_space(ORIENT_TOOL, state, ctx).await?;
+        let (space_id, _, _) = session_space(ORIENT_TOOL, state, ctx).await?;
         let limit = params
             .get("limit")
             .and_then(Value::as_u64)
@@ -683,7 +693,7 @@ impl Tool for KnowledgeCurateOrientationTool {
         };
 
         let state = gateway_state(CURATE_ORIENTATION_TOOL, ctx)?;
-        let (space_id, _) = session_space(CURATE_ORIENTATION_TOOL, state, ctx).await?;
+        let (space_id, _, _) = session_space(CURATE_ORIENTATION_TOOL, state, ctx).await?;
         let session_id = ctx.session_id().parse::<Uuid>().ok();
         match operation {
             "author" => {
@@ -768,6 +778,74 @@ mod tests {
             panic!("origin-less record should be invalid, got: {result:?}");
         };
         assert!(message.contains("origin"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn record_dedups_retries_through_the_sessions_call_scope() {
+        let root = tempfile::tempdir().unwrap();
+        let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+        let space = storage.get_or_create_default().await.unwrap();
+        // A workflow agent-call worker: the dispatch stamped the journalled
+        // call's identity into the session metadata.
+        let session = storage
+            .create_session(NewSession {
+                space_id: space.id,
+                agent_id: "researcher".into(),
+                metadata: Some(json!({
+                    (crate::turn::AGENT_CALL_SCOPE_METADATA_KEY): "entry-77"
+                })),
+                active_workspace_attachment_id: None,
+            })
+            .await
+            .unwrap();
+
+        let provider = Arc::new(MockProvider::new(vec![]));
+        let state = AppState::new_with_config_root(
+            Arc::clone(&storage) as Arc<dyn swage_storage::Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            provider as Arc<dyn LlmProvider>,
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+            root.path().to_path_buf(),
+        );
+        let base = swage_tool::context::MockToolContext::new("researcher", session.id.to_string());
+        let (ws_tx, _ws_rx) = mpsc::unbounded_channel();
+        let ctx = GatewayToolContext::new(
+            &base,
+            ws_tx,
+            Arc::clone(&storage) as Arc<dyn swage_storage::Storage>,
+        )
+        .with_app_state(Some(state));
+
+        let tool = KnowledgeRecordTool;
+        let first = tool
+            .execute(
+                json!({
+                    "content": "the page as first fetched",
+                    "url": "https://example.test/page",
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        // The interrupted call re-runs and fetches changed bytes; the scope
+        // makes it the same capture.
+        let retried = tool
+            .execute(
+                json!({
+                    "content": "the page as fetched on the resumed attempt",
+                    "url": "https://example.test/page",
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(first["observation_id"], retried["observation_id"]);
+        let observations = storage.list_observations_by_space(space.id).await.unwrap();
+        assert_eq!(observations.len(), 1);
+        assert_eq!(observations[0].capture_scope.as_deref(), Some("entry-77"));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -907,6 +985,7 @@ mod tests {
                 body_sha256: "local-orientation-body".into(),
                 body_bytes: 32,
                 media_type: "text/plain".into(),
+                capture_scope: None,
             })
             .await
             .unwrap();
@@ -921,6 +1000,7 @@ mod tests {
                 body_sha256: "foreign-orientation-body".into(),
                 body_bytes: 32,
                 media_type: "text/plain".into(),
+                capture_scope: None,
             })
             .await
             .unwrap();
@@ -1126,6 +1206,7 @@ mod tests {
                 body_sha256: "tool-citation-body".into(),
                 body_bytes: 64,
                 media_type: "text/plain".into(),
+                capture_scope: None,
             })
             .await
             .unwrap();
@@ -1214,6 +1295,7 @@ mod tests {
                 body_sha256: "subject-hash".into(),
                 body_bytes: 10,
                 media_type: "text/plain".into(),
+                capture_scope: None,
             })
             .await
             .unwrap();
@@ -1228,6 +1310,7 @@ mod tests {
                 body_sha256: "target-hash".into(),
                 body_bytes: 10,
                 media_type: "text/plain".into(),
+                capture_scope: None,
             })
             .await
             .unwrap();

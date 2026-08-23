@@ -1101,6 +1101,7 @@ async fn run_ephemeral_agent_call(
     space_id: Uuid,
     dispatch_bound_agent_ids: &[String],
     dispatch_bound_task_definition_ids: &[String],
+    journal_entry_id: Uuid,
     request: AgentCallRequest,
     resolved_working_directory: Option<ResolvedWorkerPlacement>,
     cancellation: CancellationToken,
@@ -1183,6 +1184,11 @@ async fn run_ephemeral_agent_call(
                 &mut metadata,
                 dispatch_bound_task_definition_ids,
             );
+            // The journal entry id survives an interrupted call's re-run
+            // (replay reuses the started entry), so the worker's idempotent
+            // writes — knowledge captures — dedup against the first attempt.
+            metadata[crate::turn::AGENT_CALL_SCOPE_METADATA_KEY] =
+                Value::String(journal_entry_id.to_string());
             if let Some(placement) = resolved_working_directory.as_ref() {
                 metadata[crate::turn::WORKER_PLACEMENT_CWD_METADATA_KEY] =
                     Value::String(placement.path.clone());
@@ -3283,6 +3289,7 @@ async fn complete_agent_entry(
         space_id,
         dispatch_bound_agent_ids,
         dispatch_bound_task_definition_ids,
+        entry_id,
         request,
         resolved_working_directory,
         cancellation,
@@ -6017,6 +6024,7 @@ mod tests {
             space.id,
             &[],
             &[],
+            Uuid::new_v4(),
             AgentCallRequest {
                 cwd: None,
                 isolation: None,
@@ -6084,12 +6092,14 @@ mod tests {
             None,
         );
 
+        let journal_entry_id = Uuid::new_v4();
         let result = run_ephemeral_agent_call(
             &state,
             Uuid::new_v4(),
             space.id,
             &[],
             &[],
+            journal_entry_id,
             AgentCallRequest {
                 cwd: None,
                 isolation: None,
@@ -6135,6 +6145,20 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(context.contains("Record gathered source material in the knowledge base"));
+
+        // The worker session carries its journalled call's identity, so its
+        // knowledge captures dedup across an interrupted call's re-run.
+        let session = storage
+            .list_sessions_by_agent_id("researcher")
+            .await
+            .unwrap()
+            .into_iter()
+            .next()
+            .expect("worker session");
+        assert_eq!(
+            crate::turn::agent_call_scope(session.metadata.as_ref()).as_deref(),
+            Some(journal_entry_id.to_string().as_str())
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -8197,6 +8221,7 @@ mod tests {
             space.id,
             &[],
             &[],
+            Uuid::new_v4(),
             request(),
             None,
             CancellationToken::new(),
@@ -8266,6 +8291,7 @@ mod tests {
             space.id,
             &[],
             &[],
+            Uuid::new_v4(),
             request(),
             None,
             CancellationToken::new(),
@@ -8299,6 +8325,7 @@ mod tests {
             space.id,
             &[],
             &[],
+            Uuid::new_v4(),
             missing,
             None,
             CancellationToken::new(),
@@ -9302,6 +9329,7 @@ mod tests {
             space.id,
             &[],
             &[],
+            Uuid::new_v4(),
             AgentCallRequest {
                 prompt: "continue".into(),
                 agent: None,
