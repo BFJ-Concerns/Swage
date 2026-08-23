@@ -28,6 +28,10 @@ pub(super) async fn run_with_environment(
     args: &StartArgs,
     environment: Option<&super::recovery::GatewayLifecycleEnvironment>,
 ) -> Result<(), ClientError> {
+    if let Some(environment) = environment {
+        environment.apply_to_current_process();
+    }
+
     let installed = super::install::load_install_config()?;
     let effective_port = args
         .port
@@ -81,9 +85,6 @@ pub(super) async fn run_with_environment(
 
     // Step 2: Foreground mode — run the gateway inline, blocking until shutdown.
     if args.foreground {
-        if let Some(environment) = environment {
-            environment.apply_to_current_process();
-        }
         crate::startup::run_gateway(effective_port, effective_host, effective_config).await;
         return Ok(());
     }
