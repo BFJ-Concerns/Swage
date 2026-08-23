@@ -12128,6 +12128,75 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn invalid_inline_agent_prompt_fails_after_journalling_valid_work() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let provider = Arc::new(ScriptedRecordingProvider {
+            outputs: std::sync::Mutex::new(std::collections::VecDeque::from([
+                scripted_text_output("must not be requested"),
+            ])),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(space.id),
+            Json(StartInlineWorkflowRunRequest {
+                source: r#"await agent("Valid authored task");
+                await agent({ task: "Invalid authored task" });"#
+                    .into(),
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start invalid inline run");
+
+        wait_for_terminal(&state, started.id).await;
+        let run = storage
+            .get_workflow_run(started.id)
+            .await
+            .expect("run")
+            .expect("present");
+        assert_eq!(run.state, "failed");
+        assert!(
+            run.error_message
+                .as_deref()
+                .is_some_and(|message| message.contains("agent prompt must be a string")),
+            "unexpected terminal error: {:?}",
+            run.error_message
+        );
+        assert_eq!(provider.requests.lock().expect("requests").len(), 1);
+
+        let journal = storage
+            .list_workflow_journal(started.id)
+            .await
+            .expect("journal");
+        let agent_calls = journal
+            .iter()
+            .filter(|entry| entry.kind == "agent_call")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            agent_calls.len(),
+            1,
+            "only the valid call should reach the journal: {journal:?}"
+        );
+        assert_eq!(agent_calls[0].status, "completed");
+        assert_eq!(
+            agent_calls[0].request["prompt"],
+            Value::String("Valid authored task".into())
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn inline_run_without_reserve_keeps_hard_ceiling_behaviour() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
         let space = storage.get_or_create_default().await.expect("space");
