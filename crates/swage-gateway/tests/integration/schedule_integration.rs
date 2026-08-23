@@ -877,7 +877,16 @@ async fn fresh_policy_creates_a_session_per_run_and_seeds_previous_outcome() {
             MockProvider::text_round("second outcome"),
         ]),
     );
-    let space = state.space_store.get_or_create_default().await.unwrap();
+    let viewing_space = state.space_store.get_or_create_default().await.unwrap();
+    let target_space = state
+        .space_store
+        .create(swage_storage::NewSpace {
+            name: "Scheduled work target".into(),
+            slug: "scheduled-work-target".into(),
+        })
+        .await
+        .unwrap();
+    assert_ne!(viewing_space.id, target_space.id);
 
     let created = schedule::create_schedule(
         &state,
@@ -887,7 +896,7 @@ async fn fresh_policy_creates_a_session_per_run_and_seeds_previous_outcome() {
                 every: "every 1 hours".into(),
             },
             SessionPolicy::Fresh {
-                space_id: space.id,
+                space_id: target_space.id,
                 agent_id: "gateway".into(),
             },
         ),
@@ -943,7 +952,8 @@ async fn fresh_policy_creates_a_session_per_run_and_seeds_previous_outcome() {
         .unwrap()
         .unwrap();
     assert_eq!(session.agent_id, "gateway");
-    assert_eq!(session.space_id, space.id);
+    assert_eq!(session.space_id, target_space.id);
+    assert_ne!(session.space_id, viewing_space.id);
 }
 
 #[tokio::test(flavor = "multi_thread")]
