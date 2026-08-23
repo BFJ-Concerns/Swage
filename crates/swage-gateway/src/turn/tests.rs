@@ -5847,9 +5847,17 @@ async fn second_tool_round_request_keeps_structured_tool_messages() {
                 })
         })
         .expect("assistant tool-use message should retain the structured echo call");
-    assert!(
-        assistant_replay.tool_replay().is_some(),
-        "assistant tool-use message should retain canonical replay"
+    assert_eq!(
+        assistant_replay
+            .tool_replay()
+            .expect("assistant replay")
+            .iter()
+            .filter(
+                |part| matches!(part, ToolReplayPart::ToolCall { call_id, .. } if call_id == "c1")
+            )
+            .count(),
+        1,
+        "the structured tool call must be replayed exactly once"
     );
     let user_replay = second
         .messages
@@ -5867,9 +5875,17 @@ async fn second_tool_round_request_keeps_structured_tool_messages() {
                 })
         })
         .expect("user tool-result message should retain the structured echo result");
-    assert!(
-        user_replay.tool_replay().is_some(),
-        "tool-result message should retain canonical replay"
+    assert_eq!(
+        user_replay
+            .tool_replay()
+            .expect("tool-result replay")
+            .iter()
+            .filter(
+                |part| matches!(part, ToolReplayPart::ToolResult { call_id, .. } if call_id == "c1")
+            )
+            .count(),
+        1,
+        "the structured tool result must be replayed exactly once"
     );
 }
 
@@ -7102,9 +7118,17 @@ async fn approval_resumption_keeps_structured_tool_messages() {
                 })
         })
         .expect("assistant tool-use message should retain the structured echo call after approval");
-    assert!(
-        assistant_replay.tool_replay().is_some(),
-        "assistant tool-use message should retain canonical replay after approval"
+    assert_eq!(
+        assistant_replay
+            .tool_replay()
+            .expect("assistant replay after approval")
+            .iter()
+            .filter(
+                |part| matches!(part, ToolReplayPart::ToolCall { call_id, .. } if call_id == "c1")
+            )
+            .count(),
+        1,
+        "the approved tool call must be replayed exactly once"
     );
     let user_replay = second
         .messages
@@ -7122,9 +7146,17 @@ async fn approval_resumption_keeps_structured_tool_messages() {
                 })
         })
         .expect("user tool-result message should retain the structured echo result after approval");
-    assert!(
-        user_replay.tool_replay().is_some(),
-        "tool-result message should retain canonical replay after approval"
+    assert_eq!(
+        user_replay
+            .tool_replay()
+            .expect("tool-result replay after approval")
+            .iter()
+            .filter(
+                |part| matches!(part, ToolReplayPart::ToolResult { call_id, .. } if call_id == "c1")
+            )
+            .count(),
+        1,
+        "the approved tool result must be replayed exactly once"
     );
 }
 
@@ -8840,11 +8872,16 @@ async fn delegate_worktree_provisions_isolated_cwd_and_records_resolved_placemen
         ],
     ]);
     let worktree_root = fixture.path().join("worker-worktrees");
+    let mut config = swage_config::ResolvedConfig::default();
+    config.tools.permissions.require_approval =
+        vec![swage_config::model::RequireApprovalEntry::Simple(
+            "delegated_marker_write".into(),
+        )];
     let state = AppState::new_with_config_root(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
-        swage_config::ResolvedConfig::default(),
+        config,
         crate::tool::ToolDispatcher::allow_all(vec![
             Arc::new(DelegatedMarkerWriteTool) as Arc<dyn Tool>
         ]),
@@ -8876,6 +8913,10 @@ async fn delegate_worktree_provisions_isolated_cwd_and_records_resolved_placemen
         .await
         .expect("wait-mode worktree delegation should complete");
     assert!(matches!(wait_outcome, DelegationOutcome::Completed(_)));
+    assert!(
+        storage.list_approvals().await.unwrap().is_empty(),
+        "the waiting delegated turn must use its enforced grant without parking"
+    );
     assert!(
         state
             .worktree_host
@@ -8961,6 +9002,10 @@ async fn delegate_worktree_provisions_isolated_cwd_and_records_resolved_placemen
                 && message.payload.get("error").is_none()
         }),
         "the detached delegate should record a successful terminal result"
+    );
+    assert!(
+        storage.list_approvals().await.unwrap().is_empty(),
+        "the detached delegated turn must use its enforced grant without parking"
     );
     for _ in 0..20 {
         if state.worktree_host.list_owner(owner_id).await.is_empty() && !worktree.exists() {
