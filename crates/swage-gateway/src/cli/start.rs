@@ -60,7 +60,7 @@ pub(super) async fn run_with_environment(
         Ok(meta) => {
             // PID is alive — the gateway is already running.
             eprintln!("Gateway is already running (PID {})", meta.pid);
-            return Err(ClientError::GatewayNotRunning {
+            return Err(ClientError::GatewayAlreadyRunning {
                 reason: format!(
                     "gateway is already running at {} (PID {})",
                     meta.address, meta.pid
@@ -78,7 +78,7 @@ pub(super) async fn run_with_environment(
             .await
             {
                 eprintln!("Gateway is already running (PID {})", meta.pid);
-                return Err(ClientError::GatewayNotRunning {
+                return Err(ClientError::GatewayAlreadyRunning {
                     reason: format!(
                         "gateway is already running at {} (PID {})",
                         meta.address, meta.pid
