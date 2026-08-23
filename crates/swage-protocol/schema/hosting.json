@@ -270,39 +270,16 @@
         "prompt"
       ]
     },
-    "AssemblyError": {
+    "AssemblyHistoryEntry": {
+      "description": "One turn whose persisted assembly report can be opened in the context inspector.",
       "type": "object",
       "properties": {
         "assembly_name": {
           "type": "string"
         },
-        "error_kind": {
-          "type": "string"
-        },
-        "fallback_used": {
-          "type": "string"
-        },
-        "message": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "assembly_name",
-        "error_kind",
-        "message",
-        "fallback_used"
-      ]
-    },
-    "AssemblyHistoryEntry": {
-      "description": "The persisted assembly report for one turn.",
-      "type": "object",
-      "properties": {
         "recorded_at": {
           "type": "string",
           "format": "date-time"
-        },
-        "report": {
-          "$ref": "#/$defs/AssemblyReport"
         },
         "session_id": {
           "type": "string",
@@ -322,73 +299,7 @@
         "session_id",
         "space_id",
         "recorded_at",
-        "report"
-      ]
-    },
-    "AssemblyReport": {
-      "type": "object",
-      "properties": {
-        "assembly_name": {
-          "type": "string"
-        },
-        "budget": {
-          "type": [
-            "integer",
-            "null"
-          ],
-          "format": "uint",
-          "minimum": 0
-        },
-        "budget_remaining": {
-          "type": [
-            "integer",
-            "null"
-          ],
-          "format": "int"
-        },
-        "compaction_applied": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/CompactionRecord"
-          }
-        },
-        "duration": {
-          "$ref": "#/$defs/Duration"
-        },
-        "effective_tool_permissions": true,
-        "elements": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/ElementReport"
-          }
-        },
-        "errors": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/AssemblyError"
-          }
-        },
-        "provider_visible": true,
-        "total_tokens": {
-          "type": "integer",
-          "format": "uint",
-          "minimum": 0
-        },
-        "warnings": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        }
-      },
-      "required": [
-        "assembly_name",
-        "elements",
-        "total_tokens",
-        "compaction_applied",
-        "warnings",
-        "errors",
-        "duration"
+        "assembly_name"
       ]
     },
     "ChannelStatusListResponse": {
@@ -474,77 +385,6 @@
       "required": [
         "session_id",
         "state"
-      ]
-    },
-    "CompactionRecord": {
-      "type": "object",
-      "properties": {
-        "actual_strategy": {
-          "type": "string"
-        },
-        "budget": {
-          "type": [
-            "integer",
-            "null"
-          ],
-          "format": "uint",
-          "minimum": 0
-        },
-        "element": {
-          "type": "string"
-        },
-        "failure_reason": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "messages_removed": {
-          "type": "integer",
-          "format": "uint",
-          "minimum": 0
-        },
-        "requested_strategy": {
-          "type": "string"
-        },
-        "source_message_range": {
-          "type": [
-            "array",
-            "null"
-          ],
-          "maxItems": 2,
-          "minItems": 2,
-          "prefixItems": [
-            {
-              "type": "integer",
-              "format": "uint",
-              "minimum": 0
-            },
-            {
-              "type": "integer",
-              "format": "uint",
-              "minimum": 0
-            }
-          ]
-        },
-        "tokens_after": {
-          "type": "integer",
-          "format": "uint",
-          "minimum": 0
-        },
-        "tokens_before": {
-          "type": "integer",
-          "format": "uint",
-          "minimum": 0
-        }
-      },
-      "required": [
-        "element",
-        "requested_strategy",
-        "actual_strategy",
-        "messages_removed",
-        "tokens_before",
-        "tokens_after"
       ]
     },
     "ConfigurationHistoryEvent": {
@@ -798,25 +638,6 @@
         "registered_at"
       ]
     },
-    "Duration": {
-      "type": "object",
-      "properties": {
-        "nanos": {
-          "type": "integer",
-          "format": "uint32",
-          "minimum": 0
-        },
-        "secs": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        }
-      },
-      "required": [
-        "secs",
-        "nanos"
-      ]
-    },
     "EffectiveAgentDefinitionListResponse": {
       "type": "object",
       "properties": {
@@ -893,48 +714,6 @@
         "built_in",
         "global",
         "space"
-      ]
-    },
-    "ElementReport": {
-      "type": "object",
-      "properties": {
-        "name": {
-          "type": "string"
-        },
-        "named_assembly": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/NamedAssemblyReport"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "preview": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "priority": {
-          "type": "integer",
-          "format": "int32"
-        },
-        "source": {
-          "type": "string"
-        },
-        "token_count": {
-          "type": "integer",
-          "format": "uint",
-          "minimum": 0
-        }
-      },
-      "required": [
-        "name",
-        "source",
-        "token_count",
-        "priority"
       ]
     },
     "ExternalChannelIntegration": {
@@ -1050,28 +829,6 @@
         "registered_at",
         "last_seen_at",
         "stale_after_secs"
-      ]
-    },
-    "NamedAssemblyReport": {
-      "type": "object",
-      "properties": {
-        "assembly_name": {
-          "type": "string"
-        },
-        "child_elements": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/ElementReport"
-          }
-        },
-        "resolved_level": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "assembly_name",
-        "resolved_level",
-        "child_elements"
       ]
     },
     "OperatorDeviceSummary": {
