@@ -58,15 +58,26 @@ pub async fn run(args: &StopArgs) -> Result<(), ClientError> {
         });
     }
 
+    run_with_metadata(args, &meta, &RuntimeMetadata::metadata_path()).await
+}
+
+pub(super) async fn run_with_metadata(
+    args: &StopArgs,
+    meta: &RuntimeMetadata,
+    metadata_path: &std::path::Path,
+) -> Result<(), ClientError> {
     if args.force {
-        force_stop(&meta).await
+        force_stop(meta, metadata_path).await
     } else {
-        graceful_stop(&meta).await
+        graceful_stop(meta, metadata_path).await
     }
 }
 
 /// Requests a graceful shutdown via the HTTP endpoint, then waits for the process to exit.
-async fn graceful_stop(meta: &RuntimeMetadata) -> Result<(), ClientError> {
+async fn graceful_stop(
+    meta: &RuntimeMetadata,
+    metadata_path: &std::path::Path,
+) -> Result<(), ClientError> {
     let client = GatewayClient::new(&meta.address);
 
     if let Err(e) = client.shutdown().await {
@@ -76,7 +87,7 @@ async fn graceful_stop(meta: &RuntimeMetadata) -> Result<(), ClientError> {
 
     if wait_for_exit(meta.pid, GRACEFUL_SHUTDOWN_TIMEOUT).await {
         // Gateway confirmed dead — remove any leftover metadata file.
-        let _ = RuntimeMetadata::remove();
+        let _ = RuntimeMetadata::remove_at(metadata_path);
         println!("Gateway stopped");
         Ok(())
     } else {
@@ -91,7 +102,10 @@ async fn graceful_stop(meta: &RuntimeMetadata) -> Result<(), ClientError> {
 }
 
 /// Sends SIGTERM to the gateway process and waits for it to exit.
-async fn force_stop(meta: &RuntimeMetadata) -> Result<(), ClientError> {
+async fn force_stop(
+    meta: &RuntimeMetadata,
+    metadata_path: &std::path::Path,
+) -> Result<(), ClientError> {
     // SAFETY: libc::kill is an FFI call with no Rust memory safety implications.
     // We send SIGTERM (signal 15) to request process termination.
     let kill_result = unsafe { libc::kill(meta.pid as i32, libc::SIGTERM) };
@@ -106,7 +120,7 @@ async fn force_stop(meta: &RuntimeMetadata) -> Result<(), ClientError> {
     }
 
     if wait_for_exit(meta.pid, FORCE_SHUTDOWN_TIMEOUT).await {
-        let _ = RuntimeMetadata::remove();
+        let _ = RuntimeMetadata::remove_at(metadata_path);
         println!("Gateway stopped (forced)");
         Ok(())
     } else {
