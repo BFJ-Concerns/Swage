@@ -129,7 +129,7 @@
     {#if settingsSpace}
       <SpaceSettingsPage space={settingsSpace} tab={settingsSpaceTab ?? undefined} />
     {:else}
-      <SettingsPage tab={settingsTab ?? undefined} spaceId={currentSpace?.id ?? null} {onSettingsSaved} />
+      <SettingsPage tab={settingsTab ?? undefined} spaceId={currentSpace?.id ?? null} spaces={spaceStore?.spaces ?? []} {onSettingsSaved} />
     {/if}
   </div>
 {:else if !currentSpace}

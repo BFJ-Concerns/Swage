@@ -18,7 +18,7 @@
   import InformationalSettingsSurface from "./settings/InformationalSettingsSurface.svelte";
   import ProviderSettingsSurface from "./settings/ProviderSettingsSurface.svelte";
   import RecoverySettingsSurface from "./settings/RecoverySettingsSurface.svelte";
-  import type { GenerationPresetConfig, SettingsResponse } from "../types";
+  import type { GenerationPresetConfig, SettingsResponse, Space } from "../types";
 
   // Agents, providers, generation, automation, and recovery have working
   // backends. The remaining partial pages are identified below.
@@ -38,12 +38,14 @@
   interface Props {
     tab?: SettingsTabId;
     spaceId?: string | null;
+    spaces?: Space[];
     onSettingsSaved?: () => void | Promise<void>;
   }
 
   let {
     tab = "providers",
     spaceId = null,
+    spaces = [],
     onSettingsSaved,
   }: Props = $props();
 
@@ -430,6 +432,7 @@
       <AutomationSettingsSurface
         bind:settings
         {spaceId}
+        {spaces}
         sessionId={null}
         onValidation={(bundlesInvalid, approvalsInvalid, message) => {
           hasInvalidBundlesJson = bundlesInvalid;
