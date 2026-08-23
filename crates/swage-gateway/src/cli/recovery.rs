@@ -234,10 +234,7 @@ fn process_metadata_path(pid: u32) -> Option<PathBuf> {
     let environ = fs::read(format!("/proc/{pid}/environ")).ok()?;
     let environment = lifecycle_environment_from_bytes(&environ)?;
 
-    Some(match environment.xdg_runtime_dir {
-        Some(xdg_runtime_dir) => xdg_runtime_dir.join("swage").join("metadata.json"),
-        None => environment.swage_home.join("run").join("metadata.json"),
-    })
+    Some(environment.metadata_path())
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -319,6 +316,10 @@ mod tests {
 
         assert_eq!(environment.swage_home, PathBuf::from("/data/swage"));
         assert_eq!(environment.home, Some(PathBuf::from("/operator")));
+        assert_eq!(
+            environment.metadata_path(),
+            PathBuf::from("/data/swage/run/metadata.json")
+        );
         assert_eq!(
             environment.xdg_runtime_dir,
             Some(PathBuf::from("/run/user/1000"))

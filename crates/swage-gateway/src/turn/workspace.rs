@@ -124,6 +124,7 @@ pub(crate) async fn resolve_authorised_worker_directory(
     state: &crate::state::AppState,
     space_id: Uuid,
     context_id: Uuid,
+    session_id: Option<Uuid>,
     active_workspace_attachment_id: Option<Uuid>,
     inherited_placement: Option<&ResolvedWorkerDirectory>,
     requested: &str,
@@ -198,6 +199,7 @@ pub(crate) async fn resolve_authorised_worker_directory(
     let matching_approval_grants = approval_grants
         .iter()
         .filter(|grant| grant.kind == swage_storage::model::ApprovalKind::Location)
+        .filter(|grant| grant.session_id.is_none() || grant.session_id == session_id)
         .filter(|grant| grant.space_id.is_none() || grant.space_id == Some(space_id))
         .filter(|grant| within(Path::new(&grant.name)))
         .collect::<Vec<_>>();
@@ -273,6 +275,7 @@ pub(crate) async fn reauthorise_session_worker_placement(
         state,
         session.space_id,
         authority_context_id,
+        Some(session.id),
         session.active_workspace_attachment_id,
         None,
         authority_path,

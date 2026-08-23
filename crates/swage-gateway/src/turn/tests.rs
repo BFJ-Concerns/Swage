@@ -10900,6 +10900,55 @@ fn session_scoped_approval_grant_only_removes_gate_for_granting_session() {
 }
 
 #[tokio::test]
+async fn session_scoped_location_grant_only_authorises_granting_sessions_workers() {
+    let location = tempfile::tempdir().expect("approved location");
+    let (state, granting_session_id) = make_state_with_session(vec![]).await;
+    let granting_session = state
+        .storage
+        .get_session(granting_session_id)
+        .await
+        .expect("session query")
+        .expect("granting session");
+    let other_session_id = Uuid::new_v4();
+    state
+        .session_approval_grants
+        .lock()
+        .expect("location grants")
+        .insert(crate::state::ApprovalGrantKey::location(
+            Some(granting_session_id),
+            None,
+            location.path().to_string_lossy(),
+            "write",
+        ));
+
+    let authorised = resolve_authorised_worker_directory(
+        &state,
+        granting_session.space_id,
+        Uuid::new_v4(),
+        Some(granting_session_id),
+        None,
+        None,
+        &location.path().to_string_lossy(),
+    )
+    .await
+    .expect("granting session should retain its worker location authority");
+    assert!(authorised.can_write);
+
+    let error = resolve_authorised_worker_directory(
+        &state,
+        granting_session.space_id,
+        Uuid::new_v4(),
+        Some(other_session_id),
+        None,
+        None,
+        &location.path().to_string_lossy(),
+    )
+    .await
+    .expect_err("another session must not inherit the location grant");
+    assert!(error.contains("outside the dispatching context"));
+}
+
+#[tokio::test]
 async fn workspace_summary_is_empty_when_no_attachments_exist() {
     let storage: Arc<dyn swage_storage::store::Storage> = Arc::new(MockStorage::new());
     let space_id = Uuid::new_v4();
