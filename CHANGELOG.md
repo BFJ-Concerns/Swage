@@ -38,7 +38,6 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
-- Workflow runs interrupted by a gateway crash now resume without being blocked by their orphaned worker turn.
 - Bare skill commands now run as persisted conversation turns instead of leaving the composer waiting indefinitely after activation.
 - Restarting a gateway now preserves its effective data root and runtime directory, and leaves the running gateway untouched when those values cannot be recovered.
 - Workflow scripts now reject non-string `agent` and `agentStart` prompts before dispatch instead of silently sending coerced text such as `[object Object]` to workers.

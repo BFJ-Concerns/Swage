@@ -2569,8 +2569,8 @@ mod tests {
             crate::tool::ToolDispatcher::allow_all(vec![]),
             None,
         );
-        // The injected failure is consumed only when dispatcher construction
-        // reaches the sandbox-provisioning boundary.
+        // The injected failure is consumed at build_gateway_dispatcher entry.
+        // Non-consumption therefore proves the builder was never entered.
         state.fail_next_dispatcher_builds(1);
         let router = MessageRouter::new(state.storage.clone(), None);
         let malformed = router
