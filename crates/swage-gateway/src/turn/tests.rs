@@ -1342,6 +1342,24 @@ impl SessionStore for MockStorage {
         Ok(())
     }
 
+    async fn set_session_metadata(
+        &self,
+        id: Uuid,
+        metadata: Option<serde_json::Value>,
+    ) -> Result<Session, StorageError> {
+        let mut db = self.db.lock().await;
+        let session = db
+            .sessions
+            .get_mut(&id)
+            .ok_or_else(|| StorageError::NotFound {
+                entity: "session".to_string(),
+                id: id.to_string(),
+            })?;
+        session.metadata = metadata;
+        session.updated_at = chrono::Utc::now();
+        Ok(session.clone())
+    }
+
     async fn set_session_active_workspace(
         &self,
         id: Uuid,
@@ -5105,6 +5123,7 @@ async fn unattended_sandbox_failure_records_unattended_attendance() {
         None,
         TurnAttendance::Unattended,
         DispatchContextComposition::default(),
+        None,
     )
     .await
     .expect_err("unattended degradation should fail closed");
@@ -9800,6 +9819,7 @@ async fn invalid_call_scoped_assembly_is_rejected_before_provider_dispatch() {
             assembly: Some("../../outside".into()),
             ..Default::default()
         },
+        None,
     )
     .await
     .expect_err("unsafe call-scoped assembly must fail the turn");
@@ -9851,6 +9871,7 @@ async fn unknown_forced_context_assembly_rejects_call_scoped_override() {
             assembly: Some("default".into()),
             ..Default::default()
         },
+        None,
     )
     .await
     .expect_err("unknown forced assembly must fail the turn");
