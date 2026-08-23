@@ -37,14 +37,27 @@ impl RuntimeMetadata {
     /// otherwise prefers `$XDG_RUNTIME_DIR/swage/metadata.json` and falls back
     /// to `~/.swage/run/metadata.json`.
     pub fn metadata_path() -> PathBuf {
-        if let Ok(swage_home) = std::env::var("SWAGE_HOME") {
-            PathBuf::from(swage_home).join("run").join("metadata.json")
-        } else if let Ok(xdg) = std::env::var("XDG_RUNTIME_DIR") {
-            PathBuf::from(xdg).join("swage").join("metadata.json")
+        let explicit_data_root = std::env::var("SWAGE_HOME").ok().map(PathBuf::from);
+        let runtime_dir = std::env::var("XDG_RUNTIME_DIR").ok().map(PathBuf::from);
+        Self::metadata_path_for(
+            explicit_data_root.as_deref(),
+            runtime_dir.as_deref(),
+            &effective_swage_root_path(),
+        )
+    }
+
+    /// Resolves runtime metadata from an already-resolved process environment.
+    pub fn metadata_path_for(
+        explicit_data_root: Option<&Path>,
+        runtime_dir: Option<&Path>,
+        data_root: &Path,
+    ) -> PathBuf {
+        if let Some(data_root) = explicit_data_root {
+            data_root.join("run").join("metadata.json")
+        } else if let Some(runtime_dir) = runtime_dir {
+            runtime_dir.join("swage").join("metadata.json")
         } else {
-            effective_swage_root_path()
-                .join("run")
-                .join("metadata.json")
+            data_root.join("run").join("metadata.json")
         }
     }
 
