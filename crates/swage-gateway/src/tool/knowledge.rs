@@ -304,6 +304,7 @@ impl Tool for KnowledgeRecordTool {
         // observation instead of forking the evidence. (The retried body
         // file, if its bytes differ, stays as an unreferenced
         // content-addressed file — write-once, harmless.)
+        let scoped = capture_scope.is_some();
         let observation = state
             .storage
             .record_observation(NewSourceObservation {
@@ -326,13 +327,38 @@ impl Tool for KnowledgeRecordTool {
             .and_then(Value::as_str)
             .filter(|s| !s.trim().is_empty())
         {
-            Some(text) => Some(
-                state
-                    .storage
-                    .add_extraction(observation.id, text.to_owned(), "agent-supplied".to_owned())
-                    .await
-                    .map_err(|error| failed(RECORD_TOOL, error))?,
-            ),
+            Some(text) => {
+                // Under a capture scope this may be the first attempt's row.
+                // An extraction it already carries stands: appending again
+                // would stack a duplicate derivation on every retry — and,
+                // when the retried bytes differ, attach text derived from a
+                // body this row does not hold. A first attempt that crashed
+                // before extracting has no derivation yet, so the retry's
+                // append still lands.
+                let existing = if scoped {
+                    state
+                        .storage
+                        .latest_extraction(observation.id)
+                        .await
+                        .map_err(|error| failed(RECORD_TOOL, error))?
+                } else {
+                    None
+                };
+                match existing {
+                    Some(existing) => Some(existing),
+                    None => Some(
+                        state
+                            .storage
+                            .add_extraction(
+                                observation.id,
+                                text.to_owned(),
+                                "agent-supplied".to_owned(),
+                            )
+                            .await
+                            .map_err(|error| failed(RECORD_TOOL, error))?,
+                    ),
+                }
+            }
             // A capture with no locatable text is still kept — the raw body
             // waits for better extraction — but nothing is searchable or
             // citable until a derivation produces text.
@@ -824,18 +850,21 @@ mod tests {
                 json!({
                     "content": "the page as first fetched",
                     "url": "https://example.test/page",
+                    "extracted_text": "readable text from the first fetch",
                 }),
                 &ctx,
             )
             .await
             .unwrap();
         // The interrupted call re-runs and fetches changed bytes; the scope
-        // makes it the same capture.
+        // makes it the same capture, and the first attempt's extraction
+        // stands rather than gaining a duplicate derivation.
         let retried = tool
             .execute(
                 json!({
                     "content": "the page as fetched on the resumed attempt",
                     "url": "https://example.test/page",
+                    "extracted_text": "readable text from the resumed fetch",
                 }),
                 &ctx,
             )
@@ -843,9 +872,18 @@ mod tests {
             .unwrap();
 
         assert_eq!(first["observation_id"], retried["observation_id"]);
+        assert_eq!(retried["version"], first["version"]);
+        assert_eq!(retried["searchable"], true);
         let observations = storage.list_observations_by_space(space.id).await.unwrap();
         assert_eq!(observations.len(), 1);
         assert_eq!(observations[0].capture_scope.as_deref(), Some("entry-77"));
+        let latest = storage
+            .latest_extraction(observations[0].id)
+            .await
+            .unwrap()
+            .expect("extraction");
+        assert_eq!(latest.version, 1, "the retry must not stack a derivation");
+        assert_eq!(latest.extracted_text, "readable text from the first fetch");
     }
 
     #[tokio::test(flavor = "multi_thread")]

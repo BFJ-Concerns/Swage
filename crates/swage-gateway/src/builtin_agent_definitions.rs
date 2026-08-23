@@ -113,7 +113,6 @@ mod tests {
             grants["organiser"],
             [
                 "knowledge_search",
-                "knowledge_record",
                 "knowledge_curate",
                 "knowledge_curate_orientation",
             ]

@@ -73,7 +73,12 @@ impl ObservationStore for SqliteStorage {
             // observational act, even when the live body differs between
             // attempts, so it deduplicates to the first capture. A lost
             // race between two concurrent same-scope captures costs a
-            // duplicate row — the pre-scope status quo — never a gap.
+            // duplicate row — the pre-scope status quo — never a gap. Body
+            // identity below still wins over scope: a first attempt whose
+            // bytes matched foreign evidence created no scoped row, so its
+            // changed-bytes retry records a distinct observation — a
+            // bounded edge accepted over stamping scopes onto rows the
+            // scope did not create.
             if let Some(scope) = observation.capture_scope.as_deref()
                 && let Some(existing) = conn
                     .query_row(

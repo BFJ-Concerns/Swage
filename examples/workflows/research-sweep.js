@@ -5,9 +5,9 @@
 // Saved-script contract: args = { topic, purpose, maxSources? }. The agents
 // named here are agent definitions in the dispatching space: "researcher"
 // needs web reach (search where configured, url fetch, browser) plus
-// knowledge_record; "organiser" needs knowledge_search, knowledge_record,
-// knowledge_curate, and knowledge_curate_orientation; "synthesist" needs
-// knowledge_search only. None of them holds config-apply or schedule tools.
+// knowledge_record; "organiser" needs knowledge_search, knowledge_curate,
+// and knowledge_curate_orientation; "synthesist" needs knowledge_search
+// only. None of them holds config-apply or schedule tools.
 // Knowledge-base writes happen inside agent turns, so each is journalled as
 // the agent call that made it, and every capture carries that call's scope:
 // a resumed sweep re-running an interrupted gather turn re-records under
@@ -24,7 +24,8 @@ if (!topic || !purpose) {
 }
 
 phase("Scope: choose sources");
-// The scout only plans; it records nothing, so a crash here costs nothing.
+// The scout is told to plan only; recording waits for the gather wave, so
+// a crash here costs nothing.
 const plan = await agent(
   `You are scoping a research sweep.\n` +
     `Topic: ${topic}\n` +
@@ -33,7 +34,8 @@ const plan = await agent(
     `specific pages or documents, not site homepages. Use web search if you ` +
     `have it; otherwise name canonical sources you know. For each, give the ` +
     `URL and one line on what it should contribute. Prefer primary material ` +
-    `over commentary. Return your final answer as JSON only.`,
+    `over commentary. Record nothing at this stage - you are choosing ` +
+    `sources, not gathering them. Return your final answer as JSON only.`,
   {
     agent: "researcher",
     label: "Scope sources",
@@ -126,12 +128,12 @@ const organised = await agent(
     `knowledge_curate_orientation - a short signpost titled by what it ` +
     `orients, its content saying what the material covers and where to ` +
     `look, grounded in the observation ids it points to; supersede an ` +
-    `existing card only when your new one replaces its signpost. Where ` +
-    `organising prose does not fit a card, record it as a knowledge_record ` +
-    `observation of your own authorship. Where a new observation duplicates ` +
-    `or supersedes existing material, assert that with knowledge_curate - ` +
-    `never delete anything. Zero cards or zero assertions is a valid ` +
-    `outcome when nothing warrants them.\n\n` +
+    `existing card only when your new one replaces its signpost. Where a ` +
+    `new observation duplicates or supersedes existing material, assert ` +
+    `that with knowledge_curate - never delete anything. Observations you ` +
+    `judge worth flagging but cannot express as a card or assertion go in ` +
+    `your closing note. Zero cards or zero assertions is a valid outcome ` +
+    `when nothing warrants them.\n\n` +
     `Return JSON only, exactly this shape:\n` +
     `{"orientation_cards": <count of orientation cards you authored>, ` +
     `"assertions": <count of curation assertions you made>, ` +
