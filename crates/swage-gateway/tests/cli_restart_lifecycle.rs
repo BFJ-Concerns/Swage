@@ -18,18 +18,23 @@ struct GatewayProbe {
     home: tempfile::TempDir,
     port: u16,
     explicit_root: bool,
+    xdg_runtime: bool,
 }
 
 impl GatewayProbe {
     fn new() -> Self {
-        Self::with_explicit_root(true)
+        Self::with_environment(true, true)
     }
 
     fn without_explicit_root() -> Self {
-        Self::with_explicit_root(false)
+        Self::with_environment(false, true)
     }
 
-    fn with_explicit_root(explicit_root: bool) -> Self {
+    fn with_default_root() -> Self {
+        Self::with_environment(false, false)
+    }
+
+    fn with_environment(explicit_root: bool, xdg_runtime: bool) -> Self {
         let listener = TcpListener::bind(("127.0.0.1", 0))
             .expect("failed to reserve a loopback port for the gateway probe");
         let port = listener
@@ -44,18 +49,22 @@ impl GatewayProbe {
             home: tempfile::TempDir::new().expect("failed to create the probe home"),
             port,
             explicit_root,
+            xdg_runtime,
         }
     }
 
     fn command(&self) -> Command {
         let mut command = Command::new(&self.binary);
-        command
-            .env("XDG_RUNTIME_DIR", self.runtime.path())
-            .env("HOME", self.home.path());
+        command.env("HOME", self.home.path());
         if self.explicit_root {
             command.env("SWAGE_HOME", self.root.path());
         } else {
             command.env_remove("SWAGE_HOME");
+        }
+        if self.xdg_runtime {
+            command.env("XDG_RUNTIME_DIR", self.runtime.path());
+        } else {
+            command.env_remove("XDG_RUNTIME_DIR");
         }
         command
     }
@@ -79,8 +88,10 @@ impl GatewayProbe {
     fn metadata_path(&self) -> PathBuf {
         if self.explicit_root {
             self.root.path().join("run/metadata.json")
-        } else {
+        } else if self.xdg_runtime {
             self.runtime.path().join("swage/metadata.json")
+        } else {
+            self.home.path().join(".swage/run/metadata.json")
         }
     }
 
@@ -111,7 +122,15 @@ impl Drop for GatewayProbe {
 
 #[test]
 fn restart_recovers_xdg_metadata_without_swage_home() {
-    let probe = GatewayProbe::without_explicit_root();
+    assert_restart_recovers_without_swage_home(GatewayProbe::without_explicit_root());
+}
+
+#[test]
+fn restart_recovers_default_root_metadata_without_overrides() {
+    assert_restart_recovers_without_swage_home(GatewayProbe::with_default_root());
+}
+
+fn assert_restart_recovers_without_swage_home(probe: GatewayProbe) {
     probe.start();
     let first_pid = probe.pid();
     fs::remove_file(probe.metadata_path()).expect("failed to remove live runtime metadata");
@@ -129,17 +148,21 @@ fn restart_recovers_xdg_metadata_without_swage_home() {
             .any(|entry| entry.starts_with(b"SWAGE_HOME=")),
         "replacement gateway gained an explicit SWAGE_HOME"
     );
-    for (name, value) in [
-        ("HOME", probe.home.path()),
-        ("XDG_RUNTIME_DIR", probe.runtime.path()),
-    ] {
-        let expected = format!("{name}={}", value.display());
-        assert!(
-            environment
-                .split(|byte| *byte == 0)
-                .any(|entry| entry == expected.as_bytes()),
-            "replacement gateway did not receive recovered {name}"
-        );
+    let expected_home = format!("HOME={}", probe.home.path().display());
+    assert!(
+        environment
+            .split(|byte| *byte == 0)
+            .any(|entry| entry == expected_home.as_bytes()),
+        "replacement gateway did not receive recovered HOME"
+    );
+    let recovered_xdg = environment
+        .split(|byte| *byte == 0)
+        .find(|entry| entry.starts_with(b"XDG_RUNTIME_DIR="));
+    if probe.xdg_runtime {
+        let expected_xdg = format!("XDG_RUNTIME_DIR={}", probe.runtime.path().display());
+        assert_eq!(recovered_xdg, Some(expected_xdg.as_bytes()));
+    } else {
+        assert_eq!(recovered_xdg, None);
     }
 }
 
