@@ -329,5 +329,72 @@
 </div>
 
 <style>
-  @import "./provider-settings.css";
+  .provider-settings-surface {
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+  }
+
+  .field {
+    display: grid;
+    grid-template-columns: 220px 1fr;
+    gap: 24px;
+    border-top: 1px solid var(--rule-soft);
+    padding: 14px 0;
+    align-items: baseline;
+  }
+
+  .key {
+    font-family: var(--font-mono);
+    font-weight: 500;
+    font-size: 11px;
+    line-height: 1.5;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+  }
+
+  .key small {
+    display: block;
+    margin-top: 4px;
+    font-family: var(--font-body);
+    font-weight: 400;
+    font-size: 11px;
+    line-height: 1.4;
+    letter-spacing: 0;
+    text-transform: none;
+    color: var(--ink-soft);
+  }
+
+  .val {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+
+  .empty {
+    margin: 0;
+    display: inline-flex;
+    align-items: center;
+    gap: 12px;
+    font-family: var(--font-mono);
+    font-weight: 500;
+    font-size: 10px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--ink-soft);
+  }
+
+  .empty::before {
+    content: "";
+    flex: 0 0 22px;
+    height: 1px;
+    background: var(--rule-soft);
+  }
+
+  @media (max-width: 760px) {
+    .field {
+      grid-template-columns: 1fr;
+      gap: 10px;
+    }
+  }
 </style>
