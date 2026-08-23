@@ -1,3 +1,14 @@
+@keyframes chip-in {
+  from {
+    opacity: 0;
+    transform: translateX(-6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
 .provider-settings-surface {
     :global {
   .field {
@@ -200,17 +211,6 @@
   .add-row > .opt:nth-child(4) { animation-delay: 105ms; }
   .add-row > .opt:nth-child(5) { animation-delay: 140ms; }
   .add-row > .opt:nth-child(6) { animation-delay: 200ms; }
-
-  @keyframes chip-in {
-    from {
-      opacity: 0;
-      transform: translateX(-6px);
-    }
-    to {
-      opacity: 1;
-      transform: translateX(0);
-    }
-  }
 
   @media (prefers-reduced-motion: reduce) {
     .add-row > .opt {
