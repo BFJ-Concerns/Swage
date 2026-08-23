@@ -397,14 +397,18 @@ async fn build_turn_sandbox_for_backend_selection(
 
 pub(crate) async fn build_gateway_dispatcher(
     state: &AppState,
-    config: &swage_config::ResolvedConfig,
-    agent_config: &AgentConfig,
-    session_metadata: Option<&serde_json::Value>,
-    space_id: Option<Uuid>,
-    session_id: Option<Uuid>,
-    active_workspace_attachment_id: Option<Uuid>,
-    ws_tx: mpsc::UnboundedSender<ServerEvent>,
+    request: GatewayDispatcherRequest<'_>,
 ) -> Result<GatewayDispatcherBuild, swage_core::SandboxError> {
+    let GatewayDispatcherRequest {
+        config,
+        agent_config,
+        session_metadata,
+        space_id,
+        active_workspace_attachment_id,
+        ws_tx,
+        session_id,
+        turn_id: _,
+    } = request;
     #[cfg(test)]
     if state.take_dispatcher_build_failure() {
         return Err(swage_core::SandboxError::SpawnFailed {
@@ -521,29 +525,11 @@ pub(crate) async fn build_gateway_dispatcher_for_unattended_execution(
     request: GatewayDispatcherRequest<'_>,
     execution_context: &'static str,
 ) -> Result<GatewayDispatcherBuild, swage_core::GatewayError> {
-    let GatewayDispatcherRequest {
-        config,
-        agent_config,
-        session_metadata,
-        space_id,
-        active_workspace_attachment_id,
-        ws_tx,
-        session_id,
-        turn_id,
-    } = request;
-
-    let build = build_gateway_dispatcher(
-        state,
-        config,
-        agent_config,
-        session_metadata,
-        space_id,
-        active_workspace_attachment_id,
-        session_id,
-        ws_tx.clone(),
-    )
-    .await
-    .map_err(|error| swage_core::GatewayError::ConfigError(error.to_string()))?;
+    let session_id = request.session_id;
+    let turn_id = request.turn_id;
+    let build = build_gateway_dispatcher(state, request)
+        .await
+        .map_err(|error| swage_core::GatewayError::ConfigError(error.to_string()))?;
     record_degraded_execution(
         state,
         &build.isolation,

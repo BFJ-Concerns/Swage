@@ -1058,16 +1058,34 @@ mod tests {
     #[derive(Clone, Default)]
     struct RecordedEvents(Arc<Mutex<Vec<String>>>);
 
-    #[test]
-    fn obsolete_workflow_schema_reports_rebuild_instruction() {
-        let path = std::path::Path::new("/data/obsolete/swage.db");
-        let error = swage_core::StorageError::QueryFailed(
-            "database error: no such table: workflow_runs".into(),
-        );
+    #[tokio::test(flavor = "multi_thread")]
+    async fn obsolete_workflow_schema_reports_rebuild_instruction() {
+        let directory = tempfile::tempdir().expect("obsolete data root");
+        let path = directory.path().join("swage.db");
+        let storage = swage_storage::SqliteStorage::open(&path).expect("seed current database");
+        storage
+            .with_conn(|connection| {
+                connection.execute_batch(
+                    "DROP TABLE workflow_runs;
+                     DELETE FROM _swage_migrations
+                     WHERE name = '046_workflow_run_parentage';",
+                )
+            })
+            .await
+            .expect("strip workflow schema from database");
+        drop(storage);
 
-        let message = storage_open_error(path, &error);
+        let error = swage_storage::SqliteStorage::open(&path)
+            .err()
+            .expect("opening the stripped database should fail through migrations");
+        assert!(matches!(
+            error,
+            swage_core::StorageError::MigrationFailed(_)
+        ));
 
-        assert!(message.contains("/data/obsolete"));
+        let message = storage_open_error(&path, &error);
+
+        assert!(message.contains(&directory.path().display().to_string()));
         assert!(message.contains("Rebuild this data root"));
         assert!(message.contains("data migration is not supported"));
         assert!(!message.contains("no such table"));
