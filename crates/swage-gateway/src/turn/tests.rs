@@ -8340,6 +8340,7 @@ async fn delegated_read_only_location_approval_allows_read_and_refuses_write() {
         .lock()
         .expect("location approval grants")
         .insert(crate::state::ApprovalGrantKey::location(
+            None,
             Some(space.id),
             attachment.to_string_lossy(),
             "read",
@@ -10834,7 +10835,13 @@ fn prompt_rule_from_instructions_string_matches_flat_prepend() {
 /// Convenience for invoking the private build_permission_config from tests
 /// without having to repeat the full ResolvedConfig wiring.
 fn build_permission_config_for_test(config: &swage_config::ResolvedConfig) -> PermissionConfig {
-    super::build_permission_config(config, config, None, &std::collections::HashSet::new())
+    super::build_permission_config(
+        config,
+        config,
+        None,
+        None,
+        &std::collections::HashSet::new(),
+    )
 }
 
 #[test]
@@ -10848,6 +10855,7 @@ fn space_scoped_approval_grant_only_removes_gate_for_matching_space() {
         )];
 
     let grants = std::collections::HashSet::from([crate::state::ApprovalGrantKey {
+        session_id: None,
         space_id: Some(matching_space_id),
         kind: swage_storage::model::ApprovalKind::Tool,
         name: "file_write".into(),
@@ -10855,13 +10863,40 @@ fn space_scoped_approval_grant_only_removes_gate_for_matching_space() {
     }]);
 
     let matching =
-        super::build_permission_config(&config, &config, Some(matching_space_id), &grants);
-    let other = super::build_permission_config(&config, &config, Some(other_space_id), &grants);
-    let no_space = super::build_permission_config(&config, &config, None, &grants);
+        super::build_permission_config(&config, &config, Some(matching_space_id), None, &grants);
+    let other =
+        super::build_permission_config(&config, &config, Some(other_space_id), None, &grants);
+    let no_space = super::build_permission_config(&config, &config, None, None, &grants);
 
     assert!(matching.require_approval.is_empty());
     assert_eq!(other.require_approval.len(), 1);
     assert_eq!(no_space.require_approval.len(), 1);
+}
+
+#[test]
+fn session_scoped_approval_grant_only_removes_gate_for_granting_session() {
+    let granting_session_id = Uuid::new_v4();
+    let other_session_id = Uuid::new_v4();
+    let mut config = swage_config::ResolvedConfig::default();
+    config.tools.permissions.require_approval =
+        vec![swage_config::model::RequireApprovalEntry::Simple(
+            "file_write".into(),
+        )];
+    let grants = std::collections::HashSet::from([crate::state::ApprovalGrantKey {
+        session_id: Some(granting_session_id),
+        space_id: None,
+        kind: swage_storage::model::ApprovalKind::Tool,
+        name: "file_write".into(),
+        access: None,
+    }]);
+
+    let granting =
+        super::build_permission_config(&config, &config, None, Some(granting_session_id), &grants);
+    let other =
+        super::build_permission_config(&config, &config, None, Some(other_session_id), &grants);
+
+    assert!(granting.require_approval.is_empty());
+    assert_eq!(other.require_approval.len(), 1);
 }
 
 #[tokio::test]
@@ -10956,6 +10991,7 @@ async fn durable_worker_placement_rederives_write_and_fails_closed_after_revocat
             .lock()
             .expect("location grants");
         grants.insert(crate::state::ApprovalGrantKey::location(
+            None,
             Some(session.space_id),
             placement.path().to_string_lossy(),
             "write",
@@ -10981,6 +11017,7 @@ async fn durable_worker_placement_rederives_write_and_fails_closed_after_revocat
             .expect("location grants");
         grants.clear();
         grants.insert(crate::state::ApprovalGrantKey::location(
+            None,
             Some(session.space_id),
             placement.path().to_string_lossy(),
             "read",
@@ -11160,11 +11197,18 @@ fn worker_placement_replaces_other_filesystem_authority() {
 
     let grants = std::collections::HashSet::from([crate::state::ApprovalGrantKey::location(
         None,
+        None,
         approved_location.to_string_lossy(),
         "write",
     )]);
     let mut allowed_paths = vec![placement.clone()];
-    append_approved_location_paths(&mut allowed_paths, &grants, Uuid::new_v4(), Some(&metadata));
+    append_approved_location_paths(
+        &mut allowed_paths,
+        &grants,
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        Some(&metadata),
+    );
     assert_eq!(allowed_paths, vec![placement]);
 }
 
