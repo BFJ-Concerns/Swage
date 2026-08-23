@@ -224,8 +224,8 @@
     <p class="eyebrow">Pick a space</p>
     <h1 class="display">Choose where to work.</h1>
     <p class="lede">
-      Each space keeps its conversations together. Click a card to preview,
-      then open it.
+      Each space keeps its conversations together, along with its attached workspace folders.
+      Click a card to preview, then open it.
     </p>
   </header>
 

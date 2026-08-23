@@ -68,7 +68,7 @@ describe("SpacePicker", () => {
     expect(document.querySelectorAll('[role="button"]')).toHaveLength(0);
   });
 
-  it("describes only the conversation grouping spaces provide", () => {
+  it("describes the conversation and workspace-folder grouping spaces provide", () => {
     component = mount(SpacePicker, {
       target: document.body,
       props: { spaceStore: spaceStore() },
@@ -76,6 +76,6 @@ describe("SpacePicker", () => {
 
     expect(document.body.textContent).toContain("keeps its conversations together");
     expect(document.body.textContent).not.toContain("memory");
-    expect(document.body.textContent).not.toContain("attached files");
+    expect(document.body.textContent).toContain("attached workspace folders");
   });
 });

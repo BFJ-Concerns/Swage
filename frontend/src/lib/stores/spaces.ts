@@ -155,7 +155,6 @@ export function createSpaceStore(): SpaceStore {
       spacesStore.update((spaces) => [...spaces, created]);
       currentSpaceStore.set(created);
       writeActiveSpaceId(created.id);
-      rememberSpaceOpen(created.id);
     },
 
     async deleteSpace(id) {

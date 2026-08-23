@@ -137,14 +137,45 @@ describe("ScheduleAutomationPanel", () => {
     });
     component = mount(ScheduleAutomationPanel, {
       target: document.body,
-      props: { spaceId: "viewing-space", sessionId: "viewing-session" },
+      props: {
+        spaceId: "viewing-space",
+        sessionId: "viewing-session",
+        spaces: [
+          {
+            id: "target-space",
+            name: "Research",
+            slug: "research",
+            description: "",
+            is_default: false,
+            created_at: "2026-01-01T00:00:00Z",
+          },
+        ],
+      },
     });
     await flushUi();
 
     // The execution target and creator are both explicit, even though this
     // operator-level schedule is being viewed from a different space.
-    expect(document.body.textContent).toContain("space target-space · agent researcher");
+    expect(document.body.textContent).toContain("space Research · agent researcher");
     expect(document.body.textContent).toContain("by agent gateway");
+  });
+
+  it("falls back to a fresh-session target's space ID when its name is unavailable", async () => {
+    vi.mocked(operatorApi.listSchedules).mockResolvedValue({
+      schedules: [
+        {
+          ...SCHEDULE,
+          session: { policy: "fresh", space_id: "unknown-space", agent_id: "gateway" },
+        },
+      ],
+    });
+    component = mount(ScheduleAutomationPanel, {
+      target: document.body,
+      props: { spaceId: "viewing-space", sessionId: "viewing-session", spaces: [] },
+    });
+    await flushUi();
+
+    expect(document.body.textContent).toContain("space unknown-space · agent gateway");
   });
 
   it("shows the specific continuation-session target", async () => {
