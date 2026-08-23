@@ -550,13 +550,12 @@ impl FailedAgentCallRef {
     }
 }
 
-fn token_reservation_per_call(budget: &WorkflowBudget) -> Option<u64> {
-    let limit = budget.max_total_tokens?;
+fn token_reservation_per_call(limit: u64, budget: &WorkflowBudget) -> u64 {
     let calls = budget
         .max_agent_calls
         .filter(|calls| *calls != 0)
         .unwrap_or_else(|| budget.max_concurrent_agent_calls.unwrap_or(4).max(1));
-    Some((limit / u64::from(calls)).max(1))
+    (limit / u64::from(calls)).max(1)
 }
 
 fn validate_budget(budget: &WorkflowBudget) -> Result<(), ApiError> {
@@ -1678,12 +1677,21 @@ async fn run_host_commands_inner(
     park_threshold_ms: u64,
     mut commands: mpsc::UnboundedReceiver<HostCommand>,
 ) {
-    // Reserve one equal share of the run budget per declared call, or per
-    // concurrency slot when no total call count is declared. This is an
-    // estimate, not a provider cap: actual usage can exceed it. Admission and
-    // settlement share one lock so actual spend replaces the reservation
-    // without exposing a stale gap between separate counters.
-    let token_reservation = token_reservation_per_call(&budget);
+    // Working calls reserve one equal share of the working partition so the
+    // closing reserve cannot crowd configured parallelism out. Once wind-down
+    // begins, calls keep the full-ceiling estimate: shrinking the estimate a
+    // second time would admit work that the closing partition cannot fund.
+    // These are estimates, not provider caps; actual usage replaces the
+    // reservation at settlement under the same accounting lock.
+    let working_token_reservation = budget.max_total_tokens.map(|limit| {
+        token_reservation_per_call(
+            limit.saturating_sub(budget.reserved_closing_tokens.unwrap_or(0)),
+            &budget,
+        )
+    });
+    let closing_token_reservation = budget
+        .max_total_tokens
+        .map(|limit| token_reservation_per_call(limit, &budget));
     // Wind-down is replay position, not run end-state. A transition later in
     // the journal must not classify earlier started calls as closing work.
     let mut winding_down = false;
@@ -1983,10 +1991,15 @@ async fn run_host_commands_inner(
                     let _ = reply.send(result);
                     continue;
                 }
-                if let (Some(limit), Some(reservation)) =
-                    (budget.max_total_tokens, token_reservation)
+                if let Some(limit) = budget.max_total_tokens
                     && existing_call.is_none_or(|entry| entry.status == "started")
                 {
+                    let reservation = if winding_down {
+                        closing_token_reservation
+                    } else {
+                        working_token_reservation
+                    }
+                    .expect("a token limit has a reservation estimate");
                     let mut accounting = token_budget.lock().await;
                     if existing_call.is_none() {
                         if !winding_down
@@ -2801,7 +2814,7 @@ async fn run_host_commands_inner(
                                         .unwrap_or(0)
                                         .saturating_sub(reserve);
                                     working_limit.saturating_sub(committed)
-                                        < token_reservation.unwrap_or(0)
+                                        < working_token_reservation.unwrap_or(0)
                                 });
                         let reading_winding_down = winding_down || snapshot_starts_wind_down;
                         let working_remaining = budget.max_total_tokens.map(|limit| {
@@ -7121,6 +7134,119 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn configured_working_budget_admits_both_parallel_calls() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let run = storage
+            .create_workflow_run(NewWorkflowRun {
+                space_id: space.id,
+                parent_run_id: None,
+                parent_seq: None,
+                script_version_id: None,
+                inline_workflow_id: None,
+                inline_workflow_name: None,
+                inline_workflow_version: None,
+                carrying_skill: None,
+                source: Some("return null".into()),
+                source_hash: source_hash("return null"),
+                args: Value::Null,
+                budget: serde_json::json!({}),
+                engine_version: "test".into(),
+                dispatch_bound_agent_ids: vec![],
+                dispatch_bound_task_definition_ids: vec![],
+                inherited_worker_placement: None,
+            })
+            .await
+            .expect("run");
+        let pending_call_started = Arc::new(Notify::new());
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::new(PendingWorkingProvider {
+                calls: AtomicUsize::new(0),
+                pending_calls: 2,
+                pending_call_started: Arc::clone(&pending_call_started),
+            }),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let (tx, rx) = mpsc::unbounded_channel();
+        let task = tokio::spawn(run_host_commands(
+            state,
+            run.id,
+            space.id,
+            vec![],
+            vec![],
+            None,
+            None,
+            WorkflowBudget {
+                max_agent_calls: Some(2),
+                max_total_tokens: Some(1_000),
+                reserved_closing_tokens: Some(100),
+                max_concurrent_agent_calls: Some(2),
+            },
+            vec![],
+            Arc::new(AtomicU32::new(0)),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(Mutex::new(std::collections::HashMap::new())),
+            CancellationToken::new(),
+            PARK_TIMER_THRESHOLD_MS,
+            rx,
+        ));
+        let request = |prompt: &str| AgentCallRequest {
+            cwd: None,
+            isolation: None,
+            effort: None,
+            timeout_ms: None,
+            prompt: prompt.into(),
+            agent: Some("default".into()),
+            task: None,
+            model: None,
+            schema: None,
+            max_attempts: 1,
+            label: None,
+            session: None,
+            elements: None,
+            variables: None,
+            assembly: None,
+        };
+        let first_cancellation = CancellationToken::new();
+        let (first_reply, first_receive) = oneshot::channel();
+        tx.send(HostCommand::Agent {
+            resolved_working_directory: None,
+            request: request("parallel one"),
+            cancellation: first_cancellation.clone(),
+            reply: first_reply,
+        })
+        .expect("first parallel call");
+        pending_call_started.notified().await;
+
+        let second_cancellation = CancellationToken::new();
+        let (second_reply, second_receive) = oneshot::channel();
+        tx.send(HostCommand::Agent {
+            resolved_working_directory: None,
+            request: request("parallel two"),
+            cancellation: second_cancellation.clone(),
+            reply: second_reply,
+        })
+        .expect("second parallel call");
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            pending_call_started.notified(),
+        )
+        .await
+        .expect("both configured parallel calls reach the provider");
+
+        first_cancellation.cancel();
+        second_cancellation.cancel();
+        assert!(first_receive.await.expect("first reply").is_err());
+        assert!(second_receive.await.expect("second reply").is_err());
+        drop(tx);
+        task.await.expect("host loop");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn token_reservation_refuses_a_concurrent_call_at_admission() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
         let space = storage.get_or_create_default().await.expect("space");
@@ -10768,7 +10894,7 @@ mod tests {
             },
             vec![],
             Arc::new(AtomicU32::new(0)),
-            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(2)),
             Arc::new(Mutex::new(std::collections::HashMap::new())),
             CancellationToken::new(),
             PARK_TIMER_THRESHOLD_MS,
@@ -12721,9 +12847,12 @@ mod tests {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
         let space = storage.get_or_create_default().await.expect("space");
         let provider = Arc::new(ScriptedRecordingProvider {
-            outputs: std::sync::Mutex::new(std::collections::VecDeque::from(
-                ["work one", "work two", "work three", "closing report"].map(scripted_text_output),
-            )),
+            outputs: std::sync::Mutex::new(std::collections::VecDeque::from(vec![
+                scripted_text_output("work one"),
+                scripted_text_output("work two"),
+                scripted_text_output_with_usage("work three", 2, 1),
+                scripted_text_output("closing report"),
+            ])),
             requests: std::sync::Mutex::new(Vec::new()),
         });
         let state = AppState::new(
@@ -12771,14 +12900,14 @@ mod tests {
         assert_eq!(run.state, "completed", "run error: {:?}", run.error_message);
         let output = run.final_output.expect("output");
         assert_eq!(output["snapshot"]["winding_down"], true);
-        assert_eq!(output["snapshot"]["spent"], 6);
-        assert_eq!(output["snapshot"]["remaining"], 1);
+        assert_eq!(output["snapshot"]["spent"], 7);
+        assert_eq!(output["snapshot"]["remaining"], 0);
         assert_eq!(output["snapshot"]["working_remaining"], 0);
         assert_eq!(output["snapshot"]["closing_remaining"], 3);
         assert_eq!(output["closingReport"], "closing report");
         assert_eq!(output["beyondClosing"], "BudgetExceededError");
         assert_eq!(output["finalSnapshot"]["winding_down"], true);
-        assert_eq!(output["finalSnapshot"]["spent"], 8);
+        assert_eq!(output["finalSnapshot"]["spent"], 9);
         assert_eq!(output["finalSnapshot"]["remaining"], 1);
         assert_eq!(output["finalSnapshot"]["working_remaining"], 0);
         assert_eq!(output["finalSnapshot"]["closing_remaining"], 1);
@@ -12865,6 +12994,7 @@ mod tests {
                 [
                     "work one",
                     "work two",
+                    "work three",
                     "closing one",
                     "closing two",
                     "closing three",
@@ -12882,13 +13012,13 @@ mod tests {
             None,
         );
         let source = r#"
-            const burst = [0, 1, 2].map((i) =>
+            const burst = [0, 1, 2, 3].map((i) =>
                 agentStart(`work ${i}`, {agent: "default"})
             );
             const burstResults = await Promise.all(
                 burst.map((handle) => handle.result.catch((error) => error.name))
             );
-            const signal = burstResults[2];
+            const signal = burstResults[3];
             const snapshot = await budgetSnapshot();
             const closing = [
                 await agent("closing one", {agent: "default"}),
@@ -12914,7 +13044,7 @@ mod tests {
             max_agent_calls: None,
             max_total_tokens: Some(14),
             reserved_closing_tokens: Some(8),
-            max_concurrent_agent_calls: Some(4),
+            max_concurrent_agent_calls: Some(3),
         };
         let Json(started) = start_saved_run(
             State(state.clone()),
@@ -12956,7 +13086,7 @@ mod tests {
             .expect("wind-down journal entry");
         assert_eq!(wind_down.status, WorkflowJournalEntryStatus::Completed);
         assert_eq!(wind_down.result.as_ref().unwrap()["winding_down"], true);
-        assert_eq!(provider.requests.lock().unwrap().len(), 5);
+        assert_eq!(provider.requests.lock().unwrap().len(), 6);
 
         storage
             .update_workflow_run_state(started.id, "interrupted", None, None, None)
@@ -12977,7 +13107,7 @@ mod tests {
             replayed.error_message
         );
         assert_eq!(replayed.final_output.as_ref(), Some(output));
-        assert_eq!(provider.requests.lock().unwrap().len(), 5);
+        assert_eq!(provider.requests.lock().unwrap().len(), 6);
         assert_eq!(
             storage
                 .list_workflow_journal(started.id)
@@ -13262,7 +13392,7 @@ mod tests {
                 args: Value::Null,
                 budget: Some(WorkflowBudget {
                     max_agent_calls: Some(3),
-                    max_total_tokens: Some(6),
+                    max_total_tokens: Some(5),
                     reserved_closing_tokens: Some(2),
                     max_concurrent_agent_calls: Some(1),
                 }),
