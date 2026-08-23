@@ -297,6 +297,7 @@ impl Tool for KnowledgeRecordTool {
         let body = knowledge::write_body(&state.config_root, &space_slug, content.as_bytes())
             .await
             .map_err(|error| failed(RECORD_TOOL, error))?;
+        let captured_body_sha256 = body.sha256;
 
         // A workflow worker records under its journalled call's scope, so a
         // call re-executed after an interruption returns the first attempt's
@@ -313,7 +314,7 @@ impl Tool for KnowledgeRecordTool {
                     local_path: local_path.map(str::to_owned),
                 },
                 retrieved_at: Utc::now(),
-                body_sha256: body.sha256,
+                body_sha256: captured_body_sha256.clone(),
                 body_bytes: body.byte_count,
                 media_type: media_type.to_owned(),
                 capture_scope,
@@ -328,12 +329,10 @@ impl Tool for KnowledgeRecordTool {
         {
             Some(text) => {
                 // Under a capture scope this may be the first attempt's row.
-                // An extraction it already carries stands: appending again
-                // would stack a duplicate derivation on every retry — and,
-                // when the retried bytes differ, attach text derived from a
-                // body this row does not hold. A first attempt that crashed
-                // before extracting has no derivation yet, so the retry's
-                // append still lands.
+                // An extraction it already carries stands. If that attempt
+                // stopped before extracting, only text derived from the same
+                // retained bytes may be attached; changed retry bytes cannot
+                // supply a derivation for the immutable first body.
                 let existing = if scoped {
                     state
                         .storage
@@ -345,7 +344,7 @@ impl Tool for KnowledgeRecordTool {
                 };
                 match existing {
                     Some(existing) => Some(existing),
-                    None => Some(
+                    None if observation.body_sha256 == captured_body_sha256 => Some(
                         state
                             .storage
                             .add_extraction(
@@ -356,6 +355,7 @@ impl Tool for KnowledgeRecordTool {
                             .await
                             .map_err(|error| failed(RECORD_TOOL, error))?,
                     ),
+                    None => None,
                 }
             }
             // A capture with no locatable text is still kept — the raw body
@@ -883,6 +883,47 @@ mod tests {
             .expect("extraction");
         assert_eq!(latest.version, 1, "the retry must not stack a derivation");
         assert_eq!(latest.extracted_text, "readable text from the first fetch");
+
+        let first_without_text = tool
+            .execute(
+                json!({
+                    "content": "first retained bytes without an extraction",
+                    "url": "https://example.test/changed-before-extraction",
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        let changed_retry = tool
+            .execute(
+                json!({
+                    "content": "different bytes fetched on retry",
+                    "url": "https://example.test/changed-before-extraction",
+                    "extracted_text": "text derived from the different retry bytes",
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            changed_retry["observation_id"],
+            first_without_text["observation_id"]
+        );
+        assert_eq!(changed_retry["searchable"], false);
+        assert_eq!(changed_retry["version"], Value::Null);
+        let retained_observation_id = first_without_text["observation_id"]
+            .as_str()
+            .expect("observation id")
+            .parse()
+            .expect("observation UUID");
+        assert!(
+            storage
+                .latest_extraction(retained_observation_id)
+                .await
+                .unwrap()
+                .is_none(),
+            "retry text from different bytes must not become citable"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -1263,6 +1263,7 @@ async fn run_ephemeral_agent_call(
         None,
         crate::turn::TurnAttendance::Unattended,
         composition,
+        Some(journal_entry_id),
     );
     tokio::pin!(processing);
     let timeout = request.timeout_ms.map(std::time::Duration::from_millis);
@@ -7694,6 +7695,26 @@ mod tests {
             .await
             .expect("second reply")
             .expect("second result");
+
+        let second_entry_id = storage
+            .list_workflow_journal(run.id)
+            .await
+            .expect("journal")
+            .into_iter()
+            .filter(|entry| entry.kind == "agent_call" && entry.status == "completed")
+            .max_by_key(|entry| entry.seq)
+            .expect("continued agent call entry")
+            .id;
+        let continued_session = storage
+            .get_session(token.session_id)
+            .await
+            .expect("session query")
+            .expect("continued worker session");
+        assert_eq!(
+            crate::turn::agent_call_scope(continued_session.metadata.as_ref()).as_deref(),
+            Some(second_entry_id.to_string().as_str()),
+            "a continuation carries its own journalled call scope"
+        );
 
         let (replacement_reply, replacement_receive) = oneshot::channel();
         tx.send(HostCommand::DispatchAgent {

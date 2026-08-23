@@ -605,6 +605,7 @@ pub(crate) async fn process_turn_with_existing_turn(
         existing_turn_id,
         attendance,
         DispatchContextComposition::default(),
+        None,
     )
     .await
 }
@@ -629,6 +630,7 @@ pub(crate) async fn process_turn_with_composition(
     existing_turn_id: Option<Uuid>,
     attendance: TurnAttendance,
     composition: DispatchContextComposition,
+    agent_call_scope: Option<Uuid>,
 ) -> Result<(), GatewayError> {
     // Step 1: Resolve the space and target thread for this session.
     let mut session = state
@@ -661,6 +663,22 @@ pub(crate) async fn process_turn_with_composition(
         )
     }) {
         return Err(GatewayError::TurnInProgress { session_id });
+    }
+
+    // A continued workflow worker reuses its durable session, but this turn
+    // is a distinct journalled agent call. Refresh the capture retry identity
+    // only after the active-turn guard so a refused concurrent continuation
+    // cannot change the scope underneath the turn that is already running.
+    if let Some(agent_call_scope) = agent_call_scope {
+        let metadata = session
+            .metadata
+            .get_or_insert_with(|| serde_json::json!({}));
+        metadata[AGENT_CALL_SCOPE_METADATA_KEY] =
+            serde_json::Value::String(agent_call_scope.to_string());
+        session = state
+            .storage
+            .set_session_metadata(session.id, session.metadata.clone())
+            .await?;
     }
 
     // Step 3: Resolve the space for this session so we can load per-space config
