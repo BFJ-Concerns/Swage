@@ -147,6 +147,10 @@ impl ContextElement for SkillsElement {
                 // text. This avoids creating a Tokeniser dependency on source(),
                 // which matches the ContextElement trait contract (no tokeniser
                 // parameter). Character-based approximation: ~4 chars per token.
+                // Retained as an estimate deliberately: this is a catalogue
+                // display figure with no provider at hand, and no decision
+                // turns on its precision — native counting
+                // (LlmProvider::count_tokens) is for sites where one does.
                 let approx_tokens = (s.instructions.len() / 4).max(1);
                 let level = s.level.to_string().to_lowercase();
                 format!("{} ({}, ~{} tokens)", s.name, level, approx_tokens)
