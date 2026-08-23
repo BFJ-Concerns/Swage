@@ -41,6 +41,7 @@ struct CountingMockProvider {
     /// Sequence of results: Ok(()) means succeed, Err(e) means return that error.
     /// Pops from front. When empty, succeeds.
     results: std::sync::Mutex<std::collections::VecDeque<Result<(), ProviderError>>>,
+    call_order: Option<Arc<std::sync::Mutex<Vec<String>>>>,
 }
 
 impl CountingMockProvider {
@@ -49,6 +50,18 @@ impl CountingMockProvider {
             model: model.to_string(),
             call_count: AtomicU32::new(0),
             results: std::sync::Mutex::new(results.into()),
+            call_order: None,
+        }
+    }
+
+    fn traced(
+        model: &str,
+        results: Vec<Result<(), ProviderError>>,
+        call_order: Arc<std::sync::Mutex<Vec<String>>>,
+    ) -> Self {
+        Self {
+            call_order: Some(call_order),
+            ..Self::new(model, results)
         }
     }
 
@@ -76,6 +89,12 @@ impl LlmProvider for CountingMockProvider {
         _request: CompletionRequest,
     ) -> Result<CompletionResponse, ProviderError> {
         self.call_count.fetch_add(1, Ordering::SeqCst);
+        if let Some(order) = &self.call_order {
+            order
+                .lock()
+                .expect("call-order lock")
+                .push(self.model.clone());
+        }
         self.next_result()?;
         Ok(CompletionResponse {
             content: format!("Response from {}", self.model),
@@ -140,8 +159,9 @@ impl LlmProvider for CountingMockProvider {
 
 #[tokio::test]
 async fn reliability_stack_retries_then_fails_over_to_secondary() {
+    let call_order = Arc::new(std::sync::Mutex::new(Vec::new()));
     // Primary provider: fails with transient errors (all retries will exhaust)
-    let primary = Arc::new(CountingMockProvider::new(
+    let primary = Arc::new(CountingMockProvider::traced(
         "primary",
         vec![
             Err(ProviderError::Network {
@@ -157,10 +177,15 @@ async fn reliability_stack_retries_then_fails_over_to_secondary() {
                 message: "connection refused".into(),
             }),
         ],
+        Arc::clone(&call_order),
     ));
 
     // Secondary provider: succeeds
-    let secondary = Arc::new(CountingMockProvider::new("secondary", vec![]));
+    let secondary = Arc::new(CountingMockProvider::traced(
+        "secondary",
+        vec![],
+        Arc::clone(&call_order),
+    ));
 
     // Build the full reliability stack via the builder.
     let provider = ProviderChainBuilder::new()
@@ -205,13 +230,10 @@ async fn reliability_stack_retries_then_fails_over_to_secondary() {
         "Expected response from secondary provider, got: {}",
         response.content
     );
-    // Primary was called (initial + 2 retries = 3 calls).
-    assert_eq!(primary.calls(), 3, "Primary should have been tried 3 times");
-    // Secondary was called once.
     assert_eq!(
-        secondary.calls(),
-        1,
-        "Secondary should have been tried once"
+        *call_order.lock().expect("call-order lock"),
+        ["primary", "primary", "primary", "secondary"],
+        "retry must exhaust the primary before failover reaches the secondary"
     );
 }
 

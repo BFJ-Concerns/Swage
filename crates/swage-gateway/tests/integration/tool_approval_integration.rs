@@ -39,7 +39,10 @@ use swage_core::{
 };
 use swage_gateway::{server::build_router, state::AppState};
 use swage_provider::LlmProvider;
-use swage_storage::{SqliteStorage, store::SpaceStore};
+use swage_storage::{
+    SqliteStorage,
+    store::{ApprovalStore, SpaceStore, ToolCallStore},
+};
 
 use crate::support::ProcessEnvGuard;
 
@@ -197,6 +200,23 @@ async fn http(router: &Router, method: &str, uri: &str) -> (StatusCode, Value) {
     (status, body)
 }
 
+async fn live_http_json(
+    address: SocketAddr,
+    method: reqwest::Method,
+    path: &str,
+    body: Option<Value>,
+) -> (StatusCode, Value) {
+    let client = reqwest::Client::new();
+    let mut request = client.request(method, format!("http://{address}{path}"));
+    if let Some(body) = body {
+        request = request.json(&body);
+    }
+    let response = request.send().await.expect("live gateway request");
+    let status = response.status();
+    let body = response.json().await.unwrap_or(Value::Null);
+    (status, body)
+}
+
 type WsSink = futures::stream::SplitSink<
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
     tungstenite::Message,
@@ -282,6 +302,79 @@ fn config_with_approval(tool_name: &str, timeout_secs: u64, policy: &str) -> Res
 // ---------------------------------------------------------------------------
 // Tests — each proves a cross-task journey through approval routing and storage
 // ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn unattended_rest_turn_executes_approval_gated_tool_without_an_approval_row() {
+    let _guard = SwageHomeGuard::isolate();
+    let provider = MockProvider::new(vec![
+        vec![
+            StreamChunk::ToolUse {
+                call_id: "rest-write".into(),
+                name: "write_file".into(),
+                arguments: json!({"path": "report.txt", "content": "unattended"}),
+            },
+            StreamChunk::Done {
+                finish_reason: Some(FinishReason::ToolUse),
+            },
+        ],
+        vec![
+            StreamChunk::Delta {
+                content: "Unattended tool completed".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: Some(FinishReason::Stop),
+            },
+        ],
+    ]);
+    let config = config_with_approval("write_file", 300, "reject");
+    let (_router, address, storage) = start_test_server_with_config(provider, config).await;
+    let (status, conversation) =
+        live_http_json(address, reqwest::Method::POST, "/api/conversations", None).await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let (status, submitted) = live_http_json(
+        address,
+        reqwest::Method::POST,
+        "/api/turns",
+        Some(json!({
+            "conversation_id": conversation["id"],
+            "thread_id": null,
+            "message": "Write the report",
+            "output_schema": null
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    let turn_id = submitted["turn_id"].as_str().expect("turn id");
+
+    let completed = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let (_, turn) = live_http_json(
+                address,
+                reqwest::Method::GET,
+                &format!("/api/turns/{turn_id}"),
+                None,
+            )
+            .await;
+            if turn["state"] == "completed" {
+                break turn;
+            }
+            assert_ne!(turn["state"], "failed", "turn failed: {turn:?}");
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("unattended REST turn completes");
+    assert_eq!(completed["assistant_response"], "Unattended tool completed");
+    assert!(storage.list_approvals().await.unwrap().is_empty());
+    let calls = storage
+        .list_tool_calls_by_turn(turn_id.parse().expect("turn UUID"))
+        .await
+        .unwrap();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].call_id, "rest-write");
+    assert_eq!(calls[0].status.as_deref(), Some("success"));
+}
 
 /// Journey: Configure approval → trigger tool → approve → tool executes → turn completes.
 ///

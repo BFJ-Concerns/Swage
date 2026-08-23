@@ -6018,6 +6018,95 @@ mod tests {
         assert_eq!(resumed.carrying_skill.as_deref(), Some("operator-proof"));
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn resumed_run_reapplies_its_persisted_dispatch_bound_after_a_grant_change() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let swage_home = crate::test_support::SwageHomeGuard::new();
+        let lead_dir = swage_home.path().join("spaces/default/agents/lead");
+        std::fs::create_dir_all(&lead_dir).expect("create lead definition");
+        let lead_config = lead_dir.join("config.toml");
+        std::fs::write(
+            &lead_config,
+            "[tools]\nallow = [\"shell\"]\ndeny = []\nbundles = {}\n",
+        )
+        .expect("write original grant");
+        let source =
+            r#"return await agent("continue bounded work", {agent: "default", maxAttempts: 1});"#;
+        let run = storage
+            .create_workflow_run(NewWorkflowRun {
+                space_id: space.id,
+                parent_run_id: None,
+                parent_seq: None,
+                script_version_id: None,
+                inline_workflow_id: None,
+                inline_workflow_name: None,
+                inline_workflow_version: None,
+                carrying_skill: None,
+                source: Some(source.into()),
+                source_hash: source_hash(source),
+                args: Value::Null,
+                budget: serde_json::to_value(WorkflowBudget::default()).expect("budget"),
+                engine_version: "test".into(),
+                dispatch_bound_agent_ids: vec!["lead".into()],
+                dispatch_bound_task_definition_ids: vec![],
+                inherited_worker_placement: None,
+            })
+            .await
+            .expect("run");
+        storage
+            .update_workflow_run_state(run.id, "interrupted", None, None, None)
+            .await
+            .expect("interrupt run");
+
+        std::fs::write(
+            &lead_config,
+            "[tools]\nallow = [\"knowledge_search\"]\ndeny = []\nbundles = {}\n",
+        )
+        .expect("change dispatching grant");
+        let provider = Arc::new(ScriptedRecordingProvider {
+            outputs: std::sync::Mutex::new(std::collections::VecDeque::from(vec![
+                scripted_text_output("bounded work completed"),
+            ])),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![
+                Arc::new(WorkflowShellTool) as Arc<dyn crate::tool::Tool>
+            ]),
+            None,
+        );
+
+        let Json(resumed) = resume_run(State(state.clone()), Path(run.id))
+            .await
+            .expect("resume bounded run");
+        wait_for_terminal(&state, resumed.id).await;
+        let persisted = storage
+            .get_workflow_run(run.id)
+            .await
+            .expect("run")
+            .expect("present");
+        assert_eq!(persisted.dispatch_bound_agent_ids, vec!["lead"]);
+        assert_eq!(
+            persisted.state, "completed",
+            "run error: {:?}",
+            persisted.error_message
+        );
+        let requests = provider.requests.lock().expect("requests");
+        assert_eq!(requests.len(), 1);
+        assert!(
+            requests[0]
+                .tool_definitions
+                .iter()
+                .all(|definition| definition["name"] != "shell"),
+            "the resumed request must honour the changed dispatching grant"
+        );
+    }
+
     #[tokio::test]
     async fn workflow_agent_call_executes_granted_approval_gated_tool_without_parking() {
         let rounds = vec![
@@ -12774,17 +12863,11 @@ mod tests {
         let terminal_error = run.error_message.as_deref().expect("terminal error");
         let terminal_call = journal
             .iter()
-            .find(|entry| {
-                entry.status == "failed"
-                    && entry
-                        .error_message
-                        .as_deref()
-                        .is_some_and(|error| terminal_error.contains(error))
-            })
+            .find(|entry| entry.request["label"] == "terminal call")
             .expect("terminal failed call");
         let concurrent_call = journal
             .iter()
-            .find(|entry| entry.status == "failed" && entry.id != terminal_call.id)
+            .find(|entry| entry.request["label"] == "later concurrent call")
             .expect("other concurrent failed call");
         assert_eq!(run.state, "failed");
         assert_eq!(terminal_call.status, "failed");
@@ -12802,7 +12885,25 @@ mod tests {
             handover["failed_call"]["journal_entry_id"],
             concurrent_call.id.to_string()
         );
+        assert_eq!(
+            terminal_call.error_message.as_deref(),
+            Some(failed_call_error),
+            "the handover must retain the known terminal call's failure"
+        );
+        assert_ne!(
+            concurrent_call.error_message.as_deref(),
+            Some(failed_call_error),
+            "the later concurrent failure must remain distinguishable"
+        );
         assert!(terminal_error.contains(failed_call_error));
+        assert!(
+            !terminal_error.contains(
+                concurrent_call
+                    .error_message
+                    .as_deref()
+                    .expect("later concurrent failure text")
+            )
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -12990,6 +13091,108 @@ mod tests {
             detail.run.handover,
             Some(WorkflowRunHandover::ReconstructionFailed { .. })
         ));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn uncaught_recorded_agent_failure_replays_without_provider_work_and_keeps_attribution() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let source = r#"await agent("known failing call", {agent: "default", label: "recorded failure", maxAttempts: 1});"#;
+        let run = storage
+            .create_workflow_run(NewWorkflowRun {
+                space_id: space.id,
+                parent_run_id: None,
+                parent_seq: None,
+                script_version_id: None,
+                inline_workflow_id: None,
+                inline_workflow_name: None,
+                inline_workflow_version: None,
+                carrying_skill: None,
+                source: Some(source.into()),
+                source_hash: source_hash(source),
+                args: Value::Null,
+                budget: serde_json::to_value(WorkflowBudget::default()).expect("budget"),
+                engine_version: "test".into(),
+                dispatch_bound_agent_ids: vec![],
+                dispatch_bound_task_definition_ids: vec![],
+                inherited_worker_placement: None,
+            })
+            .await
+            .expect("run");
+        let request = serde_json::to_value(AgentCallRequest {
+            cwd: None,
+            isolation: None,
+            effort: None,
+            timeout_ms: None,
+            prompt: "known failing call".into(),
+            agent: Some("default".into()),
+            task: None,
+            model: None,
+            schema: None,
+            max_attempts: 1,
+            label: Some("recorded failure".into()),
+            session: None,
+            elements: None,
+            variables: None,
+            assembly: None,
+        })
+        .expect("request");
+        let failed = storage
+            .create_workflow_journal_intent(NewWorkflowJournalIntent {
+                run_id: run.id,
+                seq: 0,
+                kind: "agent_call".into(),
+                args_hash: journal_args_hash(&request),
+                request,
+                effect_kind: None,
+                idempotency_key: None,
+                target_kind: None,
+            })
+            .await
+            .expect("journal intent");
+        let recorded_error = "AgentCallError: recorded provider failure";
+        storage
+            .fail_workflow_journal_entry(failed.id, recorded_error)
+            .await
+            .expect("record failure");
+        let provider = Arc::new(ScriptedRecordingProvider {
+            outputs: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+
+        launch_existing_run(state.clone(), run, source.into(), None)
+            .await
+            .expect("launch replay");
+        wait_for_terminal(&state, failed.run_id).await;
+        let terminal = storage
+            .get_workflow_run(failed.run_id)
+            .await
+            .expect("run")
+            .expect("present");
+        assert_eq!(terminal.state, "failed");
+        assert!(
+            terminal
+                .error_message
+                .as_deref()
+                .is_some_and(|message| message.contains(recorded_error))
+        );
+        assert!(provider.requests.lock().expect("requests").is_empty());
+        let handover = terminal.handover.expect("attributed handover");
+        assert_eq!(handover["classification"], "interrupted");
+        assert_eq!(handover["failed_call"]["label"], "recorded failure");
+        assert_eq!(
+            handover["failed_call"]["journal_entry_id"],
+            failed.id.to_string()
+        );
+        assert_eq!(handover["failed_call"]["error"], recorded_error);
     }
 
     #[tokio::test(flavor = "multi_thread")]
