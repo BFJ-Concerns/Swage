@@ -6108,7 +6108,7 @@ mod tests {
             Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![
-                Arc::new(WorkflowShellTool) as Arc<dyn crate::tool::Tool>
+                Arc::new(WorkflowNamedTool("shell")) as Arc<dyn crate::tool::Tool>
             ]),
             None,
         );
@@ -13341,6 +13341,7 @@ mod tests {
             prompt: "known failing call".into(),
             agent: Some("default".into()),
             task: None,
+            tools: None,
             model: None,
             schema: None,
             max_attempts: 1,
