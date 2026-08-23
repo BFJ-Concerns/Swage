@@ -762,6 +762,9 @@ pub struct SourceObservation {
     pub body_sha256: String,
     pub body_bytes: u64,
     pub media_type: String,
+    /// Retry-safe capture identity: when set, a later capture of the same
+    /// origin under the same scope is this observation, not a new row.
+    pub capture_scope: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -774,6 +777,11 @@ pub struct NewSourceObservation {
     pub body_sha256: String,
     pub body_bytes: u64,
     pub media_type: String,
+    /// Stable identity for the unit of work making this capture (a
+    /// workflow's journalled agent call), or `None` for one-off captures.
+    /// Re-recording the same origin under the same scope deduplicates to
+    /// the first capture, so retried work cannot fork the evidence.
+    pub capture_scope: Option<String>,
 }
 
 /// One versioned text extraction of an observation's raw body.

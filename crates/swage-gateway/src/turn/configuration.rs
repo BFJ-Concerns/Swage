@@ -16,6 +16,21 @@ pub(crate) const WORKER_PLACEMENT_AUTHORITY_PATH_METADATA_KEY: &str =
 pub(crate) const WORKER_PLACEMENT_AUTHORITY_CONTEXT_METADATA_KEY: &str =
     "worker_placement_authority_context_id";
 
+/// Host-only session metadata naming the journalled agent call a worker
+/// session executes. The value is the call's journal entry id, which replay
+/// reuses when an interrupted call re-runs, so it is stable retry identity:
+/// idempotent writes (knowledge captures) scope their dedup to it.
+pub(crate) const AGENT_CALL_SCOPE_METADATA_KEY: &str = "agent_call_scope";
+
+/// The worker session's journalled-call scope, or `None` for sessions that
+/// are not workflow agent-call workers.
+pub(crate) fn agent_call_scope(metadata: Option<&serde_json::Value>) -> Option<String> {
+    metadata
+        .and_then(|metadata| metadata.get(AGENT_CALL_SCOPE_METADATA_KEY))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+}
+
 pub(crate) fn dispatch_bound_agent_ids(
     metadata: Option<&serde_json::Value>,
 ) -> Result<Vec<String>, GatewayError> {
