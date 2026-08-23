@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { flushSync, mount, unmount } from "svelte";
+import { createClassComponent } from "svelte/legacy";
 
 import MessageInput from "../components/MessageInput.svelte";
 import type { StreamingStore } from "../stores/streaming";
@@ -238,6 +239,39 @@ describe("MessageInput", () => {
       null,
       "max",
     );
+  });
+
+  it("returns effort to the model default at a new session boundary", () => {
+    const store = makeStreamingStore();
+    const input = createClassComponent({
+      component: MessageInput,
+      target: document.body,
+      props: {
+        store,
+        modelOptions: ["provider/model-a"],
+        modelCatalogueReady: true,
+        canSelectAgent: true,
+        sessionId: "session-one",
+      },
+    });
+    const effort = document.querySelector('[aria-label="Effort"]') as HTMLSelectElement;
+    effort.value = "high";
+    effort.dispatchEvent(new Event("change", { bubbles: true }));
+    flushSync();
+
+    input.$set({ sessionId: "session-two" });
+    flushSync();
+
+    expect((document.querySelector('[aria-label="Effort"]') as HTMLSelectElement).value).toBe("");
+    setTextareaValue("Use the new session default");
+    (document.querySelector(".action.send") as HTMLButtonElement).click();
+    expect(store.startTurn).toHaveBeenCalledWith(
+      "Use the new session default",
+      "provider/model-a",
+      null,
+      null,
+    );
+    input.$destroy();
   });
 
   it("clears the draft and re-focuses the textarea after send", () => {

@@ -38,6 +38,8 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- Starting a new conversation now returns the composer reasoning effort to **Model default** instead of carrying over the previous conversation's choice.
+- Channel delivery totals and latest-delivery times now include only responses that were actually sent.
 - Conversations with unrecognised model selections no longer apply the configured default model's reasoning effort.
 - Rejected malformed tool calls no longer replay into provider history and prevent the conversation from continuing.
 - Configured workflow token ceilings no longer prevent permitted parallel agent calls from sharing the working allowance while preserving the closing reserve.

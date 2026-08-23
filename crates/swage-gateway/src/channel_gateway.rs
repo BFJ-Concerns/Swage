@@ -148,13 +148,14 @@ pub async fn list_channel_statuses(state: &AppState) -> ChannelStatusListRespons
         let matching_deliveries: Vec<&swage_storage::DeliveryRecord> = deliveries
             .iter()
             .filter(|delivery| {
-                matches!(
-                    parse_delivery_target(delivery.target.clone()),
-                    Some(DeliveryTarget::Channel {
-                        integration: target_integration,
-                        ..
-                    }) if target_integration == integration
-                )
+                delivery.status == "sent"
+                    && matches!(
+                        parse_delivery_target(delivery.target.clone()),
+                        Some(DeliveryTarget::Channel {
+                            integration: target_integration,
+                            ..
+                        }) if target_integration == integration
+                    )
             })
             .collect();
         let delivery_count = matching_deliveries.len();
@@ -751,6 +752,7 @@ mod tests {
     use super::*;
     use crate::turn::tests::make_state_with_session;
     use swage_core::{FinishReason, StreamChunk};
+    use swage_storage::{SessionStore, SpaceStore};
     use tokio::net::TcpListener;
 
     #[test]
@@ -870,6 +872,69 @@ mod tests {
 
         assert_eq!(compose_channel_messages(&rows[..1]), "first");
         assert_eq!(compose_channel_messages(&rows), "first\n\nsecond");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn channel_status_counts_only_sent_deliveries() {
+        let (mut state, _) = make_state_with_session(vec![]).await;
+        let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("storage"));
+        let space = storage
+            .get_or_create_default()
+            .await
+            .expect("default space");
+        let session_id = storage
+            .create_session(NewSession {
+                space_id: space.id,
+                agent_id: "gateway".into(),
+                metadata: None,
+                active_workspace_attachment_id: None,
+            })
+            .await
+            .expect("session")
+            .id;
+        state.storage = storage.clone();
+        state.space_store = storage;
+        let target = DeliveryTarget::Channel {
+            integration: ExternalChannelIntegration::DevDm,
+            account: "workspace".into(),
+            conversation: "alice".into(),
+        };
+        for (status, error) in [
+            ("sent", None),
+            ("not_sent", Some("deliberate no-op".to_string())),
+            ("failed", Some("delivery failed".to_string())),
+        ] {
+            record_delivery(
+                &state,
+                session_id,
+                DeliveryAttribution::default(),
+                target.clone(),
+                format!("{status} payload"),
+                status,
+                error,
+            )
+            .await
+            .expect("record delivery status");
+        }
+        let sent_at = state
+            .storage
+            .list_delivery_records()
+            .await
+            .expect("list delivery records")
+            .into_iter()
+            .find(|record| record.status == "sent")
+            .expect("sent delivery record")
+            .delivered_at;
+
+        let statuses = list_channel_statuses(&state).await;
+        let dev_dm = statuses
+            .channels
+            .iter()
+            .find(|channel| channel.integration == "dev_dm")
+            .expect("dev_dm status");
+
+        assert_eq!(dev_dm.delivery_count, 1);
+        assert_eq!(dev_dm.last_delivery_at, Some(sent_at));
     }
 
     #[tokio::test]
