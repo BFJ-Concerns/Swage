@@ -172,6 +172,20 @@ impl LlmProvider for FailoverProvider {
             .unwrap_or("")
     }
 
+    async fn count_tokens(
+        &self,
+        request: &CompletionRequest,
+    ) -> Result<Option<u64>, ProviderError> {
+        // Count at the provider a completion would try first, so the figure
+        // comes from the tokenizer that will read the prompt. No failover
+        // for an advisory read — the caller's estimate is the fallback.
+        let order = self.compute_try_order(request.model.as_deref());
+        match order.first() {
+            Some(&idx) => self.providers[idx].count_tokens(request).await,
+            None => Ok(None),
+        }
+    }
+
     /// Route the completion through the provider chain, failing over on transient
     /// errors.
     async fn complete(
@@ -1548,5 +1562,48 @@ mod tests {
     fn model_id_empty_providers_returns_empty_string() {
         let failover = FailoverProvider::with_defaults(vec![]);
         assert_eq!(failover.model_id(), "");
+    }
+
+    struct CountingProbe;
+
+    #[async_trait]
+    impl LlmProvider for CountingProbe {
+        fn model_id(&self) -> &str {
+            "counting-probe"
+        }
+
+        async fn count_tokens(&self, _: &CompletionRequest) -> Result<Option<u64>, ProviderError> {
+            Ok(Some(42))
+        }
+
+        async fn complete(
+            &self,
+            _: CompletionRequest,
+        ) -> Result<CompletionResponse, ProviderError> {
+            unreachable!("count-only probe")
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, ProviderError> {
+            unreachable!("count-only probe")
+        }
+
+        fn stream(&self, _: CompletionRequest) -> Pin<Box<dyn Stream<Item = StreamChunk> + Send>> {
+            unreachable!("count-only probe")
+        }
+    }
+
+    // A defaulted trait method is invisible to a wrapper, so delegation is
+    // asserted explicitly: an unforwarded count would report None here.
+    #[tokio::test]
+    async fn count_tokens_delegates_to_the_first_provider_in_try_order() {
+        let failover =
+            FailoverProvider::new(vec![Arc::new(CountingProbe)], FailoverConfig::default());
+        assert_eq!(
+            failover.count_tokens(&completion_req()).await.unwrap(),
+            Some(42)
+        );
     }
 }
