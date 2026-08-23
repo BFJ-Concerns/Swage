@@ -7837,10 +7837,12 @@ async fn delegated_child_snapshot_records_exact_non_empty_effective_tool_grant()
         .get_or_create_default()
         .await
         .expect("default space");
+    // This fixture needs an authored restrictive parent; `gateway` always
+    // resolves to its shipped definition and intentionally ignores stored rows.
     let session = storage
         .create_session(NewSession {
             space_id: space.id,
-            agent_id: "gateway".into(),
+            agent_id: "agent-a".into(),
             metadata: None,
             active_workspace_attachment_id: None,
         })
@@ -7850,16 +7852,16 @@ async fn delegated_child_snapshot_records_exact_non_empty_effective_tool_grant()
         &*storage,
         NewThread {
             session_id: session.id,
-            agent_id: "gateway".into(),
+            agent_id: "agent-a".into(),
         },
     )
     .await
     .expect("create root thread");
     storage
         .upsert_agent_definition(swage_storage::NewAgentDefinition {
-            id: "gateway".into(),
+            id: "agent-a".into(),
             space_id: Some(space.id),
-            display_name: "Gateway".into(),
+            display_name: "Agent A".into(),
             description: String::new(),
             instructions: String::new(),
             model_id: None,
