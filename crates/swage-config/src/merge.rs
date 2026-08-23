@@ -1945,8 +1945,22 @@ mod tests {
     fn special_map_merges_preserve_base_keys_and_replace_collisions() {
         let mut base_providers = HashMap::new();
         base_providers.insert("base".to_string(), ProviderEndpointConfig::default());
+        base_providers.insert(
+            "shared".to_string(),
+            ProviderEndpointConfig {
+                base_url: Some("https://base.invalid".to_string()),
+                ..Default::default()
+            },
+        );
         let mut overlay_providers = HashMap::new();
         overlay_providers.insert("overlay".to_string(), ProviderEndpointConfig::default());
+        overlay_providers.insert(
+            "shared".to_string(),
+            ProviderEndpointConfig {
+                base_url: Some("https://overlay.invalid".to_string()),
+                ..Default::default()
+            },
+        );
         let mut base_pricing = HashMap::new();
         base_pricing.insert(
             "base".to_string(),
@@ -1955,12 +1969,26 @@ mod tests {
                 output_price_per_mtok: 2,
             },
         );
+        base_pricing.insert(
+            "shared".to_string(),
+            ModelPricing {
+                input_price_per_mtok: 5,
+                output_price_per_mtok: 6,
+            },
+        );
         let mut overlay_pricing = HashMap::new();
         overlay_pricing.insert(
             "overlay".to_string(),
             ModelPricing {
                 input_price_per_mtok: 3,
                 output_price_per_mtok: 4,
+            },
+        );
+        overlay_pricing.insert(
+            "shared".to_string(),
+            ModelPricing {
+                input_price_per_mtok: 7,
+                output_price_per_mtok: 8,
             },
         );
         let mut base_presets = HashMap::new();
@@ -1973,11 +2001,29 @@ mod tests {
                 metadata: None,
             },
         );
+        base_presets.insert(
+            "shared".to_string(),
+            GenerationPresetConfig {
+                max_tokens: Some(300),
+                temperature: None,
+                stop_sequences: vec![],
+                metadata: None,
+            },
+        );
         let mut overlay_presets = HashMap::new();
         overlay_presets.insert(
             "overlay".to_string(),
             GenerationPresetConfig {
                 max_tokens: Some(200),
+                temperature: None,
+                stop_sequences: vec![],
+                metadata: None,
+            },
+        );
+        overlay_presets.insert(
+            "shared".to_string(),
+            GenerationPresetConfig {
+                max_tokens: Some(400),
                 temperature: None,
                 stop_sequences: vec![],
                 metadata: None,
@@ -2013,9 +2059,18 @@ mod tests {
             },
         );
 
-        assert_eq!(merged.providers.unwrap().entries.unwrap().len(), 2);
-        assert_eq!(merged.pricing.unwrap().models.unwrap().len(), 2);
-        assert_eq!(merged.generation.unwrap().presets.unwrap().len(), 2);
+        let providers = merged.providers.unwrap().entries.unwrap();
+        assert_eq!(providers.len(), 3);
+        assert_eq!(
+            providers["shared"].base_url.as_deref(),
+            Some("https://overlay.invalid")
+        );
+        let pricing = merged.pricing.unwrap().models.unwrap();
+        assert_eq!(pricing.len(), 3);
+        assert_eq!(pricing["shared"].input_price_per_mtok, 7);
+        let presets = merged.generation.unwrap().presets.unwrap();
+        assert_eq!(presets.len(), 3);
+        assert_eq!(presets["shared"].max_tokens, Some(400));
     }
 
     #[test]

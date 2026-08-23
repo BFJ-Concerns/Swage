@@ -644,11 +644,6 @@ pub(crate) async fn process_turn_with_existing_turn_and_focus(
     .await
 }
 
-#[tracing::instrument(
-    name = "turn",
-    skip(state, content, ws_tx, subscription, composition),
-    fields(turn_id = tracing::field::Empty),
-)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn process_turn_with_composition(
     state: &AppState,
@@ -686,7 +681,7 @@ pub(crate) async fn process_turn_with_composition(
 
 #[tracing::instrument(
     name = "turn",
-    skip(state, content, ws_tx, subscription, composition),
+    skip(state, content, ws_tx, subscription, composition, compaction_focus),
     fields(turn_id = tracing::field::Empty),
 )]
 #[allow(clippy::too_many_arguments)]
@@ -1108,7 +1103,7 @@ async fn process_turn_with_composition_and_focus(
         &session.agent_id,
         &session_variables,
     );
-    let (assembled_messages, mut assembly_report) = (output.messages, output.report);
+    let (assembled_messages, assembly_report) = (output.messages, output.report);
 
     tracing::debug!(
         total_tokens = assembly_report.total_tokens,
@@ -1500,7 +1495,6 @@ async fn process_turn_with_composition_and_focus(
                 turn_id: snapshot_turn_id,
                 record,
             } => {
-                assembly_report.compaction_applied.push(record.clone());
                 if let Some(records) = report_json
                     .get_mut("compaction_applied")
                     .and_then(serde_json::Value::as_array_mut)
