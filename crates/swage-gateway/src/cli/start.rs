@@ -418,6 +418,7 @@ mod tests {
     #[tokio::test]
     async fn start_against_live_pid_reports_gateway_already_running() {
         let _runtime_dir = XdgRuntimeDirGuard::new();
+        let _swage_home = SwageHomeGuard::new();
         RuntimeMetadata::new(std::process::id(), "http://127.0.0.1:3000".to_string())
             .save()
             .unwrap();

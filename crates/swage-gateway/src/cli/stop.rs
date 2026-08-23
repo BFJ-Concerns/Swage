@@ -199,13 +199,14 @@ fn is_pid_dead(pid: u32) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use crate::test_support::XdgRuntimeDirGuard;
+    use crate::test_support::{SwageHomeGuard, XdgRuntimeDirGuard};
 
     use super::*;
 
     #[tokio::test]
     async fn stop_with_no_metadata_returns_gateway_not_running() {
         let _runtime_dir = XdgRuntimeDirGuard::new();
+        let _swage_home = SwageHomeGuard::new();
 
         let args = StopArgs { force: false };
         let result = run(&args).await;
@@ -219,6 +220,7 @@ mod tests {
     #[tokio::test]
     async fn stop_force_with_no_metadata_returns_gateway_not_running() {
         let _runtime_dir = XdgRuntimeDirGuard::new();
+        let _swage_home = SwageHomeGuard::new();
 
         let args = StopArgs { force: true };
         let result = run(&args).await;
@@ -232,6 +234,7 @@ mod tests {
     #[tokio::test]
     async fn stop_with_stale_pid_cleans_up_and_returns_not_running() {
         let _runtime_dir = XdgRuntimeDirGuard::new();
+        let _swage_home = SwageHomeGuard::new();
 
         // Write metadata with a PID that will never exist.
         let meta = RuntimeMetadata {
@@ -259,6 +262,7 @@ mod tests {
     #[tokio::test]
     async fn force_stop_terminates_spawned_process_and_cleans_metadata() {
         let runtime_dir = XdgRuntimeDirGuard::new();
+        let _swage_home = SwageHomeGuard::new();
 
         // Spawn a long-running process to simulate the gateway.
         let mut child = std::process::Command::new("sleep")

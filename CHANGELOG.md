@@ -40,6 +40,7 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- Workflow scripts now reject unrecognised `agent()` and `agentStart()` option keys before dispatch instead of silently dropping them.
 - Reloading the web UI now returns to the open space instead of the space picker.
 - Operator schedules now show their complete execution target from every space.
 - The space picker now describes only the space behaviour the product provides.
