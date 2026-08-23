@@ -683,6 +683,18 @@ impl WorkflowEngine {
                         };
                         const buildAgentRequest = (options) => {
                             const merged = mergeDefaults(options);
+                            const knownOptions = new Set([
+                                "agent", "task", "model", "effort", "timeoutMs",
+                                "cwd", "isolation", "schema", "maxAttempts", "label",
+                                "session", "elements", "variables", "assembly",
+                            ]);
+                            for (const key of Object.keys(merged)) {
+                                if (!knownOptions.has(key)) {
+                                    const error = new Error(`unknown agent() option '${key}'`);
+                                    error.name = "UnknownAgentOptionError";
+                                    throw error;
+                                }
+                            }
                             if (merged.agent !== undefined && merged.agent !== null && !merged.agent) {
                                 const error = new Error("opts.agent is required");
                                 error.name = "AgentRequiredError";
@@ -1360,6 +1372,71 @@ mod tests {
             json!({"name": "AgentRequiredError", "message": "opts.agent is required"})
         );
         assert!(host.agent_requests.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn agent_call_rejects_unknown_options_before_dispatch() {
+        let host = Arc::new(SurfaceHost::new());
+        let output = WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                r#"try {
+                    await agent("inspect the unit", { maxAttemps: 2 });
+                } catch (error) {
+                    return { name: error.name, message: error.message };
+                }"#,
+                "null",
+                CancellationToken::new(),
+                Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                ScriptCapabilities::default(),
+            )
+            .await
+            .expect("unknown option rejection is catchable");
+
+        assert_eq!(
+            serde_json::from_str::<Value>(&output).unwrap(),
+            json!({
+                "name": "UnknownAgentOptionError",
+                "message": "unknown agent() option 'maxAttemps'",
+            })
+        );
+        assert!(host.agent_requests.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn agent_call_dispatches_with_recognised_options() {
+        let host = Arc::new(SurfaceHost::new());
+        WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                r#"await agent("inspect the unit", {
+                    agent: "worker", task: "review", model: "cheap", effort: "low",
+                    timeoutMs: 75, cwd: "/repo", isolation: "worktree",
+                    schema: { type: "object" }, maxAttempts: 2, label: "inspect",
+                    session: { session_id: "00000000-0000-0000-0000-00000000000a", thread_id: "00000000-0000-0000-0000-00000000000b" },
+                    elements: ["current-work"], variables: { owner: "operator" }, assembly: "focused",
+                }); return null;"#,
+                "null",
+                CancellationToken::new(),
+                Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                ScriptCapabilities::default(),
+            )
+            .await
+            .expect("recognised options dispatch");
+
+        let requests = host.agent_requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        let request = &requests[0];
+        assert_eq!(request.agent.as_deref(), Some("worker"));
+        assert_eq!(request.task.as_deref(), Some("review"));
+        assert_eq!(request.model.as_deref(), Some("cheap"));
+        assert_eq!(request.timeout_ms, Some(75));
+        assert_eq!(request.max_attempts, 2);
+        assert_eq!(request.label.as_deref(), Some("inspect"));
+        assert_eq!(
+            request.elements.as_deref(),
+            Some(["current-work".to_string()].as_slice())
+        );
+        assert_eq!(request.variables.as_ref().unwrap()["owner"], "operator");
+        assert_eq!(request.assembly.as_deref(), Some("focused"));
     }
 
     #[tokio::test]
