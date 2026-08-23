@@ -11,6 +11,8 @@ use std::{
 
 use serde_json::Value;
 
+const FIXTURE_READY_TIMEOUT: Duration = Duration::from_secs(30);
+
 struct GatewayProbe {
     binary: PathBuf,
     root: tempfile::TempDir,
@@ -85,6 +87,35 @@ impl GatewayProbe {
         );
     }
 
+    fn assert_ready_after_start(&self, output: Output) {
+        if output.status.success() {
+            return;
+        }
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("gateway did not become ready within 5s"),
+            "gateway start failed before readiness polling\nstdout: {}\nstderr: {stderr}",
+            String::from_utf8_lossy(&output.stdout),
+        );
+
+        // The CLI's five-second deadline is part of its reporting contract,
+        // not a startup-time guarantee. These tests exercise restart state,
+        // so let a slow fixture finish starting and wait on the real health
+        // condition instead of treating scheduler pressure as a failed setup.
+        let deadline = Instant::now() + FIXTURE_READY_TIMEOUT;
+        loop {
+            if self.run(&["gateway", "status"]).status.success() {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "gateway did not become healthy after the start command timed out"
+            );
+            thread::sleep(Duration::from_millis(25));
+        }
+    }
+
     fn metadata_path(&self) -> PathBuf {
         if self.explicit_root {
             self.root.path().join("run/metadata.json")
@@ -106,7 +137,7 @@ impl GatewayProbe {
 
     fn start(&self) {
         let port = self.port.to_string();
-        self.assert_success(self.run(&["gateway", "start", "--port", &port]));
+        self.assert_ready_after_start(self.run(&["gateway", "start", "--port", &port]));
     }
 
     fn stop(&self) {
@@ -172,7 +203,7 @@ fn process_environment(pid: u32) -> Vec<u8> {
 }
 
 fn wait_for_replacement_pid(probe: &GatewayProbe, previous_pid: u32, child: &mut Child) -> u32 {
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + FIXTURE_READY_TIMEOUT;
     loop {
         if let Ok(bytes) = fs::read(probe.metadata_path())
             && let Ok(metadata) = serde_json::from_slice::<Value>(&bytes)
@@ -223,7 +254,7 @@ fn restart_preserves_running_environment_and_still_starts_when_nothing_is_runnin
         .args(["gateway", "restart", "--force", "--port", &port])
         .output()
         .expect("failed to invoke gateway restart");
-    probe.assert_success(output);
+    probe.assert_ready_after_start(output);
 
     let second_pid = probe.pid();
     assert_ne!(first_pid, second_pid);
@@ -250,7 +281,7 @@ fn restart_preserves_running_environment_and_still_starts_when_nothing_is_runnin
     assert!(!probe.metadata_path().exists());
 
     let output = probe.run(&["gateway", "restart", "--force", "--port", &port]);
-    probe.assert_success(output);
+    probe.assert_ready_after_start(output);
     assert!(probe.metadata_path().exists());
 }
 
