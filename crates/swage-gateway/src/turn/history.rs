@@ -45,7 +45,7 @@ pub(super) fn compact_tool_replay_messages(
 
     for record in records
         .iter()
-        .filter(|record| record.model_result.is_some())
+        .filter(|record| record.model_result.is_some() && !record.tool.trim().is_empty())
     {
         let effective_round = match record.parent_call_id.as_deref() {
             Some(parent_call_id) => {

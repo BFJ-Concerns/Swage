@@ -38,6 +38,8 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- Conversations with unrecognised model selections no longer apply the configured default model's reasoning effort.
+- Rejected malformed tool calls no longer replay into provider history and prevent the conversation from continuing.
 - Configured workflow token ceilings no longer prevent permitted parallel agent calls from sharing the working allowance while preserving the closing reserve.
 - Development-channel no-ops now appear as `not_sent` with an explanation instead of claiming successful delivery.
 - A delayed not-found response for an earlier conversation no longer clears a conversation selected while that check was pending.
