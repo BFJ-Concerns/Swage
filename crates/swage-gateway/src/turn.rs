@@ -625,7 +625,7 @@ pub(crate) async fn process_turn_with_existing_turn_and_focus(
     attendance: TurnAttendance,
     compaction_focus: Option<String>,
 ) -> Result<(), GatewayError> {
-    process_turn_with_composition(
+    process_turn_with_composition_and_focus(
         state,
         session_id,
         target_thread_id,
@@ -651,6 +651,46 @@ pub(crate) async fn process_turn_with_existing_turn_and_focus(
 )]
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn process_turn_with_composition(
+    state: &AppState,
+    session_id: Uuid,
+    target_thread_id: Option<Uuid>,
+    content: String,
+    ws_tx: mpsc::UnboundedSender<ServerEvent>,
+    subscription: Arc<Mutex<SubscriptionState>>,
+    output_schema_override: Option<serde_json::Value>,
+    max_output_retries_override: Option<u32>,
+    effort_override: Option<swage_core::Effort>,
+    cancellation_override: Option<CancellationToken>,
+    existing_turn_id: Option<Uuid>,
+    attendance: TurnAttendance,
+    composition: DispatchContextComposition,
+) -> Result<(), GatewayError> {
+    process_turn_with_composition_and_focus(
+        state,
+        session_id,
+        target_thread_id,
+        content,
+        ws_tx,
+        subscription,
+        output_schema_override,
+        max_output_retries_override,
+        effort_override,
+        cancellation_override,
+        existing_turn_id,
+        attendance,
+        composition,
+        None,
+    )
+    .await
+}
+
+#[tracing::instrument(
+    name = "turn",
+    skip(state, content, ws_tx, subscription, composition),
+    fields(turn_id = tracing::field::Empty),
+)]
+#[allow(clippy::too_many_arguments)]
+async fn process_turn_with_composition_and_focus(
     state: &AppState,
     session_id: Uuid,
     target_thread_id: Option<Uuid>,
