@@ -1656,6 +1656,8 @@ async fn execute_external_delegate_message(
     .await;
     target_agent_config.approval_prompts_enabled = false;
     let target_context_transfer_config = target_resolved.communication.context_transfer.clone();
+    let composition = crate::turn::DispatchContextComposition::from_payload(&delegate_msg.payload)
+        .map_err(|error| ApiError::validation(error.to_string()))?;
     // Delegated activity must not reach the parent WebSocket. Shared assembly
     // still emits ContextAssembled into this silent channel; the stored child-
     // turn snapshot is the delegated assembly's audit record.
@@ -1701,8 +1703,7 @@ async fn execute_external_delegate_message(
             target_agent_config.working_directory.display().to_string(),
             silent_ws_tx,
             crate::turn::effective_tool_permissions_record(&effective_target_resolved),
-            crate::turn::DispatchContextComposition::from_payload(&delegate_msg.payload)
-                .map_err(|error| ApiError::validation(error.to_string()))?,
+            composition,
         ),
         snapshot_recorder: Some(crate::turn::delegation_snapshot_recorder(
             state.storage.clone(),
@@ -2550,6 +2551,70 @@ mod tests {
         );
 
         server.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn malformed_external_delegate_composition_is_rejected_before_dispatcher_provisioning() {
+        use swage_agent::MessageRouter;
+        use swage_core::MessageKind;
+        use swage_storage::Storage;
+
+        let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn swage_storage::SpaceStore>,
+            Arc::new(MockProvider::new(vec![])) as Arc<dyn LlmProvider>,
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        // The injected failure is consumed only when dispatcher construction
+        // reaches the sandbox-provisioning boundary.
+        state.fail_next_dispatcher_builds(1);
+        let router = MessageRouter::new(state.storage.clone(), None);
+        let malformed = router
+            .send_message(swage_storage::NewAgentMessage {
+                sender_agent_id: "agent-a".into(),
+                recipient_agent_id: "agent-b".into(),
+                kind: MessageKind::Delegate,
+                correlation_id: None,
+                payload: serde_json::json!({"task": "inspect", "assembly": ["invalid"]}),
+            })
+            .await
+            .expect("malformed delegate message");
+
+        let error = Box::pin(execute_external_delegate_message(
+            state.clone(),
+            malformed,
+            space.id,
+            None,
+        ))
+        .await
+        .expect_err("malformed composition must be rejected");
+        assert!(matches!(error.0, GatewayError::ValidationError(_)));
+
+        let valid = router
+            .send_message(swage_storage::NewAgentMessage {
+                sender_agent_id: "agent-a".into(),
+                recipient_agent_id: "agent-b".into(),
+                kind: MessageKind::Delegate,
+                correlation_id: None,
+                payload: serde_json::json!({"task": "inspect", "assembly": "focused"}),
+            })
+            .await
+            .expect("valid delegate message");
+        let error = Box::pin(execute_external_delegate_message(
+            state, valid, space.id, None,
+        ))
+        .await
+        .expect_err("unconsumed dispatcher failure proves malformed input provisioned nothing");
+        assert!(
+            error
+                .0
+                .to_string()
+                .contains("injected dispatcher build failure")
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
