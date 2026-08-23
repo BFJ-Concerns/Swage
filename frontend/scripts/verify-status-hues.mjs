@@ -15,9 +15,10 @@
        backing it actually renders on, in the scheme it renders in.
     2. CIEDE2000 (ΔE00) role separation — every spot hue stays measurably clear
        of the two warm roles the palette reserves (--accent owns action,
-       --error owns trouble), so no status ever reads as "another orange thing"
-       or as an error. This is the check that caught the dark-scheme collision
-       (--error sat ~6 ΔE00 from --accent); the fix is gated here.
+       --error owns trouble), and confirmation feedback (--success) stays
+       distinct from every status register. This is the check that caught the
+       dark-scheme collision (--error sat ~6 ΔE00 from --accent); the fixes are
+       gated here.
 
   Pairwise distances between the registers are reported for awareness but only
   warn — several pairs lean on treatment + label by design (calm ink vs not-yet
@@ -39,6 +40,7 @@ import { dirname, resolve } from "node:path";
 // Set in the spirit of the riso palette's own role separations (~18 ΔE00).
 const MIN_DELTA_E_VS_ROLE = 15; // spot hue vs --accent, and --error vs --accent
 const MIN_DELTA_E_VS_ERROR = 12; // spot hue vs --error (must not read as trouble)
+const MIN_DELTA_E_SUCCESS_VS_REGISTER = 12; // confirmation feedback vs status registers
 const AA_SMALL_TEXT = 4.5; // WCAG 2.1 AA for small text/glyph
 const WARN_DELTA_E_PAIR = 10; // pairwise register distance below this: warn only
 
@@ -247,6 +249,7 @@ export function measure(cssPath) {
     const paper = hexToRgb(resolveHex("--paper", theme, root));
     const accent = hexToRgb(resolveHex("--accent", theme, root));
     const error = hexToRgb(resolveHex("--error", theme, root));
+    const success = hexToRgb(resolveHex("--success", theme, root));
 
     // Resolve each register's representative hue for this scheme.
     const hues = {};
@@ -295,6 +298,16 @@ export function measure(cssPath) {
     }
     rows.push({ scheme, register: "--error vs --accent", errorVsAccent });
 
+    for (const reg of REGISTERS) {
+      const successVsRegister = deltaE00(success, hues[reg.key]);
+      if (successVsRegister < MIN_DELTA_E_SUCCESS_VS_REGISTER) {
+        failures.push(
+          `[${scheme}] --success: ΔE00 ${successVsRegister.toFixed(1)} from ${reg.token} < ${MIN_DELTA_E_SUCCESS_VS_REGISTER}`,
+        );
+      }
+      rows.push({ scheme, register: `--success vs ${reg.token}`, successVsRegister });
+    }
+
     // Pairwise register distinctness (warn only).
     const keys = REGISTERS.map((r) => r.key);
     for (let i = 0; i < keys.length; i++) {
@@ -333,6 +346,9 @@ function formatReport(result) {
     }
     const ea = result.rows.find((x) => x.scheme === scheme && x.errorVsAccent != null);
     lines.push(`  --error vs --accent: ΔE00 ${ea.errorVsAccent.toFixed(1)}`);
+    for (const r of result.rows.filter((x) => x.scheme === scheme && x.successVsRegister != null)) {
+      lines.push(`  ${r.register}: ΔE00 ${r.successVsRegister.toFixed(1)}`);
+    }
   }
   if (result.warnings.length) {
     lines.push("\nWarnings (informational — carried by treatment + label):");

@@ -475,6 +475,10 @@ fn verify() -> Result<()> {
 const DESIGN_TOKEN_DEFERRED_COMPONENTS: &[&str] = &[
     "frontend/src/lib/components/ScheduleAutomationPanel.svelte",
     "frontend/src/lib/components/AppLayout.svelte",
+    "frontend/src/lib/components/SpacePicker.svelte",
+    "frontend/src/lib/components/OperatorDashboard.svelte",
+    "frontend/src/lib/components/settings/ProviderSettingsSurface.svelte",
+    "frontend/src/lib/components/ApprovalCard.svelte",
 ];
 
 fn check_frontend_design_tokens() -> Result<()> {
@@ -493,9 +497,22 @@ fn check_frontend_design_tokens() -> Result<()> {
         }
         let contents = fs::read_to_string(&file)?;
         for (line_number, line) in component_style_lines(&contents) {
-            for column in hexadecimal_colour_columns(line) {
+            for column in off_palette_colour_columns(line) {
                 violations.push(format!("{}:{}:{}", file.display(), line_number, column + 1));
             }
+        }
+    }
+
+    let app_css = Path::new("frontend/src/app.css");
+    let app_css_contents = fs::read_to_string(app_css)?;
+    for (line_number, line) in app_css_contents.lines().enumerate() {
+        for column in off_palette_colour_columns(line) {
+            violations.push(format!(
+                "{}:{}:{}",
+                app_css.display(),
+                line_number + 1,
+                column + 1
+            ));
         }
     }
 
@@ -504,7 +521,7 @@ fn check_frontend_design_tokens() -> Result<()> {
         Ok(())
     } else {
         Err(format!(
-            "off-palette hexadecimal colours found in frontend components:\n  {}\nUse riso.css semantic tokens instead.",
+            "off-palette hexadecimal or rgba() colours found in frontend component styles or app.css:\n  {}\nUse riso.css semantic tokens instead.",
             violations.join("\n  ")
         )
         .into())
@@ -530,6 +547,13 @@ fn component_style_lines(contents: &str) -> impl Iterator<Item = (usize, &str)> 
         })
 }
 
+fn off_palette_colour_columns(line: &str) -> Vec<usize> {
+    let mut columns = hexadecimal_colour_columns(line);
+    columns.extend(rgba_colour_columns(line));
+    columns.sort_unstable();
+    columns
+}
+
 fn hexadecimal_colour_columns(line: &str) -> Vec<usize> {
     let bytes = line.as_bytes();
     let mut columns = Vec::new();
@@ -550,6 +574,18 @@ fn hexadecimal_colour_columns(line: &str) -> Vec<usize> {
         index = end.max(index + 1);
     }
     columns
+}
+
+fn rgba_colour_columns(line: &str) -> Vec<usize> {
+    line.match_indices("rgba(")
+        .filter_map(|(column, _)| {
+            let remainder = &line[column + "rgba(".len()..];
+            let closing = remainder.find(')')?;
+            let arguments = &remainder[..closing];
+            let values = arguments.split(',').map(str::trim).collect::<Vec<_>>();
+            (values.len() == 4 && values.iter().all(|value| !value.is_empty())).then_some(column)
+        })
+        .collect()
 }
 
 /// Local runtime state must not be tracked. Cheap, and it catches a class of

@@ -39,7 +39,7 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
-- Tool-call, connection, and inline-turn failures now use the shared error treatment instead of action orange.
+- Tool-call, connection-error, and inline-turn failure states now use the shared error treatment instead of action orange; connection loss and reconnection keep their ordinary connectivity treatment.
 - Inline turn errors now use the error-token wash in both themes.
 - Chat Completions streams now deliver every parallel tool call accumulated before completion.
 - Nullable object-valued tool parameters no longer fail nested required-field validation when set to null.
