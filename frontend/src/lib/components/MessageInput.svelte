@@ -18,6 +18,7 @@
     agentDefinitions?: EffectiveAgentDefinitionResponse[];
     canSelectAgent?: boolean;
     selectedAgentId?: string;
+    sessionId?: string | null;
   }
 
   let {
@@ -29,6 +30,7 @@
     agentDefinitions = [],
     canSelectAgent = false,
     selectedAgentId = $bindable(""),
+    sessionId = null,
   }: Props = $props();
 
   const hasNoConfiguredModels = $derived(modelCatalogueReady && modelOptions.length === 0);
@@ -37,6 +39,16 @@
   let content = $state("");
   let selectedModel = $state("");
   let selectedEffort = $state<"" | Effort>("");
+  let effortSessionId = $state<string | null | undefined>(undefined);
+
+  $effect(() => {
+    if (effortSessionId === undefined) {
+      effortSessionId = sessionId;
+    } else if (sessionId !== effortSessionId) {
+      selectedEffort = "";
+      effortSessionId = sessionId;
+    }
+  });
 
   $effect(() => {
     const fallback = selectedModelId ?? modelOptions[0] ?? "";
