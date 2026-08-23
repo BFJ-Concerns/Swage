@@ -471,14 +471,14 @@ fn verify() -> Result<()> {
 
 /// Component colours must come from riso.css tokens. These sibling-held
 /// surfaces retain their current literal colours until their owning PR lands:
-/// #130 owns ScheduleAutomationPanel; #132 owns AppLayout.
+/// #130 owns ScheduleAutomationPanel, AppLayout, and SpacePicker; #128 owns
+/// OperatorDashboard; #131 owns ProviderSettingsSurface.
 const DESIGN_TOKEN_DEFERRED_COMPONENTS: &[&str] = &[
     "frontend/src/lib/components/ScheduleAutomationPanel.svelte",
     "frontend/src/lib/components/AppLayout.svelte",
     "frontend/src/lib/components/SpacePicker.svelte",
     "frontend/src/lib/components/OperatorDashboard.svelte",
     "frontend/src/lib/components/settings/ProviderSettingsSurface.svelte",
-    "frontend/src/lib/components/ApprovalCard.svelte",
 ];
 
 fn check_frontend_design_tokens() -> Result<()> {

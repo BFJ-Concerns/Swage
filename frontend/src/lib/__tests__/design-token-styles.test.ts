@@ -35,7 +35,10 @@ describe("retinted component styles", () => {
   });
 
   it("reserves the error token for the retinted failure surfaces", () => {
-    expect(connectionIndicator).toMatch(/\.banner\.error\s*\{[^}]*var\(--error\)/s);
+    const errorRule = [...connectionIndicator.matchAll(/([^{}]+)\{([^{}]*var\(--error\)[^{}]*)\}/gs)]
+      .find(([, selectors]) => selectors.includes(".banner.error"));
+    expect(errorRule, "ConnectionIndicator must have an error paint rule").toBeDefined();
+    expect(errorRule![1].replace(/\/\*[\s\S]*?\*\//g, "").trim()).toBe(".banner.error");
     expect(toolCallDisplay).toMatch(/\.tool-call\.error\s*\{[^}]*var\(--error\)/s);
     expect(messageDisplay).toMatch(/\.turn-error\s*\{[^}]*var\(--error\)/s);
   });
