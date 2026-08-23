@@ -1,4 +1,5 @@
 import type { OperatorOverview } from "../types";
+import type { OperatorHistoryResponse } from "../protocol/OperatorHistoryResponse";
 import type { ScheduleListResponse } from "../protocol/ScheduleListResponse";
 import type { ScheduleRunListResponse } from "../protocol/ScheduleRunListResponse";
 import type { TriggerScheduleResponse } from "../protocol/TriggerScheduleResponse";
@@ -33,6 +34,11 @@ async function request(
 export async function fetchOperatorOverview(): Promise<OperatorOverview> {
   const response = await request("/api/operator/overview", "GET");
   return response.json() as Promise<OperatorOverview>;
+}
+
+export async function fetchOperatorHistory(): Promise<OperatorHistoryResponse> {
+  const response = await request("/api/operator/history", "GET");
+  return response.json() as Promise<OperatorHistoryResponse>;
 }
 
 export async function approvePendingAction(

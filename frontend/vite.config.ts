@@ -1,6 +1,9 @@
 import { defineConfig } from "vitest/config";
 import { svelte } from "@sveltejs/vite-plugin-svelte";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const frontendRoot = fileURLToPath(new URL(".", import.meta.url));
 
 export default defineConfig({
   plugins: [svelte()],
@@ -20,7 +23,7 @@ export default defineConfig({
       {
         find: /^svelte$/,
         replacement: path.resolve(
-          __dirname,
+          frontendRoot,
           "node_modules/svelte/src/index-client.js",
         ),
       },
@@ -30,7 +33,7 @@ export default defineConfig({
       {
         find: /^svelte\/store$/,
         replacement: path.resolve(
-          __dirname,
+          frontendRoot,
           "node_modules/svelte/src/store/index-client.js",
         ),
       },

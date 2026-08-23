@@ -163,8 +163,9 @@ async fn fresh_root_lists_orients_and_activates_a_shipped_skill() {
         .map(|message| message.text_content())
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(prompt.contains("commission (shipped)"));
-    assert!(prompt.contains("assembly (shipped)"));
+    assert!(prompt.contains("commission —"));
+    assert!(prompt.contains("assembly —"));
+    assert!(!prompt.contains("(shipped)"));
     assert!(
         prompt.contains("Planning is building joint understanding between the user and the model")
     );

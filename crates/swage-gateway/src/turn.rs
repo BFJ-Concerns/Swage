@@ -1058,6 +1058,7 @@ pub(crate) async fn process_turn_with_composition(
         &mut allowed_paths,
         &session_approval_grants,
         space_id,
+        session_id,
         session.metadata.as_ref(),
     );
     let mut agent_config = build_agent_config_with_workspace(
@@ -1083,12 +1084,16 @@ pub(crate) async fn process_turn_with_composition(
     };
     let dispatcher_build = match build_gateway_dispatcher(
         state,
-        &config,
-        &agent_config,
-        session.metadata.as_ref(),
-        Some(space_id),
-        session.active_workspace_attachment_id,
-        ws_tx.clone(),
+        GatewayDispatcherRequest {
+            config: &config,
+            agent_config: &agent_config,
+            session_metadata: session.metadata.as_ref(),
+            space_id: Some(space_id),
+            active_workspace_attachment_id: session.active_workspace_attachment_id,
+            ws_tx: ws_tx.clone(),
+            session_id: Some(session_id),
+            turn_id: Some(prepared_turn_id),
+        },
     )
     .await
     {
@@ -1181,12 +1186,16 @@ pub(crate) async fn process_turn_with_composition(
                 prepared_turn_id,
                 build_gateway_dispatcher(
                     state,
-                    &unsandboxed_config,
-                    &agent_config,
-                    session.metadata.as_ref(),
-                    Some(space_id),
-                    session.active_workspace_attachment_id,
-                    ws_tx.clone(),
+                    GatewayDispatcherRequest {
+                        config: &unsandboxed_config,
+                        agent_config: &agent_config,
+                        session_metadata: session.metadata.as_ref(),
+                        space_id: Some(space_id),
+                        active_workspace_attachment_id: session.active_workspace_attachment_id,
+                        ws_tx: ws_tx.clone(),
+                        session_id: Some(session_id),
+                        turn_id: Some(prepared_turn_id),
+                    },
                 )
                 .await
                 .map_err(|fallback_error| GatewayError::WebSocketError(fallback_error.to_string())),
@@ -1257,6 +1266,7 @@ pub(crate) async fn process_turn_with_composition(
             &config,
             &state.config,
             Some(space_id),
+            Some(session_id),
             &session_approval_grants,
         );
         let codex_request = crate::codex::CodexTurnRequest {
@@ -1819,7 +1829,7 @@ pub(super) struct ContextChoices {
     working_norms_scaffold: swage_context::working_norms::WorkingNormsScaffold,
 }
 
-const WORKING_NORMS_NATIVE: &str = "native";
+const WORKING_NORMS_AUTHORED_V1: &str = "authored-v1";
 const WORKING_NORMS_FAMILY_FALLBACK: &str = "family-fallback";
 
 async fn select_context_assembly(
@@ -1883,7 +1893,7 @@ async fn select_context_assembly(
         &config.experimentation,
         crate::experimentation::LOCATION_WORKING_NORMS,
         &norms_variants,
-        WORKING_NORMS_NATIVE,
+        WORKING_NORMS_AUTHORED_V1,
         turn_id,
     )
     .map_err(|error| GatewayError::ConfigError(error.to_string()))?;
@@ -1904,7 +1914,7 @@ async fn select_context_assembly(
                 "working-norms selection could not be recorded; serving the native scaffold"
             );
             crate::experimentation::VariantDecision {
-                variant: WORKING_NORMS_NATIVE.to_owned(),
+                variant: WORKING_NORMS_AUTHORED_V1.to_owned(),
                 reason: crate::experimentation::SelectionReason::RecordUnavailable,
             }
         }
