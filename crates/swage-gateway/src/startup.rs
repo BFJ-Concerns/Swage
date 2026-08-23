@@ -605,10 +605,22 @@ fn init_logging(config: &swage_config::ResolvedConfig) {
 fn open_storage(path: &std::path::Path) -> Arc<swage_storage::SqliteStorage> {
     Arc::new(
         swage_storage::SqliteStorage::open(path).unwrap_or_else(|e| {
-            eprintln!("Failed to open database at {}: {e}", path.display());
+            eprintln!("{}", storage_open_error(path, &e));
             std::process::exit(1);
         }),
     )
+}
+
+fn storage_open_error(path: &std::path::Path, error: &swage_core::StorageError) -> String {
+    let detail = error.to_string();
+    if detail.contains("no such table: workflow_runs") {
+        format!(
+            "The data root at {} uses an obsolete private-alpha database. Rebuild this data root before starting Swage; data migration is not supported during the private alpha.",
+            path.parent().unwrap_or(path).display()
+        )
+    } else {
+        format!("Failed to open database at {}: {error}", path.display())
+    }
 }
 
 /// Build the tool dispatch pipeline with all built-in tools from configuration.
@@ -1045,6 +1057,39 @@ mod tests {
 
     #[derive(Clone, Default)]
     struct RecordedEvents(Arc<Mutex<Vec<String>>>);
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn obsolete_workflow_schema_reports_rebuild_instruction() {
+        let directory = tempfile::tempdir().expect("obsolete data root");
+        let path = directory.path().join("swage.db");
+        let storage = swage_storage::SqliteStorage::open(&path).expect("seed current database");
+        storage
+            .with_conn(|connection| {
+                connection.execute_batch(
+                    "DROP TABLE workflow_runs;
+                     DELETE FROM _swage_migrations
+                     WHERE name = '046_workflow_run_parentage';",
+                )
+            })
+            .await
+            .expect("strip workflow schema from database");
+        drop(storage);
+
+        let error = swage_storage::SqliteStorage::open(&path)
+            .err()
+            .expect("opening the stripped database should fail through migrations");
+        assert!(matches!(
+            error,
+            swage_core::StorageError::MigrationFailed(_)
+        ));
+
+        let message = storage_open_error(&path, &error);
+
+        assert!(message.contains(&directory.path().display().to_string()));
+        assert!(message.contains("Rebuild this data root"));
+        assert!(message.contains("data migration is not supported"));
+        assert!(!message.contains("no such table"));
+    }
 
     impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for RecordedEvents {
         fn on_event(
