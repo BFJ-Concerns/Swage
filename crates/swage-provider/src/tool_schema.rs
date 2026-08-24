@@ -40,7 +40,12 @@ const HOSTILE_KEYWORDS: &[&str] = &[
 ];
 
 /// Keep model-facing summaries short even when a schema has many branches.
-const MAX_DESCRIBED_SCHEMA_CHOICES: usize = 4;
+///
+/// Eight alternatives leave four places of headroom beyond the nullable
+/// schedule delivery target's current four branches. Further alternatives are
+/// still described by the local-validation fallback rather than silently
+/// omitted from the provider schema.
+const MAX_DESCRIBED_SCHEMA_CHOICES: usize = 8;
 const MAX_INLINE_CONSTRAINT_VALUE_CHARS: usize = 160;
 
 pub(crate) fn provider_tool_schema(schema: &Value) -> Value {
@@ -136,7 +141,9 @@ fn stripped_constraint_summary(keyword: &str, value: &Value) -> String {
         ),
         "allOf" => format!("allOf ({})", describe_schema_choices(value, "all of")),
         "items" => describe_item_constraint(value),
-        "minLength" | "pattern" => format!("{keyword} ({})", describe_constant(value)),
+        "const" | "minLength" | "pattern" => {
+            format!("{keyword} ({})", describe_constant(value))
+        }
         "$schema" | "$id" | "$defs" => keyword.to_string(),
         _ => keyword.to_string(),
     }
@@ -283,7 +290,7 @@ fn object_schema() -> Value {
 mod tests {
     use serde_json::json;
 
-    use super::{MAX_INLINE_CONSTRAINT_VALUE_CHARS, provider_tool_schema};
+    use super::provider_tool_schema;
 
     #[test]
     fn provider_tool_schema_strips_hostile_keywords_and_notes_local_validation() {
@@ -330,6 +337,12 @@ mod tests {
         let mode = &projected["properties"]["mode"];
         assert_eq!(mode["enum"], json!(["fast", "deep"]));
         assert!(mode.get("const").is_none());
+        assert!(
+            mode["description"]
+                .as_str()
+                .unwrap()
+                .contains("const (\"fast\")")
+        );
     }
 
     #[test]
@@ -398,7 +411,7 @@ mod tests {
     }
 
     #[test]
-    fn provider_tool_schema_bounds_choice_summaries_and_uses_plain_item_guidance() {
+    fn provider_tool_schema_describes_eight_choices_and_uses_plain_item_guidance() {
         let schema = json!({
             "type": "object",
             "properties": {
@@ -417,7 +430,12 @@ mod tests {
                 {"required": ["first"]},
                 {"required": ["second"]},
                 {"required": ["third"]},
-                {"required": ["fourth"]}
+                {"required": ["fourth"]},
+                {"required": ["fifth"]},
+                {"required": ["sixth"]},
+                {"required": ["seventh"]},
+                {"required": ["eighth"]},
+                {"required": ["ninth"]}
             ]
         });
 
@@ -428,8 +446,8 @@ mod tests {
             .unwrap();
 
         assert!(description.contains("is `null`"));
-        assert!(description.contains("requires `third`"));
-        assert!(!description.contains("requires `fourth`"));
+        assert!(description.contains("requires `seventh`"));
+        assert!(!description.contains("requires `eighth`"));
         assert!(description.contains("remaining alternatives are validated locally"));
         assert_eq!(
             changes_description,
@@ -440,7 +458,7 @@ mod tests {
 
     #[test]
     fn provider_tool_schema_bounds_inline_constraint_values() {
-        let long_pattern = "a".repeat(MAX_INLINE_CONSTRAINT_VALUE_CHARS + 1);
+        let long_pattern = "a".repeat(161);
         let schema = json!({
             "type": "object",
             "properties": {"value": {"type": "string", "pattern": long_pattern}}
