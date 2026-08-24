@@ -7,7 +7,7 @@ use std::sync::{
 
 use axum::{
     Json,
-    extract::{Path, Query, State},
+    extract::{Path, State},
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -19,8 +19,7 @@ use swage_protocol::client::workflow::{
     WorkflowBudget, WorkflowHandoverEvent, WorkflowHandoverEventDelivery,
     WorkflowHandoverFailedCall, WorkflowHandoverFailedCallRef, WorkflowRun,
     WorkflowRunDetailResponse, WorkflowRunEvent, WorkflowRunEventSource, WorkflowRunHandover,
-    WorkflowRunListResponse, WorkflowRunState, WorkflowScript, WorkflowScriptListQuery,
-    WorkflowScriptListResponse,
+    WorkflowRunListResponse, WorkflowRunState, WorkflowScript, WorkflowScriptListResponse,
 };
 use swage_storage::WorkflowJournalRecord;
 use swage_storage::{
@@ -1329,10 +1328,12 @@ async fn run_ephemeral_agent_call(
     let output = match (&request_schema, turn.structured_output) {
         (Some(_), Some(structured)) => structured,
         (Some(_), None) => {
-            // A schema call never substitutes unvalidated text. Exhaustion is
-            // an ordinary null result, matching the sibling workflow runtime
-            // and leaving the script free to choose its deterministic path.
-            Value::Null
+            // Schema demanded, none produced: the validated-object contract
+            // cannot be met, and unvalidated text must not impersonate it.
+            return Err(format!(
+                "AgentCallError: agent turn {} produced no schema-valid output",
+                turn.id
+            ));
         }
         (None, structured) => {
             structured.unwrap_or_else(|| Value::String(turn.assistant_response.unwrap_or_default()))
@@ -4075,7 +4076,6 @@ pub async fn create_script(
 pub async fn list_scripts(
     State(state): State<AppState>,
     Path(space_id): Path<Uuid>,
-    _: Query<WorkflowScriptListQuery>,
 ) -> Result<Json<WorkflowScriptListResponse>, ApiError> {
     state
         .space_store
@@ -4098,7 +4098,6 @@ pub async fn list_scripts(
 pub async fn get_script(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
-    _: Query<WorkflowScriptListQuery>,
 ) -> Result<Json<WorkflowScript>, ApiError> {
     let workflow = resolve_workflow_by_id(&state, id, None)
         .await
@@ -4110,7 +4109,6 @@ pub async fn get_script(
 pub async fn update_script(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
-    query: Query<WorkflowScriptListQuery>,
     Json(request): Json<UpdateWorkflowScriptRequest>,
 ) -> Result<Json<WorkflowScript>, ApiError> {
     if resolve_workflow_by_id(&state, id, None)
@@ -4152,7 +4150,7 @@ pub async fn update_script(
             .await
             .map_err(internal)?;
     }
-    get_script(State(state), Path(id), query).await
+    get_script(State(state), Path(id)).await
 }
 
 fn source_hash(source: &str) -> String {
@@ -4676,7 +4674,6 @@ pub async fn start_inline_run(
 pub async fn start_saved_run(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
-    _: Query<WorkflowScriptListQuery>,
     Json(request): Json<StartWorkflowRunRequest>,
 ) -> Result<Json<WorkflowRun>, ApiError> {
     let script = resolve_workflow_by_id(&state, id, None)
@@ -5065,13 +5062,9 @@ mod tests {
         let space = storage.get_or_create_default().await.expect("space");
         let _skill_root = crate::skill::SpaceSkillRootGuard::empty(space.id);
 
-        let Json(list) = list_scripts(
-            State(state),
-            Path(space.id),
-            Query(WorkflowScriptListQuery::default()),
-        )
-        .await
-        .expect("workflow list");
+        let Json(list) = list_scripts(State(state), Path(space.id))
+            .await
+            .expect("workflow list");
 
         let names = list
             .scripts
@@ -5256,13 +5249,9 @@ mod tests {
         let space = storage.get_or_create_default().await.expect("space");
         let _skill_root = crate::skill::SpaceSkillRootGuard::at(space.id, root.path());
 
-        let Json(list) = list_scripts(
-            State(state.clone()),
-            Path(space.id),
-            Query(WorkflowScriptListQuery::default()),
-        )
-        .await
-        .expect("workflow list");
+        let Json(list) = list_scripts(State(state.clone()), Path(space.id))
+            .await
+            .expect("workflow list");
         let listed = list
             .scripts
             .into_iter()
@@ -5273,7 +5262,6 @@ mod tests {
         let Json(started) = start_saved_run(
             State(state.clone()),
             Path(listed.id),
-            Query(WorkflowScriptListQuery::default()),
             Json(StartWorkflowRunRequest {
                 args: Value::Null,
                 budget: None,
@@ -5300,33 +5288,24 @@ mod tests {
         let (state, storage) = workflow_test_state();
         let space = storage.get_or_create_default().await.expect("space");
         let _skill_root = crate::skill::SpaceSkillRootGuard::empty(space.id);
-        let Json(list) = list_scripts(
-            State(state.clone()),
-            Path(space.id),
-            Query(WorkflowScriptListQuery::default()),
-        )
-        .await
-        .expect("workflow list");
+        let Json(list) = list_scripts(State(state.clone()), Path(space.id))
+            .await
+            .expect("workflow list");
         let listed = list
             .scripts
             .into_iter()
             .find(|script| script.name == "research-sweep")
             .expect("research sweep");
 
-        let Json(read) = get_script(
-            State(state.clone()),
-            Path(listed.id),
-            Query(WorkflowScriptListQuery::default()),
-        )
-        .await
-        .expect("read built-in");
+        let Json(read) = get_script(State(state.clone()), Path(listed.id))
+            .await
+            .expect("read built-in");
         assert_eq!(read.id, listed.id);
         assert!(read.built_in);
 
         let update_error = update_script(
             State(state.clone()),
             Path(listed.id),
-            Query(WorkflowScriptListQuery::default()),
             Json(UpdateWorkflowScriptRequest {
                 description: Some("changed".into()),
                 ..Default::default()
@@ -5341,7 +5320,6 @@ mod tests {
         let Json(started) = start_saved_run(
             State(state.clone()),
             Path(listed.id),
-            Query(WorkflowScriptListQuery::default()),
             Json(StartWorkflowRunRequest {
                 args: Value::Null,
                 budget: None,
@@ -5384,13 +5362,9 @@ mod tests {
         let (state, storage) = workflow_test_state();
         let space = storage.get_or_create_default().await.expect("space");
         let _skill_root = crate::skill::SpaceSkillRootGuard::empty(space.id);
-        let Json(list) = list_scripts(
-            State(state.clone()),
-            Path(space.id),
-            Query(WorkflowScriptListQuery::default()),
-        )
-        .await
-        .expect("workflow list");
+        let Json(list) = list_scripts(State(state.clone()), Path(space.id))
+            .await
+            .expect("workflow list");
         let listed = list
             .scripts
             .into_iter()
@@ -5401,7 +5375,6 @@ mod tests {
         let update_error = update_script(
             State(state.clone()),
             Path(listed.id),
-            Query(WorkflowScriptListQuery::default()),
             Json(UpdateWorkflowScriptRequest {
                 source: Some("return 'changed';".into()),
                 ..Default::default()
@@ -5416,7 +5389,6 @@ mod tests {
         let Json(started) = start_saved_run(
             State(state.clone()),
             Path(listed.id),
-            Query(WorkflowScriptListQuery::default()),
             Json(StartWorkflowRunRequest {
                 args: Value::Null,
                 budget: None,
@@ -5500,7 +5472,6 @@ mod tests {
         let Json(started) = start_saved_run(
             State(state.clone()),
             Path(parent.id),
-            Query(WorkflowScriptListQuery::default()),
             Json(StartWorkflowRunRequest {
                 args: Value::Null,
                 budget: None,
@@ -5669,7 +5640,6 @@ mod tests {
         let Json(started) = start_saved_run(
             State(state.clone()),
             Path(parent.id),
-            Query(WorkflowScriptListQuery::default()),
             Json(StartWorkflowRunRequest {
                 args: Value::Null,
                 budget: None,
@@ -13131,7 +13101,6 @@ mod tests {
         let Json(started) = start_saved_run(
             State(state.clone()),
             Path(script.id),
-            Query(WorkflowScriptListQuery::default()),
             Json(StartWorkflowRunRequest {
                 args: Value::Null,
                 budget: Some(WorkflowBudget {
@@ -13463,7 +13432,6 @@ mod tests {
         let Json(started) = start_saved_run(
             State(state.clone()),
             Path(script.id),
-            Query(WorkflowScriptListQuery::default()),
             Json(StartWorkflowRunRequest {
                 args: Value::Null,
                 budget: Some(budget.clone()),
@@ -13587,7 +13555,6 @@ mod tests {
         let Json(started) = start_saved_run(
             State(state.clone()),
             Path(script.id),
-            Query(WorkflowScriptListQuery::default()),
             Json(StartWorkflowRunRequest {
                 args: Value::Null,
                 budget: Some(WorkflowBudget {
@@ -13677,7 +13644,6 @@ mod tests {
         let Json(started) = start_saved_run(
             State(state.clone()),
             Path(script.id),
-            Query(WorkflowScriptListQuery::default()),
             Json(StartWorkflowRunRequest {
                 args: Value::Null,
                 budget: Some(WorkflowBudget {
@@ -13801,7 +13767,6 @@ mod tests {
         let Json(started) = start_saved_run(
             State(state.clone()),
             Path(script.id),
-            Query(WorkflowScriptListQuery::default()),
             Json(StartWorkflowRunRequest {
                 args: Value::Null,
                 budget: Some(WorkflowBudget {
@@ -13929,7 +13894,6 @@ mod tests {
         let Json(started) = start_saved_run(
             State(state.clone()),
             Path(script.id),
-            Query(WorkflowScriptListQuery::default()),
             Json(StartWorkflowRunRequest {
                 args: serde_json::json!({"content":"checked"}),
                 budget: None,
@@ -13976,7 +13940,6 @@ mod tests {
         let Json(started) = start_saved_run(
             State(state.clone()),
             Path(script.id),
-            Query(WorkflowScriptListQuery::default()),
             Json(StartWorkflowRunRequest {
                 args: Value::Null,
                 budget: Some(WorkflowBudget {
@@ -14048,7 +14011,6 @@ mod tests {
         let Json(started) = start_saved_run(
             State(state.clone()),
             Path(parent.id),
-            Query(WorkflowScriptListQuery::default()),
             Json(StartWorkflowRunRequest {
                 args: Value::Null,
                 budget: None,
@@ -14135,7 +14097,6 @@ mod tests {
         let Json(started) = start_saved_run(
             State(state.clone()),
             Path(parent.id),
-            Query(WorkflowScriptListQuery::default()),
             Json(StartWorkflowRunRequest {
                 args: Value::Null,
                 budget: None,
