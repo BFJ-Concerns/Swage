@@ -71,20 +71,37 @@ pub struct ScriptMeta {
 pub fn script_meta(source: &str) -> Result<ScriptMeta, String> {
     let header_end = skip_whitespace_and_comments(source);
     let rest = &source[header_end..];
-    let Some(after_export) = rest.strip_prefix("export") else { return Ok(ScriptMeta::default()); };
-    let Some(after_const) = after_export.trim_start().strip_prefix("const") else { return Ok(ScriptMeta::default()); };
-    let Some(after_meta) = after_const.trim_start().strip_prefix("meta") else { return Ok(ScriptMeta::default()); };
-    let Some(after_equals) = after_meta.trim_start().strip_prefix('=') else { return Err("workflow meta must be assigned an object literal".into()); };
+    let Some(after_export) = rest.strip_prefix("export") else {
+        return Ok(ScriptMeta::default());
+    };
+    let Some(after_const) = after_export.trim_start().strip_prefix("const") else {
+        return Ok(ScriptMeta::default());
+    };
+    let Some(after_meta) = after_const.trim_start().strip_prefix("meta") else {
+        return Ok(ScriptMeta::default());
+    };
+    let Some(after_equals) = after_meta.trim_start().strip_prefix('=') else {
+        return Err("workflow meta must be assigned an object literal".into());
+    };
     let object = after_equals.trim_start();
-    if !object.starts_with('{') { return Err("workflow meta must be an object literal".into()); }
+    if !object.starts_with('{') {
+        return Err("workflow meta must be an object literal".into());
+    }
     let end = find_balanced_object_end(object)?;
     // Portable scripts use JavaScript object syntax. JSON-form headers give us
     // reliable field extraction; other object literals remain accepted and are
     // simply not a source of saved details.
-    let value: serde_json::Value = serde_json::from_str(&object[..=end]).unwrap_or(serde_json::Value::Null);
+    let value: serde_json::Value =
+        serde_json::from_str(&object[..=end]).unwrap_or(serde_json::Value::Null);
     Ok(ScriptMeta {
-        name: value.get("name").and_then(serde_json::Value::as_str).map(str::to_owned),
-        description: value.get("description").and_then(serde_json::Value::as_str).map(str::to_owned),
+        name: value
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+        description: value
+            .get("description")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
     })
 }
 
@@ -101,12 +118,19 @@ fn extract_defaults(source: &str) -> Result<(Option<String>, &str), String> {
         && let Some(after_const) = after_export.trim_start().strip_prefix("const")
         && let Some(after_meta) = after_const.trim_start().strip_prefix("meta")
     {
-        let after_equals = after_meta.trim_start().strip_prefix('=').ok_or("workflow meta must be assigned an object literal")?;
+        let after_equals = after_meta
+            .trim_start()
+            .strip_prefix('=')
+            .ok_or("workflow meta must be assigned an object literal")?;
         let object = after_equals.trim_start();
-        if !object.starts_with('{') { return Err("workflow meta must be an object literal".into()); }
+        if !object.starts_with('{') {
+            return Err("workflow meta must be an object literal".into());
+        }
         let end = find_balanced_object_end(object)?;
         body = object[end + 1..].trim_start();
-        if let Some(after_semicolon) = body.strip_prefix(';') { body = after_semicolon; }
+        if let Some(after_semicolon) = body.strip_prefix(';') {
+            body = after_semicolon;
+        }
     }
     let header_end = skip_whitespace_and_comments(body);
     let rest = &body[header_end..];
@@ -961,14 +985,29 @@ impl WorkflowEngine {
         }
         match result {
             Ok(output) => {
-                let envelope: serde_json::Value = serde_json::from_str(&output).map_err(|error| WorkflowEngineError::Script(error.to_string()))?;
+                let envelope: serde_json::Value = serde_json::from_str(&output)
+                    .map_err(|error| WorkflowEngineError::Script(error.to_string()))?;
                 if let Some(failure) = envelope.get("agent_call") {
                     return Err(WorkflowEngineError::AgentCall {
-                        host_reference: failure.get("host_reference").and_then(serde_json::Value::as_str).unwrap_or_default().to_owned(),
-                        message: failure.get("message").and_then(serde_json::Value::as_str).unwrap_or("AgentCallError: agent call failed").to_owned(),
+                        host_reference: failure
+                            .get("host_reference")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or_default()
+                            .to_owned(),
+                        message: failure
+                            .get("message")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("AgentCallError: agent call failed")
+                            .to_owned(),
                     });
                 }
-                envelope.get("result").and_then(serde_json::Value::as_str).map(str::to_owned).ok_or_else(|| WorkflowEngineError::Script("workflow result envelope is malformed".into()))
+                envelope
+                    .get("result")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
+                    .ok_or_else(|| {
+                        WorkflowEngineError::Script("workflow result envelope is malformed".into())
+                    })
             }
             Err(error) => Err(WorkflowEngineError::Script(error)),
         }
@@ -1360,8 +1399,20 @@ mod tests {
             )
             .await
             .expect("portable script runs");
-        assert_eq!(serde_json::from_str::<Value>(&output).unwrap(), json!({"ok": true}));
-        assert_eq!(script_meta(r#"export const meta = {"name":"portable","description":"runs unchanged"};"#).unwrap(), ScriptMeta { name: Some("portable".into()), description: Some("runs unchanged".into()) });
+        assert_eq!(
+            serde_json::from_str::<Value>(&output).unwrap(),
+            json!({"ok": true})
+        );
+        assert_eq!(
+            script_meta(
+                r#"export const meta = {"name":"portable","description":"runs unchanged"};"#
+            )
+            .unwrap(),
+            ScriptMeta {
+                name: Some("portable".into()),
+                description: Some("runs unchanged".into())
+            }
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
