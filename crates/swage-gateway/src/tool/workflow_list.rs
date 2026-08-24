@@ -14,8 +14,6 @@ use uuid::Uuid;
 use crate::{state::AppState, tool::Tool, tool_executor::GatewayToolContext};
 
 pub const WORKFLOW_LIST_TOOL: &str = "workflow_list";
-const ARGUMENT_GUIDANCE: &str =
-    "Pass any JSON value in workflow_run.args. This workflow does not declare an argument schema.";
 
 /// Project the established effective workflow listing for one caller session.
 ///
@@ -43,7 +41,6 @@ pub async fn workflows_for_session(state: &AppState, session_id: Uuid) -> Result
         "workflows": response.scripts.into_iter().map(|script| json!({
             "name": script.name,
             "description": script.description,
-            "argument_guidance": ARGUMENT_GUIDANCE,
         })).collect::<Vec<_>>(),
     }))
 }
@@ -57,7 +54,7 @@ impl Tool for WorkflowListTool {
     }
 
     fn description(&self) -> &str {
-        "List the workflows available in this session. Each entry gives its name, purpose, and how to pass arguments to workflow_run."
+        "List the workflows available in this session. Each entry gives its name and purpose. Workflow scripts do not declare argument schemas; pass any JSON value in workflow_run.args that the workflow expects."
     }
 
     fn parameters(&self) -> Value {
@@ -205,7 +202,7 @@ mod tests {
             .find(|workflow| workflow["name"] == "operator-report")
             .expect("saved workflow");
         assert_eq!(saved["description"], "Produce an operator report.");
-        assert_eq!(saved["argument_guidance"], ARGUMENT_GUIDANCE);
+        assert!(saved.get("argument_guidance").is_none());
     }
 
     #[tokio::test(flavor = "multi_thread")]
