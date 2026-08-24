@@ -6,6 +6,7 @@ All notable changes to Swage are documented in this file.
 
 ### Added
 
+- Context assembly alternatives can now be configured under `context.alternatives` for controlled selection experiments.
 - Fresh spaces now include immutable researcher, organiser, and synthesist agent definitions for the shipped research-sweep workflow, with same-named authored definitions taking precedence.
 - Knowledge captures made by workflow workers now carry their journalled call's identity, so a sweep interrupted mid-gather resumes without duplicating any source's observation.
 - Research sweeps now author evidence-backed orientation cards during the organising pass and report claims the synthesist withheld for lack of supporting evidence.
@@ -50,6 +51,8 @@ All notable changes to Swage are documented in this file.
 - Surface navigation now marks Settings, rather than a hidden conversation or operator surface, as active while it is open.
 - Reconnecting after a dropped socket now clears only the captured live turn when its refreshed conversation is terminal.
 - Gateway startup now directs legacy environment credentials to their governed secret-management routes.
+- Missing file-like frontend paths now return HTTP 404 instead of a successful SPA shell.
+- Turn-context inspection now shows exact built-in orientation and working-norm excerpts plus active skill names, while leaving operator and conversation content unpreviewed.
 - Resumed workflow runs now park durably when a long timer follows an agent, child-workflow, or gate completion.
 - Tool-call and connection-error failure states now use the shared error treatment instead of action orange; connection loss and reconnection keep their ordinary connectivity treatment.
 - Inline-turn and approval errors now use the error-token wash in both themes.
