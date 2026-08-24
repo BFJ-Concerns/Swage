@@ -67,6 +67,7 @@ pub struct PartialLoggingConfig {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PartialContextConfig {
     pub assembly: Option<String>,
+    pub alternatives: Option<Vec<String>>,
     pub timeout: Option<u64>,
     pub budget: Option<Option<usize>>,
 }
@@ -300,6 +301,11 @@ impl From<ResolvedConfig> for PartialConfig {
             }),
             context: Some(PartialContextConfig {
                 assembly: Some(r.context.assembly),
+                alternatives: if r.context.alternatives.is_empty() {
+                    None
+                } else {
+                    Some(r.context.alternatives)
+                },
                 timeout: Some(r.context.timeout),
                 budget: Some(r.context.budget),
             }),
@@ -473,6 +479,7 @@ impl_merge_overlay!(PartialSandboxConfig {
 impl_merge_overlay!(PartialLoggingConfig { level });
 impl_merge_overlay!(PartialContextConfig {
     assembly,
+    alternatives,
     timeout,
     budget,
 });
@@ -822,6 +829,7 @@ pub fn resolve(partial: PartialConfig) -> ResolvedConfig {
             let c = partial.context.unwrap_or_default();
             ContextConfig {
                 assembly: c.assembly.unwrap_or(dc.assembly),
+                alternatives: c.alternatives.unwrap_or(dc.alternatives),
                 timeout: c.timeout.unwrap_or(dc.timeout),
                 // Double-option: outer None → inherit default (None), Some(x) → use x.
                 budget: c.budget.unwrap_or(dc.budget),
@@ -1373,6 +1381,7 @@ mod tests {
         let partial = PartialConfig {
             context: Some(PartialContextConfig {
                 assembly: Some("custom".to_string()),
+                alternatives: Some(vec!["alternate".to_string()]),
                 timeout: Some(15),
                 budget: Some(Some(8192)),
             }),
@@ -1380,6 +1389,7 @@ mod tests {
         };
         let resolved = resolve(partial);
         assert_eq!(resolved.context.assembly, "custom");
+        assert_eq!(resolved.context.alternatives, vec!["alternate"]);
         assert_eq!(resolved.context.timeout, 15);
         assert_eq!(resolved.context.budget, Some(8192));
     }

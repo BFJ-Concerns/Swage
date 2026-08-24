@@ -120,14 +120,13 @@ fn default_assembly_inner(
             history_range = Some(range_start..range_start + content.len());
         }
 
-        // Populate a preview for skills elements: a comma-separated list of
-        // active skill names extracted from the source string. Other elements
-        // do not yet provide previews.
-        let preview = if element.name() == "skills" {
-            extract_skill_names_preview(&source)
-        } else {
-            None
-        };
+        // Elements opt in only when they can construct a useful preview
+        // without copying operator, session, or conversation material into
+        // the persistent report. Generic assembly cannot know every literal
+        // secret an element may contain, so it must not derive one itself.
+        let preview = element
+            .report_preview()
+            .or_else(|| safe_metadata_preview(element.name(), &source));
 
         element_reports.push(ElementReport {
             name: element.name().to_string(),
@@ -224,6 +223,12 @@ fn default_assembly_inner(
 ///
 /// Returns `Some("name1, name2")` when skills are present, `None` otherwise.
 /// The parenthesised level/token annotations are stripped; only the bare names remain.
+pub(crate) fn safe_metadata_preview(name: &str, source: &str) -> Option<String> {
+    (name == "skills")
+        .then(|| extract_skill_names_preview(source))
+        .flatten()
+}
+
 fn extract_skill_names_preview(source: &str) -> Option<String> {
     // Only process the "skills: ..." form; "skills (none active)" → None.
     let after_prefix = source.strip_prefix("skills: ")?;
@@ -345,6 +350,7 @@ mod tests {
     fn no_budget_config() -> ContextConfig {
         ContextConfig {
             assembly: "default".to_string(),
+            alternatives: Vec::new(),
             timeout: 5,
             budget: None,
         }
@@ -353,6 +359,7 @@ mod tests {
     fn budget_config(tokens: usize) -> ContextConfig {
         ContextConfig {
             assembly: "default".to_string(),
+            alternatives: Vec::new(),
             timeout: 5,
             budget: Some(tokens),
         }
@@ -699,6 +706,23 @@ mod tests {
             skills_report.preview.is_none(),
             "empty skills should have no preview"
         );
+    }
+
+    #[test]
+    fn untrusted_element_content_has_no_persisted_preview() {
+        let content = format!(
+            "Keep this opening instruction. Bearer {} {}",
+            "a".repeat(32),
+            "x".repeat(300)
+        );
+        let elements: Vec<Box<dyn ContextElement>> = vec![prompts_element(&content)];
+        let output = default_assembly(
+            &elements,
+            &no_budget_config(),
+            &FixedCostTokeniser { cost: 10 },
+        );
+
+        assert!(output.report.elements[0].preview.is_none());
     }
 
     #[test]
