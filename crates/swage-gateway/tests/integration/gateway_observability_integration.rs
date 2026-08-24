@@ -29,6 +29,8 @@ use swage_gateway::{server::build_router, state::AppState};
 use swage_provider::LlmProvider;
 use swage_storage::SqliteStorage;
 
+use crate::support::live_http_json;
+
 // ---------------------------------------------------------------------------
 // Mock provider — streams tokens with usage metadata
 // ---------------------------------------------------------------------------
@@ -246,17 +248,6 @@ async fn http(router: &Router, method: &str, uri: &str) -> (StatusCode, Value) {
     let status = resp.status();
     let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
     let body = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-    (status, body)
-}
-
-async fn live_http(addr: SocketAddr, method: reqwest::Method, path: &str) -> (StatusCode, Value) {
-    let response = reqwest::Client::new()
-        .request(method, format!("http://{addr}{path}"))
-        .send()
-        .await
-        .expect("loopback HTTP request should succeed");
-    let status = response.status();
-    let body = response.json().await.unwrap_or(Value::Null);
     (status, body)
 }
 
@@ -501,10 +492,11 @@ async fn past_turn_report_matches_live_websocket_report() {
     let live_report = &context_event["report"];
 
     // Query the REST endpoint for the same turn.
-    let (status, stored_body) = live_http(
+    let (status, stored_body) = live_http_json(
         addr,
         reqwest::Method::GET,
         &format!("/api/turns/{turn_id}/context"),
+        None,
     )
     .await;
     assert_eq!(

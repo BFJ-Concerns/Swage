@@ -12,7 +12,7 @@
 use chrono::{DateTime, Utc};
 use swage_core::{ChatMessage, Role};
 
-use crate::element::ContextElement;
+use crate::element::{ContextElement, built_in_first_sentence_preview};
 use crate::tokeniser::Tokeniser;
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -181,10 +181,7 @@ impl ContextElement for OrientationElement {
     }
 
     fn report_preview(&self) -> Option<String> {
-        Some(
-            "You are an agent running on Swage, a context-governed agent platform on your operator's own hardware."
-                .to_string(),
-        )
+        Some(built_in_first_sentence_preview(IDENTITY))
     }
 }
 
@@ -236,12 +233,11 @@ mod tests {
     #[test]
     fn report_preview_is_a_static_excerpt_not_session_environment() {
         let element = OrientationElement::new(bare_environment(), vec![]);
-        assert_eq!(
-            element.report_preview().as_deref(),
-            Some(
-                "You are an agent running on Swage, a context-governed agent platform on your operator's own hardware."
-            )
-        );
+        let content = element.content()[0].text_content();
+        let preview = element.report_preview().expect("built-in preview");
+
+        assert!(content.starts_with(&preview));
+        assert!(!preview.contains("Session started:"));
     }
 
     #[test]

@@ -14,7 +14,7 @@
 
 use swage_core::{ChatMessage, Role};
 
-use crate::element::ContextElement;
+use crate::element::{ContextElement, built_in_first_sentence_preview};
 use crate::tokeniser::Tokeniser;
 
 /// The model families whose bare-proxy sessions get family-specific norms.
@@ -319,10 +319,7 @@ impl ContextElement for WorkingNormsElement {
     }
 
     fn report_preview(&self) -> Option<String> {
-        Some(
-            "## Working norms\nWork to completion: when the task is clear, carry it through with your tools and report the outcome."
-                .to_string(),
-        )
+        Some(built_in_first_sentence_preview(COMMON_NORMS))
     }
 }
 
@@ -390,12 +387,11 @@ mod tests {
     #[test]
     fn report_preview_is_a_static_excerpt_of_the_common_norms() {
         let element = WorkingNormsElement::for_model("gpt-4o", WorkingNormsScaffold::Native);
-        assert_eq!(
-            element.report_preview().as_deref(),
-            Some(
-                "## Working norms\nWork to completion: when the task is clear, carry it through with your tools and report the outcome."
-            )
-        );
+        let content = element.content()[0].text_content();
+        let preview = element.report_preview().expect("built-in preview");
+
+        assert!(content.starts_with(&preview));
+        assert!(preview.ends_with("stopping at a plan."));
     }
 
     #[test]

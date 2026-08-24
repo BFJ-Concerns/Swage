@@ -44,7 +44,7 @@ All notable changes to Swage are documented in this file.
 ### Fixed
 
 - Missing file-like frontend paths now return HTTP 404 instead of a successful SPA shell.
-- Turn-context inspection now includes bounded, secret-safe summaries of the context each element contributed.
+- Turn-context inspection now shows exact built-in orientation and working-norm excerpts plus active skill names, while leaving operator and conversation content unpreviewed.
 - Workflow scripts now reject unrecognised `agent()` and `agentStart()` option keys before dispatch instead of silently dropping them.
 - Reloading the web UI now returns to the open space instead of the space picker.
 - Operator schedules now show their complete execution target from every space.
