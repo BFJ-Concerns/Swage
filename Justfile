@@ -29,11 +29,11 @@ fmt:
 fmt-check:
     cargo run -p xtask -- fmt-check
 
+# Workspace and frontend type check only.
 check:
     cargo run -p xtask -- check
 
-# Fast, pre-test static gate: local-state, format, workspace/frontend,
-# frontend design-token, and clippy checks.
+# Full fast static gate: local state, formatting, workspace/frontend, design-token, and clippy checks.
 check-gate:
     cargo run -p xtask -- check-gate
 

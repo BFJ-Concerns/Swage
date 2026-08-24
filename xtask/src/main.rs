@@ -1258,6 +1258,6 @@ fn option_value(arg: &str) -> &str {
 
 fn print_help() {
     println!(
-        "Usage: cargo run -p xtask -- <command>\n\nCommands:\n  setup\n  build-dev [--embed-frontend]\n  dev [--gateway-port PORT] [--vite-host HOST] [--vite-port PORT]\n  fmt\n  fmt-check\n  check\n  check-gate\n  check-design-tokens\n  clippy\n  test\n  test-lib <package> [filter...]\n  test-integration <package> <test-target> [filter...]\n  verify (alias: ci)\n  sweep\n  release [--force-frontend]\n  install [--prefix DIR] [--skip-frontend] [--lan]"
+        "Usage: cargo run -p xtask -- <command>\n\nCommands:\n  setup\n  build-dev [--embed-frontend]\n  dev [--gateway-port PORT] [--vite-host HOST] [--vite-port PORT]\n  fmt\n  fmt-check\n  check (workspace and frontend type check only)\n  check-gate (full static rung)\n  check-design-tokens\n  clippy\n  test\n  test-lib <package> [filter...]\n  test-integration <package> <test-target> [filter...]\n  verify (alias: ci)\n  sweep\n  release [--force-frontend]\n  install [--prefix DIR] [--skip-frontend] [--lan]"
     );
 }
