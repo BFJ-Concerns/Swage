@@ -1,7 +1,7 @@
 // The provider is controlled; Chromium, the rendered Svelte app, HTTP/WebSocket
 // transport, gateway turn loop, storage, cancellation and approvals are live.
 import { createServer } from "node:net";
-import { mkdtemp, rm } from "node:fs/promises";
+import { access, mkdtemp, rm } from "node:fs/promises";
 import { spawn, type ChildProcess } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -102,9 +102,12 @@ test("keeps concurrent browser-suite stacks isolated during teardown", async ({ 
     await secondPage.goto(second.baseUrl);
     await openComposer(firstPage);
     await openComposer(secondPage);
+    await access(join(first.root, "state"));
+    await access(join(second.root, "state"));
 
     await stopStack(first.child);
     await waitForHealth(second.baseUrl);
+    await access(join(second.root, "state"));
     await secondPage.reload();
     await openComposer(secondPage);
   } finally {
