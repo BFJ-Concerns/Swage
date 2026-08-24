@@ -783,7 +783,9 @@ mod tests {
             std::fs::write(config, "[server]\nport = 4100\n").expect("write agent config");
         }
 
-        let active = swage_config::ResolvedConfig::default();
+        let mut active = swage_config::ResolvedConfig::default();
+        active.instructions = "RUNTIME_ONLY_MARKER".to_string();
+        let runtime_instructions = active.instructions.clone();
         let reserved = load_session_config_from_root(
             root.path(),
             active.clone(),
@@ -795,7 +797,7 @@ mod tests {
             .expect("ordinary agent config");
 
         assert_eq!(
-            reserved.server.port, 3000,
+            reserved.instructions, runtime_instructions,
             "a reserved directory must not replace the running configuration"
         );
         assert_eq!(
