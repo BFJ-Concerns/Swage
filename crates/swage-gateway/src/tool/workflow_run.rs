@@ -7,6 +7,7 @@ use uuid::Uuid;
 
 use crate::{
     tool::Tool,
+    tool::workflow_list::workflows_for_session,
     tool_executor::GatewayToolContext,
     workflow::{GatewayWorkflowLauncher, WorkflowLauncher},
 };
@@ -111,10 +112,27 @@ impl Tool for WorkflowRunTool {
             }
             _ => unreachable!("name/source validation is exhaustive"),
         };
-        result.map_err(|message| ToolError::ExecutionFailed {
-            name: self.name().into(),
-            message,
-        })
+        match result {
+            Ok(value) => Ok(value),
+            Err(message)
+                if name.is_some_and(|name| {
+                    message == format!("workflow script {name:?} was not found")
+                }) =>
+            {
+                let catalogue = workflows_for_session(state, session_id).await.map_err(|listing_error| ToolError::ExecutionFailed {
+                    name: self.name().into(),
+                    message: format!("{message}; additionally failed to list available workflows: {listing_error}"),
+                })?;
+                Err(ToolError::ExecutionFailed {
+                    name: self.name().into(),
+                    message: format!("{message}. Available workflows: {catalogue}"),
+                })
+            }
+            Err(message) => Err(ToolError::ExecutionFailed {
+                name: self.name().into(),
+                message,
+            }),
+        }
     }
 }
 
@@ -229,7 +247,7 @@ mod tests {
             crate::tool::ToolDispatcher::allow_all(vec![]),
             None,
         );
-        let base = MockToolContext::new("current-agent", session.id.to_string());
+        let base = MockToolContext::new("gateway", session.id.to_string());
         let (ws_tx, _ws_rx) = tokio::sync::mpsc::unbounded_channel();
         let context =
             GatewayToolContext::new(&base, ws_tx, Arc::clone(&storage) as Arc<dyn Storage>)
@@ -289,5 +307,60 @@ mod tests {
             .expect("listed run");
         assert_eq!(listed.source.as_deref(), Some(source));
         assert_eq!(listed.source_hash, expected_hash);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn unknown_named_workflow_error_lists_the_effective_catalogue() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        storage
+            .create_workflow_script(swage_storage::NewWorkflowScript {
+                space_id: space.id,
+                name: "operator-report".into(),
+                description: "Produce an operator report.".into(),
+                source: "return {};".into(),
+                delivery_grant: None,
+            })
+            .await
+            .expect("saved workflow");
+        let session = storage
+            .create_session(NewSession {
+                space_id: space.id,
+                agent_id: "gateway".into(),
+                metadata: None,
+                active_workspace_attachment_id: None,
+            })
+            .await
+            .expect("session");
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let base = MockToolContext::new("current-agent", session.id.to_string());
+        let (ws_tx, _ws_rx) = tokio::sync::mpsc::unbounded_channel();
+        let context =
+            GatewayToolContext::new(&base, ws_tx, Arc::clone(&storage) as Arc<dyn Storage>)
+                .with_app_state(Some(state));
+
+        let error = WorkflowRunTool
+            .execute(json!({"name": "not-a-workflow"}), &context)
+            .await
+            .expect_err("unknown name should fail");
+        let ToolError::ExecutionFailed { message, .. } = error else {
+            panic!("unknown name should be an execution failure: {error}");
+        };
+        assert!(message.contains("not-a-workflow"));
+        assert!(
+            message.contains("research-sweep"),
+            "shipped workflow missing: {message}"
+        );
+        assert!(
+            message.contains("operator-report"),
+            "saved workflow missing: {message}"
+        );
     }
 }

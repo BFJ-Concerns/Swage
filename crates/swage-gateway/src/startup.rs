@@ -680,6 +680,7 @@ pub(crate) fn build_tool_dispatcher_with_browser(
             max_output_bytes: max_output,
         }),
         Arc::new(swage_tool::delegate::DelegateTool),
+        Arc::new(crate::tool::workflow_list::WorkflowListTool),
         Arc::new(crate::tool::workflow_run::WorkflowRunTool),
         // MemoryTool derives the memory path from ctx.working_directory() at runtime.
         Arc::new(MemoryTool),
@@ -1602,6 +1603,24 @@ mod tests {
                 .get(swage_tool::delegate::DELEGATE_TOOL_NAME)
                 .is_some(),
             "delegate tool should be registered with the built-in dispatcher",
+        );
+    }
+
+    #[tokio::test]
+    async fn build_tool_dispatcher_registers_workflow_list_tool() {
+        let storage =
+            Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
+        let dispatcher = build_tool_dispatcher(
+            &swage_config::ResolvedConfig::default(),
+            storage as Arc<dyn swage_storage::store::Storage>,
+            std::path::Path::new(".swage"),
+        );
+
+        assert!(
+            dispatcher
+                .registry()
+                .get(crate::tool::workflow_list::WORKFLOW_LIST_TOOL)
+                .is_some()
         );
     }
 
