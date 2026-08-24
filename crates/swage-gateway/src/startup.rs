@@ -199,19 +199,7 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
     );
     state.voice_provider = voice_provider;
     state.telegram = telegram;
-    let replayable_worktree_owners =
-        match crate::workflow::replayable_worktree_owner_ids(&state).await {
-            Ok(owners) => owners,
-            Err(error) => {
-                eprintln!("Workflow worktree recovery planning failed: {error}");
-                std::process::exit(1);
-            }
-        };
-    if let Err(error) = state
-        .worktree_host
-        .recover(&replayable_worktree_owners)
-        .await
-    {
+    if let Err(error) = recover_worktrees_after_crash(&state).await {
         eprintln!("Worktree startup recovery failed: {error}");
         std::process::exit(1);
     }
@@ -356,6 +344,18 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
     if let Err(e) = RuntimeMetadata::remove() {
         warn!("Failed to remove runtime metadata on shutdown: {e}");
     }
+}
+
+/// Recover crash-stranded worktrees after durable workflow state is available.
+///
+/// Workflow runs that the wake loop can replay retain their durable placement
+/// directories; all other registered gateway worktrees are reclaimed.
+async fn recover_worktrees_after_crash(state: &crate::state::AppState) -> Result<usize, String> {
+    let replayable_worktree_owners = state.replayable_worktree_owner_ids().await?;
+    state
+        .worktree_host
+        .recover(&replayable_worktree_owners)
+        .await
 }
 
 async fn create_voice_provider(
@@ -1067,12 +1067,126 @@ mod tests {
         LogLevel, ModelCatalogConfig, ModelEndpointConfig, Protocol, ProviderCatalogConfig,
         ProviderEndpointConfig,
     };
-    use swage_storage::store::AuditStore;
+    use swage_storage::{
+        SqliteStorage,
+        model::NewWorkflowRun,
+        store::{AuditStore, SpaceStore, Storage, WorkflowStore},
+    };
     use tokio::net::TcpListener;
     use tracing_subscriber::{Registry, layer::SubscriberExt};
 
     #[derive(Clone, Default)]
     struct RecordedEvents(Arc<Mutex<Vec<String>>>);
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn startup_recovery_retains_replayable_worktree_owners() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        let repo = fixture.path().join("repo");
+        std::fs::create_dir(&repo).expect("repository directory");
+        for args in [
+            &["init"][..],
+            &["config", "user.email", "test@example.invalid"][..],
+            &["config", "user.name", "Test"][..],
+        ] {
+            assert!(
+                std::process::Command::new("git")
+                    .arg("-C")
+                    .arg(&repo)
+                    .args(args)
+                    .status()
+                    .expect("run git")
+                    .success()
+            );
+        }
+        std::fs::write(repo.join("seed"), "seed").expect("seed repository");
+        assert!(
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(["add", "seed"])
+                .status()
+                .expect("stage seed")
+                .success()
+        );
+        assert!(
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(["commit", "-m", "seed"])
+                .status()
+                .expect("commit seed")
+                .success()
+        );
+
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let run = storage
+            .create_workflow_run(NewWorkflowRun {
+                space_id: space.id,
+                parent_run_id: None,
+                parent_seq: None,
+                script_version_id: None,
+                inline_workflow_id: None,
+                inline_workflow_name: None,
+                inline_workflow_version: None,
+                carrying_skill: None,
+                source: Some("return null".into()),
+                source_hash: "startup-recovery-test".into(),
+                args: Value::Null,
+                budget: json!({}),
+                engine_version: "test".into(),
+                dispatch_bound_agent_ids: vec![],
+                dispatch_bound_task_definition_ids: vec![],
+                workflow_call_tools: None,
+                inherited_worker_placement: None,
+            })
+            .await
+            .expect("workflow run");
+        storage
+            .update_workflow_run_state(run.id, "interrupted", None, None, None)
+            .await
+            .expect("interrupt run");
+        let state = crate::state::AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        )
+        .with_worktree_root(fixture.path().join("worker-worktrees"));
+        let worktree = state
+            .worktree_host
+            .provision(run.id, 0, &repo)
+            .await
+            .expect("provision worktree");
+
+        assert_eq!(
+            recover_worktrees_after_crash(&state)
+                .await
+                .expect("startup recovery"),
+            0,
+            "an interrupted run must retain its worktree for replay"
+        );
+        assert!(
+            worktree.exists(),
+            "replayable worktree must survive startup"
+        );
+        let registrations = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["worktree", "list", "--porcelain"])
+            .output()
+            .expect("list worktrees");
+        assert!(registrations.status.success());
+        assert!(
+            String::from_utf8_lossy(&registrations.stdout)
+                .contains(&format!("worktree {}", worktree.display())),
+            "Git registration must survive startup recovery"
+        );
+
+        state.worktree_host.shutdown().await;
+    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn obsolete_workflow_schema_reports_rebuild_instruction() {

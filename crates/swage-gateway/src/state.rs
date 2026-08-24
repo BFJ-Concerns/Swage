@@ -168,6 +168,41 @@ pub struct ChannelLinkCodeRecord {
 }
 
 impl AppState {
+    /// Owner directories that must survive startup recovery because the
+    /// workflow wake loop can replay them from durable placement journals.
+    pub(crate) async fn replayable_worktree_owner_ids(&self) -> Result<HashSet<Uuid>, String> {
+        let mut owners = self
+            .storage
+            .list_interrupted_workflow_runs()
+            .await
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .map(|run| run.id)
+            .collect::<HashSet<_>>();
+
+        // Storage has a global interrupted-run lister, but parked runs are
+        // currently listed by space. Keep the latter scan until storage owns
+        // an all-parked query too.
+        for space in self
+            .space_store
+            .list_all()
+            .await
+            .map_err(|error| error.to_string())?
+        {
+            for run in self
+                .storage
+                .list_workflow_runs(space.id)
+                .await
+                .map_err(|error| error.to_string())?
+            {
+                if run.state == "parked" {
+                    owners.insert(run.id);
+                }
+            }
+        }
+        Ok(owners)
+    }
+
     pub fn new(
         storage: Arc<dyn Storage>,
         space_store: Arc<dyn SpaceStore>,
