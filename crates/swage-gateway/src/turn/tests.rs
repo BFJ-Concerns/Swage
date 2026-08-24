@@ -10444,6 +10444,113 @@ fn effective_session_config_resolves_aliased_selected_model_as_default() {
 }
 
 #[tokio::test]
+async fn request_model_alias_overrides_only_the_turn_and_is_recorded_in_its_snapshot() {
+    let chunks = vec![
+        StreamChunk::Delta {
+            content: "Hello".into(),
+        },
+        StreamChunk::Done {
+            finish_reason: None,
+        },
+    ];
+    let (provider, captured_request) = CapturingProvider::new(chunks);
+    let (storage, session_id) = make_storage_with_session().await;
+    let mut config = swage_config::ResolvedConfig::default();
+    config.models.default = "default".to_string();
+    config.models.entries.insert(
+        "default".to_string(),
+        swage_config::ModelEndpointConfig {
+            provider_id: "first-provider".to_string(),
+            model_id: "default-wire".to_string(),
+            ..Default::default()
+        },
+    );
+    config.models.entries.insert(
+        "alternate".to_string(),
+        swage_config::ModelEndpointConfig {
+            provider_id: "second-provider".to_string(),
+            model_id: "alternate-wire".to_string(),
+            aliases: vec!["fast".to_string()],
+            ..Default::default()
+        },
+    );
+    let state = AppState::new(
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
+        Arc::new(provider) as Arc<dyn LlmProvider>,
+        config,
+        crate::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+    );
+    let (tx, _rx) = mpsc::unbounded_channel();
+
+    process_turn_with_existing_turn_and_focus_and_model(
+        &state,
+        session_id,
+        None,
+        "hello".to_string(),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+        None,
+        None,
+        None,
+        None,
+        TurnAttendance::Attended,
+        None,
+        Some("fast".to_string()),
+    )
+    .await
+    .expect("selected turn should complete");
+
+    assert_eq!(
+        captured_request
+            .lock()
+            .expect("capture lock")
+            .as_ref()
+            .expect("provider receives request")
+            .model
+            .as_deref(),
+        Some("alternate-wire")
+    );
+    let session = storage
+        .get_session(session_id)
+        .await
+        .expect("get session")
+        .expect("session remains");
+    assert_eq!(
+        session.selected_model_id, None,
+        "request must not persist selection"
+    );
+    let thread = storage.list_by_session(session_id).await.expect("threads")[0].clone();
+    let turn = storage
+        .list_turns_by_thread(thread.id)
+        .await
+        .expect("turns")[0]
+        .clone();
+    let snapshot: serde_json::Value = serde_json::from_str(
+        &storage
+            .get_snapshot(turn.id)
+            .await
+            .expect("read snapshot")
+            .expect("turn snapshot"),
+    )
+    .expect("snapshot json");
+    assert_eq!(
+        snapshot["provider_visible"]["effective_model"]["catalogue_entry"],
+        "alternate"
+    );
+    assert_eq!(
+        snapshot["provider_visible"]["effective_model"]["model_id"],
+        "alternate-wire"
+    );
+    assert_eq!(
+        snapshot["provider_visible"]["effective_model"]["provider_id"],
+        "second-provider"
+    );
+}
+
+#[tokio::test]
 async fn process_turn_stream_request_inherits_global_permissions_without_workspace_grants() {
     let chunks = vec![
         StreamChunk::Delta {
