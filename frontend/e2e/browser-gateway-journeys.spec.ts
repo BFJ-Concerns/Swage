@@ -52,6 +52,23 @@ async function stopStack(child: ChildProcess): Promise<void> {
   await new Promise<void>((resolveExit) => child.once("exit", () => resolveExit()));
 }
 
+async function listConcurrentSuite(): Promise<void> {
+  const child = spawn(process.execPath, [join(frontendDir, "e2e/run-suite.mjs"), "--list"], {
+    cwd: frontendDir,
+    stdio: "pipe",
+    env: {
+      ...process.env,
+      SWAGE_E2E_INVOCATION_DIR: undefined,
+      SWAGE_E2E_RESULTS_DIR: undefined,
+    },
+  });
+  let output = "";
+  child.stdout?.on("data", (chunk) => { output += chunk; });
+  child.stderr?.on("data", (chunk) => { output += chunk; });
+  const code = await new Promise<number | null>((resolveExit) => child.once("exit", resolveExit));
+  if (code !== 0) throw new Error(`Concurrent suite listing failed (${code}):\n${output}`);
+}
+
 async function openComposer(page: Page): Promise<void> {
   const openSpace = page.getByRole("button", { name: "Open" });
   if (await openSpace.isVisible()) await openSpace.click();
@@ -86,9 +103,12 @@ test("cancels an active turn from the rendered conversation", async ({ page }) =
   await page.getByRole("button", { name: "Stop" }).click();
   await expect(page.getByText("Response interrupted")).toBeVisible();
   await expect(page.getByRole("button", { name: "Send" })).toBeVisible();
-  await expect(page.getByLabel("Assistant message")).not.toContainText(
+  await page.waitForTimeout(8_100);
+  await expect(page.locator("body")).not.toContainText(
     "This tail must never render.",
   );
+  await page.reload();
+  await expect(page.getByText("Response interrupted")).toBeVisible();
 });
 
 test("keeps concurrent browser-suite stacks isolated during teardown", async ({ browser }) => {
@@ -102,6 +122,10 @@ test("keeps concurrent browser-suite stacks isolated during teardown", async ({ 
     await secondPage.goto(second.baseUrl);
     await openComposer(firstPage);
     await openComposer(secondPage);
+    await access(join(first.root, "state"));
+    await access(join(second.root, "state"));
+
+    await listConcurrentSuite();
     await access(join(first.root, "state"));
     await access(join(second.root, "state"));
 
