@@ -13,6 +13,7 @@ use sha2::{Digest, Sha256};
 const APP_PACKAGE: &str = "swage-gateway";
 const BINARY_NAME: &str = "swage";
 const FRONTEND_DIR: &str = "frontend";
+const FRONTEND_SRC_DIR: &str = "frontend/src";
 const DESKTOP_DIR: &str = "desktop";
 const FRONTEND_DIST_INDEX: &str = "frontend/dist/index.html";
 const FRONTEND_DEPS_STAMP: &str = "target/xtask/frontend-deps.sha256";
@@ -47,6 +48,8 @@ fn run() -> Result<()> {
         Some("fmt") => fmt(),
         Some("fmt-check") => fmt_check(),
         Some("check") => check(),
+        Some("check-gate") => check_gate(),
+        Some("check-design-tokens") => check_frontend_design_tokens(),
         Some("clippy") => clippy(),
         Some("test") => test(),
         Some("test-lib") => test_lib(args),
@@ -313,6 +316,16 @@ fn clippy() -> Result<()> {
     )
 }
 
+/// The fast, pre-test gate. Keep every static check here so builders have one
+/// command that catches branch drift before the full verification gate.
+fn check_gate() -> Result<()> {
+    check_tracked_local_state()?;
+    fmt_check()?;
+    check()?;
+    check_frontend_design_tokens()?;
+    clippy()
+}
+
 fn test() -> Result<()> {
     run_with_final_sweep("test", run_test_suite)
 }
@@ -449,10 +462,7 @@ fn filter_label(filters: &[String]) -> String {
 /// two cannot drift apart.
 fn verify() -> Result<()> {
     run_with_final_sweep("verify", || {
-        check_tracked_local_state()?;
-        fmt_check()?;
-        check()?;
-        clippy()?;
+        check_gate()?;
         let test_result = run_test_suite();
         let projection_result = check_projections_are_current();
         match (test_result, projection_result) {
@@ -464,6 +474,109 @@ fn verify() -> Result<()> {
             .into()),
         }
     })
+}
+
+fn check_frontend_design_tokens() -> Result<()> {
+    let mut files = Vec::new();
+    collect_files(Path::new(FRONTEND_SRC_DIR), &mut files)?;
+    files.sort();
+
+    let mut violations = Vec::new();
+    for file in files {
+        if file.extension().and_then(|extension| extension.to_str()) != Some("svelte") {
+            continue;
+        }
+        let contents = fs::read_to_string(&file)?;
+        for (line_number, line) in component_style_lines(&contents) {
+            for column in off_palette_colour_columns(line) {
+                violations.push(format!("{}:{}:{}", file.display(), line_number, column + 1));
+            }
+        }
+    }
+
+    let app_css = Path::new("frontend/src/app.css");
+    let app_css_contents = fs::read_to_string(app_css)?;
+    for (line_number, line) in app_css_contents.lines().enumerate() {
+        for column in off_palette_colour_columns(line) {
+            violations.push(format!(
+                "{}:{}:{}",
+                app_css.display(),
+                line_number + 1,
+                column + 1
+            ));
+        }
+    }
+
+    if violations.is_empty() {
+        println!("==> Component colour tokens are enforced");
+        Ok(())
+    } else {
+        Err(format!(
+            "off-palette hexadecimal or rgba() colours found in frontend component styles or app.css:\n  {}\nUse riso.css semantic tokens instead.",
+            violations.join("\n  ")
+        )
+        .into())
+    }
+}
+
+fn component_style_lines(contents: &str) -> impl Iterator<Item = (usize, &str)> {
+    let mut in_style = false;
+    contents
+        .lines()
+        .enumerate()
+        .filter_map(move |(index, line)| {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("<style") {
+                in_style = true;
+                return None;
+            }
+            if trimmed.starts_with("</style") {
+                in_style = false;
+                return None;
+            }
+            in_style.then_some((index + 1, line))
+        })
+}
+
+fn off_palette_colour_columns(line: &str) -> Vec<usize> {
+    let mut columns = hexadecimal_colour_columns(line);
+    columns.extend(rgba_colour_columns(line));
+    columns.sort_unstable();
+    columns
+}
+
+fn hexadecimal_colour_columns(line: &str) -> Vec<usize> {
+    let bytes = line.as_bytes();
+    let mut columns = Vec::new();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != b'#' {
+            index += 1;
+            continue;
+        }
+        let start = index + 1;
+        let mut end = start;
+        while end < bytes.len() && bytes[end].is_ascii_hexdigit() {
+            end += 1;
+        }
+        if matches!(end - start, 3 | 4 | 6 | 8) {
+            columns.push(index);
+        }
+        index = end.max(index + 1);
+    }
+    columns
+}
+
+fn rgba_colour_columns(line: &str) -> Vec<usize> {
+    line.match_indices("rgba(")
+        .filter_map(|(column, _)| {
+            let remainder = &line[column + "rgba(".len()..];
+            let closing = remainder.find(')')?;
+            let arguments = &remainder[..closing];
+            let values = arguments.split(',').map(str::trim).collect::<Vec<_>>();
+            (values.len() == 4 && values.iter().all(|value| !value.is_empty())).then_some(column)
+        })
+        .collect()
 }
 
 /// Local runtime state must not be tracked. Cheap, and it catches a class of
@@ -1145,6 +1258,6 @@ fn option_value(arg: &str) -> &str {
 
 fn print_help() {
     println!(
-        "Usage: cargo run -p xtask -- <command>\n\nCommands:\n  setup\n  build-dev [--embed-frontend]\n  dev [--gateway-port PORT] [--vite-host HOST] [--vite-port PORT]\n  fmt\n  fmt-check\n  check\n  clippy\n  test\n  test-lib <package> [filter...]\n  test-integration <package> <test-target> [filter...]\n  verify (alias: ci)\n  sweep\n  release [--force-frontend]\n  install [--prefix DIR] [--skip-frontend] [--lan]"
+        "Usage: cargo run -p xtask -- <command>\n\nCommands:\n  setup\n  build-dev [--embed-frontend]\n  dev [--gateway-port PORT] [--vite-host HOST] [--vite-port PORT]\n  fmt\n  fmt-check\n  check (workspace and frontend type check only)\n  check-gate (full static rung)\n  check-design-tokens\n  clippy\n  test\n  test-lib <package> [filter...]\n  test-integration <package> <test-target> [filter...]\n  verify (alias: ci)\n  sweep\n  release [--force-frontend]\n  install [--prefix DIR] [--skip-frontend] [--lan]"
     );
 }

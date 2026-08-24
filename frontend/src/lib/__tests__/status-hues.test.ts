@@ -1,3 +1,5 @@
+// @ts-nocheck -- these fixtures use Node's filesystem APIs under Vitest; the
+// browser-only application type-check intentionally does not include Node types.
 /**
  * Palette guard for the status registers.
  *
@@ -9,6 +11,9 @@
  * aesthetic folklore.
  */
 import { describe, it, expect } from "vitest";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 // The measurement module is dependency-free JS shared with the CLI script.
 import { measure, RISO_CSS_PATH } from "../../../scripts/verify-status-hues.mjs";
 
@@ -29,4 +34,43 @@ describe("status register hues", () => {
     // The dark --error/--accent gap was ~6 ΔE00 before this work; hold it wide.
     expect(darkErrorVsAccent?.errorVsAccent).toBeGreaterThan(15);
   });
+
+  it("keeps confirmation feedback distinct from every dark status register", () => {
+    const darkSuccessDistances = result.rows.filter(
+      (r) => r.scheme === "dark" && r.successVsRegister != null,
+    );
+    expect(darkSuccessDistances).toHaveLength(6);
+    for (const row of darkSuccessDistances) {
+      expect(row.successVsRegister).toBeGreaterThanOrEqual(12);
+    }
+  });
+
+  it("rejects an unresolved fallback that is not a colour", () => {
+    const fixture = writeRisoFixture((css) =>
+      css.replace("--status-in-motion-hue: #0f6fb2", "--status-in-motion-hue: var(--missing-hue, not-a-colour)"),
+    );
+    try {
+      expect(() => measure(fixture.path)).toThrow("expected a hex colour");
+    } finally {
+      rmSync(fixture.directory, { recursive: true, force: true });
+    }
+  });
+
+  it("uses a later root block when resolving shared tokens", () => {
+    const fixture = writeRisoFixture((css) => `${css}\n:root { --accent: var(--error); }\n`);
+    try {
+      const result = measure(fixture.path);
+      expect(result.ok).toBe(false);
+      expect(result.failures).toContainEqual(expect.stringContaining("--error"));
+    } finally {
+      rmSync(fixture.directory, { recursive: true, force: true });
+    }
+  });
 });
+
+function writeRisoFixture(transform: (css: string) => string): { directory: string; path: string } {
+  const directory = mkdtempSync(join(tmpdir(), "swage-status-hues-"));
+  const fixture = join(directory, "riso.css");
+  writeFileSync(fixture, transform(readFileSync(RISO_CSS_PATH, "utf8")));
+  return { directory, path: fixture };
+}
