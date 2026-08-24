@@ -29,21 +29,28 @@ async function waitForHealth(baseUrl: string): Promise<void> {
 
 async function startIsolatedStack(): Promise<{ baseUrl: string; child: ChildProcess; root: string }> {
   const root = await mkdtemp("/tmp/scratch/swage-browser-e2e-isolation-");
-  const gatewayPort = await unusedPort();
-  const providerPort = await unusedPort();
-  const child = spawn(process.execPath, [join(frontendDir, "e2e/run-stack.mjs")], {
-    cwd: frontendDir,
-    stdio: "pipe",
-    env: {
-      ...process.env,
-      SWAGE_E2E_INVOCATION_DIR: root,
-      SWAGE_E2E_GATEWAY_PORT: String(gatewayPort),
-      SWAGE_E2E_PROVIDER_PORT: String(providerPort),
-    },
-  });
-  const baseUrl = `http://127.0.0.1:${gatewayPort}`;
-  await waitForHealth(baseUrl);
-  return { baseUrl, child, root };
+  let child: ChildProcess | undefined;
+  try {
+    const gatewayPort = await unusedPort();
+    const providerPort = await unusedPort();
+    child = spawn(process.execPath, [join(frontendDir, "e2e/run-stack.mjs")], {
+      cwd: frontendDir,
+      stdio: "pipe",
+      env: {
+        ...process.env,
+        SWAGE_E2E_INVOCATION_DIR: root,
+        SWAGE_E2E_GATEWAY_PORT: String(gatewayPort),
+        SWAGE_E2E_PROVIDER_PORT: String(providerPort),
+      },
+    });
+    const baseUrl = `http://127.0.0.1:${gatewayPort}`;
+    await waitForHealth(baseUrl);
+    return { baseUrl, child, root };
+  } catch (error) {
+    if (child) await stopStack(child);
+    await rm(root, { recursive: true, force: true });
+    throw error;
+  }
 }
 
 async function stopStack(child: ChildProcess): Promise<void> {
@@ -109,15 +116,23 @@ test("cancels an active turn from the rendered conversation", async ({ page }) =
   );
   await page.reload();
   await expect(page.getByText("Response interrupted")).toBeVisible();
+  await expect(page.locator("body")).not.toContainText(
+    "This tail must never render.",
+  );
 });
 
 test("keeps concurrent browser-suite stacks isolated during teardown", async ({ browser }) => {
-  const first = await startIsolatedStack();
-  const second = await startIsolatedStack();
-  const firstPage = await browser.newPage();
-  const secondPage = await browser.newPage();
+  let first: Awaited<ReturnType<typeof startIsolatedStack>> | undefined;
+  let second: Awaited<ReturnType<typeof startIsolatedStack>> | undefined;
+  let firstPage: Page | undefined;
+  let secondPage: Page | undefined;
 
   try {
+    first = await startIsolatedStack();
+    second = await startIsolatedStack();
+    firstPage = await browser.newPage();
+    secondPage = await browser.newPage();
+
     await firstPage.goto(first.baseUrl);
     await secondPage.goto(second.baseUrl);
     await openComposer(firstPage);
@@ -135,12 +150,12 @@ test("keeps concurrent browser-suite stacks isolated during teardown", async ({ 
     await secondPage.reload();
     await openComposer(secondPage);
   } finally {
-    await stopStack(first.child);
-    await stopStack(second.child);
-    await firstPage.close();
-    await secondPage.close();
-    await rm(first.root, { recursive: true, force: true });
-    await rm(second.root, { recursive: true, force: true });
+    if (first) await stopStack(first.child);
+    if (second) await stopStack(second.child);
+    if (firstPage) await firstPage.close();
+    if (secondPage) await secondPage.close();
+    if (first) await rm(first.root, { recursive: true, force: true });
+    if (second) await rm(second.root, { recursive: true, force: true });
   }
 });
 
