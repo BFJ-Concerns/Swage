@@ -32,6 +32,11 @@ fmt-check:
 check:
     cargo run -p xtask -- check
 
+# Fast, pre-test static gate: local-state, format, workspace/frontend,
+# frontend design-token, and clippy checks.
+check-gate:
+    cargo run -p xtask -- check-gate
+
 clippy:
     cargo run -p xtask -- clippy
 
@@ -49,7 +54,7 @@ test-integration package target *filter:
     cargo run -p xtask -- test-integration {{ package }} {{ target }} {{ filter }}
 
 # CI runs this same recipe, so the local gate and CI cannot drift apart.
-# The gate: local-state and format checks, clippy, tests, desktop smoke.
+# The full gate: check-gate, tests, projection freshness, and desktop smoke.
 verify:
     cargo run -p xtask -- verify
 

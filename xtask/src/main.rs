@@ -48,6 +48,7 @@ fn run() -> Result<()> {
         Some("fmt") => fmt(),
         Some("fmt-check") => fmt_check(),
         Some("check") => check(),
+        Some("check-gate") => check_gate(),
         Some("check-design-tokens") => check_frontend_design_tokens(),
         Some("clippy") => clippy(),
         Some("test") => test(),
@@ -315,6 +316,16 @@ fn clippy() -> Result<()> {
     )
 }
 
+/// The fast, pre-test gate. Keep every static check here so builders have one
+/// command that catches branch drift before the full verification gate.
+fn check_gate() -> Result<()> {
+    check_tracked_local_state()?;
+    fmt_check()?;
+    check()?;
+    check_frontend_design_tokens()?;
+    clippy()
+}
+
 fn test() -> Result<()> {
     run_with_final_sweep("test", run_test_suite)
 }
@@ -451,11 +462,7 @@ fn filter_label(filters: &[String]) -> String {
 /// two cannot drift apart.
 fn verify() -> Result<()> {
     run_with_final_sweep("verify", || {
-        check_tracked_local_state()?;
-        fmt_check()?;
-        check()?;
-        check_frontend_design_tokens()?;
-        clippy()?;
+        check_gate()?;
         let test_result = run_test_suite();
         let projection_result = check_projections_are_current();
         match (test_result, projection_result) {
@@ -1251,6 +1258,6 @@ fn option_value(arg: &str) -> &str {
 
 fn print_help() {
     println!(
-        "Usage: cargo run -p xtask -- <command>\n\nCommands:\n  setup\n  build-dev [--embed-frontend]\n  dev [--gateway-port PORT] [--vite-host HOST] [--vite-port PORT]\n  fmt\n  fmt-check\n  check\n  check-design-tokens\n  clippy\n  test\n  test-lib <package> [filter...]\n  test-integration <package> <test-target> [filter...]\n  verify (alias: ci)\n  sweep\n  release [--force-frontend]\n  install [--prefix DIR] [--skip-frontend] [--lan]"
+        "Usage: cargo run -p xtask -- <command>\n\nCommands:\n  setup\n  build-dev [--embed-frontend]\n  dev [--gateway-port PORT] [--vite-host HOST] [--vite-port PORT]\n  fmt\n  fmt-check\n  check\n  check-gate\n  check-design-tokens\n  clippy\n  test\n  test-lib <package> [filter...]\n  test-integration <package> <test-target> [filter...]\n  verify (alias: ci)\n  sweep\n  release [--force-frontend]\n  install [--prefix DIR] [--skip-frontend] [--lan]"
     );
 }
