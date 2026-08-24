@@ -451,7 +451,7 @@
   }
 
   .primary {
-    background: linear-gradient(135deg, var(--ink-orange), var(--accent));
+    background: var(--ink-orange);
     border-color: color-mix(in srgb, var(--ink-orange) 32%, transparent);
     color: var(--paper);
     font-weight: 700;

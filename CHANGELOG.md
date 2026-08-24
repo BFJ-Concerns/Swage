@@ -46,6 +46,8 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- The first rendered web frame now uses the light theme's complete token set before display preferences apply.
+- Primary actions in space operations and schedule automation now use an AA-compliant light-theme treatment.
 - Tool-call and connection-error failure states now use the shared error treatment instead of action orange; connection loss and reconnection keep their ordinary connectivity treatment.
 - Inline-turn and approval errors now use the error-token wash in both themes.
 - Workflow scripts now reject unrecognised `agent()` and `agentStart()` option keys before dispatch instead of silently dropping them.

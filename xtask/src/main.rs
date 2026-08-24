@@ -480,9 +480,14 @@ fn check_frontend_design_tokens() -> Result<()> {
             continue;
         }
         let contents = fs::read_to_string(&file)?;
-        for (line_number, line) in component_style_lines(&contents) {
+        for (line_number, line, column_offset) in component_style_lines(&contents) {
             for column in off_palette_colour_columns(line) {
-                violations.push(format!("{}:{}:{}", file.display(), line_number, column + 1));
+                violations.push(format!(
+                    "{}:{}:{}",
+                    file.display(),
+                    line_number,
+                    column_offset + column + 1
+                ));
             }
         }
     }
@@ -512,22 +517,33 @@ fn check_frontend_design_tokens() -> Result<()> {
     }
 }
 
-fn component_style_lines(contents: &str) -> impl Iterator<Item = (usize, &str)> {
+fn component_style_lines(contents: &str) -> impl Iterator<Item = (usize, &str, usize)> {
     let mut in_style = false;
     contents
         .lines()
         .enumerate()
         .filter_map(move |(index, line)| {
             let trimmed = line.trim_start();
-            if trimmed.starts_with("<style") {
+            if !in_style && trimmed.starts_with("<style") {
+                let opening_offset = line.len() - trimmed.len();
+                let opening_end = trimmed.find('>')?;
+                let style_start = opening_offset + opening_end + 1;
+                let style = &line[style_start..];
+                if let Some(closing) = style.find("</style") {
+                    return (!style[..closing].is_empty())
+                        .then_some((index + 1, &style[..closing], style_start));
+                }
                 in_style = true;
-                return None;
+                return (!style.is_empty()).then_some((index + 1, style, style_start));
             }
-            if trimmed.starts_with("</style") {
-                in_style = false;
-                return None;
+            if in_style {
+                if let Some(closing) = line.find("</style") {
+                    in_style = false;
+                    return (!line[..closing].is_empty()).then_some((index + 1, &line[..closing], 0));
+                }
+                return Some((index + 1, line, 0));
             }
-            in_style.then_some((index + 1, line))
+            None
         })
 }
 
@@ -561,15 +577,32 @@ fn hexadecimal_colour_columns(line: &str) -> Vec<usize> {
 }
 
 fn rgba_colour_columns(line: &str) -> Vec<usize> {
-    line.match_indices("rgba(")
+    line.char_indices()
         .filter_map(|(column, _)| {
-            let remainder = &line[column + "rgba(".len()..];
+            let function = line.get(column..column + "rgba(".len())?;
+            if !function.eq_ignore_ascii_case("rgba(") {
+                return None;
+            }
+            let remainder = &line[column + function.len()..];
             let closing = remainder.find(')')?;
             let arguments = &remainder[..closing];
-            let values = arguments.split(',').map(str::trim).collect::<Vec<_>>();
-            (values.len() == 4 && values.iter().all(|value| !value.is_empty())).then_some(column)
+            rgba_arguments_are_valid(arguments).then_some(column)
         })
         .collect()
+}
+
+fn rgba_arguments_are_valid(arguments: &str) -> bool {
+    if arguments.contains(',') {
+        let values = arguments.split(',').map(str::trim).collect::<Vec<_>>();
+        return matches!(values.len(), 3 | 4) && values.iter().all(|value| !value.is_empty());
+    }
+
+    let (colour, alpha) = match arguments.split_once('/') {
+        Some((colour, alpha)) if !alpha.contains('/') => (colour, Some(alpha.trim())),
+        Some(_) => return false,
+        None => (arguments, None),
+    };
+    colour.split_whitespace().count() == 3 && alpha.is_none_or(|value| !value.is_empty())
 }
 
 /// Local runtime state must not be tracked. Cheap, and it catches a class of
@@ -1253,4 +1286,36 @@ fn print_help() {
     println!(
         "Usage: cargo run -p xtask -- <command>\n\nCommands:\n  setup\n  build-dev [--embed-frontend]\n  dev [--gateway-port PORT] [--vite-host HOST] [--vite-port PORT]\n  fmt\n  fmt-check\n  check\n  check-design-tokens\n  clippy\n  test\n  test-lib <package> [filter...]\n  test-integration <package> <test-target> [filter...]\n  verify (alias: ci)\n  sweep\n  release [--force-frontend]\n  install [--prefix DIR] [--skip-frontend] [--lan]"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{component_style_lines, off_palette_colour_columns};
+
+    fn component_colour_columns(contents: &str) -> Vec<(usize, usize)> {
+        component_style_lines(contents)
+            .flat_map(|(line_number, line, column_offset)| {
+                off_palette_colour_columns(line)
+                    .into_iter()
+                    .map(move |column| (line_number, column_offset + column + 1))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn detects_colour_on_opening_style_line() {
+        assert_eq!(
+            component_colour_columns("<style>.panel { color: #123456; }</style>"),
+            vec![(1, 24)]
+        );
+    }
+
+    #[test]
+    fn detects_valid_rgba_spellings_that_previously_bypassed_the_gate() {
+        let colours = component_colour_columns(
+            "<style>\n.panel {\n  box-shadow: RGBA(0, 0, 0, 0.4);\n  border: rgba(0 0 0 / 0.4);\n  color: rgba(0, 0, 0);\n}\n</style>",
+        );
+
+        assert_eq!(colours, vec![(3, 15), (4, 11), (5, 10)]);
+    }
 }
