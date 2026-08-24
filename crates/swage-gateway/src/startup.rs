@@ -421,8 +421,8 @@ async fn resolve_provider_config(
     if let Some(api_key_env) = provider.api_key_env.as_deref() {
         tracing::warn!(
             "Provider '{}' is using legacy api_key_env credential resolution. \
-             Store it as a governed provider_key secret and set api_key_secret_ref \
-             to audit credential access.",
+             Store the credential in Settings > Providers to create a governed provider_key secret \
+             and set api_key_secret_ref.",
             model.provider_id
         );
         let api_key = std::env::var(api_key_env).map_err(|_| swage_core::ProviderError::Auth {
@@ -497,8 +497,8 @@ async fn resolve_telegram_token(
     if let Some(env_var) = telegram.bot_token_env.as_deref() {
         warn!(
             "Telegram channel is using legacy bot_token_env credential resolution. \
-             Store it as a governed channel_token secret and set bot_token_secret_ref \
-             to audit credential access."
+             Create a governed channel_token secret through POST /api/secrets and set \
+             bot_token_secret_ref."
         );
         return std::env::var(env_var)
             .map_err(|_| format!("environment variable '{env_var}' is not set"));
@@ -1049,7 +1049,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use swage_config::{
         LogLevel, ModelCatalogConfig, ModelEndpointConfig, Protocol, ProviderCatalogConfig,
-        ProviderEndpointConfig,
+        ProviderEndpointConfig, TelegramChannelConfig,
     };
     use swage_storage::store::AuditStore;
     use tokio::net::TcpListener;
@@ -1469,6 +1469,58 @@ mod tests {
                 .iter()
                 .any(|event| event.contains("No default provider/model pair is configured")),
             "genuinely unusable configuration omitted the warning: {events:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn legacy_environment_credentials_warn_with_governed_remedies() {
+        let storage =
+            Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
+        let secret_manager = crate::secret::SecretManager::new(
+            Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
+        );
+        unsafe {
+            std::env::set_var("SWAGE_LEGACY_PROVIDER_KEY_TEST", "provider-key");
+            std::env::set_var("SWAGE_LEGACY_TELEGRAM_TOKEN_TEST", "telegram-token");
+        }
+        let events = RecordedEvents::default();
+        let captured = Arc::clone(&events.0);
+        let _subscriber = tracing::subscriber::set_default(Registry::default().with(events));
+        let provider = ProviderEndpointConfig {
+            protocol: Protocol::OpenAi,
+            api_key_secret_ref: None,
+            api_key_env: Some("SWAGE_LEGACY_PROVIDER_KEY_TEST".into()),
+            base_url: Some("https://provider.invalid".into()),
+            command: None,
+            state_dir: None,
+        };
+        let model = model("provider", "test-model");
+        let telegram = TelegramChannelConfig {
+            bot_token_env: Some("SWAGE_LEGACY_TELEGRAM_TOKEN_TEST".into()),
+            ..Default::default()
+        };
+
+        let provider_config = resolve_provider_config(&provider, &model, &secret_manager)
+            .await
+            .expect("legacy provider environment credential should still resolve");
+        let telegram_token = resolve_telegram_token(&telegram, &secret_manager)
+            .await
+            .expect("legacy Telegram environment credential should still resolve");
+
+        assert_eq!(provider_config.api_key.as_deref(), Some("provider-key"));
+        assert_eq!(telegram_token, "telegram-token");
+        let events = captured.lock().unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|event| event.contains("Settings > Providers")),
+            "provider legacy credential warning must direct operators to Settings: {events:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| event.contains("POST /api/secrets")),
+            "Telegram legacy credential warning must direct operators to its governed route: {events:?}"
         );
     }
 

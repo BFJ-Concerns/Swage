@@ -48,6 +48,7 @@ fn run() -> Result<()> {
         Some("fmt") => fmt(),
         Some("fmt-check") => fmt_check(),
         Some("check") => check(),
+        Some("check-gate") => check_gate(),
         Some("check-design-tokens") => check_frontend_design_tokens(),
         Some("clippy") => clippy(),
         Some("test") => test(),
@@ -315,6 +316,16 @@ fn clippy() -> Result<()> {
     )
 }
 
+/// The fast, pre-test gate. Keep every static check here so builders have one
+/// command that catches branch drift before the full verification gate.
+fn check_gate() -> Result<()> {
+    check_tracked_local_state()?;
+    fmt_check()?;
+    check()?;
+    check_frontend_design_tokens()?;
+    clippy()
+}
+
 fn test() -> Result<()> {
     run_with_final_sweep("test", run_test_suite)
 }
@@ -451,11 +462,7 @@ fn filter_label(filters: &[String]) -> String {
 /// two cannot drift apart.
 fn verify() -> Result<()> {
     run_with_final_sweep("verify", || {
-        check_tracked_local_state()?;
-        fmt_check()?;
-        check()?;
-        check_frontend_design_tokens()?;
-        clippy()?;
+        check_gate()?;
         let test_result = run_test_suite();
         let projection_result = check_projections_are_current();
         match (test_result, projection_result) {
@@ -480,9 +487,14 @@ fn check_frontend_design_tokens() -> Result<()> {
             continue;
         }
         let contents = fs::read_to_string(&file)?;
-        for (line_number, line) in component_style_lines(&contents) {
+        for (line_number, line, column_offset) in component_style_lines(&contents) {
             for column in off_palette_colour_columns(line) {
-                violations.push(format!("{}:{}:{}", file.display(), line_number, column + 1));
+                violations.push(format!(
+                    "{}:{}:{}",
+                    file.display(),
+                    line_number,
+                    column_offset + column + 1
+                ));
             }
         }
     }
@@ -512,22 +524,89 @@ fn check_frontend_design_tokens() -> Result<()> {
     }
 }
 
-fn component_style_lines(contents: &str) -> impl Iterator<Item = (usize, &str)> {
-    let mut in_style = false;
+fn component_style_lines(contents: &str) -> impl Iterator<Item = (usize, &str, usize)> {
+    #[derive(Default)]
+    enum StyleRegion {
+        #[default]
+        Outside,
+        OpeningTag {
+            quote: Option<char>,
+        },
+        Contents,
+    }
+
+    fn is_style_opening_tag(line: &str) -> bool {
+        let Some(after_name) = line.strip_prefix("<style") else {
+            return false;
+        };
+
+        matches!(after_name.chars().next(), None | Some('>'))
+            || after_name.chars().next().is_some_and(char::is_whitespace)
+    }
+
+    fn opening_tag_end(line: &str, mut quote: Option<char>) -> (Option<usize>, Option<char>) {
+        for (index, character) in line.char_indices() {
+            match quote {
+                Some(delimiter) if character == delimiter => quote = None,
+                Some(_) => {}
+                None if matches!(character, '\'' | '\"') => quote = Some(character),
+                None if character == '>' => return (Some(index), None),
+                None => {}
+            }
+        }
+
+        (None, quote)
+    }
+
+    fn style_before_closing_tag(line: &str) -> Option<usize> {
+        line.find("</style")
+    }
+
+    let mut region = StyleRegion::Outside;
     contents
         .lines()
         .enumerate()
         .filter_map(move |(index, line)| {
             let trimmed = line.trim_start();
-            if trimmed.starts_with("<style") {
-                in_style = true;
-                return None;
+            let style_start = match &region {
+                StyleRegion::Outside if is_style_opening_tag(trimmed) => {
+                    let opening_offset = line.len() - trimmed.len();
+                    let (opening_end, quote) = opening_tag_end(&trimmed["<style".len()..], None);
+                    match opening_end {
+                        Some(end) => Some(opening_offset + "<style".len() + end + 1),
+                        None => {
+                            region = StyleRegion::OpeningTag { quote };
+                            None
+                        }
+                    }
+                }
+                StyleRegion::OpeningTag { quote } => {
+                    let (opening_end, next_quote) = opening_tag_end(line, *quote);
+                    match opening_end {
+                        Some(end) => Some(end + 1),
+                        None => {
+                            region = StyleRegion::OpeningTag { quote: next_quote };
+                            None
+                        }
+                    }
+                }
+                StyleRegion::Contents => Some(0),
+                StyleRegion::Outside => None,
+            };
+
+            let style_start = style_start?;
+            let style = &line[style_start..];
+            if let Some(closing) = style_before_closing_tag(style) {
+                region = StyleRegion::Outside;
+                return (!style[..closing].is_empty()).then_some((
+                    index + 1,
+                    &style[..closing],
+                    style_start,
+                ));
             }
-            if trimmed.starts_with("</style") {
-                in_style = false;
-                return None;
-            }
-            in_style.then_some((index + 1, line))
+
+            region = StyleRegion::Contents;
+            (!style.is_empty()).then_some((index + 1, style, style_start))
         })
 }
 
@@ -561,15 +640,32 @@ fn hexadecimal_colour_columns(line: &str) -> Vec<usize> {
 }
 
 fn rgba_colour_columns(line: &str) -> Vec<usize> {
-    line.match_indices("rgba(")
+    line.char_indices()
         .filter_map(|(column, _)| {
-            let remainder = &line[column + "rgba(".len()..];
+            let function = line.get(column..column + "rgba(".len())?;
+            if !function.eq_ignore_ascii_case("rgba(") {
+                return None;
+            }
+            let remainder = &line[column + function.len()..];
             let closing = remainder.find(')')?;
             let arguments = &remainder[..closing];
-            let values = arguments.split(',').map(str::trim).collect::<Vec<_>>();
-            (values.len() == 4 && values.iter().all(|value| !value.is_empty())).then_some(column)
+            rgba_arguments_are_valid(arguments).then_some(column)
         })
         .collect()
+}
+
+fn rgba_arguments_are_valid(arguments: &str) -> bool {
+    if arguments.contains(',') {
+        let values = arguments.split(',').map(str::trim).collect::<Vec<_>>();
+        return matches!(values.len(), 3 | 4) && values.iter().all(|value| !value.is_empty());
+    }
+
+    let (colour, alpha) = match arguments.split_once('/') {
+        Some((colour, alpha)) if !alpha.contains('/') => (colour, Some(alpha.trim())),
+        Some(_) => return false,
+        None => (arguments, None),
+    };
+    colour.split_whitespace().count() == 3 && alpha.is_none_or(|value| !value.is_empty())
 }
 
 /// Local runtime state must not be tracked. Cheap, and it catches a class of
@@ -1251,6 +1347,100 @@ fn option_value(arg: &str) -> &str {
 
 fn print_help() {
     println!(
-        "Usage: cargo run -p xtask -- <command>\n\nCommands:\n  setup\n  build-dev [--embed-frontend]\n  dev [--gateway-port PORT] [--vite-host HOST] [--vite-port PORT]\n  fmt\n  fmt-check\n  check\n  check-design-tokens\n  clippy\n  test\n  test-lib <package> [filter...]\n  test-integration <package> <test-target> [filter...]\n  verify (alias: ci)\n  sweep\n  release [--force-frontend]\n  install [--prefix DIR] [--skip-frontend] [--lan]"
+        "Usage: cargo run -p xtask -- <command>\n\nCommands:\n  setup\n  build-dev [--embed-frontend]\n  dev [--gateway-port PORT] [--vite-host HOST] [--vite-port PORT]\n  fmt\n  fmt-check\n  check (workspace and frontend type check only)\n  check-gate (full static rung)\n  check-design-tokens\n  clippy\n  test\n  test-lib <package> [filter...]\n  test-integration <package> <test-target> [filter...]\n  verify (alias: ci)\n  sweep\n  release [--force-frontend]\n  install [--prefix DIR] [--skip-frontend] [--lan]"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{component_style_lines, off_palette_colour_columns};
+
+    fn component_colour_columns(contents: &str) -> Vec<(usize, usize)> {
+        component_style_lines(contents)
+            .flat_map(|(line_number, line, column_offset)| {
+                off_palette_colour_columns(line)
+                    .into_iter()
+                    .map(move |column| (line_number, column_offset + column + 1))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn scans_a_style_tag_on_its_own_line_without_scanning_surrounding_markup() {
+        assert_eq!(
+            component_colour_columns(
+                "<aside data-paint=\"#abcdef\"></aside>\n<style>\n.panel { color: #123456; }\n</style>\n<div data-paint=\"#abcdef\"></div>",
+            ),
+            vec![(3, 17)]
+        );
+    }
+
+    #[test]
+    fn scans_style_content_on_the_opening_tag_line_without_scanning_surrounding_markup() {
+        assert_eq!(
+            component_colour_columns(
+                "<aside data-paint=\"#abcdef\"></aside>\n<style>.panel { color: #123456; }\n</style><div data-paint=\"#abcdef\"></div>",
+            ),
+            vec![(2, 24)]
+        );
+    }
+
+    #[test]
+    fn scans_a_self_contained_style_line_without_scanning_following_markup() {
+        assert_eq!(
+            component_colour_columns(
+                "<style>.panel { color: #123456; }</style><div data-paint=\"#abcdef\"></div>\n<aside data-paint=\"#abcdef\"></aside>",
+            ),
+            vec![(1, 24)]
+        );
+    }
+
+    #[test]
+    fn scans_a_multiline_style_opening_tag_without_scanning_its_attributes_or_markup() {
+        assert_eq!(
+            component_colour_columns(
+                "<style\n  data-paint=\"#abcdef\"\n  lang=\"css\">\n.panel { color: #123456; }\n</style>\n<div data-paint=\"#abcdef\"></div>",
+            ),
+            vec![(4, 17)]
+        );
+    }
+
+    #[test]
+    fn stops_at_a_closing_style_tag_with_markup_trailing_on_its_line() {
+        assert_eq!(
+            component_colour_columns(
+                "<style>\n.panel { color: #123456; }</style><div data-paint=\"#abcdef\"></div>\n<aside data-paint=\"#abcdef\"></aside>",
+            ),
+            vec![(2, 17)]
+        );
+    }
+
+    #[test]
+    fn does_not_scan_a_component_without_a_style_block() {
+        assert_eq!(
+            component_colour_columns(
+                "<div data-paint=\"#abcdef\">#123456</div>\n<span style=\"color: rgba(0, 0, 0, 0.4)\"></span>",
+            ),
+            Vec::<(usize, usize)>::new()
+        );
+    }
+
+    #[test]
+    fn keeps_a_quoted_greater_than_sign_in_a_style_attribute_outside_the_style_region() {
+        assert_eq!(
+            component_colour_columns(
+                "<style data-label=\"a > #abcdef\">\n.panel { color: #123456; }\n</style>\n<div data-paint=\"#abcdef\"></div>",
+            ),
+            vec![(2, 17)]
+        );
+    }
+
+    #[test]
+    fn detects_valid_rgba_spellings_inside_style_regions() {
+        let colours = component_colour_columns(
+            "<style>\n.panel {\n  box-shadow: RGBA(0, 0, 0, 0.4);\n  border: rgba(0 0 0 / 0.4);\n  color: rgba(0, 0, 0);\n}\n</style><div data-paint=\"#abcdef\"></div>",
+        );
+
+        assert_eq!(colours, vec![(3, 15), (4, 11), (5, 10)]);
+    }
 }

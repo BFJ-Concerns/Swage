@@ -1,17 +1,20 @@
-import { readdirSync, rmSync } from "node:fs";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { spawn } from "node:child_process";
 
-const scratchParent = "/tmp/scratch";
 const playwrightCli = resolve("node_modules/@playwright/test/cli.js");
+const scratchParent = "/tmp/scratch";
+await mkdir(scratchParent, { recursive: true });
+const invocationDir = await mkdtemp(join(scratchParent, "swage-browser-e2e-"));
 const child = spawn(process.execPath, [playwrightCli, "test", ...process.argv.slice(2)], {
   stdio: "inherit",
+  env: {
+    ...process.env,
+    SWAGE_E2E_INVOCATION_DIR: invocationDir,
+    SWAGE_E2E_RESULTS_DIR: join(invocationDir, "playwright-results"),
+  },
 });
 
 const code = await new Promise((resolveExit) => child.once("exit", resolveExit));
-for (const entry of readdirSync(scratchParent)) {
-  if (entry.startsWith("swage-browser-e2e-")) {
-    rmSync(join(scratchParent, entry), { recursive: true, force: true });
-  }
-}
+await rm(invocationDir, { recursive: true, force: true });
 process.exit(code ?? 1);
