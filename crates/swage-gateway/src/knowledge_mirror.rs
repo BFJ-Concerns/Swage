@@ -308,6 +308,7 @@ mod tests {
                 body_sha256: "aa11".into(),
                 body_bytes: 64,
                 media_type: "text/html".into(),
+                capture_scope: None,
             })
             .await
             .unwrap();
@@ -331,6 +332,7 @@ mod tests {
                 body_sha256: "bb22".into(),
                 body_bytes: 64,
                 media_type: "text/html".into(),
+                capture_scope: None,
             })
             .await
             .unwrap();
