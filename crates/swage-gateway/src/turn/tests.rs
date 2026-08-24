@@ -10593,6 +10593,51 @@ async fn turn_model_snapshot_records_the_effective_model_and_its_source() {
         default_snapshot["provider_visible"]["effective_model"]["source"],
         "configured_default"
     );
+
+    storage
+        .set_session_selected_model(session_id, Some("removed-model".to_string()))
+        .await
+        .expect("record stale conversation model");
+    process_turn_with_existing_turn_and_focus_and_model(
+        &state,
+        session_id,
+        None,
+        "hello after a catalogue change".to_string(),
+        mpsc::unbounded_channel().0,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+        None,
+        None,
+        None,
+        None,
+        TurnAttendance::Attended,
+        None,
+        None,
+    )
+    .await
+    .expect("stale conversation-model turn should use the configured default");
+
+    let turns = storage
+        .list_turns_by_thread(thread.id)
+        .await
+        .expect("turns");
+    let stale_model_turn = turns.last().expect("stale conversation-model turn");
+    let stale_model_snapshot: serde_json::Value = serde_json::from_str(
+        &storage
+            .get_snapshot(stale_model_turn.id)
+            .await
+            .expect("read stale conversation-model snapshot")
+            .expect("stale conversation-model turn snapshot"),
+    )
+    .expect("stale conversation-model snapshot json");
+    assert_eq!(
+        stale_model_snapshot["provider_visible"]["effective_model"]["catalogue_entry"],
+        "default"
+    );
+    assert_eq!(
+        stale_model_snapshot["provider_visible"]["effective_model"]["source"],
+        "configured_default"
+    );
 }
 
 #[tokio::test]
