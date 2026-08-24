@@ -32,28 +32,6 @@ body {
   font-size: 13px;
 }
 
-body:not(.theme-riso):not(.theme-cyanotype) {
-  /* Ensure tokens resolve even before App.svelte sets the class. */
-  --ink: #0e3b66;
-  --ink-soft: rgba(14, 59, 102, 0.65);
-  --paper: #fff8ee;
-  --paper-deep: #ececea;
-  --rule-soft: rgba(14, 59, 102, 0.3);
-  --rule-faint: rgba(14, 59, 102, 0.18);
-  --ink-orange: #c54115;
-  --error: #a8321a;
-  /* Status register hues — mirror the light theme so a badge painted before
-     App.svelte sets the theme class still resolves (see riso.css). */
-  --status-calm-hue: var(--ink);
-  --status-in-motion-hue: #0f6fb2;
-  --status-wants-human-hue: #6d3c86;
-  --status-not-yet-hue: #4f5d70;
-  --status-elsewhere-hue: #1d6f68;
-  --status-trouble-hue: var(--error);
-  --shadow-blend: multiply;
-  --shadow-opacity: 0.5;
-}
-
 /*
   .sr-only — content available to assistive tech but not rendered visually.
   Used for throttled live-region status messages that mirror a visual state

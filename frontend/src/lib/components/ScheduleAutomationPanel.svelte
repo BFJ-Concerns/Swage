@@ -395,7 +395,7 @@
   }
 
   .panel-heading span {
-    color: #5b4634;
+    color: var(--ink-soft);
     font-size: 0.85rem;
   }
 
@@ -404,8 +404,8 @@
     gap: 10px;
     padding: 14px;
     border-radius: 16px;
-    background: rgba(255, 255, 255, 0.64);
-    border: 1px solid rgba(120, 53, 15, 0.08);
+    background: color-mix(in srgb, var(--paper) 64%, transparent);
+    border: 1px solid color-mix(in srgb, var(--ink) 8%, transparent);
   }
 
   label {
@@ -416,15 +416,15 @@
   label span {
     font-size: 0.82rem;
     font-weight: 700;
-    color: #6b3f1d;
+    color: var(--ink-orange);
   }
 
   input,
   select,
   textarea {
     border-radius: 16px;
-    border: 1px solid rgba(120, 53, 15, 0.14);
-    background: rgba(255, 255, 255, 0.76);
+    border: 1px solid color-mix(in srgb, var(--ink) 14%, transparent);
+    background: color-mix(in srgb, var(--paper) 76%, transparent);
     padding: 12px 14px;
     resize: vertical;
   }
@@ -438,22 +438,22 @@
   .scope-toggle button,
   .primary {
     border-radius: 999px;
-    border: 1px solid rgba(120, 53, 15, 0.16);
-    background: rgba(255, 255, 255, 0.72);
+    border: 1px solid color-mix(in srgb, var(--ink) 16%, transparent);
+    background: color-mix(in srgb, var(--paper) 72%, transparent);
     padding: 9px 14px;
   }
 
   .scope-toggle button.active {
-    background: rgba(180, 83, 9, 0.14);
-    border-color: rgba(146, 64, 14, 0.28);
-    color: #7c2d12;
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    border-color: color-mix(in srgb, var(--ink-orange) 28%, transparent);
+    color: var(--ink-orange);
     font-weight: 700;
   }
 
   .primary {
-    background: linear-gradient(135deg, #8a3b12, #b45309);
-    border-color: rgba(146, 64, 14, 0.32);
-    color: #fff9f1;
+    background: linear-gradient(135deg, var(--ink-orange), var(--accent));
+    border-color: color-mix(in srgb, var(--ink-orange) 32%, transparent);
+    color: var(--paper);
     font-weight: 700;
   }
 
@@ -478,8 +478,8 @@
     gap: 8px;
     padding: 14px;
     border-radius: 16px;
-    background: rgba(255, 255, 255, 0.58);
-    border: 1px solid rgba(120, 53, 15, 0.08);
+    background: color-mix(in srgb, var(--paper) 58%, transparent);
+    border: 1px solid color-mix(in srgb, var(--ink) 8%, transparent);
   }
 
   .schedule-main {
@@ -489,7 +489,7 @@
 
   .schedule-sub,
   .run-time {
-    color: #5b4634;
+    color: var(--ink-soft);
     font-size: 0.82rem;
   }
 
@@ -498,7 +498,7 @@
     align-items: center;
     gap: 12px;
     font-size: 0.85rem;
-    color: #5b4634;
+    color: var(--ink-soft);
   }
 
   .status {
@@ -509,29 +509,29 @@
   .status-active,
   .status-run-completed,
   .status-run-completed_empty {
-    color: #166534;
+    color: var(--success);
   }
 
   .status-paused {
-    color: #92400e;
+    color: var(--ink-orange);
   }
 
   .status-run-failed {
-    color: #991b1b;
+    color: var(--error);
   }
 
   .creator {
     padding: 1px 8px;
     border-radius: 999px;
-    background: #efe7db;
+    background: var(--paper-deep);
     font-size: 0.78rem;
   }
 
   /* An agent-made schedule stands out from a user's so the automation
      panel answers "where did this come from" at a glance. */
   .creator-agent {
-    background: #e0e7ff;
-    color: #3730a3;
+    background: color-mix(in srgb, var(--accent) 12%, var(--paper));
+    color: var(--ink);
   }
 
   .row-actions {
@@ -541,7 +541,7 @@
   .run-history {
     display: grid;
     gap: 6px;
-    border-top: 1px solid rgba(120, 53, 15, 0.08);
+    border-top: 1px solid color-mix(in srgb, var(--ink) 8%, transparent);
     padding-top: 8px;
   }
 
@@ -554,17 +554,17 @@
   .run-head {
     display: flex;
     gap: 10px;
-    color: #5b4634;
+    color: var(--ink-soft);
   }
 
   .run-detail {
     margin: 0;
-    color: #4b3826;
+    color: var(--ink);
     white-space: pre-wrap;
   }
 
   .run-detail.error {
-    color: #991b1b;
+    color: var(--error);
   }
 
   .feedback {
@@ -575,17 +575,17 @@
   }
 
   .feedback.error {
-    background: rgba(254, 226, 226, 0.76);
-    color: #991b1b;
+    background: color-mix(in srgb, var(--error) 12%, transparent);
+    color: var(--error);
   }
 
   .feedback.success {
-    background: rgba(220, 252, 231, 0.8);
-    color: #166534;
+    background: color-mix(in srgb, var(--success) 12%, transparent);
+    color: var(--success);
   }
 
   .empty {
-    color: #6b5340;
+    color: var(--ink-soft);
     font-size: 0.85rem;
     font-style: italic;
   }
