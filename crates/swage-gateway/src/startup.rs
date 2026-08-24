@@ -1079,7 +1079,7 @@ mod tests {
     struct RecordedEvents(Arc<Mutex<Vec<String>>>);
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn startup_recovery_retains_replayable_worktree_owners() {
+    async fn startup_recovery_reclaims_terminal_and_retains_replayable_worktree_owners() {
         let fixture = tempfile::tempdir().expect("fixture");
         let repo = fixture.path().join("repo");
         std::fs::create_dir(&repo).expect("repository directory");
@@ -1155,6 +1155,14 @@ mod tests {
             .set_workflow_run_parked(parked.id, chrono::Utc::now() + chrono::Duration::hours(1))
             .await
             .expect("park run");
+        let terminal = storage
+            .create_workflow_run(new_run("startup-recovery-terminal"))
+            .await
+            .expect("terminal workflow run");
+        storage
+            .update_workflow_run_state(terminal.id, "failed", None, None, Some("test failure"))
+            .await
+            .expect("fail run");
         let state = crate::state::AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn SpaceStore>,
@@ -1174,13 +1182,18 @@ mod tests {
             .provision(parked.id, 0, &repo)
             .await
             .expect("provision parked worktree");
+        let terminal_worktree = state
+            .worktree_host
+            .provision(terminal.id, 0, &repo)
+            .await
+            .expect("provision terminal worktree");
 
         assert_eq!(
             recover_worktrees_after_crash(&state)
                 .await
                 .expect("startup recovery"),
-            0,
-            "an interrupted run must retain its worktree for replay"
+            1,
+            "startup must reclaim terminal worktrees and retain replayable worktrees"
         );
         assert!(
             worktree.exists(),
@@ -1189,6 +1202,17 @@ mod tests {
         assert!(
             parked_worktree.exists(),
             "parked replayable worktree must survive startup"
+        );
+        assert!(
+            !terminal_worktree.exists(),
+            "terminal worktree must be reclaimed at startup"
+        );
+        assert!(
+            !terminal_worktree
+                .parent()
+                .expect("terminal owner directory")
+                .exists(),
+            "terminal owner directory must be reclaimed at startup"
         );
         let registrations = std::process::Command::new("git")
             .arg("-C")
@@ -1206,6 +1230,11 @@ mod tests {
             String::from_utf8_lossy(&registrations.stdout)
                 .contains(&format!("worktree {}", parked_worktree.display())),
             "parked Git registration must survive startup recovery"
+        );
+        assert!(
+            !String::from_utf8_lossy(&registrations.stdout)
+                .contains(&format!("worktree {}", terminal_worktree.display())),
+            "terminal Git registration must be reclaimed at startup"
         );
 
         state.worktree_host.shutdown().await;
