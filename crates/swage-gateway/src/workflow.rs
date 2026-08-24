@@ -9626,6 +9626,7 @@ mod tests {
             cancelled_path.exists(),
             "cancelled-run worktree should remain available for inspection"
         );
+
         state.worktree_host.shutdown().await;
         assert!(!retained_path.exists());
         assert!(!cancelled_path.exists());
