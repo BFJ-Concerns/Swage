@@ -469,19 +469,6 @@ fn verify() -> Result<()> {
     })
 }
 
-/// The merged lane introduced these literal-bearing components outside this
-/// unit's enumerated sweep. Provider split surfaces are expressly held by the
-/// brief; OperatorHistoryPane is a separate landed surface. Keep these narrow
-/// scope deferrals until their owners tokenise them.
-const DESIGN_TOKEN_DEFERRED_COMPONENTS: &[&str] = &[
-    "frontend/src/lib/components/OperatorHistoryPane.svelte",
-    "frontend/src/lib/components/settings/CodexProviderAuthentication.svelte",
-    "frontend/src/lib/components/settings/ProviderConfiguration.svelte",
-    "frontend/src/lib/components/settings/ProviderCreation.svelte",
-    "frontend/src/lib/components/settings/ProviderDefaultModel.svelte",
-    "frontend/src/lib/components/settings/ProviderModelManagement.svelte",
-];
-
 fn check_frontend_design_tokens() -> Result<()> {
     let mut files = Vec::new();
     collect_files(Path::new(FRONTEND_COMPONENTS_DIR), &mut files)?;
@@ -490,10 +477,6 @@ fn check_frontend_design_tokens() -> Result<()> {
     let mut violations = Vec::new();
     for file in files {
         if file.extension().and_then(|extension| extension.to_str()) != Some("svelte") {
-            continue;
-        }
-        let stable_path = file.to_string_lossy();
-        if DESIGN_TOKEN_DEFERRED_COMPONENTS.contains(&stable_path.as_ref()) {
             continue;
         }
         let contents = fs::read_to_string(&file)?;
