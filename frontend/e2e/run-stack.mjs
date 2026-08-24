@@ -7,13 +7,13 @@ import { spawn } from "node:child_process";
 const frontendDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const repoDir = resolve(frontendDir, "..");
 const scratchParent = "/tmp/scratch";
+await mkdir(scratchParent, { recursive: true });
 const invocationDir = process.env.SWAGE_E2E_INVOCATION_DIR
   ?? await mkdtemp(join(scratchParent, "swage-browser-e2e-"));
 const ownsInvocationDir = process.env.SWAGE_E2E_INVOCATION_DIR === undefined;
 const resultsDir = process.env.SWAGE_E2E_RESULTS_DIR ?? join(invocationDir, "playwright-results");
 const gatewayPort = Number(process.env.SWAGE_E2E_GATEWAY_PORT ?? "33100");
 const providerPort = Number(process.env.SWAGE_E2E_PROVIDER_PORT ?? "33101");
-await mkdir(scratchParent, { recursive: true });
 await mkdir(invocationDir, { recursive: true });
 const swageRoot = join(invocationDir, "state");
 await mkdir(swageRoot, { recursive: true });
