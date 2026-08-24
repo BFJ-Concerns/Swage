@@ -6355,6 +6355,120 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn research_sweep_executes_its_gather_organise_and_synthesis_contract() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let provider = Arc::new(ResearchSweepRecordingProvider {
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let tool_names = [
+            "web_search",
+            "url_fetch",
+            "browser_navigate",
+            "browser_snapshot",
+            "browser_click",
+            "browser_type",
+            "browser_select",
+            "browser_scroll",
+            "knowledge_record",
+            "knowledge_search",
+            "knowledge_curate",
+            "knowledge_curate_orientation",
+            "knowledge_cite",
+        ];
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(
+                tool_names
+                    .into_iter()
+                    .map(|name| Arc::new(WorkflowNamedTool(name)) as Arc<dyn crate::tool::Tool>)
+                    .collect::<Vec<_>>(),
+            ),
+            None,
+        );
+
+        let Json(started) = start_saved_run(
+            State(state.clone()),
+            Path(builtin_workflows::id(space.id, "research-sweep")),
+            Query(WorkflowScriptListQuery::default()),
+            Json(StartWorkflowRunRequest {
+                args: serde_json::json!({
+                    "topic": "contract evidence",
+                    "purpose": "prove the shipped sweep contract"
+                }),
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start research sweep with valid arguments");
+        wait_for_terminal(&state, started.id).await;
+
+        let run = storage
+            .get_workflow_run(started.id)
+            .await
+            .expect("run query")
+            .expect("research sweep run");
+        assert_eq!(run.state, "completed", "run error: {:?}", run.error_message);
+        let output = run.final_output.expect("terminal research report");
+        assert_eq!(
+            output["failed_sources"],
+            serde_json::json!([{
+                "url": "https://example.test/failed",
+                "reason": "unreachable"
+            }])
+        );
+        assert_eq!(
+            output["withheld_claims"],
+            serde_json::json!([{
+                "claim": "The comparison is conclusive.",
+                "reason": "The comparison source was unreachable."
+            }])
+        );
+        assert_eq!(output["organised"]["orientation_cards"], 1);
+        assert_eq!(
+            output["findings"][0]["citation_id"],
+            RESEARCH_SWEEP_CITATION_ID
+        );
+        assert!(output["findings"][0].get("quote").is_none());
+
+        let requests = provider.requests.lock().expect("requests");
+        assert_eq!(requests.len(), 5);
+        let request_text = |request: &swage_core::CompletionRequest| {
+            request
+                .messages
+                .iter()
+                .map(swage_core::ChatMessage::text_content)
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let organiser = requests
+            .iter()
+            .find(|request| request_text(request).contains("Organise them into"))
+            .expect("organiser request");
+        let organiser_text = request_text(organiser);
+        assert!(organiser_text.contains(RESEARCH_SWEEP_LANDED_OBSERVATION_ID));
+        assert!(!organiser_text.contains("https://example.test/failed"));
+
+        let synthesist = requests
+            .iter()
+            .find(|request| request_text(request).contains("Deliver research findings"))
+            .expect("synthesist request");
+        let synthesist_tools = synthesist
+            .tool_definitions
+            .iter()
+            .map(|definition| definition["name"].as_str().expect("tool name"))
+            .collect::<Vec<_>>();
+        assert_eq!(synthesist_tools, vec!["knowledge_cite", "knowledge_search"]);
+        assert!(
+            request_text(synthesist)
+                .contains("Put the claim in findings only after knowledge_cite accepts")
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn workflow_journal_preserves_and_recomposes_call_scoped_context() {
         let swage_home = crate::test_support::SwageHomeGuard::new();
         std::fs::create_dir_all(swage_home.path().join("assemblies"))
@@ -6698,6 +6812,15 @@ mod tests {
         requests: std::sync::Mutex<Vec<swage_core::CompletionRequest>>,
     }
 
+    const RESEARCH_SWEEP_LANDED_OBSERVATION_ID: &str = "11111111-1111-4111-8111-111111111111";
+    const RESEARCH_SWEEP_CITATION_ID: &str = "22222222-2222-4222-8222-222222222222";
+
+    /// Matches responses to stage prompts so concurrent gather calls cannot
+    /// consume one another's scripted outcome.
+    struct ResearchSweepRecordingProvider {
+        requests: std::sync::Mutex<Vec<swage_core::CompletionRequest>>,
+    }
+
     struct StaggeredFailingProvider;
 
     #[derive(Default)]
@@ -6851,6 +6974,60 @@ mod tests {
                 Some(output) => Box::pin(futures::stream::iter(output)),
                 None => Box::pin(futures::stream::pending()),
             }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl swage_provider::LlmProvider for ResearchSweepRecordingProvider {
+        fn model_id(&self) -> &str {
+            "research-sweep-scripted-model"
+        }
+
+        async fn complete(
+            &self,
+            _request: swage_core::CompletionRequest,
+        ) -> Result<swage_core::CompletionResponse, swage_core::ProviderError> {
+            unimplemented!("workflow calls use streaming")
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _request: swage_core::ToolCompletionRequest,
+        ) -> Result<swage_core::ToolCompletionResponse, swage_core::ProviderError> {
+            unimplemented!("workflow calls use streaming")
+        }
+
+        fn stream(
+            &self,
+            request: swage_core::CompletionRequest,
+        ) -> std::pin::Pin<Box<dyn futures::Stream<Item = swage_core::StreamChunk> + Send>>
+        {
+            let text = request
+                .messages
+                .iter()
+                .map(swage_core::ChatMessage::text_content)
+                .collect::<Vec<_>>()
+                .join("\n");
+            let response = if text.contains("You are scoping a research sweep.") {
+                r#"{"sources":[{"url":"https://example.test/landed","why":"primary evidence"},{"url":"https://example.test/failed","why":"comparison"}]}"#.to_string()
+            } else if text.contains("Source: https://example.test/landed") {
+                format!(
+                    r#"{{"url":"https://example.test/landed","recorded":true,"observation_id":"{RESEARCH_SWEEP_LANDED_OBSERVATION_ID}","note":"recorded"}}"#
+                )
+            } else if text.contains("Source: https://example.test/failed") {
+                r#"{"url":"https://example.test/failed","recorded":false,"observation_id":null,"note":"unreachable"}"#.to_string()
+            } else if text.contains("Organise them into the space's knowledge base.") {
+                r#"{"orientation_cards":1,"assertions":0,"note":"Added an evidence signpost."}"#
+                    .to_string()
+            } else if text.contains("Deliver research findings.") {
+                format!(
+                    r#"{{"findings":[{{"claim":"The landed source supports the purpose.","citation_id":"{RESEARCH_SWEEP_CITATION_ID}"}}],"withheld":[{{"claim":"The comparison is conclusive.","reason":"The comparison source was unreachable."}}]}}"#
+                )
+            } else {
+                panic!("unexpected research sweep request: {text}")
+            };
+            self.requests.lock().expect("requests").push(request);
+            Box::pin(futures::stream::iter(scripted_text_output(&response)))
         }
     }
 
