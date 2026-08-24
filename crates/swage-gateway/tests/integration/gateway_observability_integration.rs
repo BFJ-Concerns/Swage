@@ -497,6 +497,14 @@ async fn past_turn_report_matches_live_websocket_report() {
         StatusCode::OK,
         "past turn context endpoint should return 200"
     );
+    assert!(
+        stored_body["report"]["elements"]
+            .as_array()
+            .expect("context report elements")
+            .iter()
+            .any(|element| element["preview"].is_string()),
+        "the persisted context response should expose a safe preview for an element that contributed content"
+    );
 
     // The stored report starts as the live context event and may be enriched
     // later with provider-visible debugger data as the turn progresses.

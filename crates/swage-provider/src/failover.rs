@@ -177,7 +177,8 @@ impl LlmProvider for FailoverProvider {
         request: &CompletionRequest,
         stream: bool,
     ) -> serde_json::Value {
-        self.providers.first().map_or_else(
+        let order = self.compute_try_order(request.model.as_deref());
+        order.first().map_or_else(
             || {
                 serde_json::json!({
                     "provider": "generic",
@@ -186,7 +187,7 @@ impl LlmProvider for FailoverProvider {
                     "body": request,
                 })
             },
-            |provider| provider.provider_request_snapshot(request, stream),
+            |&idx| self.providers[idx].provider_request_snapshot(request, stream),
         )
     }
 
@@ -1641,5 +1642,57 @@ mod tests {
             failover.provider_request_snapshot(&completion_req(), true),
             serde_json::json!({"provider": "probe", "stream": true})
         );
+    }
+
+    #[test]
+    fn provider_request_snapshot_uses_the_available_provider_when_primary_is_cooled() {
+        let failover = FailoverProvider::new(
+            vec![
+                Arc::new(CountingProbe),
+                Arc::new(SnapshotProbe("secondary")),
+            ],
+            FailoverConfig::default(),
+        );
+        failover.set_cooldown(0);
+
+        assert_eq!(
+            failover.provider_request_snapshot(&completion_req(), true),
+            serde_json::json!({"provider": "secondary", "stream": true})
+        );
+    }
+
+    struct SnapshotProbe(&'static str);
+
+    #[async_trait]
+    impl LlmProvider for SnapshotProbe {
+        fn model_id(&self) -> &str {
+            self.0
+        }
+
+        fn provider_request_snapshot(
+            &self,
+            _: &CompletionRequest,
+            stream: bool,
+        ) -> serde_json::Value {
+            serde_json::json!({"provider": self.0, "stream": stream})
+        }
+
+        async fn complete(
+            &self,
+            _: CompletionRequest,
+        ) -> Result<CompletionResponse, ProviderError> {
+            unreachable!("snapshot-only probe")
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, ProviderError> {
+            unreachable!("snapshot-only probe")
+        }
+
+        fn stream(&self, _: CompletionRequest) -> Pin<Box<dyn Stream<Item = StreamChunk> + Send>> {
+            unreachable!("snapshot-only probe")
+        }
     }
 }

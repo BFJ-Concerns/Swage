@@ -6,6 +6,7 @@ All notable changes to Swage are documented in this file.
 
 ### Added
 
+- Context assembly alternatives can now be configured under `context.alternatives` for controlled selection experiments.
 - Asynchronous turn callers can provide optional focus instructions for context-compaction summaries, with the instructions retained in the compaction audit record.
 - Operators can inspect recorded configuration changes, assembly decisions, and variant selections in a read-only history pane.
 - Providers can now count prompt tokens under their own tokenizer where the vendor offers it (Anthropic), with decorated provider stacks forwarding the operation and estimate-based callers unaffected.
@@ -43,7 +44,7 @@ All notable changes to Swage are documented in this file.
 ### Fixed
 
 - Missing file-like frontend paths now return HTTP 404 instead of a successful SPA shell.
-- Turn-context inspection now includes bounded previews of the context each element contributed.
+- Turn-context inspection now includes bounded, secret-safe summaries of the context each element contributed.
 - Workflow scripts now reject unrecognised `agent()` and `agentStart()` option keys before dispatch instead of silently dropping them.
 - Reloading the web UI now returns to the open space instead of the space picker.
 - Operator schedules now show their complete execution target from every space.
