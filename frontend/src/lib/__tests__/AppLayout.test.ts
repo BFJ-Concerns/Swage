@@ -358,23 +358,30 @@ describe("AppLayout shell navigation", () => {
     expect(onNavigate).toHaveBeenCalledWith("/settings/providers");
   });
 
-  it("marks settings, rather than either hidden surface, while settings is open", () => {
-    const onNavigate = vi.fn();
-    component = mountLayout({ onNavigate, routePath: "/settings/providers" });
+  it.each(["conversation", "operator"] as const)(
+    "marks settings, rather than the %s surface, while settings is open",
+    (activeSurface) => {
+      const onNavigate = vi.fn();
+      component = mountLayout({
+        activeSurface,
+        onNavigate,
+        routePath: "/settings/providers",
+      });
 
-    expect(document.querySelector('[aria-label="Settings"]')).not.toBeNull();
-    expect(surfaceButton("Conversation").getAttribute("aria-pressed")).toBe("false");
-    expect(surfaceButton("Conversation").classList.contains("active")).toBe(false);
-    expect(surfaceButton("Operator").getAttribute("aria-pressed")).toBe("false");
-    expect(surfaceButton("Operator").classList.contains("active")).toBe(false);
-    expect(surfaceButton("Settings").getAttribute("aria-pressed")).toBe("true");
-    expect(surfaceButton("Settings").classList.contains("active")).toBe(true);
-    flushSync(() =>
-      (document.querySelector('[aria-label="Close settings"]') as HTMLButtonElement).click(),
-    );
+      expect(document.querySelector('[aria-label="Settings"]')).not.toBeNull();
+      expect(surfaceButton("Conversation").getAttribute("aria-pressed")).toBe("false");
+      expect(surfaceButton("Conversation").classList.contains("active")).toBe(false);
+      expect(surfaceButton("Operator").getAttribute("aria-pressed")).toBe("false");
+      expect(surfaceButton("Operator").classList.contains("active")).toBe(false);
+      expect(surfaceButton("Settings").getAttribute("aria-pressed")).toBe("true");
+      expect(surfaceButton("Settings").classList.contains("active")).toBe(true);
+      flushSync(() =>
+        (document.querySelector('[aria-label="Close settings"]') as HTMLButtonElement).click(),
+      );
 
-    expect(onNavigate).toHaveBeenCalledWith("/");
-  });
+      expect(onNavigate).toHaveBeenCalledWith("/");
+    },
+  );
 
   it("navigates to the agent definitions settings tab", () => {
     const onNavigate = vi.fn();
