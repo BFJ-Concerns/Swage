@@ -48,6 +48,7 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- Provider-facing tool schemas now retain stripped validation requirements in their descriptions, helping models form valid schedule delivery targets on the first call.
 - Portable JavaScript workflow `meta` headers now seed saved script details, and the unused workflow-script `agent_id` query has been removed.
 - Reserved workflow workers no longer load configuration, skills, named context elements, or JavaScript assemblies from an `__workflow_ephemeral__` agent directory, and that directory's skills are no longer listed by the skills API.
 - Sandboxed dispatched-agent shell tools now mount the minimal device filesystem over the read-only root and add narrow per-node device rules to the Landlock ruleset, restoring standard device access for ordinary Git initialisation and commits.

@@ -1210,6 +1210,12 @@ mod tests {
         assert!(schema["properties"]["query"].get("pattern").is_none());
         assert_eq!(schema["properties"]["oneOf"]["type"], "string");
         assert!(schema["description"].as_str().unwrap().contains("oneOf"));
+        assert!(
+            schema["description"]
+                .as_str()
+                .unwrap()
+                .contains("requires `query`")
+        );
     }
 
     #[test]
