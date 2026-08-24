@@ -102,10 +102,6 @@ mod tests {
                 "url_fetch",
                 "browser_navigate",
                 "browser_snapshot",
-                "browser_click",
-                "browser_type",
-                "browser_select",
-                "browser_scroll",
                 "knowledge_record",
             ]
         );

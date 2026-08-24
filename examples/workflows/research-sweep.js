@@ -43,10 +43,6 @@ const plan = await agent(
       "url_fetch",
       "browser_navigate",
       "browser_snapshot",
-      "browser_click",
-      "browser_type",
-      "browser_select",
-      "browser_scroll",
     ],
     label: "Scope sources",
     schema: {
