@@ -66,6 +66,24 @@ pub trait ContextElement: Send + Sync {
     ///
     /// Examples: `"thread history"`, `"space: my-space"`, `"global prompts"`.
     fn source(&self) -> String;
+
+    /// A bounded, safe-to-persist glimpse of this element's content.
+    ///
+    /// Most elements carry operator, session, or conversation material and
+    /// therefore have no safe generic preview. An element may opt in only
+    /// when it can construct a useful preview without copying that material.
+    fn report_preview(&self) -> Option<String> {
+        None
+    }
+}
+
+/// Return the first sentence of trusted built-in content for a report preview.
+///
+/// The returned text is an exact prefix of `content`; callers remain
+/// responsible for passing only static content that is safe to persist.
+pub(crate) fn built_in_first_sentence_preview(content: &str) -> String {
+    let sentence_end = content.find(". ").map_or(content.len(), |index| index + 1);
+    content[..sentence_end].to_string()
 }
 
 #[cfg(test)]

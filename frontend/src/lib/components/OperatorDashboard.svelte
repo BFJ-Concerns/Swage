@@ -592,7 +592,7 @@
 
   .metric-card[data-tone="critical"] .metric-label,
   .metric-card[data-tone="critical"] .metric-meta {
-    color: rgba(255, 248, 238, 0.85);
+    color: color-mix(in srgb, var(--paper) 85%, transparent);
   }
 
   .metric-card[data-tone="busy"] {

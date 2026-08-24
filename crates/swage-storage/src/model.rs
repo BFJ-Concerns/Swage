@@ -762,6 +762,9 @@ pub struct SourceObservation {
     pub body_sha256: String,
     pub body_bytes: u64,
     pub media_type: String,
+    /// Retry-safe capture identity: when set, a later capture of the same
+    /// origin under the same scope is this observation, not a new row.
+    pub capture_scope: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -774,6 +777,16 @@ pub struct NewSourceObservation {
     pub body_sha256: String,
     pub body_bytes: u64,
     pub media_type: String,
+    /// Stable identity for the unit of work making this capture (a
+    /// workflow's journalled agent call), or `None` for one-off captures.
+    /// Re-recording the same origin under the same scope deduplicates to
+    /// the first capture, so retried work cannot fork the evidence. Body
+    /// identity still wins: a capture whose bytes match existing evidence
+    /// returns that observation whatever its scope, so a scope binds only
+    /// rows it created — a retry whose first attempt landed on
+    /// body-identical foreign evidence records its changed bytes as a
+    /// distinct observation.
+    pub capture_scope: Option<String>,
 }
 
 /// One versioned text extraction of an observation's raw body.
@@ -1917,6 +1930,10 @@ pub struct WorkflowRunRecord {
     /// run. Worker sessions re-resolve and intersect every definition at
     /// each turn; a missing definition therefore fails closed.
     pub dispatch_bound_task_definition_ids: Vec<String>,
+    /// The call-scoped tool allow-list inherited from the worker session that
+    /// launched this run. This is a final narrowing overlay on every worker
+    /// the run dispatches, including workers of nested child runs.
+    pub workflow_call_tools: Option<Vec<String>>,
     /// Filesystem authority inherited from the session that launched this
     /// run. `None` means the run was not launched by a placed worker.
     pub inherited_worker_placement: Option<WorkflowRunWorkerPlacement>,
@@ -1948,6 +1965,8 @@ pub struct NewWorkflowRun {
     pub dispatch_bound_agent_ids: Vec<String>,
     /// See `WorkflowRunRecord::dispatch_bound_task_definition_ids`.
     pub dispatch_bound_task_definition_ids: Vec<String>,
+    /// See `WorkflowRunRecord::workflow_call_tools`.
+    pub workflow_call_tools: Option<Vec<String>>,
     /// See `WorkflowRunRecord::inherited_worker_placement`.
     pub inherited_worker_placement: Option<WorkflowRunWorkerPlacement>,
 }

@@ -214,5 +214,6 @@ system diagram.
 
 ## Development
 
-`just verify` runs the full gate (format, clippy, tests, frontend checks,
-projection freshness). See `CLAUDE.md` for repository conventions.
+`just check-gate` runs the fast, pre-test static gate; `just verify` runs that
+gate plus tests and projection freshness. See `CLAUDE.md` for repository
+conventions.
