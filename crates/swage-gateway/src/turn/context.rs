@@ -2,6 +2,7 @@ use super::{
     ActiveSkill, AppState, ChatMessage, ContextElement, HierarchyLevel, HistoryElement,
     MemoryElement, Path, PathBuf, PromptRule, PromptsElement, SkillManager, SkillsElement, Uuid,
 };
+use swage_config::RESERVED_WORKFLOW_AGENT_ID;
 use swage_context::briefing::BriefingElement;
 use swage_context::named_element::discover_named_elements;
 use swage_context::orientation::{
@@ -201,7 +202,10 @@ pub(crate) fn available_skills_for_agent(
     };
     let hierarchy = configuration_hierarchy(root, space_slug, agent_id);
     let space_dir = &hierarchy[1].1;
-    let agent_dir_opt = hierarchy[2].1.is_dir().then_some(hierarchy[2].1.as_path());
+    let agent_dir_opt = hierarchy
+        .iter()
+        .find(|(level, _)| *level == HierarchyLevel::Agent)
+        .and_then(|(_, path)| path.is_dir().then_some(path.as_path()));
     let (available, _warnings) = SkillManager::discover_available(root, space_dir, agent_dir_opt);
     available
         .into_iter()
@@ -213,18 +217,30 @@ pub(crate) fn available_skills_for_agent(
 }
 
 /// Construct the shared global → space → agent config hierarchy.
+///
+/// The workflow-ephemeral agent is a dispatch-only identity, not an
+/// operator-configurable agent. Its hierarchy stops at the space level so no
+/// filesystem content can join its assembled context.
 pub(crate) fn configuration_hierarchy(
     root: &Path,
     space_slug: &str,
     agent_id: &str,
 ) -> Vec<(HierarchyLevel, PathBuf)> {
     let space = root.join("spaces").join(space_slug);
-    let agent = space.join("agents").join(agent_id);
-    vec![
+    let mut hierarchy = vec![
         (HierarchyLevel::Global, root.to_path_buf()),
         (HierarchyLevel::Space, space),
-        (HierarchyLevel::Agent, agent),
-    ]
+    ];
+    if agent_id != RESERVED_WORKFLOW_AGENT_ID {
+        hierarchy.push((
+            HierarchyLevel::Agent,
+            root.join("spaces")
+                .join(space_slug)
+                .join("agents")
+                .join(agent_id),
+        ));
+    }
+    hierarchy
 }
 
 /// Load space memory content by reading all `.md` files from the space's
@@ -327,7 +343,10 @@ pub(crate) async fn load_active_skills_for_agent(
     };
     let hierarchy = configuration_hierarchy(root, space_slug, agent_id);
     let space_dir = &hierarchy[1].1;
-    let agent_dir_opt = hierarchy[2].1.is_dir().then_some(hierarchy[2].1.as_path());
+    let agent_dir_opt = hierarchy
+        .iter()
+        .find(|(level, _)| *level == HierarchyLevel::Agent)
+        .and_then(|(_, path)| path.is_dir().then_some(path.as_path()));
     let (available, _warnings) = SkillManager::discover_available(root, space_dir, agent_dir_opt);
 
     // Agent-level skills are automatic for the current agent context. Store
@@ -421,6 +440,100 @@ mod shipped_skill_tests {
                 "project-docs",
                 "workflow-authoring"
             ]
+        );
+    }
+
+    #[test]
+    fn workflow_ephemeral_agent_directory_is_excluded_from_every_context_lookup() {
+        let root = tempfile::tempdir().expect("temporary root");
+        let space = root.path().join("spaces/dispatch");
+        let reserved_agent = space.join("agents").join(RESERVED_WORKFLOW_AGENT_ID);
+        let ordinary_agent = space.join("agents/reviewer");
+
+        for agent in [&reserved_agent, &ordinary_agent] {
+            std::fs::create_dir_all(agent.join("skills/injected-skill"))
+                .expect("create agent skill directory");
+            std::fs::write(
+                agent.join("skills/injected-skill/SKILL.md"),
+                "---\ndescription: Injected context\n---\nDistinctive skill instructions.\n",
+            )
+            .expect("write agent skill");
+            std::fs::create_dir_all(agent.join("elements"))
+                .expect("create agent elements directory");
+            std::fs::write(
+                agent.join("elements/dispatch-brief.md"),
+                "Distinctive named element.\n",
+            )
+            .expect("write named element");
+            std::fs::create_dir_all(agent.join("assemblies"))
+                .expect("create agent assemblies directory");
+            std::fs::write(
+                agent.join("assemblies/dispatch-focus.js"),
+                "for (const element of elements) add(element);",
+            )
+            .expect("write assembly");
+        }
+
+        let reserved_hierarchy =
+            configuration_hierarchy(root.path(), "dispatch", RESERVED_WORKFLOW_AGENT_ID);
+        let ordinary_hierarchy = configuration_hierarchy(root.path(), "dispatch", "reviewer");
+        assert!(
+            reserved_hierarchy
+                .iter()
+                .all(|(level, _)| *level != HierarchyLevel::Agent),
+            "workflow workers must not receive an agent-level filesystem path"
+        );
+        assert_eq!(
+            ordinary_hierarchy.last(),
+            Some(&(HierarchyLevel::Agent, ordinary_agent.clone())),
+            "ordinary agents must retain their agent-level filesystem path"
+        );
+
+        let reserved_skills =
+            available_skills_for_agent("dispatch", RESERVED_WORKFLOW_AGENT_ID, Some(root.path()));
+        let ordinary_skills = available_skills_for_agent("dispatch", "reviewer", Some(root.path()));
+        assert!(
+            reserved_skills
+                .iter()
+                .all(|skill| skill.name != "injected-skill"),
+            "the reserved directory must not make skills available or auto-activatable"
+        );
+        assert!(
+            ordinary_skills
+                .iter()
+                .any(|skill| skill.name == "injected-skill"),
+            "a normal agent directory must still make its skill available"
+        );
+
+        let reserved_levels = reserved_hierarchy
+            .iter()
+            .map(|(level, path)| (level.clone(), path.as_path()))
+            .collect::<Vec<_>>();
+        let ordinary_levels = ordinary_hierarchy
+            .iter()
+            .map(|(level, path)| (level.clone(), path.as_path()))
+            .collect::<Vec<_>>();
+        assert!(
+            swage_context::named_element::resolve_named_element("dispatch-brief", &reserved_levels)
+                .expect("reserved named-element lookup")
+                .is_none(),
+            "the reserved directory must not resolve named elements"
+        );
+        assert_eq!(
+            swage_context::named_element::resolve_named_element("dispatch-brief", &ordinary_levels)
+                .expect("ordinary named-element lookup")
+                .expect("ordinary agent named element")
+                .path,
+            ordinary_agent.join("elements/dispatch-brief.md"),
+        );
+        assert!(
+            swage_context::js_assembly::resolve_js_assembly("dispatch-focus", &reserved_levels)
+                .is_none(),
+            "the reserved directory must not resolve named assemblies"
+        );
+        assert_eq!(
+            swage_context::js_assembly::resolve_js_assembly("dispatch-focus", &ordinary_levels),
+            Some(ordinary_agent.join("assemblies/dispatch-focus.js")),
         );
     }
 }
