@@ -9,12 +9,28 @@ use super::{
 /// bound and suspension cannot freeze authority.
 pub(crate) const DISPATCH_BOUND_METADATA_KEY: &str = "dispatch_bound_agent_ids";
 pub(crate) const DISPATCH_BOUND_TASK_METADATA_KEY: &str = "dispatch_bound_task_definition_ids";
+pub(crate) const WORKFLOW_CALL_TOOLS_METADATA_KEY: &str = "workflow_call_tools";
 pub(crate) const WORKER_PLACEMENT_CWD_METADATA_KEY: &str = "worker_placement_cwd";
 pub(crate) const WORKER_PLACEMENT_CAN_WRITE_METADATA_KEY: &str = "worker_placement_can_write";
 pub(crate) const WORKER_PLACEMENT_AUTHORITY_PATH_METADATA_KEY: &str =
     "worker_placement_authority_path";
 pub(crate) const WORKER_PLACEMENT_AUTHORITY_CONTEXT_METADATA_KEY: &str =
     "worker_placement_authority_context_id";
+
+/// Host-only session metadata naming the journalled agent call a worker
+/// session executes. The value is the call's journal entry id, which replay
+/// reuses when an interrupted call re-runs, so it is stable retry identity:
+/// idempotent writes (knowledge captures) scope their dedup to it.
+pub(crate) const AGENT_CALL_SCOPE_METADATA_KEY: &str = "agent_call_scope";
+
+/// The worker session's journalled-call scope, or `None` for sessions that
+/// are not workflow agent-call workers.
+pub(crate) fn agent_call_scope(metadata: Option<&serde_json::Value>) -> Option<String> {
+    metadata
+        .and_then(|metadata| metadata.get(AGENT_CALL_SCOPE_METADATA_KEY))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+}
 
 pub(crate) fn dispatch_bound_agent_ids(
     metadata: Option<&serde_json::Value>,
@@ -79,6 +95,34 @@ pub(crate) fn add_dispatch_bound_task_definition_ids(
     if !task_definition_ids.is_empty() {
         metadata[DISPATCH_BOUND_TASK_METADATA_KEY] = serde_json::json!(task_definition_ids);
     }
+}
+
+/// Apply a workflow call's journalled tool allow-list as a final narrowing
+/// overlay. The list rides the worker session so continuations retain the
+/// same authority and every turn recomputes the intersection.
+pub(crate) fn apply_workflow_call_tools(
+    mut config: swage_config::ResolvedConfig,
+    metadata: Option<&serde_json::Value>,
+) -> Result<swage_config::ResolvedConfig, GatewayError> {
+    let Some(tools) = workflow_call_tools(metadata)? else {
+        return Ok(config);
+    };
+    intersect_tool_permissions(&mut config, &tools, Vec::new());
+    Ok(config)
+}
+
+pub(crate) fn workflow_call_tools(
+    metadata: Option<&serde_json::Value>,
+) -> Result<Option<Vec<String>>, GatewayError> {
+    metadata
+        .and_then(|metadata| metadata.get(WORKFLOW_CALL_TOOLS_METADATA_KEY))
+        .map(|value| serde_json::from_value::<Vec<String>>(value.clone()))
+        .transpose()
+        .map_err(|error| {
+        GatewayError::ConfigError(format!(
+            "session metadata field {WORKFLOW_CALL_TOOLS_METADATA_KEY:?} must be an array of tool names: {error}"
+        ))
+    })
 }
 
 pub(crate) async fn dispatch_bound_agent_ids_for_turn(
@@ -169,12 +213,14 @@ pub(crate) async fn apply_dispatch_bounds(
                     "failed to load dispatch bound {bound_agent_id:?} for {subject}: {error}"
                 ))
             })?;
-        let bound = match state
-            .storage
-            .resolve_agent_definition(bound_agent_id, space_id)
-            .await
+        let bound = match crate::service::resolve_effective_agent_definition(
+            state.storage.as_ref(),
+            bound_agent_id,
+            space_id,
+        )
+        .await
         {
-            Ok(Some(definition)) => super::apply_agent_definition(bound, &definition),
+            Ok(Some(definition)) => super::apply_agent_definition(bound, &definition.definition),
             Ok(None) => bound,
             Err(error) => {
                 return Err(GatewayError::ConfigError(format!(
@@ -393,7 +439,7 @@ pub(crate) fn load_session_config_from_root(
         .map_err(|error| GatewayError::ConfigError(error.to_string()))
 }
 
-/// Overlay a durable agent definition onto the session's resolved config.
+/// Overlay an effective agent definition onto the session's resolved config.
 ///
 /// The definition is the agent's character; the file hierarchy is ambient
 /// operator configuration. Its instructions append after the operator's, its
@@ -402,7 +448,7 @@ pub(crate) fn load_session_config_from_root(
 /// grants — a definition can narrow what an agent may do, never widen it.
 pub(crate) fn apply_agent_definition(
     mut config: swage_config::ResolvedConfig,
-    definition: &swage_storage::AgentDefinition,
+    definition: &swage_storage::NewAgentDefinition,
 ) -> swage_config::ResolvedConfig {
     if !definition.instructions.trim().is_empty() {
         if config.instructions.is_empty() {
@@ -795,8 +841,8 @@ mod tests {
         instructions: &str,
         model_id: Option<&str>,
         tool_permissions: Option<serde_json::Value>,
-    ) -> swage_storage::AgentDefinition {
-        swage_storage::AgentDefinition {
+    ) -> swage_storage::NewAgentDefinition {
+        swage_storage::NewAgentDefinition {
             id: "researcher".into(),
             space_id: None,
             display_name: "Researcher".into(),
@@ -807,8 +853,6 @@ mod tests {
             skills: vec![],
             output_schema: None,
             output_max_retries: None,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
         }
     }
 

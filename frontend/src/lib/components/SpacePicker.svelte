@@ -659,7 +659,7 @@
     display: flex;
     align-items: center;
     gap: 12px;
-    border-top: 1px dotted rgba(255, 248, 238, 0.4);
+    border-top: 1px dotted color-mix(in srgb, var(--paper) 40%, transparent);
     padding-top: 10px;
   }
 
@@ -698,7 +698,7 @@
     font-family: var(--font-body);
     font-style: italic;
     font-size: var(--font-label-sm);
-    color: rgba(255, 248, 238, 0.7);
+    color: color-mix(in srgb, var(--paper) 70%, transparent);
   }
 
   /* New-space card and inline form. */
@@ -754,7 +754,7 @@
 
   .new-form input:focus {
     outline: none;
-    background: rgba(240, 106, 58, 0.06);
+    background: color-mix(in srgb, var(--accent) 6%, transparent);
   }
 
   .create-error {
@@ -860,12 +860,12 @@
     display: grid;
     grid-template-columns: minmax(0, 1fr);
     gap: 8px;
-    background: rgba(255, 248, 238, 0.42);
+    background: color-mix(in srgb, var(--paper) 42%, transparent);
   }
 
   .workspace-row.missing {
     border-style: dashed;
-    background: rgba(240, 106, 58, 0.08);
+    background: color-mix(in srgb, var(--accent) 8%, transparent);
   }
 
   .workspace-main {

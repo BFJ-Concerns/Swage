@@ -150,7 +150,7 @@
 <style>
   .context-inspector {
     padding: 1rem;
-    border-left: 1px solid var(--border-color, #ddd);
+    border-left: var(--border);
     overflow-y: auto;
     font-size: 0.875rem;
   }
@@ -175,11 +175,11 @@
   }
 
   .status {
-    color: var(--muted-color, #666);
+    color: var(--ink-soft);
   }
 
   .error {
-    color: var(--error-color, #b00020);
+    color: var(--error);
   }
 
   table.elements {
@@ -192,7 +192,7 @@
   td {
     text-align: left;
     padding: 0.25rem 0.5rem;
-    border-bottom: 1px solid var(--border-color, #eee);
+    border-bottom: var(--rule);
   }
 
   .numeric {
@@ -202,7 +202,7 @@
 
   .preview {
     display: block;
-    color: var(--muted-color, #666);
+    color: var(--ink-soft);
     font-size: 0.8em;
   }
 
