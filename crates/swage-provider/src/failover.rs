@@ -172,6 +172,24 @@ impl LlmProvider for FailoverProvider {
             .unwrap_or("")
     }
 
+    fn provider_request_snapshot(
+        &self,
+        request: &CompletionRequest,
+        stream: bool,
+    ) -> serde_json::Value {
+        self.providers.first().map_or_else(
+            || {
+                serde_json::json!({
+                    "provider": "generic",
+                    "model_id": self.model_id(),
+                    "stream": stream,
+                    "body": request,
+                })
+            },
+            |provider| provider.provider_request_snapshot(request, stream),
+        )
+    }
+
     async fn count_tokens(
         &self,
         request: &CompletionRequest,
@@ -1572,6 +1590,14 @@ mod tests {
             "counting-probe"
         }
 
+        fn provider_request_snapshot(
+            &self,
+            _: &CompletionRequest,
+            stream: bool,
+        ) -> serde_json::Value {
+            serde_json::json!({"provider": "probe", "stream": stream})
+        }
+
         async fn count_tokens(&self, _: &CompletionRequest) -> Result<Option<u64>, ProviderError> {
             Ok(Some(42))
         }
@@ -1604,6 +1630,16 @@ mod tests {
         assert_eq!(
             failover.count_tokens(&completion_req()).await.unwrap(),
             Some(42)
+        );
+    }
+
+    #[test]
+    fn provider_request_snapshot_delegates_to_the_first_provider_in_try_order() {
+        let failover =
+            FailoverProvider::new(vec![Arc::new(CountingProbe)], FailoverConfig::default());
+        assert_eq!(
+            failover.provider_request_snapshot(&completion_req(), true),
+            serde_json::json!({"provider": "probe", "stream": true})
         );
     }
 }

@@ -141,6 +141,14 @@ impl LlmProvider for RetryProvider {
         self.inner.model_id()
     }
 
+    fn provider_request_snapshot(
+        &self,
+        request: &CompletionRequest,
+        stream: bool,
+    ) -> serde_json::Value {
+        self.inner.provider_request_snapshot(request, stream)
+    }
+
     async fn count_tokens(
         &self,
         request: &CompletionRequest,
@@ -1166,6 +1174,14 @@ mod tests {
             "counting-probe"
         }
 
+        fn provider_request_snapshot(
+            &self,
+            _: &CompletionRequest,
+            stream: bool,
+        ) -> serde_json::Value {
+            serde_json::json!({"provider": "probe", "stream": stream})
+        }
+
         async fn count_tokens(&self, _: &CompletionRequest) -> Result<Option<u64>, ProviderError> {
             Ok(Some(42))
         }
@@ -1208,5 +1224,14 @@ mod tests {
     async fn count_tokens_delegates_to_the_wrapped_provider() {
         let provider = RetryProvider::with_defaults(CountingProbe);
         assert_eq!(provider.count_tokens(&count_req()).await.unwrap(), Some(42));
+    }
+
+    #[test]
+    fn provider_request_snapshot_delegates_to_the_wrapped_provider() {
+        let provider = RetryProvider::with_defaults(CountingProbe);
+        assert_eq!(
+            provider.provider_request_snapshot(&count_req(), true),
+            serde_json::json!({"provider": "probe", "stream": true})
+        );
     }
 }
