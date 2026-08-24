@@ -46,6 +46,7 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- Resumed workflow runs now park durably when a long timer follows an agent, child-workflow, or gate completion.
 - Tool-call and connection-error failure states now use the shared error treatment instead of action orange; connection loss and reconnection keep their ordinary connectivity treatment.
 - Inline-turn and approval errors now use the error-token wash in both themes.
 - Workflow scripts now reject unrecognised `agent()` and `agentStart()` option keys before dispatch instead of silently dropping them.

@@ -2369,8 +2369,12 @@ async fn run_host_commands_inner(
                                 accounting.replayed_working_credit.saturating_add(actual);
                         }
                     }
-                    let _ = reply.send(result);
                     in_flight.fetch_sub(1, Ordering::SeqCst);
+                    #[cfg(test)]
+                    let in_flight_at_reply = in_flight.load(Ordering::SeqCst);
+                    let _ = reply.send(result);
+                    #[cfg(test)]
+                    completion_handoff_test_support::pause(run_id, in_flight_at_reply).await;
                 });
             }
             HostCommand::Workflow {
@@ -2453,8 +2457,12 @@ async fn run_host_commands_inner(
                             }
                         }
                     };
-                    let _ = reply.send(result);
                     in_flight.fetch_sub(1, Ordering::SeqCst);
+                    #[cfg(test)]
+                    let in_flight_at_reply = in_flight.load(Ordering::SeqCst);
+                    let _ = reply.send(result);
+                    #[cfg(test)]
+                    completion_handoff_test_support::pause(run_id, in_flight_at_reply).await;
                 });
             }
             HostCommand::AbandonTimer { timer_id } => {
@@ -3058,8 +3066,12 @@ async fn run_host_commands_inner(
                             }
                         }
                     };
-                    let _ = reply.send(result);
                     in_flight.fetch_sub(1, Ordering::SeqCst);
+                    #[cfg(test)]
+                    let in_flight_at_reply = in_flight.load(Ordering::SeqCst);
+                    let _ = reply.send(result);
+                    #[cfg(test)]
+                    completion_handoff_test_support::pause(run_id, in_flight_at_reply).await;
                 });
             }
             HostCommand::Deliver {
@@ -5023,6 +5035,55 @@ pub(crate) fn spawn_workflow_wake_loop(
             }
         }
     })
+}
+
+#[cfg(test)]
+mod completion_handoff_test_support {
+    use std::sync::{
+        Arc, LazyLock, Mutex,
+        atomic::{AtomicU32, Ordering},
+    };
+
+    use tokio::sync::Notify;
+    use uuid::Uuid;
+
+    pub(super) struct Pause {
+        pub(super) run_id: Uuid,
+        pub(super) entered: Arc<Notify>,
+        pub(super) release: Arc<Notify>,
+        pub(super) observed_in_flight: AtomicU32,
+    }
+
+    static PAUSE: LazyLock<Mutex<Option<Arc<Pause>>>> = LazyLock::new(|| Mutex::new(None));
+
+    pub(super) fn install(pause: Arc<Pause>) {
+        let mut active = PAUSE.lock().expect("completion hand-off pause");
+        assert!(
+            active.is_none(),
+            "a completion hand-off pause is already active"
+        );
+        *active = Some(pause);
+    }
+
+    pub(super) fn remove() {
+        *PAUSE.lock().expect("completion hand-off pause") = None;
+    }
+
+    pub(super) async fn pause(run_id: Uuid, in_flight_at_reply: u32) {
+        let pause = PAUSE
+            .lock()
+            .expect("completion hand-off pause")
+            .as_ref()
+            .filter(|pause| pause.run_id == run_id)
+            .cloned();
+        if let Some(pause) = pause {
+            pause
+                .observed_in_flight
+                .store(in_flight_at_reply, Ordering::SeqCst);
+            pause.entered.notify_one();
+            pause.release.notified().await;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -11208,6 +11269,104 @@ mod tests {
             1,
             "the replayed gate never re-consulted the model"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_long_timer_parks_after_a_completion_handoff() {
+        let provider = Arc::new(ScriptedGateProvider {
+            replies: std::sync::Mutex::new(std::collections::VecDeque::from([
+                r#"{"wake": false, "reasoning": "completion is recorded"}"#,
+            ])),
+            calls: AtomicUsize::new(0),
+        });
+        let (storage, state, run) = event_gate_fixture(provider).await;
+        let park = CancellationToken::new();
+        let (tx, rx) = mpsc::unbounded_channel();
+        let task = tokio::spawn(run_host_commands(
+            state,
+            run.id,
+            run.space_id,
+            vec![],
+            vec![],
+            None,
+            None,
+            WorkflowBudget {
+                max_agent_calls: None,
+                max_total_tokens: None,
+                reserved_closing_tokens: None,
+                max_concurrent_agent_calls: None,
+            },
+            vec![],
+            Arc::new(AtomicU32::new(0)),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(Mutex::new(std::collections::HashMap::new())),
+            park.clone(),
+            50,
+            rx,
+        ));
+        let pause = Arc::new(completion_handoff_test_support::Pause {
+            run_id: run.id,
+            entered: Arc::new(Notify::new()),
+            release: Arc::new(Notify::new()),
+            observed_in_flight: AtomicU32::new(u32::MAX),
+        });
+        completion_handoff_test_support::install(Arc::clone(&pause));
+
+        let (gate_reply, gate_receive) = oneshot::channel();
+        tx.send(HostCommand::Gate {
+            request: GateRequest {
+                criteria: "record completion before a long wait".into(),
+                model: None,
+            },
+            cancellation: CancellationToken::new(),
+            reply: gate_reply,
+        })
+        .expect("gate");
+        pause.entered.notified().await;
+        assert_eq!(
+            gate_receive
+                .await
+                .expect("gate reply")
+                .expect("gate result")["wake"],
+            false
+        );
+
+        let (timer_reply, mut timer_receive) = oneshot::channel();
+        tx.send(HostCommand::Timer {
+            ms: 100,
+            timer_id: 0,
+            cancellation: CancellationToken::new(),
+            reply: timer_reply,
+        })
+        .expect("long timer after completion hand-off");
+        let parked_signal =
+            tokio::time::timeout(std::time::Duration::from_millis(250), park.cancelled()).await;
+        pause.release.notify_one();
+        completion_handoff_test_support::remove();
+        assert_eq!(
+            pause.observed_in_flight.load(Ordering::SeqCst),
+            0,
+            "the completion hand-off must publish idleness before the reply"
+        );
+        assert!(
+            parked_signal.is_ok(),
+            "the long timer must park while the completion hand-off is held"
+        );
+
+        let parked = storage
+            .get_workflow_run(run.id)
+            .await
+            .expect("read parked run")
+            .expect("run");
+        assert_eq!(parked.state, "parked");
+        assert!(parked.wake_at.is_some(), "parked run records its wake time");
+        assert!(matches!(
+            timer_receive.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+
+        drop(tx);
+        task.await.expect("host loop");
     }
 
     #[tokio::test(flavor = "multi_thread")]
