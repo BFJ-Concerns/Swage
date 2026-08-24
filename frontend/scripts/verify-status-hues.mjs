@@ -15,9 +15,10 @@
        backing it actually renders on, in the scheme it renders in.
     2. CIEDE2000 (ΔE00) role separation — every spot hue stays measurably clear
        of the two warm roles the palette reserves (--accent owns action,
-       --error owns trouble), so no status ever reads as "another orange thing"
-       or as an error. This is the check that caught the dark-scheme collision
-       (--error sat ~6 ΔE00 from --accent); the fix is gated here.
+       --error owns trouble), and confirmation feedback (--success) stays
+       distinct from every status register. This is the check that caught the
+       dark-scheme collision (--error sat ~6 ΔE00 from --accent); the fixes are
+       gated here.
 
   Pairwise distances between the registers are reported for awareness but only
   warn — several pairs lean on treatment + label by design (calm ink vs not-yet
@@ -39,6 +40,7 @@ import { dirname, resolve } from "node:path";
 // Set in the spirit of the riso palette's own role separations (~18 ΔE00).
 const MIN_DELTA_E_VS_ROLE = 15; // spot hue vs --accent, and --error vs --accent
 const MIN_DELTA_E_VS_ERROR = 12; // spot hue vs --error (must not read as trouble)
+const MIN_DELTA_E_SUCCESS_VS_REGISTER = 12; // confirmation feedback vs status registers
 const AA_SMALL_TEXT = 4.5; // WCAG 2.1 AA for small text/glyph
 const WARN_DELTA_E_PAIR = 10; // pairwise register distance below this: warn only
 
@@ -47,6 +49,9 @@ const WARN_DELTA_E_PAIR = 10; // pairwise register distance below this: warn onl
 /** "#rrggbb" → [r,g,b] in 0..255. */
 function hexToRgb(hex) {
   const h = hex.trim().replace(/^#/, "");
+  if (!/^(?:[\da-f]{3}|[\da-f]{6})$/i.test(h)) {
+    throw new Error(`expected a hex colour, received ${hex}`);
+  }
   const full = h.length === 3 ? h.split("").map((c) => c + c).join("") : h;
   return [0, 2, 4].map((i) => parseInt(full.slice(i, i + 2), 16));
 }
@@ -161,13 +166,13 @@ function stripComments(css) {
   return css.replace(/\/\*[\s\S]*?\*\//g, "");
 }
 
-/** Pull the declaration body of a single `selector { ... }` block. */
-function blockBody(css, selector) {
+/** Pull every declaration body for `selector { ... }` blocks, in source order. */
+function blockBodies(css, selector) {
   const re = new RegExp(
     selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\s*\\{([^}]*)\\}",
+    "g",
   );
-  const m = stripComments(css).match(re);
-  return m ? m[1] : "";
+  return Array.from(stripComments(css).matchAll(re), (match) => match[1]);
 }
 
 /** Parse `--name: value;` pairs from a block body into a Map. */
@@ -178,6 +183,11 @@ function parseDecls(body) {
     if (m) map.set(m[1].trim(), m[2].trim());
   }
   return map;
+}
+
+/** Later blocks override earlier blocks, matching CSS custom-property cascade. */
+function parseSelectorDecls(css, selector) {
+  return new Map(blockBodies(css, selector).flatMap((body) => [...parseDecls(body)]));
 }
 
 /**
@@ -191,8 +201,15 @@ function resolveHex(name, theme, root, seen = new Set()) {
   seen.add(name);
   const raw = theme.get(name) ?? root.get(name);
   if (raw === undefined) throw new Error(`token ${name} not found`);
-  const varMatch = raw.match(/^var\((--[\w-]+)\)$/);
-  if (varMatch) return resolveHex(varMatch[1], theme, root, seen);
+  const varMatch = raw.match(/^var\((--[\w-]+)(?:,\s*(.+))?\)$/);
+  if (varMatch) {
+    const [, reference, fallback] = varMatch;
+    if (theme.has(reference) || root.has(reference)) {
+      return resolveHex(reference, theme, root, seen);
+    }
+    if (fallback) return fallback.trim();
+    throw new Error(`token ${reference} not found while resolving ${name}`);
+  }
   return raw;
 }
 
@@ -218,10 +235,10 @@ const SPOT_KEYS = new Set(["in-motion", "wants-a-human", "not-yet", "elsewhere"]
  */
 export function measure(cssPath) {
   const css = readFileSync(cssPath, "utf8");
-  const root = parseDecls(blockBody(css, ":root"));
+  const root = parseSelectorDecls(css, ":root");
   const themes = {
-    light: parseDecls(blockBody(css, ".theme-riso")),
-    dark: parseDecls(blockBody(css, ".theme-cyanotype")),
+    light: parseSelectorDecls(css, ".theme-riso"),
+    dark: parseSelectorDecls(css, ".theme-cyanotype"),
   };
 
   const failures = [];
@@ -232,6 +249,7 @@ export function measure(cssPath) {
     const paper = hexToRgb(resolveHex("--paper", theme, root));
     const accent = hexToRgb(resolveHex("--accent", theme, root));
     const error = hexToRgb(resolveHex("--error", theme, root));
+    const success = hexToRgb(resolveHex("--success", theme, root));
 
     // Resolve each register's representative hue for this scheme.
     const hues = {};
@@ -280,6 +298,16 @@ export function measure(cssPath) {
     }
     rows.push({ scheme, register: "--error vs --accent", errorVsAccent });
 
+    for (const reg of REGISTERS) {
+      const successVsRegister = deltaE00(success, hues[reg.key]);
+      if (successVsRegister < MIN_DELTA_E_SUCCESS_VS_REGISTER) {
+        failures.push(
+          `[${scheme}] --success: ΔE00 ${successVsRegister.toFixed(1)} from ${reg.token} < ${MIN_DELTA_E_SUCCESS_VS_REGISTER}`,
+        );
+      }
+      rows.push({ scheme, register: `--success vs ${reg.token}`, successVsRegister });
+    }
+
     // Pairwise register distinctness (warn only).
     const keys = REGISTERS.map((r) => r.key);
     for (let i = 0; i < keys.length; i++) {
@@ -318,6 +346,9 @@ function formatReport(result) {
     }
     const ea = result.rows.find((x) => x.scheme === scheme && x.errorVsAccent != null);
     lines.push(`  --error vs --accent: ΔE00 ${ea.errorVsAccent.toFixed(1)}`);
+    for (const r of result.rows.filter((x) => x.scheme === scheme && x.successVsRegister != null)) {
+      lines.push(`  ${r.register}: ΔE00 ${r.successVsRegister.toFixed(1)}`);
+    }
   }
   if (result.warnings.length) {
     lines.push("\nWarnings (informational — carried by treatment + label):");

@@ -153,13 +153,13 @@
 {/if}
 
 <style>
-  .topbar { display: flex; align-items: center; gap: 1rem; padding: .75rem; border-bottom: 1px solid var(--ink, #222); }
+  .topbar { display: flex; align-items: center; gap: 1rem; padding: .75rem; border-bottom: 1px solid var(--ink); }
   nav { display: flex; gap: .5rem; }
   .settings-window { height: calc(100vh - 4rem); overflow: auto; }
-  .settings-chrome { display: flex; align-items: center; justify-content: space-between; padding: .75rem; border-bottom: 1px solid var(--ink, #222); }
+  .settings-chrome { display: flex; align-items: center; justify-content: space-between; padding: .75rem; border-bottom: 1px solid var(--ink); }
   .settings-chrome h2 { margin: 0; font-size: 1rem; }
   button.active { font-weight: bold; }
   .conversation { display: grid; grid-template-columns: minmax(16rem, 25%) 1fr; height: calc(100vh - 4rem); }
-  .conversation aside { overflow: auto; border-right: 1px solid var(--ink, #222); }
+  .conversation aside { overflow: auto; border-right: 1px solid var(--ink); }
   .conversation section, .operator { min-width: 0; overflow: auto; }
 </style>

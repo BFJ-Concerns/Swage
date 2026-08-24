@@ -263,12 +263,12 @@
   }
 
   textarea::placeholder {
-    color: rgba(14, 59, 102, 0.5);
+    color: color-mix(in srgb, var(--ink) 50%, transparent);
     font-style: italic;
   }
 
   textarea:focus {
-    background: rgba(240, 106, 58, 0.04);
+    background: color-mix(in srgb, var(--accent) 4%, transparent);
   }
 
   /* Right-hand block: fluoro orange fill with cream display label.
@@ -286,7 +286,7 @@
     cursor: pointer;
     display: flex;
     align-items: center;
-    border-left: 1px solid rgba(255, 248, 238, 0.2);
+    border-left: 1px solid color-mix(in srgb, var(--paper) 20%, transparent);
   }
 
   .action.stop {
