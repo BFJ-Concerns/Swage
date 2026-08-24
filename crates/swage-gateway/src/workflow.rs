@@ -4639,11 +4639,13 @@ async fn remove_active_workflow_generation(
     #[cfg(test)]
     let cleanup_pause = workflow_cleanup_test_hook::pause_once(run_id).await;
     let mut active = active.lock().await;
-    if active.get(&run_id) == Some(generation) {
+    let removed = active.get(&run_id) == Some(generation);
+    if removed {
         active.remove(&run_id);
     }
     #[cfg(test)]
     if let Some(pause) = cleanup_pause {
+        pause.record_removal(removed);
         pause.finished.add_permits(1);
     }
 }
@@ -4652,7 +4654,10 @@ async fn remove_active_workflow_generation(
 mod workflow_cleanup_test_hook {
     use std::{
         collections::HashMap,
-        sync::{Arc, Mutex, OnceLock},
+        sync::{
+            Arc, Mutex, OnceLock,
+            atomic::{AtomicBool, Ordering},
+        },
     };
 
     use tokio::sync::Semaphore;
@@ -4662,6 +4667,17 @@ mod workflow_cleanup_test_hook {
         pub(super) entered: Semaphore,
         pub(super) release: Semaphore,
         pub(super) finished: Semaphore,
+        removed: AtomicBool,
+    }
+
+    impl Pause {
+        pub(super) fn record_removal(&self, removed: bool) {
+            self.removed.store(removed, Ordering::SeqCst);
+        }
+
+        pub(super) fn removed_generation(&self) -> bool {
+            self.removed.load(Ordering::SeqCst)
+        }
     }
 
     fn pauses() -> &'static Mutex<HashMap<Uuid, Arc<Pause>>> {
@@ -4674,6 +4690,7 @@ mod workflow_cleanup_test_hook {
             entered: Semaphore::new(0),
             release: Semaphore::new(0),
             finished: Semaphore::new(0),
+            removed: AtomicBool::new(false),
         });
         pauses()
             .lock()
@@ -11190,9 +11207,8 @@ mod tests {
             .await
             .expect("workflow cleanup test hook remains open")
             .forget();
-        assert_eq!(
-            state.active_workflow_runs.lock().await.get(&run.id),
-            Some(&replacement),
+        assert!(
+            !cleanup_pause.removed_generation(),
             "the original generation must not remove the relaunched run's token"
         );
 
