@@ -1,4 +1,10 @@
+<script module lang="ts">
+  let nextTriggerId = 0;
+  let inspectedTurn = $state<{ triggerId: number; turnId: string } | null>(null);
+</script>
+
 <script lang="ts">
+  import { onDestroy } from "svelte";
   import TurnContextInspector from "./TurnContextInspector.svelte";
 
   interface Props {
@@ -15,7 +21,13 @@
     inspectorTarget,
   }: Props = $props();
 
-  let inspectedTurnId = $state<string | null>(null);
+  const triggerId = nextTriggerId++;
+
+  onDestroy(() => {
+    if (inspectedTurn?.triggerId === triggerId) {
+      inspectedTurn = null;
+    }
+  });
 
   function portal(node: HTMLElement, target: HTMLElement | undefined) {
     const originalParent = node.parentNode;
@@ -45,16 +57,16 @@
   class:message={presentation === "message"}
   class:history={presentation === "history"}
   class="context-link"
-  onclick={() => (inspectedTurnId = turnId)}
+  onclick={() => (inspectedTurn = { triggerId, turnId })}
 >
   {label}
 </button>
 
 <div class="inspector-portal" use:portal={inspectorTarget}>
-  {#if inspectedTurnId}
+  {#if inspectedTurn?.triggerId === triggerId}
     <TurnContextInspector
-      turnId={inspectedTurnId}
-      onClose={() => (inspectedTurnId = null)}
+      turnId={inspectedTurn.turnId}
+      onClose={() => (inspectedTurn = null)}
     />
   {/if}
 </div>
