@@ -95,6 +95,25 @@ async function send(page: Page, prompt: string): Promise<void> {
   await expect(page.getByLabel("Your message").getByText(prompt, { exact: true })).toBeVisible();
 }
 
+test("resolves light-theme tokens before runtime theme application", async ({ page }) => {
+  await page.addInitScript(() => {
+    const add = DOMTokenList.prototype.add;
+    DOMTokenList.prototype.add = function (...tokens: string[]) {
+      return add.apply(this, tokens.filter((token) => !token.startsWith("theme-")));
+    };
+  });
+
+  await page.goto("/");
+  await expect(page.locator("body")).not.toHaveClass(/theme-(riso|cyanotype)/);
+  await expect.poll(() => page.evaluate(() => {
+    const styles = getComputedStyle(document.body);
+    return {
+      ink: styles.getPropertyValue("--ink").trim(),
+      paperDeep: styles.getPropertyValue("--paper-deep").trim(),
+    };
+  })).toEqual({ ink: "#0e3b66", paperDeep: "#ececea" });
+});
+
 test("renders an early streamed response before the delayed remainder", async ({ page }) => {
   await send(page, "stream this turn");
   const assistant = page.getByLabel("Assistant message");
