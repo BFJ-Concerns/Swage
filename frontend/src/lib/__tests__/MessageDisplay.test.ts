@@ -194,6 +194,9 @@ describe("turn context inspector trigger", () => {
     expect(document.body.textContent?.replace(/\s+/g, " ")).toContain("request total: 12 tokens");
     expect(document.querySelector(".summary")?.closest(".message-display")).toBeNull();
     expect(document.querySelector(".summary")?.closest(".message")).toBeNull();
+
+    (document.querySelector('button[aria-label="Close"]') as HTMLButtonElement).click();
+    await vi.waitFor(() => expect(document.querySelector(".context-inspector")).toBeNull());
   });
 });
 
