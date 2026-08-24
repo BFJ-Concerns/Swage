@@ -1,9 +1,11 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { spawn } from "node:child_process";
 
 const playwrightCli = resolve("node_modules/@playwright/test/cli.js");
-const invocationDir = await mkdtemp("/tmp/scratch/swage-browser-e2e-");
+const scratchParent = "/tmp/scratch";
+await mkdir(scratchParent, { recursive: true });
+const invocationDir = await mkdtemp(join(scratchParent, "swage-browser-e2e-"));
 const child = spawn(process.execPath, [playwrightCli, "test", ...process.argv.slice(2)], {
   stdio: "inherit",
   env: {
