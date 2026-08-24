@@ -22,13 +22,33 @@ use crate::error::AgentError;
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Byte-equivalent allowance for provider framing around each text message.
+///
+/// The fast path only applies to text-only messages with no tool payloads.
+/// Sixteen bytes per message leaves room for roles and provider framing while
+/// keeping clearly small contexts off the counting endpoint.
+const PER_MESSAGE_TOKEN_OVERHEAD_BYTES: u64 = 16;
+
 /// Check whether the message history exceeds the compaction threshold.
 ///
-/// Uses a rough 4-characters-per-token estimate for `TokenCount` thresholds.
-pub fn exceeds_threshold(messages: &[ChatMessage], threshold: &CompactionThreshold) -> bool {
+/// Token thresholds first use a conservative byte bound, then ask the active
+/// provider to count the exact prompt. Providers that cannot count, or whose
+/// counting request fails, fall back to the existing character estimate.
+pub async fn exceeds_threshold(
+    messages: &[ChatMessage],
+    threshold: &CompactionThreshold,
+    provider: &dyn LlmProvider,
+) -> bool {
     match threshold {
         CompactionThreshold::TokenCount(max_tokens) => {
-            estimated_tokens(messages) > *max_tokens as usize
+            if token_count_byte_upper_bound(messages).is_some_and(|bound| bound <= *max_tokens) {
+                return false;
+            }
+
+            match provider.count_tokens(&counting_request(messages)).await {
+                Ok(Some(count)) => count > *max_tokens,
+                Ok(None) | Err(_) => estimated_tokens(messages) > *max_tokens as usize,
+            }
         }
         CompactionThreshold::MessageCount(max_count) => messages.len() > *max_count as usize,
     }
@@ -59,14 +79,14 @@ pub async fn compact(
     let messages_before = messages.len();
     let tokens_before = estimated_tokens(&messages);
     // Fast path: already within bounds.
-    if !exceeds_threshold(&messages, threshold) {
+    if !exceeds_threshold(&messages, threshold, provider).await {
         return Ok((messages, None));
     }
 
     // Tier 1 — Summarise: condense older half via an LLM call. Falls back
     // gracefully if the provider call fails.
     let messages = try_summarise(messages, provider, focus).await;
-    if !exceeds_threshold(&messages, threshold) {
+    if !exceeds_threshold(&messages, threshold, provider).await {
         let tokens_after = estimated_tokens(&messages);
         let messages_removed = messages_before.saturating_sub(messages.len());
         return Ok((
@@ -83,7 +103,7 @@ pub async fn compact(
 
     // Tier 2 — Truncate: drop oldest non-system messages.
     let messages = truncate(messages, threshold);
-    if !exceeds_threshold(&messages, threshold) {
+    if !exceeds_threshold(&messages, threshold, provider).await {
         let tokens_after = estimated_tokens(&messages);
         let messages_removed = messages_before.saturating_sub(messages.len());
         return Ok((
@@ -101,7 +121,7 @@ pub async fn compact(
     // Tier 3 — Aggressive truncate: keep system messages + single most recent
     // message. All dropped messages are already persisted to storage.
     let messages = aggressive_truncate(messages);
-    if !exceeds_threshold(&messages, threshold) {
+    if !exceeds_threshold(&messages, threshold, provider).await {
         let tokens_after = estimated_tokens(&messages);
         let messages_removed = messages_before.saturating_sub(messages.len());
         return Ok((
@@ -124,6 +144,50 @@ pub async fn compact(
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
+
+/// Return a safe byte upper bound for a text-only prompt.
+///
+/// A BPE token occupies at least one byte. Image and tool payloads have
+/// provider-specific token costs outside this bound, so they deliberately
+/// bypass the fast path and are counted by the provider instead.
+fn token_count_byte_upper_bound(messages: &[ChatMessage]) -> Option<u64> {
+    messages.iter().try_fold(0_u64, |total, message| {
+        if message.tool_calls().is_some() || message.tool_replay().is_some() {
+            return None;
+        }
+
+        let text_bytes = message.content().iter().try_fold(0_u64, |sum, part| {
+            let ContentPart::Text { text } = part else {
+                return None;
+            };
+            Some(sum.saturating_add(text.len() as u64))
+        })?;
+
+        Some(
+            total
+                .saturating_add(text_bytes)
+                .saturating_add(PER_MESSAGE_TOKEN_OVERHEAD_BYTES),
+        )
+    })
+}
+
+/// Build the provider request used only to count the active prompt.
+///
+/// Counting generates no response, so generation settings and tools are left
+/// empty; the provider's configured model remains the authority for tokenizer
+/// selection.
+fn counting_request(messages: &[ChatMessage]) -> CompletionRequest {
+    CompletionRequest {
+        messages: messages.to_vec(),
+        model: None,
+        effort: None,
+        max_tokens: None,
+        temperature: None,
+        stop_sequences: None,
+        metadata: None,
+        tool_definitions: vec![],
+    }
+}
 
 /// Attempt to summarise the older half of the message history with an LLM call.
 ///
@@ -394,6 +458,73 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Copy)]
+    enum CountOutcome {
+        Count(u64),
+        Unavailable,
+        Failed,
+    }
+
+    /// Count-only provider that captures the exact request it receives.
+    struct CapturingCountProvider {
+        outcome: CountOutcome,
+        count_requests: Mutex<Vec<CompletionRequest>>,
+    }
+
+    impl CapturingCountProvider {
+        fn new(outcome: CountOutcome) -> Arc<Self> {
+            Arc::new(Self {
+                outcome,
+                count_requests: Mutex::new(Vec::new()),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl LlmProvider for CapturingCountProvider {
+        fn model_id(&self) -> &str {
+            "counting-model"
+        }
+
+        async fn count_tokens(
+            &self,
+            request: &CompletionRequest,
+        ) -> Result<Option<u64>, ProviderError> {
+            self.count_requests
+                .lock()
+                .expect("count request lock")
+                .push(request.clone());
+            match self.outcome {
+                CountOutcome::Count(count) => Ok(Some(count)),
+                CountOutcome::Unavailable => Ok(None),
+                CountOutcome::Failed => Err(ProviderError::InvalidResponse(
+                    "counting unavailable in test".into(),
+                )),
+            }
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, ProviderError> {
+            unreachable!("count-only provider")
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _request: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, ProviderError> {
+            unreachable!("count-only provider")
+        }
+
+        fn stream(
+            &self,
+            _request: CompletionRequest,
+        ) -> Pin<Box<dyn Stream<Item = StreamChunk> + Send>> {
+            unreachable!("count-only provider")
+        }
+    }
+
     // Helpers
     // -----------------------------------------------------------------------
 
@@ -406,62 +537,90 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // exceeds_threshold unit tests (synchronous)
+    // exceeds_threshold unit tests
     // -----------------------------------------------------------------------
 
-    #[test]
-    fn below_message_count_threshold_returns_false() {
+    #[tokio::test]
+    async fn below_message_count_threshold_returns_false() {
         let messages = vec![
             text_msg(Role::User, "hello"),
             text_msg(Role::Assistant, "hi there"),
         ];
-        assert!(!exceeds_threshold(
-            &messages,
-            &CompactionThreshold::MessageCount(5)
-        ));
+        let provider = CapturingCountProvider::new(CountOutcome::Count(0));
+
+        assert!(
+            !exceeds_threshold(
+                &messages,
+                &CompactionThreshold::MessageCount(5),
+                provider.as_ref(),
+            )
+            .await
+        );
     }
 
-    #[test]
-    fn at_message_count_threshold_returns_false() {
+    #[tokio::test]
+    async fn at_message_count_threshold_returns_false() {
         // len == threshold is NOT exceeding (strictly greater than).
         let messages = vec![
             text_msg(Role::User, "a"),
             text_msg(Role::User, "b"),
             text_msg(Role::User, "c"),
         ];
-        assert!(!exceeds_threshold(
-            &messages,
-            &CompactionThreshold::MessageCount(3)
-        ));
+        let provider = CapturingCountProvider::new(CountOutcome::Count(0));
+
+        assert!(
+            !exceeds_threshold(
+                &messages,
+                &CompactionThreshold::MessageCount(3),
+                provider.as_ref(),
+            )
+            .await
+        );
     }
 
-    #[test]
-    fn above_message_count_threshold_returns_true() {
+    #[tokio::test]
+    async fn above_message_count_threshold_returns_true() {
         let messages = vec![
             text_msg(Role::User, "a"),
             text_msg(Role::User, "b"),
             text_msg(Role::User, "c"),
             text_msg(Role::User, "d"),
         ];
-        assert!(exceeds_threshold(
-            &messages,
-            &CompactionThreshold::MessageCount(3)
-        ));
+        let provider = CapturingCountProvider::new(CountOutcome::Count(0));
+
+        assert!(
+            exceeds_threshold(
+                &messages,
+                &CompactionThreshold::MessageCount(3),
+                provider.as_ref(),
+            )
+            .await
+        );
     }
 
-    #[test]
-    fn token_count_threshold_based_on_char_estimate() {
-        // "hello world" = 11 chars → ~2 tokens (11/4 = 2). Threshold of 1 should
-        // exceed; threshold of 10 should not.
+    #[tokio::test]
+    async fn token_count_threshold_based_on_char_estimate() {
+        // "hello world" = 11 chars -> ~2 tokens (11/4 = 2). Threshold of 1
+        // should exceed; threshold of 10 should not.
         let messages = vec![text_msg(Role::User, "hello world")];
-        assert!(exceeds_threshold(
-            &messages,
-            &CompactionThreshold::TokenCount(1)
-        ));
-        assert!(!exceeds_threshold(
-            &messages,
-            &CompactionThreshold::TokenCount(10)
-        ));
+        let provider = CapturingCountProvider::new(CountOutcome::Unavailable);
+
+        assert!(
+            exceeds_threshold(
+                &messages,
+                &CompactionThreshold::TokenCount(1),
+                provider.as_ref(),
+            )
+            .await
+        );
+        assert!(
+            !exceeds_threshold(
+                &messages,
+                &CompactionThreshold::TokenCount(10),
+                provider.as_ref(),
+            )
+            .await
+        );
 
         // The estimate sums all characters before dividing. Three short
         // messages therefore contain an estimated two tokens (9/4), rather
@@ -471,10 +630,136 @@ mod tests {
             text_msg(Role::Assistant, "abc"),
             text_msg(Role::User, "abc"),
         ];
-        assert!(exceeds_threshold(
-            &short_messages,
-            &CompactionThreshold::TokenCount(1)
-        ));
+        assert!(
+            exceeds_threshold(
+                &short_messages,
+                &CompactionThreshold::TokenCount(1),
+                provider.as_ref(),
+            )
+            .await
+        );
+    }
+
+    #[tokio::test]
+    async fn message_count_threshold_is_unchanged_and_never_counts() {
+        let messages = vec![
+            text_msg(Role::User, "hello"),
+            text_msg(Role::Assistant, "hi there"),
+        ];
+        let provider = CapturingCountProvider::new(CountOutcome::Count(0));
+
+        assert!(
+            exceeds_threshold(
+                &messages,
+                &CompactionThreshold::MessageCount(1),
+                provider.as_ref(),
+            )
+            .await
+        );
+        assert!(
+            provider
+                .count_requests
+                .lock()
+                .expect("count request lock")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn byte_bound_screen_skips_provider_counting() {
+        let messages = vec![text_msg(Role::User, "small")];
+        let provider = CapturingCountProvider::new(CountOutcome::Count(999));
+
+        assert!(
+            !exceeds_threshold(
+                &messages,
+                &CompactionThreshold::TokenCount(100),
+                provider.as_ref(),
+            )
+            .await
+        );
+        assert!(
+            provider
+                .count_requests
+                .lock()
+                .expect("count request lock")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn token_count_uses_provider_request_and_decision_over_estimate() {
+        // Eight characters estimate to two tokens, below this threshold; the
+        // provider's real count is five, so the result proves it was consulted.
+        let messages = vec![text_msg(Role::User, "abcdefgh")];
+        let provider = CapturingCountProvider::new(CountOutcome::Count(5));
+
+        assert!(
+            exceeds_threshold(
+                &messages,
+                &CompactionThreshold::TokenCount(4),
+                provider.as_ref(),
+            )
+            .await
+        );
+
+        let requests = provider.count_requests.lock().expect("count request lock");
+        assert_eq!(requests.len(), 1);
+        let request = &requests[0];
+        assert_eq!(request.messages, messages);
+        assert!(request.model.is_none());
+        assert!(request.effort.is_none());
+        assert!(request.max_tokens.is_none());
+        assert!(request.temperature.is_none());
+        assert!(request.stop_sequences.is_none());
+        assert!(request.metadata.is_none());
+        assert!(request.tool_definitions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn unavailable_provider_counting_falls_back_to_estimate() {
+        let messages = vec![text_msg(Role::User, "abcdefgh")];
+        let provider = CapturingCountProvider::new(CountOutcome::Unavailable);
+
+        assert!(
+            exceeds_threshold(
+                &messages,
+                &CompactionThreshold::TokenCount(1),
+                provider.as_ref(),
+            )
+            .await
+        );
+        assert_eq!(
+            provider
+                .count_requests
+                .lock()
+                .expect("count request lock")
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_provider_counting_falls_back_to_estimate() {
+        let messages = vec![text_msg(Role::User, "abcdefgh")];
+        let provider = CapturingCountProvider::new(CountOutcome::Failed);
+
+        assert!(
+            exceeds_threshold(
+                &messages,
+                &CompactionThreshold::TokenCount(1),
+                provider.as_ref(),
+            )
+            .await
+        );
+        assert_eq!(
+            provider
+                .count_requests
+                .lock()
+                .expect("count request lock")
+                .len(),
+            1
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -612,7 +897,12 @@ mod tests {
         .expect("compact should succeed via truncation fallback");
 
         assert!(
-            !exceeds_threshold(&result, &CompactionThreshold::MessageCount(3)),
+            !exceeds_threshold(
+                &result,
+                &CompactionThreshold::MessageCount(3),
+                provider.as_ref(),
+            )
+            .await,
             "result should be within threshold, got {} messages",
             result.len()
         );

@@ -1715,8 +1715,8 @@ async fn execute_external_delegate_message(
             crate::turn::effective_tool_permissions_record(&effective_target_resolved),
             composition,
         ),
-        snapshot_recorder: Some(crate::turn::delegation_snapshot_recorder(
-            state.storage.clone(),
+        snapshot_recorder: Some(crate::turn::delegation_snapshot_recorder_for_state(
+            state.clone(),
         )),
     };
 

@@ -37,6 +37,11 @@ pub struct AgentCallRequest {
     pub agent: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task: Option<String>,
+    /// Optional call-scoped tool allow-list. The host intersects this with
+    /// the worker's effective grants, so a call can narrow authority but
+    /// never acquire a tool its dispatching context or agent lacks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<String>>,
     pub model: Option<String>,
     /// Provider reasoning effort for this call. Absent preserves the ambient
     /// provider or model default and the historical journal request shape.
@@ -433,6 +438,7 @@ mod task_request_tests {
             prompt: "work".into(),
             agent: None,
             task: None,
+            tools: None,
             model: None,
             effort: None,
             timeout_ms: None,
@@ -448,6 +454,7 @@ mod task_request_tests {
         };
         let value = serde_json::to_value(request).unwrap();
         assert!(!value.as_object().unwrap().contains_key("task"));
+        assert!(!value.as_object().unwrap().contains_key("tools"));
     }
     #[test]
     fn named_task_is_serialised_verbatim() {
@@ -455,6 +462,7 @@ mod task_request_tests {
             prompt: "work".into(),
             agent: None,
             task: Some("review".into()),
+            tools: None,
             model: None,
             effort: None,
             timeout_ms: None,
@@ -472,6 +480,33 @@ mod task_request_tests {
         assert_eq!(value["task"], "review");
         let request: AgentCallRequest = serde_json::from_value(value).unwrap();
         assert_eq!(request.task.as_deref(), Some("review"));
+    }
+
+    #[test]
+    fn call_scoped_tools_are_serialised_verbatim() {
+        let value = serde_json::to_value(AgentCallRequest {
+            prompt: "scope sources".into(),
+            agent: Some("researcher".into()),
+            task: None,
+            tools: Some(vec!["web_search".into(), "url_fetch".into()]),
+            model: None,
+            effort: None,
+            timeout_ms: None,
+            cwd: None,
+            isolation: None,
+            schema: None,
+            max_attempts: 1,
+            label: None,
+            session: None,
+            elements: None,
+            variables: None,
+            assembly: None,
+        })
+        .unwrap();
+        assert_eq!(
+            value["tools"],
+            serde_json::json!(["web_search", "url_fetch"])
+        );
     }
 
     #[test]

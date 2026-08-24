@@ -63,6 +63,10 @@ update on completion. `wait({ watches, timerMs })` races a set of handles
 against a journalled timer: the first handle to complete or the timer to fire
 wins, and the result says which.
 
+The optional `tools` array narrows a fresh worker call to the named tools. It
+is intersected with the worker's effective grants and therefore cannot grant
+new authority; continuations retain the allow-list chosen at worker creation.
+
 ### Composition
 
 `workflow(name, args)` calls a child workflow. It is only available when the

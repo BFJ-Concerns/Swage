@@ -233,6 +233,7 @@ mod tests {
                 body_sha256: Uuid::new_v4().to_string(),
                 body_bytes: 30,
                 media_type: "text/plain".into(),
+                capture_scope: None,
             })
             .await
             .unwrap();
@@ -323,6 +324,7 @@ mod tests {
                 body_sha256: Uuid::new_v4().to_string(),
                 body_bytes: 31,
                 media_type: "text/plain".into(),
+                capture_scope: None,
             })
             .await
             .unwrap();
@@ -373,6 +375,7 @@ mod tests {
                 body_sha256: Uuid::new_v4().to_string(),
                 body_bytes: 32,
                 media_type: "text/plain".into(),
+                capture_scope: None,
             })
             .await
             .unwrap();

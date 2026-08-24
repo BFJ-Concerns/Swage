@@ -340,7 +340,7 @@
   }
 
   .space-item:hover {
-    background: rgba(14, 59, 102, 0.08);
+    background: color-mix(in srgb, var(--ink) 8%, transparent);
   }
 
   .space-item.active {
@@ -454,7 +454,7 @@
   }
 
   .create-space-btn:hover {
-    background: rgba(240, 106, 58, 0.1);
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
   }
 
   /* Create-space form. */
@@ -478,7 +478,7 @@
 
   .create-space-form input:focus {
     outline: none;
-    background: rgba(240, 106, 58, 0.06);
+    background: color-mix(in srgb, var(--accent) 6%, transparent);
   }
 
   .create-error {
