@@ -227,6 +227,28 @@ fn provider_visible_array<'a>(
         .expect("provider-visible value was normalised to an array")
 }
 
+fn record_effective_model_snapshot(
+    report_json: &mut serde_json::Value,
+    catalogue_entry: &str,
+    model: &swage_config::ModelEndpointConfig,
+    source: &str,
+) {
+    if !report_json.is_object() {
+        let previous = std::mem::replace(report_json, serde_json::json!({}));
+        report_json["assembly_report"] = previous;
+    }
+
+    if !report_json["provider_visible"].is_object() {
+        report_json["provider_visible"] = serde_json::json!({});
+    }
+    report_json["provider_visible"]["effective_model"] = serde_json::json!({
+        "catalogue_entry": catalogue_entry,
+        "model_id": model.model_id,
+        "provider_id": model.provider_id,
+        "source": source,
+    });
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SandboxDegradationApproval {
     Approved,
@@ -904,9 +926,13 @@ async fn process_turn_with_composition_and_focus(
         None => (config, false),
     };
 
-    let selected_model_id = requested_model
-        .as_deref()
-        .or(session.selected_model_id.as_deref());
+    let (selected_model_id, effective_model_source) = match requested_model.as_deref() {
+        Some(model_id) => (Some(model_id), "request"),
+        None => match session.selected_model_id.as_deref() {
+            Some(model_id) => (Some(model_id), "conversation"),
+            None => (None, "configured_default"),
+        },
+    };
     if let Some(requested_model) = requested_model.as_deref() {
         resolve_requested_turn_model(&config, requested_model)?;
     }
@@ -1182,14 +1208,16 @@ async fn process_turn_with_composition_and_focus(
         tracing::warn!(error = %e, "failed to serialise assembly report");
         serde_json::json!({ "error": "serialisation failed" })
     });
-    let (effective_model_id, effective_model) =
+    if let Some((effective_model_id, effective_model)) =
         resolve_model_catalogue_entry(&config.models, &config.models.default)
-            .expect("effective configuration must name a configured model");
-    report_json["provider_visible"]["effective_model"] = serde_json::json!({
-        "catalogue_entry": effective_model_id,
-        "model_id": effective_model.model_id,
-        "provider_id": effective_model.provider_id,
-    });
+    {
+        record_effective_model_snapshot(
+            &mut report_json,
+            effective_model_id,
+            effective_model,
+            effective_model_source,
+        );
+    }
 
     let session_approval_grants = state
         .session_approval_grants
