@@ -54,14 +54,14 @@
   .val { display: flex; gap: 10px; flex-wrap: wrap; }
   .val-stack { flex-direction: column; align-items: stretch; gap: 12px; }
   .credential-status { font-family: var(--font-mono); font-weight: 500; font-size: 10px; letter-spacing: 0.16em; text-transform: uppercase; padding: 3px 8px; border: 1px solid var(--ink-soft); color: var(--ink-soft); }
-  .credential-status.set { border-color: var(--ink); color: var(--ink); background: rgba(47, 122, 58, 0.14); }
+  .credential-status.set { border-color: var(--ink); color: var(--ink); background: color-mix(in srgb, var(--success) 14%, transparent); }
   .sign-in-guidance { margin: 0; color: var(--ink-soft); }
   .sign-in-guidance.warning { color: var(--ink-orange); }
   .device-code-instruction { display: grid; gap: 8px; }
   .opt-row { display: flex; gap: 8px; flex-wrap: wrap; }
   .text { width: 100%; max-width: 480px; padding: 9px 11px; border: 1px solid var(--ink); background: var(--paper); color: var(--ink); font-family: var(--font-body); font-size: 13px; line-height: 1.4; }
   .device-code { width: 14ch; font-family: var(--font-mono); letter-spacing: 0.08em; }
-  .text:focus { outline: none; background: rgba(240, 106, 58, 0.06); }
+  .text:focus { outline: none; background: color-mix(in srgb, var(--accent) 6%, transparent); }
   .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
   @media (max-width: 760px) { .field { grid-template-columns: 1fr; gap: 10px; } }
 </style>

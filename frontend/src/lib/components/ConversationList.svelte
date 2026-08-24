@@ -291,7 +291,7 @@
   }
 
   .conversation-item.active .timestamp {
-    color: rgba(255, 248, 238, 0.7);
+    color: color-mix(in srgb, var(--paper) 70%, transparent);
   }
 
   /* Delete affordance — always rendered so touch and keyboard can reach it,
@@ -323,7 +323,7 @@
   }
 
   .conversation-item.active .delete-btn {
-    color: rgba(255, 248, 238, 0.7);
+    color: color-mix(in srgb, var(--paper) 70%, transparent);
     opacity: 0.6;
   }
 

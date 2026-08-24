@@ -87,8 +87,6 @@ use uuid::Uuid;
 
 use crate::state::AppState;
 
-const DEFAULT_AGENT_ID: &str = "gateway";
-
 #[cfg(test)]
 static TEST_SPACE_SKILL_ROOTS: std::sync::LazyLock<
     std::sync::Mutex<std::collections::HashMap<Uuid, std::path::PathBuf>>,
@@ -185,14 +183,13 @@ pub(crate) async fn agent_scope_is_visible(
     agent_id: &str,
 ) -> Result<bool, swage_core::GatewayError> {
     validate_agent_scope_id(agent_id)?;
-    if agent_id == DEFAULT_AGENT_ID {
-        return Ok(true);
-    }
-    Ok(state
-        .storage
-        .resolve_agent_definition(agent_id, space_id)
-        .await?
-        .is_some())
+    Ok(crate::service::resolve_effective_agent_definition(
+        state.storage.as_ref(),
+        agent_id,
+        space_id,
+    )
+    .await?
+    .is_some())
 }
 
 /// Discover the effective skills for one space and optional agent beneath an
