@@ -3,11 +3,10 @@
 use async_trait::async_trait;
 use axum::{
     Json,
-    extract::{Path, Query, State},
+    extract::{Path, State},
 };
 use serde_json::{Value, json};
 use swage_core::ToolError;
-use swage_protocol::client::workflow::WorkflowScriptListQuery;
 use swage_tool::context::ToolContext;
 use uuid::Uuid;
 
@@ -89,15 +88,10 @@ pub async fn workflows_for_session(state: &AppState, session_id: Uuid) -> Result
         .await
         .map_err(|error| error.to_string())?
         .ok_or_else(|| format!("session {session_id} was not found"))?;
-    let Json(response) = crate::workflow::list_scripts(
-        State(state.clone()),
-        Path(session.space_id),
-        Query(WorkflowScriptListQuery {
-            agent_id: Some(session.agent_id),
-        }),
-    )
-    .await
-    .map_err(|error| error.0.to_string())?;
+    let Json(response) =
+        crate::workflow::list_scripts(State(state.clone()), Path(session.space_id))
+            .await
+            .map_err(|error| error.0.to_string())?;
 
     Ok(json!({
         "workflows": response.scripts.into_iter().map(|script| json!({
