@@ -446,6 +446,18 @@ impl LlmProvider for CapturingMultiRoundProvider {
         "mock-capturing-multi-round"
     }
 
+    fn provider_request_snapshot(
+        &self,
+        request: &CompletionRequest,
+        stream: bool,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "provider": "capturing-multi-round",
+            "stream": stream,
+            "message_count": request.messages.len(),
+        })
+    }
+
     async fn complete(
         &self,
         _request: CompletionRequest,
@@ -7604,6 +7616,11 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
         }),
         "the upstream bound must keep shell out even though both immediate sender and child grant it"
     );
+    assert_eq!(
+        child_snapshot["provider_visible"]["requests"][0]["request"]["provider"],
+        serde_json::json!("capturing-multi-round"),
+        "the delegated child's provider diagnostic must survive into its stored context record"
+    );
     let child_audit = state
         .storage
         .list_audit_events_by_session(child_sessions[0].id)
@@ -9781,6 +9798,7 @@ async fn process_turn_uses_hot_swapped_runtime_config_for_next_turn() {
         },
         context: swage_config::ContextConfig {
             assembly: "default".to_string(),
+            alternatives: Vec::new(),
             timeout: 7,
             budget: Some(2048),
         },
@@ -9938,6 +9956,30 @@ async fn unknown_forced_context_assembly_rejects_call_scoped_override() {
         !state.active_turns.lock().await.contains_key(&session_id),
         "context-assembly selection failure must release the turn guard"
     );
+}
+
+#[tokio::test]
+async fn registered_context_assembly_alternative_can_be_selected_and_is_audited() {
+    let storage = Arc::new(MockStorage::new());
+    let (state, session_id) = make_state_with_storage(vec![], Arc::clone(&storage)).await;
+    let mut config = swage_config::ResolvedConfig::default();
+    config.context.alternatives = vec!["candidate".to_owned()];
+
+    let choices = select_context_assembly(&state, &config, session_id, Uuid::from_u128(1), None)
+        .await
+        .expect("registered alternative should be selectable");
+
+    assert_eq!(choices.assembly_name, "candidate");
+    let audit = state
+        .storage
+        .list_audit_events_by_session(session_id)
+        .await
+        .unwrap();
+    assert!(audit.iter().any(|event| {
+        event.entity_id == crate::experimentation::LOCATION_CONTEXT_ASSEMBLY
+            && event.metadata["variant"] == serde_json::json!("candidate")
+            && event.metadata["reason"] == serde_json::json!("drawn")
+    }));
 }
 
 #[tokio::test]

@@ -120,13 +120,14 @@ fn default_assembly_inner(
             history_range = Some(range_start..range_start + content.len());
         }
 
-        // Populate a preview for skills elements: a comma-separated list of
-        // active skill names extracted from the source string. Other elements
-        // do not yet provide previews.
+        // Skills have a compact identity preview; every other rendered
+        // element exposes a bounded excerpt of the actual context it added.
+        // The report is an inspector surface, so a permanently empty preview
+        // conceals rather than summarises the assembled context.
         let preview = if element.name() == "skills" {
-            extract_skill_names_preview(&source)
+            extract_skill_names_preview(&source).or_else(|| preview_messages(&content))
         } else {
-            None
+            preview_messages(&content)
         };
 
         element_reports.push(ElementReport {
@@ -210,6 +211,26 @@ fn default_assembly_inner(
     // If assembled is empty the caller provided no viable elements — that is a
     // programming error, not a runtime condition, so we panic here.
     AssemblyOutput::new_unchecked(assembled, report)
+}
+
+pub(crate) fn preview_messages(messages: &[ChatMessage]) -> Option<String> {
+    const PREVIEW_CHARS: usize = 240;
+
+    let content = messages
+        .iter()
+        .map(|message| message.text_content())
+        .filter(|text| !text.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if content.is_empty() {
+        return None;
+    }
+
+    let mut preview = content.chars().take(PREVIEW_CHARS).collect::<String>();
+    if content.chars().nth(PREVIEW_CHARS).is_some() {
+        preview.push('…');
+    }
+    Some(preview)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -345,6 +366,7 @@ mod tests {
     fn no_budget_config() -> ContextConfig {
         ContextConfig {
             assembly: "default".to_string(),
+            alternatives: Vec::new(),
             timeout: 5,
             budget: None,
         }
@@ -353,6 +375,7 @@ mod tests {
     fn budget_config(tokens: usize) -> ContextConfig {
         ContextConfig {
             assembly: "default".to_string(),
+            alternatives: Vec::new(),
             timeout: 5,
             budget: Some(tokens),
         }
@@ -699,6 +722,21 @@ mod tests {
             skills_report.preview.is_none(),
             "empty skills should have no preview"
         );
+    }
+
+    #[test]
+    fn ordinary_element_report_preview_is_a_bounded_content_excerpt() {
+        let elements: Vec<Box<dyn ContextElement>> = vec![prompts_element(&"x".repeat(300))];
+        let output = default_assembly(
+            &elements,
+            &no_budget_config(),
+            &FixedCostTokeniser { cost: 10 },
+        );
+
+        let preview = output.report.elements[0].preview.as_deref().unwrap();
+        assert_eq!(preview.chars().count(), 241);
+        assert!(preview.ends_with('…'));
+        assert!(preview.starts_with('x'));
     }
 
     #[test]

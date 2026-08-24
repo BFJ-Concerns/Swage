@@ -800,6 +800,13 @@
     "ContextConfig": {
       "type": "object",
       "properties": {
+        "alternatives": {
+          "description": "Named context assemblies registered as hidden alternatives to the\nconfigured default. Selection records the chosen name locally.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "assembly": {
           "type": "string"
         },

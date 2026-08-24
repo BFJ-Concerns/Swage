@@ -17,7 +17,8 @@ use super::{
 use crate::turn::workspace::ResolvedWorkerDirectory;
 use sha2::{Digest, Sha256};
 use swage_agent::{
-    DelegatedAssembly, DelegationContextAssembler, DelegationOutcome, DelegationSnapshotRecorder,
+    AgentEvent, DelegatedAssembly, DelegationContextAssembler, DelegationOutcome,
+    DelegationSnapshotRecorder,
 };
 use swage_context::tokeniser::TiktokenTokeniser;
 use swage_core::DelegateCompletionMode;
@@ -168,12 +169,26 @@ impl DelegationContextAssembler for GatewayDelegatedContextAssembler {
 
 struct GatewayDelegationSnapshotRecorder {
     storage: Arc<dyn swage_storage::Storage>,
+    state: Option<AppState>,
 }
 
+#[cfg(test)]
 pub(crate) fn delegation_snapshot_recorder(
     storage: Arc<dyn swage_storage::Storage>,
 ) -> Arc<dyn DelegationSnapshotRecorder> {
-    Arc::new(GatewayDelegationSnapshotRecorder { storage })
+    Arc::new(GatewayDelegationSnapshotRecorder {
+        storage,
+        state: None,
+    })
+}
+
+pub(crate) fn delegation_snapshot_recorder_for_state(
+    state: AppState,
+) -> Arc<dyn DelegationSnapshotRecorder> {
+    Arc::new(GatewayDelegationSnapshotRecorder {
+        storage: state.storage.clone(),
+        state: Some(state),
+    })
 }
 
 #[async_trait::async_trait]
@@ -210,6 +225,54 @@ impl DelegationSnapshotRecorder for GatewayDelegationSnapshotRecorder {
             }
         }
         Ok(())
+    }
+
+    async fn record_event(&self, session_id: Uuid, event: AgentEvent) -> Result<(), AgentError> {
+        let Some(state) = &self.state else {
+            return Ok(());
+        };
+        let turn_id = match &event {
+            AgentEvent::ProviderRequestPrepared { turn_id, .. }
+            | AgentEvent::ProviderResponseCaptured { turn_id, .. }
+            | AgentEvent::ProviderReasoningCaptured { turn_id, .. } => *turn_id,
+            _ => return Ok(()),
+        };
+        let Some(snapshot) = self.storage.get_snapshot(turn_id).await? else {
+            return Err(AgentError::InvalidConfig(format!(
+                "delegated turn {turn_id} has no context snapshot for provider request"
+            )));
+        };
+        let mut report: serde_json::Value = serde_json::from_str(&snapshot).map_err(|error| {
+            AgentError::InvalidConfig(format!(
+                "delegated context snapshot is invalid JSON: {error}"
+            ))
+        })?;
+        match event {
+            AgentEvent::ProviderRequestPrepared { round, request, .. } => {
+                match super::redact_provider_visible_request(state, request).await {
+                    Ok(request) => {
+                        super::append_provider_visible_request(&mut report, round, request)
+                    }
+                    Err(error) => {
+                        tracing::error!(%turn_id, %round, %error, "delegated provider-visible request capture omitted because secret redaction was unavailable");
+                        super::append_provider_visible_capture_error(&mut report, round);
+                    }
+                }
+            }
+            AgentEvent::ProviderResponseCaptured { round, witness, .. } => {
+                super::append_provider_visible_response(&mut report, round, witness);
+            }
+            AgentEvent::ProviderReasoningCaptured {
+                round,
+                content,
+                details,
+                ..
+            } => {
+                super::append_provider_visible_reasoning(&mut report, round, content, details);
+            }
+            _ => unreachable!("non-diagnostic events returned above"),
+        }
+        self.record(session_id, turn_id, &report).await
     }
 }
 
@@ -471,7 +534,7 @@ impl DelegationHandler for GatewayDelegationHandler {
                 effective_tool_permissions_record(&effective_target_resolved),
                 composition.clone(),
             ),
-            snapshot_recorder: Some(delegation_snapshot_recorder(self.state.storage.clone())),
+            snapshot_recorder: Some(delegation_snapshot_recorder_for_state(self.state.clone())),
         };
 
         let mut payload = serde_json::to_value(composition).map_err(|error| {
