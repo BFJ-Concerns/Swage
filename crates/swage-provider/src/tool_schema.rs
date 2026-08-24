@@ -41,6 +41,7 @@ const HOSTILE_KEYWORDS: &[&str] = &[
 
 /// Keep model-facing summaries short even when a schema has many branches.
 const MAX_DESCRIBED_SCHEMA_CHOICES: usize = 4;
+const MAX_INLINE_CONSTRAINT_VALUE_CHARS: usize = 160;
 
 pub(crate) fn provider_tool_schema(schema: &Value) -> Value {
     let mut projected = project_schema(schema);
@@ -135,6 +136,7 @@ fn stripped_constraint_summary(keyword: &str, value: &Value) -> String {
         ),
         "allOf" => format!("allOf ({})", describe_schema_choices(value, "all of")),
         "items" => describe_item_constraint(value),
+        "minLength" | "pattern" => format!("{keyword} ({})", describe_constant(value)),
         "$schema" | "$id" | "$defs" => keyword.to_string(),
         _ => keyword.to_string(),
     }
@@ -241,7 +243,10 @@ fn indefinite_noun(kind: &str) -> String {
 
 fn describe_constant(value: &Value) -> String {
     match value {
-        Value::String(value) => format!("\"{value}\""),
+        Value::String(value) if value.chars().count() <= MAX_INLINE_CONSTRAINT_VALUE_CHARS => {
+            format!("\"{value}\"")
+        }
+        Value::String(_) => "a fixed value".to_string(),
         Value::Number(value) => value.to_string(),
         Value::Bool(value) => value.to_string(),
         Value::Null => "`null`".to_string(),
@@ -278,7 +283,7 @@ fn object_schema() -> Value {
 mod tests {
     use serde_json::json;
 
-    use super::provider_tool_schema;
+    use super::{MAX_INLINE_CONSTRAINT_VALUE_CHARS, provider_tool_schema};
 
     #[test]
     fn provider_tool_schema_strips_hostile_keywords_and_notes_local_validation() {
@@ -319,8 +324,8 @@ mod tests {
         assert!(query.get("minLength").is_none());
         assert!(query.get("pattern").is_none());
         let query_description = query["description"].as_str().unwrap();
-        assert!(query_description.contains("minLength"));
-        assert!(query_description.contains("pattern"));
+        assert!(query_description.contains("minLength (3)"));
+        assert!(query_description.contains("pattern (\"^[a-z]+$\")"));
 
         let mode = &projected["properties"]["mode"];
         assert_eq!(mode["enum"], json!(["fast", "deep"]));
@@ -431,5 +436,22 @@ mod tests {
             "Additional local validation applies for: items must be an object."
         );
         assert!(!changes_description.contains("secret"));
+    }
+
+    #[test]
+    fn provider_tool_schema_bounds_inline_constraint_values() {
+        let long_pattern = "a".repeat(MAX_INLINE_CONSTRAINT_VALUE_CHARS + 1);
+        let schema = json!({
+            "type": "object",
+            "properties": {"value": {"type": "string", "pattern": long_pattern}}
+        });
+
+        let projected = provider_tool_schema(&schema);
+        let description = projected["properties"]["value"]["description"]
+            .as_str()
+            .unwrap();
+
+        assert!(description.contains("pattern (a fixed value)"));
+        assert!(!description.contains(&long_pattern));
     }
 }
