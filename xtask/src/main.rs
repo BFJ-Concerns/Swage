@@ -530,8 +530,11 @@ fn component_style_lines(contents: &str) -> impl Iterator<Item = (usize, &str, u
                 let style_start = opening_offset + opening_end + 1;
                 let style = &line[style_start..];
                 if let Some(closing) = style.find("</style") {
-                    return (!style[..closing].is_empty())
-                        .then_some((index + 1, &style[..closing], style_start));
+                    return (!style[..closing].is_empty()).then_some((
+                        index + 1,
+                        &style[..closing],
+                        style_start,
+                    ));
                 }
                 in_style = true;
                 return (!style.is_empty()).then_some((index + 1, style, style_start));
@@ -539,7 +542,11 @@ fn component_style_lines(contents: &str) -> impl Iterator<Item = (usize, &str, u
             if in_style {
                 if let Some(closing) = line.find("</style") {
                     in_style = false;
-                    return (!line[..closing].is_empty()).then_some((index + 1, &line[..closing], 0));
+                    return (!line[..closing].is_empty()).then_some((
+                        index + 1,
+                        &line[..closing],
+                        0,
+                    ));
                 }
                 return Some((index + 1, line, 0));
             }
