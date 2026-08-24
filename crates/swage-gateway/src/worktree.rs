@@ -1,7 +1,7 @@
 //! Gateway-owned lifecycle for runtime-provisioned worker git worktrees.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     process::Stdio,
 };
@@ -136,10 +136,10 @@ impl WorktreeHost {
 
     /// Reclaim worktrees left behind by a gateway that did not shut down.
     ///
-    /// Failed and cancelled owners remain available until the gateway exits or
-    /// restarts. At startup no live owner can exist, so every registered
-    /// worktree beneath the host's UUID/worker-sequence layout is stale.
-    pub async fn recover(&self) -> Result<usize, String> {
+    /// Workflow owners that replay from their durable journal are retained for
+    /// the wake loop. Failed, cancelled, and delegated-worker owners have no
+    /// such live replay claim and are reclaimed.
+    pub async fn recover(&self, retained_owner_ids: &HashSet<Uuid>) -> Result<usize, String> {
         let mut owners = match tokio::fs::read_dir(&self.config.root).await {
             Ok(entries) => entries,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
@@ -156,27 +156,33 @@ impl WorktreeHost {
             .await
             .map_err(|error| format!("cannot read managed worktree owner: {error}"))?
         {
-            if !owner
-                .file_type()
-                .await
-                .map_err(|error| format!("cannot inspect managed worktree owner: {error}"))?
-                .is_dir()
-                || Uuid::parse_str(&owner.file_name().to_string_lossy()).is_err()
-            {
+            let Ok(owner_type) = owner.file_type().await else {
+                tracing::warn!(path = %owner.path().display(), "cannot inspect managed worktree owner; leaving it untouched");
+                continue;
+            };
+            let Ok(owner_id) = Uuid::parse_str(&owner.file_name().to_string_lossy()) else {
+                continue;
+            };
+            if !owner_type.is_dir() || retained_owner_ids.contains(&owner_id) {
                 continue;
             }
             let owner_path = owner.path();
-            let mut workers = tokio::fs::read_dir(&owner_path).await.map_err(|error| {
-                format!(
-                    "cannot read managed worktree owner {}: {error}",
-                    owner_path.display()
-                )
-            })?;
-            while let Some(worker) = workers
-                .next_entry()
-                .await
-                .map_err(|error| format!("cannot read managed worktree: {error}"))?
-            {
+            let mut workers = match tokio::fs::read_dir(&owner_path).await {
+                Ok(workers) => workers,
+                Err(error) => {
+                    tracing::warn!(path = %owner_path.display(), %error, "cannot inspect managed worktree owner; leaving it untouched");
+                    continue;
+                }
+            };
+            loop {
+                let worker = match workers.next_entry().await {
+                    Ok(Some(worker)) => worker,
+                    Ok(None) => break,
+                    Err(error) => {
+                        tracing::warn!(path = %owner_path.display(), %error, "cannot enumerate managed worktree owner; leaving its remaining entries untouched");
+                        break;
+                    }
+                };
                 let worker_name = worker.file_name();
                 let Some(sequence) = worker_name
                     .to_str()
@@ -184,25 +190,24 @@ impl WorktreeHost {
                 else {
                     continue;
                 };
-                if sequence.parse::<u64>().is_err()
-                    || !worker
-                        .file_type()
-                        .await
-                        .map_err(|error| format!("cannot inspect managed worktree: {error}"))?
-                        .is_dir()
-                {
+                let Ok(worker_type) = worker.file_type().await else {
+                    tracing::warn!(path = %worker.path().display(), "cannot inspect managed worktree candidate; leaving it untouched");
+                    continue;
+                };
+                if sequence.parse::<u64>().is_err() || !worker_type.is_dir() {
                     continue;
                 }
                 let path = worker.path();
                 if !path.join(".git").is_file() {
                     continue;
                 }
-                let canonical_path = tokio::fs::canonicalize(&path).await.map_err(|error| {
-                    format!(
-                        "cannot resolve managed worktree {}: {error}",
-                        path.display()
-                    )
-                })?;
+                let canonical_path = match tokio::fs::canonicalize(&path).await {
+                    Ok(path) => path,
+                    Err(error) => {
+                        tracing::warn!(path = %path.display(), %error, "cannot resolve managed worktree candidate; leaving it untouched");
+                        continue;
+                    }
+                };
                 let listed = Command::new("git")
                     .args([
                         "-C",
@@ -221,11 +226,8 @@ impl WorktreeHost {
                         )
                     })?;
                 if !listed.status.success() {
-                    return Err(format!(
-                        "cannot inspect managed worktree {}: {}",
-                        path.display(),
-                        String::from_utf8_lossy(&listed.stderr).trim()
-                    ));
+                    tracing::warn!(path = %path.display(), error = %String::from_utf8_lossy(&listed.stderr).trim(), "cannot inspect managed worktree candidate; leaving it untouched");
+                    continue;
                 }
                 let registered = String::from_utf8_lossy(&listed.stdout).lines().any(|line| {
                     line.strip_prefix("worktree ")
@@ -234,30 +236,9 @@ impl WorktreeHost {
                 if !registered {
                     continue;
                 }
-                let removed = Command::new("git")
-                    .args([
-                        "-C",
-                        &path.to_string_lossy(),
-                        "worktree",
-                        "remove",
-                        "--force",
-                        &path.to_string_lossy(),
-                    ])
-                    .stdin(Stdio::null())
-                    .output()
-                    .await
-                    .map_err(|error| {
-                        format!(
-                            "failed to start worktree recovery for {}: {error}",
-                            path.display()
-                        )
-                    })?;
-                if !removed.status.success() {
-                    return Err(format!(
-                        "worktree recovery failed for {}: {}",
-                        path.display(),
-                        String::from_utf8_lossy(&removed.stderr).trim()
-                    ));
+                if let Err(error) = remove_worktree(&path, &path).await {
+                    tracing::warn!(path = %path.display(), %error, "worktree recovery failed; leaving candidate untouched");
+                    continue;
                 }
                 recovered += 1;
             }
@@ -279,18 +260,7 @@ impl WorktreeHost {
                 .collect::<Vec<_>>()
         };
         for resource in resources {
-            let _ = Command::new("git")
-                .args([
-                    "-C",
-                    &resource.repo.to_string_lossy(),
-                    "worktree",
-                    "remove",
-                    "--force",
-                    &resource.path.to_string_lossy(),
-                ])
-                .stdin(Stdio::null())
-                .output()
-                .await;
+            let _ = remove_worktree(&resource.repo, &resource.path).await;
         }
         let _ = tokio::fs::remove_dir(self.config.root.join(owner_id.to_string())).await;
     }
@@ -306,6 +276,35 @@ impl WorktreeHost {
         for owner_id in owner_ids {
             self.cleanup_owner(owner_id).await;
         }
+    }
+}
+
+async fn remove_worktree(repo: &Path, path: &Path) -> Result<(), String> {
+    let removed = Command::new("git")
+        .args([
+            "-C",
+            &repo.to_string_lossy(),
+            "worktree",
+            "remove",
+            "--force",
+            &path.to_string_lossy(),
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .await
+        .map_err(|error| {
+            format!(
+                "failed to start worktree removal for {}: {error}",
+                path.display()
+            )
+        })?;
+    if removed.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "git worktree removal failed: {}",
+            String::from_utf8_lossy(&removed.stderr).trim()
+        ))
     }
 }
 
@@ -462,12 +461,27 @@ mod tests {
         tokio::fs::write(unrelated.join("keep"), "keep")
             .await
             .unwrap();
+        let uninspectable = config
+            .root
+            .join(Uuid::new_v4().to_string())
+            .join("worker-0");
+        tokio::fs::create_dir_all(&uninspectable).await.unwrap();
+        tokio::fs::write(uninspectable.join(".git"), "gitdir: /missing")
+            .await
+            .unwrap();
 
-        let recovered = WorktreeHost::new(config.clone()).recover().await.unwrap();
+        let recovered = WorktreeHost::new(config.clone())
+            .recover(&HashSet::new())
+            .await
+            .unwrap();
 
         assert_eq!(recovered, 2);
         assert!(!failed_path.exists() && !cancelled_path.exists());
         assert!(unrelated.join("keep").exists());
+        assert!(
+            uninspectable.exists(),
+            "an uninspectable candidate must not block recovery or be removed"
+        );
         let listed = Command::new("git")
             .arg("-C")
             .arg(&repo)
