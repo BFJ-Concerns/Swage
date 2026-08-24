@@ -914,7 +914,7 @@ impl swage_storage::WorkflowStore for MockStorage {
         &self,
         _: Uuid,
     ) -> Result<Option<swage_storage::WorkflowRunRecord>, StorageError> {
-        unimplemented!()
+        Ok(None)
     }
     async fn find_child_workflow_run(
         &self,
