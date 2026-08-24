@@ -42,14 +42,14 @@ async fn bubblewrap_sandbox_real_binary_runs_git_and_standard_device_io_through_
     let result = sandbox
         .execute_tool(
             "shell",
-            json!({ "command": "export HOME=/tmp GIT_CONFIG_NOSYSTEM=1; for device in /dev/full /dev/null /dev/random /dev/tty /dev/urandom /dev/zero; do test -c \"$device\"; done && printf device-io > /dev/null && head -c 1 /dev/zero >/dev/null && head -c 1 /dev/urandom >/dev/null && ! printf device-io > /dev/full 2>/dev/null && test ! -e /dev/kvm && git init repo && git -C repo config user.email test@example.invalid && git -C repo config user.name test && touch repo/note && git -C repo add note && git -C repo commit -m initial" }),
+            json!({ "command": "export HOME=/tmp GIT_CONFIG_NOSYSTEM=1; for device in /dev/full /dev/null /dev/random /dev/tty /dev/urandom /dev/zero; do test -c \"$device\"; done && printf device-io > /dev/null && head -c 1 /dev/zero >/dev/null && head -c 1 /dev/urandom >/dev/null && ! printf device-io > /dev/full 2>/dev/null && test ! -e /dev/kvm && test -e /dev/ptmx && ! dd if=/dev/ptmx of=/dev/null count=0 status=none 2>/dev/null && git init repo && git -C repo config user.email test@example.invalid && git -C repo config user.name test && touch repo/note && git -C repo add note && git -C repo commit -m initial" }),
         )
         .await
         .unwrap();
 
     assert!(
         result.error.is_none(),
-        "git init, git commit, and standard device I/O must work in the bubblewrap child: {:?}",
+        "git init and commit must work while ungranted /dev/ptmx remains denied by Landlock: {:?}",
         result.error
     );
     assert_eq!(result.output["exit_code"], 0, "shell result: {result:?}");

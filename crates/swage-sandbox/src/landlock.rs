@@ -478,10 +478,21 @@ mod tests {
 
         assert_eq!(
             ruleset.device_rules,
-            SYSTEM_DEVICE_RULES
-                .iter()
-                .map(|(path, access)| (PathBuf::from(path), *access))
-                .collect::<Vec<_>>()
+            vec![
+                (PathBuf::from("/dev/full"), ACCESS_FS_WRITE_FILE),
+                (
+                    PathBuf::from("/dev/null"),
+                    ACCESS_FS_READ_FILE | ACCESS_FS_WRITE_FILE,
+                ),
+                (PathBuf::from("/dev/random"), ACCESS_FS_READ_FILE),
+                (
+                    PathBuf::from("/dev/tty"),
+                    ACCESS_FS_READ_FILE | ACCESS_FS_WRITE_FILE,
+                ),
+                (PathBuf::from("/dev/urandom"), ACCESS_FS_READ_FILE),
+                (PathBuf::from("/dev/zero"), ACCESS_FS_READ_FILE),
+            ],
+            "device grants must remain restricted to each standard node's required file access"
         );
         assert!(
             ruleset
