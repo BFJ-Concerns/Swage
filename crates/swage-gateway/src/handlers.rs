@@ -1198,7 +1198,8 @@ pub async fn list_skills(
     let space_dir = root.join("spaces").join(&space.slug);
     let agent_dir = params
         .agent_id
-        .as_ref()
+        .as_deref()
+        .filter(|agent_id| *agent_id != swage_config::RESERVED_WORKFLOW_AGENT_ID)
         .map(|agent_id| space_dir.join("agents").join(agent_id));
     let agent_dir = agent_dir.as_deref().filter(|path| path.is_dir());
     let (skills, _warnings) =
@@ -1370,6 +1371,11 @@ pub async fn submit_turn(
     .await
     .map_err(ApiError::from)?;
 
+    if let Some(model) = req.model.as_deref() {
+        crate::turn::resolve_requested_turn_model(&state.active_config(), model)
+            .map_err(ApiError::from)?;
+    }
+
     if state
         .active_turns
         .lock()
@@ -1435,6 +1441,7 @@ pub async fn submit_turn(
     let message = req.message;
     let output_schema = req.output_schema;
     let compaction_focus = req.compaction_focus;
+    let model = req.model;
     let session_id = req.conversation_id;
     tokio::spawn(async move {
         use crate::subscription::SubscriptionState;
@@ -1449,7 +1456,7 @@ pub async fn submit_turn(
         // Drain events in background so the channel never fills.
         tokio::spawn(async move { while ws_rx.recv().await.is_some() {} });
 
-        let result = crate::turn::process_turn_with_existing_turn_and_focus(
+        let result = crate::turn::process_turn_with_existing_turn_and_focus_and_model(
             &bg_state,
             session_id,
             Some(thread_id),
@@ -1463,6 +1470,7 @@ pub async fn submit_turn(
             Some(turn_id),
             crate::turn::TurnAttendance::Unattended,
             compaction_focus,
+            model,
         )
         .await;
 
@@ -1714,8 +1722,8 @@ async fn execute_external_delegate_message(
             crate::turn::effective_tool_permissions_record(&effective_target_resolved),
             composition,
         ),
-        snapshot_recorder: Some(crate::turn::delegation_snapshot_recorder(
-            state.storage.clone(),
+        snapshot_recorder: Some(crate::turn::delegation_snapshot_recorder_for_state(
+            state.clone(),
         )),
     };
 
@@ -2187,11 +2195,23 @@ mod tests {
         provider: Arc<dyn LlmProvider>,
         storage: Arc<MockStorage>,
     ) -> (Router, Arc<MockStorage>) {
+        make_router_with_provider_and_config(
+            provider,
+            storage,
+            swage_config::ResolvedConfig::default(),
+        )
+    }
+
+    fn make_router_with_provider_and_config(
+        provider: Arc<dyn LlmProvider>,
+        storage: Arc<MockStorage>,
+        config: swage_config::ResolvedConfig,
+    ) -> (Router, Arc<MockStorage>) {
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn SpaceStore>,
             provider,
-            swage_config::ResolvedConfig::default(),
+            config,
             crate::tool::ToolDispatcher::allow_all(vec![]),
             None,
         );
@@ -3539,6 +3559,93 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::CONFLICT);
         let body = body_json(resp).await;
         assert_eq!(body["code"], "turn_in_progress");
+    }
+
+    #[tokio::test]
+    async fn post_turns_rejects_unknown_model_before_creating_a_pending_turn() {
+        use swage_storage::store::{SessionStore, ThreadStore, TurnStore};
+
+        let storage = Arc::new(MockStorage::new());
+        let mut config = swage_config::ResolvedConfig::default();
+        config.models.default = "first".to_string();
+        config.models.entries.insert(
+            "first".to_string(),
+            swage_config::ModelEndpointConfig::default(),
+        );
+        config.models.entries.insert(
+            "second".to_string(),
+            swage_config::ModelEndpointConfig::default(),
+        );
+        let (router, storage) = make_router_with_provider_and_config(
+            Arc::new(MockProvider::new(vec![])) as Arc<dyn LlmProvider>,
+            storage,
+            config,
+        );
+
+        let create = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/conversations")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("create conversation response");
+        let create_body = body_json(create).await;
+        let conversation_id = create_body["id"]
+            .as_str()
+            .expect("conversation id")
+            .parse::<Uuid>()
+            .expect("valid conversation id");
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/turns")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::json!({
+                            "conversation_id": conversation_id,
+                            "message": "hello",
+                            "model": "missing"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .expect("unknown-model response");
+
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = body_json(response).await;
+        let message = body["message"].as_str().expect("validation message");
+        assert!(message.contains("missing"));
+        assert!(message.contains("first"));
+        assert!(message.contains("second"));
+
+        let session = storage
+            .get_session(conversation_id)
+            .await
+            .expect("get conversation")
+            .expect("conversation exists");
+        let thread = storage
+            .list_by_session(session.id)
+            .await
+            .expect("list threads")
+            .into_iter()
+            .next()
+            .expect("root thread");
+        assert!(
+            storage
+                .list_turns_by_thread(thread.id)
+                .await
+                .expect("list turns")
+                .is_empty(),
+            "an invalid requested model must not create a pending turn"
+        );
     }
 
     // -----------------------------------------------------------------------

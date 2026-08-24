@@ -1,10 +1,29 @@
 use std::ffi::{OsStr, OsString};
 use std::sync::{Mutex, MutexGuard};
 
+use axum::http::StatusCode;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use serde_json::Value;
 use swage_storage::MANAGED_SECRET_KEY_ENV;
 
 static PROCESS_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+pub async fn live_http_json(
+    address: std::net::SocketAddr,
+    method: reqwest::Method,
+    path: &str,
+    body: Option<Value>,
+) -> (StatusCode, Value) {
+    let client = reqwest::Client::new();
+    let mut request = client.request(method, format!("http://{address}{path}"));
+    if let Some(body) = body {
+        request = request.json(&body);
+    }
+    let response = request.send().await.expect("live gateway request");
+    let status = response.status();
+    let body = response.json().await.unwrap_or(Value::Null);
+    (status, body)
+}
 
 pub struct ProcessEnvGuard {
     _lock: MutexGuard<'static, ()>,

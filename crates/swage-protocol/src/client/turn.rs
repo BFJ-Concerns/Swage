@@ -16,6 +16,9 @@ pub struct SubmitTurnRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub compaction_focus: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
@@ -71,6 +74,23 @@ mod tests {
         .expect("request without focus should remain valid");
 
         assert!(request.compaction_focus.is_none());
+        assert!(request.model.is_none());
+    }
+
+    #[test]
+    fn submit_turn_serialises_an_optional_model_only_when_selected() {
+        let request = SubmitTurnRequest {
+            conversation_id: uuid::Uuid::new_v4(),
+            thread_id: None,
+            message: "hello".to_string(),
+            output_schema: None,
+            compaction_focus: None,
+            model: Some("fast".to_string()),
+        };
+
+        let serialised = serde_json::to_value(request).expect("serialise request");
+        assert_eq!(serialised["model"], "fast");
+        assert!(serialised.get("compaction_focus").is_none());
     }
 
     #[test]
