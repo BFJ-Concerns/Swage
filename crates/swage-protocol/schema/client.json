@@ -4226,6 +4226,12 @@
         "message": {
           "type": "string"
         },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "output_schema": true,
         "thread_id": {
           "type": [

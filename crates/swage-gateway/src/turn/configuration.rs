@@ -759,6 +759,26 @@ pub(crate) fn resolve_model_catalogue_entry<'a>(
         })
 }
 
+pub(crate) fn resolve_requested_turn_model(
+    config: &swage_config::ResolvedConfig,
+    requested_model: &str,
+) -> Result<String, GatewayError> {
+    resolve_model_catalogue_entry(&config.models, requested_model)
+        .map(|(model_id, _)| model_id.to_string())
+        .ok_or_else(|| {
+            let available = config
+                .models
+                .entries
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ");
+            GatewayError::ValidationError(format!(
+                "unknown model '{requested_model}'; available models: {available}"
+            ))
+        })
+}
+
 pub(crate) fn effective_session_config(
     mut config: swage_config::ResolvedConfig,
     selected_model_id: Option<&str>,
