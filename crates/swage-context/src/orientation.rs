@@ -179,6 +179,13 @@ impl ContextElement for OrientationElement {
         }
         parts.join(", ")
     }
+
+    fn report_preview(&self) -> Option<String> {
+        Some(
+            "You are an agent running on Swage, a context-governed agent platform on your operator's own hardware."
+                .to_string(),
+        )
+    }
 }
 
 #[cfg(test)]
@@ -224,6 +231,17 @@ mod tests {
         assert!(text.contains("how this context was assembled"));
         assert!(text.contains("redacted from that record"));
         assert!(text.contains("recorded as written"));
+    }
+
+    #[test]
+    fn report_preview_is_a_static_excerpt_not_session_environment() {
+        let element = OrientationElement::new(bare_environment(), vec![]);
+        assert_eq!(
+            element.report_preview().as_deref(),
+            Some(
+                "You are an agent running on Swage, a context-governed agent platform on your operator's own hardware."
+            )
+        );
     }
 
     #[test]

@@ -317,6 +317,13 @@ impl ContextElement for WorkingNormsElement {
             ModelFamily::Unknown => "built-in working norms".into(),
         }
     }
+
+    fn report_preview(&self) -> Option<String> {
+        Some(
+            "## Working norms\nWork to completion: when the task is clear, carry it through with your tools and report the outcome."
+                .to_string(),
+        )
+    }
 }
 
 #[cfg(test)]
@@ -378,6 +385,17 @@ mod tests {
             WorkingNormsElement::for_model("claude-opus-5", WorkingNormsScaffold::FamilyFallback);
         assert!(element.priority() < 110);
         assert!(element.priority() > 100);
+    }
+
+    #[test]
+    fn report_preview_is_a_static_excerpt_of_the_common_norms() {
+        let element = WorkingNormsElement::for_model("gpt-4o", WorkingNormsScaffold::Native);
+        assert_eq!(
+            element.report_preview().as_deref(),
+            Some(
+                "## Working norms\nWork to completion: when the task is clear, carry it through with your tools and report the outcome."
+            )
+        );
     }
 
     #[test]

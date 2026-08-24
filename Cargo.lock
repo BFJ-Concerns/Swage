@@ -3583,7 +3583,6 @@ dependencies = [
  "swage-protocol",
  "swage-provider",
  "swage-python",
- "swage-safety",
  "tempfile",
  "thiserror 2.0.19",
  "tiktoken-rs",
