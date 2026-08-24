@@ -1,5 +1,9 @@
 import { defineConfig } from "@playwright/test";
 
+const gatewayPort = Number(process.env.SWAGE_E2E_GATEWAY_PORT ?? "33100");
+const resultsDir = process.env.SWAGE_E2E_RESULTS_DIR
+  ?? "/tmp/scratch/swage-browser-e2e-results";
+
 export default defineConfig({
   testDir: "./e2e",
   fullyParallel: false,
@@ -7,16 +11,16 @@ export default defineConfig({
   timeout: 30_000,
   expect: { timeout: 10_000 },
   reporter: "line",
-  outputDir: "/tmp/scratch/swage-browser-e2e-results",
+  outputDir: resultsDir,
   use: {
-    baseURL: "http://127.0.0.1:33100",
+    baseURL: `http://127.0.0.1:${gatewayPort}`,
     browserName: "chromium",
     headless: true,
     trace: "retain-on-failure",
   },
   webServer: {
     command: "node e2e/run-stack.mjs",
-    url: "http://127.0.0.1:33100/api/health",
+    url: `http://127.0.0.1:${gatewayPort}/api/health`,
     timeout: 120_000,
     reuseExistingServer: false,
   },

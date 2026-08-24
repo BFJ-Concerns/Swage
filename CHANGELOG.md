@@ -48,6 +48,8 @@ All notable changes to Swage are documented in this file.
 ### Fixed
 
 - Portable JavaScript workflow `meta` headers now seed saved script details, and the unused workflow-script `agent_id` query has been removed.
+- Reserved workflow workers no longer load configuration, skills, named context elements, or JavaScript assemblies from an `__workflow_ephemeral__` agent directory, and that directory's skills are no longer listed by the skills API.
+- Sandboxed dispatched-agent shell tools now mount the minimal device filesystem over the read-only root and add narrow per-node device rules to the Landlock ruleset, restoring standard device access for ordinary Git initialisation and commits.
 - The conversation surface control no longer appears active while settings are open.
 - Surface navigation now marks Settings, rather than a hidden conversation or operator surface, as active while it is open.
 - Reconnecting after a dropped socket now clears only the captured live turn when its refreshed conversation is terminal.

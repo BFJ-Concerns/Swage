@@ -291,6 +291,62 @@ async fn agent_skills_have_always_active_true() {
     );
 }
 
+/// The reserved workflow identity is never an authored agent scope, including
+/// on the operator-facing catalogue endpoint.
+#[tokio::test(flavor = "multi_thread")]
+async fn reserved_workflow_agent_skills_are_not_listed() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path();
+    let (router, storage) = make_router(root);
+    let space = storage
+        .create(NewSpace {
+            name: "reserved-agent".into(),
+            slug: "reserved-agent".into(),
+        })
+        .await
+        .unwrap();
+    let reserved_agent = root
+        .join("spaces/reserved-agent/agents")
+        .join(swage_config::RESERVED_WORKFLOW_AGENT_ID);
+    let ordinary_agent = root.join("spaces/reserved-agent/agents/reviewer");
+    create_skill(&reserved_agent, "injected", "Must not be visible", &[]);
+    create_skill(&ordinary_agent, "reviewer", "Must remain visible", &[]);
+
+    let (reserved_status, reserved_body) = get(
+        &router,
+        &format!(
+            "/api/skills?space_id={}&agent_id={}",
+            space.id,
+            swage_config::RESERVED_WORKFLOW_AGENT_ID
+        ),
+    )
+    .await;
+    let (ordinary_status, ordinary_body) = get(
+        &router,
+        &format!("/api/skills?space_id={}&agent_id=reviewer", space.id),
+    )
+    .await;
+
+    assert_eq!(reserved_status, StatusCode::OK, "response: {reserved_body}");
+    assert!(
+        reserved_body["skills"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|skill| skill["name"] != "injected"),
+        "the reserved directory must not contribute endpoint catalogue entries"
+    );
+    assert_eq!(ordinary_status, StatusCode::OK, "response: {ordinary_body}");
+    assert!(
+        ordinary_body["skills"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|skill| skill["name"] == "reviewer" && skill["always_active"] == true),
+        "a normally named agent directory must remain available and always active"
+    );
+}
+
 /// Same-name skill at space level shadows global.
 ///
 /// Only the space version should appear; the listing must not contain duplicates.
