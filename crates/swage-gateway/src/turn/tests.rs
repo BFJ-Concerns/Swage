@@ -926,7 +926,7 @@ impl swage_storage::WorkflowStore for MockStorage {
         &self,
         _: Uuid,
     ) -> Result<Option<swage_storage::WorkflowRunRecord>, StorageError> {
-        unimplemented!()
+        Ok(None)
     }
     async fn find_child_workflow_run(
         &self,
@@ -1358,6 +1358,24 @@ impl SessionStore for MockStorage {
             session.updated_at = chrono::Utc::now();
         }
         Ok(())
+    }
+
+    async fn set_session_metadata(
+        &self,
+        id: Uuid,
+        metadata: Option<serde_json::Value>,
+    ) -> Result<Session, StorageError> {
+        let mut db = self.db.lock().await;
+        let session = db
+            .sessions
+            .get_mut(&id)
+            .ok_or_else(|| StorageError::NotFound {
+                entity: "session".to_string(),
+                id: id.to_string(),
+            })?;
+        session.metadata = metadata;
+        session.updated_at = chrono::Utc::now();
+        Ok(session.clone())
     }
 
     async fn set_session_active_workspace(
@@ -5124,6 +5142,7 @@ async fn unattended_sandbox_failure_records_unattended_attendance() {
         None,
         TurnAttendance::Unattended,
         DispatchContextComposition::default(),
+        None,
     )
     .await
     .expect_err("unattended degradation should fail closed");
@@ -7962,10 +7981,12 @@ async fn delegated_child_snapshot_records_exact_non_empty_effective_tool_grant()
         .get_or_create_default()
         .await
         .expect("default space");
+    // This fixture needs an authored restrictive parent; `gateway` always
+    // resolves to its shipped definition and intentionally ignores stored rows.
     let session = storage
         .create_session(NewSession {
             space_id: space.id,
-            agent_id: "gateway".into(),
+            agent_id: "agent-a".into(),
             metadata: None,
             active_workspace_attachment_id: None,
         })
@@ -7975,16 +7996,16 @@ async fn delegated_child_snapshot_records_exact_non_empty_effective_tool_grant()
         &*storage,
         NewThread {
             session_id: session.id,
-            agent_id: "gateway".into(),
+            agent_id: "agent-a".into(),
         },
     )
     .await
     .expect("create root thread");
     storage
         .upsert_agent_definition(swage_storage::NewAgentDefinition {
-            id: "gateway".into(),
+            id: "agent-a".into(),
             space_id: Some(space.id),
-            display_name: "Gateway".into(),
+            display_name: "Agent A".into(),
             description: String::new(),
             instructions: String::new(),
             model_id: None,
@@ -8547,6 +8568,163 @@ async fn delegated_read_only_location_approval_allows_read_and_refuses_write() {
         !attachment.join("blocked.txt").exists(),
         "delegated read-only placement must reject the sandboxed write"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn workflow_call_tool_bound_survives_delegation_and_child_continuation() {
+    let _swage_home = SwageHomeGuard::isolate();
+    let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
+    let space = storage
+        .get_or_create_default()
+        .await
+        .expect("default space");
+    let session = storage
+        .create_session(NewSession {
+            space_id: space.id,
+            agent_id: "agent-a".into(),
+            metadata: Some(serde_json::json!({
+                WORKFLOW_CALL_TOOLS_METADATA_KEY: ["delegate"],
+            })),
+            active_workspace_attachment_id: None,
+        })
+        .await
+        .expect("create workflow worker session");
+    let root_thread = ThreadStore::create(
+        &*storage,
+        NewThread {
+            session_id: session.id,
+            agent_id: "agent-a".into(),
+        },
+    )
+    .await
+    .expect("create workflow worker thread");
+    let parent_turn = storage
+        .create_turn(NewTurn {
+            thread_id: root_thread.id,
+            agent_id: "agent-a".into(),
+            state: TurnState::Processing,
+            user_input: Some("delegate within the workflow call bound".into()),
+            parent_turn_id: None,
+        })
+        .await
+        .expect("create workflow worker turn");
+    for agent_id in ["agent-a", "agent-b"] {
+        storage
+            .upsert_agent_definition(swage_storage::NewAgentDefinition {
+                id: agent_id.into(),
+                space_id: Some(space.id),
+                display_name: agent_id.into(),
+                description: String::new(),
+                instructions: String::new(),
+                model_id: None,
+                tool_permissions: Some(serde_json::json!({
+                    "allow": ["delegate", "shell"], "deny": [], "bundles": {},
+                    "require_approval": []
+                })),
+                skills: vec![],
+                output_schema: None,
+                output_max_retries: None,
+            })
+            .await
+            .expect("store broad agent definition");
+    }
+    let (provider, captured_requests) = CapturingMultiRoundProvider::new(vec![
+        vec![
+            StreamChunk::Delta {
+                content: "delegated child complete".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ],
+        vec![
+            StreamChunk::Delta {
+                content: "delegated child continued".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ],
+    ]);
+    let state = AppState::new(
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
+        Arc::new(provider) as Arc<dyn LlmProvider>,
+        swage_config::ResolvedConfig::default(),
+        crate::tool::ToolDispatcher::allow_all(vec![
+            Arc::new(swage_tool::delegate::DelegateTool) as Arc<dyn Tool>,
+            Arc::new(ShellMockTool) as Arc<dyn Tool>,
+        ]),
+        None,
+    );
+
+    let outcome = GatewayDelegationHandler::new(state.clone())
+        .handle_delegation(
+            "agent-b",
+            "complete the delegated work",
+            None,
+            None,
+            None,
+            None,
+            DispatchContextComposition::default(),
+            "workflow-bounded-delegate",
+            "agent-a",
+            parent_turn.id,
+            space.id,
+            CancellationToken::new(),
+            DelegateCompletionMode::Wait,
+        )
+        .await
+        .expect("workflow-bounded delegation should complete");
+    assert!(matches!(outcome, DelegationOutcome::Completed(_)));
+
+    let child_session = storage
+        .list_sessions_by_agent_id("agent-b")
+        .await
+        .expect("list delegated sessions")
+        .into_iter()
+        .next()
+        .expect("delegated child session");
+    assert_eq!(
+        child_session
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get(WORKFLOW_CALL_TOOLS_METADATA_KEY)),
+        Some(&serde_json::json!(["delegate"])),
+        "the delegated session must persist its caller's workflow tool bound"
+    );
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    process_turn(
+        &state,
+        child_session.id,
+        None,
+        "continue the delegated work".into(),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .expect("delegated child continuation should complete");
+
+    let captured_requests = captured_requests.lock().unwrap();
+    assert_eq!(captured_requests.len(), 2);
+    for request in captured_requests.iter() {
+        assert!(
+            request
+                .tool_definitions
+                .iter()
+                .any(|definition| definition["name"] == "delegate"),
+            "the workflow call's delegated child should retain delegate"
+        );
+        assert!(
+            request
+                .tool_definitions
+                .iter()
+                .all(|definition| definition["name"] != "shell"),
+            "the broad sender and target definitions must not restore shell"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -9939,6 +10117,7 @@ async fn invalid_call_scoped_assembly_is_rejected_before_provider_dispatch() {
             assembly: Some("../../outside".into()),
             ..Default::default()
         },
+        None,
     )
     .await
     .expect_err("unsafe call-scoped assembly must fail the turn");
@@ -9990,6 +10169,7 @@ async fn unknown_forced_context_assembly_rejects_call_scoped_override() {
             assembly: Some("default".into()),
             ..Default::default()
         },
+        None,
     )
     .await
     .expect_err("unknown forced assembly must fail the turn");

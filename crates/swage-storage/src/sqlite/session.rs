@@ -186,6 +186,36 @@ impl SessionStore for SqliteStorage {
         .await
     }
 
+    async fn set_session_metadata(
+        &self,
+        id: Uuid,
+        metadata: Option<serde_json::Value>,
+    ) -> Result<Session, StorageError> {
+        let metadata_json = serialise_metadata(metadata.as_ref())
+            .map_err(|error| StorageError::QueryFailed(error.to_string()))?;
+        let affected = self
+            .with_conn(move |conn| {
+                let now_str = Utc::now().to_rfc3339();
+                conn.execute(
+                    "UPDATE sessions SET metadata_json = ?2, updated_at = ?3 WHERE id = ?1",
+                    params![id.to_string(), metadata_json, now_str],
+                )
+            })
+            .await?;
+        if affected == 0 {
+            return Err(StorageError::NotFound {
+                entity: "session".to_string(),
+                id: id.to_string(),
+            });
+        }
+        self.get_session(id)
+            .await?
+            .ok_or_else(|| StorageError::NotFound {
+                entity: "session".to_string(),
+                id: id.to_string(),
+            })
+    }
+
     async fn set_session_active_workspace(
         &self,
         id: Uuid,
