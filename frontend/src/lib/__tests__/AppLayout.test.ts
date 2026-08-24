@@ -54,6 +54,7 @@ function mockConnectionStore(): ConnectionStore {
 function mockStreamingStore(): StreamingStore {
   return {
     get isStreaming() { return false; },
+    get activeTurnId() { return null; },
     get streamedContent() { return ""; },
     get turnError() { return null; },
     get turnStartedAt() { return null; },

@@ -48,8 +48,10 @@
   let streamingStore: StreamingStore;
   const connectionStore = createConnectionStore({
     onReconnect: async () => {
+      const recoveredTurnId = streamingStore.activeTurnId;
+      const recoveredTurnStartedAt = streamingStore.turnStartedAt;
       await conversationStore.refreshActiveConversation();
-      streamingStore.reconcileAfterReconnect();
+      streamingStore.reconcileAfterReconnect(recoveredTurnId, recoveredTurnStartedAt);
     },
   });
 
