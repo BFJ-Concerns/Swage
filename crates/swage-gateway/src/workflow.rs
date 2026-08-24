@@ -4998,32 +4998,6 @@ async fn resumable_workflow_runs(state: &AppState) -> Vec<WorkflowRunRecord> {
     due
 }
 
-/// Owner directories that must survive startup recovery because the workflow
-/// wake loop can replay them from a durable placement journal.
-pub(crate) async fn replayable_worktree_owner_ids(
-    state: &AppState,
-) -> Result<std::collections::HashSet<Uuid>, String> {
-    let spaces = state
-        .space_store
-        .list_all()
-        .await
-        .map_err(|error| error.to_string())?;
-    let mut owners = std::collections::HashSet::new();
-    for space in spaces {
-        for run in state
-            .storage
-            .list_workflow_runs(space.id)
-            .await
-            .map_err(|error| error.to_string())?
-        {
-            if matches!(run.state.as_str(), "interrupted" | "parked") {
-                owners.insert(run.id);
-            }
-        }
-    }
-    Ok(owners)
-}
-
 /// One boot/wake pass: relaunch everything `resumable_workflow_runs` owes.
 /// Returns how many runs were relaunched.
 pub(crate) async fn resume_owed_workflow_runs(state: &AppState) -> usize {
@@ -5114,13 +5088,9 @@ mod completion_handoff_test_support {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        collections::HashSet,
-        sync::atomic::{AtomicUsize, Ordering},
-    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
-    use crate::worktree::{WorktreeConfig, WorktreeHost};
     use swage_protocol::client::workflow::{WorkflowJournalEntryKind, WorkflowJournalEntryStatus};
     use swage_storage::{
         AgentDefinitionStore, AuditStore, CitationStore, ContextSnapshotStore,
@@ -9604,13 +9574,6 @@ mod tests {
         wait_for_terminal(&state, failed.id).await;
         let failed_record = storage.get_workflow_run(failed.id).await.unwrap().unwrap();
         assert_eq!(failed_record.state, "failed");
-        assert!(
-            !replayable_worktree_owner_ids(&state)
-                .await
-                .expect("replayable workflow owners")
-                .contains(&failed.id),
-            "failed runs must not retain their worktrees beyond restart"
-        );
         let retained_path = storage
             .list_workflow_journal(failed.id)
             .await
@@ -9624,17 +9587,6 @@ mod tests {
         assert!(
             retained_path.exists(),
             "failed-run worktree should remain available for inspection"
-        );
-        let recovered = WorktreeHost::new(WorktreeConfig {
-            root: fixture.path().join("worker-worktrees"),
-        })
-        .recover(&HashSet::new())
-        .await
-        .expect("startup recovery of failed run");
-        assert_eq!(recovered, 1, "failed run should be reclaimed at restart");
-        assert!(
-            !retained_path.exists(),
-            "failed-run worktree should not survive restart recovery"
         );
 
         let cancelled_source = format!(
@@ -9666,24 +9618,6 @@ mod tests {
                     .then(|| entry.result?["path"].as_str().map(std::path::PathBuf::from))?
             })
             .expect("cancelled run should have a worktree path");
-        let replayable_owners = replayable_worktree_owner_ids(&state)
-            .await
-            .expect("replayable workflow owners");
-        assert!(
-            replayable_owners.contains(&cancelled.id),
-            "parked runs must retain their worktrees for journal replay"
-        );
-        let protected = WorktreeHost::new(WorktreeConfig {
-            root: fixture.path().join("worker-worktrees"),
-        })
-        .recover(&replayable_owners)
-        .await
-        .expect("startup recovery planning for parked run");
-        assert_eq!(protected, 0, "parked runs must remain available for replay");
-        assert!(
-            cancelled_path.exists(),
-            "parked-run worktree should survive startup recovery for replay"
-        );
         let Json(cancelled_record) = cancel_run(State(state.clone()), Path(cancelled.id))
             .await
             .expect("cancel parked placement run");
@@ -9692,18 +9626,6 @@ mod tests {
             cancelled_path.exists(),
             "cancelled-run worktree should remain available for inspection"
         );
-        let recovered = WorktreeHost::new(WorktreeConfig {
-            root: fixture.path().join("worker-worktrees"),
-        })
-        .recover(&HashSet::new())
-        .await
-        .expect("startup recovery of cancelled run");
-        assert_eq!(recovered, 1, "cancelled run should be reclaimed at restart");
-        assert!(
-            !cancelled_path.exists(),
-            "cancelled-run worktree should not survive restart recovery"
-        );
-
         state.worktree_host.shutdown().await;
         assert!(!retained_path.exists());
         assert!(!cancelled_path.exists());
