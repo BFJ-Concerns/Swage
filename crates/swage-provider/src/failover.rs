@@ -1583,12 +1583,12 @@ mod tests {
         assert_eq!(failover.model_id(), "");
     }
 
-    struct CountingProbe;
+    struct CountingProbe(&'static str);
 
     #[async_trait]
     impl LlmProvider for CountingProbe {
         fn model_id(&self) -> &str {
-            "counting-probe"
+            self.0
         }
 
         fn provider_request_snapshot(
@@ -1596,7 +1596,7 @@ mod tests {
             _: &CompletionRequest,
             stream: bool,
         ) -> serde_json::Value {
-            serde_json::json!({"provider": "probe", "stream": stream})
+            serde_json::json!({"provider": self.0, "stream": stream})
         }
 
         async fn count_tokens(&self, _: &CompletionRequest) -> Result<Option<u64>, ProviderError> {
@@ -1626,8 +1626,10 @@ mod tests {
     // asserted explicitly: an unforwarded count would report None here.
     #[tokio::test]
     async fn count_tokens_delegates_to_the_first_provider_in_try_order() {
-        let failover =
-            FailoverProvider::new(vec![Arc::new(CountingProbe)], FailoverConfig::default());
+        let failover = FailoverProvider::new(
+            vec![Arc::new(CountingProbe("probe"))],
+            FailoverConfig::default(),
+        );
         assert_eq!(
             failover.count_tokens(&completion_req()).await.unwrap(),
             Some(42)
@@ -1636,8 +1638,10 @@ mod tests {
 
     #[test]
     fn provider_request_snapshot_delegates_to_the_first_provider_in_try_order() {
-        let failover =
-            FailoverProvider::new(vec![Arc::new(CountingProbe)], FailoverConfig::default());
+        let failover = FailoverProvider::new(
+            vec![Arc::new(CountingProbe("probe"))],
+            FailoverConfig::default(),
+        );
         assert_eq!(
             failover.provider_request_snapshot(&completion_req(), true),
             serde_json::json!({"provider": "probe", "stream": true})
@@ -1648,8 +1652,8 @@ mod tests {
     fn provider_request_snapshot_uses_the_available_provider_when_primary_is_cooled() {
         let failover = FailoverProvider::new(
             vec![
-                Arc::new(CountingProbe),
-                Arc::new(SnapshotProbe("secondary")),
+                Arc::new(CountingProbe("probe")),
+                Arc::new(CountingProbe("secondary")),
             ],
             FailoverConfig::default(),
         );
@@ -1659,40 +1663,5 @@ mod tests {
             failover.provider_request_snapshot(&completion_req(), true),
             serde_json::json!({"provider": "secondary", "stream": true})
         );
-    }
-
-    struct SnapshotProbe(&'static str);
-
-    #[async_trait]
-    impl LlmProvider for SnapshotProbe {
-        fn model_id(&self) -> &str {
-            self.0
-        }
-
-        fn provider_request_snapshot(
-            &self,
-            _: &CompletionRequest,
-            stream: bool,
-        ) -> serde_json::Value {
-            serde_json::json!({"provider": self.0, "stream": stream})
-        }
-
-        async fn complete(
-            &self,
-            _: CompletionRequest,
-        ) -> Result<CompletionResponse, ProviderError> {
-            unreachable!("snapshot-only probe")
-        }
-
-        async fn complete_with_tools(
-            &self,
-            _: ToolCompletionRequest,
-        ) -> Result<ToolCompletionResponse, ProviderError> {
-            unreachable!("snapshot-only probe")
-        }
-
-        fn stream(&self, _: CompletionRequest) -> Pin<Box<dyn Stream<Item = StreamChunk> + Send>> {
-            unreachable!("snapshot-only probe")
-        }
     }
 }
