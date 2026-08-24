@@ -7368,14 +7368,34 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
             finish_reason: None,
         },
     ];
-    let child_denied_round = vec![
-        StreamChunk::Delta {
-            content: child_response.clone(),
-        },
-        StreamChunk::Done {
-            finish_reason: None,
-        },
-    ];
+    let diagnostic_round = |response: String| {
+        vec![
+            StreamChunk::ProviderResponseWitness(swage_core::ProviderResponseWitness {
+                http_status: 200,
+                request_id: Some("delegated-diagnostics".into()),
+                terminal_event: Some("message_stop".into()),
+                stop_reason: Some("end_turn".into()),
+                usage: swage_core::TokenUsage {
+                    input_tokens: 9,
+                    output_tokens: 2,
+                },
+                content_blocks: vec![swage_core::ProviderContentBlockWitness {
+                    block_type: "text".into(),
+                    count: 1,
+                    bytes: response.len() as u64,
+                }],
+            }),
+            StreamChunk::Reasoning {
+                content: "delegated diagnostic reasoning".into(),
+                details: Some(serde_json::json!({"kind": "summary"})),
+            },
+            StreamChunk::Delta { content: response },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ]
+    };
+    let child_denied_round = diagnostic_round(child_response.clone());
     let parent_resume_round = vec![
         StreamChunk::Delta {
             content: "Parent resumed after delegation".into(),
@@ -7400,6 +7420,7 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
             finish_reason: None,
         },
     ];
+    let control_round = diagnostic_round(child_response.clone());
 
     let (provider, captured_requests) = CapturingMultiRoundProvider::new(vec![
         parent_round,
@@ -7408,6 +7429,7 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
         parent_resume_round,
         parent_next_round,
         child_next_round,
+        control_round,
     ]);
 
     let swage_home = tempfile::TempDir::new().expect("temp swage home");
@@ -7694,11 +7716,58 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
     .await
     .expect("child next turn should remain dispatch-bound");
 
+    // A direct turn is the control: it records the same provider diagnostics
+    // through the ordinary event path. The delegated child's stored snapshot
+    // must preserve each diagnostic kind with the same values.
+    let (tx, _rx) = mpsc::unbounded_channel();
+    process_turn(
+        &state,
+        child_sessions[0].id,
+        None,
+        "Run the diagnostic control".to_string(),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .expect("undelegated control turn should complete");
+    let control_turn = state
+        .storage
+        .list_turns_by_thread(child_threads[0].id)
+        .await
+        .expect("list control turns")
+        .into_iter()
+        .last()
+        .expect("control turn");
+    let control_snapshot = state
+        .storage
+        .get_snapshot(control_turn.id)
+        .await
+        .expect("read control context snapshot")
+        .expect("control context snapshot should be persisted");
+    let control_snapshot: serde_json::Value =
+        serde_json::from_str(&control_snapshot).expect("control snapshot should be JSON");
+    let diagnostic_kinds = |snapshot: &serde_json::Value| {
+        serde_json::json!({
+            "request": snapshot["provider_visible"]["requests"][0]["request"]["provider"],
+            "response": snapshot["provider_visible"]["responses"][0]["witness"],
+            "reasoning": {
+                "content": snapshot["provider_visible"]["reasoning"][0]["content"],
+                "details": snapshot["provider_visible"]["reasoning"][0]["details"],
+            },
+        })
+    };
+    assert_eq!(
+        diagnostic_kinds(&child_snapshot),
+        diagnostic_kinds(&control_snapshot),
+        "the delegated child record must retain the request, response, and reasoning diagnostics its undelegated twin records"
+    );
+
     let captured_requests = captured_requests.lock().unwrap();
     assert_eq!(
         captured_requests.len(),
-        6,
-        "expected parent, two child rounds, resumed-parent, parent continuation, and child continuation requests"
+        7,
+        "expected parent, two child rounds, resumed-parent, parent continuation, child continuation, and direct control requests"
     );
     let delegated_result = captured_requests[3]
         .messages
