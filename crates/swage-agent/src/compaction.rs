@@ -41,14 +41,12 @@ pub async fn exceeds_threshold(
 ) -> bool {
     match threshold {
         CompactionThreshold::TokenCount(max_tokens) => {
-            if token_count_byte_upper_bound(messages)
-                .is_some_and(|bound| bound <= u64::from(*max_tokens))
-            {
+            if token_count_byte_upper_bound(messages).is_some_and(|bound| bound <= *max_tokens) {
                 return false;
             }
 
             match provider.count_tokens(&counting_request(messages)).await {
-                Ok(Some(count)) => count > u64::from(*max_tokens),
+                Ok(Some(count)) => count > *max_tokens,
                 Ok(None) | Err(_) => estimated_tokens(messages) > *max_tokens as usize,
             }
         }
