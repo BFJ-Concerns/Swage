@@ -258,14 +258,14 @@
     gap: 10px;
     padding: 14px;
     border-radius: 16px;
-    background: rgba(255, 255, 255, 0.64);
-    border: 1px solid rgba(120, 53, 15, 0.08);
+    background: var(--paper);
+    border: var(--rule);
   }
 
   .operation-card p,
   .capability-strip span,
   .recovery-summary {
-    color: #5b4634;
+    color: var(--ink-soft);
     font-size: 0.88rem;
     line-height: 1.4;
   }
@@ -280,27 +280,27 @@
   .primary,
   .secondary {
     border-radius: 999px;
-    border: 1px solid rgba(120, 53, 15, 0.16);
-    background: rgba(255, 255, 255, 0.72);
+    border: var(--border);
+    background: var(--paper);
     padding: 9px 14px;
   }
 
   .scope-toggle button.active {
-    background: rgba(180, 83, 9, 0.14);
-    border-color: rgba(146, 64, 14, 0.28);
-    color: #7c2d12;
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    border-color: var(--accent);
+    color: var(--ink-orange);
     font-weight: 700;
   }
 
   .primary {
-    background: linear-gradient(135deg, #8a3b12, #b45309);
-    border-color: rgba(146, 64, 14, 0.32);
-    color: #fff9f1;
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--paper);
     font-weight: 700;
   }
 
   .secondary {
-    color: #7c2d12;
+    color: var(--ink-orange);
     font-weight: 700;
   }
 
@@ -312,14 +312,14 @@
   label span {
     font-size: 0.82rem;
     font-weight: 700;
-    color: #6b3f1d;
+    color: var(--ink);
   }
 
   input,
   textarea {
     border-radius: 16px;
-    border: 1px solid rgba(120, 53, 15, 0.14);
-    background: rgba(255, 255, 255, 0.76);
+    border: var(--border);
+    background: var(--paper);
     padding: 12px 14px;
     resize: vertical;
   }
@@ -327,19 +327,19 @@
   .feedback {
     border-radius: 16px;
     padding: 10px 12px;
-    color: #5b4634;
+    color: var(--ink-soft);
     font-size: 0.92rem;
     line-height: 1.45;
   }
 
   .feedback.error {
-    background: rgba(254, 226, 226, 0.76);
-    color: #991b1b;
+    background: color-mix(in srgb, var(--error) 12%, transparent);
+    color: var(--error);
   }
 
   .feedback.success {
-    background: rgba(220, 252, 231, 0.8);
-    color: #166534;
+    background: color-mix(in srgb, var(--success) 12%, transparent);
+    color: var(--success);
   }
 
   .capability-strip {
@@ -349,8 +349,8 @@
     gap: 12px;
     padding: 12px 14px;
     border-radius: 16px;
-    background: rgba(255, 255, 255, 0.58);
-    border: 1px solid rgba(120, 53, 15, 0.08);
+    background: var(--paper);
+    border: var(--rule);
   }
 
   .capability-strip div {

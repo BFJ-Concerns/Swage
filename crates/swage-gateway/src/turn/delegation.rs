@@ -3,8 +3,9 @@ use super::{
     DispatchContextComposition, GatewayDispatcherRequest, MessageRouter, NewAgentMessage, Uuid,
     WORKER_PLACEMENT_AUTHORITY_CONTEXT_METADATA_KEY, WORKER_PLACEMENT_AUTHORITY_PATH_METADATA_KEY,
     WORKER_PLACEMENT_CAN_WRITE_METADATA_KEY, WORKER_PLACEMENT_CWD_METADATA_KEY,
-    add_dispatch_bound_task_definition_ids, apply_agent_definition, apply_dispatch_bounds,
-    apply_dispatch_task_bounds, available_skills_for_agent, build_agent_config_for_space_workspace,
+    WORKFLOW_CALL_TOOLS_METADATA_KEY, add_dispatch_bound_task_definition_ids,
+    apply_agent_definition, apply_dispatch_bounds, apply_dispatch_task_bounds,
+    apply_workflow_call_tools, available_skills_for_agent, build_agent_config_for_space_workspace,
     build_approval_registrar, build_assembly_elements,
     build_gateway_dispatcher_for_unattended_execution, build_session_environment,
     configuration_hierarchy, dispatch_bound_agent_ids_for_turn, dispatch_bound_metadata,
@@ -17,7 +18,8 @@ use super::{
 use crate::turn::workspace::ResolvedWorkerDirectory;
 use sha2::{Digest, Sha256};
 use swage_agent::{
-    DelegatedAssembly, DelegationContextAssembler, DelegationOutcome, DelegationSnapshotRecorder,
+    AgentEvent, DelegatedAssembly, DelegationContextAssembler, DelegationOutcome,
+    DelegationSnapshotRecorder,
 };
 use swage_context::tokeniser::TiktokenTokeniser;
 use swage_core::DelegateCompletionMode;
@@ -167,13 +169,67 @@ impl DelegationContextAssembler for GatewayDelegatedContextAssembler {
 }
 
 struct GatewayDelegationSnapshotRecorder {
+    state: AppState,
+}
+
+#[cfg(test)]
+struct SnapshotOnlyDelegationRecorder {
     storage: Arc<dyn swage_storage::Storage>,
 }
 
+#[cfg(test)]
 pub(crate) fn delegation_snapshot_recorder(
     storage: Arc<dyn swage_storage::Storage>,
 ) -> Arc<dyn DelegationSnapshotRecorder> {
-    Arc::new(GatewayDelegationSnapshotRecorder { storage })
+    Arc::new(SnapshotOnlyDelegationRecorder { storage })
+}
+
+pub(crate) fn delegation_snapshot_recorder_for_state(
+    state: AppState,
+) -> Arc<dyn DelegationSnapshotRecorder> {
+    Arc::new(GatewayDelegationSnapshotRecorder { state })
+}
+
+impl GatewayDelegationSnapshotRecorder {
+    async fn persist(
+        &self,
+        session_id: Uuid,
+        turn_id: Uuid,
+        report: &serde_json::Value,
+    ) -> Result<(), AgentError> {
+        let storage = self.state.storage.as_ref();
+        persist_delegated_snapshot(storage, session_id, turn_id, report).await
+    }
+}
+
+async fn persist_delegated_snapshot(
+    storage: &dyn swage_storage::Storage,
+    session_id: Uuid,
+    turn_id: Uuid,
+    report: &serde_json::Value,
+) -> Result<(), AgentError> {
+    if let Err(error) = storage.store_snapshot(turn_id, &report.to_string()).await {
+        // Reconstructive record (record_durability.rs): record the gap and
+        // escalate to a forced turn failure only if that record also fails.
+        tracing::warn!(%turn_id, %error, "failed to persist delegated context snapshot");
+        if let Err(audit_error) = crate::record_durability::record_reconstruction_gap(
+            storage,
+            Some(session_id),
+            turn_id,
+            "delegated_context_snapshot",
+            &error,
+        )
+        .await
+        {
+            if let Err(force_error) = storage.force_turn_failure(turn_id).await {
+                tracing::error!(%turn_id, %force_error, "failed to mark delegated turn failed after record loss");
+            }
+            return Err(AgentError::InvalidConfig(format!(
+                "delegated context snapshot lost and the loss could not be recorded: {audit_error}"
+            )));
+        }
+    }
+    Ok(())
 }
 
 #[async_trait::async_trait]
@@ -184,32 +240,65 @@ impl DelegationSnapshotRecorder for GatewayDelegationSnapshotRecorder {
         turn_id: Uuid,
         report: &serde_json::Value,
     ) -> Result<(), AgentError> {
-        if let Err(error) = self
-            .storage
-            .store_snapshot(turn_id, &report.to_string())
-            .await
-        {
-            // Reconstructive record (record_durability.rs): record the gap and
-            // escalate to a forced turn failure only if that record also fails.
-            tracing::warn!(%turn_id, %error, "failed to persist delegated context snapshot");
-            if let Err(audit_error) = crate::record_durability::record_reconstruction_gap(
-                self.storage.as_ref(),
-                Some(session_id),
-                turn_id,
-                "delegated_context_snapshot",
-                &error,
-            )
-            .await
-            {
-                if let Err(force_error) = self.storage.force_turn_failure(turn_id).await {
-                    tracing::error!(%turn_id, %force_error, "failed to mark delegated turn failed after record loss");
+        self.persist(session_id, turn_id, report).await
+    }
+
+    async fn record_event(&self, session_id: Uuid, event: AgentEvent) -> Result<(), AgentError> {
+        let turn_id = match &event {
+            AgentEvent::ProviderRequestPrepared { turn_id, .. }
+            | AgentEvent::ProviderResponseCaptured { turn_id, .. }
+            | AgentEvent::ProviderReasoningCaptured { turn_id, .. } => *turn_id,
+            _ => return Ok(()),
+        };
+        let Some(snapshot) = self.state.storage.get_snapshot(turn_id).await? else {
+            return Err(AgentError::InvalidConfig(format!(
+                "delegated turn {turn_id} has no context snapshot for provider request"
+            )));
+        };
+        let mut report: serde_json::Value = serde_json::from_str(&snapshot).map_err(|error| {
+            AgentError::InvalidConfig(format!(
+                "delegated context snapshot is invalid JSON: {error}"
+            ))
+        })?;
+        match event {
+            AgentEvent::ProviderRequestPrepared { round, request, .. } => {
+                match super::redact_provider_visible_request(&self.state, request).await {
+                    Ok(request) => {
+                        super::append_provider_visible_request(&mut report, round, request)
+                    }
+                    Err(error) => {
+                        tracing::error!(%turn_id, %round, %error, "delegated provider-visible request capture omitted because secret redaction was unavailable");
+                        super::append_provider_visible_capture_error(&mut report, round);
+                    }
                 }
-                return Err(AgentError::InvalidConfig(format!(
-                    "delegated context snapshot lost and the loss could not be recorded: {audit_error}"
-                )));
             }
+            AgentEvent::ProviderResponseCaptured { round, witness, .. } => {
+                super::append_provider_visible_response(&mut report, round, witness);
+            }
+            AgentEvent::ProviderReasoningCaptured {
+                round,
+                content,
+                details,
+                ..
+            } => {
+                super::append_provider_visible_reasoning(&mut report, round, content, details);
+            }
+            _ => unreachable!("non-diagnostic events returned above"),
         }
-        Ok(())
+        self.record(session_id, turn_id, &report).await
+    }
+}
+
+#[cfg(test)]
+#[async_trait::async_trait]
+impl DelegationSnapshotRecorder for SnapshotOnlyDelegationRecorder {
+    async fn record(
+        &self,
+        session_id: Uuid,
+        turn_id: Uuid,
+        report: &serde_json::Value,
+    ) -> Result<(), AgentError> {
+        persist_delegated_snapshot(self.storage.as_ref(), session_id, turn_id, report).await
     }
 }
 
@@ -257,13 +346,14 @@ impl DelegationHandler for GatewayDelegationHandler {
                     space.slug
                 ))
             })?;
-        let target_resolved = match self
-            .state
-            .storage
-            .resolve_agent_definition(target_agent_id, space_id)
-            .await
+        let target_resolved = match crate::service::resolve_effective_agent_definition(
+            self.state.storage.as_ref(),
+            target_agent_id,
+            space_id,
+        )
+        .await
         {
-            Ok(Some(definition)) => apply_agent_definition(target_resolved, &definition),
+            Ok(Some(definition)) => apply_agent_definition(target_resolved, &definition.definition),
             Ok(None) => target_resolved,
             Err(error) => {
                 tracing::warn!(
@@ -313,6 +403,18 @@ impl DelegationHandler for GatewayDelegationHandler {
             dispatch_bound_task_definition_ids_for_turn(&self.state, sender_turn_id)
                 .await
                 .map_err(|error| AgentError::InvalidConfig(error.to_string()))?;
+        let sender_filesystem_authority =
+            self.filesystem_authority_for_turn(sender_turn_id).await?;
+        let mut session_metadata = dispatch_bound_metadata(&bound_agent_ids)
+            .expect("a delegated session always has at least its sender bound");
+        add_dispatch_bound_task_definition_ids(&mut session_metadata, &bound_task_definition_ids);
+        if let Some(workflow_call_tools) = &sender_filesystem_authority.workflow_call_tools {
+            session_metadata[WORKFLOW_CALL_TOOLS_METADATA_KEY] = workflow_call_tools.clone();
+        }
+        if let Some(task_definition) = task_definition {
+            session_metadata["task_definition"] =
+                serde_json::Value::String(task_definition.to_string());
+        }
         let effective_target_resolved = apply_dispatch_bounds(
             &self.state,
             &space.slug,
@@ -331,16 +433,10 @@ impl DelegationHandler for GatewayDelegationHandler {
         )
         .await
         .map_err(|error| AgentError::InvalidConfig(error.to_string()))?;
-        let mut session_metadata = dispatch_bound_metadata(&bound_agent_ids)
-            .expect("a delegated session always has at least its sender bound");
-        add_dispatch_bound_task_definition_ids(&mut session_metadata, &bound_task_definition_ids);
-        if let Some(task_definition) = task_definition {
-            session_metadata["task_definition"] =
-                serde_json::Value::String(task_definition.to_string());
-        }
+        let effective_target_resolved =
+            apply_workflow_call_tools(effective_target_resolved, Some(&session_metadata))
+                .map_err(|error| AgentError::InvalidConfig(error.to_string()))?;
 
-        let sender_filesystem_authority =
-            self.filesystem_authority_for_turn(sender_turn_id).await?;
         let active_workspace_attachment_id =
             sender_filesystem_authority.active_workspace_attachment_id;
         let sender_session_id = sender_filesystem_authority.session_id;
@@ -471,7 +567,7 @@ impl DelegationHandler for GatewayDelegationHandler {
                 effective_tool_permissions_record(&effective_target_resolved),
                 composition.clone(),
             ),
-            snapshot_recorder: Some(delegation_snapshot_recorder(self.state.storage.clone())),
+            snapshot_recorder: Some(delegation_snapshot_recorder_for_state(self.state.clone())),
         };
 
         let mut payload = serde_json::to_value(composition).map_err(|error| {
@@ -733,6 +829,11 @@ impl GatewayDelegationHandler {
             session_id: session.id,
             active_workspace_attachment_id: session.active_workspace_attachment_id,
             placement,
+            workflow_call_tools: session
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get(WORKFLOW_CALL_TOOLS_METADATA_KEY))
+                .cloned(),
         })
     }
 }
@@ -741,4 +842,5 @@ struct DispatchFilesystemAuthority {
     session_id: Uuid,
     active_workspace_attachment_id: Option<Uuid>,
     placement: Option<ResolvedWorkerDirectory>,
+    workflow_call_tools: Option<serde_json::Value>,
 }
