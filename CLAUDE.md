@@ -12,14 +12,16 @@ deliberate "for now": it lifts the day there are users with data to migrate.
 Use the repository's `just` targets rather than assembling equivalent command
 sequences by hand:
 
-- `just check` for the fast workspace check.
+- `just check` for the narrow workspace/frontend type check only.
+- `just check-gate` for the fast, pre-test static gate: tracked-local-state,
+  formatting, workspace/frontend checking, frontend design-token checking, and
+  clippy.
 - `just build-dev-embedded` when the gateway needs the current frontend embedded.
 - `just test` for the full Rust, frontend, and desktop-smoke suite.
-- `just verify` before landing (`just ci` is an alias). It is the gate: the
-  tracked-local-state and formatting checks, clippy, the test suite, and a
-  final check that the committed protocol projections are not stale. CI runs
-  this same recipe, so a green run here means CI's checks passed — a new check
-  belongs in `xtask`, not in the workflow file.
+- `just verify` before landing (`just ci` is an alias). It runs `check-gate`,
+  the test suite, and a final check that the committed protocol projections
+  are not stale. CI runs this same recipe, so a green run here means CI's
+  checks passed — a new check belongs in `xtask`, not in the workflow file.
 
 For manually driving the running app, dispatch a subagent on `gpt-5.6-terra`;
 it uses the global `playwright` skill for browser work or `waldo` for the live

@@ -1069,6 +1069,76 @@ describe("App", () => {
     expect(document.querySelector(".message-display")?.textContent).toContain("Streamed reply.");
   });
 
+  it("keeps a newer stream live when reconnect refresh completes late", async () => {
+    const defaultSpace = makeSpace();
+    let resolveReconnectRefresh!: (conversation: ConversationDetail) => void;
+    const reconnectRefresh = new Promise<ConversationDetail>((resolve) => {
+      resolveReconnectRefresh = resolve;
+    });
+
+    vi.mocked(spacesApi.listSpaces).mockResolvedValueOnce([defaultSpace]);
+    vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([
+      makeConversationSummary({ id: "conv-reconnect" }),
+    ]);
+    vi.mocked(conversationsApi.getConversation)
+      .mockResolvedValueOnce(makeConversationDetail({ id: "conv-reconnect" }))
+      .mockReturnValueOnce(reconnectRefresh);
+
+    setPath("/conversations/conv-reconnect");
+    component = mount(App, { target: document.body });
+    await settleUi();
+    websocketHarness.fireStatus("connected");
+
+    const textarea = document.querySelector<HTMLTextAreaElement>("textarea");
+    expect(textarea).not.toBeNull();
+    flushSync(() => {
+      textarea!.value = "Turn active before reconnect";
+      textarea!.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    flushSync(() =>
+      document.querySelector<HTMLButtonElement>(".action.send")!.click(),
+    );
+    websocketHarness.fireEvent({ type: "token", content: "Older live content" });
+    await settleUi();
+
+    websocketHarness.fireStatus("reconnecting");
+    websocketHarness.fireStatus("connected");
+    expect(conversationsApi.getConversation).toHaveBeenCalledTimes(2);
+
+    websocketHarness.fireEvent({ type: "turn_complete", turn_id: "older-turn" });
+    await settleUi();
+    flushSync(() => {
+      textarea!.value = "New turn while refresh is pending";
+      textarea!.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    flushSync(() =>
+      document.querySelector<HTMLButtonElement>(".action.send")!.click(),
+    );
+    websocketHarness.fireEvent({ type: "token", content: "New live content" });
+    await settleUi();
+
+    resolveReconnectRefresh(
+      makeConversationDetail({
+        id: "conv-reconnect",
+        messages: [
+          {
+            role: "assistant",
+            content: "Recovered older response",
+            timestamp: "2026-04-07T12:04:00Z",
+            turn_state: "completed",
+            turn_id: "older-turn",
+          },
+        ],
+      }),
+    );
+    await settleUi();
+
+    expect(document.querySelector(".action.stop")).not.toBeNull();
+    expect(document.querySelector(".message-display")?.textContent).toContain(
+      "New live content",
+    );
+  });
+
   it("refreshes saved models before returning to the conversation and sending", async () => {
     const configured = makeSettings({
       "local/existing-model": {
