@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use crate::{
     tool::Tool,
-    tool::workflow_list::workflows_for_session,
+    tool::workflow_list::{workflow_catalogue_error_summary, workflows_for_session},
     tool_executor::GatewayToolContext,
     workflow::{GatewayWorkflowLauncher, WorkflowLauncher},
 };
@@ -125,7 +125,11 @@ impl Tool for WorkflowRunTool {
                 })?;
                 Err(ToolError::ExecutionFailed {
                     name: self.name().into(),
-                    message: format!("{message}. Available workflows: {catalogue}"),
+                    message: workflow_catalogue_error_summary(
+                        &message,
+                        &catalogue,
+                        swage_agent::agent::MAX_MODEL_TOOL_ERROR_DETAIL_CHARS,
+                    ),
                 })
             }
             Err(message) => Err(ToolError::ExecutionFailed {
@@ -354,13 +358,17 @@ mod tests {
             panic!("unknown name should be an execution failure: {error}");
         };
         assert!(message.contains("not-a-workflow"));
+        assert!(message.contains("13 workflows are available"));
+        assert!(message.contains("`workflow_list`"));
+        assert!(message.contains("Showing "));
+        assert!(message.contains(" of 13 names"));
+        assert!(
+            message.chars().count() <= swage_agent::agent::MAX_MODEL_TOOL_ERROR_DETAIL_CHARS,
+            "error message must fit the model error-detail budget: {message}"
+        );
         assert!(
             message.contains("research-sweep"),
             "shipped workflow missing: {message}"
-        );
-        assert!(
-            message.contains("operator-report"),
-            "saved workflow missing: {message}"
         );
     }
 }
