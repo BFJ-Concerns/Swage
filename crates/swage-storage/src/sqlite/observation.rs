@@ -17,7 +17,7 @@ use crate::store::ObservationStore;
 // ---------------------------------------------------------------------------
 
 const OBSERVATION_COLUMNS: &str = "id, space_id, origin_url, origin_local_path, retrieved_at,
-     body_sha256, body_bytes, media_type, created_at";
+     body_sha256, body_bytes, media_type, capture_scope, created_at";
 
 fn row_to_observation(row: &rusqlite::Row<'_>) -> rusqlite::Result<SourceObservation> {
     Ok(SourceObservation {
@@ -31,7 +31,8 @@ fn row_to_observation(row: &rusqlite::Row<'_>) -> rusqlite::Result<SourceObserva
         body_sha256: row.get(5)?,
         body_bytes: row.get::<_, i64>(6)?.try_into().unwrap_or(0),
         media_type: row.get(7)?,
-        created_at: parse_dt(&row.get::<_, String>(8)?)?,
+        capture_scope: row.get(8)?,
+        created_at: parse_dt(&row.get::<_, String>(9)?)?,
     })
 }
 
@@ -66,6 +67,39 @@ impl ObservationStore for SqliteStorage {
         }
 
         self.with_conn(move |conn| {
+            // A capture scope is retry identity: the same unit of work
+            // (a workflow's journalled agent call, re-executed after an
+            // interruption) re-capturing the same origin is the SAME
+            // observational act, even when the live body differs between
+            // attempts, so it deduplicates to the first capture. A lost
+            // race between two concurrent same-scope captures costs a
+            // duplicate row — the pre-scope status quo — never a gap. Body
+            // identity below still wins over scope: a first attempt whose
+            // bytes matched foreign evidence created no scoped row, so its
+            // changed-bytes retry records a distinct observation — a
+            // bounded edge accepted over stamping scopes onto rows the
+            // scope did not create.
+            if let Some(scope) = observation.capture_scope.as_deref()
+                && let Some(existing) = conn
+                    .query_row(
+                        &format!(
+                            "SELECT {OBSERVATION_COLUMNS} FROM source_observations
+                             WHERE space_id = ?1 AND capture_scope = ?2
+                               AND origin_url IS ?3 AND origin_local_path IS ?4"
+                        ),
+                        params![
+                            observation.space_id.to_string(),
+                            scope,
+                            observation.origin.url,
+                            observation.origin.local_path,
+                        ],
+                        row_to_observation,
+                    )
+                    .optional()?
+            {
+                return Ok(existing);
+            }
+
             // Identical bodies within a space deduplicate to the existing
             // observation so evidence identity never forks: two captures of
             // the same bytes are one piece of evidence, whatever fetched them.
@@ -88,8 +122,8 @@ impl ObservationStore for SqliteStorage {
             conn.execute(
                 "INSERT INTO source_observations (
                      id, space_id, origin_url, origin_local_path, retrieved_at,
-                     body_sha256, body_bytes, media_type, created_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                     body_sha256, body_bytes, media_type, capture_scope, created_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 params![
                     id.to_string(),
                     observation.space_id.to_string(),
@@ -99,6 +133,7 @@ impl ObservationStore for SqliteStorage {
                     observation.body_sha256,
                     i64::try_from(observation.body_bytes).unwrap_or(i64::MAX),
                     observation.media_type,
+                    observation.capture_scope,
                     now.to_rfc3339(),
                 ],
             )?;
@@ -111,6 +146,7 @@ impl ObservationStore for SqliteStorage {
                 body_sha256: observation.body_sha256,
                 body_bytes: observation.body_bytes,
                 media_type: observation.media_type,
+                capture_scope: observation.capture_scope,
                 created_at: now,
             })
         })
@@ -378,6 +414,7 @@ mod tests {
             body_sha256: body_sha256.into(),
             body_bytes: 1024,
             media_type: "text/html".into(),
+            capture_scope: None,
         }
     }
 
@@ -420,6 +457,88 @@ mod tests {
         assert_eq!(
             first.id, second.id,
             "one body, one evidence identity — the original observation returns"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn same_scope_and_origin_deduplicates_across_differing_bodies() {
+        let (storage, space_id) = storage_with_space().await;
+
+        let mut first = new_observation(space_id, "https://example.org/a", "aa11");
+        first.capture_scope = Some("call-1".into());
+        let first = storage.record_observation(first).await.unwrap();
+
+        // The same journalled call re-runs after an interruption and fetches
+        // the same page again; the live body differs between attempts.
+        let mut retried = new_observation(space_id, "https://example.org/a", "cc33");
+        retried.capture_scope = Some("call-1".into());
+        let retried = storage.record_observation(retried).await.unwrap();
+
+        assert_eq!(
+            first.id, retried.id,
+            "one capture per origin per scope — the retry returns the first attempt's observation"
+        );
+        assert_eq!(
+            storage
+                .list_observations_by_space(space_id)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn same_scope_different_origin_records_separately() {
+        let (storage, space_id) = storage_with_space().await;
+
+        let mut first = new_observation(space_id, "https://example.org/a", "aa11");
+        first.capture_scope = Some("call-1".into());
+        let first = storage.record_observation(first).await.unwrap();
+
+        let mut second = new_observation(space_id, "https://example.org/b", "bb22");
+        second.capture_scope = Some("call-1".into());
+        let second = storage.record_observation(second).await.unwrap();
+
+        assert_ne!(
+            first.id, second.id,
+            "a scope bounds retries of one capture, not everything the call records"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn different_scopes_re_observe_the_same_origin() {
+        let (storage, space_id) = storage_with_space().await;
+
+        let mut first = new_observation(space_id, "https://example.org/a", "aa11");
+        first.capture_scope = Some("call-1".into());
+        let first = storage.record_observation(first).await.unwrap();
+
+        // A later sweep captures the same origin with changed content: a
+        // legitimate re-observation, not a retry.
+        let mut later = new_observation(space_id, "https://example.org/a", "dd44");
+        later.capture_scope = Some("call-2".into());
+        let later = storage.record_observation(later).await.unwrap();
+
+        assert_ne!(first.id, later.id);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn scopeless_captures_keep_body_only_dedup() {
+        let (storage, space_id) = storage_with_space().await;
+
+        let first = storage
+            .record_observation(new_observation(space_id, "https://example.org/a", "aa11"))
+            .await
+            .unwrap();
+        let second = storage
+            .record_observation(new_observation(space_id, "https://example.org/a", "ee55"))
+            .await
+            .unwrap();
+
+        assert_ne!(
+            first.id, second.id,
+            "without a scope, differing bodies of one origin stay distinct observations"
         );
     }
 

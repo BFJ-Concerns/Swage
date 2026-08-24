@@ -105,6 +105,12 @@ pub trait SessionStore: Send + Sync {
     async fn delete_session(&self, id: Uuid) -> Result<bool, StorageError>;
     /// Bump the session's updated_at to now.
     async fn update_activity(&self, id: Uuid) -> Result<(), StorageError>;
+    /// Replace host-managed session metadata.
+    async fn set_session_metadata(
+        &self,
+        id: Uuid,
+        metadata: Option<serde_json::Value>,
+    ) -> Result<Session, StorageError>;
     async fn set_session_active_workspace(
         &self,
         id: Uuid,
@@ -1278,6 +1284,13 @@ mod tests {
             unimplemented!()
         }
         async fn update_activity(&self, _: Uuid) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+        async fn set_session_metadata(
+            &self,
+            _: Uuid,
+            _: Option<serde_json::Value>,
+        ) -> Result<Session, StorageError> {
             unimplemented!()
         }
         async fn set_session_active_workspace(

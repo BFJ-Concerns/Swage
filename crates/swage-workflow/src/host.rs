@@ -249,6 +249,7 @@ mod tests {
             prompt: "work".into(),
             agent: Some("worker".into()),
             task: None,
+            tools: None,
             model: None,
             effort: None,
             timeout_ms: None,
