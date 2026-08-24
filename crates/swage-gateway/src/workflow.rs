@@ -6122,7 +6122,6 @@ mod tests {
         let Json(started) = start_saved_run(
             State(state.clone()),
             Path(builtin_workflows::id(space.id, "research-sweep")),
-            Query(WorkflowScriptListQuery::default()),
             Json(StartWorkflowRunRequest {
                 args: serde_json::json!({
                     "topic": "contract evidence",

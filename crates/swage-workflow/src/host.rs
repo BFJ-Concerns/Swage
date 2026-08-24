@@ -53,6 +53,11 @@ pub struct AgentCallRequest {
     pub agent: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task: Option<String>,
+    /// Optional call-scoped tool allow-list. The host intersects this with
+    /// the worker's effective grants, so a call can narrow authority but
+    /// never acquire a tool its dispatching context or agent lacks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<String>>,
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<Effort>,
@@ -318,6 +323,7 @@ mod task_request_tests {
             prompt: "work".into(),
             agent: None,
             task: task.map(str::to_owned),
+            tools: None,
             model: None,
             effort: None,
             timeout_ms: None,
@@ -342,6 +348,12 @@ mod task_request_tests {
                 .expect("request object")
                 .contains_key("task")
         );
+        assert!(
+            !value
+                .as_object()
+                .expect("request object")
+                .contains_key("tools")
+        );
     }
 
     #[test]
@@ -350,6 +362,18 @@ mod task_request_tests {
         assert_eq!(value["task"], "review");
         let restored: AgentCallRequest = serde_json::from_value(value).expect("read request");
         assert_eq!(restored.task.as_deref(), Some("review"));
+    }
+
+    #[test]
+    fn call_scoped_tools_are_serialised_verbatim() {
+        let mut request = request(None);
+        request.agent = Some("researcher".into());
+        request.tools = Some(vec!["web_search".into(), "url_fetch".into()]);
+        let value = serde_json::to_value(request).expect("serialise request");
+        assert_eq!(
+            value["tools"],
+            serde_json::json!(["web_search", "url_fetch"])
+        );
     }
 
     #[test]
