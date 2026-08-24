@@ -2,12 +2,11 @@
   import { onMount } from "svelte";
   import { fetchOperatorHistory } from "../api/operator";
   import type { OperatorHistoryResponse } from "../protocol/OperatorHistoryResponse";
-  import TurnContextInspector from "./TurnContextInspector.svelte";
   import TurnContextInspectorTrigger from "./TurnContextInspectorTrigger.svelte";
 
   let history = $state<OperatorHistoryResponse | null>(null);
   let errorMessage = $state<string | null>(null);
-  let inspectedTurnId = $state<string | null>(null);
+  let inspectorTarget: HTMLDivElement | undefined = $state();
 
   function formatState(state: unknown): string {
     return JSON.stringify(state, null, 2);
@@ -94,16 +93,16 @@
                 <time datetime={entry.recorded_at}>{new Date(entry.recorded_at).toLocaleString()}</time>
               </div>
               <p>Turn <span class="mono">{entry.turn_id}</span> · session <span class="mono">{entry.session_id}</span></p>
-              <TurnContextInspectorTrigger turnId={entry.turn_id} label="Inspect turn context" presentation="history" onInspect={(turnId) => (inspectedTurnId = turnId)} />
+              <TurnContextInspectorTrigger
+                turnId={entry.turn_id}
+                label="Inspect turn context"
+                presentation="history"
+                {inspectorTarget}
+              />
             </article>
           {/each}
         </div>
-        {#if inspectedTurnId}
-          <TurnContextInspector
-            turnId={inspectedTurnId}
-            onClose={() => (inspectedTurnId = null)}
-          />
-        {/if}
+        <div class="turn-context-inspector-outlet" bind:this={inspectorTarget}></div>
       {/if}
     </section>
   {/if}

@@ -1511,11 +1511,15 @@ mod tests {
         assert_eq!(telegram_token, "telegram-token");
         let events = captured.lock().unwrap();
         assert!(
-            events.iter().any(|event| event.contains("Settings > Providers")),
+            events
+                .iter()
+                .any(|event| event.contains("Settings > Providers")),
             "provider legacy credential warning must direct operators to Settings: {events:?}"
         );
         assert!(
-            events.iter().any(|event| event.contains("POST /api/secrets")),
+            events
+                .iter()
+                .any(|event| event.contains("POST /api/secrets")),
             "Telegram legacy credential warning must direct operators to its governed route: {events:?}"
         );
     }
