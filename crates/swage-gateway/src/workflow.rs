@@ -31,8 +31,8 @@ use swage_storage::{
 use swage_workflow::{
     AgentCallRequest, AgentCallResult, AwaitEventRequest, EffectPayload, EffectReceipt,
     EffectRecoveryHost, EngineLimits, GateRequest, QUICKJS_ENGINE_VERSION, ResolvedWorkerPlacement,
-    RunEventPost, ScriptCapabilities, WorkflowCallRequest, WorkflowEngine, WorkflowHost, WorkflowHostError,
-    journal_args_hash, recover_started_effect,
+    RunEventPost, ScriptCapabilities, WorkflowCallRequest, WorkflowEngine, WorkflowHost,
+    WorkflowHostError, journal_args_hash, recover_started_effect,
 };
 use tokio::sync::{Mutex, Notify, Semaphore, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -1815,7 +1815,9 @@ async fn run_host_commands_inner(
                 {
                     Ok(resolved) => resolved,
                     Err(error) => {
-                        let _ = reply.send(Err(WorkflowHostError::Message(classify_agent_placement_error(error))));
+                        let _ = reply.send(Err(WorkflowHostError::Message(
+                            classify_agent_placement_error(error),
+                        )));
                         continue;
                     }
                 };
@@ -2173,7 +2175,9 @@ async fn run_host_commands_inner(
                     let _permit = match semaphore.acquire().await {
                         Ok(permit) => permit,
                         Err(_) => {
-                            let _ = reply.send(Err(WorkflowHostError::Message("workflow concurrency gate closed".into())));
+                            let _ = reply.send(Err(WorkflowHostError::Message(
+                                "workflow concurrency gate closed".into(),
+                            )));
                             return;
                         }
                     };
@@ -2277,11 +2281,9 @@ async fn run_host_commands_inner(
                             .lock()
                             .await
                             .insert(failed_call_ref.host_reference(), failed_call_ref);
-                        result.map_err(|message| {
-                            WorkflowHostError::AgentCall {
-                                host_reference: failed_call_ref.host_reference(),
-                                message,
-                            }
+                        result.map_err(|message| WorkflowHostError::AgentCall {
+                            host_reference: failed_call_ref.host_reference(),
+                            message,
                         })
                     } else {
                         result.map_err(WorkflowHostError::Message)
@@ -4169,8 +4171,16 @@ pub async fn update_script(
         .await
         .map_err(internal)?
         .ok_or_else(|| ApiError::not_found("workflow script", id))?;
-    let meta = request.source.as_deref().map(swage_workflow::script_meta).transpose().map_err(ApiError::validation)?;
-    let description = meta.as_ref().and_then(|meta| meta.description.as_deref()).or(request.description.as_deref());
+    let meta = request
+        .source
+        .as_deref()
+        .map(swage_workflow::script_meta)
+        .transpose()
+        .map_err(ApiError::validation)?;
+    let description = meta
+        .as_ref()
+        .and_then(|meta| meta.description.as_deref())
+        .or(request.description.as_deref());
     if description.is_some() || request.delivery_grant.is_some() {
         state
             .storage

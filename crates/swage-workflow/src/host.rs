@@ -10,16 +10,50 @@ use uuid::Uuid;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WorkflowHostError {
     Message(String),
-    AgentCall { host_reference: String, message: String },
+    AgentCall {
+        host_reference: String,
+        message: String,
+    },
 }
 
 impl std::fmt::Display for WorkflowHostError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self { Self::Message(message) => f.write_str(message), Self::AgentCall { message, .. } => f.write_str(message) }
+        match self {
+            Self::Message(message) => f.write_str(message),
+            Self::AgentCall { message, .. } => f.write_str(message),
+        }
     }
 }
 
-impl From<String> for WorkflowHostError { fn from(message: String) -> Self { Self::Message(message) } }
+impl From<String> for WorkflowHostError {
+    fn from(message: String) -> Self {
+        Self::Message(message)
+    }
+}
+
+impl From<&str> for WorkflowHostError {
+    fn from(message: &str) -> Self {
+        Self::Message(message.into())
+    }
+}
+
+impl std::ops::Deref for WorkflowHostError {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Message(message) | Self::AgentCall { message, .. } => message,
+        }
+    }
+}
+
+impl PartialEq<&str> for WorkflowHostError {
+    fn eq(&self, other: &&str) -> bool {
+        match self {
+            Self::Message(message) | Self::AgentCall { message, .. } => message == other,
+        }
+    }
+}
 
 /// An opaque continuation token naming a worker session the run created.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
