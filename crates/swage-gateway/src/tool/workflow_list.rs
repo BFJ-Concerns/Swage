@@ -20,7 +20,7 @@ pub const WORKFLOW_LIST_TOOL: &str = "workflow_list";
 /// The count and the full-list tool always fit. Any shorter preview says exactly
 /// how many names it contains, so an omitted name never implies it is absent.
 pub(crate) fn workflow_catalogue_error_summary(
-    not_found_message: &str,
+    missing_name: &str,
     catalogue: &Value,
     max_chars: usize,
 ) -> String {
@@ -33,9 +33,15 @@ pub(crate) fn workflow_catalogue_error_summary(
         .collect::<Vec<_>>();
     let count = names.len();
     let noun = if count == 1 { "workflow" } else { "workflows" };
-    let introduction = format!(
-        "{not_found_message}. {count} {noun} are available. Use `{WORKFLOW_LIST_TOOL}` to see all workflows."
-    );
+    let guidance =
+        format!("{count} {noun} are available. Use `{WORKFLOW_LIST_TOOL}` to see all workflows.");
+    let named_not_found = format!("workflow script {missing_name:?} was not found.");
+    let introduction =
+        if named_not_found.chars().count() + 1 + guidance.chars().count() <= max_chars {
+            format!("{named_not_found} {guidance}")
+        } else {
+            format!("workflow script with the supplied name was not found. {guidance}")
+        };
 
     if count == 0 {
         return introduction;
@@ -215,7 +221,7 @@ mod tests {
                 .collect::<Vec<_>>(),
         });
         let summary = workflow_catalogue_error_summary(
-            "workflow script \"missing-workflow\" was not found",
+            "missing-workflow",
             &catalogue,
             swage_agent::agent::MAX_MODEL_TOOL_ERROR_DETAIL_CHARS,
         );
@@ -230,6 +236,30 @@ mod tests {
         assert!(summary.contains("workflow-01-for-catalogue-preview"));
         assert!(summary.contains("workflow-05-for-catalogue-preview"));
         assert!(!summary.contains("workflow-06-for-catalogue-preview"));
+    }
+
+    #[test]
+    fn catalogue_error_summary_budgets_a_long_supplied_name() {
+        let catalogue = json!({
+            "workflows": (1..=13)
+                .map(|index| json!({ "name": format!("workflow-{index:02}") }))
+                .collect::<Vec<_>>(),
+        });
+        let summary = workflow_catalogue_error_summary(
+            &"model-supplied-name-".repeat(40),
+            &catalogue,
+            swage_agent::agent::MAX_MODEL_TOOL_ERROR_DETAIL_CHARS,
+        );
+
+        assert!(
+            summary.chars().count() <= swage_agent::agent::MAX_MODEL_TOOL_ERROR_DETAIL_CHARS,
+            "summary exceeds the model error-detail budget: {summary}"
+        );
+        assert!(summary.contains("with the supplied name was not found"));
+        assert!(summary.contains("13 workflows are available"));
+        assert!(summary.contains("`workflow_list`"));
+        assert!(summary.contains("Showing "));
+        assert!(summary.contains(" of 13 names"));
     }
 
     #[tokio::test(flavor = "multi_thread")]
