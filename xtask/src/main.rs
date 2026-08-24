@@ -526,6 +526,7 @@ fn component_style_lines(contents: &str) -> impl Iterator<Item = (usize, &str, u
             let trimmed = line.trim_start();
             if !in_style && trimmed.starts_with("<style") {
                 let opening_offset = line.len() - trimmed.len();
+                in_style = true;
                 let opening_end = trimmed.find('>')?;
                 let style_start = opening_offset + opening_end + 1;
                 let style = &line[style_start..];
@@ -1324,5 +1325,15 @@ mod tests {
         );
 
         assert_eq!(colours, vec![(3, 15), (4, 11), (5, 10)]);
+    }
+
+    #[test]
+    fn detects_colour_when_style_opening_tag_spans_lines() {
+        assert_eq!(
+            component_colour_columns(
+                "<style\n  lang=\"css\">\n.panel { color: #123456; }\n</style>",
+            ),
+            vec![(3, 17)]
+        );
     }
 }
