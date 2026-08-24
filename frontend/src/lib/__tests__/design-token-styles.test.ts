@@ -5,22 +5,30 @@
  */
 import { describe, expect, it } from "vitest";
 
+import appLayout from "../components/AppLayout.svelte?raw";
 import connectionIndicator from "../components/ConnectionIndicator.svelte?raw";
 import conversationList from "../components/ConversationList.svelte?raw";
 import messageDisplay from "../components/MessageDisplay.svelte?raw";
 import messageInput from "../components/MessageInput.svelte?raw";
+import operatorDashboard from "../components/OperatorDashboard.svelte?raw";
+import scheduleAutomationPanel from "../components/ScheduleAutomationPanel.svelte?raw";
 import spaceOperations from "../components/SpaceOperations.svelte?raw";
+import spacePicker from "../components/SpacePicker.svelte?raw";
 import spaceSelector from "../components/SpaceSelector.svelte?raw";
 import toolCallDisplay from "../components/ToolCallDisplay.svelte?raw";
 import turnContextInspector from "../components/TurnContextInspector.svelte?raw";
 import displayPreferences from "../components/settings/DisplayPreferencesSettingsSurface.svelte?raw";
 
 const RETINTED_COMPONENTS = {
+  AppLayout: appLayout,
   ConnectionIndicator: connectionIndicator,
   ConversationList: conversationList,
   MessageDisplay: messageDisplay,
   MessageInput: messageInput,
+  OperatorDashboard: operatorDashboard,
+  ScheduleAutomationPanel: scheduleAutomationPanel,
   SpaceOperations: spaceOperations,
+  SpacePicker: spacePicker,
   SpaceSelector: spaceSelector,
   ToolCallDisplay: toolCallDisplay,
   TurnContextInspector: turnContextInspector,
@@ -41,5 +49,13 @@ describe("retinted component styles", () => {
     expect(errorRule![1].replace(/\/\*[\s\S]*?\*\//g, "").trim()).toBe(".banner.error");
     expect(toolCallDisplay).toMatch(/\.tool-call\.error\s*\{[^}]*var\(--error\)/s);
     expect(messageDisplay).toMatch(/\.turn-error\s*\{[^}]*var\(--error\)/s);
+  });
+
+  it("keeps schedule outcomes on their semantic roles", () => {
+    expect(scheduleAutomationPanel).toMatch(/\.status-active,[\s\S]*?\.status-run-completed_empty\s*\{[^}]*var\(--success\)/);
+    expect(scheduleAutomationPanel).toMatch(/\.status-paused\s*\{[^}]*var\(--ink-orange\)/);
+    expect(scheduleAutomationPanel).toMatch(/\.status-run-failed\s*\{[^}]*var\(--error\)/);
+    expect(scheduleAutomationPanel).toMatch(/\.feedback\.success\s*\{[^}]*var\(--success\)/);
+    expect(scheduleAutomationPanel).toMatch(/\.feedback\.error\s*\{[^}]*var\(--error\)/);
   });
 });

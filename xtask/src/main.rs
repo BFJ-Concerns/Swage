@@ -469,16 +469,17 @@ fn verify() -> Result<()> {
     })
 }
 
-/// Component colours must come from riso.css tokens. These sibling-held
-/// surfaces retain their current literal colours until their owning PR lands:
-/// #130 owns ScheduleAutomationPanel, AppLayout, and SpacePicker; #128 owns
-/// OperatorDashboard; #131 owns ProviderSettingsSurface.
+/// The merged lane introduced these literal-bearing components outside this
+/// unit's enumerated sweep. Provider split surfaces are expressly held by the
+/// brief; OperatorHistoryPane is a separate landed surface. Keep these narrow
+/// scope deferrals until their owners tokenise them.
 const DESIGN_TOKEN_DEFERRED_COMPONENTS: &[&str] = &[
-    "frontend/src/lib/components/ScheduleAutomationPanel.svelte",
-    "frontend/src/lib/components/AppLayout.svelte",
-    "frontend/src/lib/components/SpacePicker.svelte",
-    "frontend/src/lib/components/OperatorDashboard.svelte",
-    "frontend/src/lib/components/settings/ProviderSettingsSurface.svelte",
+    "frontend/src/lib/components/OperatorHistoryPane.svelte",
+    "frontend/src/lib/components/settings/CodexProviderAuthentication.svelte",
+    "frontend/src/lib/components/settings/ProviderConfiguration.svelte",
+    "frontend/src/lib/components/settings/ProviderCreation.svelte",
+    "frontend/src/lib/components/settings/ProviderDefaultModel.svelte",
+    "frontend/src/lib/components/settings/ProviderModelManagement.svelte",
 ];
 
 fn check_frontend_design_tokens() -> Result<()> {
