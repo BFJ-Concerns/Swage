@@ -30,7 +30,6 @@
   } from "../display-preferences";
   import type { ToolCallView } from "../types";
   import ToolCallDisplay from "./ToolCallDisplay.svelte";
-  import TurnContextInspector from "./TurnContextInspector.svelte";
   import TurnContextInspectorTrigger from "./TurnContextInspectorTrigger.svelte";
 
   // ---- Markdown configuration -----------------------------------------------
@@ -119,7 +118,7 @@
   // ---- Auto-scroll ----------------------------------------------------------
 
   let scrollEl: HTMLDivElement | undefined = $state();
-  let inspectedTurnId = $state<string | null>(null);
+  let inspectorTarget: HTMLDivElement | undefined = $state();
 
   // Paused when the user has scrolled up to read earlier messages.
   // Resumes automatically when they scroll back within the 50 px threshold.
@@ -282,7 +281,11 @@
           <!-- Inspectability affordance: every agent turn's assembled
                context is one click away, per the platform's
                reconstructable-afterwards claim. -->
-          <TurnContextInspectorTrigger turnId={message.turn_id} presentation="message" onInspect={(turnId) => (inspectedTurnId = turnId)} />
+          <TurnContextInspectorTrigger
+            turnId={message.turn_id}
+            presentation="message"
+            {inspectorTarget}
+          />
         {/if}
       </div>
     {/each}
@@ -345,12 +348,7 @@
   {/if}
 </div>
 
-{#if inspectedTurnId}
-  <TurnContextInspector
-    turnId={inspectedTurnId}
-    onClose={() => (inspectedTurnId = null)}
-  />
-{/if}
+<div class="turn-context-inspector-outlet" bind:this={inspectorTarget}></div>
 
 
 <style>
