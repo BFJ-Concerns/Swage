@@ -639,6 +639,7 @@ impl GatewayClient {
             message: message.to_owned(),
             output_schema,
             compaction_focus,
+            model: None,
         };
 
         let response = self
