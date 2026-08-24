@@ -2,11 +2,10 @@
   import { onMount } from "svelte";
   import { fetchOperatorHistory } from "../api/operator";
   import type { OperatorHistoryResponse } from "../protocol/OperatorHistoryResponse";
-  import TurnContextInspector from "./TurnContextInspector.svelte";
+  import TurnContextInspectorTrigger from "./TurnContextInspectorTrigger.svelte";
 
   let history = $state<OperatorHistoryResponse | null>(null);
   let errorMessage = $state<string | null>(null);
-  let inspectedTurnId = $state<string | null>(null);
 
   function formatState(state: unknown): string {
     return JSON.stringify(state, null, 2);
@@ -93,22 +92,10 @@
                 <time datetime={entry.recorded_at}>{new Date(entry.recorded_at).toLocaleString()}</time>
               </div>
               <p>Turn <span class="mono">{entry.turn_id}</span> · session <span class="mono">{entry.session_id}</span></p>
-              <button
-                type="button"
-                class="context-link"
-                onclick={() => (inspectedTurnId = entry.turn_id)}
-              >
-                Inspect turn context
-              </button>
+              <TurnContextInspectorTrigger turnId={entry.turn_id} label="Inspect turn context" presentation="history" />
             </article>
           {/each}
         </div>
-        {#if inspectedTurnId}
-          <TurnContextInspector
-            turnId={inspectedTurnId}
-            onClose={() => (inspectedTurnId = null)}
-          />
-        {/if}
       {/if}
     </section>
   {/if}
@@ -129,8 +116,6 @@
   dl div { display: flex; gap: 6px; } dt { text-transform: uppercase; } dd { margin: 0; }
   .state-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
   pre { overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; background: var(--paper-deep); padding: 10px; font: 11px/1.45 var(--font-mono); margin: 6px 0 0; }
-  .context-link { border: none; background: none; padding: 8px 0 0; color: var(--ink-soft); cursor: pointer; text-decoration: underline dotted; }
-  .context-link:hover { color: var(--ink); }
   .history-alert { color: var(--accent); padding-top: 12px; }
   .history-loading, .empty-copy { padding: 12px 0; text-transform: uppercase; letter-spacing: 0.08em; }
   @media (max-width: 760px) { .state-grid { grid-template-columns: 1fr; } }
