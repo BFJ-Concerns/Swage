@@ -165,11 +165,11 @@ afterEach(() => {
 });
 
 describe("turn context inspector trigger", () => {
-  it("opens the matching conversation turn in the shared inspector", async () => {
-    vi.mocked(fetchTurnContext).mockResolvedValue({
+  it("switches the shared inspector when two completed turns are opened in sequence", async () => {
+    vi.mocked(fetchTurnContext).mockImplementation(async (turnId) => ({
       assembly_name: "balanced",
       elements: [],
-      total_tokens: 12,
+      total_tokens: turnId === "turn-42" ? 12 : 24,
       budget: null,
       budget_remaining: null,
       compaction_applied: [],
@@ -178,9 +178,10 @@ describe("turn context inspector trigger", () => {
       effective_tool_permissions: undefined,
       provider_visible: undefined,
       duration: { secs: 0, nanos: 1 },
-    });
+    }));
     const store = makeConversationStore([
-      makeAssistantMessage("A recorded response", undefined, undefined, "completed", "turn-42"),
+      makeAssistantMessage("First recorded response", undefined, undefined, "completed", "turn-42"),
+      makeAssistantMessage("Second recorded response", undefined, undefined, "completed", "turn-43"),
     ]);
 
     component = mount(MessageDisplay, {
@@ -188,12 +189,19 @@ describe("turn context inspector trigger", () => {
       props: { store, streamingStore: makeStreamingStore() },
     });
 
-    (document.querySelector("button.context-link") as HTMLButtonElement).click();
+    const contextLinks = document.querySelectorAll<HTMLButtonElement>("button.context-link");
+    contextLinks[0].click();
 
     await vi.waitFor(() => expect(fetchTurnContext).toHaveBeenCalledWith("turn-42"));
     expect(document.body.textContent?.replace(/\s+/g, " ")).toContain("request total: 12 tokens");
     expect(document.querySelector(".summary")?.closest(".message-display")).toBeNull();
     expect(document.querySelector(".summary")?.closest(".message")).toBeNull();
+
+    contextLinks[1].click();
+
+    await vi.waitFor(() => expect(fetchTurnContext).toHaveBeenCalledWith("turn-43"));
+    expect(document.querySelectorAll(".context-inspector")).toHaveLength(1);
+    expect(document.body.textContent?.replace(/\s+/g, " ")).toContain("request total: 24 tokens");
 
     (document.querySelector('button[aria-label="Close"]') as HTMLButtonElement).click();
     await vi.waitFor(() => expect(document.querySelector(".context-inspector")).toBeNull());
