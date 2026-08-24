@@ -2315,9 +2315,11 @@ async fn run_host_commands_inner(
                         }
                     }
                     in_flight.fetch_sub(1, Ordering::SeqCst);
+                    #[cfg(test)]
+                    let in_flight_at_reply = in_flight.load(Ordering::SeqCst);
                     let _ = reply.send(result);
                     #[cfg(test)]
-                    completion_handoff_test_support::pause(run_id).await;
+                    completion_handoff_test_support::pause(run_id, in_flight_at_reply).await;
                 });
             }
             HostCommand::Workflow {
@@ -2401,9 +2403,11 @@ async fn run_host_commands_inner(
                         }
                     };
                     in_flight.fetch_sub(1, Ordering::SeqCst);
+                    #[cfg(test)]
+                    let in_flight_at_reply = in_flight.load(Ordering::SeqCst);
                     let _ = reply.send(result);
                     #[cfg(test)]
-                    completion_handoff_test_support::pause(run_id).await;
+                    completion_handoff_test_support::pause(run_id, in_flight_at_reply).await;
                 });
             }
             HostCommand::AbandonTimer { timer_id } => {
@@ -3008,9 +3012,11 @@ async fn run_host_commands_inner(
                         }
                     };
                     in_flight.fetch_sub(1, Ordering::SeqCst);
+                    #[cfg(test)]
+                    let in_flight_at_reply = in_flight.load(Ordering::SeqCst);
                     let _ = reply.send(result);
                     #[cfg(test)]
-                    completion_handoff_test_support::pause(run_id).await;
+                    completion_handoff_test_support::pause(run_id, in_flight_at_reply).await;
                 });
             }
             HostCommand::Deliver {
@@ -4970,7 +4976,10 @@ pub(crate) fn spawn_workflow_wake_loop(
 
 #[cfg(test)]
 mod completion_handoff_test_support {
-    use std::sync::{Arc, LazyLock, Mutex};
+    use std::sync::{
+        Arc, LazyLock, Mutex,
+        atomic::{AtomicU32, Ordering},
+    };
 
     use tokio::sync::Notify;
     use uuid::Uuid;
@@ -4979,6 +4988,7 @@ mod completion_handoff_test_support {
         pub(super) run_id: Uuid,
         pub(super) entered: Arc<Notify>,
         pub(super) release: Arc<Notify>,
+        pub(super) observed_in_flight: AtomicU32,
     }
 
     static PAUSE: LazyLock<Mutex<Option<Arc<Pause>>>> = LazyLock::new(|| Mutex::new(None));
@@ -4996,7 +5006,7 @@ mod completion_handoff_test_support {
         *PAUSE.lock().expect("completion hand-off pause") = None;
     }
 
-    pub(super) async fn pause(run_id: Uuid) {
+    pub(super) async fn pause(run_id: Uuid, in_flight_at_reply: u32) {
         let pause = PAUSE
             .lock()
             .expect("completion hand-off pause")
@@ -5004,6 +5014,9 @@ mod completion_handoff_test_support {
             .filter(|pause| pause.run_id == run_id)
             .cloned();
         if let Some(pause) = pause {
+            pause
+                .observed_in_flight
+                .store(in_flight_at_reply, Ordering::SeqCst);
             pause.entered.notify_one();
             pause.release.notified().await;
         }
@@ -10649,6 +10662,7 @@ mod tests {
             run_id: run.id,
             entered: Arc::new(Notify::new()),
             release: Arc::new(Notify::new()),
+            observed_in_flight: AtomicU32::new(u32::MAX),
         });
         completion_handoff_test_support::install(Arc::clone(&pause));
 
@@ -10683,6 +10697,11 @@ mod tests {
             tokio::time::timeout(std::time::Duration::from_millis(250), park.cancelled()).await;
         pause.release.notify_one();
         completion_handoff_test_support::remove();
+        assert_eq!(
+            pause.observed_in_flight.load(Ordering::SeqCst),
+            0,
+            "the completion hand-off must publish idleness before the reply"
+        );
         assert!(
             parked_signal.is_ok(),
             "the long timer must park while the completion hand-off is held"
