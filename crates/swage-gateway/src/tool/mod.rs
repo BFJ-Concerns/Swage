@@ -24,6 +24,7 @@ pub mod task_definition;
 pub mod tool_result_read;
 pub mod url_fetch;
 pub mod web_search;
+pub mod workflow_list;
 pub mod workflow_run;
 pub mod workspace;
 
