@@ -132,12 +132,13 @@ was never made reachable.
 
 ## Verification gate
 
-Development verification runs through `just verify` (aliased as `just ci`).
-The Justfile dispatches into `xtask`, a workspace crate that orchestrates the
-gate. Most logic is Rust, but `xtask` shells out for some checks — for
-example, the tracked-local-state check runs `scripts/check-tracked-local-state.sh`.
+Development's fast, pre-test static gate is `just check-gate`; the full gate
+is `just verify` (aliased as `just ci`). The Justfile dispatches into `xtask`,
+a workspace crate that orchestrates the gate. Most logic is Rust, but `xtask`
+shells out for some checks — for example, the tracked-local-state check runs
+`scripts/check-tracked-local-state.sh`.
 
-The gate runs six stages in order. The first four abort immediately on failure
+The gate runs seven stages in order. The first five abort immediately on failure
 — a formatting problem or a type error is not worth running the full test
 suite against. The last two always run, and their results are combined:
 
@@ -146,11 +147,13 @@ suite against. The last two always run, and their results are combined:
 2. **Format check** — Rust formatting and Justfile formatting.
 3. **Type check** — `cargo check` across the workspace plus the frontend's
    type checker.
-4. **Clippy** — with warnings treated as errors.
-5. **Test suite** — Rust tests (with `--no-fail-fast` so all crates run even
+4. **Frontend design-token check** — rejects literal visual values in
+   components where a semantic design token is required.
+5. **Clippy** — with warnings treated as errors.
+6. **Test suite** — Rust tests (with `--no-fail-fast` so all crates run even
    if one fails), frontend tests, and the desktop smoke test. Individual
    failures are collected rather than aborting on the first.
-6. **Projection freshness** — a `git diff` that verifies the committed
+7. **Projection freshness** — a `git diff` that verifies the committed
    TypeScript bindings and JSON Schemas match what the tests just regenerated.
 
 When both the test suite and the projection check fail, the gate reports both
@@ -159,8 +162,8 @@ a green local run means CI will pass.
 
 Other useful recipes:
 
-- `just check` — a fast workspace type check (Rust and frontend) without
-  linting or tests.
+- `just check-gate` — the first five static stages above, before any tests.
+- `just check` — the narrower Rust and frontend type check only.
 - `just test` — the test suite alone, with the same failure-aggregation
   behaviour as the verify gate.
 - `just build-dev-embedded` — a debug build with the current frontend baked
