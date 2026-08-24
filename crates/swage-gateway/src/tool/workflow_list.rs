@@ -15,6 +15,57 @@ use crate::{state::AppState, tool::Tool, tool_executor::GatewayToolContext};
 
 pub const WORKFLOW_LIST_TOOL: &str = "workflow_list";
 
+/// Describe a catalogue in an error without relying on downstream compaction.
+///
+/// The count and the full-list tool always fit. Any shorter preview says exactly
+/// how many names it contains, so an omitted name never implies it is absent.
+pub(crate) fn workflow_catalogue_error_summary(
+    not_found_message: &str,
+    catalogue: &Value,
+    max_chars: usize,
+) -> String {
+    let names = catalogue
+        .get("workflows")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|workflow| workflow.get("name").and_then(Value::as_str))
+        .collect::<Vec<_>>();
+    let count = names.len();
+    let noun = if count == 1 { "workflow" } else { "workflows" };
+    let introduction = format!(
+        "{not_found_message}. {count} {noun} are available. Use `{WORKFLOW_LIST_TOOL}` to see all workflows."
+    );
+
+    if count == 0 {
+        return introduction;
+    }
+
+    let mut shown = Vec::new();
+    for name in names {
+        shown.push(name);
+        let candidate = format!(
+            "{introduction} Showing {} of {count} names: {}.",
+            shown.len(),
+            shown.join(", ")
+        );
+        if candidate.chars().count() > max_chars {
+            shown.pop();
+            break;
+        }
+    }
+
+    if shown.is_empty() {
+        format!("{introduction} Showing 0 of {count} names.")
+    } else {
+        format!(
+            "{introduction} Showing {} of {count} names: {}.",
+            shown.len(),
+            shown.join(", ")
+        )
+    }
+}
+
 /// Project the established effective workflow listing for one caller session.
 ///
 /// The HTTP listing owns precedence between authored, carried, and shipped
@@ -154,6 +205,31 @@ mod tests {
         );
         assert_eq!(schema["type"], "object");
         assert_eq!(schema["additionalProperties"], false);
+    }
+
+    #[test]
+    fn catalogue_error_summary_marks_a_partial_name_preview() {
+        let catalogue = json!({
+            "workflows": (1..=13)
+                .map(|index| json!({ "name": format!("workflow-{index:02}-for-catalogue-preview") }))
+                .collect::<Vec<_>>(),
+        });
+        let summary = workflow_catalogue_error_summary(
+            "workflow script \"missing-workflow\" was not found",
+            &catalogue,
+            swage_agent::agent::MAX_MODEL_TOOL_ERROR_DETAIL_CHARS,
+        );
+
+        assert!(
+            summary.chars().count() <= swage_agent::agent::MAX_MODEL_TOOL_ERROR_DETAIL_CHARS,
+            "summary exceeds the model error-detail budget: {summary}"
+        );
+        assert!(summary.contains("13 workflows are available"));
+        assert!(summary.contains("`workflow_list`"));
+        assert!(summary.contains("Showing 5 of 13 names"));
+        assert!(summary.contains("workflow-01-for-catalogue-preview"));
+        assert!(summary.contains("workflow-05-for-catalogue-preview"));
+        assert!(!summary.contains("workflow-06-for-catalogue-preview"));
     }
 
     #[tokio::test(flavor = "multi_thread")]
