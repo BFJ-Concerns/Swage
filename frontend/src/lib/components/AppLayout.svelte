@@ -105,9 +105,9 @@
   <header class="topbar">
     <SpaceSelector {spaceStore} {onSpaceChange} />
     <nav aria-label="Surface">
-      <button aria-pressed={activeSurface === "conversation"} class:active={activeSurface === "conversation"} onclick={() => onSelectSurface("conversation")}>Conversation</button>
-      <button aria-pressed={activeSurface === "operator"} class:active={activeSurface === "operator"} onclick={() => onSelectSurface("operator")}>Operator</button>
-      <button onclick={() => onNavigate?.("/settings/providers")}>Settings</button>
+      <button aria-pressed={!settingsMode && activeSurface === "conversation"} class:active={!settingsMode && activeSurface === "conversation"} onclick={() => onSelectSurface("conversation")}>Conversation</button>
+      <button aria-pressed={!settingsMode && activeSurface === "operator"} class:active={!settingsMode && activeSurface === "operator"} onclick={() => onSelectSurface("operator")}>Operator</button>
+      <button aria-pressed={settingsMode} class:active={settingsMode} onclick={() => onNavigate?.("/settings/providers")}>Settings</button>
     </nav>
     {#if desktopRuntime}<span>{desktopRuntime.managedGateway ? "MANAGED" : "REMOTE"}</span>{/if}
     {#if onSelectTheme}<ThemeToggle mode={themeMode} onSelect={onSelectTheme} />{/if}

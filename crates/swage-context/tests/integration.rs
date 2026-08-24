@@ -161,6 +161,7 @@ fn budget_triggers_truncation_preserving_recent_messages() {
     // Create a deliberately small budget that can't fit all messages
     let config = swage_config::ContextConfig {
         assembly: "default".to_string(),
+        alternatives: Vec::new(),
         timeout: 5,
         budget: Some(200), // Very small budget — forces truncation
     };

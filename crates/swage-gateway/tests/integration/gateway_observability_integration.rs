@@ -29,6 +29,8 @@ use swage_gateway::{server::build_router, state::AppState};
 use swage_provider::LlmProvider;
 use swage_storage::SqliteStorage;
 
+use crate::support::live_http_json;
+
 // ---------------------------------------------------------------------------
 // Mock provider — streams tokens with usage metadata
 // ---------------------------------------------------------------------------
@@ -490,12 +492,25 @@ async fn past_turn_report_matches_live_websocket_report() {
     let live_report = &context_event["report"];
 
     // Query the REST endpoint for the same turn.
-    let (status, stored_body) =
-        http(&router, "GET", &format!("/api/turns/{turn_id}/context")).await;
+    let (status, stored_body) = live_http_json(
+        addr,
+        reqwest::Method::GET,
+        &format!("/api/turns/{turn_id}/context"),
+        None,
+    )
+    .await;
     assert_eq!(
         status,
         StatusCode::OK,
         "past turn context endpoint should return 200"
+    );
+    assert!(
+        stored_body["report"]["elements"]
+            .as_array()
+            .expect("context report elements")
+            .iter()
+            .any(|element| element["preview"].is_string()),
+        "the persisted context response should expose a safe preview for an element that contributed content"
     );
 
     // The stored report starts as the live context event and may be enriched

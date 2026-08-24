@@ -2,6 +2,7 @@ use super::{
     AgentConfig, AppState, GatewayError, Path, PathBuf, TrustedWorkspacePolicy, Uuid,
     load_trusted_workspace_policy,
 };
+use swage_config::RESERVED_WORKFLOW_AGENT_ID;
 
 /// Host-only session metadata carrying every agent context whose effective
 /// grants bound a worker. The lineage is ordered outermost to innermost and is
@@ -425,11 +426,12 @@ pub(crate) fn load_session_config_from_root(
 ) -> Result<swage_config::ResolvedConfig, GatewayError> {
     let space_dir = root.join("spaces").join(space_slug);
     let space_config_exists = space_dir.join("config.toml").exists();
-    let agent_config_exists = space_dir
-        .join("agents")
-        .join(agent_id)
-        .join("config.toml")
-        .exists();
+    let agent_config_exists = agent_id != RESERVED_WORKFLOW_AGENT_ID
+        && space_dir
+            .join("agents")
+            .join(agent_id)
+            .join("config.toml")
+            .exists();
 
     if !space_config_exists && !agent_config_exists {
         return Ok(active_config);
@@ -759,6 +761,26 @@ pub(crate) fn resolve_model_catalogue_entry<'a>(
         })
 }
 
+pub(crate) fn resolve_requested_turn_model(
+    config: &swage_config::ResolvedConfig,
+    requested_model: &str,
+) -> Result<String, GatewayError> {
+    resolve_model_catalogue_entry(&config.models, requested_model)
+        .map(|(model_id, _)| model_id.to_string())
+        .ok_or_else(|| {
+            let available = config
+                .models
+                .entries
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ");
+            GatewayError::ValidationError(format!(
+                "unknown model '{requested_model}'; available models: {available}"
+            ))
+        })
+}
+
 pub(crate) fn effective_session_config(
     mut config: swage_config::ResolvedConfig,
     selected_model_id: Option<&str>,
@@ -809,6 +831,48 @@ pub(super) fn ensure_selected_model_available(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reserved_workflow_agent_config_does_not_replace_runtime_configuration() {
+        let root = tempfile::tempdir().expect("temporary root");
+        let reserved_config = root
+            .path()
+            .join("spaces/dispatch/agents")
+            .join(RESERVED_WORKFLOW_AGENT_ID)
+            .join("config.toml");
+        let ordinary_config = root
+            .path()
+            .join("spaces/dispatch/agents/reviewer/config.toml");
+        for config in [&reserved_config, &ordinary_config] {
+            std::fs::create_dir_all(config.parent().expect("config directory"))
+                .expect("create agent directory");
+            std::fs::write(config, "[server]\nport = 4100\n").expect("write agent config");
+        }
+
+        let active = swage_config::ResolvedConfig {
+            instructions: "RUNTIME_ONLY_MARKER".to_string(),
+            ..Default::default()
+        };
+        let runtime_instructions = active.instructions.clone();
+        let reserved = load_session_config_from_root(
+            root.path(),
+            active.clone(),
+            "dispatch",
+            RESERVED_WORKFLOW_AGENT_ID,
+        )
+        .expect("reserved worker config");
+        let ordinary = load_session_config_from_root(root.path(), active, "dispatch", "reviewer")
+            .expect("ordinary agent config");
+
+        assert_eq!(
+            reserved.instructions, runtime_instructions,
+            "a reserved directory must not replace the running configuration"
+        );
+        assert_eq!(
+            ordinary.server.port, 4100,
+            "a normal agent directory must still select its resolved configuration"
+        );
+    }
 
     #[test]
     fn dispatch_bound_metadata_preserves_the_full_lineage() {

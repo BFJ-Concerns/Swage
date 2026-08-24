@@ -446,6 +446,18 @@ impl LlmProvider for CapturingMultiRoundProvider {
         "mock-capturing-multi-round"
     }
 
+    fn provider_request_snapshot(
+        &self,
+        request: &CompletionRequest,
+        stream: bool,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "provider": "capturing-multi-round",
+            "stream": stream,
+            "message_count": request.messages.len(),
+        })
+    }
+
     async fn complete(
         &self,
         _request: CompletionRequest,
@@ -7375,14 +7387,34 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
             finish_reason: None,
         },
     ];
-    let child_denied_round = vec![
-        StreamChunk::Delta {
-            content: child_response.clone(),
-        },
-        StreamChunk::Done {
-            finish_reason: None,
-        },
-    ];
+    let diagnostic_round = |response: String| {
+        vec![
+            StreamChunk::ProviderResponseWitness(swage_core::ProviderResponseWitness {
+                http_status: 200,
+                request_id: Some("delegated-diagnostics".into()),
+                terminal_event: Some("message_stop".into()),
+                stop_reason: Some("end_turn".into()),
+                usage: swage_core::TokenUsage {
+                    input_tokens: 9,
+                    output_tokens: 2,
+                },
+                content_blocks: vec![swage_core::ProviderContentBlockWitness {
+                    block_type: "text".into(),
+                    count: 1,
+                    bytes: response.len() as u64,
+                }],
+            }),
+            StreamChunk::Reasoning {
+                content: "delegated diagnostic reasoning".into(),
+                details: Some(serde_json::json!({"kind": "summary"})),
+            },
+            StreamChunk::Delta { content: response },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ]
+    };
+    let child_denied_round = diagnostic_round(child_response.clone());
     let parent_resume_round = vec![
         StreamChunk::Delta {
             content: "Parent resumed after delegation".into(),
@@ -7407,6 +7439,7 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
             finish_reason: None,
         },
     ];
+    let control_round = diagnostic_round(child_response.clone());
 
     let (provider, captured_requests) = CapturingMultiRoundProvider::new(vec![
         parent_round,
@@ -7415,6 +7448,7 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
         parent_resume_round,
         parent_next_round,
         child_next_round,
+        control_round,
     ]);
 
     let swage_home = tempfile::TempDir::new().expect("temp swage home");
@@ -7623,6 +7657,11 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
         }),
         "the upstream bound must keep shell out even though both immediate sender and child grant it"
     );
+    assert_eq!(
+        child_snapshot["provider_visible"]["requests"][0]["request"]["provider"],
+        serde_json::json!("capturing-multi-round"),
+        "the delegated child's provider diagnostic must survive into its stored context record"
+    );
     let child_audit = state
         .storage
         .list_audit_events_by_session(child_sessions[0].id)
@@ -7696,11 +7735,58 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
     .await
     .expect("child next turn should remain dispatch-bound");
 
+    // A direct turn is the control: it records the same provider diagnostics
+    // through the ordinary event path. The delegated child's stored snapshot
+    // must preserve each diagnostic kind with the same values.
+    let (tx, _rx) = mpsc::unbounded_channel();
+    process_turn(
+        &state,
+        child_sessions[0].id,
+        None,
+        "Run the diagnostic control".to_string(),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .expect("undelegated control turn should complete");
+    let control_turn = state
+        .storage
+        .list_turns_by_thread(child_threads[0].id)
+        .await
+        .expect("list control turns")
+        .into_iter()
+        .last()
+        .expect("control turn");
+    let control_snapshot = state
+        .storage
+        .get_snapshot(control_turn.id)
+        .await
+        .expect("read control context snapshot")
+        .expect("control context snapshot should be persisted");
+    let control_snapshot: serde_json::Value =
+        serde_json::from_str(&control_snapshot).expect("control snapshot should be JSON");
+    let diagnostic_kinds = |snapshot: &serde_json::Value| {
+        serde_json::json!({
+            "request": snapshot["provider_visible"]["requests"][0]["request"]["provider"],
+            "response": snapshot["provider_visible"]["responses"][0]["witness"],
+            "reasoning": {
+                "content": snapshot["provider_visible"]["reasoning"][0]["content"],
+                "details": snapshot["provider_visible"]["reasoning"][0]["details"],
+            },
+        })
+    };
+    assert_eq!(
+        diagnostic_kinds(&child_snapshot),
+        diagnostic_kinds(&control_snapshot),
+        "the delegated child record must retain the request, response, and reasoning diagnostics its undelegated twin records"
+    );
+
     let captured_requests = captured_requests.lock().unwrap();
     assert_eq!(
         captured_requests.len(),
-        6,
-        "expected parent, two child rounds, resumed-parent, parent continuation, and child continuation requests"
+        7,
+        "expected parent, two child rounds, resumed-parent, parent continuation, child continuation, and direct control requests"
     );
     let delegated_result = captured_requests[3]
         .messages
@@ -9959,6 +10045,7 @@ async fn process_turn_uses_hot_swapped_runtime_config_for_next_turn() {
         },
         context: swage_config::ContextConfig {
             assembly: "default".to_string(),
+            alternatives: Vec::new(),
             timeout: 7,
             budget: Some(2048),
         },
@@ -10118,6 +10205,30 @@ async fn unknown_forced_context_assembly_rejects_call_scoped_override() {
         !state.active_turns.lock().await.contains_key(&session_id),
         "context-assembly selection failure must release the turn guard"
     );
+}
+
+#[tokio::test]
+async fn registered_context_assembly_alternative_can_be_selected_and_is_audited() {
+    let storage = Arc::new(MockStorage::new());
+    let (state, session_id) = make_state_with_storage(vec![], Arc::clone(&storage)).await;
+    let mut config = swage_config::ResolvedConfig::default();
+    config.context.alternatives = vec!["candidate".to_owned()];
+
+    let choices = select_context_assembly(&state, &config, session_id, Uuid::from_u128(1), None)
+        .await
+        .expect("registered alternative should be selectable");
+
+    assert_eq!(choices.assembly_name, "candidate");
+    let audit = state
+        .storage
+        .list_audit_events_by_session(session_id)
+        .await
+        .unwrap();
+    assert!(audit.iter().any(|event| {
+        event.entity_id == crate::experimentation::LOCATION_CONTEXT_ASSEMBLY
+            && event.metadata["variant"] == serde_json::json!("candidate")
+            && event.metadata["reason"] == serde_json::json!("drawn")
+    }));
 }
 
 #[tokio::test]
@@ -10441,6 +10552,203 @@ fn effective_session_config_resolves_aliased_selected_model_as_default() {
 
     assert_eq!(effective.models.default, "conversation");
     assert_eq!(effective.default_model_id(), "conversation-wire");
+}
+
+#[tokio::test]
+async fn turn_model_snapshot_records_the_effective_model_and_its_source() {
+    let chunks = vec![
+        StreamChunk::Delta {
+            content: "Hello".into(),
+        },
+        StreamChunk::Done {
+            finish_reason: None,
+        },
+    ];
+    let (provider, captured_request) = CapturingProvider::new(chunks);
+    let (storage, session_id) = make_storage_with_session().await;
+    let mut config = swage_config::ResolvedConfig::default();
+    config.models.default = "default".to_string();
+    config.models.entries.insert(
+        "default".to_string(),
+        swage_config::ModelEndpointConfig {
+            provider_id: "first-provider".to_string(),
+            model_id: "default-wire".to_string(),
+            ..Default::default()
+        },
+    );
+    config.models.entries.insert(
+        "alternate".to_string(),
+        swage_config::ModelEndpointConfig {
+            provider_id: "second-provider".to_string(),
+            model_id: "alternate-wire".to_string(),
+            aliases: vec!["fast".to_string()],
+            ..Default::default()
+        },
+    );
+    let state = AppState::new(
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
+        Arc::new(provider) as Arc<dyn LlmProvider>,
+        config,
+        crate::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+    );
+    let (tx, _rx) = mpsc::unbounded_channel();
+
+    process_turn_with_existing_turn_and_focus_and_model(
+        &state,
+        session_id,
+        None,
+        "hello".to_string(),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+        None,
+        None,
+        None,
+        None,
+        TurnAttendance::Attended,
+        None,
+        Some("fast".to_string()),
+    )
+    .await
+    .expect("selected turn should complete");
+
+    assert_eq!(
+        captured_request
+            .lock()
+            .expect("capture lock")
+            .as_ref()
+            .expect("provider receives request")
+            .model
+            .as_deref(),
+        Some("alternate-wire")
+    );
+    let session = storage
+        .get_session(session_id)
+        .await
+        .expect("get session")
+        .expect("session remains");
+    assert_eq!(
+        session.selected_model_id, None,
+        "request must not persist selection"
+    );
+    let thread = storage.list_by_session(session_id).await.expect("threads")[0].clone();
+    let turn = storage
+        .list_turns_by_thread(thread.id)
+        .await
+        .expect("turns")[0]
+        .clone();
+    let snapshot: serde_json::Value = serde_json::from_str(
+        &storage
+            .get_snapshot(turn.id)
+            .await
+            .expect("read snapshot")
+            .expect("turn snapshot"),
+    )
+    .expect("snapshot json");
+    assert_eq!(
+        snapshot["provider_visible"]["effective_model"]["catalogue_entry"],
+        "alternate"
+    );
+    assert_eq!(
+        snapshot["provider_visible"]["effective_model"]["model_id"],
+        "alternate-wire"
+    );
+    assert_eq!(
+        snapshot["provider_visible"]["effective_model"]["provider_id"],
+        "second-provider"
+    );
+    assert_eq!(
+        snapshot["provider_visible"]["effective_model"]["source"],
+        "request"
+    );
+
+    process_turn_with_existing_turn_and_focus_and_model(
+        &state,
+        session_id,
+        None,
+        "hello again".to_string(),
+        mpsc::unbounded_channel().0,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+        None,
+        None,
+        None,
+        None,
+        TurnAttendance::Attended,
+        None,
+        None,
+    )
+    .await
+    .expect("default-model turn should complete");
+
+    let turns = storage
+        .list_turns_by_thread(thread.id)
+        .await
+        .expect("turns");
+    let default_turn = turns.last().expect("default turn");
+    let default_snapshot: serde_json::Value = serde_json::from_str(
+        &storage
+            .get_snapshot(default_turn.id)
+            .await
+            .expect("read default snapshot")
+            .expect("default turn snapshot"),
+    )
+    .expect("default snapshot json");
+    assert_eq!(
+        default_snapshot["provider_visible"]["effective_model"]["catalogue_entry"],
+        "default"
+    );
+    assert_eq!(
+        default_snapshot["provider_visible"]["effective_model"]["source"],
+        "configured_default"
+    );
+
+    storage
+        .set_session_selected_model(session_id, Some("removed-model".to_string()))
+        .await
+        .expect("record stale conversation model");
+    process_turn_with_existing_turn_and_focus_and_model(
+        &state,
+        session_id,
+        None,
+        "hello after a catalogue change".to_string(),
+        mpsc::unbounded_channel().0,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+        None,
+        None,
+        None,
+        None,
+        TurnAttendance::Attended,
+        None,
+        None,
+    )
+    .await
+    .expect("stale conversation-model turn should use the configured default");
+
+    let turns = storage
+        .list_turns_by_thread(thread.id)
+        .await
+        .expect("turns");
+    let stale_model_turn = turns.last().expect("stale conversation-model turn");
+    let stale_model_snapshot: serde_json::Value = serde_json::from_str(
+        &storage
+            .get_snapshot(stale_model_turn.id)
+            .await
+            .expect("read stale conversation-model snapshot")
+            .expect("stale conversation-model turn snapshot"),
+    )
+    .expect("stale conversation-model snapshot json");
+    assert_eq!(
+        stale_model_snapshot["provider_visible"]["effective_model"]["catalogue_entry"],
+        "default"
+    );
+    assert_eq!(
+        stale_model_snapshot["provider_visible"]["effective_model"]["source"],
+        "configured_default"
+    );
 }
 
 #[tokio::test]

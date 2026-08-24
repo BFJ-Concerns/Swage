@@ -767,6 +767,7 @@ fn apply_runtime_settings_to_partial(
     if let Some(context) = context {
         partial.context = Some(swage_config::merge::PartialContextConfig {
             assembly: Some(context.assembly),
+            alternatives: Some(context.alternatives),
             timeout: Some(context.timeout),
             budget: Some(context.budget),
         });
@@ -1469,6 +1470,7 @@ mod tests {
             }),
             context: Some(swage_protocol::client::settings::ContextConfig {
                 assembly: "default".to_string(),
+                alternatives: Vec::new(),
                 timeout: 7,
                 budget: Some(2048),
             }),
@@ -1826,6 +1828,7 @@ mod tests {
         request.hitl = Some(wire_from_config(swage_config::HitlConfig::default()));
         request.context = Some(swage_protocol::client::settings::ContextConfig {
             assembly: "default".into(),
+            alternatives: Vec::new(),
             timeout: 61,
             budget: None,
         });
@@ -1899,6 +1902,7 @@ mod tests {
             }),
             Some(swage_config::ContextConfig {
                 assembly: "compact".into(),
+                alternatives: Vec::new(),
                 timeout: 10,
                 budget: Some(8192),
             }),
