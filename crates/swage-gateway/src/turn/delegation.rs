@@ -3,8 +3,9 @@ use super::{
     DispatchContextComposition, GatewayDispatcherRequest, MessageRouter, NewAgentMessage, Uuid,
     WORKER_PLACEMENT_AUTHORITY_CONTEXT_METADATA_KEY, WORKER_PLACEMENT_AUTHORITY_PATH_METADATA_KEY,
     WORKER_PLACEMENT_CAN_WRITE_METADATA_KEY, WORKER_PLACEMENT_CWD_METADATA_KEY,
-    add_dispatch_bound_task_definition_ids, apply_agent_definition, apply_dispatch_bounds,
-    apply_dispatch_task_bounds, available_skills_for_agent, build_agent_config_for_space_workspace,
+    WORKFLOW_CALL_TOOLS_METADATA_KEY, add_dispatch_bound_task_definition_ids,
+    apply_agent_definition, apply_dispatch_bounds, apply_dispatch_task_bounds,
+    apply_workflow_call_tools, available_skills_for_agent, build_agent_config_for_space_workspace,
     build_approval_registrar, build_assembly_elements,
     build_gateway_dispatcher_for_unattended_execution, build_session_environment,
     configuration_hierarchy, dispatch_bound_agent_ids_for_turn, dispatch_bound_metadata,
@@ -314,6 +315,18 @@ impl DelegationHandler for GatewayDelegationHandler {
             dispatch_bound_task_definition_ids_for_turn(&self.state, sender_turn_id)
                 .await
                 .map_err(|error| AgentError::InvalidConfig(error.to_string()))?;
+        let sender_filesystem_authority =
+            self.filesystem_authority_for_turn(sender_turn_id).await?;
+        let mut session_metadata = dispatch_bound_metadata(&bound_agent_ids)
+            .expect("a delegated session always has at least its sender bound");
+        add_dispatch_bound_task_definition_ids(&mut session_metadata, &bound_task_definition_ids);
+        if let Some(workflow_call_tools) = &sender_filesystem_authority.workflow_call_tools {
+            session_metadata[WORKFLOW_CALL_TOOLS_METADATA_KEY] = workflow_call_tools.clone();
+        }
+        if let Some(task_definition) = task_definition {
+            session_metadata["task_definition"] =
+                serde_json::Value::String(task_definition.to_string());
+        }
         let effective_target_resolved = apply_dispatch_bounds(
             &self.state,
             &space.slug,
@@ -332,16 +345,10 @@ impl DelegationHandler for GatewayDelegationHandler {
         )
         .await
         .map_err(|error| AgentError::InvalidConfig(error.to_string()))?;
-        let mut session_metadata = dispatch_bound_metadata(&bound_agent_ids)
-            .expect("a delegated session always has at least its sender bound");
-        add_dispatch_bound_task_definition_ids(&mut session_metadata, &bound_task_definition_ids);
-        if let Some(task_definition) = task_definition {
-            session_metadata["task_definition"] =
-                serde_json::Value::String(task_definition.to_string());
-        }
+        let effective_target_resolved =
+            apply_workflow_call_tools(effective_target_resolved, Some(&session_metadata))
+                .map_err(|error| AgentError::InvalidConfig(error.to_string()))?;
 
-        let sender_filesystem_authority =
-            self.filesystem_authority_for_turn(sender_turn_id).await?;
         let active_workspace_attachment_id =
             sender_filesystem_authority.active_workspace_attachment_id;
         let sender_session_id = sender_filesystem_authority.session_id;
@@ -734,6 +741,11 @@ impl GatewayDelegationHandler {
             session_id: session.id,
             active_workspace_attachment_id: session.active_workspace_attachment_id,
             placement,
+            workflow_call_tools: session
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get(WORKFLOW_CALL_TOOLS_METADATA_KEY))
+                .cloned(),
         })
     }
 }
@@ -742,4 +754,5 @@ struct DispatchFilesystemAuthority {
     session_id: Uuid,
     active_workspace_attachment_id: Option<Uuid>,
     placement: Option<ResolvedWorkerDirectory>,
+    workflow_call_tools: Option<serde_json::Value>,
 }
