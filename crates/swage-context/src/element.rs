@@ -66,6 +66,15 @@ pub trait ContextElement: Send + Sync {
     ///
     /// Examples: `"thread history"`, `"space: my-space"`, `"global prompts"`.
     fn source(&self) -> String;
+
+    /// A bounded, safe-to-persist glimpse of this element's content.
+    ///
+    /// Most elements carry operator, session, or conversation material and
+    /// therefore have no safe generic preview. An element may opt in only
+    /// when it can construct a useful preview without copying that material.
+    fn report_preview(&self) -> Option<String> {
+        None
+    }
 }
 
 #[cfg(test)]

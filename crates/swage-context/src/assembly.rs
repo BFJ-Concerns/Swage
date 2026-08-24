@@ -11,7 +11,6 @@ use std::time::Instant;
 
 use swage_config::model::ContextConfig;
 use swage_core::ChatMessage;
-use swage_safety::LeakDetector;
 
 use crate::briefing::substitute_variables;
 use crate::compaction::TruncationCompactor;
@@ -121,14 +120,13 @@ fn default_assembly_inner(
             history_range = Some(range_start..range_start + content.len());
         }
 
-        // Skills have a compact identity preview. Other rendered elements
-        // expose a bounded, redacted excerpt of the context they added, so an
-        // inspector can see its substance without persisting a credential.
-        let preview = if element.name() == "skills" {
-            extract_skill_names_preview(&source).or_else(|| preview_messages(&content))
-        } else {
-            preview_messages(&content)
-        };
+        // Elements opt in only when they can construct a useful preview
+        // without copying operator, session, or conversation material into
+        // the persistent report. Generic assembly cannot know every literal
+        // secret an element may contain, so it must not derive one itself.
+        let preview = element
+            .report_preview()
+            .or_else(|| safe_metadata_preview(element.name(), &source));
 
         element_reports.push(ElementReport {
             name: element.name().to_string(),
@@ -213,30 +211,6 @@ fn default_assembly_inner(
     AssemblyOutput::new_unchecked(assembled, report)
 }
 
-pub(crate) fn preview_messages(messages: &[ChatMessage]) -> Option<String> {
-    const MAX_PREVIEW_CHARACTERS: usize = 160;
-
-    let content = messages
-        .iter()
-        .map(ChatMessage::text_content)
-        .filter(|text| !text.trim().is_empty())
-        .collect::<Vec<_>>()
-        .join("\n");
-    if content.is_empty() {
-        return None;
-    }
-
-    let redacted = LeakDetector::default().scan(&content);
-    let mut preview = redacted
-        .chars()
-        .take(MAX_PREVIEW_CHARACTERS)
-        .collect::<String>();
-    if redacted.chars().nth(MAX_PREVIEW_CHARACTERS).is_some() {
-        preview.push('…');
-    }
-    Some(preview)
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Private helpers
 // ─────────────────────────────────────────────────────────────────────────────
@@ -249,6 +223,12 @@ pub(crate) fn preview_messages(messages: &[ChatMessage]) -> Option<String> {
 ///
 /// Returns `Some("name1, name2")` when skills are present, `None` otherwise.
 /// The parenthesised level/token annotations are stripped; only the bare names remain.
+pub(crate) fn safe_metadata_preview(name: &str, source: &str) -> Option<String> {
+    (name == "skills")
+        .then(|| extract_skill_names_preview(source))
+        .flatten()
+}
+
 fn extract_skill_names_preview(source: &str) -> Option<String> {
     // Only process the "skills: ..." form; "skills (none active)" → None.
     let after_prefix = source.strip_prefix("skills: ")?;
@@ -729,7 +709,7 @@ mod tests {
     }
 
     #[test]
-    fn ordinary_element_report_preview_contains_a_bounded_redacted_excerpt() {
+    fn untrusted_element_content_has_no_persisted_preview() {
         let content = format!(
             "Keep this opening instruction. Bearer {} {}",
             "a".repeat(32),
@@ -742,12 +722,7 @@ mod tests {
             &FixedCostTokeniser { cost: 10 },
         );
 
-        let preview = output.report.elements[0].preview.as_deref().unwrap();
-        assert!(preview.starts_with("Keep this opening instruction."));
-        assert!(preview.contains("[REDACTED:bearer_token]"));
-        assert!(!preview.contains(&"a".repeat(32)));
-        assert!(preview.ends_with('…'));
-        assert!(preview.chars().count() <= 161);
+        assert!(output.report.elements[0].preview.is_none());
     }
 
     #[test]

@@ -49,7 +49,7 @@ use swage_config::HierarchyLevel;
 use swage_config::model::ContextConfig;
 use swage_core::{ChatMessage, Role};
 
-use crate::assembly::{default_assembly_with_variables, preview_messages};
+use crate::assembly::{default_assembly_with_variables, safe_metadata_preview};
 use crate::element::ContextElement;
 use crate::report::{AssemblyError, AssemblyOutput};
 use crate::tokeniser::Tokeniser;
@@ -142,7 +142,7 @@ pub fn assemble_named(
                         name: block.name.clone(),
                         source: block.source.clone(),
                         token_count: tokeniser.count_messages(slice),
-                        preview: preview_messages(slice),
+                        preview: safe_metadata_preview(&block.name, &block.source),
                         priority: block.priority,
                         named_assembly: None,
                     }

@@ -159,6 +159,15 @@ impl ContextElement for SkillsElement {
 
         format!("skills: {}", skill_summaries.join(", "))
     }
+
+    fn report_preview(&self) -> Option<String> {
+        let names = self
+            .sorted_skills()
+            .into_iter()
+            .map(|skill| skill.name.as_str())
+            .collect::<Vec<_>>();
+        (!names.is_empty()).then(|| names.join(", "))
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
