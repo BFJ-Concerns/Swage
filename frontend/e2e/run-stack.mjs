@@ -7,14 +7,21 @@ import { spawn } from "node:child_process";
 const frontendDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const repoDir = resolve(frontendDir, "..");
 const scratchParent = "/tmp/scratch";
-const resultsDir = join(scratchParent, "swage-browser-e2e-results");
+const invocationDir = process.env.SWAGE_E2E_INVOCATION_DIR
+  ?? await mkdtemp(join(scratchParent, "swage-browser-e2e-"));
+const ownsInvocationDir = process.env.SWAGE_E2E_INVOCATION_DIR === undefined;
+const resultsDir = process.env.SWAGE_E2E_RESULTS_DIR ?? join(invocationDir, "playwright-results");
+const gatewayPort = Number(process.env.SWAGE_E2E_GATEWAY_PORT ?? "33100");
+const providerPort = Number(process.env.SWAGE_E2E_PROVIDER_PORT ?? "33101");
 await mkdir(scratchParent, { recursive: true });
-const swageRoot = await mkdtemp(join(scratchParent, "swage-browser-e2e-"));
+await mkdir(invocationDir, { recursive: true });
+const swageRoot = join(invocationDir, "state");
+await mkdir(swageRoot, { recursive: true });
 
 await writeFile(join(swageRoot, "config.toml"), `
 [server]
 host = "127.0.0.1"
-port = 33100
+port = ${gatewayPort}
 
 [providers]
 default = "e2e"
@@ -22,7 +29,7 @@ default = "e2e"
 [providers.entries.e2e]
 protocol = "anthropic"
 api_key_env = "SWAGE_E2E_PROVIDER_KEY"
-base_url = "http://127.0.0.1:33101"
+base_url = "http://127.0.0.1:${providerPort}"
 
 [models]
 default = "e2e-model"
@@ -63,7 +70,7 @@ async function stop(code = 0) {
     ? Promise.resolve()
     : new Promise((done) => child.once("exit", done))));
   await rm(swageRoot, { recursive: true, force: true });
-  await rm(resultsDir, { recursive: true, force: true });
+  if (ownsInvocationDir) await rm(invocationDir, { recursive: true, force: true });
   process.exit(code);
 }
 
@@ -72,12 +79,14 @@ process.on("SIGINT", () => void stop(130));
 process.on("exit", () => {
   for (const child of children) child.kill("SIGTERM");
   rmSync(swageRoot, { recursive: true, force: true });
-  rmSync(resultsDir, { recursive: true, force: true });
+  if (ownsInvocationDir) rmSync(invocationDir, { recursive: true, force: true });
 });
 
-start(process.execPath, [join(frontendDir, "e2e/mock-provider.mjs")]);
+start(process.execPath, [join(frontendDir, "e2e/mock-provider.mjs")], {
+  env: { ...process.env, SWAGE_E2E_PROVIDER_PORT: String(providerPort) },
+});
 start(join(repoDir, "target/debug/swage"), [
-  "--server-mode", "gateway", "start", "--host", "127.0.0.1", "--port", "33100",
+  "--server-mode", "gateway", "start", "--host", "127.0.0.1", "--port", String(gatewayPort),
 ], {
   cwd: repoDir,
   env: {
