@@ -16,8 +16,13 @@
  *   - Live tool calls without result have isLive=true (pulse indicator)
  *   - Live tool calls with a result have isLive=false (no pulse)
  */
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { mount, unmount } from "svelte";
+vi.mock("../api/turns", () => ({
+  fetchTurnContext: vi.fn(),
+}));
+
+import { fetchTurnContext } from "../api/turns";
 import MessageDisplay from "../components/MessageDisplay.svelte";
 import type { ConversationStore } from "../stores/conversations";
 import {
@@ -56,6 +61,7 @@ function makeAssistantMessage(
   tool_calls?: ToolCallView[],
   model?: string | null,
   turnState: MessageView["turn_state"] = "completed",
+  turnId?: string,
 ): MessageView {
   _msgSeq += 1;
   return {
@@ -65,6 +71,7 @@ function makeAssistantMessage(
     turn_state: turnState,
     ...(tool_calls ? { tool_calls } : {}),
     ...(model !== undefined ? { model } : {}),
+    ...(turnId !== undefined ? { turn_id: turnId } : {}),
   };
 }
 
@@ -151,6 +158,38 @@ afterEach(() => {
     document.body.removeChild(document.body.firstChild);
   }
   _msgSeq = 0;
+  vi.resetAllMocks();
+});
+
+describe("turn context inspector trigger", () => {
+  it("opens the matching conversation turn in the shared inspector", async () => {
+    vi.mocked(fetchTurnContext).mockResolvedValue({
+      assembly_name: "balanced",
+      elements: [],
+      total_tokens: 12,
+      budget: null,
+      budget_remaining: null,
+      compaction_applied: [],
+      warnings: [],
+      errors: [],
+      effective_tool_permissions: undefined,
+      provider_visible: undefined,
+      duration: { secs: 0, nanos: 1 },
+    });
+    const store = makeConversationStore([
+      makeAssistantMessage("A recorded response", undefined, undefined, "completed", "turn-42"),
+    ]);
+
+    component = mount(MessageDisplay, {
+      target: document.body,
+      props: { store, streamingStore: makeStreamingStore() },
+    });
+
+    (document.querySelector("button.context-link") as HTMLButtonElement).click();
+
+    await vi.waitFor(() => expect(fetchTurnContext).toHaveBeenCalledWith("turn-42"));
+    expect(document.body.textContent?.replace(/\s+/g, " ")).toContain("request total: 12 tokens");
+  });
 });
 
 // ---------------------------------------------------------------------------
