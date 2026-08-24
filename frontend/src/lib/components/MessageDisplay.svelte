@@ -30,7 +30,7 @@
   } from "../display-preferences";
   import type { ToolCallView } from "../types";
   import ToolCallDisplay from "./ToolCallDisplay.svelte";
-  import TurnContextInspector from "./TurnContextInspector.svelte";
+  import TurnContextInspectorTrigger from "./TurnContextInspectorTrigger.svelte";
 
   // ---- Markdown configuration -----------------------------------------------
   // Module-level setup: runs once when this module is first imported.
@@ -118,9 +118,7 @@
   // ---- Auto-scroll ----------------------------------------------------------
 
   let scrollEl: HTMLDivElement | undefined = $state();
-
-  // The turn whose context report the inspector shows; null when closed.
-  let inspectedTurnId = $state<string | null>(null);
+  let inspectorTarget: HTMLDivElement | undefined = $state();
 
   // Paused when the user has scrolled up to read earlier messages.
   // Resumes automatically when they scroll back within the 50 px threshold.
@@ -283,13 +281,11 @@
           <!-- Inspectability affordance: every agent turn's assembled
                context is one click away, per the platform's
                reconstructable-afterwards claim. -->
-          <button
-            type="button"
-            class="context-link"
-            onclick={() => (inspectedTurnId = message.turn_id ?? null)}
-          >
-            context
-          </button>
+          <TurnContextInspectorTrigger
+            turnId={message.turn_id}
+            presentation="message"
+            {inspectorTarget}
+          />
         {/if}
       </div>
     {/each}
@@ -352,28 +348,10 @@
   {/if}
 </div>
 
-{#if inspectedTurnId}
-  <TurnContextInspector
-    turnId={inspectedTurnId}
-    onClose={() => (inspectedTurnId = null)}
-  />
-{/if}
+<div class="turn-context-inspector-outlet" bind:this={inspectorTarget}></div>
+
 
 <style>
-  .context-link {
-    border: none;
-    background: none;
-    padding: 0;
-    font-size: 0.75rem;
-    color: var(--muted-color, #888);
-    cursor: pointer;
-    text-decoration: underline dotted;
-  }
-
-  .context-link:hover {
-    color: var(--ink, #333);
-  }
-
   /*
     Riso conversation surface. Messages are not bubbles in the design — they
     are short ink-coloured passages prefixed by an uppercased "WHO" label,
@@ -479,7 +457,7 @@
   .message-content {
     padding: 10px 14px;
     border-left: 3px solid var(--ink);
-    background: rgba(14, 59, 102, 0.06);
+    background: color-mix(in srgb, var(--ink) 6%, transparent);
     font-family: var(--font-body);
     font-size: var(--font-body-sm);
     line-height: 1.55;
@@ -504,7 +482,7 @@
        even with colour off (UI audit f-23). */
     border-left: none;
     border-right: 3px solid var(--ink-orange);
-    background: rgba(240, 106, 58, 0.08);
+    background: color-mix(in srgb, var(--accent) 8%, transparent);
     /* User-written text preserves manual line breaks. */
     white-space: pre-wrap;
   }
@@ -606,7 +584,7 @@
     align-items: center;
     gap: 8px;
     padding: 8px 12px;
-    background: rgba(168, 50, 26, 0.1);
+    background: color-mix(in srgb, var(--error) 10%, transparent);
     border-left: 3px solid var(--error);
     font-family: var(--font-mono);
     font-weight: 500;

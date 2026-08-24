@@ -723,6 +723,8 @@ impl GatewayWorkflowLauncher {
         {
             dispatch_bound_task_definition_ids.push(task_definition_id.to_string());
         }
+        let workflow_call_tools = crate::turn::workflow_call_tools(session.metadata.as_ref())
+            .map_err(|error| error.to_string())?;
         let inherited_worker_placement =
             reauthorise_session_worker_placement(&self.state, &session)
                 .await
@@ -743,6 +745,7 @@ impl GatewayWorkflowLauncher {
             // entire lineage before intersecting grants.
             dispatch_bound_agent_ids,
             dispatch_bound_task_definition_ids,
+            workflow_call_tools,
             inherited_worker_placement,
         )
         .await
@@ -1100,10 +1103,32 @@ async fn run_ephemeral_agent_call(
     space_id: Uuid,
     dispatch_bound_agent_ids: &[String],
     dispatch_bound_task_definition_ids: &[String],
+    journal_entry_id: Uuid,
     request: AgentCallRequest,
     resolved_working_directory: Option<ResolvedWorkerPlacement>,
     cancellation: CancellationToken,
 ) -> Result<AgentCallResult, String> {
+    let inherited_workflow_call_tools = state
+        .storage
+        .get_workflow_run(run_id)
+        .await
+        .map_err(|error| error.to_string())?
+        .and_then(|run| run.workflow_call_tools);
+    let effective_call_tools = match (
+        inherited_workflow_call_tools.as_ref(),
+        request.tools.as_ref(),
+    ) {
+        (Some(inherited), Some(requested)) => Some(
+            requested
+                .iter()
+                .filter(|tool| inherited.contains(tool))
+                .cloned()
+                .collect::<Vec<_>>(),
+        ),
+        (Some(inherited), None) => Some(inherited.clone()),
+        (None, Some(requested)) => Some(requested.clone()),
+        (None, None) => None,
+    };
     // This identity deliberately cannot name an agent definition: definition
     // ids exclude underscores. Bare workflow workers therefore receive the
     // inherited session configuration, bounded by their dispatch ancestry,
@@ -1152,6 +1177,27 @@ async fn run_ephemeral_agent_call(
                         session_ref.session_id
                     )
                 })?;
+            if request.tools.is_some() {
+                let persisted_tools = session
+                    .metadata
+                    .as_ref()
+                    .and_then(|metadata| {
+                        metadata.get(crate::turn::WORKFLOW_CALL_TOOLS_METADATA_KEY)
+                    })
+                    .map(|tools| serde_json::from_value::<Vec<String>>(tools.clone()))
+                    .transpose()
+                    .map_err(|error| {
+                        format!(
+                            "AgentCallError: continued session has invalid call-scoped tools: {error}"
+                        )
+                    })?;
+                if persisted_tools != effective_call_tools {
+                    return Err(
+                        "AgentCallError: tools cannot be changed on a continued session; select them when creating the worker"
+                            .into(),
+                    );
+                }
+            }
             let thread = ThreadStore::get(state.storage.as_ref(), session_ref.thread_id)
                 .await
                 .map_err(|error| error.to_string())?
@@ -1182,6 +1228,11 @@ async fn run_ephemeral_agent_call(
                 &mut metadata,
                 dispatch_bound_task_definition_ids,
             );
+            // The journal entry id survives an interrupted call's re-run
+            // (replay reuses the started entry), so the worker's idempotent
+            // writes — knowledge captures — dedup against the first attempt.
+            metadata[crate::turn::AGENT_CALL_SCOPE_METADATA_KEY] =
+                Value::String(journal_entry_id.to_string());
             if let Some(placement) = resolved_working_directory.as_ref() {
                 metadata[crate::turn::WORKER_PLACEMENT_CWD_METADATA_KEY] =
                     Value::String(placement.path.clone());
@@ -1200,6 +1251,9 @@ async fn run_ephemeral_agent_call(
                     .await
                     .map_err(|error| error.to_string())?;
                 metadata["task_definition"] = Value::String(task.clone());
+            }
+            if let Some(tools) = effective_call_tools.as_ref() {
+                metadata[crate::turn::WORKFLOW_CALL_TOOLS_METADATA_KEY] = serde_json::json!(tools);
             }
             let session = state
                 .storage
@@ -1256,6 +1310,7 @@ async fn run_ephemeral_agent_call(
         None,
         crate::turn::TurnAttendance::Unattended,
         composition,
+        Some(journal_entry_id),
     );
     tokio::pin!(processing);
     let timeout = request.timeout_ms.map(std::time::Duration::from_millis);
@@ -3327,6 +3382,7 @@ async fn complete_agent_entry(
         space_id,
         dispatch_bound_agent_ids,
         dispatch_bound_task_definition_ids,
+        entry_id,
         request,
         resolved_working_directory,
         cancellation,
@@ -3839,6 +3895,9 @@ async fn complete_workflow_call_entry(
                         .as_ref()
                         .map(|parent| parent.dispatch_bound_task_definition_ids.clone())
                         .unwrap_or_default(),
+                    workflow_call_tools: parent
+                        .as_ref()
+                        .and_then(|parent| parent.workflow_call_tools.clone()),
                     inherited_worker_placement: parent
                         .and_then(|parent| parent.inherited_worker_placement),
                 })
@@ -4172,6 +4231,7 @@ async fn start_run(
     carrying_skill: Option<String>,
     dispatch_bound_agent_ids: Vec<String>,
     dispatch_bound_task_definition_ids: Vec<String>,
+    workflow_call_tools: Option<Vec<String>>,
     inherited_worker_placement: Option<WorkflowRunWorkerPlacement>,
 ) -> Result<WorkflowRun, ApiError> {
     validate_budget(&budget)?;
@@ -4202,6 +4262,7 @@ async fn start_run(
             engine_version: QUICKJS_ENGINE_VERSION.into(),
             dispatch_bound_agent_ids,
             dispatch_bound_task_definition_ids,
+            workflow_call_tools,
             inherited_worker_placement,
         })
         .await
@@ -4666,6 +4727,7 @@ pub async fn start_inline_run(
             vec![],
             vec![],
             None,
+            None,
         )
         .await?,
     ))
@@ -4693,6 +4755,7 @@ pub async fn start_saved_run(
             script.carrying_skill,
             vec![],
             vec![],
+            None,
             None,
         )
         .await?,
@@ -5001,9 +5064,10 @@ mod tests {
     use super::*;
     use swage_protocol::client::workflow::{WorkflowJournalEntryKind, WorkflowJournalEntryStatus};
     use swage_storage::{
-        AgentDefinitionStore, AuditStore, ContextSnapshotStore, NewWorkspaceAttachment,
-        SessionStore, SpaceStore, SqliteStorage, Storage, TaskDefinitionStore, ToolCallStore,
-        TurnState, TurnStore, WorkflowStore, WorkspaceAttachmentStore,
+        AgentDefinitionStore, AuditStore, CitationStore, ContextSnapshotStore,
+        NewWorkspaceAttachment, ObservationStore, OrientationCardStore, SessionStore, SpaceStore,
+        SqliteStorage, Storage, TaskDefinitionStore, ToolCallStore, TurnState, TurnStore,
+        WorkflowStore, WorkspaceAttachmentStore,
     };
     use swage_workflow::AgentSessionRef;
 
@@ -5686,6 +5750,7 @@ mod tests {
                 engine_version: "test".into(),
                 dispatch_bound_agent_ids: vec![],
                 dispatch_bound_task_definition_ids: vec![],
+                workflow_call_tools: None,
                 inherited_worker_placement: None,
             })
             .await
@@ -5745,6 +5810,7 @@ mod tests {
                 engine_version: "test".into(),
                 dispatch_bound_agent_ids: vec!["lead".into()],
                 dispatch_bound_task_definition_ids: vec![],
+                workflow_call_tools: None,
                 inherited_worker_placement: None,
             })
             .await
@@ -5771,7 +5837,7 @@ mod tests {
             Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![
-                Arc::new(WorkflowShellTool) as Arc<dyn crate::tool::Tool>
+                Arc::new(WorkflowNamedTool("shell")) as Arc<dyn crate::tool::Tool>
             ]),
             None,
         );
@@ -5836,6 +5902,7 @@ mod tests {
             space.id,
             &[],
             &[],
+            Uuid::new_v4(),
             AgentCallRequest {
                 cwd: None,
                 isolation: None,
@@ -5844,6 +5911,7 @@ mod tests {
                 prompt: "Use echo".into(),
                 agent: Some("gateway".into()),
                 task: None,
+                tools: None,
                 model: None,
                 schema: None,
                 max_attempts: 1,
@@ -5877,6 +5945,278 @@ mod tests {
         assert_eq!(
             calls[0].result.as_deref(),
             Some("{\"output\":\"workflow\"}")
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fresh_space_workflow_call_applies_the_shipped_researcher_definition() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let provider = Arc::new(ScriptedRecordingProvider {
+            outputs: std::sync::Mutex::new(std::collections::VecDeque::from([
+                scripted_text_output("gathered"),
+                scripted_text_output("scoped"),
+            ])),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all([
+                Arc::new(WorkflowNamedTool("knowledge_record")) as Arc<dyn crate::tool::Tool>,
+                Arc::new(WorkflowNamedTool("web_search")) as Arc<dyn crate::tool::Tool>,
+                Arc::new(WorkflowNamedTool("shell")) as Arc<dyn crate::tool::Tool>,
+                Arc::new(WorkflowNamedTool("config_apply")) as Arc<dyn crate::tool::Tool>,
+            ]),
+            None,
+        );
+
+        let journal_entry_id = Uuid::new_v4();
+        let result = run_ephemeral_agent_call(
+            &state,
+            Uuid::new_v4(),
+            space.id,
+            &[],
+            &[],
+            journal_entry_id,
+            AgentCallRequest {
+                cwd: None,
+                isolation: None,
+                effort: None,
+                timeout_ms: None,
+                prompt: "Gather the selected source".into(),
+                agent: Some("researcher".into()),
+                task: None,
+                tools: None,
+                model: None,
+                schema: None,
+                max_attempts: 1,
+                label: None,
+                session: None,
+                elements: None,
+                variables: None,
+                assembly: None,
+            },
+            None,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("shipped researcher workflow call");
+
+        assert_eq!(result.output, Value::String("gathered".into()));
+        assert!(
+            storage
+                .list_agent_definitions(None)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let requests = provider.requests.lock().expect("requests");
+        let advertised_tools = requests[0]
+            .tool_definitions
+            .iter()
+            .map(|definition| definition["name"].as_str().expect("tool name"))
+            .collect::<Vec<_>>();
+        assert_eq!(advertised_tools, vec!["knowledge_record", "web_search"]);
+        let context = requests[0]
+            .messages
+            .iter()
+            .map(swage_core::ChatMessage::text_content)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(context.contains("Record gathered source material in the knowledge base"));
+        drop(requests);
+
+        // The worker session carries its journalled call's identity, so its
+        // knowledge captures dedup across an interrupted call's re-run.
+        let session = storage
+            .list_sessions_by_agent_id("researcher")
+            .await
+            .unwrap()
+            .into_iter()
+            .next()
+            .expect("worker session");
+        assert_eq!(
+            crate::turn::agent_call_scope(session.metadata.as_ref()).as_deref(),
+            Some(journal_entry_id.to_string().as_str())
+        );
+
+        let scoped = run_ephemeral_agent_call(
+            &state,
+            Uuid::new_v4(),
+            space.id,
+            &[],
+            &[],
+            Uuid::new_v4(),
+            AgentCallRequest {
+                cwd: None,
+                isolation: None,
+                effort: None,
+                timeout_ms: None,
+                prompt: "Scope sources without recording".into(),
+                agent: Some("researcher".into()),
+                task: None,
+                tools: Some(vec!["web_search".into()]),
+                model: None,
+                schema: None,
+                max_attempts: 1,
+                label: None,
+                session: None,
+                elements: None,
+                variables: None,
+                assembly: None,
+            },
+            None,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("call-scoped researcher workflow call");
+        assert_eq!(scoped.output, Value::String("scoped".into()));
+        let requests = provider.requests.lock().expect("requests");
+        let advertised_tools = requests[1]
+            .tool_definitions
+            .iter()
+            .map(|definition| definition["name"].as_str().expect("tool name"))
+            .collect::<Vec<_>>();
+        assert_eq!(advertised_tools, vec!["web_search"]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn research_sweep_executes_its_gather_organise_and_synthesis_contract() {
+        let _swage_home = crate::test_support::SwageHomeGuard::new();
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let provider = Arc::new(ResearchSweepRecordingProvider {
+            requests: std::sync::Mutex::new(Vec::new()),
+            observation_id: std::sync::Mutex::new(None),
+        });
+        let placeholder_tool_names = [
+            "web_search",
+            "url_fetch",
+            "browser_navigate",
+            "browser_snapshot",
+            "knowledge_curate",
+        ];
+        let mut tools = placeholder_tool_names
+            .into_iter()
+            .map(|name| Arc::new(WorkflowNamedTool(name)) as Arc<dyn crate::tool::Tool>)
+            .collect::<Vec<_>>();
+        tools.extend([
+            Arc::new(crate::tool::knowledge::KnowledgeRecordTool) as Arc<dyn crate::tool::Tool>,
+            Arc::new(crate::tool::knowledge::KnowledgeSearchTool) as Arc<dyn crate::tool::Tool>,
+            Arc::new(crate::tool::knowledge::KnowledgeCiteTool) as Arc<dyn crate::tool::Tool>,
+            Arc::new(crate::tool::knowledge::KnowledgeCurateOrientationTool)
+                as Arc<dyn crate::tool::Tool>,
+        ]);
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(tools),
+            None,
+        );
+
+        let Json(started) = start_saved_run(
+            State(state.clone()),
+            Path(builtin_workflows::id(space.id, "research-sweep")),
+            Query(WorkflowScriptListQuery::default()),
+            Json(StartWorkflowRunRequest {
+                args: serde_json::json!({
+                    "topic": "contract evidence",
+                    "purpose": "prove the shipped sweep contract"
+                }),
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start research sweep with valid arguments");
+        wait_for_terminal(&state, started.id).await;
+
+        let run = storage
+            .get_workflow_run(started.id)
+            .await
+            .expect("run query")
+            .expect("research sweep run");
+        assert_eq!(run.state, "completed", "run error: {:?}", run.error_message);
+        let output = run.final_output.expect("terminal research report");
+        assert_eq!(
+            output["failed_sources"],
+            serde_json::json!([{
+                "url": "https://example.test/failed",
+                "reason": "unreachable"
+            }])
+        );
+        assert_eq!(
+            output["withheld_claims"],
+            serde_json::json!([{
+                "claim": "The comparison is conclusive.",
+                "reason": "The comparison source was unreachable."
+            }])
+        );
+        assert_eq!(output["organised"]["orientation_cards"], 1);
+        let citation_id = output["findings"][0]["citation_id"]
+            .as_str()
+            .and_then(|id| Uuid::parse_str(id).ok())
+            .expect("terminal finding carries a citation id returned by knowledge_cite");
+        assert!(output["findings"][0].get("quote").is_none());
+
+        let observations = storage
+            .list_observations_by_space(space.id)
+            .await
+            .expect("persisted observations");
+        assert_eq!(observations.len(), 1);
+        assert_eq!(
+            observations[0].origin.url.as_deref(),
+            Some("https://example.test/landed")
+        );
+        let cards = storage
+            .find_orientation_cards(space.id, None, 10)
+            .await
+            .expect("persisted orientation cards");
+        assert_eq!(cards.len(), 1);
+        assert_eq!(cards[0].observation_ids, vec![observations[0].id]);
+        let citation = storage
+            .get_citation(citation_id)
+            .await
+            .expect("citation query")
+            .expect("persisted citation");
+        assert_eq!(citation.observation_id, observations[0].id);
+        assert_eq!(citation.quoted_text, RESEARCH_SWEEP_QUOTE);
+
+        let requests = provider.requests.lock().expect("requests");
+        assert_eq!(requests.len(), 8);
+        let request_text = |request: &swage_core::CompletionRequest| {
+            request
+                .messages
+                .iter()
+                .map(swage_core::ChatMessage::text_content)
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let organiser = requests
+            .iter()
+            .find(|request| request_text(request).contains("Organise them into"))
+            .expect("organiser request");
+        let organiser_text = request_text(organiser);
+        assert!(organiser_text.contains(&observations[0].id.to_string()));
+        assert!(!organiser_text.contains("https://example.test/failed"));
+
+        let synthesist = requests
+            .iter()
+            .find(|request| request_text(request).contains("Deliver research findings"))
+            .expect("synthesist request");
+        let synthesist_tools = synthesist
+            .tool_definitions
+            .iter()
+            .map(|definition| definition["name"].as_str().expect("tool name"))
+            .collect::<Vec<_>>();
+        assert_eq!(synthesist_tools, vec!["knowledge_cite", "knowledge_search"]);
+        assert!(
+            request_text(synthesist)
+                .contains("Put the claim in findings only after knowledge_cite accepts")
         );
     }
 
@@ -5922,6 +6262,7 @@ mod tests {
                 engine_version: "test".into(),
                 dispatch_bound_agent_ids: vec![],
                 dispatch_bound_task_definition_ids: vec![],
+                workflow_call_tools: None,
                 inherited_worker_placement: None,
             })
             .await
@@ -5968,6 +6309,7 @@ mod tests {
             prompt: "Use the briefing".into(),
             agent: Some("default".into()),
             task: None,
+            tools: None,
             model: None,
             effort: None,
             timeout_ms: None,
@@ -6223,6 +6565,15 @@ mod tests {
         requests: std::sync::Mutex<Vec<swage_core::CompletionRequest>>,
     }
 
+    const RESEARCH_SWEEP_QUOTE: &str = "The landed source supports the purpose.";
+
+    /// Matches responses to stage prompts so concurrent gather calls cannot
+    /// consume one another's scripted outcome.
+    struct ResearchSweepRecordingProvider {
+        requests: std::sync::Mutex<Vec<swage_core::CompletionRequest>>,
+        observation_id: std::sync::Mutex<Option<Uuid>>,
+    }
+
     struct StaggeredFailingProvider;
 
     #[derive(Default)]
@@ -6380,6 +6731,162 @@ mod tests {
     }
 
     #[async_trait::async_trait]
+    impl swage_provider::LlmProvider for ResearchSweepRecordingProvider {
+        fn model_id(&self) -> &str {
+            "research-sweep-scripted-model"
+        }
+
+        async fn complete(
+            &self,
+            _request: swage_core::CompletionRequest,
+        ) -> Result<swage_core::CompletionResponse, swage_core::ProviderError> {
+            unimplemented!("workflow calls use streaming")
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _request: swage_core::ToolCompletionRequest,
+        ) -> Result<swage_core::ToolCompletionResponse, swage_core::ProviderError> {
+            unimplemented!("workflow calls use streaming")
+        }
+
+        fn stream(
+            &self,
+            request: swage_core::CompletionRequest,
+        ) -> std::pin::Pin<Box<dyn futures::Stream<Item = swage_core::StreamChunk> + Send>>
+        {
+            let text = request
+                .messages
+                .iter()
+                .map(swage_core::ChatMessage::text_content)
+                .collect::<Vec<_>>()
+                .join("\n");
+            let tool_result = |call_id: &str| {
+                request
+                    .messages
+                    .iter()
+                    .find_map(|message| {
+                        if message.tool_call_id() == Some(call_id) {
+                            return Some(message.text_content());
+                        }
+                        message.tool_replay().and_then(|parts| {
+                            parts.iter().find_map(|part| match part {
+                                swage_core::ToolReplayPart::ToolResult {
+                                    call_id: result_call_id,
+                                    content,
+                                    ..
+                                } if result_call_id == call_id => Some(content.clone()),
+                                _ => None,
+                            })
+                        })
+                    })
+                    .and_then(|content| serde_json::from_str::<Value>(&content).ok())
+            };
+            let output = if text.contains("You are scoping a research sweep.") {
+                scripted_text_output(
+                    r#"{"sources":[{"url":"https://example.test/landed","why":"primary evidence"},{"url":"https://example.test/failed","why":"comparison"}]}"#,
+                )
+            } else if text.contains("Source: https://example.test/landed") {
+                match tool_result("record-landed") {
+                    Some(result) => {
+                        let observation_id = result["observation_id"]
+                            .as_str()
+                            .and_then(|id| Uuid::parse_str(id).ok())
+                            .expect("record observation id");
+                        *self.observation_id.lock().expect("observation id") = Some(observation_id);
+                        scripted_text_output(&format!(
+                            r#"{{"url":"https://example.test/landed","recorded":true,"observation_id":"{observation_id}","note":"recorded"}}"#,
+                        ))
+                    }
+                    None => vec![
+                        swage_core::StreamChunk::ToolUse {
+                            call_id: "record-landed".into(),
+                            name: "knowledge_record".into(),
+                            arguments: serde_json::json!({
+                                "url": "https://example.test/landed",
+                                "content": RESEARCH_SWEEP_QUOTE,
+                                "extracted_text": RESEARCH_SWEEP_QUOTE,
+                            }),
+                        },
+                        swage_core::StreamChunk::Done {
+                            finish_reason: None,
+                        },
+                    ],
+                }
+            } else if text.contains("Source: https://example.test/failed") {
+                scripted_text_output(
+                    r#"{"url":"https://example.test/failed","recorded":false,"observation_id":null,"note":"unreachable"}"#,
+                )
+            } else if text.contains("Organise them into the space's knowledge base.") {
+                match tool_result("orient-landed") {
+                    Some(_) => scripted_text_output(
+                        r#"{"orientation_cards":1,"assertions":0,"note":"Added an evidence signpost."}"#,
+                    ),
+                    None => {
+                        let observation_id = self
+                            .observation_id
+                            .lock()
+                            .expect("observation id")
+                            .expect("organiser receives the gatherer's recorded observation");
+                        vec![
+                            swage_core::StreamChunk::ToolUse {
+                                call_id: "orient-landed".into(),
+                                name: "knowledge_curate_orientation".into(),
+                                arguments: serde_json::json!({
+                                    "operation": "author",
+                                    "title": "Landed contract evidence",
+                                    "content": "The landed source is evidence for the sweep purpose.",
+                                    "observation_ids": [observation_id],
+                                }),
+                            },
+                            swage_core::StreamChunk::Done {
+                                finish_reason: None,
+                            },
+                        ]
+                    }
+                }
+            } else if text.contains("Deliver research findings.") {
+                match tool_result("cite-landed") {
+                    Some(result) => scripted_text_output(&format!(
+                        r#"{{"findings":[{{"claim":"The landed source supports the purpose.","citation_id":"{}"}}],"withheld":[{{"claim":"The comparison is conclusive.","reason":"The comparison source was unreachable."}}]}}"#,
+                        result["citation_id"].as_str().expect("citation id")
+                    )),
+                    None => {
+                        let observation_id = self
+                            .observation_id
+                            .lock()
+                            .expect("observation id")
+                            .expect("synthesist receives the landed observation");
+                        vec![
+                            swage_core::StreamChunk::ToolUse {
+                                call_id: "search-landed".into(),
+                                name: "knowledge_search".into(),
+                                arguments: serde_json::json!({"query": "landed source supports"}),
+                            },
+                            swage_core::StreamChunk::ToolUse {
+                                call_id: "cite-landed".into(),
+                                name: "knowledge_cite".into(),
+                                arguments: serde_json::json!({
+                                    "observation_id": observation_id,
+                                    "version": 1,
+                                    "quote": RESEARCH_SWEEP_QUOTE,
+                                }),
+                            },
+                            swage_core::StreamChunk::Done {
+                                finish_reason: None,
+                            },
+                        ]
+                    }
+                }
+            } else {
+                panic!("unexpected research sweep request: {text}")
+            };
+            self.requests.lock().expect("requests").push(request);
+            Box::pin(futures::stream::iter(output))
+        }
+    }
+
+    #[async_trait::async_trait]
     impl swage_provider::LlmProvider for StaggeredFailingProvider {
         fn model_id(&self) -> &str {
             "staggered-failing-model"
@@ -6425,16 +6932,16 @@ mod tests {
         }
     }
 
-    struct WorkflowShellTool;
+    struct WorkflowNamedTool(&'static str);
 
     #[async_trait::async_trait]
-    impl crate::tool::Tool for WorkflowShellTool {
+    impl crate::tool::Tool for WorkflowNamedTool {
         fn name(&self) -> &str {
-            "shell"
+            self.0
         }
 
         fn description(&self) -> &str {
-            "Test shell"
+            "Test workflow tool"
         }
 
         fn parameters(&self) -> serde_json::Value {
@@ -6563,6 +7070,7 @@ mod tests {
                 engine_version: "test".into(),
                 dispatch_bound_agent_ids: vec![],
                 dispatch_bound_task_definition_ids: vec![],
+                workflow_call_tools: None,
                 inherited_worker_placement: None,
             })
             .await
@@ -6973,6 +7481,7 @@ mod tests {
                 engine_version: "test".into(),
                 dispatch_bound_agent_ids: vec![],
                 dispatch_bound_task_definition_ids: vec![],
+                workflow_call_tools: None,
                 inherited_worker_placement: None,
             })
             .await
@@ -7021,6 +7530,7 @@ mod tests {
             prompt: prompt.into(),
             agent: Some("default".into()),
             task: None,
+            tools: None,
             model: None,
             schema: None,
             max_attempts: 1,
@@ -7086,6 +7596,7 @@ mod tests {
                 engine_version: "test".into(),
                 dispatch_bound_agent_ids: vec![],
                 dispatch_bound_task_definition_ids: vec![],
+                workflow_call_tools: None,
                 inherited_worker_placement: None,
             })
             .await
@@ -7129,6 +7640,7 @@ mod tests {
             prompt: "hold capacity".into(),
             agent: Some("default".into()),
             task: None,
+            tools: None,
             model: None,
             schema: None,
             max_attempts: 1,
@@ -7233,6 +7745,7 @@ mod tests {
                 engine_version: "test".into(),
                 dispatch_bound_agent_ids: vec!["lead".into()],
                 dispatch_bound_task_definition_ids: vec![],
+                workflow_call_tools: None,
                 inherited_worker_placement: None,
             })
             .await
@@ -7264,7 +7777,7 @@ mod tests {
             Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![
-                Arc::new(WorkflowShellTool) as Arc<dyn crate::tool::Tool>
+                Arc::new(WorkflowNamedTool("shell")) as Arc<dyn crate::tool::Tool>
             ]),
             None,
         );
@@ -7303,6 +7816,7 @@ mod tests {
                 prompt: "restate the brief".into(),
                 agent: Some("worker".into()),
                 task: None,
+                tools: None,
                 model: None,
                 schema: None,
                 max_attempts: 1,
@@ -7364,6 +7878,7 @@ mod tests {
                 prompt: "now do the work".into(),
                 agent: Some("worker".into()),
                 task: None,
+                tools: None,
                 model: None,
                 schema: None,
                 max_attempts: 1,
@@ -7382,6 +7897,26 @@ mod tests {
             .expect("second reply")
             .expect("second result");
 
+        let second_entry_id = storage
+            .list_workflow_journal(run.id)
+            .await
+            .expect("journal")
+            .into_iter()
+            .filter(|entry| entry.kind == "agent_call" && entry.status == "completed")
+            .max_by_key(|entry| entry.seq)
+            .expect("continued agent call entry")
+            .id;
+        let continued_session = storage
+            .get_session(token.session_id)
+            .await
+            .expect("session query")
+            .expect("continued worker session");
+        assert_eq!(
+            crate::turn::agent_call_scope(continued_session.metadata.as_ref()).as_deref(),
+            Some(second_entry_id.to_string().as_str()),
+            "a continuation carries its own journalled call scope"
+        );
+
         let (replacement_reply, replacement_receive) = oneshot::channel();
         tx.send(HostCommand::DispatchAgent {
             request: AgentCallRequest {
@@ -7392,6 +7927,7 @@ mod tests {
                 prompt: "move the continued worker".into(),
                 agent: Some("worker".into()),
                 task: None,
+                tools: None,
                 model: None,
                 schema: None,
                 max_attempts: 1,
@@ -7493,6 +8029,7 @@ mod tests {
                 carrying_skill: None,
                 dispatch_bound_agent_ids: vec!["lead".into()],
                 dispatch_bound_task_definition_ids: vec![],
+                workflow_call_tools: None,
                 inherited_worker_placement: None,
             })
             .await
@@ -7509,7 +8046,7 @@ mod tests {
             Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![
-                Arc::new(WorkflowShellTool) as Arc<dyn crate::tool::Tool>
+                Arc::new(WorkflowNamedTool("shell")) as Arc<dyn crate::tool::Tool>
             ]),
             None,
         );
@@ -7761,7 +8298,7 @@ mod tests {
             Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
             config,
             crate::tool::ToolDispatcher::allow_all(vec![
-                Arc::new(WorkflowShellTool) as Arc<dyn crate::tool::Tool>
+                Arc::new(WorkflowNamedTool("shell")) as Arc<dyn crate::tool::Tool>
             ]),
             None,
         );
@@ -7837,6 +8374,101 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn workflow_launches_preserve_call_scoped_tools_through_nested_runs() {
+        let _guard = crate::test_support::SwageHomeGuard::new();
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        storage
+            .create_workflow_script(NewWorkflowScript {
+                space_id: space.id,
+                name: "inner-bounded".into(),
+                description: String::new(),
+                source: "return await agent('nested bounded work');".into(),
+                delivery_grant: None,
+            })
+            .await
+            .expect("store inner workflow");
+        storage
+            .create_workflow_script(NewWorkflowScript {
+                space_id: space.id,
+                name: "outer-bounded".into(),
+                description: String::new(),
+                source: "return await workflow('inner-bounded', {});".into(),
+                delivery_grant: None,
+            })
+            .await
+            .expect("store outer workflow");
+        let session = storage
+            .create_session(NewSession {
+                space_id: space.id,
+                agent_id: "gateway".into(),
+                metadata: Some(serde_json::json!({
+                    crate::turn::WORKFLOW_CALL_TOOLS_METADATA_KEY: ["workflow_run"]
+                })),
+                active_workspace_attachment_id: None,
+            })
+            .await
+            .expect("call-scoped worker session");
+        let _skill_root = crate::websocket::SessionSkillRootGuard::empty(session.id);
+        let provider = Arc::new(ScriptedRecordingProvider {
+            outputs: std::sync::Mutex::new(std::collections::VecDeque::from([
+                scripted_text_output("nested bounded work completed"),
+            ])),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let config = swage_config::ResolvedConfig {
+            tools: swage_config::ToolConfig {
+                permissions: swage_config::ToolPermissionConfig {
+                    allow: vec!["workflow_run".into(), "shell".into()],
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
+            config,
+            crate::tool::ToolDispatcher::allow_all(vec![
+                Arc::new(crate::tool::workflow_run::WorkflowRunTool) as Arc<dyn crate::tool::Tool>,
+                Arc::new(WorkflowNamedTool("shell")) as Arc<dyn crate::tool::Tool>,
+            ]),
+            None,
+        );
+
+        let started = GatewayWorkflowLauncher::new(state.clone())
+            .start_by_name(session.id, "outer-bounded", Value::Null, None, false)
+            .await
+            .expect("launch workflow from call-scoped worker");
+        let parent_id: Uuid = serde_json::from_value(started["id"].clone()).expect("run id");
+        wait_for_terminal(&state, parent_id).await;
+
+        let runs = storage
+            .list_workflow_runs(space.id)
+            .await
+            .expect("workflow runs");
+        assert_eq!(runs.len(), 2);
+        assert!(runs.iter().all(|run| {
+            run.workflow_call_tools.as_deref() == Some(["workflow_run".to_string()].as_slice())
+        }));
+        let request = provider
+            .requests
+            .lock()
+            .expect("requests")
+            .first()
+            .cloned()
+            .expect("nested worker request");
+        let advertised_tools = request
+            .tool_definitions
+            .iter()
+            .map(|definition| definition["name"].as_str().expect("tool name"))
+            .collect::<Vec<_>>();
+        assert_eq!(advertised_tools, vec!["workflow_run"]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn workflow_dispatch_re_resolves_and_applies_named_tasks() {
         let _guard = crate::test_support::SwageHomeGuard::new();
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
@@ -7906,7 +8538,7 @@ mod tests {
             Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
             config,
             crate::tool::ToolDispatcher::allow_all(vec![
-                Arc::new(WorkflowShellTool) as Arc<dyn crate::tool::Tool>
+                Arc::new(WorkflowNamedTool("shell")) as Arc<dyn crate::tool::Tool>
             ]),
             None,
         );
@@ -7914,6 +8546,7 @@ mod tests {
             prompt: "Use the current review contract".into(),
             agent: None,
             task: Some("review".into()),
+            tools: None,
             model: None,
             effort: None,
             timeout_ms: None,
@@ -7940,6 +8573,7 @@ mod tests {
             space.id,
             &[],
             &[],
+            Uuid::new_v4(),
             request(),
             None,
             CancellationToken::new(),
@@ -8009,6 +8643,7 @@ mod tests {
             space.id,
             &[],
             &[],
+            Uuid::new_v4(),
             request(),
             None,
             CancellationToken::new(),
@@ -8042,6 +8677,7 @@ mod tests {
             space.id,
             &[],
             &[],
+            Uuid::new_v4(),
             missing,
             None,
             CancellationToken::new(),
@@ -8117,6 +8753,7 @@ mod tests {
                 carrying_skill: None,
                 dispatch_bound_agent_ids: vec![],
                 dispatch_bound_task_definition_ids: vec![],
+                workflow_call_tools: None,
                 inherited_worker_placement: None,
             })
             .await
@@ -8767,6 +9404,7 @@ mod tests {
                 carrying_skill: None,
                 dispatch_bound_agent_ids: vec![],
                 dispatch_bound_task_definition_ids: vec![],
+                workflow_call_tools: None,
                 inherited_worker_placement: None,
             })
             .await
@@ -8876,6 +9514,7 @@ mod tests {
                 carrying_skill: None,
                 dispatch_bound_agent_ids: vec![],
                 dispatch_bound_task_definition_ids: vec![],
+                workflow_call_tools: None,
                 inherited_worker_placement: None,
             })
             .await
@@ -8952,6 +9591,7 @@ mod tests {
                 engine_version: "test".into(),
                 dispatch_bound_agent_ids: vec![],
                 dispatch_bound_task_definition_ids: vec![],
+                workflow_call_tools: None,
                 inherited_worker_placement: None,
             })
             .await
@@ -9027,6 +9667,7 @@ mod tests {
                 engine_version: "test".into(),
                 dispatch_bound_agent_ids: vec![],
                 dispatch_bound_task_definition_ids: vec![],
+                workflow_call_tools: None,
                 inherited_worker_placement: None,
             })
             .await
@@ -9084,6 +9725,7 @@ mod tests {
                 prompt: "hijack".into(),
                 agent: Some("worker".into()),
                 task: None,
+                tools: None,
                 model: None,
                 schema: None,
                 max_attempts: 1,
@@ -9127,10 +9769,12 @@ mod tests {
             space.id,
             &[],
             &[],
+            Uuid::new_v4(),
             AgentCallRequest {
                 prompt: "continue".into(),
                 agent: None,
                 task: Some("review".into()),
+                tools: None,
                 model: None,
                 effort: None,
                 timeout_ms: None,
@@ -9284,6 +9928,7 @@ mod tests {
                 engine_version: "test".into(),
                 dispatch_bound_agent_ids: vec![],
                 dispatch_bound_task_definition_ids: vec![],
+                workflow_call_tools: None,
                 inherited_worker_placement: None,
             })
             .await
@@ -9374,6 +10019,7 @@ mod tests {
                 engine_version: "test".into(),
                 dispatch_bound_agent_ids: vec![],
                 dispatch_bound_task_definition_ids: vec![],
+                workflow_call_tools: None,
                 inherited_worker_placement: None,
             })
             .await
@@ -10669,6 +11315,7 @@ mod tests {
             engine_version: "test".into(),
             dispatch_bound_agent_ids: vec![],
             dispatch_bound_task_definition_ids: vec![],
+            workflow_call_tools: None,
             inherited_worker_placement: None,
         };
         let interrupted = storage
@@ -10760,6 +11407,7 @@ mod tests {
                 engine_version: "test".into(),
                 dispatch_bound_agent_ids: vec![],
                 dispatch_bound_task_definition_ids: vec![],
+                workflow_call_tools: None,
                 inherited_worker_placement: None,
             })
             .await
@@ -10800,6 +11448,7 @@ mod tests {
             prompt: "restate".into(),
             agent: Some("worker".into()),
             task: None,
+            tools: None,
             model: None,
             schema: None,
             max_attempts: 3,
@@ -10846,6 +11495,7 @@ mod tests {
             prompt: "continue".into(),
             agent: Some("worker".into()),
             task: None,
+            tools: None,
             model: None,
             schema: None,
             session: Some(AgentSessionRef {
@@ -10929,6 +11579,7 @@ mod tests {
                 engine_version: "test".into(),
                 dispatch_bound_agent_ids: vec![],
                 dispatch_bound_task_definition_ids: vec![],
+                workflow_call_tools: None,
                 inherited_worker_placement: None,
             })
             .await
@@ -10977,6 +11628,7 @@ mod tests {
             prompt: "account usage".into(),
             agent: Some("default".into()),
             task: None,
+            tools: None,
             model: None,
             schema: None,
             max_attempts: 1,
@@ -11054,6 +11706,7 @@ mod tests {
                 engine_version: "test".into(),
                 dispatch_bound_agent_ids: vec![],
                 dispatch_bound_task_definition_ids: vec![],
+                workflow_call_tools: None,
                 inherited_worker_placement: None,
             })
             .await
@@ -11102,6 +11755,7 @@ mod tests {
             prompt: prompt.into(),
             agent: Some("default".into()),
             task: None,
+            tools: None,
             model: None,
             schema: None,
             max_attempts: 1,
@@ -11195,6 +11849,7 @@ mod tests {
                 engine_version: "test".into(),
                 dispatch_bound_agent_ids: vec![],
                 dispatch_bound_task_definition_ids: vec![],
+                workflow_call_tools: None,
                 inherited_worker_placement: None,
             })
             .await
@@ -11207,6 +11862,7 @@ mod tests {
             prompt: prompt.into(),
             agent: Some("default".into()),
             task: None,
+            tools: None,
             model: None,
             schema: None,
             max_attempts: 1,
@@ -11385,6 +12041,7 @@ mod tests {
                 engine_version: "test".into(),
                 dispatch_bound_agent_ids: vec![],
                 dispatch_bound_task_definition_ids: vec![],
+                workflow_call_tools: None,
                 inherited_worker_placement: None,
             })
             .await
@@ -11397,6 +12054,7 @@ mod tests {
             prompt: "resume work".into(),
             agent: Some("default".into()),
             task: None,
+            tools: None,
             model: None,
             schema: None,
             max_attempts: 1,
@@ -11520,6 +12178,7 @@ mod tests {
                 engine_version: "test".into(),
                 dispatch_bound_agent_ids: vec![],
                 dispatch_bound_task_definition_ids: vec![],
+                workflow_call_tools: None,
                 inherited_worker_placement: None,
             })
             .await
@@ -11532,6 +12191,7 @@ mod tests {
             prompt: "resume working call".into(),
             agent: Some("default".into()),
             task: None,
+            tools: None,
             model: None,
             schema: None,
             max_attempts: 1,
@@ -11660,6 +12320,7 @@ mod tests {
             prompt: "closing call".into(),
             agent: Some("default".into()),
             task: None,
+            tools: None,
             model: None,
             schema: None,
             max_attempts: 1,
@@ -11726,6 +12387,7 @@ mod tests {
                 engine_version: "test".into(),
                 dispatch_bound_agent_ids: vec![],
                 dispatch_bound_task_definition_ids: vec![],
+                workflow_call_tools: None,
                 inherited_worker_placement: None,
             })
             .await
@@ -11738,6 +12400,7 @@ mod tests {
             prompt: prompt.into(),
             agent: Some("default".into()),
             task: None,
+            tools: None,
             model: None,
             schema: None,
             max_attempts: 1,
@@ -11967,6 +12630,7 @@ mod tests {
                 engine_version: "test".into(),
                 dispatch_bound_agent_ids: vec![],
                 dispatch_bound_task_definition_ids: vec![],
+                workflow_call_tools: None,
                 inherited_worker_placement: None,
             })
             .await
@@ -11979,6 +12643,7 @@ mod tests {
             prompt: prompt.into(),
             agent: Some("default".into()),
             task: None,
+            tools: None,
             model: None,
             schema: None,
             max_attempts: 1,
@@ -12195,6 +12860,7 @@ mod tests {
                 engine_version: "test".into(),
                 dispatch_bound_agent_ids: vec![],
                 dispatch_bound_task_definition_ids: vec![],
+                workflow_call_tools: None,
                 inherited_worker_placement: None,
             })
             .await
@@ -12207,6 +12873,7 @@ mod tests {
             prompt: "must not execute".into(),
             agent: Some("default".into()),
             task: None,
+            tools: None,
             model: None,
             schema: None,
             max_attempts: 1,
@@ -12810,6 +13477,7 @@ mod tests {
                 engine_version: "test".into(),
                 dispatch_bound_agent_ids: vec![],
                 dispatch_bound_task_definition_ids: vec![],
+                workflow_call_tools: None,
                 inherited_worker_placement: None,
             })
             .await
@@ -12822,6 +13490,7 @@ mod tests {
             prompt: "known failing call".into(),
             agent: Some("default".into()),
             task: None,
+            tools: None,
             model: None,
             schema: None,
             max_attempts: 1,
@@ -12916,6 +13585,7 @@ mod tests {
                 engine_version: "test".into(),
                 dispatch_bound_agent_ids: vec![],
                 dispatch_bound_task_definition_ids: vec![],
+                workflow_call_tools: None,
                 inherited_worker_placement: None,
             })
             .await
@@ -12928,6 +13598,7 @@ mod tests {
             prompt: "known failing call".into(),
             agent: Some("default".into()),
             task: None,
+            tools: None,
             model: None,
             schema: None,
             max_attempts: 1,
@@ -13018,6 +13689,7 @@ mod tests {
                 engine_version: "test".into(),
                 dispatch_bound_agent_ids: vec![],
                 dispatch_bound_task_definition_ids: vec![],
+                workflow_call_tools: None,
                 inherited_worker_placement: None,
             })
             .await

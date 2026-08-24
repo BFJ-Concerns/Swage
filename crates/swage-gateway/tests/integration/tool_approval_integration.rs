@@ -44,7 +44,7 @@ use swage_storage::{
     store::{ApprovalStore, SpaceStore, ToolCallStore},
 };
 
-use crate::support::ProcessEnvGuard;
+use crate::support::{ProcessEnvGuard, live_http_json};
 
 const WEBSOCKET_EVENT_DEADLINE: Duration = Duration::from_secs(120);
 
@@ -197,23 +197,6 @@ async fn http(router: &Router, method: &str, uri: &str) -> (StatusCode, Value) {
     let status = resp.status();
     let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
     let body = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-    (status, body)
-}
-
-async fn live_http_json(
-    address: SocketAddr,
-    method: reqwest::Method,
-    path: &str,
-    body: Option<Value>,
-) -> (StatusCode, Value) {
-    let client = reqwest::Client::new();
-    let mut request = client.request(method, format!("http://{address}{path}"));
-    if let Some(body) = body {
-        request = request.json(&body);
-    }
-    let response = request.send().await.expect("live gateway request");
-    let status = response.status();
-    let body = response.json().await.unwrap_or(Value::Null);
     (status, body)
 }
 

@@ -953,6 +953,7 @@ mod tests {
     fn context_config_defaults() {
         let cfg = ContextConfig::default();
         assert_eq!(cfg.assembly, "default");
+        assert!(cfg.alternatives.is_empty());
         assert_eq!(cfg.timeout, 5);
         assert_eq!(cfg.budget, None);
     }
@@ -961,6 +962,7 @@ mod tests {
     fn context_config_serialise_round_trip() {
         let original = ContextConfig {
             assembly: "custom".to_string(),
+            alternatives: vec!["alternate".to_string()],
             timeout: 10,
             budget: Some(4096),
         };

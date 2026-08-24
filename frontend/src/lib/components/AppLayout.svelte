@@ -105,9 +105,9 @@
   <header class="topbar">
     <SpaceSelector {spaceStore} {onSpaceChange} />
     <nav aria-label="Surface">
-      <button aria-pressed={activeSurface === "conversation"} class:active={activeSurface === "conversation"} onclick={() => onSelectSurface("conversation")}>Conversation</button>
-      <button aria-pressed={activeSurface === "operator"} class:active={activeSurface === "operator"} onclick={() => onSelectSurface("operator")}>Operator</button>
-      <button onclick={() => onNavigate?.("/settings/providers")}>Settings</button>
+      <button aria-pressed={!settingsMode && activeSurface === "conversation"} class:active={!settingsMode && activeSurface === "conversation"} onclick={() => onSelectSurface("conversation")}>Conversation</button>
+      <button aria-pressed={!settingsMode && activeSurface === "operator"} class:active={!settingsMode && activeSurface === "operator"} onclick={() => onSelectSurface("operator")}>Operator</button>
+      <button aria-pressed={settingsMode} class:active={settingsMode} onclick={() => onNavigate?.("/settings/providers")}>Settings</button>
     </nav>
     {#if desktopRuntime}<span>{desktopRuntime.managedGateway ? "MANAGED" : "REMOTE"}</span>{/if}
     {#if onSelectTheme}<ThemeToggle mode={themeMode} onSelect={onSelectTheme} />{/if}
@@ -153,13 +153,13 @@
 {/if}
 
 <style>
-  .topbar { display: flex; align-items: center; gap: 1rem; padding: .75rem; border-bottom: 1px solid var(--ink, #222); }
+  .topbar { display: flex; align-items: center; gap: 1rem; padding: .75rem; border-bottom: 1px solid var(--ink); }
   nav { display: flex; gap: .5rem; }
   .settings-window { height: calc(100vh - 4rem); overflow: auto; }
-  .settings-chrome { display: flex; align-items: center; justify-content: space-between; padding: .75rem; border-bottom: 1px solid var(--ink, #222); }
+  .settings-chrome { display: flex; align-items: center; justify-content: space-between; padding: .75rem; border-bottom: 1px solid var(--ink); }
   .settings-chrome h2 { margin: 0; font-size: 1rem; }
   button.active { font-weight: bold; }
   .conversation { display: grid; grid-template-columns: minmax(16rem, 25%) 1fr; height: calc(100vh - 4rem); }
-  .conversation aside { overflow: auto; border-right: 1px solid var(--ink, #222); }
+  .conversation aside { overflow: auto; border-right: 1px solid var(--ink); }
   .conversation section, .operator { min-width: 0; overflow: auto; }
 </style>
