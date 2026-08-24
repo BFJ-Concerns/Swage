@@ -13,7 +13,7 @@ use sha2::{Digest, Sha256};
 const APP_PACKAGE: &str = "swage-gateway";
 const BINARY_NAME: &str = "swage";
 const FRONTEND_DIR: &str = "frontend";
-const FRONTEND_COMPONENTS_DIR: &str = "frontend/src/lib/components";
+const FRONTEND_SRC_DIR: &str = "frontend/src";
 const DESKTOP_DIR: &str = "desktop";
 const FRONTEND_DIST_INDEX: &str = "frontend/dist/index.html";
 const FRONTEND_DEPS_STAMP: &str = "target/xtask/frontend-deps.sha256";
@@ -471,7 +471,7 @@ fn verify() -> Result<()> {
 
 fn check_frontend_design_tokens() -> Result<()> {
     let mut files = Vec::new();
-    collect_files(Path::new(FRONTEND_COMPONENTS_DIR), &mut files)?;
+    collect_files(Path::new(FRONTEND_SRC_DIR), &mut files)?;
     files.sort();
 
     let mut violations = Vec::new();
