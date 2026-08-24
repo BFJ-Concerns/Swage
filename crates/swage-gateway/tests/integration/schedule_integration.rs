@@ -541,7 +541,10 @@ impl LlmProvider for HeadOfLineProvider {
 /// Poll a schedule's newest run until it reaches a terminal state, or panic
 /// on timeout. Used to observe one run finishing while another is stalled.
 async fn await_terminal_run(state: &AppState, schedule_id: Uuid) -> swage_storage::ScheduleRun {
-    let deadline = std::time::Duration::from_secs(5);
+    // This is a harness safety ceiling, not a product latency guarantee. A
+    // full parallel test run can leave an otherwise immediate mock turn
+    // waiting for CPU long enough to cross the old five-second deadline.
+    let deadline = std::time::Duration::from_secs(45);
     let started = std::time::Instant::now();
     loop {
         if let Some(run) = state

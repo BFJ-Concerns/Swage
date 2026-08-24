@@ -97,23 +97,25 @@ Most logic is Rust, but `xtask` shells out for some checks (e.g.
 
 | Recipe | What it runs |
 |---|---|
+| `just check-gate` | Tracked-local-state, format, Rust/frontend type, frontend design-token, and clippy checks; no tests |
 | `just check` | `cargo check --workspace` + frontend type check (`npm run check`) |
 | `just test` | Full test suite with failure aggregation (see below) |
-| `just verify` (alias: `just ci`) | The gate CI runs; stages below in order |
+| `just verify` (alias: `just ci`) | `check-gate`, then the test and projection stages below; the gate CI runs |
 
 ### Verify stages
 
-Stages 1--4 abort on failure (`?` operator). Stages 5--6 run regardless;
-their results are combined.
+`check-gate` runs stages 1--5 and aborts on the first failure (`?` operator).
+Stages 6--7 run regardless; their results are combined.
 
 | # | Stage | Short-circuits? |
 |---|---|---|
 | 1 | Tracked-local-state check (`scripts/check-tracked-local-state.sh`) | Yes |
 | 2 | Format check (`cargo fmt --all -- --check` + `just --fmt --check`) | Yes |
 | 3 | Type check (`cargo check --workspace` + frontend) | Yes |
-| 4 | Clippy (`-D warnings`) | Yes |
-| 5 | Test suite (Rust with `--no-fail-fast`, frontend, desktop smoke) | No |
-| 6 | Projection freshness (`git diff --exit-code` on generated files) | No |
+| 4 | Frontend design-token check | Yes |
+| 5 | Clippy (`-D warnings`) | Yes |
+| 6 | Test suite (Rust with `--no-fail-fast`, frontend, desktop smoke) | No |
+| 7 | Projection freshness (`git diff --exit-code` on generated files) | No |
 
 When both tests and projections fail, both errors surface in one message.
 The test suite aggregates Rust, frontend, and desktop-smoke failures into a
