@@ -12,7 +12,7 @@
 use chrono::{DateTime, Utc};
 use swage_core::{ChatMessage, Role};
 
-use crate::element::ContextElement;
+use crate::element::{ContextElement, built_in_first_sentence_preview};
 use crate::tokeniser::Tokeniser;
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -179,6 +179,10 @@ impl ContextElement for OrientationElement {
         }
         parts.join(", ")
     }
+
+    fn report_preview(&self) -> Option<String> {
+        Some(built_in_first_sentence_preview(IDENTITY))
+    }
 }
 
 #[cfg(test)]
@@ -224,6 +228,18 @@ mod tests {
         assert!(text.contains("how this context was assembled"));
         assert!(text.contains("redacted from that record"));
         assert!(text.contains("recorded as written"));
+    }
+
+    #[test]
+    fn report_preview_is_a_static_excerpt_not_session_environment() {
+        let element = OrientationElement::new(bare_environment(), vec![]);
+        let content = element.content()[0].text_content();
+        let preview = element.report_preview().expect("built-in preview");
+        let opening_sentence = built_in_first_sentence_preview(&content);
+
+        assert!(!preview.is_empty());
+        assert_eq!(preview, opening_sentence);
+        assert!(!preview.contains("Session started:"));
     }
 
     #[test]

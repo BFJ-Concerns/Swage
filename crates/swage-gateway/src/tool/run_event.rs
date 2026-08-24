@@ -131,6 +131,7 @@ mod tests {
                 engine_version: "test".into(),
                 dispatch_bound_agent_ids: vec![],
                 dispatch_bound_task_definition_ids: vec![],
+                workflow_call_tools: None,
                 inherited_worker_placement: None,
             })
             .await

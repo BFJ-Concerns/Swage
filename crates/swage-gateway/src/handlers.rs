@@ -1198,7 +1198,8 @@ pub async fn list_skills(
     let space_dir = root.join("spaces").join(&space.slug);
     let agent_dir = params
         .agent_id
-        .as_ref()
+        .as_deref()
+        .filter(|agent_id| *agent_id != swage_config::RESERVED_WORKFLOW_AGENT_ID)
         .map(|agent_id| space_dir.join("agents").join(agent_id));
     let agent_dir = agent_dir.as_deref().filter(|path| path.is_dir());
     let (skills, _warnings) =
@@ -1714,8 +1715,8 @@ async fn execute_external_delegate_message(
             crate::turn::effective_tool_permissions_record(&effective_target_resolved),
             composition,
         ),
-        snapshot_recorder: Some(crate::turn::delegation_snapshot_recorder(
-            state.storage.clone(),
+        snapshot_recorder: Some(crate::turn::delegation_snapshot_recorder_for_state(
+            state.clone(),
         )),
     };
 

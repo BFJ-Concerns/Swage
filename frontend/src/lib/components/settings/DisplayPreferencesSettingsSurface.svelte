@@ -65,7 +65,7 @@
   .shell-label { font-family: var(--font-mono); font-weight: 500; font-size: 11px; line-height: 1; letter-spacing: 0.16em; text-transform: uppercase; color: var(--ink-soft); }
   .segmented-control { display: flex; flex-wrap: wrap; gap: 8px; }
   .opt { position: relative; display: inline-flex; align-items: center; border: 1px solid var(--ink); background: var(--paper); color: var(--ink); padding: 6px 12px; font-family: var(--font-display); font-size: 14px; line-height: 1; letter-spacing: 0.04em; text-transform: uppercase; cursor: pointer; isolation: isolate; }
-  .opt:hover:not(.active) { background: rgba(14, 59, 102, 0.08); }
+  .opt:hover:not(.active) { background: color-mix(in srgb, var(--ink) 8%, transparent); }
   .opt.active { background: var(--ink); color: var(--paper); }
   .opt.active::before { content: ""; position: absolute; inset: 0; background: var(--accent); transform: translate(2px, 2px); z-index: -1; mix-blend-mode: var(--shadow-blend); opacity: var(--shadow-opacity); pointer-events: none; }
   @media (max-width: 760px) { .shell-row { grid-template-columns: 1fr; } }

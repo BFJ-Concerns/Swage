@@ -56,7 +56,7 @@ fn known_fields_for(section: &str) -> &'static [&'static str] {
             "bundles",
             "require_approval",
         ],
-        "context" => &["assembly", "timeout", "budget"],
+        "context" => &["assembly", "alternatives", "timeout", "budget"],
         // pricing.models is a dynamic table of model-name → pricing entry;
         // field-level validation is skipped for the per-model sub-tables.
         "pricing" => &["models"],
@@ -152,6 +152,7 @@ fn check_field_type(
         ("tools", "search") => ("table", matches!(value, Value::Table(_))),
         ("tools", "browser") => ("table", matches!(value, Value::Table(_))),
         ("context", "assembly") => ("string", matches!(value, Value::String(_))),
+        ("context", "alternatives") => ("array", matches!(value, Value::Array(_))),
         ("context", "timeout") => ("integer", matches!(value, Value::Integer(_))),
         ("context", "budget") => ("integer", matches!(value, Value::Integer(_))),
         // pricing.models is a dynamic map — validate only that it is a table.

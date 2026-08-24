@@ -3,7 +3,7 @@
 use serde_json::json;
 use swage_core::{CompletionRequest, CompletionResponse, FinishReason, SandboxError};
 use swage_sandbox::llm_handler::HostLlmHandler;
-use swage_sandbox::{FallbackSandbox, Sandbox, SandboxConfig};
+use swage_sandbox::{BubblewrapSandbox, FallbackSandbox, Sandbox, SandboxConfig, find_bwrap};
 
 use crate::support::ProcessEnvGuard;
 
@@ -27,6 +27,38 @@ fn test_config(temp_dir: &tempfile::TempDir) -> SandboxConfig {
         .shutdown_grace_period(std::time::Duration::from_secs(5))
         .build()
         .expect("sandbox config should build")
+}
+
+#[tokio::test]
+async fn bubblewrap_sandbox_real_binary_runs_git_and_standard_device_io_through_shell() {
+    if find_bwrap().is_err() {
+        eprintln!("skipping real bubblewrap integration test: bwrap is not installed");
+        return;
+    }
+
+    let mut env_guard = ProcessEnvGuard::new();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let mut sandbox = BubblewrapSandbox::new(test_config(&temp_dir), test_llm_handler());
+
+    env_guard.set_var("SWAGE_SANDBOX_AGENT_BINARY", env!("CARGO_BIN_EXE_swage"));
+
+    sandbox.spawn_agent().await.unwrap();
+
+    let result = sandbox
+        .execute_tool(
+            "shell",
+            json!({ "command": "export HOME=/tmp GIT_CONFIG_NOSYSTEM=1; for device in /dev/full /dev/null /dev/random /dev/tty /dev/urandom /dev/zero; do test -c \"$device\"; done && printf device-io > /dev/null && head -c 1 /dev/zero >/dev/null && head -c 1 /dev/urandom >/dev/null && ! printf device-io > /dev/full 2>/dev/null && test ! -e /dev/kvm && test -e /dev/ptmx && ! dd if=/dev/ptmx of=/dev/null count=0 status=none 2>/dev/null && git init repo && git -C repo config user.email test@example.invalid && git -C repo config user.name test && touch repo/note && git -C repo add note && git -C repo commit -m initial" }),
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        result.error.is_none(),
+        "git init and commit must work while ungranted /dev/ptmx remains denied by Landlock: {:?}",
+        result.error
+    );
+    assert_eq!(result.output["exit_code"], 0, "shell result: {result:?}");
+    sandbox.shutdown().await.unwrap();
 }
 
 #[tokio::test]

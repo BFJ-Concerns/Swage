@@ -213,6 +213,10 @@ impl Default for SandboxConfig {
 #[serde(deny_unknown_fields)]
 pub struct ContextConfig {
     pub assembly: String,
+    /// Named context assemblies registered as hidden alternatives to the
+    /// configured default. Selection records the chosen name locally.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub alternatives: Vec<String>,
     #[ts(type = "number")]
     pub timeout: u64,
     #[ts(type = "number | null")]
@@ -222,6 +226,7 @@ impl Default for ContextConfig {
     fn default() -> Self {
         Self {
             assembly: "default".to_string(),
+            alternatives: Vec::new(),
             timeout: 5,
             budget: None,
         }

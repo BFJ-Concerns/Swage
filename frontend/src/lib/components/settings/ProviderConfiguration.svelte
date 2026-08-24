@@ -54,7 +54,7 @@
   .provider-head-text { min-width: 0; }
   .credential-status { font-family: var(--font-mono); font-weight: 500; font-size: 10px; letter-spacing: 0.16em; text-transform: uppercase; padding: 3px 8px; border: 1px solid var(--ink-soft); color: var(--ink-soft); }
   .provider-collapse .credential-status { justify-self: end; }
-  .credential-status.set { border-color: var(--ink); color: var(--ink); background: rgba(47, 122, 58, 0.14); }
+  .credential-status.set { border-color: var(--ink); color: var(--ink); background: color-mix(in srgb, var(--success) 14%, transparent); }
   .provider-remove { flex-shrink: 0; align-self: center; background: transparent; border: 1px solid transparent; color: var(--ink-soft); font-size: 16px; line-height: 1; padding: 4px 8px; cursor: pointer; opacity: 0.6; transition: opacity 120ms ease, color 120ms ease, border-color 120ms ease; }
   .provider-remove:hover, .provider-remove:focus-visible { opacity: 1; color: var(--error); border-color: var(--rule-soft); }
   .provider-remove:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
@@ -71,6 +71,6 @@
   .val { display: flex; gap: 10px; flex-wrap: wrap; }
   .key-val { align-items: center; }
   .text { width: 100%; max-width: 480px; padding: 9px 11px; border: 1px solid var(--ink); background: var(--paper); color: var(--ink); font-family: var(--font-body); font-size: 13px; line-height: 1.4; }
-  .text:focus { outline: none; background: rgba(240, 106, 58, 0.06); }
+  .text:focus { outline: none; background: color-mix(in srgb, var(--accent) 6%, transparent); }
   @media (max-width: 760px) { .field { grid-template-columns: 1fr; gap: 10px; } }
 </style>

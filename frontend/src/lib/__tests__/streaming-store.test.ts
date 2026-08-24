@@ -78,6 +78,72 @@ describe("initial state", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Reconnect reconciliation
+// ---------------------------------------------------------------------------
+
+describe("reconnect reconciliation", () => {
+  it("clears a live projection when the recovered same turn is terminal", () => {
+    const messages = [{
+      role: "assistant" as const,
+      content: "Recovered response",
+      timestamp: "2026-08-24T10:00:00Z",
+      turn_state: "completed" as const,
+      turn_id: "recovered-turn",
+    }];
+    const store = createStreamingStore({
+      conversationStore: {
+        get activeConversation() {
+          return { messages };
+        },
+        appendOptimisticUserMessage: () => {},
+        appendAssistantMessage: () => {},
+      },
+    });
+
+    store.startTurn("Continue the recovered turn");
+    const recoveredTurnGeneration = store.activeTurnGeneration;
+    store.handleServerEvent({ type: "token", content: "live content" });
+
+    store.reconcileAfterReconnect(recoveredTurnGeneration);
+
+    expect(store.isStreaming).toBe(false);
+    expect(store.streamedContent).toBe("");
+  });
+
+  it("does not let a delayed old refresh stop a newer stream", () => {
+    const messages = [{
+      role: "assistant" as const,
+      content: "Recovered response",
+      timestamp: "2026-08-24T10:00:00Z",
+      turn_state: "completed" as const,
+      turn_id: "older-turn",
+    }];
+    const store = createStreamingStore({
+      conversationStore: {
+        get activeConversation() {
+          return { messages };
+        },
+        appendOptimisticUserMessage: () => {},
+        appendAssistantMessage: () => {},
+      },
+    });
+
+    store.startTurn("Old turn before the refresh");
+    const recoveredTurnGeneration = store.activeTurnGeneration;
+
+    // Force the refresh to remain pending while a newer turn becomes live.
+    store.startTurn("New turn while the refresh is delayed");
+    store.handleServerEvent({ type: "token", content: "new live content" });
+
+    store.reconcileAfterReconnect(recoveredTurnGeneration);
+
+    expect(store.isStreaming).toBe(true);
+    expect(store.activeTurnId).toBeNull();
+    expect(store.streamedContent).toBe("new live content");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // startTurn
 // ---------------------------------------------------------------------------
 
