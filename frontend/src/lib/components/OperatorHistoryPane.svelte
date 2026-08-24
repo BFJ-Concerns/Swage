@@ -128,8 +128,8 @@
   dl { display: flex; gap: 16px; flex-wrap: wrap; margin: 10px 0; }
   dl div { display: flex; gap: 6px; } dt { text-transform: uppercase; } dd { margin: 0; }
   .state-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
-  pre { overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; background: var(--paper-deep, #eee7dc); padding: 10px; font: 11px/1.45 var(--font-mono); margin: 6px 0 0; }
-  .context-link { border: none; background: none; padding: 8px 0 0; color: var(--muted-color, #666); cursor: pointer; text-decoration: underline dotted; }
+  pre { overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; background: var(--paper-deep); padding: 10px; font: 11px/1.45 var(--font-mono); margin: 6px 0 0; }
+  .context-link { border: none; background: none; padding: 8px 0 0; color: var(--ink-soft); cursor: pointer; text-decoration: underline dotted; }
   .context-link:hover { color: var(--ink); }
   .history-alert { color: var(--accent); padding-top: 12px; }
   .history-loading, .empty-copy { padding: 12px 0; text-transform: uppercase; letter-spacing: 0.08em; }

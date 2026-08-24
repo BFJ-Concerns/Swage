@@ -195,7 +195,7 @@
   .approval-error {
     margin: 0;
     padding: 8px 14px;
-    background: rgba(168, 50, 26, 0.1);
+    background: color-mix(in srgb, var(--error) 10%, transparent);
     border-left: 3px solid var(--error);
     color: var(--error);
     font-family: var(--font-mono);
