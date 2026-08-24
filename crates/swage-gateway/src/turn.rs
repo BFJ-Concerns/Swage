@@ -197,14 +197,18 @@ pub(crate) fn append_provider_visible_reasoning(
     }));
 }
 
-fn provider_visible_array<'a>(
-    report_json: &'a mut serde_json::Value,
-    key: &str,
-) -> &'a mut Vec<serde_json::Value> {
+fn normalise_report_object(report_json: &mut serde_json::Value) {
     if !report_json.is_object() {
         let previous = std::mem::replace(report_json, serde_json::json!({}));
         report_json["assembly_report"] = previous;
     }
+}
+
+fn provider_visible_array<'a>(
+    report_json: &'a mut serde_json::Value,
+    key: &str,
+) -> &'a mut Vec<serde_json::Value> {
+    normalise_report_object(report_json);
 
     let object = report_json
         .as_object_mut()
@@ -228,6 +232,25 @@ fn provider_visible_array<'a>(
     values
         .as_array_mut()
         .expect("provider-visible value was normalised to an array")
+}
+
+fn record_effective_model_snapshot(
+    report_json: &mut serde_json::Value,
+    catalogue_entry: &str,
+    model: &swage_config::ModelEndpointConfig,
+    source: &str,
+) {
+    normalise_report_object(report_json);
+
+    if !report_json["provider_visible"].is_object() {
+        report_json["provider_visible"] = serde_json::json!({});
+    }
+    report_json["provider_visible"]["effective_model"] = serde_json::json!({
+        "catalogue_entry": catalogue_entry,
+        "model_id": model.model_id,
+        "provider_id": model.provider_id,
+        "source": source,
+    });
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -628,6 +651,42 @@ pub(crate) async fn process_turn_with_existing_turn_and_focus(
     attendance: TurnAttendance,
     compaction_focus: Option<String>,
 ) -> Result<(), GatewayError> {
+    process_turn_with_existing_turn_and_focus_and_model(
+        state,
+        session_id,
+        target_thread_id,
+        content,
+        ws_tx,
+        subscription,
+        output_schema_override,
+        max_output_retries_override,
+        effort_override,
+        cancellation_override,
+        existing_turn_id,
+        attendance,
+        compaction_focus,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn process_turn_with_existing_turn_and_focus_and_model(
+    state: &AppState,
+    session_id: Uuid,
+    target_thread_id: Option<Uuid>,
+    content: String,
+    ws_tx: mpsc::UnboundedSender<ServerEvent>,
+    subscription: Arc<Mutex<SubscriptionState>>,
+    output_schema_override: Option<serde_json::Value>,
+    max_output_retries_override: Option<u32>,
+    effort_override: Option<swage_core::Effort>,
+    cancellation_override: Option<CancellationToken>,
+    existing_turn_id: Option<Uuid>,
+    attendance: TurnAttendance,
+    compaction_focus: Option<String>,
+    requested_model: Option<String>,
+) -> Result<(), GatewayError> {
     process_turn_with_composition_and_focus(
         state,
         session_id,
@@ -644,6 +703,7 @@ pub(crate) async fn process_turn_with_existing_turn_and_focus(
         DispatchContextComposition::default(),
         None,
         compaction_focus,
+        requested_model,
     )
     .await
 }
@@ -681,6 +741,7 @@ pub(crate) async fn process_turn_with_composition(
         composition,
         agent_call_scope,
         None,
+        None,
     )
     .await
 }
@@ -707,6 +768,7 @@ async fn process_turn_with_composition_and_focus(
     composition: DispatchContextComposition,
     agent_call_scope: Option<Uuid>,
     compaction_focus: Option<String>,
+    requested_model: Option<String>,
 ) -> Result<(), GatewayError> {
     // Step 1: Resolve the space and target thread for this session.
     let mut session = state
@@ -868,13 +930,28 @@ async fn process_turn_with_composition_and_focus(
         None => (config, false),
     };
 
-    ensure_selected_model_available(
-        state,
-        &config,
-        session.selected_model_id.as_deref(),
-        session_id,
-    )?;
-    let config = effective_session_config(config, session.selected_model_id.as_deref());
+    let selected_model_id = requested_model
+        .as_deref()
+        .or(session.selected_model_id.as_deref());
+    if let Some(requested_model) = requested_model.as_deref() {
+        resolve_requested_turn_model(&config, requested_model)?;
+    }
+    ensure_selected_model_available(state, &config, selected_model_id, session_id)?;
+    let effective_model_source = match requested_model.as_deref() {
+        Some(_) => "request",
+        None if session
+            .selected_model_id
+            .as_deref()
+            .filter(|model_id| !model_id.trim().is_empty())
+            .is_some_and(|model_id| {
+                resolve_model_catalogue_entry(&config.models, model_id).is_some()
+            }) =>
+        {
+            "conversation"
+        }
+        None => "configured_default",
+    };
+    let config = effective_session_config(config, selected_model_id);
 
     // Skill discovery, space memory loading, and assembly search paths all use
     // the root retained when this application state was constructed.
@@ -1145,6 +1222,16 @@ async fn process_turn_with_composition_and_focus(
         tracing::warn!(error = %e, "failed to serialise assembly report");
         serde_json::json!({ "error": "serialisation failed" })
     });
+    if let Some((effective_model_id, effective_model)) =
+        resolve_model_catalogue_entry(&config.models, &config.models.default)
+    {
+        record_effective_model_snapshot(
+            &mut report_json,
+            effective_model_id,
+            effective_model,
+            effective_model_source,
+        );
+    }
 
     let session_approval_grants = state
         .session_approval_grants
@@ -1437,11 +1524,7 @@ async fn process_turn_with_composition_and_focus(
                     GatewayError::ConfigError(format!("session effort is invalid: {error}"))
                 })?
                 .or_else(|| {
-                    match session
-                        .selected_model_id
-                        .as_deref()
-                        .filter(|model_id| !model_id.trim().is_empty())
-                    {
+                    match selected_model_id.filter(|model_id| !model_id.trim().is_empty()) {
                         Some(model_id) => resolve_model_catalogue_entry(&config.models, model_id)
                             .and_then(|(_, model)| model.default_effort),
                         None => config
