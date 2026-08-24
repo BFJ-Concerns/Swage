@@ -240,6 +240,13 @@ fn provider_facing_schedule_schema_preserves_delivery_target_vocabulary() {
         }
     }
     assert!(
+        home["description"]
+            .as_str()
+            .expect("nullable projected target carries a description")
+            .contains("is `null`"),
+        "nullable target summary must include its null alternative"
+    );
+    assert!(
         routing["properties"]["explicit_targets"]
             .get("items")
             .is_none()
