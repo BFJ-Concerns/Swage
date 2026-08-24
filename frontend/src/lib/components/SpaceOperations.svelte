@@ -293,8 +293,8 @@
   }
 
   .primary {
-    background: var(--accent);
-    border-color: var(--accent);
+    background: var(--ink-orange);
+    border-color: var(--ink-orange);
     color: var(--paper);
     font-weight: 700;
   }
