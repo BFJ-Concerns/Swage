@@ -13,6 +13,9 @@ function makeStreamingStore(isStreaming = false): StreamingStore {
     get isStreaming() {
       return isStreaming;
     },
+    get activeTurnId() {
+      return null;
+    },
     get streamedContent() {
       return "";
     },

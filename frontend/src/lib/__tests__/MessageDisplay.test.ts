@@ -108,6 +108,9 @@ function makeStreamingStore(
     get isStreaming() {
       return isStreaming;
     },
+    get activeTurnId() {
+      return null;
+    },
     get streamedContent() {
       return "";
     },
