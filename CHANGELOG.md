@@ -6,6 +6,7 @@ All notable changes to Swage are documented in this file.
 
 ### Added
 
+- Agents can now list the workflows available to their session before starting one.
 - Asynchronous turn callers can select a configured model for one request, with the effective selection retained in that turn's audit snapshot.
 - Context assembly alternatives can now be configured under `context.alternatives` for controlled selection experiments.
 - Fresh spaces now include immutable researcher, organiser, and synthesist agent definitions for the shipped research-sweep workflow, with same-named authored definitions taking precedence.

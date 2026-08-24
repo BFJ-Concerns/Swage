@@ -1025,7 +1025,11 @@ fn tool_dispatch_result(
     }
 }
 
-fn format_tool_error_for_model(error: &swage_core::ToolError) -> String {
+/// Render a tool failure exactly as it will appear in the model's next message.
+///
+/// Tool implementations may use this boundary to verify that actionable error
+/// detail survives the agent's compaction policy.
+pub fn format_tool_error_for_model(error: &swage_core::ToolError) -> String {
     use swage_core::ToolError;
 
     match error {
@@ -1061,9 +1065,13 @@ fn format_tool_error_for_model(error: &swage_core::ToolError) -> String {
     }
 }
 
-fn compact_tool_error_detail(message: &str) -> String {
-    const MAX_DETAIL_CHARS: usize = 320;
+/// Maximum detail retained in a tool error sent to the model.
+///
+/// Producers that put structured guidance in errors must fit it within this
+/// budget themselves, so compaction never silently changes its meaning.
+pub const MAX_MODEL_TOOL_ERROR_DETAIL_CHARS: usize = 320;
 
+fn compact_tool_error_detail(message: &str) -> String {
     let lines = message
         .lines()
         .map(str::trim)
@@ -1080,13 +1088,13 @@ fn compact_tool_error_detail(message: &str) -> String {
     };
     let compact = detail.split_whitespace().collect::<Vec<_>>().join(" ");
 
-    if compact.chars().count() <= MAX_DETAIL_CHARS {
+    if compact.chars().count() <= MAX_MODEL_TOOL_ERROR_DETAIL_CHARS {
         return compact;
     }
 
     let mut shortened = compact
         .chars()
-        .take(MAX_DETAIL_CHARS.saturating_sub(3))
+        .take(MAX_MODEL_TOOL_ERROR_DETAIL_CHARS.saturating_sub(3))
         .collect::<String>();
     shortened.push_str("...");
     shortened
