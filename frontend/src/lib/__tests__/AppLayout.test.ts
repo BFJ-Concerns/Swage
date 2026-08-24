@@ -361,6 +361,8 @@ describe("AppLayout shell navigation", () => {
     component = mountLayout({ onNavigate, routePath: "/settings/providers" });
 
     expect(document.querySelector('[aria-label="Settings"]')).not.toBeNull();
+    expect(surfaceButton("Conversation").getAttribute("aria-pressed")).toBe("false");
+    expect(surfaceButton("Conversation").classList.contains("active")).toBe(false);
     flushSync(() =>
       (document.querySelector('[aria-label="Close settings"]') as HTMLButtonElement).click(),
     );
