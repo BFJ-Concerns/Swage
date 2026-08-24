@@ -37,24 +37,6 @@ impl From<&str> for WorkflowHostError {
     }
 }
 
-impl std::ops::Deref for WorkflowHostError {
-    type Target = str;
-
-    fn deref(&self) -> &Self::Target {
-        match self {
-            Self::Message(message) | Self::AgentCall { message, .. } => message,
-        }
-    }
-}
-
-impl PartialEq<&str> for WorkflowHostError {
-    fn eq(&self, other: &&str) -> bool {
-        match self {
-            Self::Message(message) | Self::AgentCall { message, .. } => message == other,
-        }
-    }
-}
-
 /// An opaque continuation token naming a worker session the run created.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentSessionRef {
@@ -324,6 +306,65 @@ pub trait WorkflowHost: Send + Sync {
     /// journal near the ceiling.
     async fn budget_snapshot(&self, _cancellation: CancellationToken) -> Result<Value, String> {
         Err("BudgetSnapshotError: this host does not support budget snapshots".into())
+    }
+}
+
+#[cfg(test)]
+mod task_request_tests {
+    use super::*;
+
+    fn request(task: Option<&str>) -> AgentCallRequest {
+        AgentCallRequest {
+            prompt: "work".into(),
+            agent: None,
+            task: task.map(str::to_owned),
+            model: None,
+            effort: None,
+            timeout_ms: None,
+            cwd: None,
+            isolation: None,
+            schema: None,
+            max_attempts: 1,
+            label: None,
+            session: None,
+            elements: None,
+            variables: None,
+            assembly: None,
+        }
+    }
+
+    #[test]
+    fn absent_task_keeps_the_historical_serialised_shape() {
+        let value = serde_json::to_value(request(None)).expect("serialise request");
+        assert!(
+            !value
+                .as_object()
+                .expect("request object")
+                .contains_key("task")
+        );
+    }
+
+    #[test]
+    fn named_task_is_serialised_verbatim() {
+        let value = serde_json::to_value(request(Some("review"))).expect("serialise request");
+        assert_eq!(value["task"], "review");
+        let restored: AgentCallRequest = serde_json::from_value(value).expect("read request");
+        assert_eq!(restored.task.as_deref(), Some("review"));
+    }
+
+    #[test]
+    fn unknown_effort_is_rejected_at_the_dispatch_boundary() {
+        let error = serde_json::from_value::<AgentCallRequest>(serde_json::json!({
+            "prompt": "work",
+            "model": null,
+            "effort": "extreme",
+            "schema": null,
+            "max_attempts": 1,
+            "label": null
+        }))
+        .expect_err("workflow effort must use the shared vocabulary");
+
+        assert!(error.to_string().contains("unknown variant `extreme`"));
     }
 }
 

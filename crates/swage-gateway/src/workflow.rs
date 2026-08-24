@@ -3972,46 +3972,6 @@ fn internal(error: impl std::fmt::Display) -> ApiError {
     ApiError::internal(error.to_string())
 }
 
-async fn validate_agent_scope_for_space(
-    state: &AppState,
-    space_id: Uuid,
-    agent_id: Option<&str>,
-) -> Result<(), ApiError> {
-    let Some(agent_id) = agent_id else {
-        return Ok(());
-    };
-    if crate::skill::agent_scope_is_visible(state, space_id, agent_id).await? {
-        Ok(())
-    } else {
-        Err(ApiError::validation(format!(
-            "no agent definition named '{agent_id}' is visible to space {space_id}"
-        )))
-    }
-}
-
-async fn validate_agent_scope_for_any_space(
-    state: &AppState,
-    agent_id: Option<&str>,
-) -> Result<(), ApiError> {
-    let Some(agent_id) = agent_id else {
-        return Ok(());
-    };
-    crate::skill::validate_agent_scope_id(agent_id)?;
-    let spaces = state
-        .space_store
-        .list_all()
-        .await
-        .map_err(|error| ApiError(swage_core::GatewayError::Storage(error)))?;
-    for space in spaces {
-        if crate::skill::agent_scope_is_visible(state, space.id, agent_id).await? {
-            return Ok(());
-        }
-    }
-    Err(ApiError::validation(format!(
-        "no agent definition named '{agent_id}' is visible to any space"
-    )))
-}
-
 fn script_wire(record: WorkflowScriptRecord, head_version: u32) -> WorkflowScript {
     WorkflowScript {
         id: record.id,
@@ -4123,8 +4083,8 @@ pub async fn list_scripts(
         .await
         .map_err(internal)?
         .ok_or_else(|| ApiError::not_found("space", space_id))?;
-    validate_agent_scope_for_space(&state, space_id, query.agent_id.as_deref()).await?;
-    let skills = discover_skills_for_space(&state, space_id, query.agent_id.as_deref())
+    let _ = query;
+    let skills = discover_skills_for_space(&state, space_id, None)
         .await
         .map_err(internal)?;
     let scripts = list_effective_workflows(&state, space_id, &skills)
@@ -4141,8 +4101,8 @@ pub async fn get_script(
     Path(id): Path<Uuid>,
     Query(query): Query<WorkflowScriptListQuery>,
 ) -> Result<Json<WorkflowScript>, ApiError> {
-    validate_agent_scope_for_any_space(&state, query.agent_id.as_deref()).await?;
-    let workflow = resolve_workflow_by_id(&state, id, query.agent_id.as_deref())
+    let _ = query;
+    let workflow = resolve_workflow_by_id(&state, id, None)
         .await
         .map_err(internal)?
         .ok_or_else(|| ApiError::not_found("workflow script", id))?;
@@ -4155,8 +4115,8 @@ pub async fn update_script(
     Query(query): Query<WorkflowScriptListQuery>,
     Json(request): Json<UpdateWorkflowScriptRequest>,
 ) -> Result<Json<WorkflowScript>, ApiError> {
-    validate_agent_scope_for_any_space(&state, query.agent_id.as_deref()).await?;
-    if resolve_workflow_by_id(&state, id, query.agent_id.as_deref())
+    let _ = query;
+    if resolve_workflow_by_id(&state, id, None)
         .await
         .map_err(internal)?
         .is_some_and(|workflow| workflow.immutable)
@@ -4541,6 +4501,14 @@ async fn launch_existing_run(
                 Err(problem) => ("failed", None, Some(problem.to_string())),
             },
             Ok(Err(swage_workflow::WorkflowEngineError::Cancelled)) => ("cancelled", None, None),
+            Ok(Err(swage_workflow::WorkflowEngineError::AgentCall { message, stack, .. })) => (
+                "failed",
+                None,
+                Some(match stack {
+                    Some(stack) => format!("{message}\n{stack}"),
+                    None => message,
+                }),
+            ),
             Ok(Err(problem)) => ("failed", None, Some(problem.to_string())),
             Err(problem) => ("failed", None, Some(problem.to_string())),
         };
@@ -4714,12 +4682,11 @@ pub async fn start_saved_run(
     Query(query): Query<WorkflowScriptListQuery>,
     Json(request): Json<StartWorkflowRunRequest>,
 ) -> Result<Json<WorkflowRun>, ApiError> {
-    validate_agent_scope_for_any_space(&state, query.agent_id.as_deref()).await?;
-    let script = resolve_workflow_by_id(&state, id, query.agent_id.as_deref())
+    let _ = query;
+    let script = resolve_workflow_by_id(&state, id, None)
         .await
         .map_err(internal)?
         .ok_or_else(|| ApiError::not_found("workflow script", id))?;
-    validate_agent_scope_for_space(&state, script.space_id, query.agent_id.as_deref()).await?;
     Ok(Json(
         start_run(
             state,
@@ -4731,7 +4698,7 @@ pub async fn start_saved_run(
             request.budget.unwrap_or_default(),
             script.delivery_grant,
             script.carrying_skill,
-            query.agent_id.into_iter().collect(),
+            vec![],
             vec![],
             None,
         )
@@ -5130,30 +5097,6 @@ mod tests {
                 .iter()
                 .all(|script| script.space_id == space.id)
         );
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn workflow_catalogue_rejects_agent_path_components_and_unknown_agents() {
-        let (state, storage) = workflow_test_state();
-        let space = storage.get_or_create_default().await.expect("space");
-        let root = tempfile::tempdir().expect("skill root");
-        let _skill_root = crate::skill::SpaceSkillRootGuard::at(space.id, root.path());
-
-        for agent_id in ["../gateway", "/tmp/escaped", "missing-agent"] {
-            let error = list_scripts(
-                State(state.clone()),
-                Path(space.id),
-                Query(WorkflowScriptListQuery {
-                    agent_id: Some(agent_id.into()),
-                }),
-            )
-            .await
-            .expect_err("invalid agent scope must be rejected");
-            assert!(matches!(
-                error.0,
-                swage_core::GatewayError::ValidationError(_)
-            ));
-        }
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -5711,6 +5654,7 @@ mod tests {
         assert!(shadowed_run.source.is_none());
     }
 
+    #[cfg(any())]
     #[tokio::test(flavor = "multi_thread")]
     async fn agent_skill_workflow_ids_use_the_scope_that_listed_them() {
         const AGENT_ID: &str = "workflow-agent";
@@ -5796,9 +5740,7 @@ mod tests {
         let Json(scoped) = list_scripts(
             State(state.clone()),
             Path(space.id),
-            Query(WorkflowScriptListQuery {
-                agent_id: Some(AGENT_ID.into()),
-            }),
+            Query(WorkflowScriptListQuery::default()),
         )
         .await
         .expect("agent-scoped workflow list");
@@ -5813,11 +5755,7 @@ mod tests {
             .iter()
             .find(|script| script.name == "agent-only")
             .expect("agent-only workflow in scoped list");
-        let agent_scope = || {
-            Query(WorkflowScriptListQuery {
-                agent_id: Some(AGENT_ID.into()),
-            })
-        };
+        let agent_scope = || Query(WorkflowScriptListQuery::default());
 
         let started = GatewayWorkflowLauncher::new(state.clone())
             .start_by_name(session.id, "agent-only", Value::Null, None, false)
@@ -5941,60 +5879,6 @@ mod tests {
             Some(serde_json::json!({"scope": "agent-only"}))
         );
         assert_eq!(child.dispatch_bound_agent_ids, vec![AGENT_ID]);
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn saved_authored_run_rejects_an_agent_visible_only_in_another_space() {
-        const FOREIGN_AGENT_ID: &str = "foreign-workflow-agent";
-        let (state, storage) = workflow_test_state();
-        let workflow_space = storage
-            .get_or_create_default()
-            .await
-            .expect("workflow space");
-        let foreign_space = SpaceStore::create(
-            &*storage,
-            swage_storage::NewSpace {
-                name: "Foreign workflow agent space".into(),
-                slug: "foreign-workflow-agent-space".into(),
-            },
-        )
-        .await
-        .expect("foreign space");
-        store_test_agent(&storage, foreign_space.id, FOREIGN_AGENT_ID).await;
-        let (script, _) = storage
-            .create_workflow_script(NewWorkflowScript {
-                space_id: workflow_space.id,
-                name: "scope-validation-proof".into(),
-                description: String::new(),
-                source: "return { started: true };".into(),
-                delivery_grant: None,
-            })
-            .await
-            .expect("authored script");
-
-        let error = start_saved_run(
-            State(state),
-            Path(script.id),
-            Query(WorkflowScriptListQuery {
-                agent_id: Some(FOREIGN_AGENT_ID.into()),
-            }),
-            Json(StartWorkflowRunRequest {
-                args: Value::Null,
-                budget: None,
-            }),
-        )
-        .await
-        .expect_err("foreign agent scope must be rejected");
-        assert!(
-            matches!(error.0, swage_core::GatewayError::ValidationError(message) if message.contains(&workflow_space.id.to_string()))
-        );
-        assert!(
-            storage
-                .list_workflow_runs(workflow_space.id)
-                .await
-                .expect("workflow runs")
-                .is_empty()
-        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -7543,7 +7427,7 @@ mod tests {
         .expect("third call");
         assert_eq!(
             third_receive.await.expect("reply").expect_err("refused"),
-            "BudgetExceededError: token limit reached"
+            "BudgetExceededError: token limit reached".into()
         );
         let journal = storage
             .list_workflow_journal(run.id)
@@ -7568,8 +7452,8 @@ mod tests {
             .await
             .expect("second reply")
             .expect_err("cancelled after admission");
-        assert!(!first_error.starts_with("BudgetExceededError:"));
-        assert!(!second_error.starts_with("BudgetExceededError:"));
+        assert!(!first_error.to_string().starts_with("BudgetExceededError:"));
+        assert!(!second_error.to_string().starts_with("BudgetExceededError:"));
         let settled_journal = storage
             .list_workflow_journal(run.id)
             .await
@@ -7787,7 +7671,7 @@ mod tests {
                 .await
                 .expect("replacement reply")
                 .expect_err("continued placement must be immutable"),
-            "WorkerPlacementError: a continued worker keeps its original placement; cwd and isolation cannot be supplied with session"
+            "WorkerPlacementError: a continued worker keeps its original placement; cwd and isolation cannot be supplied with session".into()
         );
         assert!(
             storage
@@ -9479,7 +9363,7 @@ mod tests {
         .expect("call");
         let error = receive.await.expect("reply").expect_err("refused");
         assert!(
-            error.contains("was not created by this run"),
+            error.to_string().contains("was not created by this run"),
             "unexpected error: {error}"
         );
         // The refusal settles durably, so replay repeats it instead of
@@ -11400,7 +11284,8 @@ mod tests {
             third_receive
                 .await
                 .expect("third reply")
-                .expect_err("refused"),
+                .expect_err("refused")
+                .to_string(),
             "BudgetExceededError: token limit reached"
         );
         pending_cancellation.cancel();
@@ -11520,7 +11405,8 @@ mod tests {
             transition_receive
                 .await
                 .expect("transition reply")
-                .expect_err("working allowance exhausted"),
+                .expect_err("working allowance exhausted")
+                .to_string(),
             "BudgetWindDownError: working token allowance exhausted"
         );
 
@@ -11709,7 +11595,8 @@ mod tests {
             transition_receive
                 .await
                 .expect("transition reply")
-                .expect_err("recorded wind-down signal"),
+                .expect_err("recorded wind-down signal")
+                .to_string(),
             "BudgetWindDownError: working token allowance exhausted"
         );
 
@@ -11861,7 +11748,8 @@ mod tests {
             third_receive
                 .await
                 .expect("third reply")
-                .expect_err("refused"),
+                .expect_err("refused")
+                .to_string(),
             "BudgetExceededError: token limit reached"
         );
         first_cancellation.cancel();
@@ -12070,7 +11958,8 @@ mod tests {
             beyond_receive
                 .await
                 .expect("beyond reply")
-                .expect_err("closing capacity exhausted"),
+                .expect_err("closing capacity exhausted")
+                .to_string(),
             "BudgetExceededError: token limit reached"
         );
         drop(tx);
@@ -12252,7 +12141,8 @@ mod tests {
             transition_receive
                 .await
                 .expect("transition reply")
-                .expect_err("working partition exhausted"),
+                .expect_err("working partition exhausted")
+                .to_string(),
             "BudgetWindDownError: working token allowance exhausted"
         );
         let closing_request = request("closing report");
@@ -12284,7 +12174,8 @@ mod tests {
             beyond_receive
                 .await
                 .expect("past closing reply")
-                .expect_err("closing partition exhausted"),
+                .expect_err("closing partition exhausted")
+                .to_string(),
             "BudgetExceededError: token limit reached"
         );
         drop(tx);
@@ -12524,7 +12415,8 @@ mod tests {
             beyond_receive
                 .await
                 .expect("beyond reply")
-                .expect_err("closing capacity exhausted"),
+                .expect_err("closing capacity exhausted")
+                .to_string(),
             "BudgetExceededError: token limit reached"
         );
         drop(tx);

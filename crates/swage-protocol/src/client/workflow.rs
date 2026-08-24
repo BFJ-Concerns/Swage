@@ -47,10 +47,8 @@ pub struct WorkflowScriptListResponse {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, TS, JsonSchema)]
-pub struct WorkflowScriptListQuery {
-    /// Agent whose effective skill layer should contribute carried workflows.
-    pub agent_id: Option<String>,
-}
+#[serde(deny_unknown_fields)]
+pub struct WorkflowScriptListQuery {}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
 pub struct WorkflowBudget {

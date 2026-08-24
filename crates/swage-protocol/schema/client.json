@@ -5433,15 +5433,7 @@
     },
     "WorkflowScriptListQuery": {
       "type": "object",
-      "properties": {
-        "agent_id": {
-          "description": "Agent whose effective skill layer should contribute carried workflows.",
-          "type": [
-            "string",
-            "null"
-          ]
-        }
-      }
+      "additionalProperties": false
     },
     "WorkflowScriptListResponse": {
       "type": "object",
