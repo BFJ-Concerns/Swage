@@ -247,7 +247,7 @@ mod tests {
             crate::tool::ToolDispatcher::allow_all(vec![]),
             None,
         );
-        let base = MockToolContext::new("gateway", session.id.to_string());
+        let base = MockToolContext::new("current-agent", session.id.to_string());
         let (ws_tx, _ws_rx) = tokio::sync::mpsc::unbounded_channel();
         let context =
             GatewayToolContext::new(&base, ws_tx, Arc::clone(&storage) as Arc<dyn Storage>)
