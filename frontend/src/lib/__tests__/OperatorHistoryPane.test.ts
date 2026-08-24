@@ -118,6 +118,8 @@ describe("OperatorHistoryPane", () => {
       "request total: 321 tokens",
     );
     expect(document.querySelector(".summary")?.closest(".history-entry")).toBeNull();
+    (document.querySelector('button[aria-label="Close"]') as HTMLButtonElement).click();
+    await vi.waitFor(() => expect(document.querySelector(".context-inspector")).toBeNull());
     expect(document.body.textContent).toContain("[REDACTED]");
     expect(document.body.textContent).not.toContain(secretValue);
   });
