@@ -34,6 +34,8 @@ export interface StreamingStore {
   readonly isStreaming: boolean;
   /** The server-assigned identity of the live turn, once the gateway emits it. */
   readonly activeTurnId: string | null;
+  /** Monotonic local identity for the current streamed projection. */
+  readonly activeTurnGeneration: number;
   readonly streamedContent: string;
   readonly turnError: { code: string; message: string } | null;
   readonly turnStartedAt: string | null;
@@ -48,7 +50,7 @@ export interface StreamingStore {
   // matching the approval UI.
   readonly pendingApproval: PendingApproval | null;
   handleServerEvent(event: ServerEvent): void;
-  reconcileAfterReconnect(recoveredTurnId: string | null, recoveredTurnStartedAt: string | null): void;
+  reconcileAfterReconnect(recoveredTurnGeneration: number): void;
   startTurn(content: string, selectedModelId?: string | null, agentId?: string | null, effort?: import("../protocol/Effort").Effort | null): void;
   cancelTurn(): void;
 }
@@ -105,6 +107,7 @@ export function createStreamingStore(
   // Currently active approval awaiting user decision; null when none.
   const pendingApprovalStore = writable<PendingApproval | null>(null);
   const activeTurnIdStore = writable<string | null>(null);
+  let activeTurnGeneration = 0;
 
   const isStreamingState = fromStore(isStreamingStore);
   const streamedContentState = fromStore(streamedContentStore);
@@ -156,6 +159,10 @@ export function createStreamingStore(
 
     get activeTurnId(): string | null {
       return activeTurnIdState.current;
+    },
+
+    get activeTurnGeneration(): number {
+      return activeTurnGeneration;
     },
 
     get streamedContent(): string {
@@ -426,22 +433,20 @@ export function createStreamingStore(
       }
     },
 
-    reconcileAfterReconnect(recoveredTurnId: string | null, recoveredTurnStartedAt: string | null): void {
+    reconcileAfterReconnect(recoveredTurnGeneration: number): void {
       const lastMessage = options?.conversationStore?.activeConversation?.messages.at(-1);
       if (
         !get(isStreamingStore) ||
-        recoveredTurnId === null ||
-        recoveredTurnStartedAt === null ||
-        get(activeTurnIdStore) !== recoveredTurnId ||
-        get(turnStartedAtStore) !== recoveredTurnStartedAt ||
+        activeTurnGeneration !== recoveredTurnGeneration ||
         lastMessage?.role !== "assistant" ||
-        lastMessage.turn_id !== recoveredTurnId ||
         !["completed", "failed", "interrupted"].includes(lastMessage.turn_state ?? "")
       ) return;
 
       // The HTTP refresh recovered the terminal assistant message that the
-      // dropped socket could not deliver. Discard the stale live projection;
-      // the durable conversation is now authoritative.
+      // dropped socket could not deliver. Normal token events intentionally
+      // carry no turn ID, so the monotonically increasing local generation
+      // fences a later start that races the refresh. The durable conversation
+      // is authoritative only for the projection captured before reconnect.
       streamedContentStore.set("");
       isStreamingStore.set(false);
       turnStartedAtStore.set(null);
@@ -458,6 +463,7 @@ export function createStreamingStore(
       activeToolCallsStore.set([]);
       providerRetryStore.set(null);
       activeTurnIdStore.set(null);
+      activeTurnGeneration += 1;
       turnStartedAtStore.set(new Date().toISOString());
       isStreamingStore.set(true);
 
@@ -514,6 +520,9 @@ export function withConversationAutoCreate(
     get activeTurnId(): string | null {
       return base.activeTurnId;
     },
+    get activeTurnGeneration(): number {
+      return base.activeTurnGeneration;
+    },
     get streamedContent(): string {
       return base.streamedContent;
     },
@@ -533,7 +542,7 @@ export function withConversationAutoCreate(
       return base.pendingApproval;
     },
     handleServerEvent: (event) => base.handleServerEvent(event),
-    reconcileAfterReconnect: (turnId, turnStartedAt) => base.reconcileAfterReconnect(turnId, turnStartedAt),
+    reconcileAfterReconnect: (turnGeneration) => base.reconcileAfterReconnect(turnGeneration),
     cancelTurn: () => base.cancelTurn(),
 
     startTurn(content: string, selectedModelId?: string | null, agentId?: string | null, effort?: import("../protocol/Effort").Effort | null): void {

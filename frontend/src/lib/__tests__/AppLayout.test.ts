@@ -55,6 +55,7 @@ function mockStreamingStore(): StreamingStore {
   return {
     get isStreaming() { return false; },
     get activeTurnId() { return null; },
+    get activeTurnGeneration() { return 0; },
     get streamedContent() { return ""; },
     get turnError() { return null; },
     get turnStartedAt() { return null; },
@@ -357,13 +358,17 @@ describe("AppLayout shell navigation", () => {
     expect(onNavigate).toHaveBeenCalledWith("/settings/providers");
   });
 
-  it("renders settings and returns to the shell", () => {
+  it("marks settings, rather than either hidden surface, while settings is open", () => {
     const onNavigate = vi.fn();
     component = mountLayout({ onNavigate, routePath: "/settings/providers" });
 
     expect(document.querySelector('[aria-label="Settings"]')).not.toBeNull();
     expect(surfaceButton("Conversation").getAttribute("aria-pressed")).toBe("false");
     expect(surfaceButton("Conversation").classList.contains("active")).toBe(false);
+    expect(surfaceButton("Operator").getAttribute("aria-pressed")).toBe("false");
+    expect(surfaceButton("Operator").classList.contains("active")).toBe(false);
+    expect(surfaceButton("Settings").getAttribute("aria-pressed")).toBe("true");
+    expect(surfaceButton("Settings").classList.contains("active")).toBe(true);
     flushSync(() =>
       (document.querySelector('[aria-label="Close settings"]') as HTMLButtonElement).click(),
     );

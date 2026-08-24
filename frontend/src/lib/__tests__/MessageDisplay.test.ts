@@ -118,6 +118,9 @@ function makeStreamingStore(
     get activeTurnId() {
       return null;
     },
+    get activeTurnGeneration() {
+      return 0;
+    },
     get streamedContent() {
       return "";
     },
@@ -189,6 +192,8 @@ describe("turn context inspector trigger", () => {
 
     await vi.waitFor(() => expect(fetchTurnContext).toHaveBeenCalledWith("turn-42"));
     expect(document.body.textContent?.replace(/\s+/g, " ")).toContain("request total: 12 tokens");
+    expect(document.querySelector(".summary")?.closest(".message-display")).toBeNull();
+    expect(document.querySelector(".summary")?.closest(".message")).toBeNull();
   });
 });
 

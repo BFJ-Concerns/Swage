@@ -43,7 +43,9 @@ All notable changes to Swage are documented in this file.
 ### Fixed
 
 - The conversation surface control no longer appears active while settings are open.
-- Gateway startup no longer emits legacy-credential warnings without an in-product remedy.
+- Surface navigation now marks Settings, rather than a hidden conversation or operator surface, as active while it is open.
+- Reconnecting after a dropped socket now clears only the captured live turn when its refreshed conversation is terminal.
+- Gateway startup now directs legacy environment credentials to their governed secret-management routes.
 - Tool-call and connection-error failure states now use the shared error treatment instead of action orange; connection loss and reconnection keep their ordinary connectivity treatment.
 - Inline-turn and approval errors now use the error-token wash in both themes.
 - Workflow scripts now reject unrecognised `agent()` and `agentStart()` option keys before dispatch instead of silently dropping them.

@@ -419,6 +419,12 @@ async fn resolve_provider_config(
     }
 
     if let Some(api_key_env) = provider.api_key_env.as_deref() {
+        tracing::warn!(
+            "Provider '{}' is using legacy api_key_env credential resolution. \
+             Store the credential in Settings > Providers to create a governed provider_key secret \
+             and set api_key_secret_ref.",
+            model.provider_id
+        );
         let api_key = std::env::var(api_key_env).map_err(|_| swage_core::ProviderError::Auth {
             provider: format!("environment variable '{api_key_env}' is not set"),
         })?;
@@ -489,6 +495,11 @@ async fn resolve_telegram_token(
     }
 
     if let Some(env_var) = telegram.bot_token_env.as_deref() {
+        warn!(
+            "Telegram channel is using legacy bot_token_env credential resolution. \
+             Create a governed channel_token secret through POST /api/secrets and set \
+             bot_token_secret_ref."
+        );
         return std::env::var(env_var)
             .map_err(|_| format!("environment variable '{env_var}' is not set"));
     }
@@ -1462,7 +1473,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn legacy_environment_credentials_start_without_unactionable_warnings() {
+    async fn legacy_environment_credentials_warn_with_governed_remedies() {
         let storage =
             Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
         let secret_manager = crate::secret::SecretManager::new(
@@ -1498,13 +1509,14 @@ mod tests {
 
         assert_eq!(provider_config.api_key.as_deref(), Some("provider-key"));
         assert_eq!(telegram_token, "telegram-token");
+        let events = captured.lock().unwrap();
         assert!(
-            !captured
-                .lock()
-                .unwrap()
-                .iter()
-                .any(|event| event.contains("legacy") || event.contains("audit credential access")),
-            "working legacy credentials must not emit warnings with no in-product remedy"
+            events.iter().any(|event| event.contains("Settings > Providers")),
+            "provider legacy credential warning must direct operators to Settings: {events:?}"
+        );
+        assert!(
+            events.iter().any(|event| event.contains("POST /api/secrets")),
+            "Telegram legacy credential warning must direct operators to its governed route: {events:?}"
         );
     }
 
