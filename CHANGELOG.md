@@ -7,6 +7,7 @@ All notable changes to Swage are documented in this file.
 ### Added
 
 - Asynchronous turn callers can select a configured model for one request, with the effective selection retained in that turn's audit snapshot.
+- Context assembly alternatives can now be configured under `context.alternatives` for controlled selection experiments.
 - Fresh spaces now include immutable researcher, organiser, and synthesist agent definitions for the shipped research-sweep workflow, with same-named authored definitions taking precedence.
 - Knowledge captures made by workflow workers now carry their journalled call's identity, so a sweep interrupted mid-gather resumes without duplicating any source's observation.
 - Research sweeps now author evidence-backed orientation cards during the organising pass and report claims the synthesist withheld for lack of supporting evidence.
@@ -47,6 +48,18 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- Portable JavaScript workflow `meta` headers now seed saved script details, and the unused workflow-script `agent_id` query has been removed.
+- Reserved workflow workers no longer load configuration, skills, named context elements, or JavaScript assemblies from an `__workflow_ephemeral__` agent directory, and that directory's skills are no longer listed by the skills API.
+- Sandboxed dispatched-agent shell tools now mount the minimal device filesystem over the read-only root and add narrow per-node device rules to the Landlock ruleset, restoring standard device access for ordinary Git initialisation and commits.
+- The conversation surface control no longer appears active while settings are open.
+- Surface navigation now marks Settings, rather than a hidden conversation or operator surface, as active while it is open.
+- Reconnecting after a dropped socket now clears only the captured live turn when its refreshed conversation is terminal.
+- Gateway startup now directs legacy environment credentials to their governed secret-management routes.
+- Missing file-like frontend paths now return HTTP 404 instead of a successful SPA shell.
+- Turn-context inspection now shows exact built-in orientation and working-norm excerpts plus active skill names, while leaving operator and conversation content unpreviewed.
+- Resumed workflow runs now park durably when a long timer follows an agent, child-workflow, or gate completion.
+- The first rendered web frame now uses the light theme's complete token set before display preferences apply.
+- Primary actions in space operations and schedule automation now use an AA-compliant light-theme treatment.
 - Tool-call and connection-error failure states now use the shared error treatment instead of action orange; connection loss and reconnection keep their ordinary connectivity treatment.
 - Inline-turn and approval errors now use the error-token wash in both themes.
 - Workflow scripts now reject unrecognised `agent()` and `agentStart()` option keys before dispatch instead of silently dropping them.

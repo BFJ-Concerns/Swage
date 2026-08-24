@@ -138,6 +138,13 @@ pub trait DelegationSnapshotRecorder: Send + Sync {
         turn_id: Uuid,
         report: &serde_json::Value,
     ) -> Result<(), AgentError>;
+
+    /// Persist a diagnostic event emitted while the delegated child runs.
+    /// The gateway owns the durable audit format; the agent runtime only
+    /// ensures the child's events reach that same persistence boundary.
+    async fn record_event(&self, _session_id: Uuid, _event: AgentEvent) -> Result<(), AgentError> {
+        Ok(())
+    }
 }
 
 /// Assembles model context after the delegated child session has been created.
@@ -394,8 +401,18 @@ impl DelegationExecutor {
         // DelegationGuard handles deregistration on drop (including mid-
         // execution cancellation). No explicit removal needed.
 
-        // Drain events (we don't forward them — delegation events are internal).
-        while event_rx.try_recv().is_ok() {}
+        // Delegated events are not delivered to the parent's live stream, but
+        // their diagnostic audit data belongs in the child's local record.
+        while let Ok(event) = event_rx.try_recv() {
+            if let Some(recorder) = &self.snapshot_recorder {
+                // The child has already completed. Preserve that result if an
+                // optional diagnostic write cannot be recorded; the recorder
+                // itself is responsible for recording any reconstruction gap.
+                if let Err(error) = recorder.record_event(session.id, event).await {
+                    tracing::warn!(%turn_id, %error, "failed to persist delegated diagnostic event");
+                }
+            }
+        }
 
         // 6. Create Result or failure message — only the payload differs.
         let send_result = |payload| NewAgentMessage {

@@ -196,9 +196,6 @@
     "workflow_script_list": {
       "$ref": "#/$defs/WorkflowScriptListResponse"
     },
-    "workflow_script_list_query": {
-      "$ref": "#/$defs/WorkflowScriptListQuery"
-    },
     "workspace_attachment_list": {
       "$ref": "#/$defs/WorkspaceAttachmentListResponse"
     }
@@ -257,7 +254,6 @@
     "provider_sign_in_state",
     "create_workflow_script_request",
     "update_workflow_script_request",
-    "workflow_script_list_query",
     "workflow_script_list",
     "start_workflow_run_request",
     "start_inline_workflow_run_request",
@@ -800,6 +796,13 @@
     "ContextConfig": {
       "type": "object",
       "properties": {
+        "alternatives": {
+          "description": "Named context assemblies registered as hidden alternatives to the\nconfigured default. Selection records the chosen name locally.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "assembly": {
           "type": "string"
         },
@@ -5436,18 +5439,6 @@
         "created_at",
         "updated_at"
       ]
-    },
-    "WorkflowScriptListQuery": {
-      "type": "object",
-      "properties": {
-        "agent_id": {
-          "description": "Agent whose effective skill layer should contribute carried workflows.",
-          "type": [
-            "string",
-            "null"
-          ]
-        }
-      }
     },
     "WorkflowScriptListResponse": {
       "type": "object",

@@ -117,7 +117,10 @@ describe("OperatorHistoryPane", () => {
     expect(document.querySelector(".summary")?.textContent?.replace(/\s+/g, " ")).toContain(
       "request total: 321 tokens",
     );
+    expect(document.querySelector(".summary")?.closest(".history-entry")).toBeNull();
     expect(document.body.textContent).toContain("[REDACTED]");
     expect(document.body.textContent).not.toContain(secretValue);
+    (document.querySelector('button[aria-label="Close"]') as HTMLButtonElement).click();
+    await vi.waitFor(() => expect(document.querySelector(".context-inspector")).toBeNull());
   });
 });
