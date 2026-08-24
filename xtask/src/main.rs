@@ -518,40 +518,88 @@ fn check_frontend_design_tokens() -> Result<()> {
 }
 
 fn component_style_lines(contents: &str) -> impl Iterator<Item = (usize, &str, usize)> {
-    let mut in_style = false;
+    #[derive(Default)]
+    enum StyleRegion {
+        #[default]
+        Outside,
+        OpeningTag {
+            quote: Option<char>,
+        },
+        Contents,
+    }
+
+    fn is_style_opening_tag(line: &str) -> bool {
+        let Some(after_name) = line.strip_prefix("<style") else {
+            return false;
+        };
+
+        matches!(after_name.chars().next(), None | Some('>'))
+            || after_name.chars().next().is_some_and(char::is_whitespace)
+    }
+
+    fn opening_tag_end(line: &str, mut quote: Option<char>) -> (Option<usize>, Option<char>) {
+        for (index, character) in line.char_indices() {
+            match quote {
+                Some(delimiter) if character == delimiter => quote = None,
+                Some(_) => {}
+                None if matches!(character, '\'' | '\"') => quote = Some(character),
+                None if character == '>' => return (Some(index), None),
+                None => {}
+            }
+        }
+
+        (None, quote)
+    }
+
+    fn style_before_closing_tag(line: &str) -> Option<usize> {
+        line.find("</style")
+    }
+
+    let mut region = StyleRegion::Outside;
     contents
         .lines()
         .enumerate()
         .filter_map(move |(index, line)| {
             let trimmed = line.trim_start();
-            if !in_style && trimmed.starts_with("<style") {
-                let opening_offset = line.len() - trimmed.len();
-                in_style = true;
-                let opening_end = trimmed.find('>')?;
-                let style_start = opening_offset + opening_end + 1;
-                let style = &line[style_start..];
-                if let Some(closing) = style.find("</style") {
-                    return (!style[..closing].is_empty()).then_some((
-                        index + 1,
-                        &style[..closing],
-                        style_start,
-                    ));
+            let style_start = match &region {
+                StyleRegion::Outside if is_style_opening_tag(trimmed) => {
+                    let opening_offset = line.len() - trimmed.len();
+                    let (opening_end, quote) = opening_tag_end(&trimmed["<style".len()..], None);
+                    match opening_end {
+                        Some(end) => Some(opening_offset + "<style".len() + end + 1),
+                        None => {
+                            region = StyleRegion::OpeningTag { quote };
+                            None
+                        }
+                    }
                 }
-                in_style = true;
-                return (!style.is_empty()).then_some((index + 1, style, style_start));
-            }
-            if in_style {
-                if let Some(closing) = line.find("</style") {
-                    in_style = false;
-                    return (!line[..closing].is_empty()).then_some((
-                        index + 1,
-                        &line[..closing],
-                        0,
-                    ));
+                StyleRegion::OpeningTag { quote } => {
+                    let (opening_end, next_quote) = opening_tag_end(line, *quote);
+                    match opening_end {
+                        Some(end) => Some(end + 1),
+                        None => {
+                            region = StyleRegion::OpeningTag { quote: next_quote };
+                            None
+                        }
+                    }
                 }
-                return Some((index + 1, line, 0));
+                StyleRegion::Contents => Some(0),
+                StyleRegion::Outside => None,
+            };
+
+            let style_start = style_start?;
+            let style = &line[style_start..];
+            if let Some(closing) = style_before_closing_tag(style) {
+                region = StyleRegion::Outside;
+                return (!style[..closing].is_empty()).then_some((
+                    index + 1,
+                    &style[..closing],
+                    style_start,
+                ));
             }
-            None
+
+            region = StyleRegion::Contents;
+            (!style.is_empty()).then_some((index + 1, style, style_start))
         })
 }
 
@@ -1311,29 +1359,81 @@ mod tests {
     }
 
     #[test]
-    fn detects_colour_on_opening_style_line() {
+    fn scans_a_style_tag_on_its_own_line_without_scanning_surrounding_markup() {
         assert_eq!(
-            component_colour_columns("<style>.panel { color: #123456; }</style>"),
+            component_colour_columns(
+                "<aside data-paint=\"#abcdef\"></aside>\n<style>\n.panel { color: #123456; }\n</style>\n<div data-paint=\"#abcdef\"></div>",
+            ),
+            vec![(3, 17)]
+        );
+    }
+
+    #[test]
+    fn scans_style_content_on_the_opening_tag_line_without_scanning_surrounding_markup() {
+        assert_eq!(
+            component_colour_columns(
+                "<aside data-paint=\"#abcdef\"></aside>\n<style>.panel { color: #123456; }\n</style><div data-paint=\"#abcdef\"></div>",
+            ),
+            vec![(2, 24)]
+        );
+    }
+
+    #[test]
+    fn scans_a_self_contained_style_line_without_scanning_following_markup() {
+        assert_eq!(
+            component_colour_columns(
+                "<style>.panel { color: #123456; }</style><div data-paint=\"#abcdef\"></div>\n<aside data-paint=\"#abcdef\"></aside>",
+            ),
             vec![(1, 24)]
         );
     }
 
     #[test]
-    fn detects_valid_rgba_spellings_that_previously_bypassed_the_gate() {
-        let colours = component_colour_columns(
-            "<style>\n.panel {\n  box-shadow: RGBA(0, 0, 0, 0.4);\n  border: rgba(0 0 0 / 0.4);\n  color: rgba(0, 0, 0);\n}\n</style>",
+    fn scans_a_multiline_style_opening_tag_without_scanning_its_attributes_or_markup() {
+        assert_eq!(
+            component_colour_columns(
+                "<style\n  data-paint=\"#abcdef\"\n  lang=\"css\">\n.panel { color: #123456; }\n</style>\n<div data-paint=\"#abcdef\"></div>",
+            ),
+            vec![(4, 17)]
         );
-
-        assert_eq!(colours, vec![(3, 15), (4, 11), (5, 10)]);
     }
 
     #[test]
-    fn detects_colour_when_style_opening_tag_spans_lines() {
+    fn stops_at_a_closing_style_tag_with_markup_trailing_on_its_line() {
         assert_eq!(
             component_colour_columns(
-                "<style\n  lang=\"css\">\n.panel { color: #123456; }\n</style>",
+                "<style>\n.panel { color: #123456; }</style><div data-paint=\"#abcdef\"></div>\n<aside data-paint=\"#abcdef\"></aside>",
             ),
-            vec![(3, 17)]
+            vec![(2, 17)]
         );
+    }
+
+    #[test]
+    fn does_not_scan_a_component_without_a_style_block() {
+        assert_eq!(
+            component_colour_columns(
+                "<div data-paint=\"#abcdef\">#123456</div>\n<span style=\"color: rgba(0, 0, 0, 0.4)\"></span>",
+            ),
+            Vec::<(usize, usize)>::new()
+        );
+    }
+
+    #[test]
+    fn keeps_a_quoted_greater_than_sign_in_a_style_attribute_outside_the_style_region() {
+        assert_eq!(
+            component_colour_columns(
+                "<style data-label=\"a > #abcdef\">\n.panel { color: #123456; }\n</style>\n<div data-paint=\"#abcdef\"></div>",
+            ),
+            vec![(2, 17)]
+        );
+    }
+
+    #[test]
+    fn detects_valid_rgba_spellings_inside_style_regions() {
+        let colours = component_colour_columns(
+            "<style>\n.panel {\n  box-shadow: RGBA(0, 0, 0, 0.4);\n  border: rgba(0 0 0 / 0.4);\n  color: rgba(0, 0, 0);\n}\n</style><div data-paint=\"#abcdef\"></div>",
+        );
+
+        assert_eq!(colours, vec![(3, 15), (4, 11), (5, 10)]);
     }
 }
