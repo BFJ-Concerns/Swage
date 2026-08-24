@@ -541,6 +541,106 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[tokio::test]
+    async fn below_message_count_threshold_returns_false() {
+        let messages = vec![
+            text_msg(Role::User, "hello"),
+            text_msg(Role::Assistant, "hi there"),
+        ];
+        let provider = CapturingCountProvider::new(CountOutcome::Count(0));
+
+        assert!(
+            !exceeds_threshold(
+                &messages,
+                &CompactionThreshold::MessageCount(5),
+                provider.as_ref(),
+            )
+            .await
+        );
+    }
+
+    #[tokio::test]
+    async fn at_message_count_threshold_returns_false() {
+        // len == threshold is NOT exceeding (strictly greater than).
+        let messages = vec![
+            text_msg(Role::User, "a"),
+            text_msg(Role::User, "b"),
+            text_msg(Role::User, "c"),
+        ];
+        let provider = CapturingCountProvider::new(CountOutcome::Count(0));
+
+        assert!(
+            !exceeds_threshold(
+                &messages,
+                &CompactionThreshold::MessageCount(3),
+                provider.as_ref(),
+            )
+            .await
+        );
+    }
+
+    #[tokio::test]
+    async fn above_message_count_threshold_returns_true() {
+        let messages = vec![
+            text_msg(Role::User, "a"),
+            text_msg(Role::User, "b"),
+            text_msg(Role::User, "c"),
+            text_msg(Role::User, "d"),
+        ];
+        let provider = CapturingCountProvider::new(CountOutcome::Count(0));
+
+        assert!(
+            exceeds_threshold(
+                &messages,
+                &CompactionThreshold::MessageCount(3),
+                provider.as_ref(),
+            )
+            .await
+        );
+    }
+
+    #[tokio::test]
+    async fn token_count_threshold_based_on_char_estimate() {
+        // "hello world" = 11 chars -> ~2 tokens (11/4 = 2). Threshold of 1
+        // should exceed; threshold of 10 should not.
+        let messages = vec![text_msg(Role::User, "hello world")];
+        let provider = CapturingCountProvider::new(CountOutcome::Unavailable);
+
+        assert!(
+            exceeds_threshold(
+                &messages,
+                &CompactionThreshold::TokenCount(1),
+                provider.as_ref(),
+            )
+            .await
+        );
+        assert!(
+            !exceeds_threshold(
+                &messages,
+                &CompactionThreshold::TokenCount(10),
+                provider.as_ref(),
+            )
+            .await
+        );
+
+        // The estimate sums all characters before dividing. Three short
+        // messages therefore contain an estimated two tokens (9/4), rather
+        // than zero tokens from flooring each message independently.
+        let short_messages = vec![
+            text_msg(Role::User, "abc"),
+            text_msg(Role::Assistant, "abc"),
+            text_msg(Role::User, "abc"),
+        ];
+        assert!(
+            exceeds_threshold(
+                &short_messages,
+                &CompactionThreshold::TokenCount(1),
+                provider.as_ref(),
+            )
+            .await
+        );
+    }
+
+    #[tokio::test]
     async fn message_count_threshold_is_unchanged_and_never_counts() {
         let messages = vec![
             text_msg(Role::User, "hello"),
