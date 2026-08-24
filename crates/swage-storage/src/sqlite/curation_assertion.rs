@@ -184,6 +184,7 @@ mod tests {
                 body_sha256: format!("hash-{label}"),
                 body_bytes: 20,
                 media_type: "text/plain".into(),
+                capture_scope: None,
             })
             .await
             .unwrap()

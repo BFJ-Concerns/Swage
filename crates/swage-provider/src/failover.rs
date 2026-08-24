@@ -172,6 +172,25 @@ impl LlmProvider for FailoverProvider {
             .unwrap_or("")
     }
 
+    fn provider_request_snapshot(
+        &self,
+        request: &CompletionRequest,
+        stream: bool,
+    ) -> serde_json::Value {
+        let order = self.compute_try_order(request.model.as_deref());
+        order.first().map_or_else(
+            || {
+                serde_json::json!({
+                    "provider": "generic",
+                    "model_id": self.model_id(),
+                    "stream": stream,
+                    "body": request,
+                })
+            },
+            |&idx| self.providers[idx].provider_request_snapshot(request, stream),
+        )
+    }
+
     async fn count_tokens(
         &self,
         request: &CompletionRequest,
@@ -1564,12 +1583,20 @@ mod tests {
         assert_eq!(failover.model_id(), "");
     }
 
-    struct CountingProbe;
+    struct CountingProbe(&'static str);
 
     #[async_trait]
     impl LlmProvider for CountingProbe {
         fn model_id(&self) -> &str {
-            "counting-probe"
+            self.0
+        }
+
+        fn provider_request_snapshot(
+            &self,
+            _: &CompletionRequest,
+            stream: bool,
+        ) -> serde_json::Value {
+            serde_json::json!({"provider": self.0, "stream": stream})
         }
 
         async fn count_tokens(&self, _: &CompletionRequest) -> Result<Option<u64>, ProviderError> {
@@ -1599,11 +1626,42 @@ mod tests {
     // asserted explicitly: an unforwarded count would report None here.
     #[tokio::test]
     async fn count_tokens_delegates_to_the_first_provider_in_try_order() {
-        let failover =
-            FailoverProvider::new(vec![Arc::new(CountingProbe)], FailoverConfig::default());
+        let failover = FailoverProvider::new(
+            vec![Arc::new(CountingProbe("probe"))],
+            FailoverConfig::default(),
+        );
         assert_eq!(
             failover.count_tokens(&completion_req()).await.unwrap(),
             Some(42)
+        );
+    }
+
+    #[test]
+    fn provider_request_snapshot_delegates_to_the_first_provider_in_try_order() {
+        let failover = FailoverProvider::new(
+            vec![Arc::new(CountingProbe("probe"))],
+            FailoverConfig::default(),
+        );
+        assert_eq!(
+            failover.provider_request_snapshot(&completion_req(), true),
+            serde_json::json!({"provider": "probe", "stream": true})
+        );
+    }
+
+    #[test]
+    fn provider_request_snapshot_uses_the_available_provider_when_primary_is_cooled() {
+        let failover = FailoverProvider::new(
+            vec![
+                Arc::new(CountingProbe("probe")),
+                Arc::new(CountingProbe("secondary")),
+            ],
+            FailoverConfig::default(),
+        );
+        failover.set_cooldown(0);
+
+        assert_eq!(
+            failover.provider_request_snapshot(&completion_req(), true),
+            serde_json::json!({"provider": "secondary", "stream": true})
         );
     }
 }
