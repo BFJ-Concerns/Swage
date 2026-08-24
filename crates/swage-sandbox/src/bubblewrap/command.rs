@@ -80,12 +80,14 @@ pub(crate) fn build_bwrap_command_with_path(
     // orphaned sandbox processes when the daemon crashes or is killed.
     cmd.arg("--die-with-parent");
 
-    // Minimal virtual filesystem.
+    // Read-only root — must come before every overlay mount, including the
+    // minimal /dev and /tmp filesystems below.
+    cmd.args(["--ro-bind", "/", "/"]);
+
+    // Minimal virtual filesystem. These mounts must overlay the read-only
+    // root: mounting the root afterwards exposes the host's nodev /dev.
     cmd.args(["--dev", "/dev"]);
     cmd.args(["--tmpfs", "/tmp"]);
-
-    // Read-only root — must come before any specific rw binds so they overlay.
-    cmd.args(["--ro-bind", "/", "/"]);
 
     // Working directory: read-write inside the sandbox.
     let wd = config.working_directory.as_os_str();
@@ -215,6 +217,40 @@ mod tests {
         assert!(args.contains(&OsStr::new("/dev")));
         assert!(args.contains(&OsStr::new("--tmpfs")));
         assert!(args.contains(&OsStr::new("/tmp")));
+    }
+
+    #[test]
+    fn command_mounts_root_before_dev_and_tmpfs_overlays() {
+        let config = basic_config();
+        let cmd = build_bwrap_command_with_path(
+            Path::new("/usr/bin/bwrap"),
+            &config,
+            Path::new("/run/swage/agent.sock"),
+            Path::new("/usr/bin/swage-agent"),
+        )
+        .unwrap();
+
+        let args = args_of(&cmd);
+        let root = args
+            .windows(3)
+            .position(|window| {
+                window == [OsStr::new("--ro-bind"), OsStr::new("/"), OsStr::new("/")]
+            })
+            .expect("command must contain the read-only root mount");
+        let dev = args
+            .windows(2)
+            .position(|window| window == [OsStr::new("--dev"), OsStr::new("/dev")])
+            .expect("command must contain the minimal /dev mount");
+        let tmp = args
+            .windows(2)
+            .position(|window| window == [OsStr::new("--tmpfs"), OsStr::new("/tmp")])
+            .expect("command must contain the /tmp overlay");
+
+        assert!(
+            root < dev,
+            "the minimal /dev mount must overlay the root bind"
+        );
+        assert!(root < tmp, "the /tmp mount must overlay the root bind");
     }
 
     #[test]

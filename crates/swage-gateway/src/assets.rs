@@ -51,9 +51,16 @@ pub async fn serve_frontend(headers: HeaderMap, uri: Uri) -> Response {
         return serve_static_file(asset_key, file);
     }
 
-    // SPA fallback: serve index.html for any path that doesn't match a file.
-    // This includes the root path ("") and any URL the frontend router owns
-    // (e.g. /conversations/:id on page refresh).
+    // A path with a filename extension names a resource, not a client-side
+    // route. Do not turn a missing resource into a successful HTML response:
+    // clients use the status code to distinguish an absent document from the
+    // SPA entry point.
+    if is_file_like_path(path) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+
+    // SPA fallback: serve index.html for paths the client router owns. This
+    // includes the root path ("") and routes such as /conversations/:id.
     if let Some(file) = FrontendAssets::get("index.html") {
         return serve_index(file);
     }
@@ -61,6 +68,15 @@ pub async fn serve_frontend(headers: HeaderMap, uri: Uri) -> Response {
     // Dev mode: the frontend hasn't been built yet. rust-embed produces an
     // empty asset set when dist/ is missing — requests fall through to here.
     dev_fallback()
+}
+
+fn is_file_like_path(path: &str) -> bool {
+    path.rsplit('/').next().is_some_and(|segment| {
+        let Some((stem, extension)) = segment.rsplit_once('.') else {
+            return false;
+        };
+        !stem.is_empty() && !extension.is_empty()
+    })
 }
 
 /// Serve a static embedded file with Content-Type and Cache-Control headers.
@@ -177,5 +193,13 @@ mod tests {
         let uri = "/".parse::<Uri>().unwrap();
 
         assert!(redirect_to_dev_frontend(&headers, &uri, "").is_none());
+    }
+
+    #[test]
+    fn file_like_paths_are_distinguished_from_client_routes() {
+        assert!(is_file_like_path("/openapi.json"));
+        assert!(is_file_like_path("/assets/missing.css"));
+        assert!(!is_file_like_path("/conversations/abc"));
+        assert!(!is_file_like_path("/"));
     }
 }

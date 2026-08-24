@@ -82,8 +82,27 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
         ("051_workflow_run_parking", ADD_WORKFLOW_RUN_PARKING),
         ("052_task_definitions", CREATE_TASK_DEFINITION_TABLE),
         ("053_session_variables", CREATE_SESSION_VARIABLES),
+        (
+            "054_observation_capture_scope",
+            ADD_OBSERVATION_CAPTURE_SCOPE,
+        ),
     ]
 }
+
+/// Retry-safe capture identity for observations. A caller that may run the
+/// same capture twice — a workflow's journalled agent call re-executed after
+/// an interruption — records under a stable scope; a second capture of the
+/// same origin in the same scope returns the existing observation instead of
+/// forking the evidence. Additive on the knowledge-base family: existing
+/// rows keep NULL (no scope, no dedup change) and bodies and origin
+/// metadata are untouched.
+const ADD_OBSERVATION_CAPTURE_SCOPE: &str = "
+    ALTER TABLE source_observations ADD COLUMN capture_scope TEXT;
+
+    CREATE INDEX IF NOT EXISTS idx_source_observations_space_scope
+        ON source_observations(space_id, capture_scope)
+        WHERE capture_scope IS NOT NULL;
+";
 
 const CREATE_SESSION_VARIABLES: &str = "
     CREATE TABLE session_variables (
@@ -125,6 +144,7 @@ const ADD_WORKFLOW_RUN_PARKING: &str = "
         parent_seq           INTEGER,
         dispatch_bound_agent_ids_json TEXT NOT NULL,
         dispatch_bound_task_definition_ids_json TEXT NOT NULL,
+        workflow_call_tools_json TEXT,
         wake_at              TEXT,
         inherited_worker_placement_json TEXT
     );
@@ -135,6 +155,7 @@ const ADD_WORKFLOW_RUN_PARKING: &str = "
         budget_json, state, final_output_json, handover_json, error_message, engine_version,
         created_at, completed_at, parent_run_id, parent_seq,
         dispatch_bound_agent_ids_json, dispatch_bound_task_definition_ids_json,
+        workflow_call_tools_json,
         inherited_worker_placement_json
     )
     SELECT
@@ -144,6 +165,7 @@ const ADD_WORKFLOW_RUN_PARKING: &str = "
         budget_json, state, final_output_json, NULL, error_message, engine_version,
         created_at, completed_at, parent_run_id, parent_seq,
         dispatch_bound_agent_ids_json, dispatch_bound_task_definition_ids_json,
+        workflow_call_tools_json,
         inherited_worker_placement_json
     FROM workflow_runs;
     DROP TABLE workflow_runs;
@@ -966,6 +988,7 @@ const COMPLETE_SCHEMA: &str = "
         completed_at        TEXT,
         dispatch_bound_agent_ids_json TEXT NOT NULL DEFAULT '[]',
         dispatch_bound_task_definition_ids_json TEXT NOT NULL DEFAULT '[]',
+        workflow_call_tools_json TEXT,
         inherited_worker_placement_json TEXT
     );
 

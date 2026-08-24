@@ -251,6 +251,14 @@ impl LlmProvider for ArcProvider {
         self.0.model_id()
     }
 
+    fn provider_request_snapshot(
+        &self,
+        request: &CompletionRequest,
+        stream: bool,
+    ) -> serde_json::Value {
+        self.0.provider_request_snapshot(request, stream)
+    }
+
     async fn count_tokens(
         &self,
         request: &CompletionRequest,
