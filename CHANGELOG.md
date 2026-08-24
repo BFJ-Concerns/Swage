@@ -42,7 +42,7 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
-- Reserved workflow workers no longer load skills, named context elements, or JavaScript assemblies from an `__workflow_ephemeral__` agent directory.
+- Reserved workflow workers no longer load configuration, skills, named context elements, or JavaScript assemblies from an `__workflow_ephemeral__` agent directory, and that directory's skills are no longer listed by the skills API.
 - Workflow scripts now reject unrecognised `agent()` and `agentStart()` option keys before dispatch instead of silently dropping them.
 - Reloading the web UI now returns to the open space instead of the space picker.
 - Operator schedules now show their complete execution target from every space.
