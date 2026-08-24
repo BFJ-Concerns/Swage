@@ -140,6 +140,15 @@ impl WorktreeHost {
     /// the wake loop. Failed, cancelled, and delegated-worker owners have no
     /// such live replay claim and are reclaimed.
     pub async fn recover(&self, retained_owner_ids: &HashSet<Uuid>) -> Result<usize, String> {
+        self.recover_with_git(retained_owner_ids, Path::new("git"))
+            .await
+    }
+
+    async fn recover_with_git(
+        &self,
+        retained_owner_ids: &HashSet<Uuid>,
+        git: &Path,
+    ) -> Result<usize, String> {
         let mut owners = match tokio::fs::read_dir(&self.config.root).await {
             Ok(entries) => entries,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
@@ -210,7 +219,7 @@ impl WorktreeHost {
                         continue;
                     }
                 };
-                let listed = Command::new("git")
+                let listed = match Command::new(git)
                     .args([
                         "-C",
                         &path.to_string_lossy(),
@@ -221,12 +230,13 @@ impl WorktreeHost {
                     .stdin(Stdio::null())
                     .output()
                     .await
-                    .map_err(|error| {
-                        format!(
-                            "failed to inspect managed worktree {}: {error}",
-                            path.display()
-                        )
-                    })?;
+                {
+                    Ok(listed) => listed,
+                    Err(error) => {
+                        tracing::warn!(path = %path.display(), %error, "cannot inspect managed worktree candidate; leaving it untouched");
+                        continue;
+                    }
+                };
                 if !listed.status.success() {
                     tracing::warn!(path = %path.display(), error = %String::from_utf8_lossy(&listed.stderr).trim(), "cannot inspect managed worktree candidate; leaving it untouched");
                     continue;
@@ -512,6 +522,34 @@ mod tests {
         assert_eq!(
             tokio::fs::read_to_string(root).await.unwrap(),
             "not a directory"
+        );
+    }
+
+    #[tokio::test]
+    async fn recovery_leaves_candidate_untouched_when_git_cannot_start() {
+        let temp = tempfile::tempdir().unwrap();
+        let candidate = temp
+            .path()
+            .join("worktrees")
+            .join(Uuid::new_v4().to_string())
+            .join("worker-0");
+        tokio::fs::create_dir_all(&candidate).await.unwrap();
+        tokio::fs::write(candidate.join(".git"), "gitdir: /missing")
+            .await
+            .unwrap();
+        let host = WorktreeHost::new(WorktreeConfig {
+            root: temp.path().join("worktrees"),
+        });
+
+        assert_eq!(
+            host.recover_with_git(&HashSet::new(), &temp.path().join("missing-git"))
+                .await
+                .unwrap(),
+            0
+        );
+        assert!(
+            candidate.exists(),
+            "a candidate must remain untouched when Git inspection cannot start"
         );
     }
 }
