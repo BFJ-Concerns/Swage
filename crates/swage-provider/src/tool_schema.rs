@@ -39,6 +39,9 @@ const HOSTILE_KEYWORDS: &[&str] = &[
     "uniqueItems",
 ];
 
+/// Keep model-facing summaries short even when a schema has many branches.
+const MAX_DESCRIBED_SCHEMA_CHOICES: usize = 4;
+
 pub(crate) fn provider_tool_schema(schema: &Value) -> Value {
     let mut projected = project_schema(schema);
     ensure_object_schema(&mut projected);
@@ -131,27 +134,40 @@ fn stripped_constraint_summary(keyword: &str, value: &Value) -> String {
             describe_schema_choices(value, "at least one of")
         ),
         "allOf" => format!("allOf ({})", describe_schema_choices(value, "all of")),
+        "items" => describe_item_constraint(value),
         "$schema" | "$id" | "$defs" => keyword.to_string(),
-        _ => format!("{keyword} ({})", compact_json(value)),
+        _ => keyword.to_string(),
     }
 }
 
 fn describe_schema_choices(value: &Value, quantifier: &str) -> String {
     let Some(choices) = value.as_array() else {
-        return compact_json(value);
+        return "an additional locally validated choice".to_string();
     };
 
-    let summaries: Vec<_> = choices.iter().filter_map(describe_schema_choice).collect();
-    if summaries.is_empty() {
-        compact_json(value)
+    let summaries: Vec<_> = choices
+        .iter()
+        .take(MAX_DESCRIBED_SCHEMA_CHOICES)
+        .map(describe_schema_choice)
+        .collect();
+    let description = format!("{quantifier}: {}", summaries.join("; or "));
+
+    if choices.len() > MAX_DESCRIBED_SCHEMA_CHOICES {
+        format!("{description}; remaining alternatives are validated locally")
     } else {
-        format!("{quantifier}: {}", summaries.join("; or "))
+        description
     }
 }
 
-fn describe_schema_choice(schema: &Value) -> Option<String> {
-    let object = schema.as_object()?;
+fn describe_schema_choice(schema: &Value) -> String {
+    let Some(object) = schema.as_object() else {
+        return "an additional locally validated alternative".to_string();
+    };
     let mut details = Vec::new();
+
+    if object.get("type").is_some_and(is_null_schema_type) {
+        details.push("is `null`".to_string());
+    }
 
     if let Some(required) = object.get("required").and_then(Value::as_array) {
         let fields: Vec<_> = required
@@ -167,16 +183,70 @@ fn describe_schema_choice(schema: &Value) -> Option<String> {
     if let Some(properties) = object.get("properties").and_then(Value::as_object) {
         for (name, property) in properties {
             if let Some(value) = property.get("const") {
-                details.push(format!("{} must be {}", quoted(name), compact_json(value)));
+                details.push(format!(
+                    "{} must be {}",
+                    quoted(name),
+                    describe_constant(value)
+                ));
             }
         }
     }
 
-    (!details.is_empty()).then(|| details.join("; "))
+    if details.is_empty() {
+        "an additional locally validated alternative".to_string()
+    } else {
+        details.join("; ")
+    }
 }
 
-fn compact_json(value: &Value) -> String {
-    serde_json::to_string(value).unwrap_or_else(|_| "an additional constraint".to_string())
+fn describe_item_constraint(value: &Value) -> String {
+    let Some(object) = value.as_object() else {
+        return "items".to_string();
+    };
+
+    match object.get("type") {
+        Some(Value::String(kind)) => format!("items must be {}", indefinite_noun(kind)),
+        Some(Value::Array(kinds)) => {
+            let kinds: Vec<_> = kinds
+                .iter()
+                .filter_map(Value::as_str)
+                .map(indefinite_noun)
+                .collect();
+            if kinds.is_empty() {
+                "items".to_string()
+            } else {
+                format!("items must be {}", kinds.join(" or "))
+            }
+        }
+        _ => "items".to_string(),
+    }
+}
+
+fn is_null_schema_type(value: &Value) -> bool {
+    matches!(value, Value::String(kind) if kind == "null")
+        || value
+            .as_array()
+            .is_some_and(|kinds| kinds.iter().any(|kind| kind == "null"))
+}
+
+fn indefinite_noun(kind: &str) -> String {
+    match kind {
+        "array" => "an array".to_string(),
+        "object" => "an object".to_string(),
+        "integer" => "an integer".to_string(),
+        "null" => "`null`".to_string(),
+        _ => format!("a {kind}"),
+    }
+}
+
+fn describe_constant(value: &Value) -> String {
+    match value {
+        Value::String(value) => format!("\"{value}\""),
+        Value::Number(value) => value.to_string(),
+        Value::Bool(value) => value.to_string(),
+        Value::Null => "`null`".to_string(),
+        Value::Array(_) | Value::Object(_) => "a fixed value".to_string(),
+    }
 }
 
 fn quoted(value: &str) -> String {
@@ -249,8 +319,8 @@ mod tests {
         assert!(query.get("minLength").is_none());
         assert!(query.get("pattern").is_none());
         let query_description = query["description"].as_str().unwrap();
-        assert!(query_description.contains("minLength (3)"));
-        assert!(query_description.contains("pattern (\"^[a-z]+$\")"));
+        assert!(query_description.contains("minLength"));
+        assert!(query_description.contains("pattern"));
 
         let mode = &projected["properties"]["mode"];
         assert_eq!(mode["enum"], json!(["fast", "deep"]));
@@ -320,5 +390,46 @@ mod tests {
         assert!(description.contains("requires `kind`, `integration`, `account`, `conversation`"));
         assert!(description.contains("`kind` must be \"local_storage\""));
         assert!(description.contains("requires `kind`, `url`"));
+    }
+
+    #[test]
+    fn provider_tool_schema_bounds_choice_summaries_and_uses_plain_item_guidance() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "changes": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "secret": {"type": "string", "description": "Do not expose this schema."}
+                        }
+                    }
+                }
+            },
+            "oneOf": [
+                {"type": "null"},
+                {"required": ["first"]},
+                {"required": ["second"]},
+                {"required": ["third"]},
+                {"required": ["fourth"]}
+            ]
+        });
+
+        let projected = provider_tool_schema(&schema);
+        let description = projected["description"].as_str().unwrap();
+        let changes_description = projected["properties"]["changes"]["description"]
+            .as_str()
+            .unwrap();
+
+        assert!(description.contains("is `null`"));
+        assert!(description.contains("requires `third`"));
+        assert!(!description.contains("requires `fourth`"));
+        assert!(description.contains("remaining alternatives are validated locally"));
+        assert_eq!(
+            changes_description,
+            "Additional local validation applies for: items must be an object."
+        );
+        assert!(!changes_description.contains("secret"));
     }
 }
