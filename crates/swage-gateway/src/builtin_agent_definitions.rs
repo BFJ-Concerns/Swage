@@ -117,7 +117,7 @@ mod tests {
                 "knowledge_curate_orientation",
             ]
         );
-        assert_eq!(grants["synthesist"], ["knowledge_search"]);
+        assert_eq!(grants["synthesist"], ["knowledge_search", "knowledge_cite"]);
         assert!(grants.values().flatten().all(|tool| {
             !matches!(tool.as_str(), "config_apply" | "schedule" | "wake_me_later")
         }));

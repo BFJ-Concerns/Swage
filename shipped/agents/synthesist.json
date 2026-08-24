@@ -3,11 +3,12 @@
   "space_id": null,
   "display_name": "Research synthesist",
   "description": "Synthesises findings from the knowledge base.",
-  "instructions": "Synthesise findings for the stated purpose using only evidence in the knowledge base. Support each claim with the observation and shortest sufficient quotation.",
+  "instructions": "Synthesise findings for the stated purpose using only evidence in the knowledge base. Validate the shortest sufficient exact quotation for every delivered claim with knowledge_cite, and report the durable citation id it returns.",
   "model_id": null,
   "tool_permissions": {
     "allow": [
-      "knowledge_search"
+      "knowledge_search",
+      "knowledge_cite"
     ],
     "deny": [],
     "bundles": {},

@@ -7,7 +7,7 @@
 // needs web reach (search where configured, url fetch, browser) plus
 // knowledge_record; "organiser" needs knowledge_search, knowledge_curate,
 // and knowledge_curate_orientation; "synthesist" needs knowledge_search
-// only. None of them holds config-apply or schedule tools.
+// and knowledge_cite. None of them holds config-apply or schedule tools.
 // Knowledge-base writes happen inside agent turns, so each is journalled as
 // the agent call that made it, and every capture carries that call's scope:
 // a resumed sweep re-running an interrupted gather turn re-records under
@@ -170,18 +170,20 @@ const organised = await agent(
 );
 
 phase("Synthesise: findings against the purpose");
-// The synthesist reads only through search over the accumulated corpus -
-// not this sweep's pocket - so cross-sweep synthesis is the default shape.
+// The synthesist reads through search over the accumulated corpus - not this
+// sweep's pocket - and validates quotes through cite before reporting them,
+// so cross-sweep synthesis is the default shape without bypassing citations.
 const findings = await agent(
   `Deliver research findings.\n` +
     `Topic: ${topic}\n` +
     `Purpose the findings must serve: ${purpose}\n\n` +
     `Work only from the space's knowledge base via knowledge_search - no ` +
-    `fetching, no memory of this conversation. Every claim must be ` +
-    `traceable: cite the observation id and quote the supporting text for ` +
-    `each - verbatim from the stored extraction, kept to the shortest span ` +
-    `that supports the claim. A claim the purpose needs that you cannot ` +
-    `pin to an observation does not go in the findings - it goes in ` +
+    `fetching, no memory of this conversation. For every claim, call ` +
+    `knowledge_cite with the observation id, extraction version, and ` +
+    `shortest sufficient exact quote returned by search. Put the claim in ` +
+    `findings only after knowledge_cite accepts the quote, and return its ` +
+    `citation_id with the claim. If citation validation refuses the quote, ` +
+    `the claim does not go in findings - it goes in ` +
     `"withheld", with the reason it could not be supported (nothing in the ` +
     `corpus, evidence conflicts, the evidence is too thin). Never drop an ` +
     `unsupported claim silently. Return JSON only.`,
@@ -197,12 +199,11 @@ const findings = await agent(
           type: "array",
           items: {
             type: "object",
-            required: ["claim", "observation_id", "quote"],
+            required: ["claim", "citation_id"],
             additionalProperties: false,
             properties: {
               claim: { type: "string" },
-              observation_id: { type: "string" },
-              quote: { type: "string" },
+              citation_id: { type: "string" },
             },
           },
         },
