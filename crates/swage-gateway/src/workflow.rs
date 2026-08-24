@@ -31,7 +31,7 @@ use swage_storage::{
 use swage_workflow::{
     AgentCallRequest, AgentCallResult, AwaitEventRequest, EffectPayload, EffectReceipt,
     EffectRecoveryHost, EngineLimits, GateRequest, QUICKJS_ENGINE_VERSION, ResolvedWorkerPlacement,
-    RunEventPost, ScriptCapabilities, WorkflowCallRequest, WorkflowEngine, WorkflowHost,
+    RunEventPost, ScriptCapabilities, WorkflowCallRequest, WorkflowEngine, WorkflowHost, WorkflowHostError,
     journal_args_hash, recover_started_effect,
 };
 use tokio::sync::{Mutex, Notify, Semaphore, mpsc, oneshot};
@@ -782,12 +782,12 @@ enum HostCommand {
         request: AgentCallRequest,
         resolved_working_directory: Option<ResolvedWorkerPlacement>,
         cancellation: CancellationToken,
-        reply: oneshot::Sender<Result<AgentCallResult, String>>,
+        reply: oneshot::Sender<Result<AgentCallResult, WorkflowHostError>>,
     },
     DispatchAgent {
         request: AgentCallRequest,
         cancellation: CancellationToken,
-        reply: oneshot::Sender<Result<AgentCallResult, String>>,
+        reply: oneshot::Sender<Result<AgentCallResult, WorkflowHostError>>,
     },
     ProvisionWorker {
         cwd: Option<String>,
@@ -875,7 +875,7 @@ impl WorkflowHost for ChannelWorkflowHost {
         request: AgentCallRequest,
         resolved_working_directory: Option<ResolvedWorkerPlacement>,
         cancellation: CancellationToken,
-    ) -> Result<AgentCallResult, String> {
+    ) -> Result<AgentCallResult, WorkflowHostError> {
         let (reply, receive) = oneshot::channel();
         self.tx
             .send(HostCommand::Agent {
@@ -894,7 +894,7 @@ impl WorkflowHost for ChannelWorkflowHost {
         &self,
         request: AgentCallRequest,
         cancellation: CancellationToken,
-    ) -> Result<AgentCallResult, String> {
+    ) -> Result<AgentCallResult, WorkflowHostError> {
         let (reply, receive) = oneshot::channel();
         self.tx
             .send(HostCommand::DispatchAgent {
@@ -1329,12 +1329,10 @@ async fn run_ephemeral_agent_call(
     let output = match (&request_schema, turn.structured_output) {
         (Some(_), Some(structured)) => structured,
         (Some(_), None) => {
-            // Schema demanded, none produced: the validated-object contract
-            // cannot be met, and unvalidated text must not impersonate it.
-            return Err(format!(
-                "AgentCallError: agent turn {} produced no schema-valid output",
-                turn.id
-            ));
+            // A schema call never substitutes unvalidated text. Exhaustion is
+            // an ordinary null result, matching the sibling workflow runtime
+            // and leaving the script free to choose its deterministic path.
+            Value::Null
         }
         (None, structured) => {
             structured.unwrap_or_else(|| Value::String(turn.assistant_response.unwrap_or_default()))
@@ -1817,7 +1815,7 @@ async fn run_host_commands_inner(
                 {
                     Ok(resolved) => resolved,
                     Err(error) => {
-                        let _ = reply.send(Err(classify_agent_placement_error(error)));
+                        let _ = reply.send(Err(WorkflowHostError::Message(classify_agent_placement_error(error))));
                         continue;
                     }
                 };
@@ -2001,7 +1999,7 @@ async fn run_host_commands_inner(
                             Err(error) => Err(error.to_string()),
                         }
                     };
-                    let _ = reply.send(result);
+                    let _ = reply.send(result.map_err(WorkflowHostError::Message));
                     continue;
                 }
                 if existing_call.is_none()
@@ -2016,7 +2014,7 @@ async fn run_host_commands_inner(
                         record_agent_budget_refusal(&state, run_id, current_seq, &request, error)
                             .await
                             .map_or_else(Err, |_| Err(error.into()));
-                    let _ = reply.send(result);
+                    let _ = reply.send(result.map_err(WorkflowHostError::Message));
                     continue;
                 }
                 if let Some(limit) = budget.max_total_tokens
@@ -2094,7 +2092,7 @@ async fn run_host_commands_inner(
                                 let result = recorded.and(Err(
                                     "BudgetWindDownError: working token allowance exhausted".into(),
                                 ));
-                                let _ = reply.send(result);
+                                let _ = reply.send(result.map_err(WorkflowHostError::Message));
                                 continue;
                             }
                         }
@@ -2130,7 +2128,7 @@ async fn run_host_commands_inner(
                             )
                             .await
                             .map_or_else(Err, |_| Err(error.into()));
-                            let _ = reply.send(result);
+                            let _ = reply.send(result.map_err(WorkflowHostError::Message));
                             continue;
                         }
                     }
@@ -2175,7 +2173,7 @@ async fn run_host_commands_inner(
                     let _permit = match semaphore.acquire().await {
                         Ok(permit) => permit,
                         Err(_) => {
-                            let _ = reply.send(Err("workflow concurrency gate closed".into()));
+                            let _ = reply.send(Err(WorkflowHostError::Message("workflow concurrency gate closed".into())));
                             return;
                         }
                     };
@@ -2279,14 +2277,14 @@ async fn run_host_commands_inner(
                             .lock()
                             .await
                             .insert(failed_call_ref.host_reference(), failed_call_ref);
-                        result.map_err(|error| {
-                            format!(
-                                "AgentCallReference:{}:{error}",
-                                failed_call_ref.host_reference()
-                            )
+                        result.map_err(|message| {
+                            WorkflowHostError::AgentCall {
+                                host_reference: failed_call_ref.host_reference(),
+                                message,
+                            }
                         })
                     } else {
-                        result
+                        result.map_err(WorkflowHostError::Message)
                     };
                     let actual = if !completed_replay {
                         result
@@ -4097,12 +4095,13 @@ pub async fn create_script(
         .await
         .map_err(internal)?
         .ok_or_else(|| ApiError::not_found("space", space_id))?;
+    let meta = swage_workflow::script_meta(&request.source).map_err(ApiError::validation)?;
     let (record, version) = state
         .storage
         .create_workflow_script(NewWorkflowScript {
             space_id,
-            name: request.name,
-            description: request.description,
+            name: meta.name.unwrap_or(request.name),
+            description: meta.description.unwrap_or(request.description),
             source: request.source,
             delivery_grant: request.delivery_grant,
         })
@@ -4170,10 +4169,12 @@ pub async fn update_script(
         .await
         .map_err(internal)?
         .ok_or_else(|| ApiError::not_found("workflow script", id))?;
-    if request.description.is_some() || request.delivery_grant.is_some() {
+    let meta = request.source.as_deref().map(swage_workflow::script_meta).transpose().map_err(ApiError::validation)?;
+    let description = meta.as_ref().and_then(|meta| meta.description.as_deref()).or(request.description.as_deref());
+    if description.is_some() || request.delivery_grant.is_some() {
         state
             .storage
-            .update_workflow_script(id, request.description.as_deref(), request.delivery_grant)
+            .update_workflow_script(id, description, request.delivery_grant)
             .await
             .map_err(internal)?;
     }

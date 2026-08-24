@@ -275,10 +275,9 @@ what happened without re-reading the journal.
 ### How attribution works
 
 When a spawned agent task fails, it records a `FailedAgentCallRef` linking the
-failure to its journal entry. The error message embeds this reference as
-`AgentCallReference:{id}:{error}`. The engine captures the reference in a
-structured error variant, and the terminal-state handler uses it to look up the
-failed call and reconstruct the handover.
+failure to its journal entry. The host returns that reference structurally; the
+engine preserves it in a structured error variant, and the terminal-state
+handler uses it to reconstruct the handover.
 
 ### The handover record
 

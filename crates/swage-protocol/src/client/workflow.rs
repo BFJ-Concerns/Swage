@@ -1,84 +1,11 @@
 //! Durable JavaScript workflows and their read-only run traces.
 
-use std::collections::BTreeMap;
-
 use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use ts_rs::TS;
 use uuid::Uuid;
-
-use super::settings::Effort;
-
-/// An opaque continuation token naming a worker session a run already
-/// created. Scripts receive it on an `agentStart` handle after the call
-/// completes and pass it back whole via the `session` option; its fields are
-/// host business. The token's values come from journalled results, so a
-/// resumed run rebuilds identical tokens and replay stays deterministic.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct AgentSessionRef {
-    pub session_id: Uuid,
-    pub thread_id: Uuid,
-}
-
-/// A journal-stable workflow child dispatch request.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct AgentCallRequest {
-    pub prompt: String,
-    /// Optional durable definition giving the worker its character. When
-    /// absent, the host creates a definition-less ephemeral worker whose
-    /// authority still comes from the dispatching context.
-    ///
-    /// Both serde attributes are load-bearing: journal argument hashes cover
-    /// this serialised request, so historical named calls must not acquire an
-    /// `agent: null` field when replayed.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub task: Option<String>,
-    pub model: Option<String>,
-    /// Provider reasoning effort for this call. Absent preserves the ambient
-    /// provider or model default and the historical journal request shape.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub effort: Option<Effort>,
-    /// Host-enforced deadline for this call in milliseconds.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub timeout_ms: Option<u64>,
-    /// Caller-selected working directory. This remains unresolved in the
-    /// journalled request so its argument hash is stable across hosts.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cwd: Option<String>,
-    /// Optional runtime-managed isolation for the worker.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub isolation: Option<WorkerIsolation>,
-    pub schema: Option<Value>,
-    pub max_attempts: u32,
-    pub label: Option<String>,
-    /// Continue this worker session instead of creating a fresh one: the
-    /// next turn lands on the same session and thread, so the worker meets
-    /// its own history — a restated brief and the later "proceed" are one
-    /// session. `None` is the fresh-session default.
-    ///
-    /// `skip_serializing_if` is load-bearing beside `default`: journal args
-    /// hashes are computed over the serialised request, so an optional
-    /// field that serialises as `null` when unset would change every
-    /// existing entry's hash and fail interrupted runs on resume. Unset
-    /// must serialise to nothing.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session: Option<AgentSessionRef>,
-    /// Named briefing elements to compose for this child call. When omitted,
-    /// the configured element set remains unchanged.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub elements: Option<Vec<String>>,
-    /// Values visible only while composing this child call. These shadow
-    /// durable session values without changing the session-variable store.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub variables: Option<BTreeMap<String, String>>,
-    /// Named context assembly to use for this child call.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub assembly: Option<String>,
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
 pub struct WorkflowScript {
@@ -422,70 +349,4 @@ pub struct WorkflowEntryEvent {
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
 pub struct WorkflowRunCompletedEvent {
     pub run: WorkflowRun,
-}
-
-#[cfg(test)]
-mod task_request_tests {
-    use super::*;
-    #[test]
-    fn absent_task_keeps_the_historical_serialised_shape() {
-        let request = AgentCallRequest {
-            prompt: "work".into(),
-            agent: None,
-            task: None,
-            model: None,
-            effort: None,
-            timeout_ms: None,
-            cwd: None,
-            isolation: None,
-            schema: None,
-            max_attempts: 1,
-            label: None,
-            session: None,
-            elements: None,
-            variables: None,
-            assembly: None,
-        };
-        let value = serde_json::to_value(request).unwrap();
-        assert!(!value.as_object().unwrap().contains_key("task"));
-    }
-    #[test]
-    fn named_task_is_serialised_verbatim() {
-        let value = serde_json::to_value(AgentCallRequest {
-            prompt: "work".into(),
-            agent: None,
-            task: Some("review".into()),
-            model: None,
-            effort: None,
-            timeout_ms: None,
-            cwd: None,
-            isolation: None,
-            schema: None,
-            max_attempts: 1,
-            label: None,
-            session: None,
-            elements: None,
-            variables: None,
-            assembly: None,
-        })
-        .unwrap();
-        assert_eq!(value["task"], "review");
-        let request: AgentCallRequest = serde_json::from_value(value).unwrap();
-        assert_eq!(request.task.as_deref(), Some("review"));
-    }
-
-    #[test]
-    fn unknown_effort_is_rejected_at_the_dispatch_boundary() {
-        let error = serde_json::from_value::<AgentCallRequest>(serde_json::json!({
-            "prompt": "work",
-            "model": null,
-            "effort": "extreme",
-            "schema": null,
-            "max_attempts": 1,
-            "label": null
-        }))
-        .expect_err("workflow effort must use the shared vocabulary");
-
-        assert!(error.to_string().contains("unknown variant `extreme`"));
-    }
 }
