@@ -444,7 +444,7 @@ mod shipped_skill_tests {
     }
 
     #[test]
-    fn workflow_ephemeral_agent_directory_is_excluded_from_every_context_lookup() {
+    fn workflow_ephemeral_agent_directory_is_excluded_from_hierarchy_catalogue_and_named_lookups() {
         let root = tempfile::tempdir().expect("temporary root");
         let space = root.path().join("spaces/dispatch");
         let reserved_agent = space.join("agents").join(RESERVED_WORKFLOW_AGENT_ID);
@@ -496,7 +496,7 @@ mod shipped_skill_tests {
             reserved_skills
                 .iter()
                 .all(|skill| skill.name != "injected-skill"),
-            "the reserved directory must not make skills available or auto-activatable"
+            "the reserved directory must not make skills available in the orientation catalogue"
         );
         assert!(
             ordinary_skills

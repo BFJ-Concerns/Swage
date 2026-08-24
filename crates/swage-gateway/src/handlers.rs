@@ -1198,7 +1198,8 @@ pub async fn list_skills(
     let space_dir = root.join("spaces").join(&space.slug);
     let agent_dir = params
         .agent_id
-        .as_ref()
+        .as_deref()
+        .filter(|agent_id| *agent_id != swage_config::RESERVED_WORKFLOW_AGENT_ID)
         .map(|agent_id| space_dir.join("agents").join(agent_id));
     let agent_dir = agent_dir.as_deref().filter(|path| path.is_dir());
     let (skills, _warnings) =
