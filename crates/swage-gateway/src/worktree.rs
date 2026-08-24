@@ -144,18 +144,20 @@ impl WorktreeHost {
             Ok(entries) => entries,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
             Err(error) => {
-                return Err(format!(
-                    "cannot read managed worktree root {}: {error}",
-                    self.config.root.display()
-                ));
+                tracing::warn!(path = %self.config.root.display(), %error, "cannot enumerate managed worktree root; leaving it untouched");
+                return Ok(0);
             }
         };
         let mut recovered = 0;
-        while let Some(owner) = owners
-            .next_entry()
-            .await
-            .map_err(|error| format!("cannot read managed worktree owner: {error}"))?
-        {
+        loop {
+            let owner = match owners.next_entry().await {
+                Ok(Some(owner)) => owner,
+                Ok(None) => break,
+                Err(error) => {
+                    tracing::warn!(path = %self.config.root.display(), %error, "cannot enumerate managed worktree root; leaving its remaining entries untouched");
+                    break;
+                }
+            };
             let Ok(owner_type) = owner.file_type().await else {
                 tracing::warn!(path = %owner.path().display(), "cannot inspect managed worktree owner; leaving it untouched");
                 continue;
@@ -496,6 +498,20 @@ mod tests {
                 .count(),
             1,
             "recovery must remove registrations as well as directories"
+        );
+    }
+
+    #[tokio::test]
+    async fn recovery_leaves_unenumerable_root_untouched() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("worktrees");
+        tokio::fs::write(&root, "not a directory").await.unwrap();
+        let host = WorktreeHost::new(WorktreeConfig { root: root.clone() });
+
+        assert_eq!(host.recover(&HashSet::new()).await.unwrap(), 0);
+        assert_eq!(
+            tokio::fs::read_to_string(root).await.unwrap(),
+            "not a directory"
         );
     }
 }
