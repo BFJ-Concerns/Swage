@@ -36,12 +36,17 @@ pub(crate) fn workflow_catalogue_error_summary(
     let guidance =
         format!("{count} {noun} are available. Use `{WORKFLOW_LIST_TOOL}` to see all workflows.");
     let named_not_found = format!("workflow script {missing_name:?} was not found.");
-    let introduction =
-        if named_not_found.chars().count() + 1 + guidance.chars().count() <= max_chars {
-            format!("{named_not_found} {guidance}")
-        } else {
-            format!("workflow script with the supplied name was not found. {guidance}")
-        };
+    let shortest_preview = format!(" Showing 0 of {count} names.");
+    let introduction = if named_not_found.chars().count()
+        + 1
+        + guidance.chars().count()
+        + shortest_preview.chars().count()
+        <= max_chars
+    {
+        format!("{named_not_found} {guidance}")
+    } else {
+        format!("workflow script with the supplied name was not found. {guidance}")
+    };
 
     if count == 0 {
         return introduction;
@@ -245,21 +250,23 @@ mod tests {
                 .map(|index| json!({ "name": format!("workflow-{index:02}") }))
                 .collect::<Vec<_>>(),
         });
-        let summary = workflow_catalogue_error_summary(
-            &"model-supplied-name-".repeat(40),
-            &catalogue,
-            swage_agent::agent::MAX_MODEL_TOOL_ERROR_DETAIL_CHARS,
-        );
+        for name_length in [195, 217, 800] {
+            let summary = workflow_catalogue_error_summary(
+                &"x".repeat(name_length),
+                &catalogue,
+                swage_agent::agent::MAX_MODEL_TOOL_ERROR_DETAIL_CHARS,
+            );
 
-        assert!(
-            summary.chars().count() <= swage_agent::agent::MAX_MODEL_TOOL_ERROR_DETAIL_CHARS,
-            "summary exceeds the model error-detail budget: {summary}"
-        );
-        assert!(summary.contains("with the supplied name was not found"));
-        assert!(summary.contains("13 workflows are available"));
-        assert!(summary.contains("`workflow_list`"));
-        assert!(summary.contains("Showing "));
-        assert!(summary.contains(" of 13 names"));
+            assert!(
+                summary.chars().count() <= swage_agent::agent::MAX_MODEL_TOOL_ERROR_DETAIL_CHARS,
+                "summary for a {name_length}-character name exceeds the model error-detail budget: {summary}"
+            );
+            assert!(summary.contains("with the supplied name was not found"));
+            assert!(summary.contains("13 workflows are available"));
+            assert!(summary.contains("`workflow_list`"));
+            assert!(summary.contains("Showing "));
+            assert!(summary.contains(" of 13 names"));
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]
