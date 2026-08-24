@@ -4154,6 +4154,25 @@ pub async fn list_scripts(
     Ok(Json(WorkflowScriptListResponse { scripts }))
 }
 
+pub(crate) async fn list_scripts_for_session(
+    state: &AppState,
+    session_id: Uuid,
+) -> Result<WorkflowScriptListResponse, String> {
+    let session = state
+        .storage
+        .get_session(session_id)
+        .await
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("session {session_id} was not found"))?;
+    let skills = crate::websocket::discover_available_for_session(state, session_id).await?;
+    let scripts = list_effective_workflows(state, session.space_id, &skills)
+        .await?
+        .into_iter()
+        .map(effective_script_wire)
+        .collect();
+    Ok(WorkflowScriptListResponse { scripts })
+}
+
 pub async fn get_script(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
