@@ -46,10 +46,6 @@ pub struct WorkflowScriptListResponse {
     pub scripts: Vec<WorkflowScript>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, TS, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct WorkflowScriptListQuery {}
-
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
 pub struct WorkflowBudget {
     pub max_agent_calls: Option<u32>,
