@@ -104,17 +104,25 @@ pub(crate) fn apply_workflow_call_tools(
     mut config: swage_config::ResolvedConfig,
     metadata: Option<&serde_json::Value>,
 ) -> Result<swage_config::ResolvedConfig, GatewayError> {
-    let Some(value) = metadata.and_then(|metadata| metadata.get(WORKFLOW_CALL_TOOLS_METADATA_KEY))
-    else {
+    let Some(tools) = workflow_call_tools(metadata)? else {
         return Ok(config);
     };
-    let tools = serde_json::from_value::<Vec<String>>(value.clone()).map_err(|error| {
+    intersect_tool_permissions(&mut config, &tools, Vec::new());
+    Ok(config)
+}
+
+pub(crate) fn workflow_call_tools(
+    metadata: Option<&serde_json::Value>,
+) -> Result<Option<Vec<String>>, GatewayError> {
+    metadata
+        .and_then(|metadata| metadata.get(WORKFLOW_CALL_TOOLS_METADATA_KEY))
+        .map(|value| serde_json::from_value::<Vec<String>>(value.clone()))
+        .transpose()
+        .map_err(|error| {
         GatewayError::ConfigError(format!(
             "session metadata field {WORKFLOW_CALL_TOOLS_METADATA_KEY:?} must be an array of tool names: {error}"
         ))
-    })?;
-    intersect_tool_permissions(&mut config, &tools, Vec::new());
-    Ok(config)
+    })
 }
 
 pub(crate) async fn dispatch_bound_agent_ids_for_turn(
