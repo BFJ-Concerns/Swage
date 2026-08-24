@@ -223,6 +223,21 @@ fn provider_facing_schedule_schema_preserves_delivery_target_vocabulary() {
         for field in ["account", "conversation", "url"] {
             assert_eq!(target["properties"][field]["type"], "string");
         }
+        let description = target["description"]
+            .as_str()
+            .expect("projected delivery target carries its stripped oneOf requirements");
+        for required in [
+            "`kind` must be \"channel\"",
+            "requires `kind`, `integration`, `account`, `conversation`",
+            "`kind` must be \"local_storage\"",
+            "`kind` must be \"webhook\"",
+            "requires `kind`, `url`",
+        ] {
+            assert!(
+                description.contains(required),
+                "projected target description omits {required}: {description}"
+            );
+        }
     }
     assert!(
         routing["properties"]["explicit_targets"]

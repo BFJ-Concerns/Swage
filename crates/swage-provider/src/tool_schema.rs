@@ -79,7 +79,9 @@ fn project_schema(schema: &Value) -> Value {
                     projected.insert(key.clone(), Value::Object(project_properties(properties)));
                 }
             }
-            other if HOSTILE_KEYWORDS.contains(&other) => stripped.push(other.to_string()),
+            other if HOSTILE_KEYWORDS.contains(&other) => {
+                stripped.push(stripped_constraint_summary(other, value));
+            }
             _ => {}
         }
     }
@@ -100,10 +102,6 @@ fn append_stripped_keyword_note(projected: &mut Map<String, Value>, stripped: &[
         return;
     }
 
-    for keyword in stripped {
-        debug_assert!(HOSTILE_KEYWORDS.contains(&keyword.as_str()));
-    }
-
     let note = format!(
         "Additional local validation applies for: {}.",
         stripped.join(", ")
@@ -117,6 +115,72 @@ fn append_stripped_keyword_note(projected: &mut Map<String, Value>, stripped: &[
             projected.insert("description".to_string(), Value::String(note));
         }
     }
+}
+
+/// Retain useful validation guidance after removing provider-hostile JSON
+/// Schema keywords. Providers receive a deliberately small schema subset, but
+/// models still need the constraints to form a valid first tool call.
+fn stripped_constraint_summary(keyword: &str, value: &Value) -> String {
+    match keyword {
+        "oneOf" => format!(
+            "oneOf ({})",
+            describe_schema_choices(value, "exactly one of")
+        ),
+        "anyOf" => format!(
+            "anyOf ({})",
+            describe_schema_choices(value, "at least one of")
+        ),
+        "allOf" => format!("allOf ({})", describe_schema_choices(value, "all of")),
+        "$schema" | "$id" | "$defs" => keyword.to_string(),
+        _ => format!("{keyword} ({})", compact_json(value)),
+    }
+}
+
+fn describe_schema_choices(value: &Value, quantifier: &str) -> String {
+    let Some(choices) = value.as_array() else {
+        return compact_json(value);
+    };
+
+    let summaries: Vec<_> = choices.iter().filter_map(describe_schema_choice).collect();
+    if summaries.is_empty() {
+        compact_json(value)
+    } else {
+        format!("{quantifier}: {}", summaries.join("; or "))
+    }
+}
+
+fn describe_schema_choice(schema: &Value) -> Option<String> {
+    let object = schema.as_object()?;
+    let mut details = Vec::new();
+
+    if let Some(required) = object.get("required").and_then(Value::as_array) {
+        let fields: Vec<_> = required
+            .iter()
+            .filter_map(Value::as_str)
+            .map(quoted)
+            .collect();
+        if !fields.is_empty() {
+            details.push(format!("requires {}", fields.join(", ")));
+        }
+    }
+
+    if let Some(properties) = object.get("properties").and_then(Value::as_object) {
+        for (name, property) in properties {
+            if let Some(value) = property.get("const") {
+                details.push(format!("{} must be {}", quoted(name), compact_json(value)));
+            }
+        }
+    }
+
+    (!details.is_empty()).then(|| details.join("; "))
+}
+
+fn compact_json(value: &Value) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| "an additional constraint".to_string())
+}
+
+fn quoted(value: &str) -> String {
+    format!("`{value}`")
 }
 
 fn ensure_object_schema(schema: &mut Value) {
@@ -176,14 +240,17 @@ mod tests {
         assert_eq!(projected["additionalProperties"], false);
         assert!(projected.get("$schema").is_none());
         assert!(projected.get("oneOf").is_none());
-        assert!(projected["description"].as_str().unwrap().contains("oneOf"));
+        let description = projected["description"].as_str().unwrap();
+        assert!(description.contains("oneOf"));
+        assert!(description.contains("requires `mode`"));
 
         let query = &projected["properties"]["query"];
         assert_eq!(query["type"], "string");
         assert!(query.get("minLength").is_none());
         assert!(query.get("pattern").is_none());
-        assert!(query["description"].as_str().unwrap().contains("minLength"));
-        assert!(query["description"].as_str().unwrap().contains("pattern"));
+        let query_description = query["description"].as_str().unwrap();
+        assert!(query_description.contains("minLength (3)"));
+        assert!(query_description.contains("pattern (\"^[a-z]+$\")"));
 
         let mode = &projected["properties"]["mode"];
         assert_eq!(mode["enum"], json!(["fast", "deep"]));
@@ -223,5 +290,35 @@ mod tests {
                 .get("maxLength")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn provider_tool_schema_explains_discriminated_union_requirements() {
+        let schema = json!({
+            "type": "object",
+            "oneOf": [
+                {
+                    "properties": {"kind": {"const": "channel"}},
+                    "required": ["kind", "integration", "account", "conversation"]
+                },
+                {
+                    "properties": {"kind": {"const": "local_storage"}},
+                    "required": ["kind"]
+                },
+                {
+                    "properties": {"kind": {"const": "webhook"}},
+                    "required": ["kind", "url"]
+                }
+            ]
+        });
+
+        let projected = provider_tool_schema(&schema);
+        let description = projected["description"].as_str().unwrap();
+
+        assert!(description.contains("exactly one of"));
+        assert!(description.contains("`kind` must be \"channel\""));
+        assert!(description.contains("requires `kind`, `integration`, `account`, `conversation`"));
+        assert!(description.contains("`kind` must be \"local_storage\""));
+        assert!(description.contains("requires `kind`, `url`"));
     }
 }
