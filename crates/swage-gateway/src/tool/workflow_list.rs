@@ -1,10 +1,6 @@
 //! Workflow discovery for agent turns.
 
 use async_trait::async_trait;
-use axum::{
-    Json,
-    extract::{Path, State},
-};
 use serde_json::{Value, json};
 use swage_core::ToolError;
 use swage_tool::context::ToolContext;
@@ -82,16 +78,7 @@ pub(crate) fn workflow_catalogue_error_summary(
 /// workflows. Keeping this helper as a projection means agent discovery and
 /// operator listing cannot drift into separate catalogue rules.
 pub async fn workflows_for_session(state: &AppState, session_id: Uuid) -> Result<Value, String> {
-    let session = state
-        .storage
-        .get_session(session_id)
-        .await
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| format!("session {session_id} was not found"))?;
-    let Json(response) =
-        crate::workflow::list_scripts(State(state.clone()), Path(session.space_id))
-            .await
-            .map_err(|error| error.0.to_string())?;
+    let response = crate::workflow::list_scripts_for_session(state, session_id).await?;
 
     Ok(json!({
         "workflows": response.scripts.into_iter().map(|script| json!({
@@ -157,8 +144,8 @@ mod tests {
     use swage_core::CompletionRequest;
     use swage_provider::{LlmProvider, ProviderConfig, openai::OpenAiProvider};
     use swage_storage::{
-        NewSession, NewSpace, NewWorkflowScript, SessionStore, SpaceStore, SqliteStorage, Storage,
-        WorkflowStore,
+        AgentDefinitionStore, NewAgentDefinition, NewSession, NewSpace, NewWorkflowScript,
+        SessionStore, SpaceStore, SqliteStorage, Storage, WorkflowStore,
     };
     use swage_tool::context::MockToolContext;
 
@@ -181,6 +168,53 @@ mod tests {
         let base = MockToolContext::new("gateway", session_id.to_string());
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         GatewayToolContext::new(&base, tx, storage as Arc<dyn Storage>).with_app_state(Some(state))
+    }
+
+    async fn store_test_agent(storage: &SqliteStorage, space_id: Uuid, agent_id: &str) {
+        storage
+            .upsert_agent_definition(NewAgentDefinition {
+                id: agent_id.into(),
+                space_id: Some(space_id),
+                display_name: agent_id.into(),
+                description: String::new(),
+                instructions: String::new(),
+                model_id: None,
+                tool_permissions: None,
+                skills: vec![],
+                output_schema: None,
+                output_max_retries: None,
+            })
+            .await
+            .expect("store agent definition");
+    }
+
+    fn write_agent_workflow(
+        root: &std::path::Path,
+        space_slug: &str,
+        agent_id: &str,
+        skill_name: &str,
+        workflow_name: &str,
+    ) {
+        let skill_dir = root
+            .join("spaces")
+            .join(space_slug)
+            .join("agents")
+            .join(agent_id)
+            .join("skills")
+            .join(skill_name);
+        std::fs::create_dir_all(skill_dir.join("workflows")).expect("workflow directory");
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            format!("---\ndescription: Workflows for {agent_id}.\n---\n"),
+        )
+        .expect("skill definition");
+        std::fs::write(
+            skill_dir
+                .join("workflows")
+                .join(format!("{workflow_name}.js")),
+            "return {};",
+        )
+        .expect("carried workflow");
     }
 
     #[test]
@@ -369,5 +403,96 @@ mod tests {
                 .iter()
                 .any(|workflow| workflow["name"] == "research-sweep")
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn listing_uses_the_callers_agent_skills() {
+        let root = tempfile::tempdir().expect("skill root");
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        store_test_agent(&storage, space.id, "agent-one").await;
+        store_test_agent(&storage, space.id, "agent-two").await;
+        write_agent_workflow(
+            root.path(),
+            &space.slug,
+            "agent-one",
+            "one-workflows",
+            "only-agent-one",
+        );
+        write_agent_workflow(
+            root.path(),
+            &space.slug,
+            "agent-two",
+            "two-workflows",
+            "only-agent-two",
+        );
+        let first_session = storage
+            .create_session(NewSession {
+                space_id: space.id,
+                agent_id: "agent-one".into(),
+                metadata: None,
+                active_workspace_attachment_id: None,
+            })
+            .await
+            .expect("first session");
+        let second_session = storage
+            .create_session(NewSession {
+                space_id: space.id,
+                agent_id: "agent-two".into(),
+                metadata: None,
+                active_workspace_attachment_id: None,
+            })
+            .await
+            .expect("second session");
+        let _first_root =
+            crate::websocket::SessionSkillRootGuard::at(first_session.id, root.path());
+        let _second_root =
+            crate::websocket::SessionSkillRootGuard::at(second_session.id, root.path());
+
+        let first_context = context_for(
+            state(Arc::clone(&storage)),
+            Arc::clone(&storage),
+            first_session.id,
+        )
+        .await;
+        let second_context = context_for(
+            state(Arc::clone(&storage)),
+            Arc::clone(&storage),
+            second_session.id,
+        )
+        .await;
+        let first = WorkflowListTool
+            .execute(json!({}), &first_context)
+            .await
+            .expect("first listing");
+        let second = WorkflowListTool
+            .execute(json!({}), &second_context)
+            .await
+            .expect("second listing");
+        let names = |catalogue: &Value| {
+            catalogue["workflows"]
+                .as_array()
+                .expect("workflow array")
+                .iter()
+                .map(|workflow| workflow["name"].as_str().expect("workflow name").to_owned())
+                .collect::<Vec<_>>()
+        };
+
+        let first_names = names(&first);
+        assert!(first_names.iter().any(|name| name == "only-agent-one"));
+        assert!(!first_names.iter().any(|name| name == "only-agent-two"));
+        let second_names = names(&second);
+        assert!(second_names.iter().any(|name| name == "only-agent-two"));
+        assert!(!second_names.iter().any(|name| name == "only-agent-one"));
+
+        let error = crate::tool::workflow_run::WorkflowRunTool
+            .execute(json!({"name": "missing-workflow"}), &first_context)
+            .await
+            .expect_err("missing workflow");
+        let ToolError::ExecutionFailed { message, .. } = error else {
+            panic!("unexpected workflow error: {error}");
+        };
+        assert!(message.contains("only-agent-one"));
+        assert!(!message.contains("only-agent-two"));
     }
 }
