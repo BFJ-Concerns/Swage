@@ -3,7 +3,7 @@
 use serde_json::json;
 use swage_core::{CompletionRequest, CompletionResponse, FinishReason, SandboxError};
 use swage_sandbox::llm_handler::HostLlmHandler;
-use swage_sandbox::{BubblewrapSandbox, FallbackSandbox, Sandbox, SandboxConfig};
+use swage_sandbox::{BubblewrapSandbox, FallbackSandbox, Sandbox, SandboxConfig, find_bwrap};
 
 use crate::support::ProcessEnvGuard;
 
@@ -31,6 +31,11 @@ fn test_config(temp_dir: &tempfile::TempDir) -> SandboxConfig {
 
 #[tokio::test]
 async fn bubblewrap_sandbox_real_binary_runs_git_and_standard_device_io_through_shell() {
+    if find_bwrap().is_err() {
+        eprintln!("skipping real bubblewrap integration test: bwrap is not installed");
+        return;
+    }
+
     let mut env_guard = ProcessEnvGuard::new();
     let temp_dir = tempfile::tempdir().unwrap();
     let mut sandbox = BubblewrapSandbox::new(test_config(&temp_dir), test_llm_handler());
