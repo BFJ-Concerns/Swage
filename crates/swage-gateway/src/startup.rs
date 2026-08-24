@@ -1120,32 +1120,41 @@ mod tests {
 
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
         let space = storage.get_or_create_default().await.expect("space");
+        let new_run = |source_hash: &str| NewWorkflowRun {
+            space_id: space.id,
+            parent_run_id: None,
+            parent_seq: None,
+            script_version_id: None,
+            inline_workflow_id: None,
+            inline_workflow_name: None,
+            inline_workflow_version: None,
+            carrying_skill: None,
+            source: Some("return null".into()),
+            source_hash: source_hash.into(),
+            args: Value::Null,
+            budget: json!({}),
+            engine_version: "test".into(),
+            dispatch_bound_agent_ids: vec![],
+            dispatch_bound_task_definition_ids: vec![],
+            workflow_call_tools: None,
+            inherited_worker_placement: None,
+        };
         let run = storage
-            .create_workflow_run(NewWorkflowRun {
-                space_id: space.id,
-                parent_run_id: None,
-                parent_seq: None,
-                script_version_id: None,
-                inline_workflow_id: None,
-                inline_workflow_name: None,
-                inline_workflow_version: None,
-                carrying_skill: None,
-                source: Some("return null".into()),
-                source_hash: "startup-recovery-test".into(),
-                args: Value::Null,
-                budget: json!({}),
-                engine_version: "test".into(),
-                dispatch_bound_agent_ids: vec![],
-                dispatch_bound_task_definition_ids: vec![],
-                workflow_call_tools: None,
-                inherited_worker_placement: None,
-            })
+            .create_workflow_run(new_run("startup-recovery-interrupted"))
             .await
             .expect("workflow run");
         storage
             .update_workflow_run_state(run.id, "interrupted", None, None, None)
             .await
             .expect("interrupt run");
+        let parked = storage
+            .create_workflow_run(new_run("startup-recovery-parked"))
+            .await
+            .expect("parked workflow run");
+        storage
+            .set_workflow_run_parked(parked.id, chrono::Utc::now() + chrono::Duration::hours(1))
+            .await
+            .expect("park run");
         let state = crate::state::AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn SpaceStore>,
@@ -1160,6 +1169,11 @@ mod tests {
             .provision(run.id, 0, &repo)
             .await
             .expect("provision worktree");
+        let parked_worktree = state
+            .worktree_host
+            .provision(parked.id, 0, &repo)
+            .await
+            .expect("provision parked worktree");
 
         assert_eq!(
             recover_worktrees_after_crash(&state)
@@ -1172,6 +1186,10 @@ mod tests {
             worktree.exists(),
             "replayable worktree must survive startup"
         );
+        assert!(
+            parked_worktree.exists(),
+            "parked replayable worktree must survive startup"
+        );
         let registrations = std::process::Command::new("git")
             .arg("-C")
             .arg(&repo)
@@ -1183,6 +1201,11 @@ mod tests {
             String::from_utf8_lossy(&registrations.stdout)
                 .contains(&format!("worktree {}", worktree.display())),
             "Git registration must survive startup recovery"
+        );
+        assert!(
+            String::from_utf8_lossy(&registrations.stdout)
+                .contains(&format!("worktree {}", parked_worktree.display())),
+            "parked Git registration must survive startup recovery"
         );
 
         state.worktree_host.shutdown().await;
