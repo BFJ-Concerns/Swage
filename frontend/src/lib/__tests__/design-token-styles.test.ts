@@ -11,6 +11,7 @@ import conversationList from "../components/ConversationList.svelte?raw";
 import messageDisplay from "../components/MessageDisplay.svelte?raw";
 import messageInput from "../components/MessageInput.svelte?raw";
 import operatorDashboard from "../components/OperatorDashboard.svelte?raw";
+import operatorHistoryPane from "../components/OperatorHistoryPane.svelte?raw";
 import scheduleAutomationPanel from "../components/ScheduleAutomationPanel.svelte?raw";
 import spaceOperations from "../components/SpaceOperations.svelte?raw";
 import spacePicker from "../components/SpacePicker.svelte?raw";
@@ -18,6 +19,11 @@ import spaceSelector from "../components/SpaceSelector.svelte?raw";
 import toolCallDisplay from "../components/ToolCallDisplay.svelte?raw";
 import turnContextInspector from "../components/TurnContextInspector.svelte?raw";
 import displayPreferences from "../components/settings/DisplayPreferencesSettingsSurface.svelte?raw";
+import codexProviderAuthentication from "../components/settings/CodexProviderAuthentication.svelte?raw";
+import providerConfiguration from "../components/settings/ProviderConfiguration.svelte?raw";
+import providerCreation from "../components/settings/ProviderCreation.svelte?raw";
+import providerDefaultModel from "../components/settings/ProviderDefaultModel.svelte?raw";
+import providerModelManagement from "../components/settings/ProviderModelManagement.svelte?raw";
 
 const RETINTED_COMPONENTS = {
   AppLayout: appLayout,
@@ -26,6 +32,7 @@ const RETINTED_COMPONENTS = {
   MessageDisplay: messageDisplay,
   MessageInput: messageInput,
   OperatorDashboard: operatorDashboard,
+  OperatorHistoryPane: operatorHistoryPane,
   ScheduleAutomationPanel: scheduleAutomationPanel,
   SpaceOperations: spaceOperations,
   SpacePicker: spacePicker,
@@ -33,6 +40,11 @@ const RETINTED_COMPONENTS = {
   ToolCallDisplay: toolCallDisplay,
   TurnContextInspector: turnContextInspector,
   DisplayPreferencesSettingsSurface: displayPreferences,
+  CodexProviderAuthentication: codexProviderAuthentication,
+  ProviderConfiguration: providerConfiguration,
+  ProviderCreation: providerCreation,
+  ProviderDefaultModel: providerDefaultModel,
+  ProviderModelManagement: providerModelManagement,
 };
 
 describe("retinted component styles", () => {
