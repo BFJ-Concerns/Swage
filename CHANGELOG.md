@@ -47,6 +47,10 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- The conversation surface control no longer appears active while settings are open.
+- Surface navigation now marks Settings, rather than a hidden conversation or operator surface, as active while it is open.
+- Reconnecting after a dropped socket now clears only the captured live turn when its refreshed conversation is terminal.
+- Gateway startup now directs legacy environment credentials to their governed secret-management routes.
 - Missing file-like frontend paths now return HTTP 404 instead of a successful SPA shell.
 - Turn-context inspection now shows exact built-in orientation and working-norm excerpts plus active skill names, while leaving operator and conversation content unpreviewed.
 - Resumed workflow runs now park durably when a long timer follows an agent, child-workflow, or gate completion.
