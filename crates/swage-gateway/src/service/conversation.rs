@@ -80,12 +80,16 @@ impl ConversationService {
             space_slug,
             agent_id,
         )?;
-        let config = match self
-            .storage
-            .resolve_agent_definition(agent_id, space_id)
-            .await
+        let config = match crate::service::resolve_effective_agent_definition(
+            self.storage.as_ref(),
+            agent_id,
+            space_id,
+        )
+        .await
         {
-            Ok(Some(definition)) => crate::turn::apply_agent_definition(config, &definition),
+            Ok(Some(definition)) => {
+                crate::turn::apply_agent_definition(config, &definition.definition)
+            }
             Ok(None) => config,
             Err(error) => {
                 tracing::warn!(
@@ -205,12 +209,13 @@ impl ConversationService {
                 "agent_id must not be empty".to_string(),
             ));
         }
-        if agent_id != DEFAULT_AGENT_ID
-            && self
-                .storage
-                .resolve_agent_definition(&agent_id, space_id)
-                .await?
-                .is_none()
+        if crate::service::resolve_effective_agent_definition(
+            self.storage.as_ref(),
+            &agent_id,
+            space_id,
+        )
+        .await?
+        .is_none()
         {
             return Err(GatewayError::ValidationError(format!(
                 "no agent definition named '{agent_id}' is visible to this space"
