@@ -42,6 +42,7 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- Sandboxed dispatched-agent shell tools now mount the minimal device filesystem over the read-only root, restoring standard device access for ordinary Git initialisation and commits.
 - Workflow scripts now reject unrecognised `agent()` and `agentStart()` option keys before dispatch instead of silently dropping them.
 - Reloading the web UI now returns to the open space instead of the space picker.
 - Operator schedules now show their complete execution target from every space.

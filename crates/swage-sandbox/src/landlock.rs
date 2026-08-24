@@ -34,17 +34,19 @@ const ACCESS_FS_REMOVE_FILE: u64 = 1 << 5;
 const ACCESS_FS_MAKE_CHAR: u64 = 1 << 6;
 const ACCESS_FS_MAKE_DIR: u64 = 1 << 7;
 const ACCESS_FS_MAKE_REG: u64 = 1 << 8;
-const ACCESS_FS_MAKE_SYM: u64 = 1 << 9;
-const ACCESS_FS_MAKE_SOCK: u64 = 1 << 10;
-const ACCESS_FS_MAKE_FIFO: u64 = 1 << 11;
-const ACCESS_FS_MAKE_BLOCK: u64 = 1 << 12;
-const ACCESS_FS_MAKE_IPC: u64 = 1 << 13;
+const ACCESS_FS_MAKE_SOCK: u64 = 1 << 9;
+const ACCESS_FS_MAKE_FIFO: u64 = 1 << 10;
+const ACCESS_FS_MAKE_BLOCK: u64 = 1 << 11;
+const ACCESS_FS_MAKE_SYM: u64 = 1 << 12;
 
 // ABI 2 (Linux 5.19+) — adds cross-directory rename support.
-const ACCESS_FS_REFER: u64 = 1 << 14;
+const ACCESS_FS_REFER: u64 = 1 << 13;
 
 // ABI 3 (Linux 6.2+) — adds truncate support.
-const ACCESS_FS_TRUNCATE: u64 = 1 << 15;
+const ACCESS_FS_TRUNCATE: u64 = 1 << 14;
+
+// ABI 5 (Linux 6.12+) — restricts device ioctls.
+const ACCESS_FS_IOCTL_DEV: u64 = 1 << 15;
 
 /// All access flags defined in ABI 1 (Linux 5.13).
 const ABI_V1_FLAGS: u64 = ACCESS_FS_EXECUTE
@@ -59,8 +61,7 @@ const ABI_V1_FLAGS: u64 = ACCESS_FS_EXECUTE
     | ACCESS_FS_MAKE_SYM
     | ACCESS_FS_MAKE_SOCK
     | ACCESS_FS_MAKE_FIFO
-    | ACCESS_FS_MAKE_BLOCK
-    | ACCESS_FS_MAKE_IPC;
+    | ACCESS_FS_MAKE_BLOCK;
 
 /// All access flags defined in ABI 2 (Linux 5.19).
 const ABI_V2_FLAGS: u64 = ABI_V1_FLAGS | ACCESS_FS_REFER;
@@ -68,8 +69,14 @@ const ABI_V2_FLAGS: u64 = ABI_V1_FLAGS | ACCESS_FS_REFER;
 /// All access flags defined in ABI 3 (Linux 6.2).
 const ABI_V3_FLAGS: u64 = ABI_V2_FLAGS | ACCESS_FS_TRUNCATE;
 
+/// All filesystem access flags defined in ABI 5 (Linux 6.12).
+///
+/// ABI 4 adds network rules but no filesystem flag, so its filesystem mask is
+/// identical to ABI 3's.
+const ABI_V5_FLAGS: u64 = ABI_V3_FLAGS | ACCESS_FS_IOCTL_DEV;
+
 /// The highest ABI version this implementation is aware of.
-const MAX_KNOWN_ABI: i64 = 3;
+const MAX_KNOWN_ABI: i64 = 5;
 
 /// Flag for landlock_create_ruleset() to query the ABI version.
 const LANDLOCK_CREATE_RULESET_VERSION: u32 = 1 << 0;
@@ -88,6 +95,21 @@ const WRITE_ALLOWED_BASE: u64 = READ_ALLOWED
     | ACCESS_FS_MAKE_SYM
     | ACCESS_FS_REMOVE_FILE
     | ACCESS_FS_REMOVE_DIR;
+
+/// Access required for the device nodes supplied by bubblewrap's `--dev`.
+///
+/// Each rule names one standard node rather than granting the `/dev`
+/// directory. The access bits mirror the node's ordinary role: entropy and
+/// zero are read sources, full is a write sink, null is both, and tty supports
+/// interactive read/write use when a child has a controlling terminal.
+const SYSTEM_DEVICE_RULES: &[(&str, u64)] = &[
+    ("/dev/full", ACCESS_FS_WRITE_FILE),
+    ("/dev/null", ACCESS_FS_READ_FILE | ACCESS_FS_WRITE_FILE),
+    ("/dev/random", ACCESS_FS_READ_FILE),
+    ("/dev/tty", ACCESS_FS_READ_FILE | ACCESS_FS_WRITE_FILE),
+    ("/dev/urandom", ACCESS_FS_READ_FILE),
+    ("/dev/zero", ACCESS_FS_READ_FILE),
+];
 
 /// Read/execute paths required for sandboxed process tools to start ordinary
 /// system commands such as `/bin/sh`. Writes remain limited to the configured
@@ -160,6 +182,9 @@ pub struct LandlockRuleset {
     /// Always includes the working directory and `/tmp` in addition to
     /// whatever was specified in [`SandboxConfig::landlock_write_paths`].
     write_paths: Vec<PathBuf>,
+    /// Explicit rules for bubblewrap's standard device nodes. No rule grants
+    /// access to the `/dev` directory itself.
+    device_rules: Vec<(PathBuf, u64)>,
 }
 
 impl LandlockRuleset {
@@ -179,10 +204,14 @@ impl LandlockRuleset {
         // explicit write paths from the config on top.
         let mut write_paths = vec![config.working_directory.clone(), PathBuf::from("/tmp")];
         write_paths.extend(config.landlock_write_paths.iter().cloned());
-
+        let device_rules = SYSTEM_DEVICE_RULES
+            .iter()
+            .map(|(path, access)| (PathBuf::from(path), *access))
+            .collect();
         Self {
             read_paths,
             write_paths,
+            device_rules,
         }
     }
 
@@ -255,6 +284,10 @@ impl LandlockRuleset {
             add_path_rule(ruleset_fd, path, write_flags);
         }
 
+        for (path, allowed_access) in &self.device_rules {
+            add_path_rule(ruleset_fd, path, allowed_access & handled_flags);
+        }
+
         // Apply the ruleset to this thread (and all future threads it spawns).
         let rc = unsafe { libc::syscall(libc::SYS_landlock_restrict_self, ruleset_fd, 0u32) };
 
@@ -319,7 +352,13 @@ fn flags_for_abi(abi: i64) -> (u64, Vec<String>) {
         missing.push("ACCESS_FS_TRUNCATE (ABI 3, Linux 6.2)".into());
     }
 
-    let flags = if abi >= 3 {
+    if abi < 5 {
+        missing.push("ACCESS_FS_IOCTL_DEV (ABI 5, Linux 6.12)".into());
+    }
+
+    let flags = if abi >= 5 {
+        ABI_V5_FLAGS
+    } else if abi >= 3 {
         ABI_V3_FLAGS
     } else if abi >= 2 {
         ABI_V2_FLAGS
@@ -429,6 +468,30 @@ mod tests {
     }
 
     #[test]
+    fn new_grants_only_standard_device_nodes_with_needed_access() {
+        let config = SandboxConfig::builder()
+            .working_directory("/tmp/agent")
+            .build()
+            .unwrap();
+
+        let ruleset = LandlockRuleset::new(&config);
+
+        assert_eq!(
+            ruleset.device_rules,
+            SYSTEM_DEVICE_RULES
+                .iter()
+                .map(|(path, access)| (PathBuf::from(path), *access))
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            ruleset
+                .device_rules
+                .iter()
+                .all(|(path, _)| path != &PathBuf::from("/dev"))
+        );
+    }
+
+    #[test]
     fn new_auto_includes_working_directory_in_write_paths() {
         let config = SandboxConfig::builder()
             .working_directory("/tmp/agent-workspace")
@@ -491,6 +554,7 @@ mod tests {
 
         assert_eq!(ruleset.read_paths.len(), SYSTEM_EXECUTION_READ_PATHS.len());
         assert_eq!(ruleset.write_paths.len(), 2);
+        assert_eq!(ruleset.device_rules.len(), SYSTEM_DEVICE_RULES.len());
     }
 
     // -----------------------------------------------------------------------
@@ -521,14 +585,22 @@ mod tests {
         assert_eq!(flags, ABI_V3_FLAGS);
         assert!(flags & ACCESS_FS_REFER != 0);
         assert!(flags & ACCESS_FS_TRUNCATE != 0);
+        assert!(missing.iter().any(|m| m.contains("IOCTL_DEV")));
+    }
+
+    #[test]
+    fn abi_5_flags_include_device_ioctl_restrictions() {
+        let (flags, missing) = flags_for_abi(5);
+        assert_eq!(flags, ABI_V5_FLAGS);
+        assert!(flags & ACCESS_FS_IOCTL_DEV != 0);
         assert!(missing.is_empty());
     }
 
     #[test]
     fn future_abi_uses_max_known_flags() {
-        // ABI > 3 should still use ABI_V3_FLAGS — we don't know future flags.
+        // ABI > 5 should still use ABI_V5_FLAGS — we don't know future flags.
         let (flags, missing) = flags_for_abi(99);
-        assert_eq!(flags, ABI_V3_FLAGS);
+        assert_eq!(flags, ABI_V5_FLAGS);
         assert!(missing.is_empty());
     }
 
@@ -584,9 +656,9 @@ mod tests {
             ACCESS_FS_MAKE_SOCK,
             ACCESS_FS_MAKE_FIFO,
             ACCESS_FS_MAKE_BLOCK,
-            ACCESS_FS_MAKE_IPC,
             ACCESS_FS_REFER,
             ACCESS_FS_TRUNCATE,
+            ACCESS_FS_IOCTL_DEV,
         ];
 
         // Each must be a power of two.
@@ -601,17 +673,22 @@ mod tests {
 
     #[test]
     fn abi_v1_flags_matches_expected_bitmask() {
-        // 14 flags set in bits 0..=13.
-        assert_eq!(ABI_V1_FLAGS, 0x3FFF);
+        // 13 flags set in bits 0..=12.
+        assert_eq!(ABI_V1_FLAGS, 0x1FFF);
     }
 
     #[test]
     fn abi_v2_flags_adds_one_bit() {
-        assert_eq!(ABI_V2_FLAGS, ABI_V1_FLAGS | (1 << 14));
+        assert_eq!(ABI_V2_FLAGS, ABI_V1_FLAGS | (1 << 13));
     }
 
     #[test]
     fn abi_v3_flags_adds_one_more_bit() {
-        assert_eq!(ABI_V3_FLAGS, ABI_V2_FLAGS | (1 << 15));
+        assert_eq!(ABI_V3_FLAGS, ABI_V2_FLAGS | (1 << 14));
+    }
+
+    #[test]
+    fn abi_v5_flags_adds_device_ioctl_bit() {
+        assert_eq!(ABI_V5_FLAGS, ABI_V3_FLAGS | (1 << 15));
     }
 }
