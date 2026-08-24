@@ -72,6 +72,7 @@ mod tests {
     #[tokio::test]
     async fn restart_fails_before_stop_when_gateway_provenance_is_unavailable() {
         let _runtime_dir = crate::test_support::XdgRuntimeDirGuard::new();
+        let _swage_home = crate::test_support::SwageHomeGuard::new();
         let mut gateway = Command::new("/bin/sleep")
             .arg("60")
             .env_clear()

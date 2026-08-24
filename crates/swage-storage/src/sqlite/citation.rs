@@ -188,6 +188,7 @@ mod tests {
                 body_sha256: "citation-body".into(),
                 body_bytes: 64,
                 media_type: "text/plain".into(),
+                capture_scope: None,
             })
             .await
             .unwrap();
@@ -281,6 +282,7 @@ mod tests {
                 body_sha256: "other-body".into(),
                 body_bytes: 5,
                 media_type: "text/plain".into(),
+                capture_scope: None,
             })
             .await
             .unwrap();

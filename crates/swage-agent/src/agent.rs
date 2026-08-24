@@ -253,7 +253,10 @@ impl Agent {
         let assembled_context = if crate::compaction::exceeds_threshold(
             &request.assembled_context,
             &self.config.compaction_threshold,
-        ) {
+            self.provider.as_ref(),
+        )
+        .await
+        {
             match crate::compaction::compact(
                 request.assembled_context,
                 &self.config.compaction_threshold,

@@ -5,12 +5,15 @@
 // Saved-script contract: args = { topic, purpose, maxSources? }. The agents
 // named here are agent definitions in the dispatching space: "researcher"
 // needs web reach (search where configured, url fetch, browser) plus
-// knowledge_record; "organiser" needs knowledge_search, knowledge_record,
-// and knowledge_curate; "synthesist" needs knowledge_search only. None of
-// them holds config-apply or schedule tools. Knowledge-base writes happen
-// inside agent turns, so each is journalled as the agent call that made it,
-// and the store's hash-dedup means a resumed sweep re-running a gather turn
-// cannot duplicate an observation.
+// knowledge_record; "organiser" needs knowledge_search, knowledge_curate,
+// and knowledge_curate_orientation; "synthesist" needs knowledge_search
+// and knowledge_cite. None of them holds config-apply or schedule tools.
+// Knowledge-base writes happen inside agent turns, so each is journalled as
+// the agent call that made it, and every capture carries that call's scope:
+// a resumed sweep re-running an interrupted gather turn re-records under
+// the same scope and gets the first attempt's observation back, so no
+// observation duplicates even when the live page's bytes changed between
+// attempts.
 export const defaults = { maxAttempts: 3 };
 
 const topic = args.topic;
@@ -21,7 +24,8 @@ if (!topic || !purpose) {
 }
 
 phase("Scope: choose sources");
-// The scout only plans; it records nothing, so a crash here costs nothing.
+// The scout's call-scoped grants exclude knowledge_record; recording waits
+// for the gather wave, so a crash here costs nothing.
 const plan = await agent(
   `You are scoping a research sweep.\n` +
     `Topic: ${topic}\n` +
@@ -30,9 +34,16 @@ const plan = await agent(
     `specific pages or documents, not site homepages. Use web search if you ` +
     `have it; otherwise name canonical sources you know. For each, give the ` +
     `URL and one line on what it should contribute. Prefer primary material ` +
-    `over commentary. Return your final answer as JSON only.`,
+    `over commentary. Record nothing at this stage - you are choosing ` +
+    `sources, not gathering them. Return your final answer as JSON only.`,
   {
     agent: "researcher",
+    tools: [
+      "web_search",
+      "url_fetch",
+      "browser_navigate",
+      "browser_snapshot",
+    ],
     label: "Scope sources",
     schema: {
       type: "object",
@@ -119,14 +130,18 @@ const organised = await agent(
       .map((entry) => `- ${entry.observation_id} (${entry.url})`)
       .join("\n") +
     `\n\nOrganise them into the space's knowledge base. Search the corpus ` +
-    `to see what already exists. Record orientation notes (as knowledge_record ` +
-    `observations of your own authorship) that summarise what this material ` +
-    `covers and cite the observation ids they derive from. Where a new ` +
-    `observation duplicates or supersedes existing material, assert that ` +
-    `with knowledge_curate - never delete anything. Zero notes or zero ` +
-    `assertions is a valid outcome when nothing warrants them.\n\n` +
+    `to see what already exists. Author orientation cards with ` +
+    `knowledge_curate_orientation - a short signpost titled by what it ` +
+    `orients, its content saying what the material covers and where to ` +
+    `look, grounded in the observation ids it points to; supersede an ` +
+    `existing card only when your new one replaces its signpost. Where a ` +
+    `new observation duplicates or supersedes existing material, assert ` +
+    `that with knowledge_curate - never delete anything. Observations you ` +
+    `judge worth flagging but cannot express as a card or assertion go in ` +
+    `your closing note. Zero cards or zero assertions is a valid outcome ` +
+    `when nothing warrants them.\n\n` +
     `Return JSON only, exactly this shape:\n` +
-    `{"orientation_notes": <count of orientation notes you recorded>, ` +
+    `{"orientation_cards": <count of orientation cards you authored>, ` +
     `"assertions": <count of curation assertions you made>, ` +
     `"note": "one or two sentences on what you did and anything that ` +
     `needs a human eye"}`,
@@ -139,10 +154,10 @@ const organised = await agent(
     maxAttempts: 5,
     schema: {
       type: "object",
-      required: ["orientation_notes", "assertions", "note"],
+      required: ["orientation_cards", "assertions", "note"],
       additionalProperties: false,
       properties: {
-        orientation_notes: { type: "number" },
+        orientation_cards: { type: "number" },
         assertions: { type: "number" },
         note: { type: "string" },
       },
@@ -151,36 +166,52 @@ const organised = await agent(
 );
 
 phase("Synthesise: findings against the purpose");
-// The synthesist reads only through search over the accumulated corpus -
-// not this sweep's pocket - so cross-sweep synthesis is the default shape.
+// The synthesist reads through search over the accumulated corpus - not this
+// sweep's pocket - and validates quotes through cite before reporting them,
+// so cross-sweep synthesis is the default shape without bypassing citations.
 const findings = await agent(
   `Deliver research findings.\n` +
     `Topic: ${topic}\n` +
     `Purpose the findings must serve: ${purpose}\n\n` +
     `Work only from the space's knowledge base via knowledge_search - no ` +
-    `fetching, no memory of this conversation. Every claim must be ` +
-    `traceable: cite the observation id and quote the supporting text for ` +
-    `each - verbatim from the stored extraction, kept to the shortest span ` +
-    `that supports the claim. A claim you cannot pin to an observation ` +
-    `does not go in the findings. Return JSON only.`,
+    `fetching, no memory of this conversation. For every claim, call ` +
+    `knowledge_cite with the observation id, extraction version, and ` +
+    `shortest sufficient exact quote returned by search. Put the claim in ` +
+    `findings only after knowledge_cite accepts the quote, and return its ` +
+    `citation_id with the claim. If citation validation refuses the quote, ` +
+    `the claim does not go in findings - it goes in ` +
+    `"withheld", with the reason it could not be supported (nothing in the ` +
+    `corpus, evidence conflicts, the evidence is too thin). Never drop an ` +
+    `unsupported claim silently. Return JSON only.`,
   {
     agent: "synthesist",
     label: "Synthesise findings",
     schema: {
       type: "object",
-      required: ["findings"],
+      required: ["findings", "withheld"],
       additionalProperties: false,
       properties: {
         findings: {
           type: "array",
           items: {
             type: "object",
-            required: ["claim", "observation_id", "quote"],
+            required: ["claim", "citation_id"],
             additionalProperties: false,
             properties: {
               claim: { type: "string" },
-              observation_id: { type: "string" },
-              quote: { type: "string" },
+              citation_id: { type: "string" },
+            },
+          },
+        },
+        withheld: {
+          type: "array",
+          items: {
+            type: "object",
+            required: ["claim", "reason"],
+            additionalProperties: false,
+            properties: {
+              claim: { type: "string" },
+              reason: { type: "string" },
             },
           },
         },
@@ -189,10 +220,11 @@ const findings = await agent(
   },
 );
 
-// The terminal report names what failed or was omitted - the commission's
-// requirement that a sweep never pretends completeness.
+// The terminal report names what failed, was omitted, or was withheld -
+// the commission's requirement that a sweep never pretends completeness.
 // agent() throws on failure, so reaching here means synthesis validated;
-// the terminal report still names what failed or was omitted upstream.
+// the report still names what failed upstream and what the synthesist
+// could not support.
 return {
   topic,
   purpose,
@@ -203,4 +235,5 @@ return {
   failed_sources: failed,
   organised,
   findings: findings.findings,
+  withheld_claims: findings.withheld,
 };
