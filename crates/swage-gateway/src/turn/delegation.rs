@@ -18,7 +18,8 @@ use super::{
 use crate::turn::workspace::ResolvedWorkerDirectory;
 use sha2::{Digest, Sha256};
 use swage_agent::{
-    DelegatedAssembly, DelegationContextAssembler, DelegationOutcome, DelegationSnapshotRecorder,
+    AgentEvent, DelegatedAssembly, DelegationContextAssembler, DelegationOutcome,
+    DelegationSnapshotRecorder,
 };
 use swage_context::tokeniser::TiktokenTokeniser;
 use swage_core::DelegateCompletionMode;
@@ -168,13 +169,67 @@ impl DelegationContextAssembler for GatewayDelegatedContextAssembler {
 }
 
 struct GatewayDelegationSnapshotRecorder {
+    state: AppState,
+}
+
+#[cfg(test)]
+struct SnapshotOnlyDelegationRecorder {
     storage: Arc<dyn swage_storage::Storage>,
 }
 
+#[cfg(test)]
 pub(crate) fn delegation_snapshot_recorder(
     storage: Arc<dyn swage_storage::Storage>,
 ) -> Arc<dyn DelegationSnapshotRecorder> {
-    Arc::new(GatewayDelegationSnapshotRecorder { storage })
+    Arc::new(SnapshotOnlyDelegationRecorder { storage })
+}
+
+pub(crate) fn delegation_snapshot_recorder_for_state(
+    state: AppState,
+) -> Arc<dyn DelegationSnapshotRecorder> {
+    Arc::new(GatewayDelegationSnapshotRecorder { state })
+}
+
+impl GatewayDelegationSnapshotRecorder {
+    async fn persist(
+        &self,
+        session_id: Uuid,
+        turn_id: Uuid,
+        report: &serde_json::Value,
+    ) -> Result<(), AgentError> {
+        let storage = self.state.storage.as_ref();
+        persist_delegated_snapshot(storage, session_id, turn_id, report).await
+    }
+}
+
+async fn persist_delegated_snapshot(
+    storage: &dyn swage_storage::Storage,
+    session_id: Uuid,
+    turn_id: Uuid,
+    report: &serde_json::Value,
+) -> Result<(), AgentError> {
+    if let Err(error) = storage.store_snapshot(turn_id, &report.to_string()).await {
+        // Reconstructive record (record_durability.rs): record the gap and
+        // escalate to a forced turn failure only if that record also fails.
+        tracing::warn!(%turn_id, %error, "failed to persist delegated context snapshot");
+        if let Err(audit_error) = crate::record_durability::record_reconstruction_gap(
+            storage,
+            Some(session_id),
+            turn_id,
+            "delegated_context_snapshot",
+            &error,
+        )
+        .await
+        {
+            if let Err(force_error) = storage.force_turn_failure(turn_id).await {
+                tracing::error!(%turn_id, %force_error, "failed to mark delegated turn failed after record loss");
+            }
+            return Err(AgentError::InvalidConfig(format!(
+                "delegated context snapshot lost and the loss could not be recorded: {audit_error}"
+            )));
+        }
+    }
+    Ok(())
 }
 
 #[async_trait::async_trait]
@@ -185,32 +240,65 @@ impl DelegationSnapshotRecorder for GatewayDelegationSnapshotRecorder {
         turn_id: Uuid,
         report: &serde_json::Value,
     ) -> Result<(), AgentError> {
-        if let Err(error) = self
-            .storage
-            .store_snapshot(turn_id, &report.to_string())
-            .await
-        {
-            // Reconstructive record (record_durability.rs): record the gap and
-            // escalate to a forced turn failure only if that record also fails.
-            tracing::warn!(%turn_id, %error, "failed to persist delegated context snapshot");
-            if let Err(audit_error) = crate::record_durability::record_reconstruction_gap(
-                self.storage.as_ref(),
-                Some(session_id),
-                turn_id,
-                "delegated_context_snapshot",
-                &error,
-            )
-            .await
-            {
-                if let Err(force_error) = self.storage.force_turn_failure(turn_id).await {
-                    tracing::error!(%turn_id, %force_error, "failed to mark delegated turn failed after record loss");
+        self.persist(session_id, turn_id, report).await
+    }
+
+    async fn record_event(&self, session_id: Uuid, event: AgentEvent) -> Result<(), AgentError> {
+        let turn_id = match &event {
+            AgentEvent::ProviderRequestPrepared { turn_id, .. }
+            | AgentEvent::ProviderResponseCaptured { turn_id, .. }
+            | AgentEvent::ProviderReasoningCaptured { turn_id, .. } => *turn_id,
+            _ => return Ok(()),
+        };
+        let Some(snapshot) = self.state.storage.get_snapshot(turn_id).await? else {
+            return Err(AgentError::InvalidConfig(format!(
+                "delegated turn {turn_id} has no context snapshot for provider request"
+            )));
+        };
+        let mut report: serde_json::Value = serde_json::from_str(&snapshot).map_err(|error| {
+            AgentError::InvalidConfig(format!(
+                "delegated context snapshot is invalid JSON: {error}"
+            ))
+        })?;
+        match event {
+            AgentEvent::ProviderRequestPrepared { round, request, .. } => {
+                match super::redact_provider_visible_request(&self.state, request).await {
+                    Ok(request) => {
+                        super::append_provider_visible_request(&mut report, round, request)
+                    }
+                    Err(error) => {
+                        tracing::error!(%turn_id, %round, %error, "delegated provider-visible request capture omitted because secret redaction was unavailable");
+                        super::append_provider_visible_capture_error(&mut report, round);
+                    }
                 }
-                return Err(AgentError::InvalidConfig(format!(
-                    "delegated context snapshot lost and the loss could not be recorded: {audit_error}"
-                )));
             }
+            AgentEvent::ProviderResponseCaptured { round, witness, .. } => {
+                super::append_provider_visible_response(&mut report, round, witness);
+            }
+            AgentEvent::ProviderReasoningCaptured {
+                round,
+                content,
+                details,
+                ..
+            } => {
+                super::append_provider_visible_reasoning(&mut report, round, content, details);
+            }
+            _ => unreachable!("non-diagnostic events returned above"),
         }
-        Ok(())
+        self.record(session_id, turn_id, &report).await
+    }
+}
+
+#[cfg(test)]
+#[async_trait::async_trait]
+impl DelegationSnapshotRecorder for SnapshotOnlyDelegationRecorder {
+    async fn record(
+        &self,
+        session_id: Uuid,
+        turn_id: Uuid,
+        report: &serde_json::Value,
+    ) -> Result<(), AgentError> {
+        persist_delegated_snapshot(self.storage.as_ref(), session_id, turn_id, report).await
     }
 }
 
@@ -479,7 +567,7 @@ impl DelegationHandler for GatewayDelegationHandler {
                 effective_tool_permissions_record(&effective_target_resolved),
                 composition.clone(),
             ),
-            snapshot_recorder: Some(delegation_snapshot_recorder(self.state.storage.clone())),
+            snapshot_recorder: Some(delegation_snapshot_recorder_for_state(self.state.clone())),
         };
 
         let mut payload = serde_json::to_value(composition).map_err(|error| {

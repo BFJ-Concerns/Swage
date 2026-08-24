@@ -32,6 +32,10 @@ export interface ProviderRetryState {
 
 export interface StreamingStore {
   readonly isStreaming: boolean;
+  /** The server-assigned identity of the live turn, once the gateway emits it. */
+  readonly activeTurnId: string | null;
+  /** Monotonic local identity for the current streamed projection. */
+  readonly activeTurnGeneration: number;
   readonly streamedContent: string;
   readonly turnError: { code: string; message: string } | null;
   readonly turnStartedAt: string | null;
@@ -46,7 +50,7 @@ export interface StreamingStore {
   // matching the approval UI.
   readonly pendingApproval: PendingApproval | null;
   handleServerEvent(event: ServerEvent): void;
-  reconcileAfterReconnect(): void;
+  reconcileAfterReconnect(recoveredTurnGeneration: number): void;
   startTurn(content: string, selectedModelId?: string | null, agentId?: string | null, effort?: import("../protocol/Effort").Effort | null): void;
   cancelTurn(): void;
 }
@@ -102,6 +106,8 @@ export function createStreamingStore(
   const providerRetryStore = writable<ProviderRetryState | null>(null);
   // Currently active approval awaiting user decision; null when none.
   const pendingApprovalStore = writable<PendingApproval | null>(null);
+  const activeTurnIdStore = writable<string | null>(null);
+  let activeTurnGeneration = 0;
 
   const isStreamingState = fromStore(isStreamingStore);
   const streamedContentState = fromStore(streamedContentStore);
@@ -110,6 +116,7 @@ export function createStreamingStore(
   const activeToolCallsState = fromStore(activeToolCallsStore);
   const providerRetryState = fromStore(providerRetryStore);
   const pendingApprovalState = fromStore(pendingApprovalStore);
+  const activeTurnIdState = fromStore(activeTurnIdStore);
 
   // ---- Helpers ----------------------------------------------------------------
 
@@ -148,6 +155,14 @@ export function createStreamingStore(
   return {
     get isStreaming(): boolean {
       return isStreamingState.current;
+    },
+
+    get activeTurnId(): string | null {
+      return activeTurnIdState.current;
+    },
+
+    get activeTurnGeneration(): number {
+      return activeTurnGeneration;
     },
 
     get streamedContent(): string {
@@ -280,6 +295,7 @@ export function createStreamingStore(
           // Tool calls are now captured in the message history — clear live state.
           activeToolCallsStore.set([]);
           providerRetryStore.set(null);
+          activeTurnIdStore.set(null);
           break;
 
         case "error":
@@ -292,6 +308,7 @@ export function createStreamingStore(
           // activeToolCalls are preserved so the UI can show what was
           // in-flight when the error occurred.
           providerRetryStore.set(null);
+          activeTurnIdStore.set(null);
           break;
 
         case "output_schema_failed": {
@@ -312,6 +329,7 @@ export function createStreamingStore(
           isStreamingStore.set(false);
           turnStartedAtStore.set(null);
           providerRetryStore.set(null);
+          activeTurnIdStore.set(null);
           break;
         }
 
@@ -323,6 +341,7 @@ export function createStreamingStore(
           turnStartedAtStore.set(null);
           // activeToolCalls preserved — same rationale as the error case.
           providerRetryStore.set(null);
+          activeTurnIdStore.set(null);
           break;
 
         case "shutdown":
@@ -334,9 +353,11 @@ export function createStreamingStore(
           isStreamingStore.set(false);
           turnStartedAtStore.set(null);
           providerRetryStore.set(null);
+          activeTurnIdStore.set(null);
           break;
 
         case "provider_retry_started":
+          activeTurnIdStore.set(event.turn_id);
           providerRetryStore.set({
             turn_id: event.turn_id,
             attempt: event.attempt,
@@ -348,6 +369,7 @@ export function createStreamingStore(
           break;
 
         case "provider_retry_settled":
+          activeTurnIdStore.set(event.turn_id);
           providerRetryStore.set({
             turn_id: event.turn_id,
             attempt: event.attempt,
@@ -367,6 +389,7 @@ export function createStreamingStore(
           break;
 
         case "approval_required":
+          activeTurnIdStore.set(event.turn_id);
           // Surface the request so MessageInput can swap itself out for the
           // ApprovalCard. We retain only the latest active approval;
           // cross-conversation approval queues are not modelled here.
@@ -392,6 +415,8 @@ export function createStreamingStore(
           break;
 
         case "context_assembled":
+          activeTurnIdStore.set(event.turn_id);
+          break;
         case "output_schema_retry":
         case "delegation_started":
         case "delegation_completed":
@@ -408,23 +433,27 @@ export function createStreamingStore(
       }
     },
 
-    reconcileAfterReconnect(): void {
+    reconcileAfterReconnect(recoveredTurnGeneration: number): void {
       const lastMessage = options?.conversationStore?.activeConversation?.messages.at(-1);
       if (
         !get(isStreamingStore) ||
+        activeTurnGeneration !== recoveredTurnGeneration ||
         lastMessage?.role !== "assistant" ||
         !["completed", "failed", "interrupted"].includes(lastMessage.turn_state ?? "")
       ) return;
 
       // The HTTP refresh recovered the terminal assistant message that the
-      // dropped socket could not deliver. Discard the stale live projection;
-      // the durable conversation is now authoritative.
+      // dropped socket could not deliver. Normal token events intentionally
+      // carry no turn ID, so the monotonically increasing local generation
+      // fences a later start that races the refresh. The durable conversation
+      // is authoritative only for the projection captured before reconnect.
       streamedContentStore.set("");
       isStreamingStore.set(false);
       turnStartedAtStore.set(null);
       activeToolCallsStore.set([]);
       providerRetryStore.set(null);
       pendingApprovalStore.set(null);
+      activeTurnIdStore.set(null);
     },
 
     startTurn(content: string, selectedModelId?: string | null): void {
@@ -433,6 +462,8 @@ export function createStreamingStore(
       turnErrorStore.set(null);
       activeToolCallsStore.set([]);
       providerRetryStore.set(null);
+      activeTurnIdStore.set(null);
+      activeTurnGeneration += 1;
       turnStartedAtStore.set(new Date().toISOString());
       isStreamingStore.set(true);
 
@@ -486,6 +517,12 @@ export function withConversationAutoCreate(
     get isStreaming(): boolean {
       return isCreatingState.current || base.isStreaming;
     },
+    get activeTurnId(): string | null {
+      return base.activeTurnId;
+    },
+    get activeTurnGeneration(): number {
+      return base.activeTurnGeneration;
+    },
     get streamedContent(): string {
       return base.streamedContent;
     },
@@ -505,7 +542,7 @@ export function withConversationAutoCreate(
       return base.pendingApproval;
     },
     handleServerEvent: (event) => base.handleServerEvent(event),
-    reconcileAfterReconnect: () => base.reconcileAfterReconnect(),
+    reconcileAfterReconnect: (turnGeneration) => base.reconcileAfterReconnect(turnGeneration),
     cancelTurn: () => base.cancelTurn(),
 
     startTurn(content: string, selectedModelId?: string | null, agentId?: string | null, effort?: import("../protocol/Effort").Effort | null): void {
