@@ -783,8 +783,10 @@ mod tests {
             std::fs::write(config, "[server]\nport = 4100\n").expect("write agent config");
         }
 
-        let mut active = swage_config::ResolvedConfig::default();
-        active.instructions = "RUNTIME_ONLY_MARKER".to_string();
+        let active = swage_config::ResolvedConfig {
+            instructions: "RUNTIME_ONLY_MARKER".to_string(),
+            ..Default::default()
+        };
         let runtime_instructions = active.instructions.clone();
         let reserved = load_session_config_from_root(
             root.path(),
