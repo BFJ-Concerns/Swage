@@ -64,9 +64,28 @@ async fn running_gateway_metadata(
 
 #[cfg(test)]
 mod tests {
-    use std::process::Command;
+    use std::{process::Command, time::Duration};
 
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    async fn wait_for_empty_process_environment(pid: u32) {
+        let environment_path = format!("/proc/{pid}/environ");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+
+        loop {
+            let environment =
+                std::fs::read(&environment_path).expect("read spawned process environment");
+            if environment.is_empty() {
+                return;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "spawned process did not expose its cleared environment"
+            );
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    }
 
     #[cfg(target_os = "linux")]
     #[tokio::test]
@@ -78,6 +97,7 @@ mod tests {
             .env_clear()
             .spawn()
             .unwrap();
+        wait_for_empty_process_environment(gateway.id()).await;
         RuntimeMetadata::new(gateway.id(), "http://127.0.0.1:9".to_string())
             .save()
             .unwrap();
