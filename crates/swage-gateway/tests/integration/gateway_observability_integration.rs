@@ -249,6 +249,17 @@ async fn http(router: &Router, method: &str, uri: &str) -> (StatusCode, Value) {
     (status, body)
 }
 
+async fn live_http(addr: SocketAddr, method: reqwest::Method, path: &str) -> (StatusCode, Value) {
+    let response = reqwest::Client::new()
+        .request(method, format!("http://{addr}{path}"))
+        .send()
+        .await
+        .expect("loopback HTTP request should succeed");
+    let status = response.status();
+    let body = response.json().await.unwrap_or(Value::Null);
+    (status, body)
+}
+
 type WsSink = futures::stream::SplitSink<
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
     tungstenite::Message,
@@ -490,8 +501,12 @@ async fn past_turn_report_matches_live_websocket_report() {
     let live_report = &context_event["report"];
 
     // Query the REST endpoint for the same turn.
-    let (status, stored_body) =
-        http(&router, "GET", &format!("/api/turns/{turn_id}/context")).await;
+    let (status, stored_body) = live_http(
+        addr,
+        reqwest::Method::GET,
+        &format!("/api/turns/{turn_id}/context"),
+    )
+    .await;
     assert_eq!(
         status,
         StatusCode::OK,
