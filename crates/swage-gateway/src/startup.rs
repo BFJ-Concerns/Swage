@@ -199,7 +199,19 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
     );
     state.voice_provider = voice_provider;
     state.telegram = telegram;
-    if let Err(error) = state.worktree_host.recover().await {
+    let replayable_worktree_owners =
+        match crate::workflow::replayable_worktree_owner_ids(&state).await {
+            Ok(owners) => owners,
+            Err(error) => {
+                eprintln!("Workflow worktree recovery planning failed: {error}");
+                std::process::exit(1);
+            }
+        };
+    if let Err(error) = state
+        .worktree_host
+        .recover(&replayable_worktree_owners)
+        .await
+    {
         eprintln!("Worktree startup recovery failed: {error}");
         std::process::exit(1);
     }
