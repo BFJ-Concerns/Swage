@@ -29,7 +29,7 @@ function hasSuccessfulApprovalResult(messages) {
 }
 
 async function handle(request, response) {
-  if (request.method !== "POST" || request.url !== "/v1/messages") {
+  if (request.method !== "POST" || !request.url?.startsWith("/v1/messages")) {
     response.writeHead(404).end();
     return;
   }
@@ -55,9 +55,14 @@ async function handle(request, response) {
     await textResponse(response, ["Partial response before cancellation. ", "This tail must never render."], 8_000);
   } else if (serialised.includes("reconnect this turn")) {
     await textResponse(response, ["First half before disconnect. ", "Second half after reconnect."], 700);
+  } else if (serialised.includes("stream this turn")) {
+    await textResponse(response, ["Streamed ", "response reached the browser."], 1_000);
   } else {
     await textResponse(response, ["Streamed ", "response reached the browser."]);
   }
 }
 
-createServer((request, response) => void handle(request, response)).listen(33101, "127.0.0.1");
+createServer((request, response) => void handle(request, response)).listen(
+  Number(process.env.SWAGE_E2E_PROVIDER_PORT ?? "33101"),
+  "127.0.0.1",
+);

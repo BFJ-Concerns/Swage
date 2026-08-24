@@ -84,7 +84,7 @@ fn map_turn_creation_error(error: swage_core::StorageError, session_id: Uuid) ->
     }
 }
 
-fn append_provider_visible_request(
+pub(crate) fn append_provider_visible_request(
     report_json: &mut serde_json::Value,
     round: usize,
     request: serde_json::Value,
@@ -95,14 +95,17 @@ fn append_provider_visible_request(
     }));
 }
 
-fn append_provider_visible_capture_error(report_json: &mut serde_json::Value, round: usize) {
+pub(crate) fn append_provider_visible_capture_error(
+    report_json: &mut serde_json::Value,
+    round: usize,
+) {
     provider_visible_array(report_json, "capture_errors").push(serde_json::json!({
         "round": round,
         "kind": "secret_redaction_unavailable",
     }));
 }
 
-fn append_provider_visible_response(
+pub(crate) fn append_provider_visible_response(
     report_json: &mut serde_json::Value,
     round: usize,
     witness: swage_core::ProviderResponseWitness,
@@ -113,7 +116,7 @@ fn append_provider_visible_response(
     }));
 }
 
-async fn redact_provider_visible_request(
+pub(crate) async fn redact_provider_visible_request(
     state: &AppState,
     mut request: serde_json::Value,
 ) -> Result<serde_json::Value, swage_core::StorageError> {
@@ -181,7 +184,7 @@ fn redact_secret_values(value: &mut serde_json::Value, secret_values: &[String])
     }
 }
 
-fn append_provider_visible_reasoning(
+pub(crate) fn append_provider_visible_reasoning(
     report_json: &mut serde_json::Value,
     round: usize,
     content: String,
@@ -1970,7 +1973,12 @@ async fn select_context_assembly(
         .unwrap_or(&config.context.assembly)
         .trim()
         .to_owned();
-    let assembly_variants: Vec<&str> = vec![];
+    let assembly_variants = config
+        .context
+        .alternatives
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
     let decision = crate::experimentation::select_variant(
         &config.experimentation,
         crate::experimentation::LOCATION_CONTEXT_ASSEMBLY,
