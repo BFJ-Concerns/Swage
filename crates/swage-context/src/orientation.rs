@@ -235,8 +235,10 @@ mod tests {
         let element = OrientationElement::new(bare_environment(), vec![]);
         let content = element.content()[0].text_content();
         let preview = element.report_preview().expect("built-in preview");
+        let opening_sentence = built_in_first_sentence_preview(&content);
 
-        assert!(content.starts_with(&preview));
+        assert!(!preview.is_empty());
+        assert_eq!(preview, opening_sentence);
         assert!(!preview.contains("Session started:"));
     }
 
