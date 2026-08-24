@@ -4075,7 +4075,7 @@ pub async fn create_script(
 pub async fn list_scripts(
     State(state): State<AppState>,
     Path(space_id): Path<Uuid>,
-    Query(query): Query<WorkflowScriptListQuery>,
+    _: Query<WorkflowScriptListQuery>,
 ) -> Result<Json<WorkflowScriptListResponse>, ApiError> {
     state
         .space_store
@@ -4083,7 +4083,6 @@ pub async fn list_scripts(
         .await
         .map_err(internal)?
         .ok_or_else(|| ApiError::not_found("space", space_id))?;
-    let _ = query;
     let skills = discover_skills_for_space(&state, space_id, None)
         .await
         .map_err(internal)?;
@@ -4099,9 +4098,8 @@ pub async fn list_scripts(
 pub async fn get_script(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
-    Query(query): Query<WorkflowScriptListQuery>,
+    _: Query<WorkflowScriptListQuery>,
 ) -> Result<Json<WorkflowScript>, ApiError> {
-    let _ = query;
     let workflow = resolve_workflow_by_id(&state, id, None)
         .await
         .map_err(internal)?
@@ -4112,10 +4110,9 @@ pub async fn get_script(
 pub async fn update_script(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
-    Query(query): Query<WorkflowScriptListQuery>,
+    query: Query<WorkflowScriptListQuery>,
     Json(request): Json<UpdateWorkflowScriptRequest>,
 ) -> Result<Json<WorkflowScript>, ApiError> {
-    let _ = query;
     if resolve_workflow_by_id(&state, id, None)
         .await
         .map_err(internal)?
@@ -4155,7 +4152,7 @@ pub async fn update_script(
             .await
             .map_err(internal)?;
     }
-    get_script(State(state), Path(id), Query(query)).await
+    get_script(State(state), Path(id), query).await
 }
 
 fn source_hash(source: &str) -> String {
@@ -4679,10 +4676,9 @@ pub async fn start_inline_run(
 pub async fn start_saved_run(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
-    Query(query): Query<WorkflowScriptListQuery>,
+    _: Query<WorkflowScriptListQuery>,
     Json(request): Json<StartWorkflowRunRequest>,
 ) -> Result<Json<WorkflowRun>, ApiError> {
-    let _ = query;
     let script = resolve_workflow_by_id(&state, id, None)
         .await
         .map_err(internal)?
@@ -5652,233 +5648,6 @@ mod tests {
         );
         assert_eq!(shadowed_run.carrying_skill, None);
         assert!(shadowed_run.source.is_none());
-    }
-
-    #[cfg(any())]
-    #[tokio::test(flavor = "multi_thread")]
-    async fn agent_skill_workflow_ids_use_the_scope_that_listed_them() {
-        const AGENT_ID: &str = "workflow-agent";
-        let root = tempfile::tempdir().expect("skill root");
-        let (state, storage) = workflow_test_state();
-        let space = storage.get_or_create_default().await.expect("space");
-        store_test_agent(&storage, space.id, AGENT_ID).await;
-        let space_skill_dir = root
-            .path()
-            .join("spaces")
-            .join(&space.slug)
-            .join("skills/scoped-proof");
-        let agent_skill_dir = root
-            .path()
-            .join("spaces")
-            .join(&space.slug)
-            .join(format!("agents/{AGENT_ID}/skills/scoped-proof"));
-        std::fs::create_dir_all(space_skill_dir.join("workflows"))
-            .expect("space workflow directory");
-        std::fs::create_dir_all(agent_skill_dir.join("workflows"))
-            .expect("agent workflow directory");
-        std::fs::write(
-            space_skill_dir.join("SKILL.md"),
-            "---\ndescription: Space carried workflow proof.\n---\n\nInstructions.\n",
-        )
-        .expect("space skill definition");
-        std::fs::write(
-            space_skill_dir.join("workflows/shared.js"),
-            "return { scope: 'space' };\n",
-        )
-        .expect("space carried workflow");
-        std::fs::write(
-            agent_skill_dir.join("SKILL.md"),
-            "---\ndescription: Agent carried workflow proof.\n---\n\nInstructions.\n",
-        )
-        .expect("agent skill definition");
-        std::fs::write(
-            agent_skill_dir.join("workflows/shared.js"),
-            "return { scope: 'agent' };\n",
-        )
-        .expect("agent override workflow");
-        std::fs::write(
-            agent_skill_dir.join("workflows/agent-only.js"),
-            "return { scope: 'agent-only' };\n",
-        )
-        .expect("agent-only workflow");
-        std::fs::write(
-            agent_skill_dir.join("workflows/composed-parent.js"),
-            "return await workflow('agent-only', {});\n",
-        )
-        .expect("agent-scoped composed workflow");
-        let session = storage
-            .create_session(NewSession {
-                space_id: space.id,
-                agent_id: AGENT_ID.into(),
-                metadata: None,
-                active_workspace_attachment_id: None,
-            })
-            .await
-            .expect("session");
-        let _space_root = crate::skill::SpaceSkillRootGuard::at(space.id, root.path());
-        let _session_root = crate::websocket::SessionSkillRootGuard::at(session.id, root.path());
-
-        let Json(unscoped) = list_scripts(
-            State(state.clone()),
-            Path(space.id),
-            Query(WorkflowScriptListQuery::default()),
-        )
-        .await
-        .expect("unscoped workflow list");
-        let unscoped_shared = unscoped
-            .scripts
-            .iter()
-            .find(|script| script.name == "shared")
-            .expect("space workflow in unscoped list");
-        assert!(
-            unscoped
-                .scripts
-                .iter()
-                .all(|script| script.name != "agent-only")
-        );
-
-        let Json(scoped) = list_scripts(
-            State(state.clone()),
-            Path(space.id),
-            Query(WorkflowScriptListQuery::default()),
-        )
-        .await
-        .expect("agent-scoped workflow list");
-        let scoped_shared = scoped
-            .scripts
-            .iter()
-            .find(|script| script.name == "shared")
-            .expect("agent override in scoped list");
-        assert_eq!(scoped_shared.id, unscoped_shared.id);
-        let agent_only = scoped
-            .scripts
-            .iter()
-            .find(|script| script.name == "agent-only")
-            .expect("agent-only workflow in scoped list");
-        let agent_scope = || Query(WorkflowScriptListQuery::default());
-
-        let started = GatewayWorkflowLauncher::new(state.clone())
-            .start_by_name(session.id, "agent-only", Value::Null, None, false)
-            .await
-            .expect("start agent-only workflow by name from its owning session");
-        let run_id: Uuid = serde_json::from_value(started["id"].clone()).expect("run id");
-        wait_for_terminal(&state, run_id).await;
-        let run = storage
-            .get_workflow_run(run_id)
-            .await
-            .expect("name-launched run query")
-            .expect("name-launched run");
-        assert_eq!(
-            run.final_output,
-            Some(serde_json::json!({"scope": "agent-only"}))
-        );
-        assert_eq!(run.carrying_skill.as_deref(), Some("scoped-proof"));
-        assert_eq!(run.dispatch_bound_agent_ids, vec![AGENT_ID]);
-
-        let Json(read) = get_script(State(state.clone()), Path(agent_only.id), agent_scope())
-            .await
-            .expect("read agent-only workflow by scoped ID");
-        assert_eq!(read.id, agent_only.id);
-
-        let update_error = update_script(
-            State(state.clone()),
-            Path(agent_only.id),
-            agent_scope(),
-            Json(UpdateWorkflowScriptRequest {
-                source: Some("return 'changed';".into()),
-                ..Default::default()
-            }),
-        )
-        .await
-        .expect_err("agent-only carried workflow must remain immutable");
-        assert!(
-            matches!(update_error.0, swage_core::GatewayError::SpaceConflict(message) if message.contains("immutable"))
-        );
-
-        let Json(started) = start_saved_run(
-            State(state.clone()),
-            Path(agent_only.id),
-            agent_scope(),
-            Json(StartWorkflowRunRequest {
-                args: Value::Null,
-                budget: None,
-            }),
-        )
-        .await
-        .expect("start agent-only workflow by scoped ID");
-        wait_for_terminal(&state, started.id).await;
-        let run = storage
-            .get_workflow_run(started.id)
-            .await
-            .expect("run query")
-            .expect("run");
-        assert_eq!(
-            run.final_output,
-            Some(serde_json::json!({"scope": "agent-only"}))
-        );
-        assert_eq!(run.carrying_skill.as_deref(), Some("scoped-proof"));
-
-        let Json(started) = start_saved_run(
-            State(state.clone()),
-            Path(scoped_shared.id),
-            agent_scope(),
-            Json(StartWorkflowRunRequest {
-                args: Value::Null,
-                budget: None,
-            }),
-        )
-        .await
-        .expect("start agent override by scoped ID");
-        wait_for_terminal(&state, started.id).await;
-        let run = storage
-            .get_workflow_run(started.id)
-            .await
-            .expect("override run query")
-            .expect("override run");
-        assert_eq!(
-            run.final_output,
-            Some(serde_json::json!({"scope": "agent"}))
-        );
-
-        let composed_parent = scoped
-            .scripts
-            .iter()
-            .find(|script| script.name == "composed-parent")
-            .expect("agent-scoped composed parent");
-        let Json(started) = start_saved_run(
-            State(state.clone()),
-            Path(composed_parent.id),
-            agent_scope(),
-            Json(StartWorkflowRunRequest {
-                args: Value::Null,
-                budget: None,
-            }),
-        )
-        .await
-        .expect("start agent-scoped composed workflow");
-        wait_for_terminal(&state, started.id).await;
-        let parent = storage
-            .get_workflow_run(started.id)
-            .await
-            .expect("composed parent query")
-            .expect("composed parent run");
-        assert_eq!(
-            parent.final_output,
-            Some(serde_json::json!({"scope": "agent-only"}))
-        );
-        assert_eq!(parent.dispatch_bound_agent_ids, vec![AGENT_ID]);
-        let child = storage
-            .list_workflow_runs(space.id)
-            .await
-            .expect("composed runs")
-            .into_iter()
-            .find(|run| run.parent_run_id == Some(started.id))
-            .expect("agent-scoped child run");
-        assert_eq!(
-            child.final_output,
-            Some(serde_json::json!({"scope": "agent-only"}))
-        );
-        assert_eq!(child.dispatch_bound_agent_ids, vec![AGENT_ID]);
     }
 
     #[tokio::test(flavor = "multi_thread")]

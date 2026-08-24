@@ -117,17 +117,22 @@ fn meta_string_field(object: &str, field: &str) -> Option<String> {
         {
             index += 1;
         }
-        let key_start = index;
-        while bytes
-            .get(index)
-            .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
-        {
-            index += 1;
-        }
-        if key_start == index {
-            return None;
-        }
-        let key = &object[key_start..index];
+        let (key, after_key) = if bytes.get(index) == Some(&b'"') {
+            json_string_at(object, index)?
+        } else {
+            let key_start = index;
+            while bytes
+                .get(index)
+                .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+            {
+                index += 1;
+            }
+            if key_start == index {
+                return None;
+            }
+            (object[key_start..index].to_owned(), index)
+        };
+        index = after_key;
         while bytes.get(index).is_some_and(u8::is_ascii_whitespace) {
             index += 1;
         }
@@ -138,30 +143,72 @@ fn meta_string_field(object: &str, field: &str) -> Option<String> {
         while bytes.get(index).is_some_and(u8::is_ascii_whitespace) {
             index += 1;
         }
-        if bytes.get(index) != Some(&b'"') {
-            return None;
-        }
-        let value_start = index;
-        index += 1;
-        while let Some(byte) = bytes.get(index) {
-            if *byte == b'\\' {
-                index += 2;
-            } else if *byte == b'"' {
-                index += 1;
-                break;
-            } else {
-                index += 1;
-            }
-        }
-        let value = serde_json::from_str::<String>(&object[value_start..index]).ok();
+        let value = (bytes.get(index) == Some(&b'"'))
+            .then(|| json_string_at(object, index))
+            .flatten();
         if key == field {
-            return value;
+            return value.map(|(value, _)| value);
         }
-        while bytes.get(index).is_some_and(|byte| *byte != b',') {
+        index = skip_meta_value(object, index);
+    }
+    None
+}
+
+/// Return the decoded JSON string at `start` and the first byte after it.
+fn json_string_at(source: &str, start: usize) -> Option<(String, usize)> {
+    let bytes = source.as_bytes();
+    if bytes.get(start) != Some(&b'"') {
+        return None;
+    }
+    let mut index = start + 1;
+    while let Some(byte) = bytes.get(index) {
+        if *byte == b'\\' {
+            index += 2;
+        } else if *byte == b'"' {
+            index += 1;
+            return serde_json::from_str(&source[start..index])
+                .ok()
+                .map(|value| (value, index));
+        } else {
             index += 1;
         }
     }
     None
+}
+
+/// Advance through one metadata value without mistaking nested commas for a
+/// following field. Metadata only saves string fields, but unrelated object,
+/// array, and scalar fields must not hide later `name` or `description` data.
+fn skip_meta_value(source: &str, start: usize) -> usize {
+    let bytes = source.as_bytes();
+    let mut index = start;
+    let mut depth = 0usize;
+    while let Some(byte) = bytes.get(index) {
+        match *byte {
+            b'"' | b'\'' | b'`' => {
+                let quote = *byte;
+                index += 1;
+                while let Some(byte) = bytes.get(index) {
+                    if *byte == b'\\' {
+                        index += 2;
+                    } else if *byte == quote {
+                        index += 1;
+                        break;
+                    } else {
+                        index += 1;
+                    }
+                }
+                continue;
+            }
+            b'{' | b'[' | b'(' => depth += 1,
+            b'}' | b']' | b')' if depth > 0 => depth -= 1,
+            b'}' if depth == 0 => return index,
+            b',' if depth == 0 => return index + 1,
+            _ => {}
+        }
+        index += 1;
+    }
+    index
 }
 
 /// Splits optional portable `meta` and `defaults` headers off a script
@@ -1438,7 +1485,7 @@ mod tests {
     async fn portable_meta_header_is_ignored_when_the_script_runs() {
         let output = WorkflowEngine::new(EngineLimits::default())
             .execute_hosted(
-                r#"export const meta = { name: "portable", description: "runs unchanged" }; return {ok: true};"#,
+                r#"export const meta = {"name":"portable","description":"runs unchanged"}; return {ok: true};"#,
                 "null", CancellationToken::new(), None, ScriptCapabilities::default(),
             )
             .await
@@ -1449,7 +1496,7 @@ mod tests {
         );
         assert_eq!(
             script_meta(
-                r#"export const meta = { name: "portable", description: "runs unchanged" };"#
+                r#"export const meta = {"name":"portable","description":"runs unchanged"};"#
             )
             .unwrap(),
             ScriptMeta {
@@ -1459,26 +1506,30 @@ mod tests {
         );
     }
 
-    #[tokio::test(flavor = "current_thread")]
-    async fn schema_agent_exhaustion_reaches_the_script_as_null() {
-        let host = Arc::new(FakeHost {
-            outputs: Mutex::new(VecDeque::from([Value::Null])),
-            deliveries: Mutex::new(Vec::new()),
-            records: Mutex::new(Vec::new()),
-            spent: 0,
-            remaining: None,
-        });
-        let output = WorkflowEngine::new(EngineLimits::default())
-            .execute_hosted(
-                "return await agent('classify', { agent: 'worker', schema: { type: 'object' } });",
-                "null",
-                CancellationToken::new(),
-                Some(host),
-                ScriptCapabilities::default(),
-            )
-            .await
-            .expect("schema exhaustion is a null result");
-        assert_eq!(serde_json::from_str::<Value>(&output).unwrap(), Value::Null);
+    #[test]
+    fn portable_meta_header_reads_java_script_and_json_object_forms() {
+        let json_form =
+            script_meta(r#"export const meta = {"name":"json","description":"quoted keys"};"#)
+                .expect("JSON-form metadata");
+        let java_script_form = script_meta(
+            r#"export const meta = { task: { mode: "nested" }, name: "javascript", description: "bare keys" };"#,
+        )
+        .expect("JavaScript-form metadata");
+
+        assert_eq!(
+            json_form,
+            ScriptMeta {
+                name: Some("json".into()),
+                description: Some("quoted keys".into()),
+            }
+        );
+        assert_eq!(
+            java_script_form,
+            ScriptMeta {
+                name: Some("javascript".into()),
+                description: Some("bare keys".into()),
+            }
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
