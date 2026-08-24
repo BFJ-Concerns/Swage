@@ -1,9 +1,63 @@
+use std::collections::BTreeMap;
+
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-pub use swage_protocol::client::workflow::{AgentCallRequest, AgentSessionRef};
+use swage_protocol::client::{settings::Effort, workflow::WorkerIsolation};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WorkflowHostError {
+    Message(String),
+    AgentCall { host_reference: String, message: String },
+}
+
+impl std::fmt::Display for WorkflowHostError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self { Self::Message(message) => f.write_str(message), Self::AgentCall { message, .. } => f.write_str(message) }
+    }
+}
+
+impl From<String> for WorkflowHostError { fn from(message: String) -> Self { Self::Message(message) } }
+
+/// An opaque continuation token naming a worker session the run created.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentSessionRef {
+    pub session_id: Uuid,
+    pub thread_id: Uuid,
+}
+
+/// A journal-stable workflow child dispatch request. This is host-journal
+/// state, not a client wire type.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AgentCallRequest {
+    pub prompt: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task: Option<String>,
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<Effort>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub isolation: Option<WorkerIsolation>,
+    pub schema: Option<Value>,
+    pub max_attempts: u32,
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<AgentSessionRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elements: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub variables: Option<BTreeMap<String, String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assembly: Option<String>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedWorkerPlacement {
@@ -88,7 +142,7 @@ pub trait WorkflowHost: Send + Sync {
         request: AgentCallRequest,
         resolved_placement: Option<ResolvedWorkerPlacement>,
         cancellation: CancellationToken,
-    ) -> Result<AgentCallResult, String>;
+    ) -> Result<AgentCallResult, WorkflowHostError>;
 
     /// Resolve placement and admit one agent call through a single host
     /// dispatch. Durable hosts override this to keep the two journal entries
@@ -97,7 +151,7 @@ pub trait WorkflowHost: Send + Sync {
         &self,
         request: AgentCallRequest,
         cancellation: CancellationToken,
-    ) -> Result<AgentCallResult, String> {
+    ) -> Result<AgentCallResult, WorkflowHostError> {
         let resolved_placement = self
             .resolve_worker_placement(&request, cancellation.clone())
             .await

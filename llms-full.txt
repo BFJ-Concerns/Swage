@@ -868,8 +868,7 @@ next handler.
    `FailedAgentCallRef { journal_entry_id, seq }`.
 2. It inserts the ref into `failed_agent_calls` keyed by
    `journal_entry_id.to_string()`.
-3. The error message carries
-   `"AgentCallReference:{journal_entry_id}:{error}"`.
+3. The host returns the reference structurally with the failure.
 4. The engine captures the reference inside
    `WorkflowEngineError::AgentCall { host_reference, message }`.
 5. At terminal state resolution, the `host_reference` looks up

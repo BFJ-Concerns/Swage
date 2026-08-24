@@ -10,7 +10,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     AgentCallRequest, AwaitEventRequest, EffectPayload, GateRequest, RunEventPost,
-    WorkflowCallRequest, WorkflowHost,
+    WorkflowCallRequest, WorkflowHost, WorkflowHostError,
 };
 
 fn named_host_error(error: &str, fallback: &str) -> (String, String) {
@@ -59,16 +59,59 @@ pub struct ScriptCapabilities {
     pub composition: bool,
 }
 
-/// Splits an optional `export const defaults = { … };` header off a script
+/// Metadata carried by portable workflow scripts. It is deliberately save-time
+/// information: the caged runtime never exposes it to the script.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ScriptMeta {
+    pub name: Option<String>,
+    pub description: Option<String>,
+}
+
+/// Read an optional leading portable `export const meta = { … };` header.
+pub fn script_meta(source: &str) -> Result<ScriptMeta, String> {
+    let header_end = skip_whitespace_and_comments(source);
+    let rest = &source[header_end..];
+    let Some(after_export) = rest.strip_prefix("export") else { return Ok(ScriptMeta::default()); };
+    let Some(after_const) = after_export.trim_start().strip_prefix("const") else { return Ok(ScriptMeta::default()); };
+    let Some(after_meta) = after_const.trim_start().strip_prefix("meta") else { return Ok(ScriptMeta::default()); };
+    let Some(after_equals) = after_meta.trim_start().strip_prefix('=') else { return Err("workflow meta must be assigned an object literal".into()); };
+    let object = after_equals.trim_start();
+    if !object.starts_with('{') { return Err("workflow meta must be an object literal".into()); }
+    let end = find_balanced_object_end(object)?;
+    // Portable scripts use JavaScript object syntax. JSON-form headers give us
+    // reliable field extraction; other object literals remain accepted and are
+    // simply not a source of saved details.
+    let value: serde_json::Value = serde_json::from_str(&object[..=end]).unwrap_or(serde_json::Value::Null);
+    Ok(ScriptMeta {
+        name: value.get("name").and_then(serde_json::Value::as_str).map(str::to_owned),
+        description: value.get("description").and_then(serde_json::Value::as_str).map(str::to_owned),
+    })
+}
+
+/// Splits optional portable `meta` and `defaults` headers off a script
 /// body. The body is wrapped in an async function before evaluation, where
 /// `export` is a syntax error — so the header can only be the first
 /// statement (comments permitted before it), and an existing script cannot
 /// already contain one.
 fn extract_defaults(source: &str) -> Result<(Option<String>, &str), String> {
-    let header_end = skip_whitespace_and_comments(source);
-    let rest = &source[header_end..];
+    let mut body = source;
+    let header_end = skip_whitespace_and_comments(body);
+    let rest = &body[header_end..];
+    if let Some(after_export) = rest.strip_prefix("export")
+        && let Some(after_const) = after_export.trim_start().strip_prefix("const")
+        && let Some(after_meta) = after_const.trim_start().strip_prefix("meta")
+    {
+        let after_equals = after_meta.trim_start().strip_prefix('=').ok_or("workflow meta must be assigned an object literal")?;
+        let object = after_equals.trim_start();
+        if !object.starts_with('{') { return Err("workflow meta must be an object literal".into()); }
+        let end = find_balanced_object_end(object)?;
+        body = object[end + 1..].trim_start();
+        if let Some(after_semicolon) = body.strip_prefix(';') { body = after_semicolon; }
+    }
+    let header_end = skip_whitespace_and_comments(body);
+    let rest = &body[header_end..];
     let Some(after_keyword) = rest.strip_prefix("export") else {
-        return Ok((None, source));
+        return Ok((None, body));
     };
     let after_keyword = after_keyword.trim_start();
     let Some(after_const) = after_keyword.strip_prefix("const") else {
@@ -201,8 +244,6 @@ pub enum WorkflowEngineError {
     },
 }
 
-const AGENT_CALL_FAILURE_PREFIX: &str = "\u{1e}swage-agent-call:";
-
 /// Creates one isolated JavaScript runtime per workflow attempt.
 pub struct WorkflowEngine {
     limits: EngineLimits,
@@ -255,8 +296,7 @@ impl WorkflowEngine {
         type WorkflowIntrinsics = (Eval, Json, PromiseIntrinsic, MapSet, RegExpCompiler, RegExp);
         let context = AsyncContext::custom::<WorkflowIntrinsics>(&runtime).await?;
         let source = format!(
-            "(async () => {{ try {{ const value = await (async () => {{ {source} }})(); return JSON.stringify(value === undefined ? null : value); }} catch (error) {{ if (error && typeof error.__swageAgentCallReference === 'string') {{ const rendered = String(error.name) + ': ' + String(error.message); const stack = error.stack == null ? '' : String(error.stack); return {prefix:?} + error.__swageAgentCallReference + ':' + rendered + (stack ? '\\n' + stack : ''); }} throw error; }} }})()",
-            prefix = AGENT_CALL_FAILURE_PREFIX,
+            "(async () => {{ try {{ const value = await (async () => {{ {source} }})(); return JSON.stringify({{ result: JSON.stringify(value === undefined ? null : value) }}); }} catch (error) {{ if (error && typeof error.__swageAgentCallReference === 'string') return JSON.stringify({{ agent_call: {{ host_reference: error.__swageAgentCallReference, message: String(error.name) + ': ' + String(error.message) }} }}); throw error; }} }})()",
         );
         let args_json = args_json.to_string();
         let host_cancellation = (*cancellation).clone();
@@ -335,13 +375,11 @@ impl WorkflowEngine {
                                         serde_json::json!({"ok": true, "value": result.output, "session": session}).to_string()
                                     }
                                     Err(error) => {
-                                        let (host_reference, error) = error
-                                            .strip_prefix("AgentCallReference:")
-                                            .and_then(|rest| rest.split_once(':'))
-                                            .map_or((None, error.as_str()), |(reference, message)| {
-                                                (Some(reference), message)
-                                            });
-                                        let (name, message) = named_host_error(error, "AgentCallError");
+                                        let (host_reference, error) = match error {
+                                            WorkflowHostError::AgentCall { host_reference, message } => (Some(host_reference), message),
+                                            WorkflowHostError::Message(message) => (None, message),
+                                        };
+                                        let (name, message) = named_host_error(&error, "AgentCallError");
                                         serde_json::json!({
                                             "ok": false,
                                             "error": {"name": name, "message": message, "host_reference": host_reference}
@@ -922,18 +960,16 @@ impl WorkflowEngine {
             return Err(WorkflowEngineError::Cancelled);
         }
         match result {
-            Ok(output) => match output.strip_prefix(AGENT_CALL_FAILURE_PREFIX) {
-                Some(failure) => {
-                    let (host_reference, message) = failure
-                        .split_once(':')
-                        .unwrap_or((failure, "AgentCallError: agent call failed"));
-                    Err(WorkflowEngineError::AgentCall {
-                        host_reference: host_reference.to_string(),
-                        message: message.to_string(),
-                    })
+            Ok(output) => {
+                let envelope: serde_json::Value = serde_json::from_str(&output).map_err(|error| WorkflowEngineError::Script(error.to_string()))?;
+                if let Some(failure) = envelope.get("agent_call") {
+                    return Err(WorkflowEngineError::AgentCall {
+                        host_reference: failure.get("host_reference").and_then(serde_json::Value::as_str).unwrap_or_default().to_owned(),
+                        message: failure.get("message").and_then(serde_json::Value::as_str).unwrap_or("AgentCallError: agent call failed").to_owned(),
+                    });
                 }
-                None => Ok(output),
-            },
+                envelope.get("result").and_then(serde_json::Value::as_str).map(str::to_owned).ok_or_else(|| WorkflowEngineError::Script("workflow result envelope is malformed".into()))
+            }
             Err(error) => Err(WorkflowEngineError::Script(error)),
         }
     }
@@ -974,7 +1010,7 @@ mod tests {
             _: AgentCallRequest,
             _: Option<crate::host::ResolvedWorkerPlacement>,
             _: CancellationToken,
-        ) -> Result<AgentCallResult, String> {
+        ) -> Result<AgentCallResult, WorkflowHostError> {
             let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
             self.peak.fetch_max(active, Ordering::SeqCst);
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
@@ -1019,7 +1055,7 @@ mod tests {
             _: AgentCallRequest,
             _: Option<crate::host::ResolvedWorkerPlacement>,
             _: CancellationToken,
-        ) -> Result<AgentCallResult, String> {
+        ) -> Result<AgentCallResult, WorkflowHostError> {
             Ok(AgentCallResult {
                 output: self
                     .outputs
@@ -1110,7 +1146,7 @@ mod tests {
             request: AgentCallRequest,
             resolved_placement: Option<crate::host::ResolvedWorkerPlacement>,
             _: CancellationToken,
-        ) -> Result<AgentCallResult, String> {
+        ) -> Result<AgentCallResult, WorkflowHostError> {
             self.agent_requests.lock().expect("requests").push(request);
             self.resolved_working_directories
                 .lock()
@@ -1313,6 +1349,19 @@ mod tests {
         assert_eq!(requests[1].model.as_deref(), Some("strong"));
         // An explicit `undefined` must fall back, not erase the default.
         assert_eq!(requests[1].agent.as_deref(), Some("worker"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn portable_meta_header_is_ignored_when_the_script_runs() {
+        let output = WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                r#"export const meta = {"name":"portable","description":"runs unchanged"}; return {ok: true};"#,
+                "null", CancellationToken::new(), None, ScriptCapabilities::default(),
+            )
+            .await
+            .expect("portable script runs");
+        assert_eq!(serde_json::from_str::<Value>(&output).unwrap(), json!({"ok": true}));
+        assert_eq!(script_meta(r#"export const meta = {"name":"portable","description":"runs unchanged"};"#).unwrap(), ScriptMeta { name: Some("portable".into()), description: Some("runs unchanged".into()) });
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -2275,8 +2324,8 @@ mod tests {
             _: AgentCallRequest,
             _: Option<crate::host::ResolvedWorkerPlacement>,
             _: CancellationToken,
-        ) -> Result<AgentCallResult, String> {
-            Err(self.0.to_string())
+        ) -> Result<AgentCallResult, WorkflowHostError> {
+            Err(WorkflowHostError::Message(self.0.to_string()))
         }
 
         async fn deliver(

@@ -42,6 +42,7 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- Schema-constrained workflow agent calls now return `null` after their validation attempts are exhausted, and portable workflow `meta` headers now seed saved script details.
 - Resumed workflow runs now park durably when a long timer follows an agent, child-workflow, or gate completion.
 - Workflow scripts now reject unrecognised `agent()` and `agentStart()` option keys before dispatch instead of silently dropping them.
 - Reloading the web UI now returns to the open space instead of the space picker.
