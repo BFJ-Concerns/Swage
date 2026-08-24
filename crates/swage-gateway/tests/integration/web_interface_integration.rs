@@ -182,6 +182,24 @@ async fn conversation_url_returns_spa_fallback() {
     );
 }
 
+/// A missing file-like path must remain a missing resource, rather than
+/// receiving the SPA shell with a misleading successful status.
+#[tokio::test(flavor = "multi_thread")]
+async fn missing_file_like_path_returns_not_found_not_spa_html() {
+    if skip_without_frontend_assets("missing_file_like_path_returns_not_found_not_spa_html") {
+        return;
+    }
+
+    let router = make_router();
+    let (status, body) = request(&router, "GET", "/openapi.json").await;
+
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(
+        !String::from_utf8_lossy(&body).contains("<div id=\"app\">"),
+        "missing file-like paths must not receive the SPA shell"
+    );
+}
+
 /// API routes still work alongside asset serving.
 ///
 /// Delivery Closure: Gateway asset serving — API coexistence
