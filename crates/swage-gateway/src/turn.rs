@@ -194,14 +194,18 @@ fn append_provider_visible_reasoning(
     }));
 }
 
-fn provider_visible_array<'a>(
-    report_json: &'a mut serde_json::Value,
-    key: &str,
-) -> &'a mut Vec<serde_json::Value> {
+fn normalise_report_object(report_json: &mut serde_json::Value) {
     if !report_json.is_object() {
         let previous = std::mem::replace(report_json, serde_json::json!({}));
         report_json["assembly_report"] = previous;
     }
+}
+
+fn provider_visible_array<'a>(
+    report_json: &'a mut serde_json::Value,
+    key: &str,
+) -> &'a mut Vec<serde_json::Value> {
+    normalise_report_object(report_json);
 
     let object = report_json
         .as_object_mut()
@@ -233,10 +237,7 @@ fn record_effective_model_snapshot(
     model: &swage_config::ModelEndpointConfig,
     source: &str,
 ) {
-    if !report_json.is_object() {
-        let previous = std::mem::replace(report_json, serde_json::json!({}));
-        report_json["assembly_report"] = previous;
-    }
+    normalise_report_object(report_json);
 
     if !report_json["provider_visible"].is_object() {
         report_json["provider_visible"] = serde_json::json!({});
@@ -926,17 +927,27 @@ async fn process_turn_with_composition_and_focus(
         None => (config, false),
     };
 
-    let (selected_model_id, effective_model_source) = match requested_model.as_deref() {
-        Some(model_id) => (Some(model_id), "request"),
-        None => match session.selected_model_id.as_deref() {
-            Some(model_id) => (Some(model_id), "conversation"),
-            None => (None, "configured_default"),
-        },
-    };
+    let selected_model_id = requested_model
+        .as_deref()
+        .or(session.selected_model_id.as_deref());
     if let Some(requested_model) = requested_model.as_deref() {
         resolve_requested_turn_model(&config, requested_model)?;
     }
     ensure_selected_model_available(state, &config, selected_model_id, session_id)?;
+    let effective_model_source = match requested_model.as_deref() {
+        Some(_) => "request",
+        None if session
+            .selected_model_id
+            .as_deref()
+            .filter(|model_id| !model_id.trim().is_empty())
+            .is_some_and(|model_id| {
+                resolve_model_catalogue_entry(&config.models, model_id).is_some()
+            }) =>
+        {
+            "conversation"
+        }
+        None => "configured_default",
+    };
     let config = effective_session_config(config, selected_model_id);
 
     // Skill discovery, space memory loading, and assembly search paths all use
