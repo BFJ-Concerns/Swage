@@ -1930,6 +1930,10 @@ pub struct WorkflowRunRecord {
     /// run. Worker sessions re-resolve and intersect every definition at
     /// each turn; a missing definition therefore fails closed.
     pub dispatch_bound_task_definition_ids: Vec<String>,
+    /// The call-scoped tool allow-list inherited from the worker session that
+    /// launched this run. This is a final narrowing overlay on every worker
+    /// the run dispatches, including workers of nested child runs.
+    pub workflow_call_tools: Option<Vec<String>>,
     /// Filesystem authority inherited from the session that launched this
     /// run. `None` means the run was not launched by a placed worker.
     pub inherited_worker_placement: Option<WorkflowRunWorkerPlacement>,
@@ -1961,6 +1965,8 @@ pub struct NewWorkflowRun {
     pub dispatch_bound_agent_ids: Vec<String>,
     /// See `WorkflowRunRecord::dispatch_bound_task_definition_ids`.
     pub dispatch_bound_task_definition_ids: Vec<String>,
+    /// See `WorkflowRunRecord::workflow_call_tools`.
+    pub workflow_call_tools: Option<Vec<String>>,
     /// See `WorkflowRunRecord::inherited_worker_placement`.
     pub inherited_worker_placement: Option<WorkflowRunWorkerPlacement>,
 }

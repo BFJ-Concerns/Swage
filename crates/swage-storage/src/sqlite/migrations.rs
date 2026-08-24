@@ -144,6 +144,7 @@ const ADD_WORKFLOW_RUN_PARKING: &str = "
         parent_seq           INTEGER,
         dispatch_bound_agent_ids_json TEXT NOT NULL,
         dispatch_bound_task_definition_ids_json TEXT NOT NULL,
+        workflow_call_tools_json TEXT,
         wake_at              TEXT,
         inherited_worker_placement_json TEXT
     );
@@ -154,6 +155,7 @@ const ADD_WORKFLOW_RUN_PARKING: &str = "
         budget_json, state, final_output_json, handover_json, error_message, engine_version,
         created_at, completed_at, parent_run_id, parent_seq,
         dispatch_bound_agent_ids_json, dispatch_bound_task_definition_ids_json,
+        workflow_call_tools_json,
         inherited_worker_placement_json
     )
     SELECT
@@ -163,6 +165,7 @@ const ADD_WORKFLOW_RUN_PARKING: &str = "
         budget_json, state, final_output_json, NULL, error_message, engine_version,
         created_at, completed_at, parent_run_id, parent_seq,
         dispatch_bound_agent_ids_json, dispatch_bound_task_definition_ids_json,
+        workflow_call_tools_json,
         inherited_worker_placement_json
     FROM workflow_runs;
     DROP TABLE workflow_runs;
@@ -985,6 +988,7 @@ const COMPLETE_SCHEMA: &str = "
         completed_at        TEXT,
         dispatch_bound_agent_ids_json TEXT NOT NULL DEFAULT '[]',
         dispatch_bound_task_definition_ids_json TEXT NOT NULL DEFAULT '[]',
+        workflow_call_tools_json TEXT,
         inherited_worker_placement_json TEXT
     );
 
