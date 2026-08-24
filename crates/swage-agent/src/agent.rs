@@ -39,9 +39,7 @@ mod tests {
 
     use swage_core::{PermissionDeniedReason, ToolError};
 
-    use super::{
-        MAX_MODEL_TOOL_ERROR_DETAIL_CHARS, compact_tool_error_detail, format_tool_error_for_model,
-    };
+    use super::{compact_tool_error_detail, format_tool_error_for_model};
 
     #[test]
     fn format_tool_error_for_model_keeps_invalid_parameters_compact() {
@@ -88,32 +86,6 @@ mod tests {
         assert_eq!(
             formatted,
             "Tool error: `web_search` timed out after 30s. Retry with a smaller or simpler request."
-        );
-    }
-
-    #[test]
-    fn format_tool_error_for_model_keeps_workflow_catalogue_preview_actionable() {
-        let message = "workflow script \"missing-workflow\" was not found. 13 workflows are available. Use `workflow_list` to see all workflows. Showing 6 of 13 names: blind-rederivation, build-verify, research-sweep, operator-proof-workflow, operator-report, nightly-audit.";
-        let error = ToolError::ExecutionFailed {
-            name: "workflow_run".to_string(),
-            message: message.to_string(),
-        };
-
-        let formatted = format_tool_error_for_model(&error);
-
-        assert!(formatted.contains("13 workflows are available"));
-        assert!(formatted.contains("`workflow_list`"));
-        assert!(formatted.contains("Showing 6 of 13 names"));
-        assert!(formatted.contains("research-sweep"));
-        assert!(formatted.contains("operator-proof-workflow"));
-        assert!(formatted.contains("nightly-audit"));
-        assert!(
-            !formatted.contains("..."),
-            "the model-visible error must not silently truncate the advertised preview: {formatted}"
-        );
-        assert!(
-            message.chars().count() <= MAX_MODEL_TOOL_ERROR_DETAIL_CHARS,
-            "the catalogue preview must fit the model error-detail budget"
         );
     }
 
@@ -1053,7 +1025,11 @@ fn tool_dispatch_result(
     }
 }
 
-fn format_tool_error_for_model(error: &swage_core::ToolError) -> String {
+/// Render a tool failure exactly as it will appear in the model's next message.
+///
+/// Tool implementations may use this boundary to verify that actionable error
+/// detail survives the agent's compaction policy.
+pub fn format_tool_error_for_model(error: &swage_core::ToolError) -> String {
     use swage_core::ToolError;
 
     match error {

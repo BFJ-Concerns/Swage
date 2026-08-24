@@ -126,7 +126,7 @@ impl Tool for WorkflowRunTool {
                 Err(ToolError::ExecutionFailed {
                     name: self.name().into(),
                     message: workflow_catalogue_error_summary(
-                        &message,
+                        name.expect("not-found enrichment requires a named workflow"),
                         &catalogue,
                         swage_agent::agent::MAX_MODEL_TOOL_ERROR_DETAIL_CHARS,
                     ),
@@ -354,21 +354,20 @@ mod tests {
             .execute(json!({"name": "not-a-workflow"}), &context)
             .await
             .expect_err("unknown name should fail");
-        let ToolError::ExecutionFailed { message, .. } = error else {
-            panic!("unknown name should be an execution failure: {error}");
-        };
-        assert!(message.contains("not-a-workflow"));
-        assert!(message.contains("13 workflows are available"));
-        assert!(message.contains("`workflow_list`"));
-        assert!(message.contains("Showing "));
-        assert!(message.contains(" of 13 names"));
+        let model_visible = swage_agent::agent::format_tool_error_for_model(&error);
         assert!(
-            message.chars().count() <= swage_agent::agent::MAX_MODEL_TOOL_ERROR_DETAIL_CHARS,
-            "error message must fit the model error-detail budget: {message}"
+            matches!(error, ToolError::ExecutionFailed { .. }),
+            "unknown name should be an execution failure: {error}"
         );
+        assert!(model_visible.contains("not-a-workflow"));
+        assert!(model_visible.contains("13 workflows are available"));
+        assert!(model_visible.contains("`workflow_list`"));
+        assert!(model_visible.contains("Showing "));
+        assert!(model_visible.contains(" of 13 names"));
+        assert!(model_visible.contains("research-sweep"));
         assert!(
-            message.contains("research-sweep"),
-            "shipped workflow missing: {message}"
+            !model_visible.contains("..."),
+            "the production error must reach the model without silent truncation: {model_visible}"
         );
     }
 }
