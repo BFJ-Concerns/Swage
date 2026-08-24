@@ -101,11 +101,10 @@ describe("reconnect reconciliation", () => {
     });
 
     store.startTurn("Continue the recovered turn");
-    store.handleServerEvent({ type: "context_assembled", turn_id: "recovered-turn", report: {} as never });
-    const recoveredStartedAt = store.turnStartedAt;
+    const recoveredTurnGeneration = store.activeTurnGeneration;
     store.handleServerEvent({ type: "token", content: "live content" });
 
-    store.reconcileAfterReconnect("recovered-turn", recoveredStartedAt);
+    store.reconcileAfterReconnect(recoveredTurnGeneration);
 
     expect(store.isStreaming).toBe(false);
     expect(store.streamedContent).toBe("");
@@ -130,18 +129,16 @@ describe("reconnect reconciliation", () => {
     });
 
     store.startTurn("Old turn before the refresh");
-    store.handleServerEvent({ type: "context_assembled", turn_id: "older-turn", report: {} as never });
-    const recoveredStartedAt = store.turnStartedAt;
+    const recoveredTurnGeneration = store.activeTurnGeneration;
 
     // Force the refresh to remain pending while a newer turn becomes live.
     store.startTurn("New turn while the refresh is delayed");
-    store.handleServerEvent({ type: "context_assembled", turn_id: "newer-turn", report: {} as never });
     store.handleServerEvent({ type: "token", content: "new live content" });
 
-    store.reconcileAfterReconnect("older-turn", recoveredStartedAt);
+    store.reconcileAfterReconnect(recoveredTurnGeneration);
 
     expect(store.isStreaming).toBe(true);
-    expect(store.activeTurnId).toBe("newer-turn");
+    expect(store.activeTurnId).toBeNull();
     expect(store.streamedContent).toBe("new live content");
   });
 });
