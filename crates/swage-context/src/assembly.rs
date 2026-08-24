@@ -121,9 +121,9 @@ fn default_assembly_inner(
         }
 
         // Skills have a compact identity preview; every other rendered
-        // element exposes a bounded excerpt of the actual context it added.
-        // The report is an inspector surface, so a permanently empty preview
-        // conceals rather than summarises the assembled context.
+        // element exposes bounded metadata about the context it added. The
+        // report is persisted, so it must never copy unredacted context into
+        // the snapshot merely to make the inspector more informative.
         let preview = if element.name() == "skills" {
             extract_skill_names_preview(&source).or_else(|| preview_messages(&content))
         } else {
@@ -214,23 +214,29 @@ fn default_assembly_inner(
 }
 
 pub(crate) fn preview_messages(messages: &[ChatMessage]) -> Option<String> {
-    const PREVIEW_CHARS: usize = 240;
-
-    let content = messages
+    let non_empty_messages = messages
         .iter()
-        .map(|message| message.text_content())
+        .map(ChatMessage::text_content)
         .filter(|text| !text.trim().is_empty())
-        .collect::<Vec<_>>()
-        .join("\n");
-    if content.is_empty() {
+        .collect::<Vec<_>>();
+    if non_empty_messages.is_empty() {
         return None;
     }
 
-    let mut preview = content.chars().take(PREVIEW_CHARS).collect::<String>();
-    if content.chars().nth(PREVIEW_CHARS).is_some() {
-        preview.push('…');
-    }
-    Some(preview)
+    let characters = non_empty_messages
+        .iter()
+        .map(|text| text.chars().count())
+        .sum::<usize>();
+    Some(format!(
+        "{} message{} ({} characters)",
+        non_empty_messages.len(),
+        if non_empty_messages.len() == 1 {
+            ""
+        } else {
+            "s"
+        },
+        characters,
+    ))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -725,7 +731,7 @@ mod tests {
     }
 
     #[test]
-    fn ordinary_element_report_preview_is_a_bounded_content_excerpt() {
+    fn ordinary_element_report_preview_summarises_content_without_copying_it() {
         let elements: Vec<Box<dyn ContextElement>> = vec![prompts_element(&"x".repeat(300))];
         let output = default_assembly(
             &elements,
@@ -734,9 +740,8 @@ mod tests {
         );
 
         let preview = output.report.elements[0].preview.as_deref().unwrap();
-        assert_eq!(preview.chars().count(), 241);
-        assert!(preview.ends_with('…'));
-        assert!(preview.starts_with('x'));
+        assert_eq!(preview, "1 message (300 characters)");
+        assert!(!preview.contains(&"x".repeat(300)));
     }
 
     #[test]

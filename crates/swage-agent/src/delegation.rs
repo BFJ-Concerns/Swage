@@ -405,7 +405,12 @@ impl DelegationExecutor {
         // their diagnostic audit data belongs in the child's local record.
         while let Ok(event) = event_rx.try_recv() {
             if let Some(recorder) = &self.snapshot_recorder {
-                recorder.record_event(session.id, event).await?;
+                // The child has already completed. Preserve that result if an
+                // optional diagnostic write cannot be recorded; the recorder
+                // itself is responsible for recording any reconstruction gap.
+                if let Err(error) = recorder.record_event(session.id, event).await {
+                    tracing::warn!(%turn_id, %error, "failed to persist delegated diagnostic event");
+                }
             }
         }
 
