@@ -10444,7 +10444,7 @@ fn effective_session_config_resolves_aliased_selected_model_as_default() {
 }
 
 #[tokio::test]
-async fn request_model_alias_overrides_only_the_turn_and_is_recorded_in_its_snapshot() {
+async fn turn_model_snapshot_records_the_effective_model_and_its_source() {
     let chunks = vec![
         StreamChunk::Delta {
             content: "Hello".into(),
@@ -10547,6 +10547,51 @@ async fn request_model_alias_overrides_only_the_turn_and_is_recorded_in_its_snap
     assert_eq!(
         snapshot["provider_visible"]["effective_model"]["provider_id"],
         "second-provider"
+    );
+    assert_eq!(
+        snapshot["provider_visible"]["effective_model"]["source"],
+        "request"
+    );
+
+    process_turn_with_existing_turn_and_focus_and_model(
+        &state,
+        session_id,
+        None,
+        "hello again".to_string(),
+        mpsc::unbounded_channel().0,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+        None,
+        None,
+        None,
+        None,
+        TurnAttendance::Attended,
+        None,
+        None,
+    )
+    .await
+    .expect("default-model turn should complete");
+
+    let turns = storage
+        .list_turns_by_thread(thread.id)
+        .await
+        .expect("turns");
+    let default_turn = turns.last().expect("default turn");
+    let default_snapshot: serde_json::Value = serde_json::from_str(
+        &storage
+            .get_snapshot(default_turn.id)
+            .await
+            .expect("read default snapshot")
+            .expect("default turn snapshot"),
+    )
+    .expect("default snapshot json");
+    assert_eq!(
+        default_snapshot["provider_visible"]["effective_model"]["catalogue_entry"],
+        "default"
+    );
+    assert_eq!(
+        default_snapshot["provider_visible"]["effective_model"]["source"],
+        "configured_default"
     );
 }
 
