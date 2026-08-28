@@ -4,6 +4,7 @@ use uuid::Uuid;
 use swage_core::StorageError;
 
 use crate::model::{
+    NewPage, NewPageModule, Page, PageModule,
     ActiveSkillRecord, AgentDefinition, AgentMemoryRecord, AgentMessage, AppendMessage,
     ApprovalRequest, ApprovalState, Attachment, AttachmentStatus, AuditEvent, BackgroundJob,
     ChannelInboundMessage, ChannelLink, ContextSnapshotRecord, CurationAssertion, DeliveryRecord,
@@ -1155,6 +1156,25 @@ pub trait WorkflowStore: Send + Sync {
 ///
 /// `SpaceStore` is not included — it is independently available and consumers
 /// that need space operations import it separately.
+/// Pages: agent-run tabs on a space assembled from module instances. The
+/// database is authoritative for page content; renderings derive from it.
+#[async_trait]
+pub trait PageStore: Send + Sync {
+    async fn create_page(&self, page: NewPage) -> Result<Page, StorageError>;
+    async fn get_page(&self, id: Uuid) -> Result<Option<Page>, StorageError>;
+    /// All pages of a space, oldest first.
+    async fn list_pages_by_space(&self, space_id: Uuid) -> Result<Vec<Page>, StorageError>;
+    async fn create_page_module(&self, module: NewPageModule)
+    -> Result<PageModule, StorageError>;
+    async fn get_page_module(&self, id: Uuid) -> Result<Option<PageModule>, StorageError>;
+    /// A page's module instances in position order.
+    async fn list_page_modules(&self, page_id: Uuid) -> Result<Vec<PageModule>, StorageError>;
+    /// Replace a module instance's source, advancing the owning page's
+    /// updated_at in the same write.
+    async fn update_page_module_source(&self, id: Uuid, source: &str)
+    -> Result<(), StorageError>;
+}
+
 pub trait Storage:
     SessionStore
     + WorkspaceAttachmentStore
@@ -1185,6 +1205,7 @@ pub trait Storage:
     + ScheduleStore
     + ChannelQueueStore
     + WorkflowStore
+    + PageStore
     + Send
     + Sync
 {
@@ -1221,6 +1242,7 @@ impl<T> Storage for T where
         + ScheduleStore
         + ChannelQueueStore
         + WorkflowStore
+        + PageStore
         + Send
         + Sync
 {
@@ -1917,6 +1939,31 @@ mod tests {
     }
 
     #[async_trait]
+    #[async_trait]
+    impl PageStore for StubStorage {
+        async fn create_page(&self, _: NewPage) -> Result<Page, StorageError> {
+            unimplemented!()
+        }
+        async fn get_page(&self, _: Uuid) -> Result<Option<Page>, StorageError> {
+            unimplemented!()
+        }
+        async fn list_pages_by_space(&self, _: Uuid) -> Result<Vec<Page>, StorageError> {
+            unimplemented!()
+        }
+        async fn create_page_module(&self, _: NewPageModule) -> Result<PageModule, StorageError> {
+            unimplemented!()
+        }
+        async fn get_page_module(&self, _: Uuid) -> Result<Option<PageModule>, StorageError> {
+            unimplemented!()
+        }
+        async fn list_page_modules(&self, _: Uuid) -> Result<Vec<PageModule>, StorageError> {
+            unimplemented!()
+        }
+        async fn update_page_module_source(&self, _: Uuid, _: &str) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+    }
+
     impl TurnStore for StubStorage {
         async fn create_turn(&self, _: NewTurn) -> Result<Turn, StorageError> {
             unimplemented!()

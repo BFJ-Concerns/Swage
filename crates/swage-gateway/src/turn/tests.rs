@@ -2598,6 +2598,46 @@ impl ThreadStore for MockStorage {
 }
 
 #[async_trait]
+impl swage_storage::PageStore for MockStorage {
+    async fn create_page(
+        &self,
+        _: swage_storage::NewPage,
+    ) -> Result<swage_storage::Page, StorageError> {
+        unimplemented!()
+    }
+    async fn get_page(&self, _: Uuid) -> Result<Option<swage_storage::Page>, StorageError> {
+        unimplemented!()
+    }
+    async fn list_pages_by_space(
+        &self,
+        _: Uuid,
+    ) -> Result<Vec<swage_storage::Page>, StorageError> {
+        unimplemented!()
+    }
+    async fn create_page_module(
+        &self,
+        _: swage_storage::NewPageModule,
+    ) -> Result<swage_storage::PageModule, StorageError> {
+        unimplemented!()
+    }
+    async fn get_page_module(
+        &self,
+        _: Uuid,
+    ) -> Result<Option<swage_storage::PageModule>, StorageError> {
+        unimplemented!()
+    }
+    async fn list_page_modules(
+        &self,
+        _: Uuid,
+    ) -> Result<Vec<swage_storage::PageModule>, StorageError> {
+        unimplemented!()
+    }
+    async fn update_page_module_source(&self, _: Uuid, _: &str) -> Result<(), StorageError> {
+        unimplemented!()
+    }
+}
+
+#[async_trait]
 impl TurnStore for MockStorage {
     async fn create_turn(&self, turn: NewTurn) -> Result<Turn, StorageError> {
         let t = Turn {

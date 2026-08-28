@@ -5,6 +5,7 @@
   import MessageDisplay from "./MessageDisplay.svelte";
   import MessageInput from "./MessageInput.svelte";
   import OperatorDashboard from "./OperatorDashboard.svelte";
+  import PagesSurface from "./PagesSurface.svelte";
   import SettingsPage from "./SettingsPage.svelte";
   import SpacePicker from "./SpacePicker.svelte";
   import SpaceSelector from "./SpaceSelector.svelte";
@@ -18,9 +19,10 @@
   import type { ConversationStore } from "../stores/conversations";
   import type { SpaceStore } from "../stores/spaces";
   import type { StreamingStore } from "../stores/streaming";
+  import type { PagesStore } from "../stores/pages";
   import type { EffectiveAgentDefinitionResponse } from "../protocol/EffectiveAgentDefinitionResponse";
 
-  type Surface = "conversation" | "operator";
+  type Surface = "conversation" | "operator" | "pages";
 
   interface Props {
     conversationStore: ConversationStore;
@@ -30,6 +32,7 @@
     onSpaceChange?: () => void;
     onRetry: () => void;
     activeSurface: Surface;
+    pagesStore?: PagesStore;
     onSelectSurface: (next: Surface) => void;
     desktopRuntime?: DesktopRuntimeInfo | null;
     themeMode?: ThemeMode;
@@ -53,6 +56,7 @@
     onSpaceChange,
     onRetry,
     activeSurface,
+    pagesStore,
     onSelectSurface,
     desktopRuntime,
     themeMode = "system",
@@ -106,6 +110,7 @@
     <SpaceSelector {spaceStore} {onSpaceChange} />
     <nav aria-label="Surface">
       <button aria-pressed={!settingsMode && activeSurface === "conversation"} class:active={!settingsMode && activeSurface === "conversation"} onclick={() => onSelectSurface("conversation")}>Conversation</button>
+      <button aria-pressed={!settingsMode && activeSurface === "pages"} class:active={!settingsMode && activeSurface === "pages"} onclick={() => onSelectSurface("pages")}>Pages</button>
       <button aria-pressed={!settingsMode && activeSurface === "operator"} class:active={!settingsMode && activeSurface === "operator"} onclick={() => onSelectSurface("operator")}>Operator</button>
       <button aria-pressed={settingsMode} class:active={settingsMode} onclick={() => onNavigate?.("/settings/providers")}>Settings</button>
     </nav>
@@ -137,6 +142,12 @@
   <SpacePicker {spaceStore} {onSpaceChange} />
 {:else if activeSurface === "operator"}
   <main class="operator"><OperatorDashboard /></main>
+{:else if activeSurface === "pages"}
+  <main class="pages-surface">
+    {#if pagesStore && currentSpace}
+      <PagesSurface store={pagesStore} spaceId={currentSpace.id} />
+    {/if}
+  </main>
 {:else}
   <main class="conversation">
     <aside><ConversationList store={conversationStore} {onNewConversation} /></aside>
@@ -161,5 +172,5 @@
   button.active { font-weight: bold; }
   .conversation { display: grid; grid-template-columns: minmax(16rem, 25%) 1fr; height: calc(100vh - 4rem); }
   .conversation aside { overflow: auto; border-right: 1px solid var(--ink); }
-  .conversation section, .operator { min-width: 0; overflow: auto; }
+  .conversation section, .operator, .pages-surface { min-width: 0; overflow: auto; }
 </style>

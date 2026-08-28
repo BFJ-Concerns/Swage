@@ -19,6 +19,7 @@
   import type { ConversationStore } from "./lib/stores/conversations";
   import { createConversationStore } from "./lib/stores/conversations";
   import { createConnectionStore } from "./lib/stores/connection";
+  import { createPagesStore } from "./lib/stores/pages";
   import {
     createStreamingStore,
     withConversationAutoCreate,
@@ -34,7 +35,7 @@
     writeDisplayPreferences,
     type DisplayPreferences,
   } from "./lib/display-preferences";
-  type Surface = "conversation" | "operator";
+  type Surface = "conversation" | "operator" | "pages";
 
   // ---------------------------------------------------------------------------
   // Store creation
@@ -66,6 +67,11 @@
   connectionStore.onServerEvent((event) =>
     streamingStore.handleServerEvent(event),
   );
+
+  // Pages listen on the same relay: page_updated is the live-refresh signal
+  // for the work surfaces, whichever surface is in view.
+  const pagesStore = createPagesStore();
+  connectionStore.onServerEvent((event) => pagesStore.handleServerEvent(event));
 
   // ---------------------------------------------------------------------------
   // Router-aware conversation actions
@@ -318,7 +324,10 @@
   function handleSelectSurface(next: Surface): void {
     activeSurface = next;
 
-    if (next !== "conversation") {
+    // The pages surface keeps the conversation socket: page_updated rides
+    // it, and the conversation is the control channel beside the work
+    // surface rather than a place to navigate away to.
+    if (next === "operator") {
       connectionStore.disconnect();
       return;
     }
@@ -435,6 +444,7 @@
     onSpaceChange={handleSpaceChange}
     onRetry={handleRetry}
     {activeSurface}
+    {pagesStore}
     onSelectSurface={handleSelectSurface}
     {desktopRuntime}
     {themeMode}

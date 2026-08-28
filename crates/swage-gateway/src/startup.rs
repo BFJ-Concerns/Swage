@@ -663,7 +663,8 @@ pub(crate) fn build_tool_dispatcher_with_browser(
         file_write::FileWriteTool, knowledge::KnowledgeCiteTool,
         knowledge::KnowledgeCurateOrientationTool, knowledge::KnowledgeCurateTool,
         knowledge::KnowledgeOrientTool, knowledge::KnowledgeRecordTool,
-        knowledge::KnowledgeSearchTool, memory::MemoryTool, plugin::discover_plugin_tools,
+        knowledge::KnowledgeSearchTool, memory::MemoryTool, page::PageReadTool,
+        page::PageWriteTool, plugin::discover_plugin_tools,
         python_execute::PythonExecuteTool, run_event::RunEventPostTool, schedule::ScheduleTool,
         schedule::WakeMeLaterTool, session_variable::SessionVariableTool, shell::ShellTool,
         task_definition::TaskDefinitionTool, tool_result_read::ToolResultReadTool,
@@ -696,6 +697,8 @@ pub(crate) fn build_tool_dispatcher_with_browser(
             max_output_bytes: max_output,
         }),
         Arc::new(swage_tool::delegate::DelegateTool),
+        Arc::new(PageReadTool),
+        Arc::new(PageWriteTool),
         Arc::new(crate::tool::workflow_list::WorkflowListTool),
         Arc::new(crate::tool::workflow_run::WorkflowRunTool),
         // MemoryTool derives the memory path from ctx.working_directory() at runtime.

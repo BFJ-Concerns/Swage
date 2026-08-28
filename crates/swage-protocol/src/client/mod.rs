@@ -8,6 +8,7 @@ pub mod conversation;
 pub mod delivery;
 pub mod knowledge;
 pub mod material;
+pub mod page;
 pub mod provider_signin;
 pub mod recovery;
 pub mod schedule;
@@ -39,6 +40,10 @@ pub struct ClientSurface {
     synthesise_speech_response: voice::SynthesiseSpeechResponse,
     create_channel_link_code_request: channel::CreateChannelLinkCodeRequest,
     create_space_request: space::CreateSpaceRequest,
+    create_page_request: page::CreatePageRequest,
+    write_page_module_request: page::WritePageModuleRequest,
+    page: page::PageResponse,
+    page_list: page::PageListResponse,
     update_space_request: space::UpdateSpaceRequest,
     space_list: space::SpaceListResponse,
     create_workspace_attachment_request: space::CreateWorkspaceAttachmentRequest,

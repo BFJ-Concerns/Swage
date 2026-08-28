@@ -66,6 +66,7 @@ pub mod lifecycle;
 pub mod material;
 pub mod onboarding;
 pub mod operator;
+pub mod page;
 pub mod presence;
 pub mod record_durability;
 pub mod schedule;

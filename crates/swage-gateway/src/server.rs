@@ -11,7 +11,7 @@ use tower_http::trace::TraceLayer;
 use tracing::Instrument;
 use uuid::Uuid;
 
-use crate::{assets, handlers, knowledge_mirror, state::AppState, websocket, workflow};
+use crate::{assets, handlers, knowledge_mirror, page, state::AppState, websocket, workflow};
 
 // ---------------------------------------------------------------------------
 // Request ID correlation middleware
@@ -214,6 +214,15 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/api/spaces/{space_id}/agent-definitions",
             get(handlers::list_effective_agent_definitions),
+        )
+        .route(
+            "/api/spaces/{space_id}/pages",
+            get(page::list_pages_handler).post(page::create_page_handler),
+        )
+        .route("/api/pages/{page_id}", get(page::get_page_handler))
+        .route(
+            "/api/pages/{page_id}/modules",
+            post(page::write_page_module_handler),
         )
         .route(
             "/api/operator/agent-definitions",
