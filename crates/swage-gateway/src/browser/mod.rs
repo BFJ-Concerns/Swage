@@ -353,11 +353,10 @@ impl BrowserHost {
         };
         let url_before = current_url(&page.page).await.ok();
         let target = if let Some(reference) = reference {
-            let entry = page
-                .refs
-                .get(reference)
-                .cloned()
-                .ok_or_else(|| stale_ref_error("browser_scroll", reference, page.snapshot_seq))?;
+            let entry =
+                page.refs.get(reference).cloned().ok_or_else(|| {
+                    stale_ref_error("browser_scroll", reference, page.snapshot_seq)
+                })?;
             let object_id =
                 resolve_object(&page.page, entry.backend_node_id, "browser_scroll").await?;
             page.page

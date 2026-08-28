@@ -15,7 +15,12 @@ export type ServerEvent = { "type": "token", content: string, } | { "type": "too
  * Omitted from the serialised JSON when None so existing clients that
  * do not handle sub-tools remain unaffected.
  */
-parent_call_id?: string, } | { "type": "tool_end", call_id: string, tool: string, result: string | Record<string, unknown>,
+parent_call_id?: string,
+/**
+ * One-line headline for the call, from the tool's declared display
+ * hints. Omitted when the tool declares none.
+ */
+summary?: string, } | { "type": "tool_end", call_id: string, tool: string, result: string | Record<string, unknown>,
 /**
  * "success" or "error".
  */
@@ -25,7 +30,7 @@ status: string, duration_ms: number, truncated: boolean, total_bytes: number | n
  *
  * Omitted from the serialised JSON when None.
  */
-parent_call_id?: string, } | { "type": "context_assembled", turn_id: string, report: AssemblyReport, } | { "type": "turn_complete", turn_id: string, input_tokens?: number, output_tokens?: number, cost_microcents?: number,
+parent_call_id?: string, } | { "type": "page_updated", page_id: string, module_id: string, } | { "type": "context_assembled", turn_id: string, report: AssemblyReport, } | { "type": "turn_complete", turn_id: string, input_tokens?: number, output_tokens?: number, cost_microcents?: number,
 /**
  * Validated, parsed JSON output when an output schema was configured and
  * validation passed. Absent (serialised as omitted) when no schema is

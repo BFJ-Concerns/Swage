@@ -1034,6 +1034,7 @@ mod tests {
                 provider_round: 2,
                 position: 0,
                 parent_call_id: None,
+                display_summary: None,
             })
             .await
             .unwrap();
@@ -1137,6 +1138,7 @@ mod tests {
                 provider_round: 1,
                 position: 0,
                 parent_call_id: None,
+                display_summary: None,
             })
             .await
             .unwrap();

@@ -664,9 +664,9 @@ pub(crate) fn build_tool_dispatcher_with_browser(
         knowledge::KnowledgeCurateOrientationTool, knowledge::KnowledgeCurateTool,
         knowledge::KnowledgeOrientTool, knowledge::KnowledgeRecordTool,
         knowledge::KnowledgeSearchTool, memory::MemoryTool, page::PageReadTool,
-        page::PageWriteTool, plugin::discover_plugin_tools,
-        python_execute::PythonExecuteTool, run_event::RunEventPostTool, schedule::ScheduleTool,
-        schedule::WakeMeLaterTool, session_variable::SessionVariableTool, shell::ShellTool,
+        page::PageWriteTool, plugin::discover_plugin_tools, python_execute::PythonExecuteTool,
+        run_event::RunEventPostTool, schedule::ScheduleTool, schedule::WakeMeLaterTool,
+        session_variable::SessionVariableTool, shell::ShellTool,
         task_definition::TaskDefinitionTool, tool_result_read::ToolResultReadTool,
         url_fetch::UrlFetchTool, web_search::WebSearchTool,
     };

@@ -106,6 +106,7 @@ async fn create_full_hierarchy(
             provider_round: 1,
             position: 0,
             parent_call_id: None,
+            display_summary: None,
         })
         .await
         .expect("create tool call");
