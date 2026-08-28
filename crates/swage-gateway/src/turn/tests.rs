@@ -6507,6 +6507,7 @@ async fn branch_turn_rebuilds_tool_replay_from_copied_history() {
             provider_round: 1,
             position: 0,
             parent_call_id: None,
+            display_summary: None,
         })
         .await
         .expect("create parent tool call");
@@ -6696,6 +6697,7 @@ async fn later_turn_rebuilds_failed_tool_replay_as_error() {
             provider_round: 1,
             position: 0,
             parent_call_id: None,
+            display_summary: None,
         })
         .await
         .expect("create failed tool call");

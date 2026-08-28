@@ -79,7 +79,7 @@ fn copy_tool_calls_for_branch(
     let mut stmt = conn.prepare(
         "SELECT agent_id, call_id, tool, arguments, model_arguments, result, status,
                 duration_ms, truncated, total_bytes, provider_round, position, created_at,
-                parent_call_id
+                parent_call_id, display_summary
          FROM tool_calls
          WHERE turn_id = ?1
          ORDER BY provider_round ASC, position ASC",
@@ -100,6 +100,7 @@ fn copy_tool_calls_for_branch(
             row.get::<_, i32>(11)?,
             row.get::<_, String>(12)?,
             row.get::<_, Option<String>>(13)?,
+            row.get::<_, Option<String>>(14)?,
         ))
     })?;
     let calls = rows.collect::<rusqlite::Result<Vec<_>>>()?;
@@ -120,6 +121,7 @@ fn copy_tool_calls_for_branch(
         position,
         created_at,
         parent_call_id,
+        display_summary,
     ) in calls
     {
         let model_result = result.as_deref().map(|result| {
@@ -134,8 +136,8 @@ fn copy_tool_calls_for_branch(
             "INSERT INTO tool_calls
 	             (id, turn_id, agent_id, call_id, tool, arguments, model_arguments, result,
 	              model_result, status, duration_ms, truncated, total_bytes, provider_round,
-	              position, created_at, parent_call_id)
-	             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+	              position, created_at, parent_call_id, display_summary)
+	             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
             params![
                 Uuid::new_v4().to_string(),
                 child_turn_id,
@@ -154,6 +156,7 @@ fn copy_tool_calls_for_branch(
                 position,
                 created_at,
                 parent_call_id,
+                display_summary,
             ],
         )?;
     }

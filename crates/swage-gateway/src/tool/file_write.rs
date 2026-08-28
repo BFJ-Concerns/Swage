@@ -23,6 +23,12 @@ impl Tool for FileWriteTool {
         "file_write"
     }
 
+    fn display_hints(&self) -> swage_tool::tool::ToolDisplayHints {
+        swage_tool::tool::ToolDisplayHints {
+            summary_param: Some("path"),
+        }
+    }
+
     fn description(&self) -> &str {
         "Create or overwrite a file in the workspace. Parent directories are created if needed."
     }

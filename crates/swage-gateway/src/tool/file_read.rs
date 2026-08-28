@@ -27,6 +27,12 @@ impl Tool for FileReadTool {
         "file_read"
     }
 
+    fn display_hints(&self) -> swage_tool::tool::ToolDisplayHints {
+        swage_tool::tool::ToolDisplayHints {
+            summary_param: Some("path"),
+        }
+    }
+
     fn description(&self) -> &str {
         "Read the contents of a file in the workspace, optionally from a byte offset."
     }

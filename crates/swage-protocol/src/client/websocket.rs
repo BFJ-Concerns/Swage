@@ -91,6 +91,11 @@ pub enum ServerEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
         parent_call_id: Option<String>,
+        /// One-line headline for the call, from the tool's declared display
+        /// hints. Omitted when the tool declares none.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        summary: Option<String>,
     },
     /// A tool call has finished. Contains the result and execution metadata.
     ToolEnd {

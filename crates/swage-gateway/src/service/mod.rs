@@ -966,6 +966,7 @@ default_effort = "high"
                 provider_round: 1,
                 position: 0,
                 parent_call_id: None,
+                display_summary: None,
             })
             .await
             .unwrap();
@@ -1048,6 +1049,7 @@ default_effort = "high"
                 provider_round: 1,
                 position: 0,
                 parent_call_id: None,
+                display_summary: None,
             })
             .await
             .unwrap();
@@ -1070,6 +1072,7 @@ default_effort = "high"
                 provider_round: 0,
                 position: 1,
                 parent_call_id: Some("py_01".into()),
+                display_summary: None,
             })
             .await
             .unwrap();

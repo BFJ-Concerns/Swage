@@ -334,71 +334,41 @@ describe("collapsible result", () => {
 // ---------------------------------------------------------------------------
 
 describe("arguments summary", () => {
-  it("shows the command for shell tool calls", () => {
+  it("renders the platform-supplied summary when the call carries one", () => {
     component = mount(ToolCallDisplay, {
       target: document.body,
       props: {
         toolCall: makeCompletedCall({
           tool: "shell",
-          arguments: { command: "echo hello" },
+          arguments: { command: "echo hello", cwd: "/tmp" },
+          summary: "echo hello",
         }),
         isLive: false,
       },
     });
 
-    const header = document.querySelector(".tool-call");
-    expect(header!.textContent).toContain("echo hello");
+    const summary = document.querySelector(".args-summary");
+    expect(summary!.textContent).toBe("echo hello");
   });
 
-  it("shows the path for file read tool calls", () => {
+  it("does not branch on the tool name — an unknown tool with a summary renders it", () => {
     component = mount(ToolCallDisplay, {
       target: document.body,
       props: {
         toolCall: makeCompletedCall({
-          tool: "read_file",
-          arguments: { path: "/etc/hosts" },
+          tool: "brand_new_tool",
+          arguments: { anything: "else" },
+          summary: "the hinted headline",
         }),
         isLive: false,
       },
     });
 
-    const header = document.querySelector(".tool-call");
-    expect(header!.textContent).toContain("/etc/hosts");
+    const summary = document.querySelector(".args-summary");
+    expect(summary!.textContent).toBe("the hinted headline");
   });
 
-  it("shows the query for web search tool calls", () => {
-    component = mount(ToolCallDisplay, {
-      target: document.body,
-      props: {
-        toolCall: makeCompletedCall({
-          tool: "web_search",
-          arguments: { query: "rust async runtime" },
-        }),
-        isLive: false,
-      },
-    });
-
-    const header = document.querySelector(".tool-call");
-    expect(header!.textContent).toContain("rust async runtime");
-  });
-
-  it("shows the URL for URL fetch tool calls", () => {
-    component = mount(ToolCallDisplay, {
-      target: document.body,
-      props: {
-        toolCall: makeCompletedCall({
-          tool: "fetch_url",
-          arguments: { url: "https://example.com" },
-        }),
-        isLive: false,
-      },
-    });
-
-    const header = document.querySelector(".tool-call");
-    expect(header!.textContent).toContain("https://example.com");
-  });
-
-  it("falls back to first key=value for unrecognised tool types", () => {
+  it("falls back to the generic first key=value pair without a summary", () => {
     component = mount(ToolCallDisplay, {
       target: document.body,
       props: {
@@ -410,9 +380,20 @@ describe("arguments summary", () => {
       },
     });
 
-    // At least shows something from the args.
-    const header = document.querySelector(".tool-call");
-    expect(header!.textContent).toMatch(/some-value|target/);
+    const summary = document.querySelector(".args-summary");
+    expect(summary!.textContent).toBe("target=some-value");
+  });
+
+  it("renders no summary span for empty arguments and no summary", () => {
+    component = mount(ToolCallDisplay, {
+      target: document.body,
+      props: {
+        toolCall: makeCompletedCall({ tool: "custom_tool", arguments: {} }),
+        isLive: false,
+      },
+    });
+
+    expect(document.querySelector(".args-summary")).toBeNull();
   });
 });
 

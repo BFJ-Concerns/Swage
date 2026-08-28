@@ -166,6 +166,18 @@ impl ToolDispatcher {
         &self.registry
     }
 
+    /// The one-line display summary for a call, from the tool's own display
+    /// hints (`Tool::display_hints`). `None` — an unknown tool, no hint, or
+    /// a non-scalar value — means renderers use their generic fallback.
+    pub fn display_summary(
+        &self,
+        tool_name: &str,
+        arguments: &serde_json::Value,
+    ) -> Option<String> {
+        let tool = self.registry.get(tool_name)?;
+        crate::tool::display_summary(&tool.display_hints(), arguments)
+    }
+
     /// Set a custom execution strategy for step 6 of the pipeline.
     ///
     /// When set, `dispatch()` delegates to `strategy.execute()` instead of

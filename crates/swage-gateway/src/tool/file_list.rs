@@ -23,6 +23,12 @@ impl Tool for FileListTool {
         "file_list"
     }
 
+    fn display_hints(&self) -> swage_tool::tool::ToolDisplayHints {
+        swage_tool::tool::ToolDisplayHints {
+            summary_param: Some("path"),
+        }
+    }
+
     fn description(&self) -> &str {
         "List the contents of a directory in the workspace."
     }

@@ -397,6 +397,7 @@ async fn facade_streaming_turn_emits_tool_and_turn_lifecycle_events() {
             call_id,
             tool_name,
             ..
+            display_summary: None,
         }
         if call_id == "call_echo" && tool_name == "echo"
     )));

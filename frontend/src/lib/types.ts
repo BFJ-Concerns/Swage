@@ -126,6 +126,7 @@ export type ToolCallView = Omit<
   duration_ms: number | null;
   total_bytes: number | null;
   parent_call_id?: string | null;
+  summary?: string | null;
   sub_calls?: ToolCallView[];
 };
 

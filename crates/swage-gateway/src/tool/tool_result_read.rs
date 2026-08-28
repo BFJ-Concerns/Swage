@@ -228,6 +228,7 @@ mod tests {
             position: 0,
             parent_call_id: None,
         }
+        display_summary: None,
     }
 
     #[tokio::test(flavor = "multi_thread")]

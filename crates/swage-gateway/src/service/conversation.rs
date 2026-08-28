@@ -668,6 +668,7 @@ fn tool_call_record_to_view(record: swage_storage::model::ToolCallRecord) -> Too
         truncated: record.truncated,
         total_bytes: record.total_bytes.map(|bytes| bytes.max(0) as u64),
         parent_call_id: record.parent_call_id,
+        summary: record.display_summary,
     }
 }
 

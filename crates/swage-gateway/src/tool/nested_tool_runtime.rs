@@ -58,11 +58,13 @@ impl swage_python::NestedToolHost for NestedToolRuntime {
         let position = self.position_counter.fetch_add(1, Ordering::Relaxed);
         let start = Instant::now();
 
+        let display_summary = self.dispatcher.display_summary(tool_name, &arguments);
         let _ = self.ws_tx.send(ServerEvent::ToolStart {
             call_id: call_id.clone(),
             tool: tool_name.to_string(),
             arguments: arguments.clone(),
             parent_call_id: Some(self.parent_call_id.clone()),
+            summary: display_summary.clone(),
         });
 
         let new_call = NewToolCall {
@@ -81,6 +83,7 @@ impl swage_python::NestedToolHost for NestedToolRuntime {
             provider_round: 0,
             position,
             parent_call_id: Some(self.parent_call_id.clone()),
+            display_summary,
         };
         if let Err(error) = self.storage.create_tool_call(new_call).await {
             let failure = error.to_string();

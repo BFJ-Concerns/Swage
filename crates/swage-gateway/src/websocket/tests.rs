@@ -98,6 +98,7 @@ fn server_event_tool_start_serialises() {
         tool: "shell".to_string(),
         arguments: serde_json::json!({"command": "ls -la"}),
         parent_call_id: None,
+        summary: None,
     };
     let json = serde_json::to_value(&event).unwrap();
     assert_eq!(json["type"], "tool_start");
@@ -113,6 +114,7 @@ fn server_event_tool_start_omits_parent_call_id_when_none() {
         tool: "shell".to_string(),
         arguments: serde_json::json!({}),
         parent_call_id: None,
+        summary: None,
     };
     let json = serde_json::to_value(&event).unwrap();
     // parent_call_id must be absent entirely, not serialised as null,
@@ -130,6 +132,7 @@ fn server_event_tool_start_includes_parent_call_id_when_some() {
         tool: "shell".to_string(),
         arguments: serde_json::json!({}),
         parent_call_id: Some("py_call_01".to_string()),
+        summary: None,
     };
     let json = serde_json::to_value(&event).unwrap();
     assert_eq!(json["parent_call_id"], "py_call_01");

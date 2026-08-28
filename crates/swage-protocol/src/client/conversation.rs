@@ -118,6 +118,12 @@ pub struct ToolCallView {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub parent_call_id: Option<String>,
+    /// One-line headline for the call, derived from the tool's declared
+    /// display hints. Omitted when the tool declares none — renderers then
+    /// use their generic fallback.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub summary: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
