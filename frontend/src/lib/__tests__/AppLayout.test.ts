@@ -93,10 +93,10 @@ function mockSpaceStore(hasCurrentSpace = true, spaceId = "default"): SpaceStore
 }
 
 interface MountOptions {
-  activeSurface?: "conversation" | "operator";
+  activeSurface?: "conversation" | "operator" | "pages";
   hasCurrentSpace?: boolean;
   onNavigate?: (path: string) => void;
-  onSelectSurface?: (surface: "conversation" | "operator") => void;
+  onSelectSurface?: (surface: "conversation" | "operator" | "pages") => void;
   routePath?: string;
   agentDefinitions?: import("../protocol/EffectiveAgentDefinitionResponse").EffectiveAgentDefinitionResponse[];
   streamingStore?: StreamingStore;
