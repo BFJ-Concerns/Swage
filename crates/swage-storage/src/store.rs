@@ -509,6 +509,16 @@ pub trait TurnStore: Send + Sync {
     ) -> Result<(), StorageError>;
     /// Persist token counts after the LLM call completes.
     async fn update_tokens(&self, id: Uuid, input: i64, output: i64) -> Result<(), StorageError>;
+    /// Fold a completed delegated child's spend (the child's own tokens plus
+    /// its own delegated aggregate, so roll-up is transitive) into this
+    /// turn's delegated billing aggregate. Accumulating: NULL columns start
+    /// at zero and later children add on.
+    async fn add_delegated_tokens(
+        &self,
+        id: Uuid,
+        input: i64,
+        output: i64,
+    ) -> Result<(), StorageError>;
     /// Persist the computed cost after pricing is applied.
     ///
     /// `cost` is in microcents (see `PricingConfig::compute_cost`). Only called
@@ -1937,6 +1947,15 @@ mod tests {
             _id: Uuid,
             _input: i64,
             _output: i64,
+        ) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+
+        async fn add_delegated_tokens(
+            &self,
+            _: Uuid,
+            _: i64,
+            _: i64,
         ) -> Result<(), StorageError> {
             unimplemented!()
         }

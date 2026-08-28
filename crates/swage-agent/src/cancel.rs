@@ -369,6 +369,15 @@ mod tests {
             unimplemented!()
         }
 
+        async fn add_delegated_tokens(
+            &self,
+            _id: Uuid,
+            _input: i64,
+            _output: i64,
+        ) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+
         async fn update_cost(&self, _id: Uuid, _cost: i64) -> Result<(), StorageError> {
             unimplemented!()
         }

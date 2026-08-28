@@ -267,6 +267,8 @@ impl ChannelQueueStore for SqliteStorage {
                 parent_turn_id: None,
                 created_at: now,
                 completed_at: None,
+                delegated_input_tokens: None,
+                delegated_output_tokens: None,
             })
         })
         .await

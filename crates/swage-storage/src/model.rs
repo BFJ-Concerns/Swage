@@ -1068,6 +1068,16 @@ pub struct Turn {
     /// created by inter-agent delegation. Multi-hop chains (A → B → C) are
     /// traceable by following the parent references.
     pub parent_turn_id: Option<Uuid>,
+    /// Prompt tokens spent by this turn's delegated children (transitively),
+    /// accumulated as each child completes. A billing figure, deliberately
+    /// separate from `input_tokens`: the children's tokens never occupied
+    /// this turn's context window, so the context measure reads only the
+    /// turn's own fields while billing sums own + delegated. `None` when no
+    /// delegation has completed.
+    pub delegated_input_tokens: Option<i64>,
+    /// Completion tokens spent by this turn's delegated children
+    /// (transitively); see `delegated_input_tokens`.
+    pub delegated_output_tokens: Option<i64>,
     pub created_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
 }
@@ -2640,6 +2650,8 @@ mod tests {
             structured_output: None,
             created_at: now,
             completed_at: None,
+            delegated_input_tokens: None,
+            delegated_output_tokens: None,
         };
 
         let json = serde_json::to_string(&turn).expect("serialisation should succeed");
@@ -2693,12 +2705,16 @@ mod tests {
             structured_output: None,
             created_at: now,
             completed_at: Some(now),
+            delegated_input_tokens: None,
+            delegated_output_tokens: None,
         };
         assert_eq!(turn_with_cost.cost_microcents, Some(42));
 
         let turn_no_cost = Turn {
             cost_microcents: None,
             ..turn_with_cost
+            delegated_input_tokens: None,
+            delegated_output_tokens: None,
         };
         assert_eq!(turn_no_cost.cost_microcents, None);
     }
@@ -2720,6 +2736,8 @@ mod tests {
             structured_output: None,
             created_at: Utc::now(),
             completed_at: None,
+            delegated_input_tokens: None,
+            delegated_output_tokens: None,
         };
         let json = serde_json::to_string(&turn).expect("serialisation should succeed");
         assert!(
@@ -2750,6 +2768,8 @@ mod tests {
             structured_output: Some(schema_result.clone()),
             created_at: Utc::now(),
             completed_at: None,
+            delegated_input_tokens: None,
+            delegated_output_tokens: None,
         };
 
         let json = serde_json::to_string(&turn).expect("serialisation should succeed");
@@ -2778,6 +2798,8 @@ mod tests {
             structured_output: None,
             created_at: Utc::now(),
             completed_at: None,
+            delegated_input_tokens: None,
+            delegated_output_tokens: None,
         };
 
         let json = serde_json::to_string(&turn).expect("serialisation should succeed");
