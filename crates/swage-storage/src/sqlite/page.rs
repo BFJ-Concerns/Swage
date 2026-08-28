@@ -111,10 +111,7 @@ impl PageStore for SqliteStorage {
         .await
     }
 
-    async fn create_page_module(
-        &self,
-        module: NewPageModule,
-    ) -> Result<PageModule, StorageError> {
+    async fn create_page_module(&self, module: NewPageModule) -> Result<PageModule, StorageError> {
         self.with_conn(move |conn| {
             let id = Uuid::new_v4();
             let now = Utc::now();
@@ -173,11 +170,7 @@ impl PageStore for SqliteStorage {
         .await
     }
 
-    async fn update_page_module_source(
-        &self,
-        id: Uuid,
-        source: &str,
-    ) -> Result<(), StorageError> {
+    async fn update_page_module_source(&self, id: Uuid, source: &str) -> Result<(), StorageError> {
         let source = source.to_owned();
         self.with_conn(move |conn| {
             let now_str = Utc::now().to_rfc3339();

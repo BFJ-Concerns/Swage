@@ -4,7 +4,6 @@ use uuid::Uuid;
 use swage_core::StorageError;
 
 use crate::model::{
-    NewPage, NewPageModule, Page, PageModule,
     ActiveSkillRecord, AgentDefinition, AgentMemoryRecord, AgentMessage, AppendMessage,
     ApprovalRequest, ApprovalState, Attachment, AttachmentStatus, AuditEvent, BackgroundJob,
     ChannelInboundMessage, ChannelLink, ContextSnapshotRecord, CurationAssertion, DeliveryRecord,
@@ -12,15 +11,15 @@ use crate::model::{
     Material, Message, NewAgentDefinition, NewAgentMemoryRecord, NewAgentMessage,
     NewApprovalRequest, NewAttachment, NewAuditEvent, NewBackgroundJob, NewChannelInboundMessage,
     NewChannelLink, NewCurationAssertion, NewDeliveryRecord, NewDeviceRegistration,
-    NewKnowledgeCitation, NewMaterial, NewMessage, NewOrientationCard, NewSchedule, NewScheduleRun,
-    NewSecretRecord, NewSession, NewSourceObservation, NewSpace, NewTaskDefinition, NewThread,
-    NewToolCall, NewTurn, NewWorkflowJournalIntent, NewWorkflowRun, NewWorkflowRunEvent,
-    NewWorkflowScript, NewWorkspaceAttachment, OrientationCard, OrientationCardLifecycle,
-    PendingChannelOrigin, Schedule, ScheduleRun, ScheduleRunUpdate, SecretRecord, Session,
-    SessionVariable, SourceObservation, Space, SpaceSlug, TaskDefinition, Thread, ThreadBranch,
-    ThreadState, ToolCallRecord, Turn, TurnState, UpdateSchedule, WorkflowJournalRecord,
-    WorkflowRunEventRecord, WorkflowRunRecord, WorkflowScriptRecord, WorkflowScriptVersion,
-    WorkspaceAttachment,
+    NewKnowledgeCitation, NewMaterial, NewMessage, NewOrientationCard, NewPage, NewPageModule,
+    NewSchedule, NewScheduleRun, NewSecretRecord, NewSession, NewSourceObservation, NewSpace,
+    NewTaskDefinition, NewThread, NewToolCall, NewTurn, NewWorkflowJournalIntent, NewWorkflowRun,
+    NewWorkflowRunEvent, NewWorkflowScript, NewWorkspaceAttachment, OrientationCard,
+    OrientationCardLifecycle, Page, PageModule, PendingChannelOrigin, Schedule, ScheduleRun,
+    ScheduleRunUpdate, SecretRecord, Session, SessionVariable, SourceObservation, Space, SpaceSlug,
+    TaskDefinition, Thread, ThreadBranch, ThreadState, ToolCallRecord, Turn, TurnState,
+    UpdateSchedule, WorkflowJournalRecord, WorkflowRunEventRecord, WorkflowRunRecord,
+    WorkflowScriptRecord, WorkflowScriptVersion, WorkspaceAttachment,
 };
 
 // ---------------------------------------------------------------------------
@@ -1164,15 +1163,13 @@ pub trait PageStore: Send + Sync {
     async fn get_page(&self, id: Uuid) -> Result<Option<Page>, StorageError>;
     /// All pages of a space, oldest first.
     async fn list_pages_by_space(&self, space_id: Uuid) -> Result<Vec<Page>, StorageError>;
-    async fn create_page_module(&self, module: NewPageModule)
-    -> Result<PageModule, StorageError>;
+    async fn create_page_module(&self, module: NewPageModule) -> Result<PageModule, StorageError>;
     async fn get_page_module(&self, id: Uuid) -> Result<Option<PageModule>, StorageError>;
     /// A page's module instances in position order.
     async fn list_page_modules(&self, page_id: Uuid) -> Result<Vec<PageModule>, StorageError>;
     /// Replace a module instance's source, advancing the owning page's
     /// updated_at in the same write.
-    async fn update_page_module_source(&self, id: Uuid, source: &str)
-    -> Result<(), StorageError>;
+    async fn update_page_module_source(&self, id: Uuid, source: &str) -> Result<(), StorageError>;
 }
 
 pub trait Storage:
@@ -1939,7 +1936,6 @@ mod tests {
     }
 
     #[async_trait]
-    #[async_trait]
     impl PageStore for StubStorage {
         async fn create_page(&self, _: NewPage) -> Result<Page, StorageError> {
             unimplemented!()
@@ -1964,6 +1960,7 @@ mod tests {
         }
     }
 
+    #[async_trait]
     impl TurnStore for StubStorage {
         async fn create_turn(&self, _: NewTurn) -> Result<Turn, StorageError> {
             unimplemented!()
@@ -1998,12 +1995,7 @@ mod tests {
             unimplemented!()
         }
 
-        async fn add_delegated_tokens(
-            &self,
-            _: Uuid,
-            _: i64,
-            _: i64,
-        ) -> Result<(), StorageError> {
+        async fn add_delegated_tokens(&self, _: Uuid, _: i64, _: i64) -> Result<(), StorageError> {
             unimplemented!()
         }
         async fn update_cost(&self, _id: Uuid, _cost: i64) -> Result<(), StorageError> {

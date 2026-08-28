@@ -90,10 +90,7 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
             "055_tool_call_display_summary",
             ADD_TOOL_CALL_DISPLAY_SUMMARY,
         ),
-        (
-            "056_turn_delegated_tokens",
-            ADD_TURN_DELEGATED_TOKENS,
-        ),
+        ("056_turn_delegated_tokens", ADD_TURN_DELEGATED_TOKENS),
         ("057_pages", CREATE_PAGE_TABLES),
     ]
 }

@@ -2134,6 +2134,7 @@ mod tests {
             position: 0,
             created_at: now,
             parent_call_id: None,
+            display_summary: None,
         };
 
         let json = serde_json::to_string(&record).expect("serialisation should succeed");
@@ -2177,6 +2178,7 @@ mod tests {
             position: 1,
             created_at: Utc::now(),
             parent_call_id: None,
+            display_summary: None,
         };
 
         let json = serde_json::to_string(&record).expect("serialisation should succeed");
@@ -2210,6 +2212,7 @@ mod tests {
             provider_round: 1,
             position: 0,
             parent_call_id: None,
+            display_summary: None,
         };
         let cloned = original.clone();
         // Debug: just ensure it formats without panic.
@@ -2238,6 +2241,7 @@ mod tests {
             position: 0,
             created_at: Utc::now(),
             parent_call_id: Some(parent_id.clone()),
+            display_summary: None,
         };
 
         let json = serde_json::to_string(&record).expect("serialisation should succeed");
@@ -2265,6 +2269,7 @@ mod tests {
             provider_round: 1,
             position: 0,
             parent_call_id: Some("parent_01".to_string()),
+            display_summary: None,
         };
         assert_eq!(sub.parent_call_id.as_deref(), Some("parent_01"));
 
@@ -2761,8 +2766,6 @@ mod tests {
         let turn_no_cost = Turn {
             cost_microcents: None,
             ..turn_with_cost
-            delegated_input_tokens: None,
-            delegated_output_tokens: None,
         };
         assert_eq!(turn_no_cost.cost_microcents, None);
     }

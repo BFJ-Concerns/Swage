@@ -40,6 +40,9 @@
     "create_material": {
       "$ref": "#/$defs/CreateMaterialRequest"
     },
+    "create_page_request": {
+      "$ref": "#/$defs/CreatePageRequest"
+    },
     "create_schedule_request": {
       "$ref": "#/$defs/CreateScheduleRequest"
     },
@@ -66,6 +69,12 @@
     },
     "orientation_find": {
       "$ref": "#/$defs/OrientationFindResponse"
+    },
+    "page": {
+      "$ref": "#/$defs/PageResponse"
+    },
+    "page_list": {
+      "$ref": "#/$defs/PageListResponse"
     },
     "post_workflow_run_event_request": {
       "$ref": "#/$defs/PostWorkflowRunEventRequest"
@@ -198,6 +207,9 @@
     },
     "workspace_attachment_list": {
       "$ref": "#/$defs/WorkspaceAttachmentListResponse"
+    },
+    "write_page_module_request": {
+      "$ref": "#/$defs/WritePageModuleRequest"
     }
   },
   "required": [
@@ -210,6 +222,10 @@
     "synthesise_speech_response",
     "create_channel_link_code_request",
     "create_space_request",
+    "create_page_request",
+    "write_page_module_request",
+    "page",
+    "page_list",
     "update_space_request",
     "space_list",
     "create_workspace_attachment_request",
@@ -1261,6 +1277,17 @@
         "content_text"
       ]
     },
+    "CreatePageRequest": {
+      "type": "object",
+      "properties": {
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "title"
+      ]
+    },
     "CreateScheduleRequest": {
       "description": "Create a schedule.",
       "type": "object",
@@ -2074,6 +2101,109 @@
       "required": [
         "cards",
         "guidance"
+      ]
+    },
+    "PageListResponse": {
+      "type": "object",
+      "properties": {
+        "pages": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PageSummary"
+          }
+        }
+      },
+      "required": [
+        "pages"
+      ]
+    },
+    "PageModuleView": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "position": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "source": {
+          "type": "string"
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "position",
+        "source",
+        "updated_at"
+      ]
+    },
+    "PageResponse": {
+      "type": "object",
+      "properties": {
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "modules": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PageModuleView"
+          }
+        },
+        "space_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "title": {
+          "type": "string"
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "space_id",
+        "title",
+        "created_at",
+        "updated_at",
+        "modules"
+      ]
+    },
+    "PageSummary": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "title": {
+          "type": "string"
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "updated_at"
       ]
     },
     "PostWorkflowRunEventRequest": {
@@ -3156,6 +3286,13 @@
                 "null"
               ]
             },
+            "summary": {
+              "description": "One-line headline for the call, from the tool's declared display\nhints. Omitted when the tool declares none.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "tool": {
               "type": "string"
             },
@@ -3222,6 +3359,29 @@
             "status",
             "duration_ms",
             "truncated"
+          ]
+        },
+        {
+          "description": "A page changed: a module was written or added. Clients showing the\npage refetch it — the event is the signal, not the content.",
+          "type": "object",
+          "properties": {
+            "module_id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "page_id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "type": {
+              "type": "string",
+              "const": "page_updated"
+            }
+          },
+          "required": [
+            "type",
+            "page_id",
+            "module_id"
           ]
         },
         {
@@ -4344,6 +4504,13 @@
             "null"
           ]
         },
+        "summary": {
+          "description": "One-line headline for the call, derived from the tool's declared\ndisplay hints. Omitted when the tool declares none — renderers then\nuse their generic fallback.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "tool": {
           "type": "string"
         },
@@ -4511,6 +4678,21 @@
             "string",
             "null"
           ]
+        },
+        "delegated_input_tokens": {
+          "description": "Tokens spent by this turn's delegated children (transitively) — a\nbilling figure separate from the turn's own tokens, which alone\nmeasure its context window. Null when no delegation has completed.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "delegated_output_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
         },
         "input_tokens": {
           "type": [
@@ -5557,6 +5739,34 @@
         "permissions",
         "is_trusted",
         "created_at"
+      ]
+    },
+    "WritePageModuleRequest": {
+      "description": "Write a module's source: replace an existing instance's content, or\nappend a new instance to the page when `module_id` is absent.",
+      "type": "object",
+      "properties": {
+        "kind": {
+          "description": "Module kind for a new instance (\"document\" first); ignored when\n`module_id` names an existing instance.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "module_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid",
+          "default": null
+        },
+        "source": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "source"
       ]
     }
   }

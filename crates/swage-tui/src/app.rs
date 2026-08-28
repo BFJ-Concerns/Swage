@@ -446,6 +446,9 @@ pub fn handle_server_event(state: &mut ConversationState, event: ServerEvent) ->
             EventOutcome::Continue
         }
 
+        // Pages are a web-surface concern; the terminal client ignores them.
+        ServerEvent::PageUpdated { .. } => EventOutcome::Continue,
+
         ServerEvent::ToolEnd {
             call_id,
             status,

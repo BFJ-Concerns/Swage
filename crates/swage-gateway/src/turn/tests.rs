@@ -2608,10 +2608,7 @@ impl swage_storage::PageStore for MockStorage {
     async fn get_page(&self, _: Uuid) -> Result<Option<swage_storage::Page>, StorageError> {
         unimplemented!()
     }
-    async fn list_pages_by_space(
-        &self,
-        _: Uuid,
-    ) -> Result<Vec<swage_storage::Page>, StorageError> {
+    async fn list_pages_by_space(&self, _: Uuid) -> Result<Vec<swage_storage::Page>, StorageError> {
         unimplemented!()
     }
     async fn create_page_module(
@@ -2989,6 +2986,7 @@ impl ToolCallStore for MockStorage {
             position: tool_call.position,
             created_at: chrono::Utc::now(),
             parent_call_id: tool_call.parent_call_id,
+            display_summary: None,
         };
         self.db.lock().await.tool_calls.push(record.clone());
         Ok(record)
@@ -6850,6 +6848,7 @@ fn compact_tool_replay_messages_includes_nested_compact_rows() {
             position: 0,
             created_at: chrono::Utc::now(),
             parent_call_id: None,
+            display_summary: None,
         },
         ToolCallRecord {
             id: Uuid::new_v4(),
@@ -6874,6 +6873,7 @@ fn compact_tool_replay_messages_includes_nested_compact_rows() {
             position: 1,
             created_at: chrono::Utc::now(),
             parent_call_id: Some(top_level_call_id),
+            display_summary: None,
         },
     ];
 
@@ -6943,6 +6943,7 @@ fn complete_replay_record(call_id: &str) -> ToolCallRecord {
         position: 0,
         created_at: chrono::Utc::now(),
         parent_call_id: None,
+        display_summary: None,
     }
 }
 

@@ -227,8 +227,8 @@ mod tests {
             provider_round: 1,
             position: 0,
             parent_call_id: None,
+            display_summary: None,
         }
-        display_summary: None,
     }
 
     #[tokio::test(flavor = "multi_thread")]
