@@ -585,7 +585,7 @@ mod tests {
         let (flags, missing) = flags_for_abi(2);
         assert_eq!(flags, ABI_V2_FLAGS);
         assert!(flags & ACCESS_FS_REFER != 0);
-        assert!(flags & ACCESS_FS_TRUNCATE == 0);
+        assert_eq!(flags & ACCESS_FS_TRUNCATE, 0);
         assert!(!missing.iter().any(|m| m.contains("REFER")));
         assert!(missing.iter().any(|m| m.contains("TRUNCATE")));
     }

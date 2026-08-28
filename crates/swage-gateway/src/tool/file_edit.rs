@@ -438,7 +438,7 @@ fn append_to_section(
     let (start, end) = find_unique_section_range(content, heading, tool_name)?;
     ensure_current_section_matches_old_text(&content[start..end], heading, old_text, tool_name)?;
     let insertion = format!("\n\n{}", normalise_section_text(new_text));
-    let edited_section = format!("{}{}", &content[..end].trim_end(), insertion);
+    let edited_section = format!("{}{}", content[..end].trim_end(), insertion);
     Ok(AppliedEdit {
         content: join_section_edit("", &edited_section, &content[end..]),
         replacements: 1,
