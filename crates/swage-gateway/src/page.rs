@@ -62,6 +62,11 @@ pub async fn create_page(
             metadata: json!({ "space_id": page.space_id, "title": title }),
         })
         .await?;
+    // Creation is a page-level change: open surfaces refetch their list.
+    let _ = state.broadcast.send(ServerEvent::PageUpdated {
+        page_id: page.id,
+        module_id: None,
+    });
     Ok(PageResponse {
         id: page.id,
         space_id: page.space_id,
@@ -141,7 +146,10 @@ pub async fn write_page_module(
 
     // Provenance: who changed what, with the displaced content retained —
     // the page row holds only current truth, so the trail is where a
-    // superseded source survives.
+    // superseded source survives. Recording failure propagates AFTER the
+    // mutation landed — a loud applied-but-unrecorded error, the platform's
+    // decided posture (see record_config_change) — never a success report
+    // on an unrecorded change, and never a second buffered record.
     state
         .storage
         .create_audit_event(NewAuditEvent {
@@ -165,7 +173,7 @@ pub async fn write_page_module(
     // fetch, not the event.
     let _ = state.broadcast.send(ServerEvent::PageUpdated {
         page_id: page.id,
-        module_id: module.id,
+        module_id: Some(module.id),
     });
 
     Ok(module_view(module))

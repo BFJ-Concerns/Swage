@@ -289,9 +289,7 @@ async fn browser_reports_dynamic_stale_refs() {
         .await
         .expect_err("old snapshot ref should be rejected");
     assert!(
-        old_ref_error
-            .to_string()
-            .contains("is not in the latest snapshot"),
+        old_ref_error.to_string().contains("has superseded"),
         "unexpected old-ref error: {old_ref_error}"
     );
 

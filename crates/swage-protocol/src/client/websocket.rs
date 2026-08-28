@@ -117,9 +117,16 @@ pub enum ServerEvent {
         #[ts(optional)]
         parent_call_id: Option<String>,
     },
-    /// A page changed: a module was written or added. Clients showing the
-    /// page refetch it — the event is the signal, not the content.
-    PageUpdated { page_id: Uuid, module_id: Uuid },
+    /// A page changed: it was created, or a module was written or added.
+    /// Clients showing pages refetch — the event is the signal, not the
+    /// content.
+    PageUpdated {
+        page_id: Uuid,
+        /// The module written; absent for page-level changes (creation).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        module_id: Option<Uuid>,
+    },
     /// Context assembly completed for a turn.
     ///
     /// Contains the full assembly report for diagnostics and token budget

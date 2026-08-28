@@ -75,7 +75,8 @@ exists. That refusal is correct gating, never a defect to work around.
 Three consequences, binding:
 
 - **The ceremony is not skippable.** However small the intent, the
-  handshake runs and the README lands only on the user's explicit
+  handshake runs and the README lands — is written, committed, and
+  pushed with the sign-off publication — only on the user's explicit
   sign-off reply (Sign-off, below). There is no fast path that writes a
   README without one, and nobody signs on the user's behalf: a session
   driving this workflow with no user answer available ends unsigned
