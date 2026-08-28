@@ -47,6 +47,11 @@ export function createPagesStore(): PagesStore {
     },
 
     async loadPages(spaceId: string): Promise<void> {
+      if (currentSpaceId !== null && currentSpaceId !== spaceId) {
+        // A space switch closes the previous space's page — the surface
+        // must never leave another space's page visible and writable.
+        activePageStore.set(null);
+      }
       currentSpaceId = spaceId;
       const response = await pagesApi.listPages(spaceId);
       pagesStore.set(response.pages);

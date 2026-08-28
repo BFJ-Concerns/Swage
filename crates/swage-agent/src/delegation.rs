@@ -448,17 +448,24 @@ impl DelegationExecutor {
                 // child turn row (parent_turn_id + its own tokens) remains
                 // the per-child attribution record.
                 if let Some(parent_turn_id) = sender_turn_id {
-                    let child_delegated = TurnStore::get_turn(self.storage.as_ref(), turn_id)
+                    let child_delegated = match TurnStore::get_turn(self.storage.as_ref(), turn_id)
                         .await
-                        .ok()
-                        .flatten()
-                        .map(|turn| {
-                            (
-                                turn.delegated_input_tokens.unwrap_or(0),
-                                turn.delegated_output_tokens.unwrap_or(0),
-                            )
-                        })
-                        .unwrap_or((0, 0));
+                    {
+                        Ok(Some(turn)) => (
+                            turn.delegated_input_tokens.unwrap_or(0),
+                            turn.delegated_output_tokens.unwrap_or(0),
+                        ),
+                        // The child's own spend still folds in; only the
+                        // grandchildren's aggregate is lost, and the loss is
+                        // named rather than silently zeroed.
+                        Ok(None) | Err(_) => {
+                            tracing::warn!(
+                                child_turn_id = %turn_id,
+                                "could not read the child's delegated aggregate; folding its own spend only"
+                            );
+                            (0, 0)
+                        }
+                    };
                     if let Err(error) = TurnStore::add_delegated_tokens(
                         self.storage.as_ref(),
                         parent_turn_id,

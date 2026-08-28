@@ -278,6 +278,7 @@ pub(super) fn broadcast_event_matches_session(_session_id: Uuid, event: &ServerE
     matches!(
         event,
         ServerEvent::Shutdown { .. }
+            | ServerEvent::PageUpdated { .. }
             | ServerEvent::WorkflowRunStarted { .. }
             | ServerEvent::WorkflowEntryStarted { .. }
             | ServerEvent::WorkflowEntryCompleted { .. }

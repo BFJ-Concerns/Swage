@@ -8,7 +8,7 @@
  *   - Error state: error class applied, error message visible
  *   - Collapsible: short results expanded, long results collapsed with preview
  *   - Toggle: clicking toggle changes expanded/collapsed state
- *   - Arguments summary: per-tool-type extraction
+ *   - Arguments summary: platform-supplied summary with generic fallback
  *   - Truncation notice: shown when result was truncated
  */
 import { describe, it, expect, afterEach } from "vitest";

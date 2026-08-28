@@ -94,7 +94,7 @@
               <button onclick={() => void saveEdit()}>Save</button>
               <button onclick={() => (editingModuleId = null)}>Cancel</button>
             </div>
-          {:else}
+          {:else if module.kind === "document"}
             <!-- eslint-disable-next-line svelte/no-at-html-tags — sanitised above -->
             <div class="module-content">{@html renderDocument(module.source)}</div>
             <div class="module-actions">

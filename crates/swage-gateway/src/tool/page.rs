@@ -73,6 +73,32 @@ async fn session_space(
     Ok(session.space_id)
 }
 
+/// Resolve a page id and confirm the page belongs to the calling session's
+/// space — the tools describe "this space's pages", so a retained id from
+/// another space is rejected, never silently honoured.
+async fn page_in_session_space(
+    tool: &str,
+    state: &AppState,
+    ctx: &dyn ToolContext,
+    params: &Value,
+) -> Result<Uuid, ToolError> {
+    let page_id = parse_page_id(tool, params)?;
+    let space_id = session_space(tool, state, ctx).await?;
+    let page = state
+        .storage
+        .get_page(page_id)
+        .await
+        .map_err(|error| failed(tool, error))?
+        .ok_or_else(|| invalid(tool, format!("no page with id {page_id}")))?;
+    if page.space_id != space_id {
+        return Err(invalid(
+            tool,
+            "that page belongs to another space — use ids from page_read in this space",
+        ));
+    }
+    Ok(page_id)
+}
+
 fn parse_page_id(tool: &str, params: &Value) -> Result<Uuid, ToolError> {
     params
         .get("page_id")
@@ -117,7 +143,7 @@ impl Tool for PageReadTool {
     async fn execute(&self, params: Value, ctx: &dyn ToolContext) -> Result<Value, ToolError> {
         let state = gateway_state(READ_TOOL, ctx)?;
         if params.get("page_id").is_some() {
-            let page_id = parse_page_id(READ_TOOL, &params)?;
+            let page_id = page_in_session_space(READ_TOOL, state, ctx, &params).await?;
             let response = page::page_response(state, page_id)
                 .await
                 .map_err(|error| failed(READ_TOOL, error))?;
@@ -201,7 +227,10 @@ impl Tool for PageWriteTool {
         let author = ctx.agent_id().to_string();
 
         if let Some(title) = params.get("title").and_then(Value::as_str) {
-            if params.get("page_id").is_some() {
+            if ["page_id", "module_id", "kind", "source"]
+                .iter()
+                .any(|other| params.get(other).is_some())
+            {
                 return Err(invalid(
                     WRITE_TOOL,
                     "pass title alone to create a page, or page_id + source to write a module",
@@ -220,7 +249,7 @@ impl Tool for PageWriteTool {
             return serde_json::to_value(&response).map_err(|error| failed(WRITE_TOOL, error));
         }
 
-        let page_id = parse_page_id(WRITE_TOOL, &params)?;
+        let page_id = page_in_session_space(WRITE_TOOL, state, ctx, &params).await?;
         let source = params
             .get("source")
             .and_then(Value::as_str)
