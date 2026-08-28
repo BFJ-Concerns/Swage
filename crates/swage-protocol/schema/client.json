@@ -3362,11 +3362,15 @@
           ]
         },
         {
-          "description": "A page changed: a module was written or added. Clients showing the\npage refetch it — the event is the signal, not the content.",
+          "description": "A page changed: it was created, or a module was written or added.\nClients showing pages refetch — the event is the signal, not the\ncontent.",
           "type": "object",
           "properties": {
             "module_id": {
-              "type": "string",
+              "description": "The module written; absent for page-level changes (creation).",
+              "type": [
+                "string",
+                "null"
+              ],
               "format": "uuid"
             },
             "page_id": {
@@ -3380,8 +3384,7 @@
           },
           "required": [
             "type",
-            "page_id",
-            "module_id"
+            "page_id"
           ]
         },
         {
