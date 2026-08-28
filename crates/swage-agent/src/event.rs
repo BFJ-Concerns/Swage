@@ -82,6 +82,9 @@ pub enum AgentEvent {
         call_id: String,
         tool_name: String,
         arguments: serde_json::Value,
+        /// One-line headline from the tool's display hints; None means
+        /// renderers use their generic fallback.
+        display_summary: Option<String>,
     },
 
     /// A tool call has finished.
@@ -232,16 +235,19 @@ mod tests {
             call_id: "call-1".to_string(),
             tool_name: "bash".to_string(),
             arguments: serde_json::json!({"cmd": "ls"}),
+            display_summary: Some("ls".to_string()),
         };
         if let AgentEvent::ToolStart {
             call_id,
             tool_name,
             arguments,
+            display_summary,
         } = event
         {
             assert_eq!(call_id, "call-1");
             assert_eq!(tool_name, "bash");
             assert_eq!(arguments["cmd"], "ls");
+            assert_eq!(display_summary.as_deref(), Some("ls"));
         } else {
             panic!("unexpected variant");
         }
@@ -345,6 +351,7 @@ mod tests {
             call_id: "c".to_string(),
             tool_name: "t".to_string(),
             arguments: serde_json::Value::Null,
+            display_summary: None,
         })
         .unwrap();
         tx.send(AgentEvent::ToolEnd {

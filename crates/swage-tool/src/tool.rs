@@ -34,6 +34,35 @@ use crate::context::ToolContext;
 ///     }
 /// }
 /// ```
+/// Declarative rendering hints a tool carries about its own calls.
+///
+/// Renderers consume these instead of keeping per-tool-name heuristics: a
+/// new tool that declares hints renders sensibly on every surface without
+/// any renderer growing a matching branch, and a tool that declares none
+/// gets each surface's generic fallback.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ToolDisplayHints {
+    /// The parameter whose value is the call's one-line headline — the
+    /// command for a shell tool, the path for a file tool, the query for a
+    /// search tool. The framework reads it from the call's arguments at
+    /// execution time; a missing or non-scalar value falls back to the
+    /// generic rendering rather than erroring.
+    pub summary_param: Option<&'static str>,
+}
+
+/// Derive the one-line display summary for a call from its tool's hints and
+/// the call's arguments. `None` means "no hint applies" — renderers fall
+/// back to their generic rendering, never to a per-tool branch.
+pub fn display_summary(hints: &ToolDisplayHints, arguments: &Value) -> Option<String> {
+    let param = hints.summary_param?;
+    match arguments.get(param)? {
+        Value::String(text) => Some(text.clone()),
+        Value::Number(number) => Some(number.to_string()),
+        Value::Bool(flag) => Some(flag.to_string()),
+        _ => None,
+    }
+}
+
 #[async_trait]
 pub trait Tool: Send + Sync {
     /// Unique name used to look up this tool in the registry.
@@ -41,6 +70,12 @@ pub trait Tool: Send + Sync {
 
     /// Human-readable description shown to the model.
     fn description(&self) -> &str;
+
+    /// Rendering hints for this tool's calls. Defaults to none — override
+    /// where one argument is the call's natural headline.
+    fn display_hints(&self) -> ToolDisplayHints {
+        ToolDisplayHints::default()
+    }
 
     /// JSON Schema object describing the parameters this tool accepts.
     fn parameters(&self) -> Value;
@@ -239,6 +274,26 @@ mod tests {
     fn sensitive_keys_default_is_empty() {
         let tool = AddTool;
         assert!(tool.sensitive_keys().is_empty());
+    }
+
+    #[test]
+    fn display_hints_default_to_none_and_summary_reads_the_named_param() {
+        assert_eq!(AddTool.display_hints(), ToolDisplayHints::default());
+        assert_eq!(
+            display_summary(&ToolDisplayHints::default(), &json!({"a": 1})),
+            None
+        );
+
+        let hints = ToolDisplayHints {
+            summary_param: Some("command"),
+        };
+        assert_eq!(
+            display_summary(&hints, &json!({"command": "ls -la"})).as_deref(),
+            Some("ls -la")
+        );
+        // Missing or non-scalar values fall back to the generic rendering.
+        assert_eq!(display_summary(&hints, &json!({"other": true})), None);
+        assert_eq!(display_summary(&hints, &json!({"command": ["ls"]})), None);
     }
 
     #[test]

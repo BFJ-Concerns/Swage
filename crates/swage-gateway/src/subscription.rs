@@ -293,6 +293,7 @@ mod tests {
             tool: "shell".to_string(),
             arguments: serde_json::json!({}),
             parent_call_id: None,
+            summary: None,
         };
         assert!(state.should_deliver(&tool_start));
 
@@ -434,6 +435,7 @@ mod tests {
             tool: "shell".to_string(),
             arguments: serde_json::json!({}),
             parent_call_id: None,
+            summary: None,
         };
         assert!(!state.should_deliver(&event));
     }
@@ -446,6 +448,7 @@ mod tests {
             tool: "shell".to_string(),
             arguments: serde_json::json!({}),
             parent_call_id: None,
+            summary: None,
         };
         assert!(state.should_deliver(&event));
     }
@@ -492,6 +495,7 @@ mod tests {
             tool: "shell".to_string(),
             arguments: serde_json::json!({}),
             parent_call_id: None,
+            summary: None,
         };
         assert!(!state.should_deliver(&event));
     }

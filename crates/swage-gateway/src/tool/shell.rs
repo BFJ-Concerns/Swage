@@ -35,6 +35,12 @@ impl Tool for ShellTool {
         "shell"
     }
 
+    fn display_hints(&self) -> swage_tool::tool::ToolDisplayHints {
+        swage_tool::tool::ToolDisplayHints {
+            summary_param: Some("command"),
+        }
+    }
+
     fn description(&self) -> &str {
         "Execute a shell command in the workspace directory."
     }

@@ -517,6 +517,7 @@ impl Agent {
                             provider_round: round as i32,
                             position: tool_position,
                             parent_call_id: None,
+                            display_summary: self.tool_display_summary(call),
                         })
                         .await;
                     tool_position += 1;
@@ -1270,6 +1271,16 @@ impl Agent {
     /// Returns `Ok((result_content, is_error, status))` on normal completion
     /// (including rejections), or `Err` when the turn must be interrupted
     /// (timeout with interrupt policy, or storage errors).
+    /// One-line display headline for a call, from the tool's declared
+    /// display hints (`ToolDisplayHints`). None without a dispatcher, a
+    /// hint, or a scalar value at the hinted parameter — consumers then use
+    /// their generic rendering.
+    fn tool_display_summary(&self, call: &ToolCall) -> Option<String> {
+        self.tool_dispatcher
+            .as_ref()?
+            .display_summary(&call.name, &call.arguments)
+    }
+
     async fn dispatch_tool_call(
         &self,
         call: &ToolCall,
@@ -1284,6 +1295,7 @@ impl Agent {
             call_id: call.call_id.clone(),
             tool_name: call.name.clone(),
             arguments: call.arguments.clone(),
+            display_summary: self.tool_display_summary(call),
         });
 
         let Some(ref dispatcher) = self.tool_dispatcher else {

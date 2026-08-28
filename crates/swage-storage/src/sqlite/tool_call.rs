@@ -20,7 +20,8 @@ use crate::store::ToolCallStore;
 
 /// Map a row from `SELECT id, turn_id, agent_id, call_id, tool, arguments,
 /// model_arguments, result, model_result, status, duration_ms, truncated,
-/// total_bytes, provider_round, position, created_at, parent_call_id`.
+/// total_bytes, provider_round, position, created_at, parent_call_id,
+/// display_summary`.
 fn row_to_tool_call(row: &rusqlite::Row<'_>) -> rusqlite::Result<ToolCallRecord> {
     let id: String = row.get(0)?;
     let turn_id: String = row.get(1)?;
@@ -56,6 +57,7 @@ fn row_to_tool_call(row: &rusqlite::Row<'_>) -> rusqlite::Result<ToolCallRecord>
         position: row.get(14)?,
         created_at: parse_dt(&created)?,
         parent_call_id: row.get(16)?,
+        display_summary: row.get(17)?,
     })
 }
 
@@ -103,8 +105,8 @@ impl ToolCallStore for SqliteStorage {
                  (id, turn_id, agent_id, call_id, tool, arguments, model_arguments,
                   result, model_result, status,
                   duration_ms, truncated, total_bytes, provider_round, position, created_at,
-                  parent_call_id)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+                  parent_call_id, display_summary)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
                 params![
                     id.to_string(),
                     tool_call.turn_id.to_string(),
@@ -123,6 +125,7 @@ impl ToolCallStore for SqliteStorage {
                     tool_call.position,
                     &now_str,
                     &tool_call.parent_call_id,
+                    &tool_call.display_summary,
                 ],
             )?;
 
@@ -144,6 +147,7 @@ impl ToolCallStore for SqliteStorage {
                 position: tool_call.position,
                 created_at: now,
                 parent_call_id: tool_call.parent_call_id,
+                display_summary: tool_call.display_summary,
             })
         })
         .await
@@ -154,7 +158,8 @@ impl ToolCallStore for SqliteStorage {
             conn.query_row(
                 "SELECT id, turn_id, agent_id, call_id, tool, arguments, model_arguments,
                         result, model_result, status, duration_ms, truncated, total_bytes,
-                        provider_round, position, created_at, parent_call_id
+                        provider_round, position, created_at, parent_call_id,
+                        display_summary
                  FROM tool_calls WHERE id = ?1",
                 params![id.to_string()],
                 row_to_tool_call,
@@ -174,7 +179,8 @@ impl ToolCallStore for SqliteStorage {
             conn.query_row(
                 "SELECT id, turn_id, agent_id, call_id, tool, arguments, model_arguments,
                         result, model_result, status, duration_ms, truncated, total_bytes,
-                        provider_round, position, created_at, parent_call_id
+                        provider_round, position, created_at, parent_call_id,
+                        display_summary
                  FROM tool_calls WHERE turn_id = ?1 AND call_id = ?2",
                 params![turn_id.to_string(), call_id],
                 row_to_tool_call,
@@ -235,7 +241,7 @@ impl ToolCallStore for SqliteStorage {
                 "SELECT id, turn_id, agent_id, call_id, tool, arguments, model_arguments,
                         result, model_result, status, duration_ms, truncated, total_bytes,
                         provider_round, position, created_at,
-                        parent_call_id
+                        parent_call_id, display_summary
                  FROM tool_calls
                  WHERE turn_id = ?1
                  ORDER BY provider_round ASC, position ASC",
@@ -330,6 +336,7 @@ mod tests {
             provider_round: 1,
             position,
             parent_call_id: None,
+            display_summary: Some("ls".into()),
         }
     }
 
@@ -606,6 +613,7 @@ mod tests {
                 provider_round: 1,
                 position: 0,
                 parent_call_id: None,
+                display_summary: Some("/etc/hosts".into()),
             })
             .await
             .unwrap();
@@ -627,6 +635,7 @@ mod tests {
                 provider_round: 2,
                 position: 1,
                 parent_call_id: None,
+                display_summary: None,
             })
             .await
             .unwrap();

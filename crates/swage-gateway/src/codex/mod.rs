@@ -561,10 +561,12 @@ async fn handle_tool_call(
         .get("arguments")
         .cloned()
         .unwrap_or_else(|| json!({}));
+    let display_summary = request.dispatcher.display_summary(&tool, &arguments);
     let _ = request.event_tx.send(AgentEvent::ToolStart {
         call_id: call_id.clone(),
         tool_name: tool.clone(),
         arguments: arguments.clone(),
+        display_summary: display_summary.clone(),
     });
     let started = Instant::now();
     let mut context = swage_agent::context::AgentToolContext::new(
@@ -623,6 +625,7 @@ async fn handle_tool_call(
             provider_round: 0,
             position: i32::try_from(position.saturating_sub(1)).unwrap_or(i32::MAX),
             parent_call_id: None,
+            display_summary,
         })
         .await;
     let _ = request.event_tx.send(AgentEvent::ToolEnd {

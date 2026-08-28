@@ -109,6 +109,12 @@ impl Tool for WebSearchTool {
         "web_search"
     }
 
+    fn display_hints(&self) -> swage_tool::tool::ToolDisplayHints {
+        swage_tool::tool::ToolDisplayHints {
+            summary_param: Some("query"),
+        }
+    }
+
     fn description(&self) -> &str {
         "Search the web for information. Returns titles, URLs, and snippets."
     }

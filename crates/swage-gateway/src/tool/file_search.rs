@@ -42,6 +42,12 @@ impl Tool for FileSearchTool {
         "file_search"
     }
 
+    fn display_hints(&self) -> swage_tool::tool::ToolDisplayHints {
+        swage_tool::tool::ToolDisplayHints {
+            summary_param: Some("pattern"),
+        }
+    }
+
     fn description(&self) -> &str {
         "Search file contents for a pattern across the workspace or a subdirectory."
     }

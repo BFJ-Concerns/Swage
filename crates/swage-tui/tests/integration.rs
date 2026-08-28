@@ -36,6 +36,7 @@ fn complete_turn_pipeline_updates_state_end_to_end() {
             tool: "read_file".to_string(),
             arguments: json!({"path": "README.md"}),
             parent_call_id: None,
+            summary: None,
         },
     );
     handle_server_event(

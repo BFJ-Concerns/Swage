@@ -1149,6 +1149,12 @@ pub struct ToolCallRecord {
     /// None for native (top-level) tool calls. Set when a tool such as
     /// python_execute dispatches further tool calls on behalf of the model.
     pub parent_call_id: Option<String>,
+    /// One-line human-readable headline for the call, derived from the
+    /// tool's declared display hints and the call's arguments at execution
+    /// time. None when the tool declares no hint — renderers then use their
+    /// generic fallback.
+    #[serde(default)]
+    pub display_summary: Option<String>,
 }
 
 /// Input for inserting a new tool call record.
@@ -1175,6 +1181,9 @@ pub struct NewToolCall {
     ///
     /// None for native (top-level) tool calls.
     pub parent_call_id: Option<String>,
+    /// One-line display headline derived from the tool's display hints;
+    /// None when the tool declares no hint.
+    pub display_summary: Option<String>,
 }
 
 /// Thread lifecycle state.

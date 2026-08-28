@@ -74,34 +74,19 @@
 
   // ---- Helpers --------------------------------------------------------------
 
-  /** Extract a human-readable summary from the tool's arguments. */
-  function argsSummary(tool: string, args: Record<string, unknown>): string {
-    // Shell: show the command string.
-    if (tool === "shell" && typeof args.command === "string") {
-      return args.command;
+  /**
+   * One-line headline for the call. The platform derives it from the tool's
+   * own display hints and sends it on the wire, so a new tool renders
+   * sensibly here without this component learning its name; a call without
+   * one falls back to the generic first key=value pair.
+   */
+  function argsSummary(call: ToolCallView): string {
+    if (typeof call.summary === "string" && call.summary.length > 0) {
+      return call.summary;
     }
-    // File tools: show the path.
-    if (
-      (tool === "read_file" ||
-        tool === "write_file" ||
-        tool === "search_file" ||
-        tool === "list_files") &&
-      typeof args.path === "string"
-    ) {
-      return args.path;
-    }
-    // Web search: show the query.
-    if (tool === "web_search" && typeof args.query === "string") {
-      return args.query;
-    }
-    // URL fetch: show the URL.
-    if (tool === "fetch_url" && typeof args.url === "string") {
-      return args.url;
-    }
-    // Generic fallback: first key=value pair.
-    const firstKey = Object.keys(args)[0];
+    const firstKey = Object.keys(call.arguments)[0];
     if (firstKey !== undefined) {
-      return `${firstKey}=${String(args[firstKey])}`;
+      return `${firstKey}=${String(call.arguments[firstKey])}`;
     }
     return "";
   }
@@ -133,8 +118,8 @@
 
     <span class="tool-name">{toolCall.tool}</span>
 
-    {#if argsSummary(toolCall.tool, toolCall.arguments)}
-      <span class="args-summary">{argsSummary(toolCall.tool, toolCall.arguments)}</span>
+    {#if argsSummary(toolCall)}
+      <span class="args-summary">{argsSummary(toolCall)}</span>
     {/if}
 
     {#if isInProgress}

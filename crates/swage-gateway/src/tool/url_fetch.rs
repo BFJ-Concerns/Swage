@@ -46,6 +46,12 @@ impl Tool for UrlFetchTool {
         "url_fetch"
     }
 
+    fn display_hints(&self) -> swage_tool::tool::ToolDisplayHints {
+        swage_tool::tool::ToolDisplayHints {
+            summary_param: Some("url"),
+        }
+    }
+
     fn description(&self) -> &str {
         "Fetch a URL and return its content as readable text. HTML is converted to plain text. Static content only — no JavaScript rendering."
     }

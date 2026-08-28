@@ -208,6 +208,7 @@ export function createStreamingStore(
             truncated: false,
             total_bytes: null,
             parent_call_id: event.parent_call_id ?? null,
+            summary: event.summary ?? null,
           };
 
           if (event.parent_call_id) {

@@ -1746,6 +1746,7 @@ async fn process_turn_with_composition_and_focus(
                 call_id,
                 tool_name,
                 arguments,
+                display_summary,
             } => {
                 activity_tracker.record_activity();
                 let tool_start = ServerEvent::ToolStart {
@@ -1753,6 +1754,7 @@ async fn process_turn_with_composition_and_focus(
                     tool: tool_name,
                     arguments,
                     parent_call_id: None,
+                    summary: display_summary,
                 };
                 if subscription.lock().await.should_deliver(&tool_start) {
                     let _ = ws_tx.send(tool_start);

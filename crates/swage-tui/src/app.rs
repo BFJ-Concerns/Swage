@@ -677,6 +677,7 @@ mod tests {
                 tool: "read_file".to_string(),
                 arguments: json!({}),
                 parent_call_id: None,
+                summary: None,
             },
         );
         assert_eq!(state.active_tools().len(), 1);
@@ -694,6 +695,7 @@ mod tests {
                 tool: "shell".to_string(),
                 arguments: json!({}),
                 parent_call_id: None,
+                summary: None,
             },
         );
         handle_server_event(

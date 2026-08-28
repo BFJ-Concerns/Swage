@@ -86,8 +86,19 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
             "054_observation_capture_scope",
             ADD_OBSERVATION_CAPTURE_SCOPE,
         ),
+        (
+            "055_tool_call_display_summary",
+            ADD_TOOL_CALL_DISPLAY_SUMMARY,
+        ),
     ]
 }
+
+/// One-line display headline per tool call, derived from the tool's declared
+/// display hints at execution time. Nullable: a tool with no hint stores
+/// NULL and renderers use their generic fallback.
+const ADD_TOOL_CALL_DISPLAY_SUMMARY: &str = "
+ALTER TABLE tool_calls ADD COLUMN display_summary TEXT;
+";
 
 /// Retry-safe capture identity for observations. A caller that may run the
 /// same capture twice — a workflow's journalled agent call re-executed after
