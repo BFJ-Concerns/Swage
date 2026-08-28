@@ -97,7 +97,7 @@ impl Tool for WorkflowListTool {
     }
 
     fn description(&self) -> &str {
-        "List the workflows available in this session. Each entry gives its name and purpose. Workflow scripts do not declare argument schemas; pass any JSON value in workflow_run.args that the workflow expects."
+        "List the workflows available in this session. Each entry gives its name and purpose. Workflow scripts do not declare argument schemas; pass any JSON value in workflow_run.args that the workflow expects. To author a new workflow, activate the Workflow Authoring skill, which documents the script surface."
     }
 
     fn parameters(&self) -> Value {

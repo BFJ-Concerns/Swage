@@ -44,7 +44,8 @@ Two consequences for how you write scripts:
 ## The script surface
 
 ```js
-// Optional: state per-model policy once; call-site values override.
+// Optional headers, in this order, before any other code:
+export const meta = { name: "readme-digest", description: "Summarise the README." };
 export const defaults = { model: "gpt-5.6-terra", effort: "low" };
 
 const reply = await agent("Summarise this repo's README.", {
@@ -54,6 +55,15 @@ const reply = await agent("Summarise this repo's README.", {
 return { reply };
 ```
 
+- **`export const meta`** — optional name/description header. On save, a
+  header's `name` and `description` override the request's, and the run
+  record carries them, so a portable script names itself. When present it
+  must be the file's first statement (comments may precede it).
+- **`export const defaults`** — optional per-call policy every `agent()`
+  call inherits; call-site values override. Follows `meta`, or opens the
+  file when there is no `meta`. These two are the only permitted
+  top-level `export`s.
+
 - **`agent(prompt, options)`** — dispatch one worker turn and await its
   reply. Options: `model` (catalogue model id — this also selects the
   model family), `effort` (`low` / `medium` / `high`), `schema` (JSON
@@ -61,7 +71,8 @@ return { reply };
   (names the worker in the run record), `session` (a continuation token
   from an earlier handle, to keep one worker's session going), `tools`
   (a call-scoped allow-list that can only narrow the worker's effective
-  grants), `cwd`
+  grants), `timeoutMs` (fail this one call at a hard deadline; unset
+  means the worker runs to completion), `cwd`
   (the directory the worker's tools operate in), `isolation:
   "worktree"` (give the worker its own provisioned worktree of the
   `cwd` repository, so parallel siblings never share a mutable tree),
@@ -115,6 +126,9 @@ return { reply };
 - **`budget.spent()` / `budget.remaining()`** — live diagnostics.
   **`budgetSnapshot()`** — the journalled read to branch on. The host
   enforces the run's budgets and winds work down as they exhaust.
+- **`workerPlacements()`** — journalled listing of the worktree paths
+  this run has provisioned for isolated workers, so a later stage can
+  find where a sibling's tree lives.
 - **`deliver(payload, { target })`** — send something out of the run
   (a channel message, storage) through a granted delivery capability;
   journalled with an idempotency key. Only available when the workflow
