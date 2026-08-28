@@ -117,6 +117,12 @@ pub enum ServerEvent {
         #[ts(optional)]
         parent_call_id: Option<String>,
     },
+    /// A page changed: a module was written or added. Clients showing the
+    /// page refetch it — the event is the signal, not the content.
+    PageUpdated {
+        page_id: Uuid,
+        module_id: Uuid,
+    },
     /// Context assembly completed for a turn.
     ///
     /// Contains the full assembly report for diagnostics and token budget

@@ -190,7 +190,7 @@ export type KnownServerEventType = KnownServerEvent["type"];
 // Runtime validation still needs values. The type assertion makes additions to
 // the generated union fail the frontend check until this parser list follows.
 export const KNOWN_SERVER_EVENT_TYPES = [
-  "token", "tool_start", "tool_end", "context_assembled", "turn_complete",
+  "token", "tool_start", "tool_end", "page_updated", "context_assembled", "turn_complete",
   "output_schema_retry", "provider_retry_started", "provider_retry_settled",
   "output_schema_failed", "delegation_started", "delegation_completed",
   "workflow_run_started", "workflow_entry_started",

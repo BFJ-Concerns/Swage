@@ -1082,6 +1082,54 @@ pub struct Turn {
     pub completed_at: Option<DateTime<Utc>>,
 }
 
+/// A page: an agent-run tab on a space, assembled from module instances.
+///
+/// The database is authoritative for page content; renderings are derived.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Page {
+    pub id: Uuid,
+    pub space_id: Uuid,
+    pub title: String,
+    pub created_at: DateTime<Utc>,
+    /// Advanced on every module mutation, so "has this page moved?" is one
+    /// column read.
+    pub updated_at: DateTime<Utc>,
+}
+
+/// A module instance on a page: work product seeded from a canonical module
+/// kind, legitimately divergent from the moment it is used.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PageModule {
+    pub id: Uuid,
+    pub page_id: Uuid,
+    /// The canonical module kind this instance was seeded from ("document"
+    /// first). Kinds are compiled-in until module authoring lands.
+    pub kind: String,
+    /// Ordering index within the page.
+    pub position: i32,
+    /// The module's durable source, in the kind's own format (markdown for
+    /// the document module).
+    pub source: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Input for creating a page. `id` and timestamps are storage-assigned.
+#[derive(Debug, Clone)]
+pub struct NewPage {
+    pub space_id: Uuid,
+    pub title: String,
+}
+
+/// Input for adding a module instance to a page.
+#[derive(Debug, Clone)]
+pub struct NewPageModule {
+    pub page_id: Uuid,
+    pub kind: String,
+    pub position: i32,
+    pub source: String,
+}
+
 /// A message within a thread.
 ///
 /// Messages are scoped to a thread and may optionally reference the turn that

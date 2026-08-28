@@ -94,8 +94,34 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
             "056_turn_delegated_tokens",
             ADD_TURN_DELEGATED_TOKENS,
         ),
+        ("057_pages", CREATE_PAGE_TABLES),
     ]
 }
+
+/// Pages — agent-run tabs on a space — and their module instances. The
+/// database is authoritative for page content; the alpha wipe-and-rebuild
+/// posture applies (pages are work product, regenerable by their authors,
+/// unlike knowledge-base evidence).
+const CREATE_PAGE_TABLES: &str = "
+CREATE TABLE IF NOT EXISTS pages (
+    id          TEXT NOT NULL PRIMARY KEY,
+    space_id    TEXT NOT NULL REFERENCES spaces(id),
+    title       TEXT NOT NULL,
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_pages_space ON pages(space_id);
+CREATE TABLE IF NOT EXISTS page_modules (
+    id          TEXT NOT NULL PRIMARY KEY,
+    page_id     TEXT NOT NULL REFERENCES pages(id) ON DELETE CASCADE,
+    kind        TEXT NOT NULL,
+    position    INTEGER NOT NULL,
+    source      TEXT NOT NULL,
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_page_modules_page ON page_modules(page_id);
+";
 
 /// Delegated-child usage aggregated onto the delegating turn: a billing
 /// figure separate from the turn's own token columns, so which-child-spent-
