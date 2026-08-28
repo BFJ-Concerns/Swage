@@ -35,6 +35,7 @@ use tokio::task::JoinHandle;
 use tracing::{debug, warn};
 
 pub use render::{RefEntry, RefTable, RenderedSnapshot, render_snapshot};
+use render::{element_reference, parse_reference_snapshot, tail_truncate};
 
 const DEFAULT_PROFILE: &str = "default";
 const LOAD_SETTLE: Duration = Duration::from_secs(1);
@@ -356,7 +357,7 @@ impl BrowserHost {
                 .refs
                 .get(reference)
                 .cloned()
-                .ok_or_else(|| stale_ref_error("browser_scroll"))?;
+                .ok_or_else(|| stale_ref_error("browser_scroll", reference, page.snapshot_seq))?;
             let object_id =
                 resolve_object(&page.page, entry.backend_node_id, "browser_scroll").await?;
             page.page
@@ -463,7 +464,7 @@ impl BrowserHost {
             .refs
             .get(reference)
             .cloned()
-            .ok_or_else(|| stale_ref_error(tool_name))?;
+            .ok_or_else(|| stale_ref_error(tool_name, reference, page.snapshot_seq))?;
         let url_before = current_url(&page.page).await.ok();
         if let Some(selector) = target.selector.clone() {
             page.page
@@ -1125,7 +1126,7 @@ async fn dom_snapshot(
         String::new(),
     ];
     for (index, node) in nodes.into_iter().enumerate() {
-        let reference = format!("e{}", index + 1);
+        let reference = element_reference(snapshot_seq, index + 1);
         let state = if node.state.is_empty() {
             String::new()
         } else {
@@ -1150,8 +1151,11 @@ async fn dom_snapshot(
         );
     }
     let full = lines.join("\n");
+    // Same over-budget contract as the accessibility renderer: one shared
+    // tail truncation with its saved-snapshot marker, never a second
+    // hand-maintained cut.
     let output = if full.len() > max_bytes {
-        full.chars().take(max_bytes).collect::<String>()
+        tail_truncate(&full, max_bytes)
     } else {
         full.clone()
     };
@@ -1193,12 +1197,25 @@ async fn current_title(page: &Page) -> Result<String, ToolError> {
         })
 }
 
-fn stale_ref_error(tool_name: &str) -> ToolError {
+/// Reject a reference the latest snapshot did not issue. A reference token
+/// carries the snapshot that issued it, so a superseded token is named as
+/// such — acting on it could land on a different element than the one the
+/// caller saw — and anything else (a cleared table after navigation, a
+/// malformed token) is reported as not-in-the-latest-snapshot.
+fn stale_ref_error(tool_name: &str, reference: &str, current_seq: u64) -> ToolError {
+    let message = match parse_reference_snapshot(reference) {
+        Some(issued_seq) if issued_seq < current_seq => format!(
+            "that reference is from snapshot {issued_seq}, which snapshot {current_seq} has \
+             superseded — the page has changed and the element may no longer be what it was; \
+             act on refs from the latest snapshot"
+        ),
+        _ => "that reference is not in the latest snapshot — the page has navigated or changed \
+              since it was issued; use refs from the latest snapshot"
+            .to_string(),
+    };
     ToolError::ExecutionFailed {
         name: tool_name.to_string(),
-        message:
-            "the page has navigated since that snapshot — use the refs from the latest snapshot"
-                .to_string(),
+        message,
     }
 }
 

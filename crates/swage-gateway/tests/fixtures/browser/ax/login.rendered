@@ -6,19 +6,19 @@ snapshot: 1
 - form
   - LabelText
     - StaticText "Username"
-    - textbox "Username" [invalid=false] ref=e1
+    - textbox "Username" [invalid=false] ref=s1e1
   - LabelText
     - StaticText "Password"
-    - textbox "Password" [invalid=false] ref=e2
-  - link "Sign in" ref=e3
+    - textbox "Password" [invalid=false] ref=s1e2
+  - link "Sign in" ref=s1e3
 - LabelText
   - StaticText "Username"
-  - textbox "Username" [invalid=false] ref=e4
+  - textbox "Username" [invalid=false] ref=s1e4
 - LabelText
   - StaticText "Password"
-  - textbox "Password" [invalid=false] ref=e5
-- link "Sign in" ref=e6
+  - textbox "Password" [invalid=false] ref=s1e5
+- link "Sign in" ref=s1e6
 - StaticText "Username"
-- textbox "Username" [invalid=false] ref=e7
+- textbox "Username" [invalid=false] ref=s1e7
 - StaticText "Password"
-- textbox "Password" [invalid=false] ref=e8
+- textbox "Password" [invalid=false] ref=s1e8
