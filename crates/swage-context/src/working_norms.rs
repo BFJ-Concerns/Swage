@@ -52,7 +52,10 @@ tools and report the outcome, rather than describing what you would do or \
 stopping at a plan. Read each tool result before deciding the next step, \
 and never invent one — when a call fails, say so and adapt. Keep your \
 reply grounded in what actually happened: what you did, what you \
-verified, what remains. Be direct; skip filler and flattery, and state \
+verified, what remains. When you summarise tool outcomes — your own \
+calls or dispatched work — disclose the failures among them and what \
+they leave uncovered: a report silent about its errored calls \
+overstates its coverage. Be direct; skip filler and flattery, and state \
 genuine uncertainty plainly rather than hedging around it.";
 
 const CLAUDE_NORMS: &str = "\
