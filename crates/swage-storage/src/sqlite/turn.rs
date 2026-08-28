@@ -45,7 +45,8 @@ fn parse_dt(s: &str) -> rusqlite::Result<DateTime<Utc>> {
 
 /// Column order: id, thread_id, agent_id, user_input, inbound_audit,
 /// assistant_response, input_tokens, output_tokens, state, created_at,
-/// completed_at, cost_microcents, structured_output, parent_turn_id
+/// completed_at, cost_microcents, structured_output, parent_turn_id,
+/// delegated_input_tokens, delegated_output_tokens
 fn row_to_turn(row: &rusqlite::Row<'_>) -> rusqlite::Result<Turn> {
     let id: String = row.get(0)?;
     let thread_id: String = row.get(1)?;
@@ -100,6 +101,8 @@ fn row_to_turn(row: &rusqlite::Row<'_>) -> rusqlite::Result<Turn> {
         cost_microcents: row.get(11)?,
         structured_output,
         parent_turn_id,
+        delegated_input_tokens: row.get(14)?,
+        delegated_output_tokens: row.get(15)?,
         created_at: parse_dt(&created)?,
         completed_at: completed.as_deref().map(parse_dt).transpose()?,
     })
@@ -149,6 +152,8 @@ impl TurnStore for SqliteStorage {
                 parent_turn_id: turn.parent_turn_id,
                 created_at: now,
                 completed_at: None,
+                delegated_input_tokens: None,
+                delegated_output_tokens: None,
             })
         })
         .await
@@ -159,7 +164,8 @@ impl TurnStore for SqliteStorage {
             conn.query_row(
                 "SELECT id, thread_id, agent_id, user_input, inbound_audit, assistant_response,
                         input_tokens, output_tokens, state, created_at, completed_at, cost_microcents,
-                        structured_output, parent_turn_id
+                        structured_output, parent_turn_id,
+                        delegated_input_tokens, delegated_output_tokens
                  FROM turns WHERE id = ?1",
                 params![id.to_string()],
                 row_to_turn,
@@ -174,7 +180,8 @@ impl TurnStore for SqliteStorage {
             let mut stmt = conn.prepare(
                 "SELECT id, thread_id, agent_id, user_input, inbound_audit, assistant_response,
                         input_tokens, output_tokens, state, created_at, completed_at, cost_microcents,
-                        structured_output, parent_turn_id
+                        structured_output, parent_turn_id,
+                        delegated_input_tokens, delegated_output_tokens
                  FROM turns WHERE thread_id = ?1
                  ORDER BY created_at ASC",
             )?;
@@ -254,7 +261,8 @@ impl TurnStore for SqliteStorage {
             let mut stmt = conn.prepare(
                 "SELECT id, thread_id, agent_id, user_input, inbound_audit, assistant_response,
                         input_tokens, output_tokens, state, created_at, completed_at, cost_microcents,
-                        structured_output, parent_turn_id
+                        structured_output, parent_turn_id,
+                        delegated_input_tokens, delegated_output_tokens
                  FROM turns WHERE state IN ('pending', 'processing', 'awaiting_approval', 'delegating') AND agent_id = ?1",
             )?;
             let rows = stmt.query_map(params![&agent_id], row_to_turn)?;
@@ -298,6 +306,25 @@ impl TurnStore for SqliteStorage {
         self.with_conn(move |conn| {
             conn.execute(
                 "UPDATE turns SET input_tokens = ?1, output_tokens = ?2 WHERE id = ?3",
+                params![input, output, id.to_string()],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
+    async fn add_delegated_tokens(
+        &self,
+        id: Uuid,
+        input: i64,
+        output: i64,
+    ) -> Result<(), StorageError> {
+        self.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE turns
+                 SET delegated_input_tokens = COALESCE(delegated_input_tokens, 0) + ?1,
+                     delegated_output_tokens = COALESCE(delegated_output_tokens, 0) + ?2
+                 WHERE id = ?3",
                 params![input, output, id.to_string()],
             )?;
             Ok(())
@@ -742,5 +769,43 @@ mod tests {
             TurnState::Interrupted,
             "terminal state should not be overwritten"
         );
+    }
+
+    /// The delegated aggregate accumulates separately from the turn's own
+    /// tokens: billing sums both, the context measure reads own alone, and
+    /// which-child-spent-what stays on the child rows.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn delegated_tokens_accumulate_beside_the_turns_own() {
+        let (storage, thread_id) = make_thread().await;
+        let parent = storage
+            .create_turn(NewTurn {
+                thread_id,
+                agent_id: "test-agent".into(),
+                state: TurnState::Processing,
+                user_input: None,
+                parent_turn_id: None,
+            })
+            .await
+            .unwrap();
+        assert!(parent.delegated_input_tokens.is_none(), "starts unset");
+
+        storage.update_tokens(parent.id, 100, 40).await.unwrap();
+        storage
+            .add_delegated_tokens(parent.id, 500, 200)
+            .await
+            .unwrap();
+        storage
+            .add_delegated_tokens(parent.id, 30, 10)
+            .await
+            .unwrap();
+
+        let read = storage.get_turn(parent.id).await.unwrap().unwrap();
+        // The turn's own figures — the context measure's inputs — are
+        // untouched by the children's spend.
+        assert_eq!(read.input_tokens, Some(100));
+        assert_eq!(read.output_tokens, Some(40));
+        // The billing aggregate accumulated both children.
+        assert_eq!(read.delegated_input_tokens, Some(530));
+        assert_eq!(read.delegated_output_tokens, Some(210));
     }
 }

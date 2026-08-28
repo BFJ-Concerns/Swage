@@ -38,6 +38,13 @@ pub struct TurnPollResponse {
     pub input_tokens: Option<i64>,
     #[ts(type = "number | null")]
     pub output_tokens: Option<i64>,
+    /// Tokens spent by this turn's delegated children (transitively) — a
+    /// billing figure separate from the turn's own tokens, which alone
+    /// measure its context window. Null when no delegation has completed.
+    #[ts(type = "number | null")]
+    pub delegated_input_tokens: Option<i64>,
+    #[ts(type = "number | null")]
+    pub delegated_output_tokens: Option<i64>,
     pub parent_turn_id: Option<Uuid>,
 }
 

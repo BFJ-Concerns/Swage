@@ -90,8 +90,22 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
             "055_tool_call_display_summary",
             ADD_TOOL_CALL_DISPLAY_SUMMARY,
         ),
+        (
+            "056_turn_delegated_tokens",
+            ADD_TURN_DELEGATED_TOKENS,
+        ),
     ]
 }
+
+/// Delegated-child usage aggregated onto the delegating turn: a billing
+/// figure separate from the turn's own token columns, so which-child-spent-
+/// what stays reconstructable from child turn rows (parent_turn_id + their
+/// own tokens) while the parent's context measure keeps reading only its
+/// own fields.
+const ADD_TURN_DELEGATED_TOKENS: &str = "
+ALTER TABLE turns ADD COLUMN delegated_input_tokens INTEGER;
+ALTER TABLE turns ADD COLUMN delegated_output_tokens INTEGER;
+";
 
 /// One-line display headline per tool call, derived from the tool's declared
 /// display hints at execution time. Nullable: a tool with no hint stores

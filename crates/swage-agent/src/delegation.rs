@@ -439,6 +439,41 @@ impl DelegationExecutor {
                         "failed to persist delegated structured output"
                     );
                 }
+                // Fold the child's spend into the delegating turn's billing
+                // aggregate — the child's own tokens plus the child's own
+                // delegated aggregate, so multi-hop chains roll up
+                // transitively. Deliberately not update_tokens: the child's
+                // tokens never occupied the parent's context window, and the
+                // context measure reads only the turn's own columns. The
+                // child turn row (parent_turn_id + its own tokens) remains
+                // the per-child attribution record.
+                if let Some(parent_turn_id) = sender_turn_id {
+                    let child_delegated = TurnStore::get_turn(self.storage.as_ref(), turn_id)
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(|turn| {
+                            (
+                                turn.delegated_input_tokens.unwrap_or(0),
+                                turn.delegated_output_tokens.unwrap_or(0),
+                            )
+                        })
+                        .unwrap_or((0, 0));
+                    if let Err(error) = TurnStore::add_delegated_tokens(
+                        self.storage.as_ref(),
+                        parent_turn_id,
+                        i64::from(outbound.input_tokens) + child_delegated.0,
+                        i64::from(outbound.output_tokens) + child_delegated.1,
+                    )
+                    .await
+                    {
+                        tracing::warn!(
+                            %error,
+                            %parent_turn_id,
+                            "failed to record delegated usage on the parent turn"
+                        );
+                    }
+                }
                 let mut result_payload = serde_json::json!({
                     "response": outbound.response,
                     "input_tokens": outbound.input_tokens,

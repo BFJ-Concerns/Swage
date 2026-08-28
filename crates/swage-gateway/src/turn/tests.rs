@@ -2615,6 +2615,8 @@ impl TurnStore for MockStorage {
             parent_turn_id: turn.parent_turn_id,
             created_at: chrono::Utc::now(),
             completed_at: None,
+            delegated_input_tokens: None,
+            delegated_output_tokens: None,
         };
         self.db.lock().await.turns.insert(t.id, t.clone());
         Ok(t)
@@ -2712,6 +2714,19 @@ impl TurnStore for MockStorage {
         if let Some(t) = self.db.lock().await.turns.get_mut(&id) {
             t.input_tokens = Some(input);
             t.output_tokens = Some(output);
+        }
+        Ok(())
+    }
+
+    async fn add_delegated_tokens(
+        &self,
+        id: Uuid,
+        input: i64,
+        output: i64,
+    ) -> Result<(), StorageError> {
+        if let Some(t) = self.db.lock().await.turns.get_mut(&id) {
+            t.delegated_input_tokens = Some(t.delegated_input_tokens.unwrap_or(0) + input);
+            t.delegated_output_tokens = Some(t.delegated_output_tokens.unwrap_or(0) + output);
         }
         Ok(())
     }

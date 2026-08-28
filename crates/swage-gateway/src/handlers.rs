@@ -1517,6 +1517,8 @@ pub async fn get_turn(
         structured_output: turn.structured_output,
         input_tokens: turn.input_tokens,
         output_tokens: turn.output_tokens,
+        delegated_input_tokens: turn.delegated_input_tokens,
+        delegated_output_tokens: turn.delegated_output_tokens,
         parent_turn_id: turn.parent_turn_id,
     }))
 }
@@ -2142,6 +2144,8 @@ pub async fn list_turns(
             structured_output: t.structured_output,
             input_tokens: t.input_tokens,
             output_tokens: t.output_tokens,
+            delegated_input_tokens: t.delegated_input_tokens,
+            delegated_output_tokens: t.delegated_output_tokens,
             parent_turn_id: t.parent_turn_id,
         })
         .collect();
