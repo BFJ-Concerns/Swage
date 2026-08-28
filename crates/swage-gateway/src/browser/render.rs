@@ -47,13 +47,13 @@ pub fn render_snapshot(
     masked_backend_nodes: &HashSet<BackendNodeId>,
 ) -> RenderedSnapshot {
     let header = snapshot_header(url, title, snapshot_seq);
-    let mut renderer = Renderer::new(header.clone(), masked_backend_nodes);
+    let mut renderer = Renderer::new(header.clone(), snapshot_seq, masked_backend_nodes);
     let roots = root_nodes(nodes);
     for node in &roots {
         renderer.render_node(nodes, node, 0);
     }
     if renderer.only_rendered_root_refs() && nodes.len() > roots.len() {
-        renderer = Renderer::new(header, masked_backend_nodes);
+        renderer = Renderer::new(header, snapshot_seq, masked_backend_nodes);
         for node in nodes.iter().filter(|node| node.parent_id.is_some()) {
             renderer.render_node(nodes, node, 0);
         }
@@ -71,15 +71,21 @@ pub fn render_snapshot(
 struct Renderer {
     refs: RefTable,
     next_ref: usize,
+    snapshot_seq: u64,
     masked_backend_nodes: HashSet<BackendNodeId>,
     lines: Vec<RenderLine>,
 }
 
 impl Renderer {
-    fn new(lines: Vec<RenderLine>, masked_backend_nodes: &HashSet<BackendNodeId>) -> Self {
+    fn new(
+        lines: Vec<RenderLine>,
+        snapshot_seq: u64,
+        masked_backend_nodes: &HashSet<BackendNodeId>,
+    ) -> Self {
         Self {
             refs: HashMap::new(),
             next_ref: 1,
+            snapshot_seq,
             masked_backend_nodes: masked_backend_nodes.clone(),
             lines,
         }
@@ -134,7 +140,10 @@ impl Renderer {
         }
         let actionable = is_actionable(node, &role);
         if actionable && let Some(backend_node_id) = node.backend_dom_node_id {
-            let reference = format!("e{}", self.next_ref);
+            // The reference token carries the snapshot that issued it, so the
+            // action path can reject a ref from a superseded snapshot instead
+            // of resolving whatever the same position means now.
+            let reference = element_reference(self.snapshot_seq, self.next_ref);
             self.next_ref += 1;
             line.push_str(&format!(" ref={reference}"));
             self.refs.insert(
@@ -190,6 +199,26 @@ impl Renderer {
             has_interactive,
         });
     }
+}
+
+/// Format an element reference: snapshot identity, then index. The token is
+/// the model-facing handle — parsing it back is `parse_reference_snapshot`.
+pub fn element_reference(snapshot_seq: u64, index: usize) -> String {
+    format!("s{snapshot_seq}e{index}")
+}
+
+/// The snapshot sequence a reference token was issued from, when the token
+/// carries one. A malformed token reads as None — callers treat it as an
+/// unknown reference, never as current.
+pub fn parse_reference_snapshot(reference: &str) -> Option<u64> {
+    let rest = reference.strip_prefix('s')?;
+    let split = rest.find('e')?;
+    let (seq, index) = rest.split_at(split);
+    let digits = &index[1..];
+    if seq.is_empty() || digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    seq.parse().ok()
 }
 
 fn snapshot_header(url: &str, title: &str, snapshot_seq: u64) -> Vec<RenderLine> {
@@ -444,7 +473,12 @@ fn join_truncated_lines(lines: &[TruncLine]) -> String {
         .join("\n")
 }
 
-fn tail_truncate(full: &str, max_bytes: usize) -> String {
+/// The one over-budget truncation contract both snapshot paths share — the
+/// accessibility renderer's final stage and the DOM fallback alike: reserve
+/// the marker, cut at a UTF-8 boundary, and say plainly that the full
+/// snapshot was saved. Keeping a second inline truncation beside this one is
+/// how the two contracts drift apart.
+pub(crate) fn tail_truncate(full: &str, max_bytes: usize) -> String {
     let marker = "\n... (snapshot truncated - full snapshot saved)";
     let budget = max_bytes.saturating_sub(marker.len());
     let mut end = budget.min(full.len());
@@ -479,9 +513,11 @@ mod tests {
             10_000,
             &HashSet::new(),
         );
-        assert!(rendered.output.contains("- textbox \"Username\" ref=e1"));
-        assert!(rendered.output.contains("- button \"Submit\" ref=e2"));
+        assert!(rendered.output.contains("- textbox \"Username\" ref=s1e1"));
+        assert!(rendered.output.contains("- button \"Submit\" ref=s1e2"));
         assert_eq!(rendered.refs.len(), 2);
+        // The token round-trips its issuing snapshot.
+        assert_eq!(parse_reference_snapshot("s1e1"), Some(1));
     }
 
     #[test]
@@ -529,7 +565,7 @@ mod tests {
             rendered.output
         );
         assert!(
-            rendered.output.contains("ref=e1") && rendered.output.contains("ref=e2"),
+            rendered.output.contains("ref=s1e1") && rendered.output.contains("ref=s1e2"),
             "interactive refs should remain visible after truncation:\n{}",
             rendered.output
         );
@@ -542,6 +578,31 @@ mod tests {
             rendered.full_output.is_some(),
             "full snapshot should still spill"
         );
+    }
+
+    #[test]
+    fn shared_tail_truncation_reserves_its_marker_at_a_char_boundary() {
+        // Both snapshot paths — the accessibility renderer's final stage and
+        // the DOM fallback — cut through this one contract.
+        let full = "héllo wörld ".repeat(100);
+        let cut = tail_truncate(&full, 120);
+        assert!(cut.len() <= 120);
+        assert!(cut.ends_with("... (snapshot truncated - full snapshot saved)"));
+        assert!(full.starts_with(cut.split('\n').next().unwrap()));
+
+        let short = tail_truncate("tiny", 120);
+        assert!(short.ends_with("... (snapshot truncated - full snapshot saved)"));
+    }
+
+    #[test]
+    fn reference_tokens_carry_and_yield_their_issuing_snapshot() {
+        assert_eq!(element_reference(7, 3), "s7e3");
+        assert_eq!(parse_reference_snapshot("s7e3"), Some(7));
+        // Malformed tokens read as unknown, never as current.
+        assert_eq!(parse_reference_snapshot("e3"), None);
+        assert_eq!(parse_reference_snapshot("s7e"), None);
+        assert_eq!(parse_reference_snapshot("se3"), None);
+        assert_eq!(parse_reference_snapshot("s7x3"), None);
     }
 
     fn node(

@@ -117,7 +117,7 @@ impl Tool for BrowserClickTool {
     }
 
     fn description(&self) -> &str {
-        "Click an element on the current page, identified by its ref from the latest snapshot. Returns the page as it looks after the click."
+        "Click an element on the current page, identified by its ref from the latest snapshot. Refs are only valid for the snapshot that issued them: after the page changes, take or read the latest snapshot — a ref from a superseded snapshot is rejected rather than clicking whatever now sits there. Returns the page as it looks after the click."
     }
 
     fn parameters(&self) -> Value {

@@ -291,7 +291,7 @@ async fn browser_reports_dynamic_stale_refs() {
     assert!(
         old_ref_error
             .to_string()
-            .contains("the page has navigated since that snapshot"),
+            .contains("is not in the latest snapshot"),
         "unexpected old-ref error: {old_ref_error}"
     );
 
