@@ -221,7 +221,7 @@ pub(super) async fn build_turn_sandbox(
             backend: SandboxBackend::TestHarness,
         });
     }
-    if std::env::current_exe().ok().is_some_and(|path| {
+    if std::env::current_exe().is_ok_and(|path| {
         path.parent()
             .and_then(Path::file_name)
             .is_some_and(|name| name == "deps")
