@@ -80,28 +80,23 @@ async fn real_browser_drives_fixture_and_persists_profile() {
         .expect("username ref")
         .reference
         .clone();
-    let password = first
-        .refs
-        .values()
-        .find(|entry| entry.name == "Password")
-        .expect("password ref")
-        .reference
-        .clone();
-    let submit = first
-        .refs
-        .values()
-        .find(|entry| entry.name == "Sign in")
-        .expect("submit ref")
-        .reference
-        .clone();
-
-    tokio::time::timeout(
+    // Every action returns a fresh observation with fresh refs, and refs
+    // from a superseded snapshot are rejected — so the journey re-reads its
+    // targets from each action's returned snapshot, exactly as a model must.
+    let (after_username, _) = tokio::time::timeout(
         std::time::Duration::from_secs(15),
         host.type_text("session-a", &username, "ben", true, false),
     )
     .await
     .expect("type username timed out")
     .expect("type username");
+    let password = after_username
+        .refs
+        .values()
+        .find(|entry| entry.name == "Password")
+        .expect("password ref")
+        .reference
+        .clone();
     let (after_password, _) = tokio::time::timeout(
         std::time::Duration::from_secs(15),
         host.type_text("session-a", &password, "secret", true, false),
@@ -109,6 +104,13 @@ async fn real_browser_drives_fixture_and_persists_profile() {
     .await
     .expect("type password timed out")
     .expect("type password");
+    let submit = after_password
+        .refs
+        .values()
+        .find(|entry| entry.name == "Sign in")
+        .expect("submit ref")
+        .reference
+        .clone();
     assert!(
         !after_password.output.contains("secret"),
         "password text leaked into post-type snapshot:\n{}",

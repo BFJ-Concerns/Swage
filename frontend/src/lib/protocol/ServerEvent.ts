@@ -30,7 +30,11 @@ status: string, duration_ms: number, truncated: boolean, total_bytes: number | n
  *
  * Omitted from the serialised JSON when None.
  */
-parent_call_id?: string, } | { "type": "page_updated", page_id: string, module_id: string, } | { "type": "context_assembled", turn_id: string, report: AssemblyReport, } | { "type": "turn_complete", turn_id: string, input_tokens?: number, output_tokens?: number, cost_microcents?: number,
+parent_call_id?: string, } | { "type": "page_updated", page_id: string,
+/**
+ * The module written; absent for page-level changes (creation).
+ */
+module_id?: string, } | { "type": "context_assembled", turn_id: string, report: AssemblyReport, } | { "type": "turn_complete", turn_id: string, input_tokens?: number, output_tokens?: number, cost_microcents?: number,
 /**
  * Validated, parsed JSON output when an output schema was configured and
  * validation passed. Absent (serialised as omitted) when no schema is
