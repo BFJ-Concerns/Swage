@@ -25,8 +25,11 @@ first used mid-run.
 
 No modes or flags — read the world:
 
-- **No annexe or no commission** → stop and say so; capture is the
-  commission skill's job.
+- **No annexe or no commission** → stop and say which is missing;
+  capture is the commission skill's job. An annexe whose `README.md` is
+  absent — scaffold present or not — is an unsigned commission: name
+  that state and its route (a commissioning conversation resumes the
+  draft and lands the signature), and write nothing here.
 - **Commission exists, no `build/` directory in the annexe** → fresh
   phase: survey the codebase against the commission through dispatched
   recon (Grunt Work, below), judge the spine the remaining work needs,

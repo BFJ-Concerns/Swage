@@ -61,6 +61,39 @@ owed before the call can be made. Changes that don't touch the contract are
 settled directly too, or logged for later — never deferred to a commission pass
 that isn't needed.
 
+## The Hand-off
+
+The commissioning conversation's product for the build phases is exactly
+one artefact: the signed commission — `README.md` committed in the
+annexe. The structural phase (the maestro workflow) starts only from
+that file; the volume build (the assembly workflow) starts only from the
+structural phase's `build/` state. Nothing else this conversation
+produces — a scaffolded annexe, working files, an unsigned draft — is a
+hand-off, and the downstream workflows refuse until the commission
+exists. That refusal is correct gating, never a defect to work around.
+
+Three consequences, binding:
+
+- **The ceremony is not skippable.** However small the intent, the
+  handshake runs and the README lands only on the user's explicit
+  sign-off reply (Sign-off, below). There is no fast path that writes a
+  README without one, and nobody signs on the user's behalf: a session
+  driving this workflow with no user answer available ends unsigned
+  rather than inventing a yes.
+- **End legibly.** A conversation that ends without the sign-off yes
+  states its actual state in its closing message: what stands (a
+  scaffold, an unsigned working-tree draft), that no commission exists
+  yet, and that the structural and build workflows will refuse until a
+  later conversation lands the signature. An unsigned draft in the
+  working tree is a legitimate resume marker; presenting it as a
+  commissioned project is the failure.
+- **Decline what needs no commission.** An ask that is ordinary work
+  rather than project intent — a fix, a change to something the project
+  produces, a task an agent could just do (the boundary in What Counts
+  as a Commission Change) — is declined at the door: say it needs no
+  commission and route it as ordinary work. Do not scaffold an annexe
+  for it.
+
 ## Start From a Current Clone
 
 Before reading the README as the contract, bring the repos this conversation

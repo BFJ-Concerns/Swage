@@ -38,7 +38,11 @@ Every run — fresh or resumed — opens with **reconciliation**
 header whose handover ref is `unset` is a structural phase still open, not
 a run to start; under PR mode the ref is the structural branch, the base
 every unit builds on), then every non-terminal status verified against the
-world.
+world. No `build/` directory at all is a structural phase not yet run, and
+no commission `README.md` sits a step further back still: stop and name
+the workflow that owes the missing artefact — maestro for the spine and
+ledger, a commissioning conversation for the contract — rather than
+improvising either here.
 A fresh run then derives the obligation set by **triage wave** (same
 reference): cheap workers propose the decomposition — criteria first, which
 vary by project; rarely by-file — and you judge and land the result. The
