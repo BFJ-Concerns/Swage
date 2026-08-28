@@ -73,8 +73,7 @@ export function createPagesStore(): PagesStore {
       source: string,
     ): Promise<void> {
       await pagesApi.writePageModule(pageId, {
-        module_id: moduleId,
-        kind: null,
+        module_id: moduleId ?? undefined,
         source,
       });
       await refreshActive(pageId);

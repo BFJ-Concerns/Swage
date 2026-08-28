@@ -118,7 +118,7 @@ export type ConversationDetail = Omit<WireConversationDetail, "messages" | "sele
 
 export type ToolCallView = Omit<
   WireToolCallView,
-  "arguments" | "result" | "status" | "duration_ms" | "total_bytes" | "parent_call_id"
+  "arguments" | "result" | "status" | "duration_ms" | "total_bytes" | "parent_call_id" | "summary"
 > & {
   arguments: Record<string, unknown>;
   result: string | Record<string, unknown> | null;
