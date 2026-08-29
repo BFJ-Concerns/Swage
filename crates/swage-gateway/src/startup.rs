@@ -71,9 +71,7 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
         eprintln!("{problem}");
         std::process::exit(1);
     }
-    if let Err(error) = crate::shipped_skill_projection::regenerate(&root).await {
-        warn!(%error, "failed to regenerate shipped skill resources");
-    }
+    regenerate_shipped_skill_projection(&root).await;
     let db_path = root.join("swage.db");
 
     // Step 4: Open persistent storage.
@@ -343,6 +341,13 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
     // Step 12c: Remove runtime metadata now that the gateway has stopped.
     if let Err(e) = RuntimeMetadata::remove() {
         warn!("Failed to remove runtime metadata on shutdown: {e}");
+    }
+}
+
+/// Projects the bundled skills before startup opens any consumer of them.
+async fn regenerate_shipped_skill_projection(root: &std::path::Path) {
+    if let Err(error) = crate::shipped_skill_projection::regenerate(root).await {
+        warn!(%error, "failed to regenerate shipped skill resources");
     }
 }
 
@@ -1081,6 +1086,51 @@ mod tests {
 
     #[derive(Clone, Default)]
     struct RecordedEvents(Arc<Mutex<Vec<String>>>);
+
+    #[tokio::test]
+    async fn startup_projection_restores_fresh_and_damaged_shipped_skill_roots() {
+        let data_root = tempfile::tempdir().expect("temporary data root");
+        let projected = crate::shipped_skill_projection::skill_dir(data_root.path(), "commission")
+            .join("scripts/create-annexe.sh");
+        let expected = include_str!("../../../shipped/skills/commission/scripts/create-annexe.sh");
+
+        regenerate_shipped_skill_projection(data_root.path()).await;
+        assert_eq!(
+            std::fs::read(&projected).expect("startup projected script"),
+            expected.as_bytes(),
+            "a fresh startup must project bundled skills"
+        );
+
+        std::fs::write(&projected, "mutated").expect("mutate projected script");
+        let stray = crate::shipped_skill_projection::root(data_root.path()).join("stray.txt");
+        std::fs::write(&stray, "stray").expect("write stray");
+        regenerate_shipped_skill_projection(data_root.path()).await;
+
+        assert_eq!(
+            std::fs::read(&projected).expect("startup restored script"),
+            expected.as_bytes(),
+            "a later startup must replace damaged projection bytes"
+        );
+        assert!(
+            !stray.exists(),
+            "a later startup must replace the complete projection"
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            assert_eq!(
+                std::fs::metadata(&projected)
+                    .expect("startup restored projected script metadata")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o755,
+                "a later startup must restore executable script mode"
+            );
+        }
+    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn startup_recovery_reclaims_terminal_and_retains_replayable_worktree_owners() {
