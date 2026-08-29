@@ -135,10 +135,10 @@ pub async fn register_remote_device(
         .insert(device.device_id.clone(), device.clone());
     drop(runtime);
 
-    crate::presence::upsert_machine_heartbeat(
+    crate::presence::upsert_device_heartbeat(
         state,
-        crate::presence::MachineHeartbeatRequest {
-            machine_id: device.device_id.clone(),
+        crate::presence::DeviceHeartbeatRequest {
+            device_id: device.device_id.clone(),
             label: device.label.clone(),
             stale_after_secs: 30,
         },
