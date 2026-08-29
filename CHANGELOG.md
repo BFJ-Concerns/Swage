@@ -49,6 +49,7 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- Tool-schema guidance now describes every `allOf` branch as required together.
 - Workflow metadata headers now accept valid unquoted keys that begin with `$`.
 - Gateway startup now reclaims worker worktrees and their Git registrations left behind by an unclean exit.
 - Provider-facing tool schemas now retain stripped validation requirements in their descriptions, helping models form valid schedule delivery targets on the first call.
