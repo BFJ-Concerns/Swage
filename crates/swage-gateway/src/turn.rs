@@ -965,8 +965,10 @@ async fn process_turn_with_composition_and_focus(
         Some(swage_root),
         true,
         &config.declared_skills,
+        composition.skills.as_deref().unwrap_or_default(),
     )
-    .await;
+    .await
+    .map_err(GatewayError::ConfigError)?;
 
     // Step 4: Ensure the turn exists before any hook execution so the raw
     // input is recorded durably even when inbound processing blocks the turn.
