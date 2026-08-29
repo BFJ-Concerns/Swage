@@ -28,7 +28,6 @@ use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use futures::{SinkExt, StreamExt};
 use serde_json::{Value, json};
-use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite;
 use tower::ServiceExt;
 
@@ -44,7 +43,9 @@ use swage_storage::{
     store::{ApprovalStore, SpaceStore, ToolCallStore},
 };
 
-use crate::support::{ProcessEnvGuard, WsStream, live_http_json, ws_recv_lenient};
+use crate::support::{
+    ProcessEnvGuard, WsStream, live_http_json, start_live_server, ws_recv_lenient,
+};
 
 const WEBSOCKET_EVENT_DEADLINE: Duration = Duration::from_secs(120);
 
@@ -172,12 +173,7 @@ async fn start_test_server_with_config(
     );
     let router = build_router(state);
 
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let serve_router = router.clone();
-    tokio::spawn(async move {
-        axum::serve(listener, serve_router).await.unwrap();
-    });
+    let (addr, _server) = start_live_server(router.clone()).await;
 
     (router, addr, storage)
 }

@@ -11,7 +11,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::support::{WsStream, ws_collect_until};
+use crate::support::{WsStream, start_live_server, ws_collect_until};
 
 use async_trait::async_trait;
 use axum::Router;
@@ -19,7 +19,6 @@ use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use futures::{SinkExt, StreamExt};
 use serde_json::{Value, json};
-use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite;
 use tower::ServiceExt;
 
@@ -225,12 +224,7 @@ async fn start_test_server_with_dispatcher(
     );
     let router = build_router(state);
 
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let serve_router = router.clone();
-    tokio::spawn(async move {
-        axum::serve(listener, serve_router).await.unwrap();
-    });
+    let (addr, _server) = start_live_server(router.clone()).await;
 
     (router, addr, storage)
 }

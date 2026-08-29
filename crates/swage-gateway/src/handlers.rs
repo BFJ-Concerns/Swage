@@ -3150,8 +3150,8 @@ mod tests {
             Arc::new(provider) as Arc<dyn LlmProvider>,
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![
-                Arc::new(NamedTool("shared")) as Arc<dyn crate::tool::Tool>,
-                Arc::new(NamedTool("target_only")) as Arc<dyn crate::tool::Tool>,
+                Arc::new(NamedTool::new("shared")) as Arc<dyn crate::tool::Tool>,
+                Arc::new(NamedTool::new("target_only")) as Arc<dyn crate::tool::Tool>,
             ]),
             None,
         );

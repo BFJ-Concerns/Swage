@@ -1028,7 +1028,7 @@ mod tests {
     #[tokio::test]
     async fn scripted_tool_call_offers_dispatcher_definitions_and_returns_result() {
         let dispatcher =
-            ToolDispatcher::allow_all([Arc::new(NamedTool("file_read")) as Arc<dyn Tool>]);
+            ToolDispatcher::allow_all([Arc::new(NamedTool::echoing("file_read")) as Arc<dyn Tool>]);
         let expected_tools = json!([{
             "type":"function",
             "name":"file_read",
@@ -1203,8 +1203,8 @@ mod tests {
     #[test]
     fn dynamic_tools_exclude_approval_gated_capabilities() {
         let dispatcher = ToolDispatcher::allow_all([
-            Arc::new(NamedTool("file_read")) as Arc<dyn Tool>,
-            Arc::new(NamedTool("authenticated_post")) as Arc<dyn Tool>,
+            Arc::new(NamedTool::new("file_read")) as Arc<dyn Tool>,
+            Arc::new(NamedTool::new("authenticated_post")) as Arc<dyn Tool>,
         ]);
         let permissions = permissions(&["file_read"], &["authenticated_post"]);
         let names = dynamic_tools(&dispatcher, &permissions)

@@ -89,11 +89,14 @@ impl LlmProvider for CapturingProvider {
         &self,
         request: CompletionRequest,
     ) -> Pin<Box<dyn futures::Stream<Item = StreamChunk> + Send>> {
-        self.requests.lock().unwrap().push(request);
+        self.requests
+            .lock()
+            .expect("captured provider requests")
+            .push(request);
         let round = self
             .rounds
             .lock()
-            .unwrap()
+            .expect("scripted provider rounds")
             .pop_front()
             .or_else(|| self.repeated_round.clone())
             .expect("missing configured provider round");
@@ -102,19 +105,21 @@ impl LlmProvider for CapturingProvider {
 }
 
 /// Serve a gateway router on an ephemeral loopback address.
-pub async fn start_live_server(router: Router) -> std::net::SocketAddr {
+pub async fn start_live_server(
+    router: Router,
+) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind test gateway listener");
     let address = listener
         .local_addr()
         .expect("test gateway listener address");
-    tokio::spawn(async move {
+    let task = tokio::spawn(async move {
         axum::serve(listener, router)
             .await
             .expect("serve test gateway");
     });
-    address
+    (address, task)
 }
 
 pub async fn live_http_json(

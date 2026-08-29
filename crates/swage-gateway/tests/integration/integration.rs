@@ -199,7 +199,7 @@ async fn start_test_server_with_dispatcher(
     );
     let router = build_router(state);
 
-    let addr = start_live_server(router.clone()).await;
+    let (addr, _server) = start_live_server(router.clone()).await;
 
     (router, addr, storage)
 }

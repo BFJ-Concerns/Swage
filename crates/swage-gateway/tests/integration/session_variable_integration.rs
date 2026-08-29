@@ -8,9 +8,10 @@ use std::time::Duration;
 use async_trait::async_trait;
 use futures::{SinkExt, StreamExt};
 use serde_json::json;
-use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite;
 use uuid::Uuid;
+
+use crate::support::start_live_server;
 
 use swage_config::HierarchyLevel;
 use swage_context::briefing::BriefingElement;
@@ -386,11 +387,7 @@ async fn live_listener_turns_set_and_update_the_values_used_by_composition() {
         ToolDispatcher::allow_all(vec![Arc::new(SessionVariableTool) as Arc<dyn Tool>]),
         None,
     );
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        axum::serve(listener, build_router(state)).await.unwrap();
-    });
+    let (address, _server) = start_live_server(build_router(state)).await;
     let conversation: serde_json::Value = reqwest::Client::new()
         .post(format!("http://{address}/api/conversations"))
         .send()
@@ -547,11 +544,7 @@ async fn live_http_delegations_apply_call_scoped_context_composition() {
         ToolDispatcher::allow_all(vec![]),
         None,
     );
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        axum::serve(listener, build_router(state)).await.unwrap();
-    });
+    let (address, _server) = start_live_server(build_router(state)).await;
     let client = reqwest::Client::new();
 
     let dispatch = |task: &'static str| {
