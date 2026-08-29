@@ -127,6 +127,46 @@ pub(crate) async fn redact_provider_visible_request(
     Ok(request)
 }
 
+/// Apply a provider diagnostic event to its durable context report. Both the
+/// ordinary and delegated turn paths use this seam so request redaction cannot
+/// drift from response and reasoning capture.
+pub(crate) async fn apply_provider_snapshot_event(
+    state: &AppState,
+    report_json: &mut serde_json::Value,
+    event: AgentEvent,
+) -> Result<Option<Uuid>, AgentError> {
+    let turn_id = match &event {
+        AgentEvent::ProviderRequestPrepared { turn_id, .. }
+        | AgentEvent::ProviderResponseCaptured { turn_id, .. }
+        | AgentEvent::ProviderReasoningCaptured { turn_id, .. } => *turn_id,
+        _ => return Ok(None),
+    };
+    match event {
+        AgentEvent::ProviderRequestPrepared { round, request, .. } => {
+            match redact_provider_visible_request(state, request).await {
+                Ok(request) => append_provider_visible_request(report_json, round, request),
+                Err(error) => {
+                    tracing::error!(turn_id = %turn_id, round, error = %error, "provider-visible request capture omitted because secret redaction was unavailable");
+                    append_provider_visible_capture_error(report_json, round);
+                }
+            }
+        }
+        AgentEvent::ProviderResponseCaptured { round, witness, .. } => {
+            append_provider_visible_response(report_json, round, witness);
+        }
+        AgentEvent::ProviderReasoningCaptured {
+            round,
+            content,
+            details,
+            ..
+        } => {
+            append_provider_visible_reasoning(report_json, round, content, details);
+        }
+        _ => unreachable!("non-provider event returned above"),
+    }
+    Ok(Some(turn_id))
+}
+
 async fn known_secret_values(state: &AppState) -> Result<Vec<String>, swage_core::StorageError> {
     let records = state.storage.list_secrets().await?;
 
@@ -1641,23 +1681,16 @@ async fn process_turn_with_composition_and_focus(
                 round,
                 request,
             } => {
-                match redact_provider_visible_request(state, request).await {
-                    Ok(request) => {
-                        append_provider_visible_request(&mut report_json, round, request);
-                    }
-                    Err(error) => {
-                        // Never persist an unredacted provider request. The
-                        // turn may continue, but the snapshot must record why
-                        // this round's provider-visible capture is absent.
-                        tracing::error!(
-                            turn_id = %snapshot_turn_id,
-                            round,
-                            error = %error,
-                            "provider-visible request capture omitted because secret redaction was unavailable"
-                        );
-                        append_provider_visible_capture_error(&mut report_json, round);
-                    }
-                }
+                apply_provider_snapshot_event(
+                    state,
+                    &mut report_json,
+                    AgentEvent::ProviderRequestPrepared {
+                        turn_id: snapshot_turn_id,
+                        round,
+                        request,
+                    },
+                )
+                .await?;
                 if let Err(e) = state
                     .storage
                     .store_snapshot(snapshot_turn_id, &report_json.to_string())
@@ -1689,7 +1722,17 @@ async fn process_turn_with_composition_and_focus(
                 content,
                 details,
             } => {
-                append_provider_visible_reasoning(&mut report_json, round, content, details);
+                apply_provider_snapshot_event(
+                    state,
+                    &mut report_json,
+                    AgentEvent::ProviderReasoningCaptured {
+                        turn_id: snapshot_turn_id,
+                        round,
+                        content,
+                        details,
+                    },
+                )
+                .await?;
                 if let Err(e) = state
                     .storage
                     .store_snapshot(snapshot_turn_id, &report_json.to_string())
@@ -1720,7 +1763,16 @@ async fn process_turn_with_composition_and_focus(
                 round,
                 witness,
             } => {
-                append_provider_visible_response(&mut report_json, round, witness);
+                apply_provider_snapshot_event(
+                    state,
+                    &mut report_json,
+                    AgentEvent::ProviderResponseCaptured {
+                        turn_id: snapshot_turn_id,
+                        round,
+                        witness,
+                    },
+                )
+                .await?;
                 if let Err(e) = state
                     .storage
                     .store_snapshot(snapshot_turn_id, &report_json.to_string())
