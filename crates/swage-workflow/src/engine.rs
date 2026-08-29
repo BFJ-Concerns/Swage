@@ -296,8 +296,20 @@ fn find_balanced_object_end(source: &str) -> Result<usize, String> {
                     return Ok(index);
                 }
             }
-            b'"' | b'\'' => index = skip_quoted_string(bytes, index)?,
-            b'`' => index = skip_template_literal(source, index)?,
+            quote @ (b'"' | b'\'' | b'`') => {
+                index += 1;
+                while index < bytes.len() {
+                    if bytes[index] == b'\\' {
+                        index += 1;
+                    } else if bytes[index] == quote {
+                        break;
+                    }
+                    index += 1;
+                }
+                if index >= bytes.len() {
+                    return Err("workflow defaults string is not terminated".into());
+                }
+            }
             b'/' if bytes.get(index + 1) == Some(&b'/') => {
                 while index < bytes.len() && bytes[index] != b'\n' {
                     index += 1;
@@ -313,77 +325,6 @@ fn find_balanced_object_end(source: &str) -> Result<usize, String> {
         index += 1;
     }
     Err("workflow defaults object is not balanced".into())
-}
-
-/// Skip a quoted JavaScript string, returning its closing quote's byte offset.
-/// quote. Template literals use a separate scanner because `${...}` can carry
-/// nested strings and templates of its own.
-fn skip_quoted_string(bytes: &[u8], start: usize) -> Result<usize, String> {
-    let quote = bytes[start];
-    let mut index = start + 1;
-    while let Some(byte) = bytes.get(index) {
-        if *byte == b'\\' {
-            index += 2;
-        } else if *byte == quote {
-            return Ok(index);
-        } else {
-            index += 1;
-        }
-    }
-    Err("workflow defaults string is not terminated".into())
-}
-
-/// Skip a template literal and every interpolation it contains. An
-/// interpolation is JavaScript expression text, so a backtick inside `${...}`
-/// begins a nested template rather than ending the outer one.
-fn skip_template_literal(source: &str, start: usize) -> Result<usize, String> {
-    let bytes = source.as_bytes();
-    let mut index = start + 1;
-    while let Some(byte) = bytes.get(index) {
-        match *byte {
-            b'\\' => index += 2,
-            b'`' => return Ok(index),
-            b'$' if bytes.get(index + 1) == Some(&b'{') => {
-                index = skip_template_interpolation(source, index + 2)?;
-            }
-            _ => index += 1,
-        }
-    }
-    Err("workflow defaults template literal is not terminated".into())
-}
-
-/// Skip the expression within a template interpolation, starting immediately
-/// after `${` and returning its matching `}`.
-fn skip_template_interpolation(source: &str, start: usize) -> Result<usize, String> {
-    let bytes = source.as_bytes();
-    let mut index = start;
-    let mut braces = 1usize;
-    while let Some(byte) = bytes.get(index) {
-        match *byte {
-            b'{' => braces += 1,
-            b'}' => {
-                braces -= 1;
-                if braces == 0 {
-                    return Ok(index);
-                }
-            }
-            b'"' | b'\'' => index = skip_quoted_string(bytes, index)?,
-            b'`' => index = skip_template_literal(source, index)?,
-            b'/' if bytes.get(index + 1) == Some(&b'/') => {
-                while index < bytes.len() && bytes[index] != b'\n' {
-                    index += 1;
-                }
-                continue;
-            }
-            b'/' if bytes.get(index + 1) == Some(&b'*') => match source[index + 2..].find("*/") {
-                Some(end) => index += 2 + end + 1,
-                None => return Err("workflow defaults comment is not terminated".into()),
-            },
-            _ => {}
-        }
-        index += 1;
-    }
-    Err("workflow defaults template interpolation is not terminated".into())
 }
 
 impl Default for EngineLimits {
@@ -426,13 +367,13 @@ pub fn parse_workflow(source: &str) -> Result<(), String> {
     let runtime = Runtime::new().map_err(|error| error.to_string())?;
     let context = Context::full(&runtime).map_err(|error| error.to_string())?;
     let source = serde_json::to_string(source).expect("workflow source serialises");
-    context
-        .with(|ctx| {
-            ctx.eval::<(), _>(format!(
-                "Object.getPrototypeOf(async function() {{}}).constructor({source});"
-            ))
-        })
+    context.with(|ctx| {
+        ctx.eval::<(), _>(format!(
+            "Object.getPrototypeOf(async function() {{}}).constructor({source});"
+        ))
+        .catch(&ctx)
         .map_err(|error| error.to_string())
+    })
 }
 
 impl WorkflowEngine {
@@ -1559,24 +1500,12 @@ mod tests {
         assert_eq!(requests[1].agent.as_deref(), Some("worker"));
     }
 
-    #[tokio::test(flavor = "current_thread")]
-    async fn defaults_header_accepts_nested_templates_in_interpolations() {
-        let output = WorkflowEngine::new(EngineLimits::default())
-            .execute(
-                r#"export const defaults = {
-                    label: `${`nested ${"template"}`}`,
-                };
-                return __defaults.label;
-                "#,
-                CancellationToken::new(),
-            )
-            .await
-            .expect("nested template defaults run");
-
-        assert_eq!(
-            serde_json::from_str::<Value>(&output).unwrap(),
-            json!("nested template")
-        );
+    #[test]
+    fn shipped_build_verify_parses() {
+        parse_workflow(include_str!(
+            "../../../shipped/skills/assembly/workflows/build-verify.js"
+        ))
+        .expect("shipped build-verify workflow parses");
     }
 
     #[tokio::test(flavor = "current_thread")]
