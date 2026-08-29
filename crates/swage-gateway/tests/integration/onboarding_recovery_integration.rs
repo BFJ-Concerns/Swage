@@ -9,7 +9,6 @@ use async_trait::async_trait;
 use axum::Router;
 use reqwest::StatusCode;
 use serde_json::{Value, json};
-use tokio::net::TcpListener;
 
 use swage_core::{
     CompletionRequest, CompletionResponse, ProviderError, StreamChunk, ToolCompletionRequest,
@@ -29,7 +28,7 @@ use swage_storage::{
 use swage_tool::context::MockToolContext;
 use swage_tool::tool::Tool;
 
-use crate::support::ProcessEnvGuard;
+use crate::support::{ProcessEnvGuard, start_live_server};
 
 struct ChannelProvider {
     receivers:
@@ -138,11 +137,7 @@ async fn start_test_server(
         register_local_device(&state).await;
     }
     let router: Router = build_router(state.clone());
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        axum::serve(listener, router).await.unwrap();
-    });
+    let addr = start_live_server(router).await;
     (addr, state)
 }
 

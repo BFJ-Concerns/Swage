@@ -49,8 +49,15 @@ mod tests {
         )];
 
         assert_eq!(BUILTIN_WORKFLOWS.len(), expected.len());
-        for (name, source) in expected {
+        for (name, source) in &expected {
             let workflow = find_by_name(name).expect("catalogue entry");
+            assert_eq!(workflow.source.as_bytes(), source.as_bytes());
+        }
+        for workflow in BUILTIN_WORKFLOWS {
+            let (_, source) = expected
+                .iter()
+                .find(|(name, _)| *name == workflow.name)
+                .expect("catalogue entry has an authored script");
             assert_eq!(workflow.source.as_bytes(), source.as_bytes());
         }
     }
