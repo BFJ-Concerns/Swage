@@ -100,9 +100,12 @@
     {#if store.activePage}
       <h2>{store.activePage.title}</h2>
       {#if store.activePage.forked_from_template_id}
+        {@const originId = store.activePage.forked_from_template_id}
         <p class="lineage">
-          Forked from a template — this page's modules are its own; the
-          template is unaffected by edits here.
+          Forked from <strong
+            >{store.templateName(originId) ?? originId}</strong
+          > — this page's modules are its own; the template is unaffected by
+          edits here.
         </p>
       {/if}
       {#each store.activePage.modules as module (module.id)}
