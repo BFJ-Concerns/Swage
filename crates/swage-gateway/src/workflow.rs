@@ -5491,7 +5491,16 @@ mod tests {
             State(state.clone()),
             Path(listed.id),
             Json(StartWorkflowRunRequest {
-                args: Value::Null,
+                args: serde_json::json!({
+                    "briefPath": "/workspace/brief.md",
+                    "worktree": "/workspace",
+                    "commissionPath": "/workspace/commission.md",
+                    "spinePath": "/workspace/spine.md",
+                    "verificationPath": "/workspace/verification.md",
+                    "unitDir": "/workspace/unit",
+                    "mergePolicy": "direct-merge",
+                    "annexeConfigPath": "/workspace/config.toml"
+                }),
                 budget: None,
             }),
         )
@@ -5514,9 +5523,13 @@ mod tests {
             .list_workflow_journal(started.id)
             .await
             .expect("workflow journal");
-        assert!(journal.iter().any(|entry| {
-            entry.kind == "phase" && entry.request == serde_json::json!({ "message": "restate" })
-        }));
+        assert!(
+            journal.iter().any(|entry| {
+                entry.kind == "phase"
+                    && entry.request == serde_json::json!({ "message": "restate" })
+            }),
+            "run: {run:?}; journal: {journal:?}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
