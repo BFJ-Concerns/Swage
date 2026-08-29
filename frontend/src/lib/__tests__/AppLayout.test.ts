@@ -396,6 +396,24 @@ describe("AppLayout shell navigation", () => {
     expect(onNavigate).toHaveBeenCalledWith("/settings/agents");
   });
 
+  it("navigates to command and skill settings tabs", () => {
+    const onNavigate = vi.fn();
+    component = mountLayout({ onNavigate, routePath: "/settings/providers" });
+    const settingsNavigation = document.querySelector('nav[aria-label="Settings sections"]');
+    const command = Array.from(settingsNavigation?.querySelectorAll("button") ?? []).find(
+      (button) => button.textContent?.trim() === "Commands",
+    );
+    const skill = Array.from(settingsNavigation?.querySelectorAll("button") ?? []).find(
+      (button) => button.textContent?.trim() === "Skills",
+    );
+
+    flushSync(() => command?.click());
+    flushSync(() => skill?.click());
+
+    expect(onNavigate).toHaveBeenNthCalledWith(1, "/settings/commands");
+    expect(onNavigate).toHaveBeenNthCalledWith(2, "/settings/skills");
+  });
+
   it("opens global settings without a selected space", () => {
     const onNavigate = vi.fn();
     component = mountLayout({

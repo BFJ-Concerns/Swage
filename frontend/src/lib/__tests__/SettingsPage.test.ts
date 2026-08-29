@@ -8,6 +8,7 @@ import type { SettingsPayload, SettingsResponse } from "../types";
 
 import * as agentDefinitionsApi from "../api/agent-definitions";
 import * as settingsApi from "../api/settings";
+import * as skillsApi from "../api/skills";
 import * as workflowApi from "../api/workflows";
 import * as operatorApi from "../api/operator";
 import { makeSchedule } from "./fixtures/schedules";
@@ -21,6 +22,10 @@ vi.mock("../api/settings", () => ({
 
 vi.mock("../api/agent-definitions", () => ({
   listEffectiveAgentDefinitions: vi.fn(),
+}));
+
+vi.mock("../api/skills", () => ({
+  listSkills: vi.fn(),
 }));
 
 vi.mock("../api/workflows", () => ({
@@ -185,6 +190,7 @@ describe("SettingsPage", () => {
       models: [{ id: "gpt-4.1-mini", name: "gpt-4.1-mini", context_window: null }],
     });
     vi.mocked(agentDefinitionsApi.listEffectiveAgentDefinitions).mockResolvedValue([]);
+    vi.mocked(skillsApi.listSkills).mockResolvedValue([]);
     vi.mocked(workflowApi.listRecoveryExports).mockResolvedValue({ exports: [] });
     vi.mocked(workflowApi.exportRecoveryBundle).mockResolvedValue({});
     vi.mocked(workflowApi.downloadRecoveryExport).mockResolvedValue({});
@@ -451,6 +457,18 @@ describe("SettingsPage", () => {
     await flushUi();
 
     expect(agentDefinitionsApi.listEffectiveAgentDefinitions).toHaveBeenCalledWith("selected-space");
+  });
+
+  it("shows command and skill catalogues without loading mutable settings", async () => {
+    component = mount(SettingsPage, {
+      target: document.body,
+      props: { tab: "commands", spaceId: "selected-space" },
+    });
+    await flushUi();
+
+    expect(skillsApi.listSkills).toHaveBeenCalledWith("selected-space");
+    expect(settingsApi.fetchSettings).not.toHaveBeenCalled();
+    expect(document.body.textContent).toContain("Commands");
   });
 
   it("creates a fresh schedule in the selected space", async () => {
