@@ -7602,7 +7602,7 @@ mod tests {
         let failed = state
             .create_workflow_journal_intent(NewWorkflowJournalIntent {
                 run_id: started.id,
-                seq: 1,
+                seq: 2,
                 kind: "effect".into(),
                 args_hash: journal_args_hash(&Value::Null),
                 request: Value::Null,
