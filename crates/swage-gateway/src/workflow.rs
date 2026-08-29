@@ -5497,7 +5497,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn saved_run_rejects_invalid_arguments_before_creating_a_run_or_journal() {
+    async fn saved_run_rejects_invalid_arguments_before_creating_a_run() {
         let (state, storage) = workflow_test_state();
         let space = storage.get_or_create_default().await.expect("space");
         let (script, _) = storage
