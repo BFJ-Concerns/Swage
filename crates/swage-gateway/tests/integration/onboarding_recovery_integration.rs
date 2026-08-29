@@ -16,9 +16,7 @@ use swage_core::{
     ToolCompletionResponse, ToolError,
 };
 use swage_gateway::{
-    device::spawn_attached_device,
-    secret::CreateSecretRequest,
-    server::build_router,
+    device::spawn_attached_device, secret::CreateSecretRequest, server::build_router,
     state::AppState,
 };
 use swage_provider::LlmProvider;

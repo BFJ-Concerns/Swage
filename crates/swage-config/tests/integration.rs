@@ -6,7 +6,7 @@
 //! multiple internal modules.
 
 use std::fs;
-use swage_config::{discover, load_resolved_config_from, RESERVED_WORKFLOW_AGENT_ID};
+use swage_config::{RESERVED_WORKFLOW_AGENT_ID, discover, load_resolved_config_from};
 use tempfile::TempDir;
 
 // ---------------------------------------------------------------------------
@@ -555,9 +555,11 @@ fn discovery_finds_spaces_and_agents() {
     let alpha = spaces.iter().find(|p| p.name == "alpha").unwrap();
     assert!(alpha.agents.contains(&"coder".to_string()));
     assert!(alpha.agents.contains(&"reviewer".to_string()));
-    assert!(!alpha
-        .agents
-        .contains(&RESERVED_WORKFLOW_AGENT_ID.to_string()));
+    assert!(
+        !alpha
+            .agents
+            .contains(&RESERVED_WORKFLOW_AGENT_ID.to_string())
+    );
 
     // Beta has one agent
     let beta = spaces.iter().find(|p| p.name == "beta").unwrap();
