@@ -93,6 +93,25 @@ async fn bubblewrap_sandbox_real_binary_runs_git_and_standard_device_io_through_
             .is_some_and(|output| output.contains("Permission denied")),
         "Landlock denial must be EACCES rather than the /dev/full ENOSPC result: {denied:?}"
     );
+
+    let tty = sandbox
+        .execute_tool(
+            "shell",
+            json!({ "command": "dd if=/dev/tty of=/dev/null count=0 status=none" }),
+        )
+        .await
+        .unwrap();
+    assert!(tty.error.is_none(), "shell dispatch failed: {tty:?}");
+    assert_ne!(
+        tty.output["exit_code"], 0,
+        "headless /dev/tty open must not succeed"
+    );
+    assert!(
+        tty.output["output"].as_str().is_some_and(|output| {
+            output.contains("No such device or address") && !output.contains("Permission denied")
+        }),
+        "/dev/tty must reach its ordinary headless ENXIO rather than a Landlock denial: {tty:?}"
+    );
     sandbox.shutdown().await.unwrap();
 }
 
