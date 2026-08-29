@@ -125,7 +125,7 @@ async fn saved_workflow_runs_through_the_gateway_engine_and_persists_its_final_o
     });
     let base = format!("http://{address}");
     let client = reqwest::Client::new();
-    let script: Value = client.post(format!("{base}/api/spaces/{}/workflow-scripts", space.id)).json(&json!({"name":"final output","description":"engine output","source":"return { placement: 'engine', stages: ['gather', 'report'] };","delivery_grant":null})).send().await.unwrap().error_for_status().unwrap().json().await.unwrap();
+    let script: Value = client.post(format!("{base}/api/spaces/{}/workflow-scripts", space.id)).json(&json!({"name":"final output","description":"engine output","source":"const placements = await workerPlacements(); return { placements };","delivery_grant":null})).send().await.unwrap().error_for_status().unwrap().json().await.unwrap();
     let started: Value = client
         .post(format!(
             "{base}/api/workflow-scripts/{}/runs",
@@ -164,7 +164,7 @@ async fn saved_workflow_runs_through_the_gateway_engine_and_persists_its_final_o
     .unwrap();
     assert_eq!(
         detail["run"]["final_output"],
-        json!({"placement":"engine","stages":["gather","report"]})
+        json!({"placements": {"paths": []}})
     );
     server.abort();
 }
