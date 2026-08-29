@@ -32,7 +32,7 @@ pub use model::{
     ObservabilityConfig, OutputConfig, PricingConfig, Protocol, ProviderCatalogConfig,
     ProviderEndpointConfig, PythonExecuteToolConfig, PythonRuntimePolicy, RequireApprovalEntry,
     ResolvedConfig, SandboxConfig, SearchProviderConfig, ServerConfig, TelegramChannelConfig,
-    ToolConfig, ToolPermissionConfig, WorkspaceConfig,
+    ToolConfig, ToolPermissionConfig,
 };
 
 // Error types

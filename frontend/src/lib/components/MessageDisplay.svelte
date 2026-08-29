@@ -205,13 +205,16 @@
   <!-- Dedicated, throttled assistive status — see streamingStatus above. -->
   <div class="sr-only" aria-live="polite" aria-atomic="true">{streamingStatus}</div>
   {#if !hasConversation}
-    <!-- No active conversation — first-time user or sidebar empty state.
+    <!-- No active conversation — first-time user, or every conversation
+         deleted. The help copy points at the channel's own session controls,
+         which travel with it onto every surface, rather than at a sidebar
+         list that only one surface has.
          Three registers, not one: Bebas display for the headline (caps are
          fine in display type), sentence-case body for the help copy, and
          uppercase mono reserved for the small category label. UI audit f-10. -->
     <div class="empty-state">
       <p class="empty-headline">Nothing here yet</p>
-      <p class="empty-help">Pick a conversation from the list, or start a new one with the button above.</p>
+      <p class="empty-help">Pick up a conversation from the selector above, or start a new one there.</p>
       <p class="empty-label">Empty · Conversation</p>
     </div>
   {:else if messages.length === 0 && !isStreaming}

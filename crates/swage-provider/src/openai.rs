@@ -529,7 +529,15 @@ impl OpenAiProvider {
         };
 
         // Usage information may arrive in a chunk with empty choices (e.g. the
-        // final chunk from OpenAI when stream_options.include_usage is set).
+        // final chunk from OpenAI when stream_options.include_usage is set), or
+        // alongside the terminal choice.
+        let usage = chunk.usage.as_ref().map(|usage| {
+            StreamChunk::Usage(swage_core::TokenUsage {
+                input_tokens: usage.prompt_tokens,
+                output_tokens: usage.completion_tokens,
+            })
+        });
+
         if let Some(choice) = chunk.choices.first() {
             // Accumulate streaming tool calls.
             if let Some(ref tool_calls) = choice.delta.tool_calls {
@@ -552,6 +560,9 @@ impl OpenAiProvider {
                         arguments: tool_call.arguments,
                     })
                     .collect::<Vec<_>>();
+                if let Some(usage) = usage {
+                    chunks.push(usage);
+                }
                 chunks.push(StreamChunk::Done {
                     finish_reason: Some(finish),
                 });
@@ -579,11 +590,8 @@ impl OpenAiProvider {
 
         // Usage information (sent in some streaming responses, often with
         // empty choices array).
-        if let Some(usage) = chunk.usage {
-            return vec![StreamChunk::Usage(swage_core::TokenUsage {
-                input_tokens: usage.prompt_tokens,
-                output_tokens: usage.completion_tokens,
-            })];
+        if let Some(usage) = usage {
+            return vec![usage];
         }
 
         Vec::new()
@@ -1591,6 +1599,26 @@ mod tests {
         assert!(matches!(
             chunk,
             Some(StreamChunk::Usage(usage)) if usage.input_tokens == 10 && usage.output_tokens == 5
+        ));
+    }
+
+    #[test]
+    fn parse_stream_event_with_finish_reason_and_usage_emits_usage_before_done() {
+        let event = SseEvent {
+            event_type: None,
+            data: r#"{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5}}"#.into(),
+        };
+        let mut acc = ToolCallAccumulator::new();
+        let chunks = OpenAiProvider::parse_stream_event_chunks(&event, &mut acc);
+
+        assert!(matches!(
+            chunks.as_slice(),
+            [
+                StreamChunk::Usage(usage),
+                StreamChunk::Done {
+                    finish_reason: Some(FinishReason::Stop)
+                }
+            ] if usage.input_tokens == 10 && usage.output_tokens == 5
         ));
     }
 
