@@ -62,11 +62,12 @@ the default.
 agent's output. When a call supplies `schema` and every validation attempt is
 exhausted, it returns `null`; provider, turn, budget, and other call failures
 still throw. `agentStart(prompt, options)` dispatches a call and returns a
-handle immediately — the handle's `.done`, `.session`, and `.result` fields
-update on completion, with the same `null` result for schema exhaustion.
-`wait({ watches, timerMs })` races a set of handles against a journalled timer:
-the first handle to complete or the timer to fire wins, and the result says
-which.
+handle immediately — the handle's `.done`, `.session`, `.result`, and
+`.workingDirectory` fields update on completion, with the same `null` result
+for schema exhaustion. `workingDirectory` is the host-resolved directory where
+the child ran, including a provisioned isolated worktree. `wait({ watches,
+timerMs })` races a set of handles against a journalled timer: the first handle
+to complete or the timer to fire wins, and the result says which.
 
 The optional `tools` array narrows a fresh worker call to the named tools. It
 is intersected with the worker's effective grants and therefore cannot grant
