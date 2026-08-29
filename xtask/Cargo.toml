@@ -9,3 +9,4 @@ workspace = true
 
 [dependencies]
 sha2 = { workspace = true }
+swage-workflow = { path = "../crates/swage-workflow" }

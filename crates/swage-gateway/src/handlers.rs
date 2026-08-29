@@ -1079,7 +1079,7 @@ pub async fn list_space_workspaces(
     State(state): State<AppState>,
     Path(space_id): Path<Uuid>,
 ) -> Result<Json<WorkspaceAttachmentListResponse>, ApiError> {
-    let svc = WorkspaceAttachmentService::new(state.storage, state.space_store);
+    let svc = WorkspaceAttachmentService::from_state(state);
     Ok(Json(svc.list_workspaces(space_id).await?))
 }
 
@@ -1089,7 +1089,7 @@ pub async fn attach_space_workspace(
     Path(space_id): Path<Uuid>,
     Json(req): Json<CreateWorkspaceAttachmentRequest>,
 ) -> Result<(StatusCode, Json<WorkspaceAttachmentResponse>), ApiError> {
-    let svc = WorkspaceAttachmentService::new(state.storage, state.space_store);
+    let svc = WorkspaceAttachmentService::from_state(state);
     Ok((
         StatusCode::CREATED,
         Json(svc.attach_workspace(space_id, req).await?),
@@ -1102,7 +1102,7 @@ pub async fn update_space_workspace_trust(
     Path((space_id, workspace_id)): Path<(Uuid, Uuid)>,
     Json(req): Json<UpdateWorkspaceTrustRequest>,
 ) -> Result<Json<WorkspaceAttachmentResponse>, ApiError> {
-    let svc = WorkspaceAttachmentService::new(state.storage, state.space_store);
+    let svc = WorkspaceAttachmentService::from_state(state);
     Ok(Json(svc.set_trust(space_id, workspace_id, req).await?))
 }
 
@@ -1111,7 +1111,7 @@ pub async fn detach_space_workspace(
     State(state): State<AppState>,
     Path((space_id, workspace_id)): Path<(Uuid, Uuid)>,
 ) -> Result<StatusCode, ApiError> {
-    let svc = WorkspaceAttachmentService::new(state.storage, state.space_store);
+    let svc = WorkspaceAttachmentService::from_state(state);
     svc.detach_workspace(space_id, workspace_id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -4797,6 +4797,9 @@ mod tests {
         let turn_id = Uuid::new_v4();
         let report = swage_protocol::client::context::AssemblyReport {
             total_tokens: 1024,
+            tool_scope: Some(serde_json::json!({
+                "effective_root": "/var/lib/swage/scratch/spaces/example/sessions/example",
+            })),
             ..Default::default()
         };
         let report_json = serde_json::to_string(&report).unwrap();
@@ -4819,5 +4822,9 @@ mod tests {
         let body = body_json(resp).await;
         assert_eq!(body["turn_id"].as_str().unwrap(), turn_id.to_string());
         assert_eq!(body["report"]["total_tokens"].as_i64().unwrap(), 1024);
+        assert_eq!(
+            body["report"]["tool_scope"]["effective_root"],
+            "/var/lib/swage/scratch/spaces/example/sessions/example"
+        );
     }
 }
