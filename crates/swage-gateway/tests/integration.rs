@@ -35,6 +35,8 @@ mod operator_control_integration;
 mod output_schema_validation_integration;
 #[path = "integration/presence_liveness_integration.rs"]
 mod presence_liveness_integration;
+#[path = "integration/provider_tool_schema_gateway_integration.rs"]
+mod provider_tool_schema_gateway_integration;
 #[path = "integration/ptc_integration.rs"]
 mod ptc_integration;
 #[path = "integration/run_supervision_integration.rs"]

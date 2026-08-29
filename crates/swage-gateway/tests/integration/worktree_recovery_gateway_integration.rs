@@ -1,10 +1,12 @@
 #![allow(clippy::unwrap_used)]
 
-use std::collections::HashSet;
+use std::{collections::HashSet, os::unix::fs::PermissionsExt};
 
 use swage_gateway::worktree::{WorktreeConfig, WorktreeHost};
 use tokio::process::Command;
 use uuid::Uuid;
+
+use crate::support::ProcessEnvGuard;
 
 async fn git(repo: &std::path::Path, args: &[&str]) {
     assert!(
@@ -35,21 +37,60 @@ async fn recovery_continues_past_an_uninspectable_candidate_and_reclaims_the_lat
 
     let root = fixture.path().join("worktrees");
     let owner = Uuid::new_v4();
-    let invalid = root.join(owner.to_string()).join("worker-0");
-    tokio::fs::create_dir_all(&invalid).await.unwrap();
+    let host = WorktreeHost::new(WorktreeConfig { root: root.clone() });
+    let first = host.provision(owner, 0, &repo).await.unwrap();
+    let second = host.provision(owner, 1, &repo).await.unwrap();
+    let owner_path = root.join(owner.to_string());
+    // Probe this filesystem's enumeration before assigning the candidates:
+    // recovery deliberately does not sort `read_dir`, so the first observed
+    // valid checkout is corrupted into the uninspectable candidate.
+    let mut entries = tokio::fs::read_dir(&owner_path).await.unwrap();
+    let first_name = entries.next_entry().await.unwrap().unwrap().file_name();
+    let _second_name = entries.next_entry().await.unwrap().unwrap().file_name();
+    assert!(entries.next_entry().await.unwrap().is_none());
+    let invalid = owner_path.join(&first_name);
+    let valid = if invalid == first { second } else { first };
     tokio::fs::write(invalid.join(".git"), "gitdir: /missing")
-        .await
-        .unwrap();
-    let valid = WorktreeHost::new(WorktreeConfig { root: root.clone() })
-        .provision(owner, 1, &repo)
         .await
         .unwrap();
     assert!(valid.exists());
 
+    // `read_dir` deliberately promises no entry order. The wrapper records the
+    // actual `git -C <candidate> worktree list` order and the assertion below
+    // admits this fixture only when the bad candidate was observed first.
+    let wrapper_dir = fixture.path().join("git-wrapper");
+    tokio::fs::create_dir(&wrapper_dir).await.unwrap();
+    let command_log = fixture.path().join("recovery-git-order.log");
+    let wrapper = wrapper_dir.join("git");
+    tokio::fs::write(
+        &wrapper,
+        "#!/bin/sh\nprintf '%s\\n' \"$2\" >> \"$SWAGE_RECOVERY_GIT_LOG\"\nexec /usr/bin/git \"$@\"\n",
+    )
+    .await
+    .unwrap();
+    tokio::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755))
+        .await
+        .unwrap();
+    let mut environment = ProcessEnvGuard::new();
+    environment.set_var("SWAGE_RECOVERY_GIT_LOG", &command_log);
+    environment.set_var(
+        "PATH",
+        format!(
+            "{}:{}",
+            wrapper_dir.display(),
+            std::env::var("PATH").unwrap()
+        ),
+    );
     let recovered = WorktreeHost::new(WorktreeConfig { root: root.clone() })
         .recover(&HashSet::new())
         .await
         .unwrap();
+    let inspection_order = tokio::fs::read_to_string(&command_log).await.unwrap();
+    assert_eq!(
+        inspection_order.lines().next(),
+        Some(invalid.to_string_lossy().as_ref()),
+        "the fixture must observe the uninspectable candidate before the valid one"
+    );
     assert_eq!(recovered, 1);
     assert!(
         invalid.exists(),
@@ -71,7 +112,7 @@ async fn recovery_continues_past_an_uninspectable_candidate_and_reclaims_the_lat
             .lines()
             .filter(|line| line.starts_with("worktree "))
             .count(),
-        1,
-        "recovery removes the valid checkout registration too"
+        2,
+        "recovery removes the later valid checkout registration while leaving the failed candidate untouched"
     );
 }
