@@ -286,31 +286,13 @@ impl DelegationSnapshotRecorder for GatewayDelegationSnapshotRecorder {
                 "delegated context snapshot is invalid JSON: {error}"
             ))
         })?;
-        match event {
-            AgentEvent::ProviderRequestPrepared { round, request, .. } => {
-                match super::redact_provider_visible_request(&self.state, request).await {
-                    Ok(request) => {
-                        super::append_provider_visible_request(&mut report, round, request)
-                    }
-                    Err(error) => {
-                        tracing::error!(%turn_id, %round, %error, "delegated provider-visible request capture omitted because secret redaction was unavailable");
-                        super::append_provider_visible_capture_error(&mut report, round);
-                    }
-                }
-            }
-            AgentEvent::ProviderResponseCaptured { round, witness, .. } => {
-                super::append_provider_visible_response(&mut report, round, witness);
-            }
-            AgentEvent::ProviderReasoningCaptured {
-                round,
-                content,
-                details,
-                ..
-            } => {
-                super::append_provider_visible_reasoning(&mut report, round, content, details);
-            }
-            _ => unreachable!("non-diagnostic events returned above"),
-        }
+        super::apply_provider_snapshot_event(
+            &self.state,
+            &mut report,
+            event,
+            super::ProviderSnapshotCapturePath::Delegated,
+        )
+        .await;
         self.record(session_id, turn_id, &report).await
     }
 }
