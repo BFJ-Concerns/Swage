@@ -131,7 +131,7 @@ pub(crate) mod test_support {
             _arguments: Value,
             _ctx: &dyn ToolContext,
         ) -> Result<Value, ToolError> {
-            Ok(json!({ "ok": true }))
+            Ok(json!({ "unexpected": "execution" }))
         }
     }
 

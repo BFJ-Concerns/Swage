@@ -1032,7 +1032,7 @@ mod tests {
         let expected_tools = json!([{
             "type":"function",
             "name":"file_read",
-            "description":"test tool",
+            "description":"Test tool",
             "inputSchema":{"type":"object"}
         }]);
         let success_notifications = successful_turn_notifications();
