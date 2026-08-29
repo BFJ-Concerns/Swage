@@ -10204,7 +10204,13 @@ mod tests {
                 source: Some(source.into()),
                 source_hash: source_hash(source),
                 args: Value::Null,
-                budget: serde_json::json!({}),
+                budget: serde_json::to_value(WorkflowBudget {
+                    max_agent_calls: Some(1),
+                    max_total_tokens: Some(10),
+                    reserved_closing_tokens: Some(4),
+                    max_concurrent_agent_calls: Some(1),
+                })
+                .expect("budget"),
                 engine_version: "test".into(),
                 carrying_skill: None,
                 dispatch_bound_agent_ids: vec![],
@@ -10255,6 +10261,21 @@ mod tests {
         assert_eq!(
             agent_call.error_message.as_deref(),
             Some("WorkflowCancelledError: run cancelled")
+        );
+        let terminal = journal
+            .iter()
+            .find(|entry| entry.kind == "terminal_budget")
+            .expect("terminal budget entry");
+        assert_eq!(terminal.status, "completed");
+        assert_eq!(terminal.result.as_ref().unwrap()["spent"], 0);
+        assert_eq!(terminal.result.as_ref().unwrap()["remaining"], 10);
+        assert_eq!(terminal.result.as_ref().unwrap()["closing_remaining"], 4);
+        assert_eq!(
+            journal
+                .iter()
+                .filter(|entry| entry.kind == "terminal_budget")
+                .count(),
+            1
         );
         assert_eq!(provider.requests.lock().expect("requests").len(), 1);
         wait_for_worker_turn_interrupted(&storage).await;
