@@ -13,7 +13,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::support::{ProcessEnvGuard, WsStream, ws_collect_until};
+use crate::support::{ProcessEnvGuard, WsStream, ws_collect_until_with};
 
 /// RAII guard that sets SWAGE_HOME for a test and restores it on drop.
 struct SwageHomeGuard {
@@ -376,7 +376,13 @@ async fn slash_command_activates_skill_and_appears_in_assembly_report() {
     .await;
 
     // Collect events — expecting SkillActivated, ContextAssembled, Token(s), TurnComplete.
-    let events = ws_collect_until(&mut stream, "turn_complete", WEBSOCKET_EVENT_DEADLINE).await;
+    let events = ws_collect_until_with(
+        &mut stream,
+        "turn_complete",
+        WEBSOCKET_EVENT_DEADLINE,
+        |stream| Box::pin(ws_recv_lenient(stream)),
+    )
+    .await;
 
     // Verify SkillActivated event was sent.
     let skill_activated = events
@@ -473,7 +479,13 @@ async fn agent_level_skill_appears_in_assembly_without_invocation() {
     )
     .await;
 
-    let events = ws_collect_until(&mut stream, "turn_complete", WEBSOCKET_EVENT_DEADLINE).await;
+    let events = ws_collect_until_with(
+        &mut stream,
+        "turn_complete",
+        WEBSOCKET_EVENT_DEADLINE,
+        |stream| Box::pin(ws_recv_lenient(stream)),
+    )
+    .await;
 
     // Assembly report should include the agent-level skill without explicit activation.
     let context_assembled = events
@@ -666,7 +678,10 @@ async fn deactivating_agent_level_skill_returns_error() {
     )
     .await;
 
-    let events = ws_collect_until(&mut stream, "error", WEBSOCKET_EVENT_DEADLINE).await;
+    let events = ws_collect_until_with(&mut stream, "error", WEBSOCKET_EVENT_DEADLINE, |stream| {
+        Box::pin(ws_recv_lenient(stream))
+    })
+    .await;
     let error = events
         .iter()
         .find(|e| e["type"] == "error")

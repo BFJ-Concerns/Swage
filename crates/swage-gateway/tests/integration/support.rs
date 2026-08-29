@@ -51,10 +51,29 @@ pub async fn ws_collect_until(
     terminal_event: &str,
     timeout: std::time::Duration,
 ) -> Vec<Value> {
+    ws_collect_until_with(stream, terminal_event, timeout, |stream| {
+        Box::pin(ws_recv_lenient(stream))
+    })
+    .await
+}
+
+/// Collect WebSocket events through the named terminal event using the suite's
+/// own receive semantics.
+pub async fn ws_collect_until_with<F>(
+    stream: &mut WsStream,
+    terminal_event: &str,
+    timeout: std::time::Duration,
+    mut receive: F,
+) -> Vec<Value>
+where
+    F: for<'stream> FnMut(
+        &'stream mut WsStream,
+    ) -> futures::future::BoxFuture<'stream, Option<Value>>,
+{
     let mut events = Vec::new();
     tokio::time::timeout(timeout, async {
         loop {
-            let event = ws_recv_lenient(stream)
+            let event = receive(stream)
                 .await
                 .unwrap_or_else(|| panic!("websocket closed before {terminal_event}: {events:?}"));
             let reached_terminal = event["type"] == terminal_event;
