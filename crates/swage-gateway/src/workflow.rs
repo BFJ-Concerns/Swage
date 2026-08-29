@@ -1286,7 +1286,7 @@ async fn run_ephemeral_agent_call(
             (session.id, thread.id)
         }
     };
-    let (events, _events_rx) = mpsc::unbounded_channel::<ServerEvent>();
+    let (events, mut events_rx) = mpsc::unbounded_channel::<ServerEvent>();
     let request_schema = request.schema.clone();
     let request_schema_retries = request
         .schema
@@ -1369,11 +1369,26 @@ async fn run_ephemeral_agent_call(
         .into_iter()
         .max_by_key(|turn| turn.created_at)
         .ok_or_else(|| "agent call produced no turn".to_string())?;
+    let schema_exhausted = std::iter::from_fn(|| events_rx.try_recv().ok()).any(|event| {
+        matches!(
+            event,
+            ServerEvent::OutputSchemaFailed { turn_id, .. } if turn_id == turn.id
+        )
+    });
     // The turn's failure must surface as this call's error — the shared turn
     // path reports failures over its event channel, which nobody holds here.
     // Falling through would hand the script raw text (or an empty string)
     // where its schema promised an object, silently.
     if turn.state != swage_storage::TurnState::Completed {
+        if schema_exhausted {
+            return Err(WorkflowHostError::SchemaExhausted {
+                host_reference: None,
+                message: format!(
+                    "SchemaExhaustedError: agent turn {} produced no schema-valid output",
+                    turn.id
+                ),
+            });
+        }
         return Err(format!(
             "AgentCallError: agent turn {} {}",
             turn.id,
