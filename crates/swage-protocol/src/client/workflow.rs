@@ -16,8 +16,24 @@ pub struct WorkflowScript {
     pub head_version: u32,
     pub built_in: bool,
     pub has_delivery_grant: bool,
+    pub argument_contract: WorkflowArgumentContract,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+/// The argument contract a workflow declares in its portable metadata.
+///
+/// Workflows may omit a schema. That is an explicit unconstrained contract,
+/// rather than an absent field that callers could mistake for an incomplete
+/// listing.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WorkflowArgumentContract {
+    Declared {
+        #[ts(type = "unknown")]
+        schema: Value,
+    },
+    Unconstrained,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]

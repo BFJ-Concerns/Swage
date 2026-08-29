@@ -184,6 +184,9 @@
     "worker_isolation": {
       "$ref": "#/$defs/WorkerIsolation"
     },
+    "workflow_argument_contract": {
+      "$ref": "#/$defs/WorkflowArgumentContract"
+    },
     "workflow_decision_event_payload": {
       "$ref": "#/$defs/WorkflowDecisionEventPayload"
     },
@@ -271,6 +274,7 @@
     "create_workflow_script_request",
     "update_workflow_script_request",
     "workflow_script_list",
+    "workflow_argument_contract",
     "start_workflow_run_request",
     "start_inline_workflow_run_request",
     "post_workflow_run_event_request",
@@ -368,6 +372,7 @@
           }
         },
         "provider_visible": true,
+        "tool_scope": true,
         "total_tokens": {
           "type": "integer",
           "format": "uint",
@@ -4922,6 +4927,37 @@
         }
       }
     },
+    "WorkflowArgumentContract": {
+      "description": "The argument contract a workflow declares in its portable metadata.\n\nWorkflows may omit a schema. That is an explicit unconstrained contract,\nrather than an absent field that callers could mistake for an incomplete\nlisting.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "declared"
+            },
+            "schema": true
+          },
+          "required": [
+            "kind",
+            "schema"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "unconstrained"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        }
+      ]
+    },
     "WorkflowBudget": {
       "type": "object",
       "properties": {
@@ -5584,6 +5620,9 @@
     "WorkflowScript": {
       "type": "object",
       "properties": {
+        "argument_contract": {
+          "$ref": "#/$defs/WorkflowArgumentContract"
+        },
         "built_in": {
           "type": "boolean"
         },
@@ -5626,6 +5665,7 @@
         "head_version",
         "built_in",
         "has_delivery_grant",
+        "argument_contract",
         "created_at",
         "updated_at"
       ]
