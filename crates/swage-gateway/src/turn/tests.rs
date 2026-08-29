@@ -80,6 +80,247 @@ fn provider_response_witness_is_appended_without_content_fields() {
     assert!(response["witness"].get("thinking").is_none());
 }
 
+#[tokio::test]
+async fn ordinary_and_delegated_snapshot_paths_record_provider_events_identically() {
+    let storage = Arc::new(MockStorage::new());
+    let (state, session_id) = make_state_with_storage(vec![], Arc::clone(&storage)).await;
+    let ordinary_turn_id = Uuid::new_v4();
+    let delegated_turn_id = Uuid::new_v4();
+    let mut ordinary_report = serde_json::json!({"assembly": "same input"});
+    let delegated_report = serde_json::json!({"assembly": "same input"});
+
+    let witness = swage_core::ProviderResponseWitness {
+        http_status: 200,
+        request_id: Some("request-3".into()),
+        terminal_event: Some("message_stop".into()),
+        stop_reason: Some("end_turn".into()),
+        usage: swage_core::TokenUsage {
+            input_tokens: 11,
+            output_tokens: 7,
+        },
+        content_blocks: vec![swage_core::ProviderContentBlockWitness {
+            block_type: "text".into(),
+            count: 1,
+            bytes: 7,
+        }],
+    };
+    let expected_provider_visible = serde_json::json!({
+        "requests": [{
+            "round": 3,
+            "request": {"messages": ["same request"]},
+        }],
+        "responses": [{
+            "round": 3,
+            "witness": witness,
+        }],
+        "reasoning": [{
+            "round": 3,
+            "content": "same reasoning",
+            "details": {"source": "provider"},
+        }],
+    });
+
+    for event in [
+        AgentEvent::ProviderRequestPrepared {
+            turn_id: ordinary_turn_id,
+            round: 3,
+            request: serde_json::json!({"messages": ["same request"]}),
+        },
+        AgentEvent::ProviderResponseCaptured {
+            turn_id: ordinary_turn_id,
+            round: 3,
+            witness: witness.clone(),
+        },
+        AgentEvent::ProviderReasoningCaptured {
+            turn_id: ordinary_turn_id,
+            round: 3,
+            content: "same reasoning".into(),
+            details: Some(serde_json::json!({"source": "provider"})),
+        },
+    ] {
+        apply_provider_snapshot_event(
+            &state,
+            &mut ordinary_report,
+            event,
+            ProviderSnapshotCapturePath::Ordinary,
+        )
+        .await;
+    }
+
+    storage
+        .store_snapshot(delegated_turn_id, &delegated_report.to_string())
+        .await
+        .expect("seed delegated snapshot");
+    for event in [
+        AgentEvent::ProviderRequestPrepared {
+            turn_id: delegated_turn_id,
+            round: 3,
+            request: serde_json::json!({"messages": ["same request"]}),
+        },
+        AgentEvent::ProviderResponseCaptured {
+            turn_id: delegated_turn_id,
+            round: 3,
+            witness,
+        },
+        AgentEvent::ProviderReasoningCaptured {
+            turn_id: delegated_turn_id,
+            round: 3,
+            content: "same reasoning".into(),
+            details: Some(serde_json::json!({"source": "provider"})),
+        },
+    ] {
+        delegation_snapshot_recorder_for_state(state.clone())
+            .record_event(session_id, event)
+            .await
+            .expect("record delegated provider event");
+    }
+    let delegated_report: serde_json::Value = serde_json::from_str(
+        &storage
+            .get_snapshot(delegated_turn_id)
+            .await
+            .expect("read delegated snapshot")
+            .expect("delegated snapshot"),
+    )
+    .expect("delegated snapshot JSON");
+
+    assert_eq!(
+        ordinary_report["provider_visible"],
+        expected_provider_visible
+    );
+    assert_eq!(
+        delegated_report["provider_visible"],
+        expected_provider_visible
+    );
+}
+
+#[test]
+fn ordinary_and_delegated_snapshot_paths_fail_closed_with_their_audit_wording() {
+    use std::sync::{Arc as StdArc, Mutex as StdMutex};
+    use tracing_subscriber::{Registry, layer::SubscriberExt};
+
+    #[derive(Default)]
+    struct MessageRecorder(StdArc<StdMutex<Vec<String>>>);
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for MessageRecorder {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            struct MessageVisitor<'a>(&'a mut Option<String>);
+
+            impl tracing::field::Visit for MessageVisitor<'_> {
+                fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                    if field.name() == "message" {
+                        *self.0 = Some(value.to_owned());
+                    }
+                }
+
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    if field.name() == "message" {
+                        *self.0 = Some(format!("{value:?}"));
+                    }
+                }
+            }
+
+            let mut message = None;
+            event.record(&mut MessageVisitor(&mut message));
+            if let Some(message) = message {
+                self.0.lock().unwrap().push(message);
+            }
+        }
+    }
+
+    let messages = MessageRecorder::default();
+    let captured_messages = StdArc::clone(&messages.0);
+    let subscriber = Registry::default().with(messages);
+
+    tracing::subscriber::with_default(subscriber, || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build test runtime")
+            .block_on(async {
+                let storage = Arc::new(MockStorage::new());
+                let (state, session_id) =
+                    make_state_with_storage(vec![], Arc::clone(&storage)).await;
+                let ordinary_turn_id = Uuid::new_v4();
+                let delegated_turn_id = Uuid::new_v4();
+                let mut ordinary_report = serde_json::json!({"assembly": "same input"});
+                let delegated_report = serde_json::json!({"assembly": "same input"});
+                let expected_provider_visible = serde_json::json!({
+                    "capture_errors": [{
+                        "round": 4,
+                        "kind": "secret_redaction_unavailable",
+                    }],
+                });
+
+                storage
+                    .store_snapshot(delegated_turn_id, &delegated_report.to_string())
+                    .await
+                    .expect("seed delegated snapshot");
+                storage.fail_secret_reads();
+                tracing::callsite::rebuild_interest_cache();
+
+                apply_provider_snapshot_event(
+                    &state,
+                    &mut ordinary_report,
+                    AgentEvent::ProviderRequestPrepared {
+                        turn_id: ordinary_turn_id,
+                        round: 4,
+                        request: serde_json::json!({"messages": ["secret request"]}),
+                    },
+                    ProviderSnapshotCapturePath::Ordinary,
+                )
+                .await;
+                delegation_snapshot_recorder_for_state(state.clone())
+                    .record_event(
+                        session_id,
+                        AgentEvent::ProviderRequestPrepared {
+                            turn_id: delegated_turn_id,
+                            round: 4,
+                            request: serde_json::json!({"messages": ["secret request"]}),
+                        },
+                    )
+                    .await
+                    .expect("record delegated redaction failure");
+                let delegated_report: serde_json::Value = serde_json::from_str(
+                    &storage
+                        .get_snapshot(delegated_turn_id)
+                        .await
+                        .expect("read delegated snapshot")
+                        .expect("delegated snapshot"),
+                )
+                .expect("delegated snapshot JSON");
+
+                assert_eq!(
+                    ordinary_report["provider_visible"],
+                    expected_provider_visible
+                );
+                assert_eq!(
+                    delegated_report["provider_visible"],
+                    expected_provider_visible
+                );
+                assert!(ordinary_report["provider_visible"]["requests"].is_null());
+                assert!(delegated_report["provider_visible"]["requests"].is_null());
+            });
+    });
+
+    let messages = captured_messages.lock().expect("recorded messages");
+    assert!(messages.iter().any(|message| {
+        message
+            == "provider-visible request capture omitted because secret redaction was unavailable"
+    }));
+    assert!(messages.iter().any(|message| {
+        message
+            == "delegated provider-visible request capture omitted because secret redaction was unavailable"
+    }));
+}
+
 #[test]
 fn delegate_worktree_identity_is_stable_per_tool_call() {
     let sender_turn_id = Uuid::new_v4();
@@ -991,6 +1232,11 @@ impl swage_storage::WorkflowStore for MockStorage {
     async fn list_due_parked_workflow_runs(
         &self,
         _: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<swage_storage::WorkflowRunRecord>, StorageError> {
+        unimplemented!()
+    }
+    async fn list_parked_workflow_runs(
+        &self,
     ) -> Result<Vec<swage_storage::WorkflowRunRecord>, StorageError> {
         unimplemented!()
     }
