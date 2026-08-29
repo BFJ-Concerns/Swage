@@ -152,12 +152,12 @@ async fn non_text_and_tool_payloads_use_native_counting_while_exact_limit_and_er
             arguments: serde_json::json!({}),
         }],
     );
-    let threshold = CompactionThreshold::TokenCount(10);
+    let threshold = CompactionThreshold::TokenCount(17);
     let provider = CountingProvider {
         calls: AtomicUsize::new(0),
         counts: vec![
-            Ok(Some(11)),
-            Ok(Some(10)),
+            Ok(Some(18)),
+            Ok(Some(17)),
             Err(ProviderError::Network {
                 provider: "native".into(),
                 message: "unavailable".into(),
@@ -165,11 +165,11 @@ async fn non_text_and_tool_payloads_use_native_counting_while_exact_limit_and_er
         ],
     };
     assert!(
-        exceeds_threshold(&[non_text.clone()], &threshold, &provider).await,
+        exceeds_threshold(std::slice::from_ref(&non_text), &threshold, &provider).await,
         "non-text payload bypasses the byte screen and uses native count"
     );
     assert!(
-        !exceeds_threshold(&[tool_replay.clone()], &threshold, &provider).await,
+        !exceeds_threshold(std::slice::from_ref(&tool_replay), &threshold, &provider).await,
         "native count at the exact limit must not compact"
     );
     assert!(
