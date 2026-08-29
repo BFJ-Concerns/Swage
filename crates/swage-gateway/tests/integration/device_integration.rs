@@ -21,7 +21,7 @@ use swage_core::{
 use swage_gateway::{
     device::{
         DeviceKind, RegisterDeviceRequest, register_attached_device_with_gateway,
-        register_local_device, spawn_attached_device, spawn_transport_backed_device,
+        spawn_attached_device, spawn_transport_backed_device,
     },
     secret::CreateSecretRequest,
     server::build_router,
@@ -115,12 +115,11 @@ fn with_secret_env() -> ProcessEnvGuard {
 async fn start_test_server(
     provider: impl LlmProvider + 'static,
     dispatcher: swage_gateway::tool::ToolDispatcher,
-    workspace_root: PathBuf,
-    include_local_device: bool,
+    _workspace_root: PathBuf,
+    _include_local_device: bool,
 ) -> (SocketAddr, AppState) {
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-    let mut config = swage_config::ResolvedConfig::default();
-    config.workspace.path = workspace_root.to_string_lossy().into_owned();
+    let config = swage_config::ResolvedConfig::default();
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
@@ -129,9 +128,6 @@ async fn start_test_server(
         dispatcher,
         None,
     );
-    if include_local_device {
-        register_local_device(&state).await;
-    }
     let router: Router = build_router(state.clone());
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -145,12 +141,11 @@ async fn start_file_backed_test_server(
     db_path: &std::path::Path,
     provider: impl LlmProvider + 'static,
     dispatcher: swage_gateway::tool::ToolDispatcher,
-    workspace_root: PathBuf,
+    _workspace_root: PathBuf,
     restore_devices: bool,
 ) -> (SocketAddr, AppState) {
     let storage = Arc::new(SqliteStorage::open(db_path).unwrap());
-    let mut config = swage_config::ResolvedConfig::default();
-    config.workspace.path = workspace_root.to_string_lossy().into_owned();
+    let config = swage_config::ResolvedConfig::default();
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
@@ -159,7 +154,6 @@ async fn start_file_backed_test_server(
         dispatcher,
         None,
     );
-    register_local_device(&state).await;
     if restore_devices {
         swage_gateway::device::restore_registered_devices(&state)
             .await
@@ -325,7 +319,7 @@ async fn run_turn_and_collect_tool_result(
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn same_machine_gateway_executes_turns_through_local_device() {
+async fn same_machine_gateway_executes_turns_without_a_registered_local_device() {
     let _guard = with_secret_env();
     let workspace = tempfile::TempDir::new().unwrap();
     let (tx1, rx1) = tokio::sync::mpsc::channel(10);
@@ -344,7 +338,7 @@ async fn same_machine_gateway_executes_turns_through_local_device() {
         .json()
         .await
         .unwrap();
-    assert_eq!(devices["devices"][0]["device_id"], "local");
+    assert_eq!(devices["devices"], json!([]));
 
     let result = run_turn_and_collect_tool_result(addr, tx1, tx2, Some(workspace.path())).await;
     assert_eq!(result["device"], "local-device");

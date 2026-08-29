@@ -16,7 +16,7 @@ use swage_core::{
     ToolCompletionResponse, ToolError,
 };
 use swage_gateway::{
-    device::{register_local_device, spawn_attached_device},
+    device::spawn_attached_device,
     secret::CreateSecretRequest,
     server::build_router,
     state::AppState,
@@ -117,15 +117,14 @@ async fn start_test_server(
     db_path: Option<&Path>,
     provider: impl LlmProvider + 'static,
     dispatcher: swage_gateway::tool::ToolDispatcher,
-    workspace_root: PathBuf,
-    include_local_device: bool,
+    _workspace_root: PathBuf,
+    _include_local_device: bool,
 ) -> (SocketAddr, AppState) {
     let storage = Arc::new(match db_path {
         Some(path) => SqliteStorage::open(path).unwrap(),
         None => SqliteStorage::in_memory().unwrap(),
     });
-    let mut config = swage_config::ResolvedConfig::default();
-    config.workspace.path = workspace_root.to_string_lossy().into_owned();
+    let config = swage_config::ResolvedConfig::default();
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn SpaceStore>,
@@ -134,9 +133,6 @@ async fn start_test_server(
         dispatcher,
         None,
     );
-    if include_local_device {
-        register_local_device(&state).await;
-    }
     let router: Router = build_router(state.clone());
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
