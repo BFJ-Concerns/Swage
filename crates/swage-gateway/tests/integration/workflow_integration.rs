@@ -257,3 +257,73 @@ async fn terminal_run_rejects_operator_events_without_adding_to_the_queue() {
 
     server.abort();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cancelled_run_rejects_operator_events_without_adding_to_the_queue() {
+    let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+    let space = storage.get_or_create_default().await.unwrap();
+    let state = AppState::new(
+        Arc::clone(&storage) as Arc<dyn Storage>,
+        Arc::clone(&storage) as Arc<dyn SpaceStore>,
+        Arc::new(StubProvider),
+        swage_config::ResolvedConfig::default(),
+        swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, build_router(state)).await.unwrap();
+    });
+    let base = format!("http://{address}");
+    let client = reqwest::Client::new();
+
+    let started: Value = client
+        .post(format!("{base}/api/spaces/{}/workflow-runs", space.id))
+        .json(&json!({
+            "source": "return await wait({ timerMs: 120000 });",
+            "args": null,
+            "budget": null
+        }))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let run_id = started["id"].as_str().unwrap();
+    let parked = wait_for_run(&client, &base, run_id).await;
+    assert_eq!(parked["run"]["state"], "parked");
+
+    let cancelled: Value = client
+        .post(format!("{base}/api/workflow-runs/{run_id}/cancel"))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(cancelled["state"], "cancelled");
+
+    let rejected = client
+        .post(format!("{base}/api/workflow-runs/{run_id}/events"))
+        .json(&json!({"kind": "operator.decision", "payload": {"verdict": "accept"}}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(rejected.status(), reqwest::StatusCode::CONFLICT);
+    assert!(
+        storage
+            .list_workflow_run_events(run_id.parse().unwrap())
+            .await
+            .unwrap()
+            .is_empty(),
+        "a cancelled run must not gain a queued operator event"
+    );
+
+    server.abort();
+}
