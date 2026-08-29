@@ -401,7 +401,7 @@ async fn live_listener_turns_set_and_update_the_values_used_by_composition() {
     std::fs::create_dir_all(swage_home.path().join("assemblies")).unwrap();
     std::fs::write(
         swage_home.path().join("assemblies/briefing.js"),
-        "add(elements.find(element => element.name === 'prompts')); add(elements.find(element => element.name === 'current-work').render());",
+        "add(elements.find(element => element.name === 'working_norms')); add(elements.find(element => element.name === 'prompts')); add(elements.find(element => element.name === 'current-work').render());",
     )
     .unwrap();
     let element_path = swage_home
@@ -443,6 +443,14 @@ async fn live_listener_turns_set_and_update_the_values_used_by_composition() {
     .await
     .unwrap();
     let (mut sink, mut stream) = socket.split();
+    sink.send(tungstenite::Message::Text(
+        json!({"type":"subscribe","channels":["context"]})
+            .to_string()
+            .into(),
+    ))
+    .await
+    .unwrap();
+    let mut context_reports = Vec::new();
 
     for prompt in ["save the task", "update the task"] {
         sink.send(tungstenite::Message::Text(
@@ -457,6 +465,9 @@ async fn live_listener_turns_set_and_update_the_values_used_by_composition() {
                 let message = message.unwrap();
                 if let tungstenite::Message::Text(text) = message {
                     let event: serde_json::Value = serde_json::from_str(&text).unwrap();
+                    if event["type"] == "context_assembled" {
+                        context_reports.push(event["report"].clone());
+                    }
                     if event["type"] == "turn_complete" {
                         break;
                     }
@@ -527,6 +538,37 @@ async fn live_listener_turns_set_and_update_the_values_used_by_composition() {
     assert!(
         second_turn_context.contains("Current work: inspect storage"),
         "the real session_values update should re-render the named element: {second_turn_context}"
+    );
+    assert_eq!(
+        context_reports.len(),
+        2,
+        "one context report per foreground turn"
+    );
+    for report in &context_reports {
+        assert_eq!(report["assembly_name"], "briefing");
+        assert!(
+            report["elements"]
+                .as_array()
+                .expect("assembled elements")
+                .iter()
+                .any(|element| element["name"] == "working_norms"),
+            "the named JavaScript route must receive rendered working norms: {report}"
+        );
+    }
+    assert_ne!(
+        context_reports[0]["total_tokens"], context_reports[1]["total_tokens"],
+        "a re-rendered briefing must be token-counted again for the next foreground turn"
+    );
+    let audit = storage
+        .list_audit_events_by_session(session_id)
+        .await
+        .unwrap();
+    assert!(
+        audit.iter().any(|event| {
+            event.entity_id == swage_gateway::experimentation::LOCATION_WORKING_NORMS
+                && event.event_kind == "variant_selected"
+        }),
+        "the JavaScript assembly route must record its working-norms decision: {audit:?}"
     );
 }
 
