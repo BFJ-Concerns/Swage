@@ -16,7 +16,7 @@ use swage_core::{ChatMessage, CompletionRequest, Role, StorageError};
 use swage_protocol::client::workflow::{
     CreateWorkflowScriptRequest, PostWorkflowRunEventRequest, PostWorkflowRunEventResponse,
     StartInlineWorkflowRunRequest, StartWorkflowRunRequest, UpdateWorkflowScriptRequest,
-    WorkflowBudget, WorkflowHandoverEvent, WorkflowHandoverEventDelivery,
+    WorkflowArgumentContract, WorkflowBudget, WorkflowHandoverEvent, WorkflowHandoverEventDelivery,
     WorkflowHandoverFailedCall, WorkflowHandoverFailedCallRef, WorkflowRun,
     WorkflowRunDetailResponse, WorkflowRunEvent, WorkflowRunEventSource, WorkflowRunHandover,
     WorkflowRunListResponse, WorkflowRunState, WorkflowScript, WorkflowScriptListResponse,
@@ -104,6 +104,7 @@ struct EffectiveWorkflow {
     built_in: bool,
     immutable: bool,
     carrying_skill: Option<String>,
+    argument_schema: Option<Value>,
 }
 
 #[derive(Clone)]
@@ -114,9 +115,9 @@ struct InlineWorkflowIdentity {
 }
 
 impl EffectiveWorkflow {
-    fn from_builtin(space_id: Uuid, workflow: &'static BuiltinWorkflow) -> Self {
+    fn from_builtin(space_id: Uuid, workflow: &'static BuiltinWorkflow) -> Result<Self, String> {
         let released_at = builtin_workflows::released_at(workflow);
-        Self {
+        Ok(Self {
             id: builtin_workflows::id(space_id, workflow.name),
             space_id,
             name: workflow.name.into(),
@@ -130,7 +131,15 @@ impl EffectiveWorkflow {
             built_in: true,
             immutable: true,
             carrying_skill: None,
-        }
+            argument_schema: swage_workflow::script_meta(workflow.source)
+                .map_err(|error| {
+                    format!(
+                        "built-in workflow {} metadata is invalid: {error}",
+                        workflow.name
+                    )
+                })?
+                .argument_schema,
+        })
     }
 
     fn inline_identity(&self) -> Option<InlineWorkflowIdentity> {
@@ -143,9 +152,22 @@ impl EffectiveWorkflow {
         })
     }
 
-    fn from_carried(space_id: Uuid, skill: &SkillDefinition, name: String, source: String) -> Self {
+    fn from_carried(
+        space_id: Uuid,
+        skill: &SkillDefinition,
+        name: String,
+        source: String,
+    ) -> Result<Self, String> {
         let identity = format!("{}/{}", skill.name, name);
-        Self {
+        let argument_schema = swage_workflow::script_meta(&source)
+            .map_err(|error| {
+                format!(
+                    "workflow {name} carried by skill {} has invalid metadata: {error}",
+                    skill.name
+                )
+            })?
+            .argument_schema;
+        Ok(Self {
             id: crate::synthetic_id::synthetic_id(CARRIED_WORKFLOW_ID_DOMAIN, space_id, &identity),
             space_id,
             name,
@@ -159,7 +181,8 @@ impl EffectiveWorkflow {
             built_in: false,
             immutable: true,
             carrying_skill: Some(skill.name.clone()),
-        }
+            argument_schema,
+        })
     }
 }
 
@@ -176,12 +199,17 @@ fn carried_workflows(
                     .rsplit_once('/')
                     .and_then(|(_, file)| file.strip_suffix(".js"))
                     .ok_or_else(|| format!("invalid shipped workflow path: {}", file.path))?;
-                workflows.push(EffectiveWorkflow::from_carried(
+                match EffectiveWorkflow::from_carried(
                     space_id,
                     skill,
                     name.into(),
                     file.contents.into(),
-                ));
+                ) {
+                    Ok(workflow) => workflows.push(workflow),
+                    Err(error) => {
+                        tracing::warn!(%error, "excluding carried workflow with invalid metadata")
+                    }
+                }
             }
             continue;
         }
@@ -227,12 +255,12 @@ fn carried_workflows(
                     skill.name
                 )
             })?;
-            workflows.push(EffectiveWorkflow::from_carried(
-                space_id,
-                skill,
-                name.into(),
-                source,
-            ));
+            match EffectiveWorkflow::from_carried(space_id, skill, name.into(), source) {
+                Ok(workflow) => workflows.push(workflow),
+                Err(error) => {
+                    tracing::warn!(%error, "excluding carried workflow with invalid metadata")
+                }
+            }
         }
     }
     Ok(workflows)
@@ -256,6 +284,7 @@ async fn authored_workflow(
         .await
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "workflow script has no version".to_string())?;
+    let argument_schema = swage_workflow::script_meta(&head.source)?.argument_schema;
     Ok(EffectiveWorkflow {
         id: record.id,
         space_id: record.space_id,
@@ -270,6 +299,7 @@ async fn authored_workflow(
         built_in: false,
         immutable: false,
         carrying_skill: None,
+        argument_schema,
     })
 }
 
@@ -295,8 +325,9 @@ async fn resolve_workflow_by_name(
     {
         return Ok(Some(workflow));
     }
-    Ok(builtin_workflows::find_by_name(name)
-        .map(|workflow| EffectiveWorkflow::from_builtin(space_id, workflow)))
+    builtin_workflows::find_by_name(name)
+        .map(|workflow| EffectiveWorkflow::from_builtin(space_id, workflow))
+        .transpose()
 }
 
 async fn resolve_workflow_by_id(
@@ -366,7 +397,8 @@ async fn list_effective_workflows(
         BUILTIN_WORKFLOWS
             .iter()
             .filter(|workflow| !effective_names.contains(workflow.name))
-            .map(|workflow| EffectiveWorkflow::from_builtin(space_id, workflow)),
+            .map(|workflow| EffectiveWorkflow::from_builtin(space_id, workflow))
+            .collect::<Result<Vec<_>, _>>()?,
     );
     workflows.sort_by(|left, right| left.name.cmp(&right.name));
     Ok(workflows)
@@ -667,6 +699,7 @@ impl WorkflowLauncher for GatewayWorkflowLauncher {
             script.source,
             script.delivery_grant,
             script.carrying_skill,
+            script.argument_schema,
             args,
             budget,
             wait,
@@ -696,6 +729,7 @@ impl WorkflowLauncher for GatewayWorkflowLauncher {
             source.to_owned(),
             None,
             None,
+            None,
             args,
             budget,
             wait,
@@ -713,6 +747,7 @@ impl GatewayWorkflowLauncher {
         source: String,
         delivery_grant: Option<Value>,
         carrying_skill: Option<String>,
+        argument_schema: Option<Value>,
         args: Value,
         budget: Option<WorkflowBudget>,
         wait: bool,
@@ -745,6 +780,7 @@ impl GatewayWorkflowLauncher {
             script_version_id,
             inline_identity,
             source,
+            argument_schema,
             args,
             budget.unwrap_or_default(),
             delivery_grant,
@@ -4109,7 +4145,11 @@ fn internal(error: impl std::fmt::Display) -> ApiError {
     ApiError::internal(error.to_string())
 }
 
-fn script_wire(record: WorkflowScriptRecord, head_version: u32) -> WorkflowScript {
+fn script_wire(
+    record: WorkflowScriptRecord,
+    head_version: u32,
+    argument_schema: Option<Value>,
+) -> WorkflowScript {
     WorkflowScript {
         id: record.id,
         space_id: record.space_id,
@@ -4118,6 +4158,7 @@ fn script_wire(record: WorkflowScriptRecord, head_version: u32) -> WorkflowScrip
         head_version,
         built_in: false,
         has_delivery_grant: record.delivery_grant.is_some(),
+        argument_contract: argument_contract(argument_schema),
         created_at: record.created_at,
         updated_at: record.updated_at,
     }
@@ -4132,9 +4173,37 @@ fn effective_script_wire(workflow: EffectiveWorkflow) -> WorkflowScript {
         head_version: workflow.head_version,
         built_in: workflow.built_in,
         has_delivery_grant: workflow.delivery_grant.is_some(),
+        argument_contract: argument_contract(workflow.argument_schema),
         created_at: workflow.created_at,
         updated_at: workflow.updated_at,
     }
+}
+
+fn argument_contract(schema: Option<Value>) -> WorkflowArgumentContract {
+    match schema {
+        Some(schema) => WorkflowArgumentContract::Declared { schema },
+        None => WorkflowArgumentContract::Unconstrained,
+    }
+}
+
+fn validate_workflow_arguments(schema: Option<&Value>, args: &Value) -> Result<(), ApiError> {
+    let Some(schema) = schema else {
+        return Ok(());
+    };
+    let validator = jsonschema::validator_for(schema).map_err(|error| {
+        ApiError::validation(format!("workflow argument schema is invalid: {error}"))
+    })?;
+    validator.validate(args).map_err(|error| {
+        let location = error.instance_path().to_string();
+        let field = if location.is_empty() {
+            "arguments"
+        } else {
+            &location
+        };
+        ApiError::validation(format!(
+            "workflow arguments violate the declared schema at {field}: {error}"
+        ))
+    })
 }
 
 fn run_state(state: &str) -> Result<WorkflowRunState, ApiError> {
@@ -4195,6 +4264,7 @@ pub async fn create_script(
         .map_err(internal)?
         .ok_or_else(|| ApiError::not_found("space", space_id))?;
     let meta = swage_workflow::script_meta(&request.source).map_err(ApiError::validation)?;
+    let argument_schema = meta.argument_schema.clone();
     let (record, version) = state
         .storage
         .create_workflow_script(NewWorkflowScript {
@@ -4206,7 +4276,7 @@ pub async fn create_script(
         })
         .await
         .map_err(internal)?;
-    Ok(Json(script_wire(record, version.version)))
+    Ok(Json(script_wire(record, version.version, argument_schema)))
 }
 
 pub async fn list_scripts(
@@ -4321,6 +4391,7 @@ async fn start_run(
     script_version_id: Option<Uuid>,
     inline_identity: Option<InlineWorkflowIdentity>,
     source: String,
+    argument_schema: Option<Value>,
     args: Value,
     budget: WorkflowBudget,
     delivery_grant: Option<Value>,
@@ -4331,6 +4402,7 @@ async fn start_run(
     inherited_worker_placement: Option<WorkflowRunWorkerPlacement>,
 ) -> Result<WorkflowRun, ApiError> {
     validate_budget(&budget)?;
+    validate_workflow_arguments(argument_schema.as_ref(), &args)?;
     // Each run owns a QuickJS runtime and an OS thread. Keep the default bound
     // explicit until workflow settings join the resolved configuration model.
     if state.active_workflow_runs.lock().await.len() >= 4 {
@@ -4831,6 +4903,7 @@ pub async fn start_inline_run(
             None,
             None,
             request.source,
+            None,
             request.args,
             request.budget.unwrap_or_default(),
             None,
@@ -4862,6 +4935,7 @@ pub async fn start_saved_run(
             script.script_version_id,
             script.inline_identity(),
             script.source,
+            script.argument_schema,
             request.args,
             request.budget.unwrap_or_default(),
             script.delivery_grant,
@@ -5458,6 +5532,83 @@ mod tests {
         );
         assert_eq!(run.source.as_deref(), Some(carried_source));
         assert_eq!(run.carrying_skill.as_deref(), Some("research-shadow"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn invalid_carried_workflow_metadata_does_not_hide_valid_workflows() {
+        let root = tempfile::tempdir().expect("skill root");
+        let skill_dir = root.path().join("skills/invalid-meta");
+        std::fs::create_dir_all(skill_dir.join("workflows")).expect("workflow directory");
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\ndescription: Invalid metadata proof.\n---\n\nInstructions.\n",
+        )
+        .expect("skill definition");
+        std::fs::write(
+            skill_dir.join("workflows/invalid.js"),
+            r#"export const meta = { argumentSchema: { type: "object" } }; return {};"#,
+        )
+        .expect("carried workflow");
+        std::fs::write(
+            skill_dir.join("workflows/valid.js"),
+            "return { valid: true };",
+        )
+        .expect("carried workflow");
+
+        let (state, storage) = workflow_test_state();
+        let space = storage.get_or_create_default().await.expect("space");
+        let _skill_root = crate::skill::SpaceSkillRootGuard::at(space.id, root.path());
+
+        let Json(list) = list_scripts(State(state), Path(space.id))
+            .await
+            .expect("valid carried workflows remain listable");
+        assert!(
+            list.scripts.iter().any(|script| script.name == "valid"),
+            "the valid carried workflow must remain listed: {list:?}"
+        );
+        assert!(
+            !list.scripts.iter().any(|script| script.name == "invalid"),
+            "the malformed carried workflow must be excluded: {list:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn saved_run_rejects_invalid_arguments_before_creating_a_run() {
+        let (state, storage) = workflow_test_state();
+        let space = storage.get_or_create_default().await.expect("space");
+        let (script, _) = storage
+            .create_workflow_script(NewWorkflowScript {
+                space_id: space.id,
+                name: "constrained".into(),
+                description: String::new(),
+                source: r#"export const meta = { argumentSchema: {"type":"object","required":["task"],"properties":{"task":{"type":"string"}}} }; return {};"#.into(),
+                delivery_grant: None,
+            })
+            .await
+            .expect("workflow");
+
+        let error = start_saved_run(
+            State(state),
+            Path(script.id),
+            Json(StartWorkflowRunRequest {
+                args: serde_json::json!({"task": 42}),
+                budget: None,
+            }),
+        )
+        .await
+        .expect_err("invalid arguments must be rejected");
+        assert!(
+            error.0.to_string().contains("/task"),
+            "validation must name the failing field: {error:?}"
+        );
+        assert!(
+            storage
+                .list_workflow_runs(space.id)
+                .await
+                .expect("runs")
+                .is_empty(),
+            "rejected arguments must not create a run"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
