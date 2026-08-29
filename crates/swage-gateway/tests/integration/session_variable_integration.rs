@@ -16,8 +16,9 @@ use swage_config::HierarchyLevel;
 use swage_context::briefing::BriefingElement;
 use swage_context::element::ContextElement;
 use swage_context::named_element::ResolvedNamedElement;
+use swage_context::tokeniser::{TiktokenTokeniser, Tokeniser};
 use swage_core::{
-    ChatMessage, CompletionRequest, CompletionResponse, ProviderError, StreamChunk,
+    ChatMessage, CompletionRequest, CompletionResponse, ProviderError, Role, StreamChunk,
     ToolCompletionRequest, ToolCompletionResponse,
 };
 use swage_gateway::server::build_router;
@@ -452,7 +453,7 @@ async fn live_listener_turns_set_and_update_the_values_used_by_composition() {
     .unwrap();
     let mut context_reports = Vec::new();
 
-    for prompt in ["save the task", "update the task"] {
+    for (turn_index, prompt) in ["save the task", "update the task"].into_iter().enumerate() {
         sink.send(tungstenite::Message::Text(
             json!({"type":"send_message","content":prompt})
                 .to_string()
@@ -489,6 +490,10 @@ async fn live_listener_turns_set_and_update_the_values_used_by_composition() {
             "Task: verify audit with durable evidence; owner: ⟦unset:owner⟧"
         };
         assert_eq!(render(variables)[0].text_content(), expected);
+        if turn_index == 0 {
+            std::fs::write(&element_path, "Reloaded current work: {{task}}")
+                .expect("rewrite briefing between foreground turns");
+        }
     }
     let events: Vec<_> = storage
         .list_audit_events_by_session(session_id)
@@ -536,8 +541,8 @@ async fn live_listener_turns_set_and_update_the_values_used_by_composition() {
         "literal prompts should remain unchanged after session values are saved: {second_turn_context}"
     );
     assert!(
-        second_turn_context.contains("Current work: inspect storage"),
-        "the real session_values update should re-render the named element: {second_turn_context}"
+        second_turn_context.contains("Reloaded current work: inspect storage"),
+        "the second foreground turn must re-read the rewritten named briefing: {second_turn_context}"
     );
     for context in [&first_context, &second_turn_context] {
         assert!(
@@ -561,20 +566,30 @@ async fn live_listener_turns_set_and_update_the_values_used_by_composition() {
             "the named JavaScript route must account for its working-norms element: {report}"
         );
     }
-    let first_total = context_reports[0]["total_tokens"]
-        .as_u64()
-        .expect("first report token total");
-    let second_total = context_reports[1]["total_tokens"]
-        .as_u64()
-        .expect("second report token total");
-    assert_ne!(
-        first_total, second_total,
-        "changing the stored briefing value must change the assembled token total"
-    );
+    let briefing_token_count = |report: &serde_json::Value| {
+        report["elements"]
+            .as_array()
+            .expect("assembled elements")
+            .iter()
+            .find(|element| element["name"] == "current-work")
+            .and_then(|element| element["token_count"].as_u64())
+            .expect("current-work token count") as usize
+    };
+    let tokeniser = TiktokenTokeniser::new("tool-caller");
+    let expected_briefing_tokens = [
+        tokeniser.count_messages(&[ChatMessage::new(Role::System, "Current work: ⟦unset:task⟧")]),
+        tokeniser.count_messages(&[ChatMessage::new(
+            Role::System,
+            "Reloaded current work: inspect storage",
+        )]),
+    ];
     assert_eq!(
-        (first_total, second_total),
-        (178, 173),
-        "the two stored briefing values must retain their exact independently recounted totals"
+        [
+            briefing_token_count(&context_reports[0]),
+            briefing_token_count(&context_reports[1]),
+        ],
+        expected_briefing_tokens,
+        "each foreground report must recount the rendered briefing message, not retain an ambient total"
     );
     let audit = storage
         .list_audit_events_by_session(session_id)
