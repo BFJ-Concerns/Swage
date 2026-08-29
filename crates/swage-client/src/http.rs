@@ -19,7 +19,7 @@ pub use swage_protocol::client::space::{
 
 pub use swage_protocol::client::approval::{ApprovalDecisionScope, ApprovalDecisionValue};
 pub use swage_protocol::hosting::{
-    ApprovalDecisionRequest, ClientPresenceResponse, MachinePresenceResponse,
+    ApprovalDecisionRequest, ClientPresenceResponse, DevicePresenceResponse,
     PresenceGatewayResponse, PresenceSnapshotResponse,
 };
 
