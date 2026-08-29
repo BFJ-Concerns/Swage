@@ -252,7 +252,7 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
         assert!(
-            String::from_utf8_lossy(&output.stdout).contains("test result: ok"),
+            String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"),
             "the isolated child must report its passing test on stdout; stdout:\n{}\nstderr:\n{}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
