@@ -17,6 +17,9 @@
   let { store, spaceId }: Props = $props();
 
   let newTitle = $state("");
+  // The template a new page is forked from, "" for a blank page. The picker
+  // reads the space's templates; it never mutates them.
+  let newTemplateId = $state("");
   // The module currently being edited by the user, if any.
   let editingModuleId = $state<string | null>(null);
   let editingSource = $state("");
@@ -35,8 +38,10 @@
   async function createPage(): Promise<void> {
     const title = newTitle.trim();
     if (!title) return;
+    const templateId = newTemplateId;
     newTitle = "";
-    await store.createPage(spaceId, title);
+    newTemplateId = "";
+    await store.createPage(spaceId, title, templateId || undefined);
   }
 
   function startEditing(moduleId: string, source: string): void {
@@ -67,6 +72,14 @@
       }}
     >
       <input placeholder="New page title" bind:value={newTitle} />
+      {#if store.templates.length > 0}
+        <select aria-label="Template" bind:value={newTemplateId}>
+          <option value="">Blank page</option>
+          {#each store.templates as template (template.id)}
+            <option value={template.id}>{template.name}</option>
+          {/each}
+        </select>
+      {/if}
       <button type="submit">Create</button>
     </form>
     <ul>
@@ -86,6 +99,12 @@
   <section aria-label="Page">
     {#if store.activePage}
       <h2>{store.activePage.title}</h2>
+      {#if store.activePage.forked_from_template_id}
+        <p class="lineage">
+          Forked from a template — this page's modules are its own; the
+          template is unaffected by edits here.
+        </p>
+      {/if}
       {#each store.activePage.modules as module (module.id)}
         <article class="module" data-kind={module.kind}>
           {#if editingModuleId === module.id}
@@ -152,6 +171,12 @@
     display: flex;
     gap: 8px;
     margin-top: 4px;
+  }
+
+  .lineage {
+    color: var(--ink-soft);
+    font-size: 0.9em;
+    margin: 0 0 8px;
   }
 
   .empty {

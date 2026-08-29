@@ -40,6 +40,19 @@ const listBody = {
   pages: [{ id: PAGE_ID, title: "Planning", updated_at: "2026-08-28T00:00:00Z" }],
 };
 
+const TEMPLATE_ID = "44444444-4444-4444-8444-444444444444";
+
+const templateListBody = {
+  templates: [
+    { id: TEMPLATE_ID, name: "Standup", updated_at: "2026-08-28T00:00:00Z" },
+  ],
+};
+
+function requestBody(call: unknown[]): Record<string, unknown> {
+  const init = call[1] as RequestInit;
+  return JSON.parse(init.body as string) as Record<string, unknown>;
+}
+
 describe("pages store", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
@@ -49,6 +62,7 @@ describe("pages store", () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(jsonResponse(listBody))
+      .mockResolvedValueOnce(jsonResponse(templateListBody))
       .mockResolvedValueOnce(jsonResponse(pageBody("# Hello")));
     vi.stubGlobal("fetch", fetchMock);
 
@@ -69,6 +83,7 @@ describe("pages store", () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(jsonResponse(listBody))
+      .mockResolvedValueOnce(jsonResponse(templateListBody))
       .mockResolvedValueOnce(jsonResponse(pageBody("before")))
       // The event answers with a refetch of the page and the list.
       .mockResolvedValueOnce(jsonResponse(pageBody("after")))
@@ -103,5 +118,53 @@ describe("pages store", () => {
     // No space loaded, nothing open: the signal is inert.
     expect(fetchMock).not.toHaveBeenCalled();
     expect(store.activePage).toBeNull();
+  });
+  it("offers the space's templates and forks a page from the chosen one", async () => {
+    const forked = {
+      ...pageBody("## Yesterday"),
+      forked_from_template_id: TEMPLATE_ID,
+      forked_at: "2026-08-28T00:00:00Z",
+    };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(listBody))
+      .mockResolvedValueOnce(jsonResponse(templateListBody))
+      // The create, then the list refresh that follows it.
+      .mockResolvedValueOnce(jsonResponse(forked))
+      .mockResolvedValueOnce(jsonResponse(listBody));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const store = createPagesStore();
+    await store.loadPages(SPACE_ID);
+    expect(store.templates.map((template) => template.name)).toEqual([
+      "Standup",
+    ]);
+
+    await store.createPage(SPACE_ID, "Monday standup", TEMPLATE_ID);
+    const createCall = fetchMock.mock.calls[2];
+    expect(createCall[0]).toBe(`/api/spaces/${SPACE_ID}/pages`);
+    expect(requestBody(createCall)).toEqual({
+      title: "Monday standup",
+      template_id: TEMPLATE_ID,
+    });
+    // The seeded modules and the recorded origin come back on the page the
+    // create returned — the surface reads lineage from there.
+    expect(store.activePage?.modules[0].source).toBe("## Yesterday");
+    expect(store.activePage?.forked_from_template_id).toBe(TEMPLATE_ID);
+  });
+
+  it("creates a blank page when no template is chosen", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(listBody))
+      .mockResolvedValueOnce(jsonResponse(templateListBody))
+      .mockResolvedValueOnce(jsonResponse(pageBody("")))
+      .mockResolvedValueOnce(jsonResponse(listBody));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const store = createPagesStore();
+    await store.loadPages(SPACE_ID);
+    await store.createPage(SPACE_ID, "Scratch");
+    expect(requestBody(fetchMock.mock.calls[2]).template_id).toBeUndefined();
   });
 });

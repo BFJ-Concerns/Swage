@@ -7,6 +7,9 @@ import type { PageListResponse } from "../protocol/PageListResponse";
 import type { PageResponse } from "../protocol/PageResponse";
 import type { PageModuleView } from "../protocol/PageModuleView";
 import type { WritePageModuleRequest } from "../protocol/WritePageModuleRequest";
+import type { PageTemplateListResponse } from "../protocol/PageTemplateListResponse";
+import type { PageTemplateResponse } from "../protocol/PageTemplateResponse";
+import type { CreatePageTemplateRequest } from "../protocol/CreatePageTemplateRequest";
 
 let baseUrl = "";
 
@@ -42,14 +45,40 @@ export async function getPage(pageId: string): Promise<PageResponse> {
   return (await response.json()) as PageResponse;
 }
 
+// A template seeds the new page's modules and is recorded as its origin;
+// omitting it creates a blank page.
 export async function createPage(
   spaceId: string,
   title: string,
+  templateId?: string,
 ): Promise<PageResponse> {
   const response = await request(`/api/spaces/${spaceId}/pages`, "POST", {
     title,
+    template_id: templateId,
   });
   return (await response.json()) as PageResponse;
+}
+
+export async function listPageTemplates(
+  spaceId: string,
+): Promise<PageTemplateListResponse> {
+  const response = await request(
+    `/api/spaces/${spaceId}/page-templates`,
+    "GET",
+  );
+  return (await response.json()) as PageTemplateListResponse;
+}
+
+export async function createPageTemplate(
+  spaceId: string,
+  body: CreatePageTemplateRequest,
+): Promise<PageTemplateResponse> {
+  const response = await request(
+    `/api/spaces/${spaceId}/page-templates`,
+    "POST",
+    body,
+  );
+  return (await response.json()) as PageTemplateResponse;
 }
 
 export async function writePageModule(
