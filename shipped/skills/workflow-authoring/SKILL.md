@@ -93,7 +93,10 @@ return { reply };
   needed, then exactly one ```json fence carrying the value (or the
   bare JSON alone); JSON trailing prose outside a fence is not found.
 - **`agentStart(prompt, options)`** — dispatch without awaiting;
-  returns a handle (`result`, `done`, `label`, session token). Pair
+  returns a handle (`result`, `done`, `label`, session token,
+  `workingDirectory`). After completion, `workingDirectory` is the
+  host-resolved directory where the child ran, including a provisioned
+  isolated worktree. Pair
   with **`wait({ watches, timerMs })`** to race handles against a
   timer; the journal records which won, and replay repeats the winner.
 - **`parallel(thunks)`** — run thunks concurrently; a failed slot
