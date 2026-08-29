@@ -117,7 +117,7 @@ impl EffectiveWorkflow {
             source: workflow.source.into(),
             script_version_id: None,
             delivery_grant: None,
-            captured_sources_grant: true,
+            captured_sources_grant: workflow.captured_sources_grant,
             created_at: released_at,
             updated_at: released_at,
             built_in: true,
@@ -4617,28 +4617,7 @@ async fn launch_existing_run(
     let args_json = serde_json::to_string(&record.args).map_err(internal)?;
     // Composition is a top-level capability only: a child run (one carrying
     // parentage) gets no `workflow()`, which bounds nesting to one level.
-    let captured_sources_grant = if let Some(version_id) = record.script_version_id {
-        let version = state
-            .storage
-            .get_workflow_script_version(version_id)
-            .await
-            .map_err(internal)?;
-        let script = match version {
-            Some(version) => state
-                .storage
-                .get_workflow_script(version.script_id)
-                .await
-                .map_err(internal)?,
-            None => None,
-        };
-        script.is_some_and(|script| script.captured_sources_grant)
-    } else {
-        record
-            .script_name
-            .as_deref()
-            .and_then(builtin_workflows::find_by_name)
-            .is_some_and(|workflow| workflow.captured_sources_grant)
-    };
+    let captured_sources_grant = captured_sources_grant_for_run(&state, &record).await?;
     let capabilities = ScriptCapabilities {
         delivery: delivery_grant.is_some(),
         composition: record.parent_run_id.is_none(),
@@ -4776,6 +4755,36 @@ async fn launch_existing_run(
         remove_active_workflow_generation(&active, run_id, &cancellation).await;
     });
     Ok(started)
+}
+
+/// Re-resolve the persisted authority root on every launch. Saved scripts use
+/// their recorded version; immutable workflows have no version row, so only a
+/// matching built-in synthetic identity can receive a built-in capability.
+async fn captured_sources_grant_for_run(
+    state: &AppState,
+    record: &WorkflowRunRecord,
+) -> Result<bool, ApiError> {
+    if let Some(version_id) = record.script_version_id {
+        let Some(version) = state
+            .storage
+            .get_workflow_script_version(version_id)
+            .await
+            .map_err(internal)?
+        else {
+            return Ok(false);
+        };
+        return Ok(state
+            .storage
+            .get_workflow_script(version.script_id)
+            .await
+            .map_err(internal)?
+            .is_some_and(|script| script.captured_sources_grant));
+    }
+
+    Ok(record
+        .script_id
+        .and_then(|id| builtin_workflows::find_by_id(record.space_id, id))
+        .is_some_and(|workflow| workflow.captured_sources_grant))
 }
 
 async fn remove_active_workflow_generation(
@@ -9043,6 +9052,129 @@ mod tests {
         drop(tx);
         host.await.expect("host loop");
         assert_eq!(replayed, reading, "replay must use the journalled reading");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn launch_resolves_captured_sources_from_the_persisted_authority_root() {
+        let (state, storage) = workflow_test_state();
+        let space = storage.get_or_create_default().await.expect("space");
+        let source = "return typeof capturedSources;";
+        let (script, version) = storage
+            .create_workflow_script(NewWorkflowScript {
+                space_id: space.id,
+                name: "saved-sweep".into(),
+                description: String::new(),
+                source: source.into(),
+                delivery_grant: None,
+            })
+            .await
+            .expect("saved script");
+        storage
+            .update_workflow_script(script.id, None, None, Some(true))
+            .await
+            .expect("grant captured sources to saved script");
+
+        let saved = storage
+            .create_workflow_run(NewWorkflowRun {
+                space_id: space.id,
+                parent_run_id: None,
+                parent_seq: None,
+                script_version_id: Some(version.id),
+                inline_workflow_id: None,
+                inline_workflow_name: None,
+                inline_workflow_version: None,
+                carrying_skill: None,
+                source: None,
+                source_hash: source_hash(source),
+                args: Value::Null,
+                budget: serde_json::json!({}),
+                engine_version: "test".into(),
+                dispatch_bound_agent_ids: vec![],
+                dispatch_bound_task_definition_ids: vec![],
+                workflow_call_tools: None,
+                inherited_worker_placement: None,
+            })
+            .await
+            .expect("saved run");
+        assert!(
+            captured_sources_grant_for_run(&state, &saved)
+                .await
+                .expect("resolve saved grant")
+        );
+        launch_existing_run(state.clone(), saved.clone(), source.into(), None)
+            .await
+            .expect("launch saved run");
+        wait_for_terminal(&state, saved.id).await;
+        assert_eq!(
+            storage
+                .get_workflow_run(saved.id)
+                .await
+                .expect("saved run query")
+                .expect("saved run")
+                .final_output,
+            Some(Value::String("function".into()))
+        );
+
+        let carried = storage
+            .create_workflow_run(NewWorkflowRun {
+                space_id: space.id,
+                parent_run_id: None,
+                parent_seq: None,
+                script_version_id: None,
+                inline_workflow_id: Some(crate::synthetic_id::synthetic_id(
+                    CARRIED_WORKFLOW_ID_DOMAIN,
+                    space.id,
+                    "skill/research-sweep",
+                )),
+                inline_workflow_name: Some("research-sweep".into()),
+                inline_workflow_version: Some(1),
+                carrying_skill: Some("skill".into()),
+                source: Some(source.into()),
+                source_hash: source_hash(source),
+                args: Value::Null,
+                budget: serde_json::json!({}),
+                engine_version: "test".into(),
+                dispatch_bound_agent_ids: vec![],
+                dispatch_bound_task_definition_ids: vec![],
+                workflow_call_tools: None,
+                inherited_worker_placement: None,
+            })
+            .await
+            .expect("carried run");
+        assert!(
+            !captured_sources_grant_for_run(&state, &carried)
+                .await
+                .expect("resolve carried grant"),
+            "a carried workflow named like the built-in must retain its advertised denial"
+        );
+
+        let builtin = storage
+            .create_workflow_run(NewWorkflowRun {
+                space_id: space.id,
+                parent_run_id: None,
+                parent_seq: None,
+                script_version_id: None,
+                inline_workflow_id: Some(builtin_workflows::id(space.id, "research-sweep")),
+                inline_workflow_name: Some("research-sweep".into()),
+                inline_workflow_version: Some(1),
+                carrying_skill: None,
+                source: Some(source.into()),
+                source_hash: source_hash(source),
+                args: Value::Null,
+                budget: serde_json::json!({}),
+                engine_version: "test".into(),
+                dispatch_bound_agent_ids: vec![],
+                dispatch_bound_task_definition_ids: vec![],
+                workflow_call_tools: None,
+                inherited_worker_placement: None,
+            })
+            .await
+            .expect("built-in run");
+        assert!(
+            captured_sources_grant_for_run(&state, &builtin)
+                .await
+                .expect("resolve built-in grant")
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
