@@ -993,6 +993,11 @@ impl swage_storage::WorkflowStore for MockStorage {
     ) -> Result<Vec<swage_storage::WorkflowRunRecord>, StorageError> {
         unimplemented!()
     }
+    async fn list_parked_workflow_runs(
+        &self,
+    ) -> Result<Vec<swage_storage::WorkflowRunRecord>, StorageError> {
+        unimplemented!()
+    }
     async fn list_interrupted_workflow_runs(
         &self,
     ) -> Result<Vec<swage_storage::WorkflowRunRecord>, StorageError> {
