@@ -11,15 +11,16 @@ use crate::model::{
     Material, Message, NewAgentDefinition, NewAgentMemoryRecord, NewAgentMessage,
     NewApprovalRequest, NewAttachment, NewAuditEvent, NewBackgroundJob, NewChannelInboundMessage,
     NewChannelLink, NewCurationAssertion, NewDeliveryRecord, NewDeviceRegistration,
-    NewKnowledgeCitation, NewMaterial, NewMessage, NewOrientationCard, NewPage, NewPageModule,
-    NewSchedule, NewScheduleRun, NewSecretRecord, NewSession, NewSourceObservation, NewSpace,
-    NewTaskDefinition, NewThread, NewToolCall, NewTurn, NewWorkflowJournalIntent, NewWorkflowRun,
-    NewWorkflowRunEvent, NewWorkflowScript, NewWorkspaceAttachment, OrientationCard,
-    OrientationCardLifecycle, Page, PageModule, PendingChannelOrigin, Schedule, ScheduleRun,
-    ScheduleRunUpdate, SecretRecord, Session, SessionVariable, SourceObservation, Space, SpaceSlug,
-    TaskDefinition, Thread, ThreadBranch, ThreadState, ToolCallRecord, Turn, TurnState,
-    UpdateSchedule, WorkflowJournalRecord, WorkflowRunEventRecord, WorkflowRunRecord,
-    WorkflowScriptRecord, WorkflowScriptVersion, WorkspaceAttachment,
+    NewKnowledgeCitation, NewMaterial, NewMessage, NewOrientationCard, NewPage, NewPageAnnotation,
+    NewPageModule, NewSchedule, NewScheduleRun, NewSecretRecord, NewSession, NewSourceObservation,
+    NewSpace, NewTaskDefinition, NewThread, NewToolCall, NewTurn, NewWorkflowJournalIntent,
+    NewWorkflowRun, NewWorkflowRunEvent, NewWorkflowScript, NewWorkspaceAttachment,
+    OrientationCard, OrientationCardLifecycle, Page, PageAnnotation, PageModule,
+    PendingChannelOrigin, Schedule, ScheduleRun, ScheduleRunUpdate, SecretRecord, Session,
+    SessionVariable, SourceObservation, Space, SpaceSlug, TaskDefinition, Thread, ThreadBranch,
+    ThreadState, ToolCallRecord, Turn, TurnState, UpdateSchedule, WorkflowJournalRecord,
+    WorkflowRunEventRecord, WorkflowRunRecord, WorkflowScriptRecord, WorkflowScriptVersion,
+    WorkspaceAttachment,
 };
 
 // ---------------------------------------------------------------------------
@@ -1011,11 +1012,17 @@ pub trait WorkflowStore: Send + Sync {
         &self,
         id: Uuid,
     ) -> Result<Option<WorkflowScriptVersion>, StorageError>;
+    /// Change a script row's mutable fields; every argument left `None`
+    /// leaves its column alone. Setting `authoring_session_id` marks the row
+    /// as a conversation's own work, which
+    /// [`WorkflowScriptRecord::effective_delivery_grant`] reads as "this
+    /// script never delivers".
     async fn update_workflow_script(
         &self,
         id: Uuid,
         description: Option<&str>,
         delivery_grant: Option<serde_json::Value>,
+        authoring_session_id: Option<Uuid>,
     ) -> Result<WorkflowScriptRecord, StorageError>;
     async fn list_workflow_scripts(
         &self,
@@ -1172,6 +1179,36 @@ pub trait PageStore: Send + Sync {
     async fn update_page_module_source(&self, id: Uuid, source: &str) -> Result<(), StorageError>;
 }
 
+/// Annotations on a page's modules: the notes a user and an agent both hang
+/// on the same module rather than describing a location to each other.
+///
+/// Anchoring is at module grain — an annotation names the module it is about,
+/// or none for a note on the page as a whole. Rows carry current truth only;
+/// a superseded body survives in the audit trail, not in a version row.
+#[async_trait]
+pub trait PageAnnotationStore: Send + Sync {
+    async fn create_page_annotation(
+        &self,
+        annotation: NewPageAnnotation,
+    ) -> Result<PageAnnotation, StorageError>;
+    async fn get_page_annotation(&self, id: Uuid) -> Result<Option<PageAnnotation>, StorageError>;
+    /// Every annotation on a page — module notes and page-level notes alike —
+    /// oldest first.
+    async fn list_page_annotations(
+        &self,
+        page_id: Uuid,
+    ) -> Result<Vec<PageAnnotation>, StorageError>;
+    /// Replace an annotation's body and tags together: the note as its author
+    /// now states it, with no version row left behind.
+    async fn update_page_annotation(
+        &self,
+        id: Uuid,
+        body: &str,
+        tags: &[String],
+    ) -> Result<(), StorageError>;
+    async fn delete_page_annotation(&self, id: Uuid) -> Result<(), StorageError>;
+}
+
 pub trait Storage:
     SessionStore
     + WorkspaceAttachmentStore
@@ -1203,6 +1240,7 @@ pub trait Storage:
     + ChannelQueueStore
     + WorkflowStore
     + PageStore
+    + PageAnnotationStore
     + Send
     + Sync
 {
@@ -1240,6 +1278,7 @@ impl<T> Storage for T where
         + ChannelQueueStore
         + WorkflowStore
         + PageStore
+        + PageAnnotationStore
         + Send
         + Sync
 {
@@ -1961,6 +2000,39 @@ mod tests {
     }
 
     #[async_trait]
+    impl PageAnnotationStore for StubStorage {
+        async fn create_page_annotation(
+            &self,
+            _: NewPageAnnotation,
+        ) -> Result<PageAnnotation, StorageError> {
+            unimplemented!()
+        }
+        async fn get_page_annotation(
+            &self,
+            _: Uuid,
+        ) -> Result<Option<PageAnnotation>, StorageError> {
+            unimplemented!()
+        }
+        async fn list_page_annotations(
+            &self,
+            _: Uuid,
+        ) -> Result<Vec<PageAnnotation>, StorageError> {
+            unimplemented!()
+        }
+        async fn update_page_annotation(
+            &self,
+            _: Uuid,
+            _: &str,
+            _: &[String],
+        ) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+        async fn delete_page_annotation(&self, _: Uuid) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+    }
+
+    #[async_trait]
     impl TurnStore for StubStorage {
         async fn create_turn(&self, _: NewTurn) -> Result<Turn, StorageError> {
             unimplemented!()
@@ -2337,6 +2409,7 @@ mod tests {
             _: Uuid,
             _: Option<&str>,
             _: Option<serde_json::Value>,
+            _: Option<Uuid>,
         ) -> Result<WorkflowScriptRecord, StorageError> {
             unimplemented!()
         }

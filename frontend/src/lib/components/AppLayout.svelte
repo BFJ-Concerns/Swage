@@ -129,6 +129,8 @@
       <nav aria-label="Settings sections">
         <button class:active={settingsTab === "providers"} onclick={() => onNavigate?.("/settings/providers")}>Providers</button>
         <button class:active={settingsTab === "agents"} onclick={() => onNavigate?.("/settings/agents")}>Agents</button>
+        <button class:active={settingsTab === "commands"} onclick={() => onNavigate?.("/settings/commands")}>Commands</button>
+        <button class:active={settingsTab === "skills"} onclick={() => onNavigate?.("/settings/skills")}>Skills</button>
         <button class:active={settingsTab === "automation"} onclick={() => onNavigate?.("/settings/automation")}>Automation</button>
         {#if currentSpace}
           <button class:active={settingsSpaceTab === "workspaces"} onclick={openCurrentSpaceWorkspaces}>Workspaces</button>
