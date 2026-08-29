@@ -40,7 +40,7 @@ use swage_storage::{
 
 use super::history::parse_model_arguments;
 
-use swage_agent::{AgentEvent, DelegationOutcome, DelegationSnapshotRecorder};
+use swage_agent::{AgentEvent, DelegationOutcome};
 use swage_sandbox::ToolCallResult;
 
 use super::*;
