@@ -71,6 +71,15 @@ fn runtime_worker_placement(placement: &WorkflowRunWorkerPlacement) -> ResolvedW
     }
 }
 
+fn runtime_placement_from_directory(placement: ResolvedWorkerDirectory) -> ResolvedWorkerPlacement {
+    ResolvedWorkerPlacement {
+        path: placement.path.to_string_lossy().into_owned(),
+        can_write: placement.can_write,
+        authority_path: placement.authority_path.to_string_lossy().into_owned(),
+        authority_context_id: placement.authority_context_id,
+    }
+}
+
 fn worker_placement_directory(placement: &ResolvedWorkerPlacement) -> ResolvedWorkerDirectory {
     ResolvedWorkerDirectory {
         path: placement.path.clone().into(),
@@ -1737,12 +1746,7 @@ async fn resolve_agent_placement_command(
                 reauthorise_session_worker_placement(state, &session)
                     .await
                     .map_err(|error| error.to_string())?
-                    .map(|placement| ResolvedWorkerPlacement {
-                        path: placement.path.to_string_lossy().into_owned(),
-                        can_write: placement.can_write,
-                        authority_path: placement.authority_path.to_string_lossy().into_owned(),
-                        authority_context_id: placement.authority_context_id,
-                    })
+                    .map(runtime_placement_from_directory)
                     .map_or_else(|| Ok(None), |placement| Ok(Some(placement)))
             }
             None => match inherited_worker_placement {
@@ -3315,12 +3319,7 @@ async fn complete_worker_directory_resolution(
     .await
     {
         Ok(directory) => {
-            let placement = ResolvedWorkerPlacement {
-                path: directory.path.to_string_lossy().into_owned(),
-                can_write: directory.can_write,
-                authority_path: directory.authority_path.to_string_lossy().into_owned(),
-                authority_context_id: directory.authority_context_id,
-            };
+            let placement = runtime_placement_from_directory(directory);
             state
                 .complete_workflow_journal_entry(
                     entry_id,
