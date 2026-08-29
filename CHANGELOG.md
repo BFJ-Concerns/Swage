@@ -6,7 +6,8 @@ All notable changes to Swage are documented in this file.
 
 ### Added
 
-- Users and agents can leave durable notes on a page's modules, visible to both sides live and readable by the agent alongside the module they hang on.
+- Users and agents can leave durable notes on a page's modules, appearing on an open page as they are written and readable by the agent alongside the module they hang on.
+- Work surfaces receive server-wide page signals over their own listen-only WebSocket, so an open page stays current whether or not a conversation is selected.
 - Agents can now list the workflows available to their session before starting one.
 - Asynchronous turn callers can select a configured model for one request, with the effective selection retained in that turn's audit snapshot.
 - Context assembly alternatives can now be configured under `context.alternatives` for controlled selection experiments.
