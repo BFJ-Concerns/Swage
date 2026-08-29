@@ -58,8 +58,10 @@ the default.
 
 `agent(prompt, options)` makes a synchronous (awaited) call and returns the
 agent's output. `agentStart(prompt, options)` dispatches a call and returns a
-handle immediately — the handle's `.done`, `.session`, and `.result` fields
-update on completion. `wait({ watches, timerMs })` races a set of handles
+handle immediately — the handle's `.done`, `.session`, `.result`, and
+`.workingDirectory` fields update on completion. `workingDirectory` is the
+host-resolved directory where the child ran, including a provisioned isolated
+worktree. `wait({ watches, timerMs })` races a set of handles
 against a journalled timer: the first handle to complete or the timer to fire
 wins, and the result says which.
 
