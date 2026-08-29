@@ -552,6 +552,8 @@ fn terminal_budget_reading(accounting: &TokenBudgetState, budget: &WorkflowBudge
     })
 }
 
+const TERMINAL_BUDGET_SEQUENCE: u64 = i64::MAX as u64;
+
 async fn record_terminal_budget(
     state: &AppState,
     run_id: Uuid,
@@ -591,11 +593,11 @@ async fn record_terminal_budget(
         };
     }
 
-    let seq = journal
-        .iter()
-        .map(|entry| entry.seq)
-        .max()
-        .map_or(0, |seq| seq.saturating_add(1));
+    // Script commands occupy dense sequence numbers for positional replay.
+    // Reserve the largest SQLite-safe value for this out-of-band terminal
+    // audit record so a recovered incomplete run can continue its script
+    // sequence without colliding with the already-recorded balance.
+    let seq = TERMINAL_BUDGET_SEQUENCE;
     let reading = terminal_budget_reading(&*accounting.lock().await, budget);
     let intent = state
         .create_workflow_journal_intent(NewWorkflowJournalIntent {
@@ -4578,11 +4580,18 @@ async fn launch_existing_run(
     let (result_tx, result_rx) = tokio::sync::oneshot::channel();
     let (host_tx, host_rx) = mpsc::unbounded_channel();
     let run_budget = budget_wire(&record.budget);
-    let replay = state
+    let journal = state
         .storage
         .list_workflow_journal(record.id)
         .await
         .map_err(internal)?;
+    // Terminal budget rows are audit records, not script commands. Keeping
+    // them out of positional replay preserves the command sequence when a
+    // failed or cancelled run is later resumed for recovery.
+    let replay = journal
+        .into_iter()
+        .filter(|entry| entry.kind != "terminal_budget")
+        .collect::<Vec<_>>();
     // These prefixes are produced by both budget-refusal paths in the host-command loop.
     let initial_agent_calls = replay
         .iter()
@@ -4726,14 +4735,13 @@ async fn launch_existing_run(
             Ok(Err(problem)) => ("failed", None, Some(problem.to_string())),
             Err(problem) => ("failed", None, Some(problem.to_string())),
         };
-        if run_state != "failed"
-            && let Err(problem) = record_terminal_budget(
-                &terminal_budget_state_owner,
-                run_id,
-                &terminal_budget,
-                &terminal_budget_state,
-            )
-            .await
+        if let Err(problem) = record_terminal_budget(
+            &terminal_budget_state_owner,
+            run_id,
+            &terminal_budget,
+            &terminal_budget_state,
+        )
+        .await
         {
             tracing::warn!(%run_id, %problem, "could not record terminal budget audit entry");
         }
@@ -14833,6 +14841,12 @@ mod tests {
             .list_workflow_journal(started.id)
             .await
             .expect("journal");
+        let terminal = first_journal
+            .iter()
+            .find(|entry| entry.kind == "terminal_budget")
+            .expect("failed run terminal budget entry");
+        assert_eq!(terminal.status, "completed");
+        assert_eq!(terminal.seq, TERMINAL_BUDGET_SEQUENCE);
         let snapshot = first_journal
             .iter()
             .find(|entry| entry.kind == "budget")
@@ -14879,6 +14893,14 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(snapshots.len(), 1);
         assert_eq!(snapshots[0].status, "completed");
+        assert_eq!(
+            replayed_journal
+                .iter()
+                .filter(|entry| entry.kind == "terminal_budget")
+                .count(),
+            1,
+            "replay retains the failed-run terminal audit entry without treating it as a script command"
+        );
         assert_eq!(provider.requests.lock().expect("requests").len(), 2);
     }
 
