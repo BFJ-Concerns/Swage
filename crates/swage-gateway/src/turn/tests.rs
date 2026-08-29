@@ -2632,6 +2632,43 @@ impl swage_storage::PageStore for MockStorage {
     async fn update_page_module_source(&self, _: Uuid, _: &str) -> Result<(), StorageError> {
         unimplemented!()
     }
+    async fn create_page_template(
+        &self,
+        _: swage_storage::NewPageTemplate,
+    ) -> Result<swage_storage::PageTemplate, StorageError> {
+        unimplemented!()
+    }
+    async fn get_page_template(
+        &self,
+        _: Uuid,
+    ) -> Result<Option<swage_storage::PageTemplate>, StorageError> {
+        unimplemented!()
+    }
+    async fn list_page_templates_by_space(
+        &self,
+        _: Uuid,
+    ) -> Result<Vec<swage_storage::PageTemplate>, StorageError> {
+        unimplemented!()
+    }
+    async fn create_page_template_module(
+        &self,
+        _: swage_storage::NewPageTemplateModule,
+    ) -> Result<swage_storage::PageTemplateModule, StorageError> {
+        unimplemented!()
+    }
+    async fn list_page_template_modules(
+        &self,
+        _: Uuid,
+    ) -> Result<Vec<swage_storage::PageTemplateModule>, StorageError> {
+        unimplemented!()
+    }
+    async fn create_page_from_template(
+        &self,
+        _: swage_storage::NewPage,
+        _: Uuid,
+    ) -> Result<swage_storage::Page, StorageError> {
+        unimplemented!()
+    }
 }
 
 #[async_trait]
