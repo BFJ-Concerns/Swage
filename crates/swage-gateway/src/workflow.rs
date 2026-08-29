@@ -1145,7 +1145,8 @@ async fn run_ephemeral_agent_call(
             if let Some(task) = request.task.as_deref() {
                 return Err(format!(
                     "AgentCallError: task {task:?} cannot be selected on a continued session; select it when creating the worker"
-                ));
+                )
+                .into());
             }
             let created_here = state
                 .storage
@@ -1164,7 +1165,8 @@ async fn run_ephemeral_agent_call(
                     "AgentCallError: session {} was not created by this run; \
                      continuation tokens come from this run's own agentStart handles",
                     session_ref.session_id
-                ));
+                )
+                .into());
             }
             let session = state
                 .storage
@@ -1355,7 +1357,8 @@ async fn run_ephemeral_agent_call(
             return Err(format!(
                 "AgentCallTimeoutError: agent call exceeded its {}ms deadline",
                 request.timeout_ms.expect("timeout branch requires a deadline")
-            ));
+            )
+            .into());
         }
     }
     let turn = state
@@ -1378,7 +1381,8 @@ async fn run_ephemeral_agent_call(
                 swage_storage::TurnState::Failed => "failed".to_string(),
                 other => format!("ended {other:?}"),
             }
-        ));
+        )
+        .into());
     }
     let output = match (&request_schema, turn.structured_output) {
         (Some(_), Some(structured)) => structured,
@@ -2247,7 +2251,9 @@ async fn run_host_commands_inner(
                         if entry.args_hash != hash {
                             (
                                 Some(journal_entry_id),
-                                Err("NondeterministicReplayError".into()),
+                                Err(WorkflowHostError::Message(
+                                    "NondeterministicReplayError".into(),
+                                )),
                             )
                         } else if entry.status == "failed" {
                             // The original run observed this failure (and may
@@ -2255,10 +2261,12 @@ async fn run_host_commands_inner(
                             // error rather than re-executing the call.
                             (
                                 Some(journal_entry_id),
-                                Err(entry
-                                    .error_message
-                                    .clone()
-                                    .unwrap_or_else(|| "recorded agent failure".to_string())),
+                                Err(WorkflowHostError::Message(
+                                    entry
+                                        .error_message
+                                        .clone()
+                                        .unwrap_or_else(|| "recorded agent failure".to_string()),
+                                )),
                             )
                         } else if entry.status == "completed" {
                             let result = entry
@@ -2267,7 +2275,8 @@ async fn run_host_commands_inner(
                                 .ok_or_else(|| "completed agent entry has no result".to_string())
                                 .and_then(|value| {
                                     serde_json::from_value(value).map_err(|error| error.to_string())
-                                });
+                                })
+                                .map_err(WorkflowHostError::Message);
                             if let Some(rank) = replay_agent_ranks.get(&current_seq).copied() {
                                 await_replay_release(
                                     rank,
@@ -2326,7 +2335,9 @@ async fn run_host_commands_inner(
                                     .await,
                                 )
                             }
-                            Err(error) => (None, Err(error.to_string())),
+                            Err(error) => {
+                                (None, Err(WorkflowHostError::Message(error.to_string())))
+                            }
                         }
                     };
                     let result = if result.is_err()
@@ -8834,7 +8845,9 @@ mod tests {
         .await
         .expect_err("missing task must fail before provider dispatch");
         assert!(
-            error.contains("no task definition 'missing' exists"),
+            error
+                .to_string()
+                .contains("no task definition 'missing' exists"),
             "unexpected missing-task error: {error}"
         );
         assert_eq!(provider.requests.lock().expect("requests").len(), 3);
@@ -9946,7 +9959,11 @@ mod tests {
         .await
         .expect_err("continued calls must not silently ignore a task selector");
 
-        assert!(error.contains("cannot be selected on a continued session"));
+        assert!(
+            error
+                .to_string()
+                .contains("cannot be selected on a continued session")
+        );
     }
 
     /// Serves scripted gate verdicts through `complete` and counts calls, so
