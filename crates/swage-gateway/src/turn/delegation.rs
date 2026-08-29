@@ -260,7 +260,13 @@ impl DelegationSnapshotRecorder for GatewayDelegationSnapshotRecorder {
                 "delegated context snapshot is invalid JSON: {error}"
             ))
         })?;
-        super::apply_provider_snapshot_event(&self.state, &mut report, event).await?;
+        super::apply_provider_snapshot_event(
+            &self.state,
+            &mut report,
+            event,
+            super::ProviderSnapshotCapturePath::Delegated,
+        )
+        .await;
         self.record(session_id, turn_id, &report).await
     }
 }

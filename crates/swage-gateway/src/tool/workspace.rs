@@ -100,7 +100,7 @@ pub fn resolve_context_path(
     ctx: &dyn ToolContext,
     requested: &str,
 ) -> Result<ResolvedToolPath, String> {
-    let working_directory = canonical_existing_root(ctx.working_directory())?;
+    let working_directory = canonical_existing_root(ctx.working_directory(), "Tool root")?;
     let allowed_roots = context_roots(ctx)?;
 
     if Path::new(requested).is_absolute() {
@@ -128,7 +128,7 @@ pub fn resolve_new_context_path(
     ctx: &dyn ToolContext,
     requested: &str,
 ) -> Result<ResolvedToolPath, String> {
-    let working_directory = canonical_existing_root(ctx.working_directory())?;
+    let working_directory = canonical_existing_root(ctx.working_directory(), "Tool root")?;
     let allowed_roots = context_roots(ctx)?;
 
     if Path::new(requested).is_absolute() {
@@ -361,10 +361,10 @@ fn normalise_path(path: &Path) -> PathBuf {
 fn context_roots(ctx: &dyn ToolContext) -> Result<Vec<PathBuf>, String> {
     let mut roots = vec![canonical_existing_root(
         ctx.working_directory(),
-        "Workspace root",
+        "Tool root",
     )?];
     for path in ctx.allowed_paths() {
-        let root = canonical_existing_root(path, "Workspace root")?;
+        let root = canonical_existing_root(path, "Attachment root")?;
         if !roots.contains(&root) {
             roots.push(root);
         }
@@ -636,21 +636,42 @@ mod tests {
     }
 
     #[test]
-    fn canonical_root_checker_keeps_each_callers_wording() {
+    fn canonical_root_checker_preserves_tool_and_attachment_root_wording() {
         let dir = tmp_workspace();
-        let file = dir.path().join("not-a-directory");
-        std::fs::write(&file, b"").unwrap();
+        let tool_root = dir.path().join("not-a-directory");
+        std::fs::write(&tool_root, b"").unwrap();
+        let tool_context = swage_tool::context::MockToolContext {
+            agent_id: "test-agent".into(),
+            session_id: "test-session".into(),
+            working_directory: tool_root.clone(),
+            allowed_paths: vec![],
+            user_info: None,
+            call_id: None,
+            turn_id: None,
+        };
 
         assert_eq!(
-            canonical_existing_root(&file, "Attachment root").unwrap_err(),
-            format!("Attachment root is not a directory: {}", file.display())
+            resolve_context_path(&tool_context, "readme.md").unwrap_err(),
+            format!("Tool root is not a directory: {}", tool_root.display())
         );
 
-        let missing = dir.path().join("missing");
+        let attachment_root = dir.path().join("missing");
+        let attachment_context = swage_tool::context::MockToolContext {
+            agent_id: "test-agent".into(),
+            session_id: "test-session".into(),
+            working_directory: dir.path().to_path_buf(),
+            allowed_paths: vec![attachment_root.clone()],
+            user_info: None,
+            call_id: None,
+            turn_id: None,
+        };
         assert!(
-            canonical_existing_root(&missing, "Tool root")
+            resolve_context_path(&attachment_context, attachment_root.to_str().unwrap())
                 .unwrap_err()
-                .starts_with(&format!("Tool root is unavailable: {}:", missing.display()))
+                .starts_with(&format!(
+                    "Attachment root is unavailable: {}:",
+                    attachment_root.display()
+                ))
         );
     }
 }

@@ -724,6 +724,83 @@ mod tests {
     use crate::{NewSpace, SpaceStore};
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn list_parked_workflow_runs_returns_only_parked_runs_across_spaces() {
+        let storage = SqliteStorage::in_memory().expect("storage");
+        let first_space = storage
+            .create(NewSpace {
+                name: "first workflow space".into(),
+                slug: "first-workflow-space".parse().expect("slug"),
+            })
+            .await
+            .expect("first space");
+        let second_space = storage
+            .create(NewSpace {
+                name: "second workflow space".into(),
+                slug: "second-workflow-space".parse().expect("slug"),
+            })
+            .await
+            .expect("second space");
+        let new_run = |space_id| NewWorkflowRun {
+            space_id,
+            parent_run_id: None,
+            parent_seq: None,
+            script_version_id: None,
+            inline_workflow_id: None,
+            inline_workflow_name: None,
+            inline_workflow_version: None,
+            carrying_skill: None,
+            source: Some("return null".into()),
+            source_hash: Uuid::new_v4().to_string(),
+            args: serde_json::Value::Null,
+            budget: serde_json::json!({}),
+            engine_version: "test".into(),
+            dispatch_bound_agent_ids: vec![],
+            dispatch_bound_task_definition_ids: vec![],
+            workflow_call_tools: None,
+            inherited_worker_placement: None,
+        };
+
+        let parked_first = storage
+            .create_workflow_run(new_run(first_space.id))
+            .await
+            .expect("first parked run");
+        storage
+            .set_workflow_run_parked(parked_first.id, Utc::now() + chrono::Duration::hours(2))
+            .await
+            .expect("park first run");
+        let running = storage
+            .create_workflow_run(new_run(first_space.id))
+            .await
+            .expect("running run");
+        let parked_second = storage
+            .create_workflow_run(new_run(second_space.id))
+            .await
+            .expect("second parked run");
+        storage
+            .set_workflow_run_parked(parked_second.id, Utc::now() + chrono::Duration::hours(1))
+            .await
+            .expect("park second run");
+
+        let parked = storage
+            .list_parked_workflow_runs()
+            .await
+            .expect("list parked runs");
+        assert_eq!(
+            parked.iter().map(|run| run.id).collect::<Vec<_>>(),
+            vec![parked_second.id, parked_first.id],
+            "the lister includes parked runs from every space in wake order"
+        );
+        assert!(
+            parked.iter().all(|run| run.state == "parked"),
+            "the lister excludes non-parked runs"
+        );
+        assert!(
+            !parked.iter().any(|run| run.id == running.id),
+            "running workflows are not recovery owners"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn script_versions_append_and_runs_survive_reopen_shape() {
         let storage = SqliteStorage::in_memory().expect("storage");
         let space = storage
