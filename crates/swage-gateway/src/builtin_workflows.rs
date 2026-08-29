@@ -29,6 +29,12 @@ pub(crate) fn find_by_name(name: &str) -> Option<&'static BuiltinWorkflow> {
         .find(|workflow| workflow.name == name)
 }
 
+pub(crate) fn find_by_id(space_id: Uuid, id: Uuid) -> Option<&'static BuiltinWorkflow> {
+    BUILTIN_WORKFLOWS
+        .iter()
+        .find(|workflow| self::id(space_id, workflow.name) == id)
+}
+
 pub(crate) fn id(space_id: Uuid, name: &str) -> Uuid {
     synthetic_id(SYNTHETIC_ID_DOMAIN, space_id, name)
 }
