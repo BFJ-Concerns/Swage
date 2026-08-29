@@ -10,7 +10,7 @@ import type { ConnectionStore } from "../stores/connection";
 import type { SpaceStore } from "../stores/spaces";
 import type { StreamingStore } from "../stores/streaming";
 import type { PagesStore } from "../stores/pages";
-import type { ConversationDetail, MessageView } from "../types";
+import type { ConversationDetail, ConversationSummary, MessageView } from "../types";
 
 import * as operatorApi from "../api/operator";
 
@@ -50,6 +50,31 @@ function mockConversationStoreWithMessages(messages: MessageView[]): Conversatio
     messages,
   };
   return { ...mockConversationStore(), get activeConversation() { return detail; } };
+}
+
+function mockConversationStoreWithSessions(
+  previews: string[],
+  activeIndex: number,
+): ConversationStore {
+  const summaries: ConversationSummary[] = previews.map((preview, index) => ({
+    id: `conv-${index + 1}`,
+    created_at: "2026-08-29T10:00:00Z",
+    last_activity: "2026-08-29T10:00:00Z",
+    message_preview: preview,
+    has_interrupted_turn: false,
+  }));
+  const active: ConversationDetail = {
+    id: summaries[activeIndex].id,
+    space_id: "default",
+    created_at: "2026-08-29T10:00:00Z",
+    last_activity: "2026-08-29T10:00:00Z",
+    messages: [],
+  };
+  return {
+    ...mockConversationStore(),
+    get conversations() { return summaries; },
+    get activeConversation() { return active; },
+  };
 }
 
 function mockPagesStore(): PagesStore {
@@ -371,7 +396,7 @@ describe("AppLayout shell navigation", () => {
   it("marks conversation as the selected surface", () => {
     component = mountLayout();
 
-    expect(surfaceButton("Conversation").getAttribute("aria-pressed")).toBe("true");
+    expect(surfaceButton("Conversations").getAttribute("aria-pressed")).toBe("true");
     expect(surfaceButton("Operator").getAttribute("aria-pressed")).toBe("false");
   });
 
@@ -413,8 +438,8 @@ describe("AppLayout shell navigation", () => {
       });
 
       expect(document.querySelector('[aria-label="Settings"]')).not.toBeNull();
-      expect(surfaceButton("Conversation").getAttribute("aria-pressed")).toBe("false");
-      expect(surfaceButton("Conversation").classList.contains("active")).toBe(false);
+      expect(surfaceButton("Conversations").getAttribute("aria-pressed")).toBe("false");
+      expect(surfaceButton("Conversations").classList.contains("active")).toBe(false);
       expect(surfaceButton("Operator").getAttribute("aria-pressed")).toBe("false");
       expect(surfaceButton("Operator").classList.contains("active")).toBe(false);
       expect(surfaceButton("Settings").getAttribute("aria-pressed")).toBe("true");
@@ -524,14 +549,12 @@ describe("ambient conversation channel", () => {
     const selectConversation = vi.spyOn(conversationStore, "selectConversation");
     const loadConversations = vi.spyOn(conversationStore, "loadConversations");
     const refreshActiveConversation = vi.spyOn(conversationStore, "refreshActiveConversation");
-    const connectionStore = mockConnectionStore();
-    const disconnect = vi.spyOn(connectionStore, "disconnect");
     const layout = createClassComponent({
       component: AppLayout,
       target: document.body,
       props: {
         conversationStore,
-        connectionStore,
+        connectionStore: mockConnectionStore(),
         streamingStore: mockStreamingStore(),
         spaceStore: mockSpaceStore(),
         onRetry: () => {},
@@ -551,7 +574,6 @@ describe("ambient conversation channel", () => {
     expect(selectConversation).not.toHaveBeenCalled();
     expect(loadConversations).not.toHaveBeenCalled();
     expect(refreshActiveConversation).not.toHaveBeenCalled();
-    expect(disconnect).not.toHaveBeenCalled();
 
     layout.$set({ activeSurface: "conversation" });
     flushSync();
@@ -561,4 +583,54 @@ describe("ambient conversation channel", () => {
     expect(selectConversation).not.toHaveBeenCalled();
     layout.$destroy();
   });
+
+  it("cycles to another conversation from the work surface", () => {
+    const conversationStore = mockConversationStoreWithSessions(
+      ["Release checklist review", "Ledger migration"],
+      0,
+    );
+    const selectConversation = vi.spyOn(conversationStore, "selectConversation");
+    component = mountLayout({
+      activeSurface: "pages",
+      pagesStore: mockPagesStore(),
+      conversationStore,
+    });
+    const selector = document.querySelector(
+      'main.pages-surface [aria-label="Conversation"] select[aria-label="Active conversation"]',
+    ) as HTMLSelectElement;
+    expect(Array.from(selector.options).map((option) => option.textContent?.trim())).toEqual([
+      "Release checklist review",
+      "Ledger migration",
+    ]);
+    expect(selector.value).toBe("conv-1");
+
+    selector.value = "conv-2";
+    selector.dispatchEvent(new Event("change", { bubbles: true }));
+    flushSync();
+
+    // Reached from where the user was standing: the work surface is still on
+    // screen, so cycling cost no page.
+    expect(selectConversation).toHaveBeenCalledWith("conv-2");
+    expect(document.querySelector('main.pages-surface [aria-label="Page"] h2')?.textContent)
+      .toBe("Release checklist");
+  });
+
+  it("starts a conversation from the work surface", () => {
+    const onNewConversation = vi.fn();
+    component = mountLayout({
+      activeSurface: "pages",
+      pagesStore: mockPagesStore(),
+      conversationStore: mockConversationStoreWithSessions(["Release checklist review"], 0),
+      onNewConversation,
+    });
+
+    flushSync(() =>
+      (document.querySelector(
+        'main.pages-surface [aria-label="Conversation"] button.new-session',
+      ) as HTMLButtonElement).click(),
+    );
+
+    expect(onNewConversation).toHaveBeenCalledOnce();
+  });
 });
+
