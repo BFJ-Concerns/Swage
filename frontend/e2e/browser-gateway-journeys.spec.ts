@@ -251,7 +251,9 @@ test("clears effort after switching conversations before the following new-conve
   await page.getByRole("button", { name: "+ New conversation" }).click();
   await sendNewConversation(page, "second high effort conversation", "high");
 
-  await page.getByRole("button", { name: "first high effort conversation" }).click();
+  const conversations = page.locator(".conversation-select-btn");
+  await expect(conversations).toHaveCount(2);
+  await conversations.nth(1).click();
   await expect(page.getByRole("textbox", { name: "Message" })).toBeVisible();
   await page.getByRole("button", { name: "+ New conversation" }).click();
   await expect(page.getByRole("combobox", { name: "Effort" })).toHaveValue("");
