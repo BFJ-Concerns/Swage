@@ -123,7 +123,7 @@ fn meta_string_field(object: &str, field: &str) -> Option<String> {
             let key_start = index;
             while bytes
                 .get(index)
-                .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+                .is_some_and(|byte| byte.is_ascii_alphanumeric() || matches!(*byte, b'_' | b'$'))
             {
                 index += 1;
             }
@@ -1532,6 +1532,16 @@ mod tests {
                 name: Some("javascript".into()),
                 description: Some("bare keys".into()),
             }
+        );
+
+        let dollar_key_form = script_meta(
+            r#"export const meta = { $name: "dollar", description: "valid JavaScript key" };"#,
+        )
+        .expect("JavaScript metadata with a dollar key");
+        assert_eq!(dollar_key_form.name.as_deref(), None);
+        assert_eq!(
+            dollar_key_form.description.as_deref(),
+            Some("valid JavaScript key")
         );
     }
 
