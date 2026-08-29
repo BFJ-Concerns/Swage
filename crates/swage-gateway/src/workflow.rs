@@ -4726,13 +4726,14 @@ async fn launch_existing_run(
             Ok(Err(problem)) => ("failed", None, Some(problem.to_string())),
             Err(problem) => ("failed", None, Some(problem.to_string())),
         };
-        if let Err(problem) = record_terminal_budget(
-            &terminal_budget_state_owner,
-            run_id,
-            &terminal_budget,
-            &terminal_budget_state,
-        )
-        .await
+        if run_state != "failed"
+            && let Err(problem) = record_terminal_budget(
+                &terminal_budget_state_owner,
+                run_id,
+                &terminal_budget,
+                &terminal_budget_state,
+            )
+            .await
         {
             tracing::warn!(%run_id, %problem, "could not record terminal budget audit entry");
         }
