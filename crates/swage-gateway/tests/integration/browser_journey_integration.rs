@@ -407,7 +407,7 @@ async fn browser_tools_run_through_dispatcher_storage_and_secret_hygiene() {
         swage_gateway::tool::browser::browser_tools(Arc::clone(&browser_host)),
     );
     let (router, addr) =
-        start_browser_tool_server(provider, dispatcher, Arc::clone(&storage), temp.path()).await;
+        start_browser_tool_server(provider, dispatcher, Arc::clone(&storage)).await;
 
     let (_, body) = http(&router, "POST", "/api/conversations").await;
     let conv_id = body["id"].as_str().expect("conversation id").to_string();
@@ -764,10 +764,8 @@ async fn start_browser_tool_server(
     provider: impl LlmProvider + 'static,
     dispatcher: swage_gateway::tool::ToolDispatcher,
     storage: Arc<SqliteStorage>,
-    workspace_root: &std::path::Path,
 ) -> (Router, SocketAddr) {
     let mut config = swage_config::ResolvedConfig::default();
-    config.workspace.path = workspace_root.to_string_lossy().to_string();
     // Approval prompting defaults off; this attended-session journey asserts
     // the approval flow, so opt the typed-secret tool in explicitly.
     config.tools.permissions.require_approval =
