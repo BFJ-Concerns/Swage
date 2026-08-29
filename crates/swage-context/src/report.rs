@@ -163,6 +163,7 @@ mod tests {
             warnings: vec![],
             errors: vec![],
             effective_tool_permissions: None,
+            tool_scope: None,
             provider_visible: None,
             duration: std::time::Duration::from_millis(12),
         };

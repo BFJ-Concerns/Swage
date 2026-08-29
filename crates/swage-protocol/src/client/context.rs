@@ -20,6 +20,9 @@ pub struct AssemblyReport {
     pub effective_tool_permissions: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional, type = "Record<string, unknown>")]
+    pub tool_scope: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "Record<string, unknown>")]
     pub provider_visible: Option<serde_json::Value>,
     #[ts(type = "{ secs: number; nanos: number }")]
     pub duration: std::time::Duration,
@@ -37,6 +40,7 @@ impl AssemblyReport {
             warnings: Vec::new(),
             errors: Vec::new(),
             effective_tool_permissions: None,
+            tool_scope: None,
             provider_visible: None,
             duration: std::time::Duration::ZERO,
         }

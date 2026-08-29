@@ -84,6 +84,7 @@ pub async fn workflows_for_session(state: &AppState, session_id: Uuid) -> Result
         "workflows": response.scripts.into_iter().map(|script| json!({
             "name": script.name,
             "description": script.description,
+            "argument_contract": script.argument_contract,
         })).collect::<Vec<_>>(),
     }))
 }
@@ -97,7 +98,7 @@ impl Tool for WorkflowListTool {
     }
 
     fn description(&self) -> &str {
-        "List the workflows available in this session. Each entry gives its name and purpose. Workflow scripts do not declare argument schemas; pass any JSON value in workflow_run.args that the workflow expects. To author a new workflow, activate the Workflow Authoring skill, which documents the script surface."
+        "List the workflows available in this session. Each entry gives its name, purpose, and argument contract. A workflow with an unconstrained argument contract declares no schema, so pass the JSON value it expects in workflow_run.args. To author a new workflow, activate the Workflow Authoring skill, which documents the script surface."
     }
 
     fn parameters(&self) -> Value {
@@ -344,7 +345,60 @@ mod tests {
             .find(|workflow| workflow["name"] == "operator-report")
             .expect("saved workflow");
         assert_eq!(saved["description"], "Produce an operator report.");
-        assert!(saved.get("argument_guidance").is_none());
+        assert_eq!(saved["argument_contract"]["kind"], "unconstrained");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn listing_projects_declared_and_unconstrained_argument_contracts() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        storage
+            .create_workflow_script(NewWorkflowScript {
+                space_id: space.id,
+                name: "constrained-report".into(),
+                description: String::new(),
+                source: r#"export const meta = { argumentSchema: {"type":"object","required":["topic"]} }; return {};"#.into(),
+                delivery_grant: None,
+            })
+            .await
+            .expect("constrained workflow");
+        storage
+            .create_workflow_script(NewWorkflowScript {
+                space_id: space.id,
+                name: "open-report".into(),
+                description: String::new(),
+                source: "return {};".into(),
+                delivery_grant: None,
+            })
+            .await
+            .expect("unconstrained workflow");
+        let session = storage
+            .create_session(NewSession {
+                space_id: space.id,
+                agent_id: "gateway".into(),
+                metadata: None,
+                active_workspace_attachment_id: None,
+            })
+            .await
+            .expect("session");
+        let result = workflows_for_session(&state(Arc::clone(&storage)), session.id)
+            .await
+            .expect("workflow listing");
+        let workflows = result["workflows"].as_array().expect("workflow array");
+        let constrained = workflows
+            .iter()
+            .find(|workflow| workflow["name"] == "constrained-report")
+            .expect("constrained workflow");
+        assert_eq!(constrained["argument_contract"]["kind"], "declared");
+        assert_eq!(
+            constrained["argument_contract"]["schema"]["required"],
+            json!(["topic"])
+        );
+        let open = workflows
+            .iter()
+            .find(|workflow| workflow["name"] == "open-report")
+            .expect("unconstrained workflow");
+        assert_eq!(open["argument_contract"]["kind"], "unconstrained");
     }
 
     #[tokio::test(flavor = "multi_thread")]

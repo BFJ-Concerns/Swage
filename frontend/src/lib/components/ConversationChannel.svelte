@@ -1,0 +1,155 @@
+<!--
+  The conversation control channel — the session controls, connection state,
+  the message history, and the composer (or the approval it is waiting on).
+  It is ambient: it rides whatever work surface the user is standing on
+  rather than being a place they navigate to, so the same instance renders
+  beside the pages surface and beside the conversation list. Sessions cycle
+  within it — picking up an earlier conversation or starting a fresh one is
+  done from here, without leaving the work in view.
+-->
+<script lang="ts">
+  import ApprovalCard from "./ApprovalCard.svelte";
+  import ConnectionIndicator from "./ConnectionIndicator.svelte";
+  import MessageDisplay from "./MessageDisplay.svelte";
+  import MessageInput from "./MessageInput.svelte";
+  import type { DisplayPreferences } from "../display-preferences";
+  import type { ConnectionStore } from "../stores/connection";
+  import type { ConversationStore } from "../stores/conversations";
+  import type { StreamingStore } from "../stores/streaming";
+  import type { EffectiveAgentDefinitionResponse } from "../protocol/EffectiveAgentDefinitionResponse";
+
+  interface Props {
+    conversationStore: ConversationStore;
+    connectionStore: ConnectionStore;
+    streamingStore: StreamingStore;
+    onRetry: () => void;
+    displayPreferences?: DisplayPreferences;
+    modelOptions?: string[];
+    modelCatalogueReady?: boolean;
+    defaultModelId?: string | null;
+    agentDefinitions?: EffectiveAgentDefinitionResponse[];
+    selectedAgentId: string;
+    onNavigate?: (path: string) => void;
+    onNewConversation?: () => void;
+  }
+
+  let {
+    conversationStore,
+    connectionStore,
+    streamingStore,
+    onRetry,
+    displayPreferences,
+    modelOptions = [],
+    modelCatalogueReady = false,
+    defaultModelId = null,
+    agentDefinitions = [],
+    selectedAgentId = $bindable(),
+    onNavigate,
+    onNewConversation,
+  }: Props = $props();
+
+  const activeConversation = $derived(conversationStore.activeConversation);
+
+  // The sessions the switcher offers. A conversation that is active but not
+  // yet in the loaded list (just created, list not refreshed) still needs an
+  // option, or the switcher would read as having nothing selected.
+  const sessions = $derived.by(() => {
+    const listed = conversationStore.conversations.map((conversation) => ({
+      id: conversation.id,
+      label: conversation.message_preview ?? "New conversation",
+    }));
+    const active = activeConversation;
+    if (active && !listed.some((session) => session.id === active.id)) {
+      listed.unshift({ id: active.id, label: "New conversation" });
+    }
+    return listed;
+  });
+
+  let selectedSessionId = $state("");
+  $effect(() => {
+    selectedSessionId = activeConversation?.id ?? "";
+  });
+
+  function cycleSession(id: string): void {
+    if (id && id !== activeConversation?.id) conversationStore.selectConversation(id);
+  }
+</script>
+
+<section aria-label="Conversation">
+  <!-- Session controls travel with the channel, so cycling to another
+       conversation or starting one costs no page. -->
+  <header class="session-bar">
+    <select
+      class="session-select"
+      aria-label="Active conversation"
+      bind:value={selectedSessionId}
+      onchange={() => cycleSession(selectedSessionId)}
+    >
+      {#if !activeConversation}
+        <option value="">No conversation</option>
+      {/if}
+      {#each sessions as session (session.id)}
+        <option value={session.id}>{session.label}</option>
+      {/each}
+    </select>
+    <button class="new-session" aria-label="New conversation" onclick={() => onNewConversation?.()}>+ New</button>
+  </header>
+  {#if activeConversation}<ConnectionIndicator store={connectionStore} {onRetry} />{/if}
+  <MessageDisplay store={conversationStore} {streamingStore} {displayPreferences} />
+  {#if streamingStore.pendingApproval}
+    <ApprovalCard approval={streamingStore.pendingApproval} />
+  {:else}
+    <MessageInput store={streamingStore} {modelOptions} {modelCatalogueReady} selectedModelId={activeConversation?.selected_model_id ?? defaultModelId} sessionId={activeConversation?.id ?? null} {agentDefinitions} canSelectAgent={!activeConversation} bind:selectedAgentId {onNavigate} />
+  {/if}
+</section>
+
+<style>
+  section { min-width: 0; overflow: auto; }
+
+  /* One mono line above the history: which session is in the channel, and the
+     way to start another. Matches the conversation list's control register.
+     Sticky within the channel's own scroll, so cycling stays reachable however
+     far down the history the user has read. */
+  .session-bar {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 22px;
+    background: var(--paper);
+    border-bottom: 1px dotted var(--rule-soft);
+  }
+
+  .session-select {
+    flex: 1;
+    min-width: 0;
+    background: var(--paper);
+    border: 1px solid var(--rule-soft);
+    color: var(--ink);
+    font-family: var(--font-mono);
+    font-weight: 500;
+    font-size: 11px;
+    line-height: 1.4;
+    letter-spacing: 0.08em;
+    padding: 3px 6px;
+  }
+
+  .new-session {
+    background: transparent;
+    border: none;
+    padding: 0;
+    font-family: var(--font-mono);
+    font-weight: 500;
+    font-size: 11px;
+    line-height: 1;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--ink);
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+
+  .new-session:hover { color: var(--ink-orange); }
+</style>
