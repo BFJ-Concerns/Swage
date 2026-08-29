@@ -1166,6 +1166,22 @@ async fn process_turn_with_composition_and_focus(
         let path = std::path::PathBuf::from(path);
         (path.clone(), vec![path])
     } else {
+        if attendance == TurnAttendance::Unattended
+            && workspace_policy.active_workspace.is_none()
+            && !state.config_root.is_absolute()
+        {
+            record_terminal_state_and_release(
+                state,
+                session_id,
+                prepared_turn_id,
+                TurnState::Failed,
+            )
+            .await?;
+            return Err(GatewayError::ConfigError(format!(
+                "unattended turn has no deliberate tool root: attach a workspace or configure an absolute managed scratch root (current root: {})",
+                state.config_root.display()
+            )));
+        }
         agent_workspace_from_policy(&state.config_root, &workspace_policy, space_id, session.id)
     };
 
@@ -1206,7 +1222,10 @@ async fn process_turn_with_composition_and_focus(
         &session.agent_id,
         &session_variables,
     );
-    let (assembled_messages, assembly_report) = (output.messages, output.report);
+    let (assembled_messages, mut assembly_report) = (output.messages, output.report);
+    assembly_report.tool_scope = Some(serde_json::json!({
+        "effective_root": workspace_root,
+    }));
 
     tracing::debug!(
         total_tokens = assembly_report.total_tokens,
@@ -1232,7 +1251,6 @@ async fn process_turn_with_composition_and_focus(
             effective_model_source,
         );
     }
-
     let session_approval_grants = state
         .session_approval_grants
         .lock()

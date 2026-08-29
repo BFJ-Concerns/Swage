@@ -6,6 +6,10 @@ All notable changes to Swage are documented in this file.
 
 ### Added
 
+- Workflows may declare an argument schema in portable metadata; saved runs validate it before starting and workflow listings expose the declared or unconstrained contract.
+- The conversation now rides every work surface: pages carry the same live conversation beside them, with earlier conversations picked up and new ones started from the channel itself, so moving between pages neither leaves the conversation behind nor resets it.
+- Workspace attachment, trust, and detach controls are now reachable from the selected space's Settings workspaces section.
+- Shipped development workflows are now syntax-checked at the gate, and the assembly build-and-verify workflow is runnable.
 - Agents can now list the workflows available to their session before starting one.
 - Asynchronous turn callers can select a configured model for one request, with the effective selection retained in that turn's audit snapshot.
 - Context assembly alternatives can now be configured under `context.alternatives` for controlled selection experiments.
@@ -21,6 +25,7 @@ All notable changes to Swage are documented in this file.
 - Agents can now run newly authored workflow source directly without saving or registering it first.
 - Durable named task definitions bundle instructions, an output contract, a model preference, and narrowing permissions for workflow and delegated child dispatches.
 - Workflow and delegation authors can place individual workers in a chosen working directory or a runtime-provisioned isolated git worktree.
+- Dispatch results and the audit trail now name the directory where each child worker ran.
 - Workflow agent calls now honour per-call reasoning effort and host-enforced timeout options.
 - Workflow scripts can now dispatch ephemeral workers by prompt and model options without naming an agent definition.
 - Skills can carry immediately runnable workflow scripts, with same-named authored workflows taking precedence.
@@ -37,6 +42,7 @@ All notable changes to Swage are documented in this file.
 
 ### Changed
 
+- Presence APIs and protocol types now consistently identify attached devices; the former machine-named routes and fields are removed in this private alpha.
 - Context compaction now uses provider-native prompt token counts when available, while retaining conservative local screening and estimate fallback when counting is unavailable.
 - Async turn submissions now reject unrecognised request fields instead of silently ignoring them.
 - JavaScript context assemblies now expose `render()` only on template-backed briefing elements; calling it on literal elements fails the script and records the fallback to the default assembly.
@@ -49,6 +55,9 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- Schema-constrained workflow agent calls now return `null` after exhausting validation attempts, while ordinary agent and turn failures still throw.
+- Unattended turns now refuse a relative managed scratch root with an error naming how to configure a deliberate root, and record their resolved tool root in turn diagnostics.
+- Terminal Chat Completions stream events now preserve reported token usage when it arrives alongside the finish reason.
 - Gateway startup now reclaims worker worktrees and their Git registrations left behind by an unclean exit.
 - Provider-facing tool schemas now retain stripped validation requirements in their descriptions, helping models form valid schedule delivery targets on the first call.
 - Portable JavaScript workflow `meta` headers now seed saved script details, and the unused workflow-script `agent_id` query has been removed.

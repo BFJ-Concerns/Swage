@@ -270,7 +270,7 @@ function makeOperatorOverview(
     devices: [
       {
         device_id: "local",
-        label: "Local machine",
+        label: "Local device",
         kind: "local",
         base_url: null,
         workspace_root: "/tmp/swage",
@@ -1279,7 +1279,7 @@ describe("App", () => {
       "Live control surface for the running gateway",
     );
     expect(document.body.textContent).toContain("dev_dm");
-    expect(document.body.textContent).toContain("Local machine");
+    expect(document.body.textContent).toContain("Local device");
   });
 
   it("shows missing space workspaces and relinks them before opening", async () => {
