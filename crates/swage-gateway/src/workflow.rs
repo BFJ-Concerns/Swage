@@ -5561,7 +5561,7 @@ mod tests {
 
         let (state, storage) = workflow_test_state();
         let space = storage.get_or_create_default().await.expect("space");
-        let _skill_root = crate::skill::SpaceSkillRootGuard::at(space.id, root.path());
+        let _skill_root = crate::skill::TestSkillRootGuard::at(space.id, root.path());
 
         let Json(list) = list_scripts(State(state), Path(space.id))
             .await
