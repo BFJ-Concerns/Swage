@@ -103,6 +103,11 @@
   function closeSettings(): void {
     onNavigate?.(activeConversation?.id ? `/conversations/${activeConversation.id}` : "/");
   }
+
+  function openCurrentSpaceWorkspaces(): void {
+    if (!currentSpace) return;
+    onNavigate?.(`/settings/space/${encodeURIComponent(currentSpace.slug)}/workspaces`);
+  }
 </script>
 
 {#if currentSpace}
@@ -128,6 +133,9 @@
         <button class:active={settingsTab === "providers"} onclick={() => onNavigate?.("/settings/providers")}>Providers</button>
         <button class:active={settingsTab === "agents"} onclick={() => onNavigate?.("/settings/agents")}>Agents</button>
         <button class:active={settingsTab === "automation"} onclick={() => onNavigate?.("/settings/automation")}>Automation</button>
+        {#if currentSpace}
+          <button class:active={settingsSpaceTab === "workspaces"} onclick={openCurrentSpaceWorkspaces}>Workspaces</button>
+        {/if}
       </nav>
       <button class="close" onclick={closeSettings} aria-label="Close settings">×</button>
     </header>
