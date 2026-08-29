@@ -37,7 +37,7 @@ All notable changes to Swage are documented in this file.
 
 ### Changed
 
-- The removed `workspace.path` key no longer supplies a global tool scope; workspace attachments and managed scratch roots define tool scope.
+- The `workspace.path` key is removed; workspace attachments and managed scratch roots define tool scope, and local execution is no longer listed as an attached device.
 - Context compaction now uses provider-native prompt token counts when available, while retaining conservative local screening and estimate fallback when counting is unavailable.
 - Async turn submissions now reject unrecognised request fields instead of silently ignoring them.
 - JavaScript context assemblies now expose `render()` only on template-backed briefing elements; calling it on literal elements fails the script and records the fallback to the default assembly.

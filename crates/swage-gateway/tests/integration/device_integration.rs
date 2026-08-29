@@ -28,7 +28,7 @@ use swage_gateway::{
     state::AppState,
 };
 use swage_provider::LlmProvider;
-use swage_storage::SqliteStorage;
+use swage_storage::{SessionStore, SqliteStorage};
 use swage_tool::context::{MockToolContext, ToolContext};
 use swage_tool::tool::Tool;
 
@@ -115,8 +115,6 @@ fn with_secret_env() -> ProcessEnvGuard {
 async fn start_test_server(
     provider: impl LlmProvider + 'static,
     dispatcher: swage_gateway::tool::ToolDispatcher,
-    _workspace_root: PathBuf,
-    _include_local_device: bool,
 ) -> (SocketAddr, AppState) {
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
     let config = swage_config::ResolvedConfig::default();
@@ -141,7 +139,6 @@ async fn start_file_backed_test_server(
     db_path: &std::path::Path,
     provider: impl LlmProvider + 'static,
     dispatcher: swage_gateway::tool::ToolDispatcher,
-    _workspace_root: PathBuf,
     restore_devices: bool,
 ) -> (SocketAddr, AppState) {
     let storage = Arc::new(SqliteStorage::open(db_path).unwrap());
@@ -225,12 +222,21 @@ async fn ws_recv(stream: &mut WsStream) -> Value {
 
 async fn run_turn_and_collect_tool_result(
     addr: SocketAddr,
+    state: &AppState,
     provider_tx1: tokio::sync::mpsc::Sender<StreamChunk>,
     provider_tx2: tokio::sync::mpsc::Sender<StreamChunk>,
     workspace_root: Option<&std::path::Path>,
+    session_metadata: Option<Value>,
 ) -> serde_json::Value {
     let client = GatewayClient::new(&format!("http://{addr}"));
     let conversation = client.create_conversation().await.unwrap();
+    if let Some(metadata) = session_metadata {
+        state
+            .storage
+            .set_session_metadata(conversation.id, Some(metadata))
+            .await
+            .unwrap();
+    }
     if let Some(workspace_root) = workspace_root {
         let response = reqwest::Client::new()
             .post(format!(
@@ -329,8 +335,7 @@ async fn same_machine_gateway_executes_turns_without_a_registered_local_device()
         swage_gateway::tool::ToolDispatcher::allow_all(vec![Arc::new(DeviceIdentityTool {
             marker: "local-device",
         }) as Arc<dyn Tool>]);
-    let (addr, _state) =
-        start_test_server(provider, dispatcher, workspace.path().to_path_buf(), true).await;
+    let (addr, state) = start_test_server(provider, dispatcher).await;
 
     let devices: serde_json::Value = reqwest::get(format!("http://{addr}/api/devices"))
         .await
@@ -340,7 +345,9 @@ async fn same_machine_gateway_executes_turns_without_a_registered_local_device()
         .unwrap();
     assert_eq!(devices["devices"], json!([]));
 
-    let result = run_turn_and_collect_tool_result(addr, tx1, tx2, Some(workspace.path())).await;
+    let result =
+        run_turn_and_collect_tool_result(addr, &state, tx1, tx2, Some(workspace.path()), None)
+            .await;
     assert_eq!(result["device"], "local-device");
 }
 
@@ -355,13 +362,7 @@ async fn attached_device_registers_with_remote_gateway_and_executes_work() {
         swage_gateway::tool::ToolDispatcher::allow_all(vec![Arc::new(DeviceIdentityTool {
             marker: "gateway-unused",
         }) as Arc<dyn Tool>]);
-    let (addr, state) = start_test_server(
-        provider,
-        gateway_dispatcher,
-        device_workspace.path().to_path_buf(),
-        false,
-    )
-    .await;
+    let (addr, state) = start_test_server(provider, gateway_dispatcher).await;
     let shared_token_secret_ref =
         create_secret_ref(&state, "Remote device token", "device-secret").await;
 
@@ -389,8 +390,15 @@ async fn attached_device_registers_with_remote_gateway_and_executes_work() {
         .await
         .unwrap();
 
-    let result =
-        run_turn_and_collect_tool_result(addr, tx1, tx2, Some(device_workspace.path())).await;
+    let result = run_turn_and_collect_tool_result(
+        addr,
+        &state,
+        tx1,
+        tx2,
+        Some(device_workspace.path()),
+        Some(json!({"device_id": "remote-device-a"})),
+    )
+    .await;
     assert_eq!(
         result["device"], "remote-device",
         "remote tool result: {result:?}"
@@ -413,13 +421,7 @@ async fn run_transport_backend_round_trip(
         swage_gateway::tool::ToolDispatcher::allow_all(vec![Arc::new(DeviceIdentityTool {
             marker: "gateway-unused",
         }) as Arc<dyn Tool>]);
-    let (addr, state) = start_test_server(
-        provider,
-        gateway_dispatcher,
-        workspace.path().to_path_buf(),
-        false,
-    )
-    .await;
+    let (addr, state) = start_test_server(provider, gateway_dispatcher).await;
     let shared_token_secret_ref =
         create_secret_ref(&state, &format!("{backend_label} token"), "backend-secret").await;
 
@@ -448,7 +450,15 @@ async fn run_transport_backend_round_trip(
         .await
         .unwrap();
 
-    let result = run_turn_and_collect_tool_result(addr, tx1, tx2, Some(workspace.path())).await;
+    let result = run_turn_and_collect_tool_result(
+        addr,
+        &state,
+        tx1,
+        tx2,
+        Some(workspace.path()),
+        Some(json!({"execution_backend": backend_kind.to_string()})),
+    )
+    .await;
     assert_eq!(
         result["device"], marker,
         "{backend_label} result: {result:?}"
@@ -481,14 +491,8 @@ async fn registered_remote_device_survives_restart() {
         swage_gateway::tool::ToolDispatcher::allow_all(vec![Arc::new(DeviceIdentityTool {
             marker: "gateway-unused",
         }) as Arc<dyn Tool>]);
-    let (addr, state) = start_file_backed_test_server(
-        &db_path,
-        provider,
-        gateway_dispatcher,
-        workspace.path().to_path_buf(),
-        false,
-    )
-    .await;
+    let (addr, state) =
+        start_file_backed_test_server(&db_path, provider, gateway_dispatcher, false).await;
     let shared_token_secret_ref =
         create_secret_ref(&state, "Persisted backend token", "backend-secret").await;
 
@@ -524,14 +528,9 @@ async fn registered_remote_device_survives_restart() {
         swage_gateway::tool::ToolDispatcher::allow_all(vec![Arc::new(DeviceIdentityTool {
             marker: "gateway-unused",
         }) as Arc<dyn Tool>]);
-    let (_restarted_addr, restarted_state) = start_file_backed_test_server(
-        &db_path,
-        restarted_provider,
-        restarted_dispatcher,
-        workspace.path().to_path_buf(),
-        true,
-    )
-    .await;
+    let (_restarted_addr, restarted_state) =
+        start_file_backed_test_server(&db_path, restarted_provider, restarted_dispatcher, true)
+            .await;
 
     let devices = swage_gateway::device::list_devices(&restarted_state).await;
     assert!(
