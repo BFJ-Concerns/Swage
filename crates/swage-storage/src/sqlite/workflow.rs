@@ -497,6 +497,16 @@ impl WorkflowStore for SqliteStorage {
         .await
     }
 
+    async fn list_parked_workflow_runs(&self) -> Result<Vec<WorkflowRunRecord>, StorageError> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(&format!(
+                "SELECT {RUN_COLUMNS} FROM workflow_runs WHERE state = 'parked' ORDER BY wake_at ASC"
+            ))?;
+            stmt.query_map([], run_row)?.collect()
+        })
+        .await
+    }
+
     async fn list_interrupted_workflow_runs(&self) -> Result<Vec<WorkflowRunRecord>, StorageError> {
         self.with_conn(|conn| {
             let mut stmt = conn.prepare(&format!(

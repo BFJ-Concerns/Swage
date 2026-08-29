@@ -1079,6 +1079,8 @@ pub trait WorkflowStore: Send + Sync {
         &self,
         now: chrono::DateTime<chrono::Utc>,
     ) -> Result<Vec<WorkflowRunRecord>, StorageError>;
+    /// All parked runs, oldest wake first, including runs not yet due.
+    async fn list_parked_workflow_runs(&self) -> Result<Vec<WorkflowRunRecord>, StorageError>;
     /// Runs a crash or shutdown left interrupted, oldest first — the boot
     /// resume's work list.
     async fn list_interrupted_workflow_runs(&self) -> Result<Vec<WorkflowRunRecord>, StorageError>;
@@ -2414,6 +2416,9 @@ mod tests {
             &self,
             _: chrono::DateTime<chrono::Utc>,
         ) -> Result<Vec<WorkflowRunRecord>, StorageError> {
+            unimplemented!()
+        }
+        async fn list_parked_workflow_runs(&self) -> Result<Vec<WorkflowRunRecord>, StorageError> {
             unimplemented!()
         }
         async fn list_interrupted_workflow_runs(
