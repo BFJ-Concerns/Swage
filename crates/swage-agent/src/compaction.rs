@@ -29,19 +29,6 @@ use crate::error::AgentError;
 /// keeping clearly small contexts off the counting endpoint.
 const PER_MESSAGE_TOKEN_OVERHEAD_BYTES: u64 = 16;
 
-/// Check whether the message history exceeds the compaction threshold.
-///
-/// Token thresholds first use a conservative byte bound, then ask the active
-/// provider to count the exact prompt. Providers that cannot count, or whose
-/// counting request fails, fall back to the existing character estimate.
-pub async fn exceeds_threshold(
-    messages: &[ChatMessage],
-    threshold: &CompactionThreshold,
-    provider: &dyn LlmProvider,
-) -> bool {
-    exceeds_threshold_with_model(messages, threshold, provider, None).await
-}
-
 /// Check whether the message history exceeds the compaction threshold for the
 /// model that will receive the completion.
 pub async fn exceeds_threshold_with_model(
@@ -66,34 +53,6 @@ pub async fn exceeds_threshold_with_model(
         }
         CompactionThreshold::MessageCount(max_count) => messages.len() > *max_count as usize,
     }
-}
-
-/// Compact the message history, applying tiers until context is within bounds.
-///
-/// Returns the compacted message list. Removed messages are already persisted
-/// to storage from earlier writes — this function only trims the active context.
-///
-/// # Parameters
-/// - `messages`: Current active message history.
-/// - `threshold`: When context is considered too large.
-/// - `provider`: LLM provider used for tier-1 summarisation.
-/// - `_storage`: Currently unused — reserved for future tier-3 storage queries.
-///   The underscore prefix signals intentional non-use to the compiler. Removed
-///   messages already exist in the DB from earlier persistence calls.
-/// - `_thread_id`: Currently unused — owning thread identifier, reserved for
-///   scoped storage queries in future tier implementations.
-pub async fn compact(
-    messages: Vec<ChatMessage>,
-    threshold: &CompactionThreshold,
-    provider: &dyn LlmProvider,
-    _storage: &dyn Storage,
-    _thread_id: Uuid,
-    focus: Option<&str>,
-) -> Result<(Vec<ChatMessage>, Option<CompactionRecord>), AgentError> {
-    compact_with_model(
-        messages, threshold, provider, _storage, _thread_id, focus, None, false,
-    )
-    .await
 }
 
 /// Compact a history using the tokenizer and completion model selected for the
@@ -646,10 +605,11 @@ mod tests {
         let provider = CapturingCountProvider::new(CountOutcome::Count(0));
 
         assert!(
-            !exceeds_threshold(
+            !exceeds_threshold_with_model(
                 &messages,
                 &CompactionThreshold::MessageCount(5),
                 provider.as_ref(),
+                None,
             )
             .await
         );
@@ -666,10 +626,11 @@ mod tests {
         let provider = CapturingCountProvider::new(CountOutcome::Count(0));
 
         assert!(
-            !exceeds_threshold(
+            !exceeds_threshold_with_model(
                 &messages,
                 &CompactionThreshold::MessageCount(3),
                 provider.as_ref(),
+                None,
             )
             .await
         );
@@ -686,10 +647,11 @@ mod tests {
         let provider = CapturingCountProvider::new(CountOutcome::Count(0));
 
         assert!(
-            exceeds_threshold(
+            exceeds_threshold_with_model(
                 &messages,
                 &CompactionThreshold::MessageCount(3),
                 provider.as_ref(),
+                None,
             )
             .await
         );
@@ -703,18 +665,20 @@ mod tests {
         let provider = CapturingCountProvider::new(CountOutcome::Unavailable);
 
         assert!(
-            exceeds_threshold(
+            exceeds_threshold_with_model(
                 &messages,
                 &CompactionThreshold::TokenCount(1),
                 provider.as_ref(),
+                None,
             )
             .await
         );
         assert!(
-            !exceeds_threshold(
+            !exceeds_threshold_with_model(
                 &messages,
                 &CompactionThreshold::TokenCount(10),
                 provider.as_ref(),
+                None,
             )
             .await
         );
@@ -728,10 +692,11 @@ mod tests {
             text_msg(Role::User, "abc"),
         ];
         assert!(
-            exceeds_threshold(
+            exceeds_threshold_with_model(
                 &short_messages,
                 &CompactionThreshold::TokenCount(1),
                 provider.as_ref(),
+                None,
             )
             .await
         );
@@ -746,10 +711,11 @@ mod tests {
         let provider = CapturingCountProvider::new(CountOutcome::Count(0));
 
         assert!(
-            exceeds_threshold(
+            exceeds_threshold_with_model(
                 &messages,
                 &CompactionThreshold::MessageCount(1),
                 provider.as_ref(),
+                None,
             )
             .await
         );
@@ -768,10 +734,11 @@ mod tests {
         let provider = CapturingCountProvider::new(CountOutcome::Count(999));
 
         assert!(
-            !exceeds_threshold(
+            !exceeds_threshold_with_model(
                 &messages,
                 &CompactionThreshold::TokenCount(100),
                 provider.as_ref(),
+                None,
             )
             .await
         );
@@ -792,10 +759,11 @@ mod tests {
         let provider = CapturingCountProvider::new(CountOutcome::Count(5));
 
         assert!(
-            exceeds_threshold(
+            exceeds_threshold_with_model(
                 &messages,
                 &CompactionThreshold::TokenCount(4),
                 provider.as_ref(),
+                None,
             )
             .await
         );
@@ -819,10 +787,11 @@ mod tests {
         let provider = CapturingCountProvider::new(CountOutcome::Unavailable);
 
         assert!(
-            exceeds_threshold(
+            exceeds_threshold_with_model(
                 &messages,
                 &CompactionThreshold::TokenCount(1),
                 provider.as_ref(),
+                None,
             )
             .await
         );
@@ -842,10 +811,11 @@ mod tests {
         let provider = CapturingCountProvider::new(CountOutcome::Failed);
 
         assert!(
-            exceeds_threshold(
+            exceeds_threshold_with_model(
                 &messages,
                 &CompactionThreshold::TokenCount(1),
                 provider.as_ref(),
+                None,
             )
             .await
         );
@@ -894,13 +864,15 @@ mod tests {
         let storage = stub_storage();
         let provider = SummaryProvider::new("irrelevant");
 
-        let result = compact(
+        let result = compact_with_model(
             messages,
             &CompactionThreshold::MessageCount(10),
             provider.as_ref(),
             storage.as_ref(),
             Uuid::new_v4(),
             None,
+            None,
+            false,
         )
         .await
         .expect("compact should succeed when below threshold");
@@ -921,13 +893,15 @@ mod tests {
         let storage = stub_storage();
         let provider = SummaryProvider::new("Summary of the first two messages");
 
-        let (result, record) = compact(
+        let (result, record) = compact_with_model(
             messages,
             &CompactionThreshold::MessageCount(3),
             provider.as_ref(),
             storage.as_ref(),
             Uuid::new_v4(),
             None,
+            None,
+            false,
         )
         .await
         .expect("compact should succeed");
@@ -967,13 +941,15 @@ mod tests {
         let storage = stub_storage();
         let provider = SummaryProvider::new("focused summary");
 
-        let (_, record) = compact(
+        let (_, record) = compact_with_model(
             messages,
             &CompactionThreshold::MessageCount(3),
             provider.as_ref(),
             storage.as_ref(),
             Uuid::new_v4(),
             Some("Preserve dates and named decisions"),
+            None,
+            false,
         )
         .await
         .expect("focused compaction should succeed");
@@ -1004,22 +980,25 @@ mod tests {
         let storage = stub_storage();
         let provider = Arc::new(ErrorProvider);
 
-        let (result, _) = compact(
+        let (result, _) = compact_with_model(
             messages,
             &CompactionThreshold::MessageCount(3),
             provider.as_ref(),
             storage.as_ref(),
             Uuid::new_v4(),
             None,
+            None,
+            false,
         )
         .await
         .expect("compact should succeed via truncation fallback");
 
         assert!(
-            !exceeds_threshold(
+            !exceeds_threshold_with_model(
                 &result,
                 &CompactionThreshold::MessageCount(3),
                 provider.as_ref(),
+                None,
             )
             .await,
             "result should be within threshold, got {} messages",
@@ -1038,13 +1017,15 @@ mod tests {
         let storage = stub_storage();
         let provider = TransientCountFailureProvider::new();
 
-        let (result, record) = compact(
+        let (result, record) = compact_with_model(
             messages,
             &CompactionThreshold::TokenCount(20),
             provider.as_ref(),
             storage.as_ref(),
             Uuid::new_v4(),
             None,
+            None,
+            false,
         )
         .await
         .expect("fallback estimate places the unchanged prompt below the threshold");
@@ -1069,13 +1050,15 @@ mod tests {
         let storage = stub_storage();
         let provider = Arc::new(ErrorProvider);
 
-        let result = compact(
+        let result = compact_with_model(
             messages,
             &CompactionThreshold::MessageCount(0),
             provider.as_ref(),
             storage.as_ref(),
             Uuid::new_v4(),
             None,
+            None,
+            false,
         )
         .await;
 
