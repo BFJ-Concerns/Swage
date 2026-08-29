@@ -465,6 +465,19 @@ describe("AppLayout shell navigation", () => {
     expect(onNavigate).toHaveBeenCalledWith("/settings/agents");
   });
 
+  it("navigates to the selected space workspaces from settings", () => {
+    const onNavigate = vi.fn();
+    component = mountLayout({ onNavigate, routePath: "/settings/providers" });
+    const settingsNavigation = document.querySelector('nav[aria-label="Settings sections"]');
+    const workspaces = Array.from(settingsNavigation?.querySelectorAll("button") ?? []).find(
+      (button) => button.textContent?.trim() === "Workspaces",
+    );
+
+    flushSync(() => workspaces?.click());
+
+    expect(onNavigate).toHaveBeenCalledWith("/settings/space/default/workspaces");
+  });
+
   it("opens global settings without a selected space", () => {
     const onNavigate = vi.fn();
     component = mountLayout({
