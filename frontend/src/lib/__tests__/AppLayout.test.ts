@@ -91,6 +91,7 @@ function mockPagesStore(): PagesStore {
         position: 0,
         source: "Ship the gateway",
         updated_at: "2026-08-29T10:00:00Z",
+        annotations: [],
       },
     ],
   };
@@ -102,7 +103,9 @@ function mockPagesStore(): PagesStore {
     closePage: () => {},
     createPage: async () => {},
     writeModule: async () => {},
-    handleServerEvent: () => {},
+    annotate: async () => {},
+    removeAnnotation: async () => {},
+    stopListening: () => {},
   };
 }
 
@@ -646,4 +649,3 @@ describe("ambient conversation channel", () => {
     expect(onNewConversation).toHaveBeenCalledOnce();
   });
 });
-
