@@ -3,6 +3,9 @@
 // Live refresh rides the server's page_updated event: the event is only a
 // signal (page id + module id); the store refetches the page, so content
 // always comes from the authoritative read path, never from event payloads.
+// Annotations — the notes the user and the agent hang on the same module —
+// travel with the page on that refetch, so an agent's note appears without a
+// reload by the same route a module edit does.
 
 import { fromStore, writable } from "svelte/store";
 import type { PageResponse } from "../protocol/PageResponse";
@@ -22,6 +25,14 @@ export interface PagesStore {
     moduleId: string | null,
     source: string,
   ): Promise<void>;
+  // Leave a note on a module, or on the page when moduleId is null.
+  annotate(
+    pageId: string,
+    moduleId: string | null,
+    body: string,
+    tags?: string[],
+  ): Promise<void>;
+  removeAnnotation(pageId: string, annotationId: string): Promise<void>;
   handleServerEvent(event: ServerEvent): void;
 }
 
@@ -81,6 +92,30 @@ export function createPagesStore(): PagesStore {
         module_id: moduleId ?? undefined,
         source,
       });
+      await refreshActive(pageId);
+    },
+
+    async annotate(
+      pageId: string,
+      moduleId: string | null,
+      body: string,
+      tags: string[] = [],
+    ): Promise<void> {
+      await pagesApi.createPageAnnotation(pageId, {
+        module_id: moduleId ?? undefined,
+        body,
+        tags,
+      });
+      // The note comes back through the same read path as everything else
+      // on the page — the response body is a receipt, not the source.
+      await refreshActive(pageId);
+    },
+
+    async removeAnnotation(
+      pageId: string,
+      annotationId: string,
+    ): Promise<void> {
+      await pagesApi.deletePageAnnotation(annotationId);
       await refreshActive(pageId);
     },
 
