@@ -19,9 +19,9 @@ use tower::ServiceExt;
 use swage_gateway::server::build_router;
 use swage_gateway::state::AppState;
 use swage_storage::SqliteStorage;
+use swage_storage::store::PageStore;
 
-fn make_test_router() -> (Router, Arc<SqliteStorage>) {
-    let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+fn router_over(storage: Arc<SqliteStorage>) -> Router {
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
@@ -30,7 +30,20 @@ fn make_test_router() -> (Router, Arc<SqliteStorage>) {
         swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
         None,
     );
-    (build_router(state), storage)
+    build_router(state)
+}
+
+fn make_test_router() -> (Router, Arc<SqliteStorage>) {
+    let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+    (router_over(Arc::clone(&storage)), storage)
+}
+
+/// A router over a database file on disk — the storage a started gateway
+/// opens. An in-memory database dies with its connection, so it cannot show
+/// whether the seeded rows were durably written; this one can.
+fn make_file_backed_router(db_path: &std::path::Path) -> (Router, Arc<SqliteStorage>) {
+    let storage = Arc::new(SqliteStorage::open(db_path).unwrap());
+    (router_over(Arc::clone(&storage)), storage)
 }
 
 /// A provider that panics if called — these tests exercise HTTP and storage.
@@ -163,6 +176,98 @@ async fn a_page_created_from_a_template_is_seeded_and_records_its_origin() {
         Some(template_id.as_str())
     );
     assert!(reread["forked_at"].is_string(), "the fork records when");
+}
+
+/// The same fork journey over a database file on disk, then read back from a
+/// connection opened after the writing one is gone: what a restarted gateway
+/// would find. The seeded rows have to be durably in `page_modules`, not
+/// merely in the create response.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_fork_is_seeded_on_a_database_file_and_the_seeded_rows_persist() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("swage.db");
+
+    let (page_id, template_id, seeded_module_id) = {
+        let (router, _storage) = make_file_backed_router(&db_path);
+        let space_id = make_space(&router, "fork-seed-on-disk").await;
+        let template_id = make_template(&router, &space_id).await;
+
+        let (status, page) = http_json(
+            &router,
+            "POST",
+            &format!("/api/spaces/{space_id}/pages"),
+            Some(json!({ "title": "Monday standup", "template_id": template_id })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "fork: {page}");
+        let sources: Vec<&str> = page["modules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|module| module["source"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            sources,
+            vec!["## Yesterday", "## Blockers"],
+            "the create response carries the seeded modules in template order"
+        );
+
+        // Edit a seeded copy, not a module added afterwards: the discriminating
+        // case is whether a copy is the fork's own from birth.
+        let seeded_module_id = page["modules"][0]["id"].as_str().unwrap().to_string();
+        let page_id = page["id"].as_str().unwrap().to_string();
+        let (status, _) = http_json(
+            &router,
+            "POST",
+            &format!("/api/pages/{page_id}/modules"),
+            Some(json!({
+                "module_id": seeded_module_id,
+                "source": "## Yesterday: shipped the fork"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        (page_id, template_id, seeded_module_id)
+    };
+
+    // The writing connection is gone; open the file again.
+    let reopened = SqliteStorage::open(&db_path).unwrap();
+    let page_uuid: uuid::Uuid = page_id.parse().unwrap();
+    let modules = reopened.list_page_modules(page_uuid).await.unwrap();
+    assert_eq!(
+        modules
+            .iter()
+            .map(|module| (module.position, module.source.as_str()))
+            .collect::<Vec<_>>(),
+        vec![(0, "## Yesterday: shipped the fork"), (1, "## Blockers")],
+        "the seeded rows are on disk under the forked page, the edit among them"
+    );
+
+    let page = reopened.get_page(page_uuid).await.unwrap().unwrap();
+    assert_eq!(
+        page.forked_from_template_id.map(|id| id.to_string()),
+        Some(template_id.clone()),
+        "the recorded origin is on disk too"
+    );
+
+    let template_modules = reopened
+        .list_page_template_modules(template_id.parse().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        template_modules
+            .iter()
+            .map(|module| module.source.as_str())
+            .collect::<Vec<_>>(),
+        vec!["## Yesterday", "## Blockers"],
+        "editing the fork's seeded copy left the template's own rows alone"
+    );
+    assert!(
+        !template_modules
+            .iter()
+            .any(|module| module.id.to_string() == seeded_module_id),
+        "the fork's seeded module is a row of its own, not the template's"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
