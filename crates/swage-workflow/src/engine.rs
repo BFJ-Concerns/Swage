@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use rquickjs::{
-    AsyncContext, AsyncRuntime, CatchResultExt, Function, Promise,
+    AsyncContext, AsyncRuntime, CatchResultExt, Context, Function, Promise, Runtime,
     context::intrinsic::{Eval, Json, MapSet, Promise as PromiseIntrinsic, RegExp, RegExpCompiler},
     prelude::Async,
 };
@@ -360,6 +360,22 @@ pub struct WorkflowEngine {
     limits: EngineLimits,
 }
 
+/// Parse a workflow through the same header extraction and async-function body
+/// grammar that execution uses, without evaluating its body.
+pub fn parse_workflow(source: &str) -> Result<(), String> {
+    let (_, source) = extract_defaults(source)?;
+    let runtime = Runtime::new().map_err(|error| error.to_string())?;
+    let context = Context::full(&runtime).map_err(|error| error.to_string())?;
+    let source = serde_json::to_string(source).expect("workflow source serialises");
+    context.with(|ctx| {
+        ctx.eval::<(), _>(format!(
+            "Object.getPrototypeOf(async function() {{}}).constructor({source});"
+        ))
+        .catch(&ctx)
+        .map_err(|error| error.to_string())
+    })
+}
+
 impl WorkflowEngine {
     pub const fn new(limits: EngineLimits) -> Self {
         Self { limits }
@@ -473,9 +489,9 @@ impl WorkflowEngine {
                                                 "error": {"name": "EmptyAgentOutputError", "message": "agent returned empty output"}
                                             }).to_string();
                                         }
-                                        // The worker's continuation token rides beside the
-                                        // output so `agentStart` handles can expose it
-                                        // without touching agent()'s bare-value contract.
+                                        // Worker metadata rides beside the output so
+                                        // `agentStart` handles can expose it without
+                                        // touching agent()'s bare-value contract.
                                         let session = result
                                             .session_id
                                             .zip(result.thread_id)
@@ -483,12 +499,24 @@ impl WorkflowEngine {
                                                 "session_id": session_id,
                                                 "thread_id": thread_id,
                                             }));
-                                        serde_json::json!({"ok": true, "value": result.output, "session": session}).to_string()
+                                        serde_json::json!({
+                                            "ok": true,
+                                            "value": result.output,
+                                            "session": session,
+                                            "working_directory": result.working_directory,
+                                        }).to_string()
+                                    }
+                                    Err(WorkflowHostError::SchemaExhausted { .. }) => {
+                                        // Exhausting a schema's validation attempts is a
+                                        // script-visible absence, not an ordinary agent
+                                        // failure. Keep this typed so other failures throw.
+                                        serde_json::json!({"ok": true, "value": null, "session": null}).to_string()
                                     }
                                     Err(error) => {
                                         let (host_reference, error) = match error {
                                             WorkflowHostError::AgentCall { host_reference, message } => (Some(host_reference), message),
                                             WorkflowHostError::Message(message) => (None, message),
+                                            WorkflowHostError::SchemaExhausted { .. } => unreachable!("schema exhaustion is handled above"),
                                         };
                                         let (name, message) = named_host_error(&error, "AgentCallError");
                                         serde_json::json!({
@@ -817,7 +845,11 @@ impl WorkflowEngine {
                                 }
                                 throw error;
                             }
-                            return { value: response.value, session: response.session ?? null };
+                            return {
+                                value: response.value,
+                                session: response.session ?? null,
+                                workingDirectory: response.working_directory ?? null,
+                            };
                         };
                         // Script-level defaults fill options a call site leaves
                         // unset; only *defined* call-site values override, so a
@@ -917,12 +949,14 @@ impl WorkflowEngine {
                                 label: request.label,
                                 done: false,
                                 session: request.session ?? null,
+                                workingDirectory: null,
                             };
                             handle.result = __agent(prompt, JSON.stringify(request))
                                 .then((json) => {
                                     const response = unwrapAgentResponse(json);
                                     handle.done = true;
                                     handle.session = response.session ?? handle.session;
+                                    handle.workingDirectory = response.workingDirectory;
                                     return response.value;
                                 }, (error) => {
                                     handle.done = true;
@@ -1152,6 +1186,7 @@ mod tests {
                 output: json!("ok"),
                 input_tokens: 0,
                 output_tokens: 0,
+                working_directory: None,
                 session_id: None,
                 thread_id: None,
                 turn_id: None,
@@ -1198,6 +1233,7 @@ mod tests {
                     .expect("scripted output"),
                 input_tokens: 1,
                 output_tokens: 1,
+                working_directory: None,
                 session_id: None,
                 thread_id: None,
                 turn_id: None,
@@ -1281,10 +1317,13 @@ mod tests {
             _: CancellationToken,
         ) -> Result<AgentCallResult, WorkflowHostError> {
             self.agent_requests.lock().expect("requests").push(request);
+            let working_directory = resolved_placement
+                .as_ref()
+                .map(|placement| placement.path.clone());
             self.resolved_working_directories
                 .lock()
                 .expect("resolved paths")
-                .push(resolved_placement.map(|placement| placement.path));
+                .push(working_directory.clone());
             if self.agent_delay_ms > 0 {
                 tokio::time::sleep(std::time::Duration::from_millis(self.agent_delay_ms)).await;
             }
@@ -1298,6 +1337,7 @@ mod tests {
                 output,
                 input_tokens: 1,
                 output_tokens: 1,
+                working_directory,
                 session_id: Some(uuid::Uuid::from_u128(0xA)),
                 thread_id: Some(uuid::Uuid::from_u128(0xB)),
                 turn_id: None,
@@ -1309,13 +1349,14 @@ mod tests {
             request: &AgentCallRequest,
             _: CancellationToken,
         ) -> Result<Option<crate::host::ResolvedWorkerPlacement>, String> {
+            let worker_number = self.placement_requests.lock().expect("placements").len();
             self.placement_requests
                 .lock()
                 .expect("placements")
                 .push((request.cwd.clone(), request.isolation));
             Ok(match request.isolation {
                 Some(_) => Some(crate::host::ResolvedWorkerPlacement {
-                    path: "/runtime/worktrees/worker-0".into(),
+                    path: format!("/runtime/worktrees/worker-{worker_number}"),
                     can_write: true,
                     authority_path: request.cwd.clone().unwrap_or_default(),
                     authority_context_id: uuid::Uuid::nil(),
@@ -1482,6 +1523,14 @@ mod tests {
         assert_eq!(requests[1].model.as_deref(), Some("strong"));
         // An explicit `undefined` must fall back, not erase the default.
         assert_eq!(requests[1].agent.as_deref(), Some("worker"));
+    }
+
+    #[test]
+    fn shipped_build_verify_parses() {
+        parse_workflow(include_str!(
+            "../../../shipped/skills/assembly/workflows/build-verify.js"
+        ))
+        .expect("shipped build-verify workflow parses");
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1811,6 +1860,41 @@ mod tests {
         assert_eq!(
             host.resolved_working_directories.lock().unwrap()[0].as_deref(),
             Some("/runtime/worktrees/worker-0")
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_start_handles_report_distinct_resolved_directories_for_isolated_siblings() {
+        let host = Arc::new(SurfaceHost::new());
+        let output = WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                r#"
+                const left = agentStart("inspect left", { cwd: "/repo", isolation: "worktree" });
+                const right = agentStart("inspect right", { cwd: "/repo", isolation: "worktree" });
+                await Promise.all([left.result, right.result]);
+                return { left: left.workingDirectory, right: right.workingDirectory };
+                "#,
+                "null",
+                CancellationToken::new(),
+                Some(host.clone()),
+                ScriptCapabilities::default(),
+            )
+            .await
+            .expect("isolated sibling calls");
+
+        assert_eq!(
+            serde_json::from_str::<Value>(&output).unwrap(),
+            json!({
+                "left": "/runtime/worktrees/worker-0",
+                "right": "/runtime/worktrees/worker-1",
+            })
+        );
+        let requests = host.agent_requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(
+            requests
+                .iter()
+                .all(|request| request.cwd.as_deref() == Some("/repo"))
         );
     }
 
