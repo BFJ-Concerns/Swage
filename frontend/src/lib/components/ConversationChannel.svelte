@@ -92,7 +92,7 @@
         <option value={session.id}>{session.label}</option>
       {/each}
     </select>
-    <button class="new-session" onclick={() => onNewConversation?.()}>+ New</button>
+    <button class="new-session" aria-label="New conversation" onclick={() => onNewConversation?.()}>+ New</button>
   </header>
   {#if activeConversation}<ConnectionIndicator store={connectionStore} {onRetry} />{/if}
   <MessageDisplay store={conversationStore} {streamingStore} {displayPreferences} />
