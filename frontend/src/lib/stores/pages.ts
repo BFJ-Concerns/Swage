@@ -19,6 +19,7 @@ export interface PagesStore {
   openPage(pageId: string): Promise<void>;
   closePage(): void;
   createPage(spaceId: string, title: string, templateId?: string): Promise<void>;
+  templateName(templateId: string): string | null;
   writeModule(
     pageId: string,
     moduleId: string | null,
@@ -84,6 +85,16 @@ export function createPagesStore(): PagesStore {
       const response = await pagesApi.listPages(spaceId);
       pagesStore.set(response.pages);
       activePageStore.set(page);
+    },
+
+    templateName(templateId: string): string | null {
+      // The recorded origin is an id; the space's loaded templates give it a
+      // name. A template that no longer exists resolves to nothing, and the
+      // caller shows the bare id rather than losing the lineage.
+      const template = templatesState.current.find(
+        (candidate) => candidate.id === templateId,
+      );
+      return template ? template.name : null;
     },
 
     async writeModule(

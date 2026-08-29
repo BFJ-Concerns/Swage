@@ -153,6 +153,22 @@ describe("pages store", () => {
     expect(store.activePage?.forked_from_template_id).toBe(TEMPLATE_ID);
   });
 
+  it("names the template a forked page came from, and yields nothing for one that is gone", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(listBody))
+      .mockResolvedValueOnce(jsonResponse(templateListBody));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const store = createPagesStore();
+    await store.loadPages(SPACE_ID);
+
+    expect(store.templateName(TEMPLATE_ID)).toBe("Standup");
+    // A template deleted since the fork resolves to nothing, so the surface
+    // falls back to the recorded id rather than dropping the lineage.
+    expect(store.templateName("55555555-5555-4555-8555-555555555555")).toBeNull();
+  });
+
   it("creates a blank page when no template is chosen", async () => {
     const fetchMock = vi
       .fn()
