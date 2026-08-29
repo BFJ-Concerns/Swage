@@ -1022,6 +1022,7 @@ const COMPLETE_SCHEMA: &str = "
         name                TEXT NOT NULL,
         description         TEXT NOT NULL,
         delivery_grant_json TEXT,
+        authoring_session_id TEXT,
         created_at          TEXT NOT NULL,
         updated_at          TEXT NOT NULL,
         UNIQUE (space_id, name)
