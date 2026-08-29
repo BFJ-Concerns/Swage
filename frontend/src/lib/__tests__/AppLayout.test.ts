@@ -9,6 +9,8 @@ import type { ConversationStore } from "../stores/conversations";
 import type { ConnectionStore } from "../stores/connection";
 import type { SpaceStore } from "../stores/spaces";
 import type { StreamingStore } from "../stores/streaming";
+import type { PagesStore } from "../stores/pages";
+import type { ConversationDetail, MessageView } from "../types";
 
 import * as operatorApi from "../api/operator";
 
@@ -36,6 +38,46 @@ function mockConversationStore(): ConversationStore {
     appendAssistantMessage: () => {},
     clearActiveConversation: () => {},
     refreshActiveConversation: async () => {},
+  };
+}
+
+function mockConversationStoreWithMessages(messages: MessageView[]): ConversationStore {
+  const detail: ConversationDetail = {
+    id: "conv-1",
+    space_id: "default",
+    created_at: "2026-08-29T10:00:00Z",
+    last_activity: "2026-08-29T10:00:00Z",
+    messages,
+  };
+  return { ...mockConversationStore(), get activeConversation() { return detail; } };
+}
+
+function mockPagesStore(): PagesStore {
+  const page = {
+    id: "page-1",
+    space_id: "default",
+    title: "Release checklist",
+    created_at: "2026-08-29T10:00:00Z",
+    updated_at: "2026-08-29T10:00:00Z",
+    modules: [
+      {
+        id: "module-1",
+        kind: "document",
+        position: 0,
+        source: "Ship the gateway",
+        updated_at: "2026-08-29T10:00:00Z",
+      },
+    ],
+  };
+  return {
+    get pages() { return [{ id: page.id, title: page.title, updated_at: page.updated_at }]; },
+    get activePage() { return page; },
+    loadPages: async () => {},
+    openPage: async () => {},
+    closePage: () => {},
+    createPage: async () => {},
+    writeModule: async () => {},
+    handleServerEvent: () => {},
   };
 }
 
@@ -102,6 +144,7 @@ interface MountOptions {
   streamingStore?: StreamingStore;
   conversationStore?: ConversationStore;
   onNewConversation?: () => void;
+  pagesStore?: PagesStore;
 }
 
 function mountLayout(options: MountOptions = {}): MountedComponent {
@@ -119,6 +162,7 @@ function mountLayout(options: MountOptions = {}): MountedComponent {
       route: options.routePath ? parseRoute(options.routePath) : undefined,
       agentDefinitions: options.agentDefinitions ?? [],
       onNewConversation: options.onNewConversation,
+      pagesStore: options.pagesStore,
     },
   });
 }
@@ -421,5 +465,100 @@ describe("AppLayout shell navigation", () => {
 
     expect(document.querySelector('[aria-label="Settings"]')).not.toBeNull();
     expect(document.body.textContent).not.toContain("Choose where to work.");
+  });
+});
+
+describe("ambient conversation channel", () => {
+  let component: MountedComponent | undefined;
+
+  afterEach(() => {
+    if (component) {
+      unmount(component);
+      component = undefined;
+    }
+    document.body.replaceChildren();
+  });
+
+  it("carries the conversation channel beside the pages work surface", () => {
+    component = mountLayout({
+      activeSurface: "pages",
+      pagesStore: mockPagesStore(),
+      conversationStore: mockConversationStoreWithMessages([
+        { role: "user", content: "Draft the checklist", timestamp: "2026-08-29T10:00:01Z", turn_state: "completed" },
+      ]),
+    });
+
+    // The work surface is genuinely on screen...
+    expect(document.querySelector('main.pages-surface [aria-label="Page"] h2')?.textContent)
+      .toBe("Release checklist");
+    // ...and so is the control channel, with the ongoing conversation in it.
+    const channel = document.querySelector('main.pages-surface [aria-label="Conversation"]');
+    expect(channel).not.toBeNull();
+    expect(channel?.textContent).toContain("Draft the checklist");
+    expect(channel?.querySelector('textarea[aria-label="Message"]')).not.toBeNull();
+  });
+
+  it("sends from the channel while standing on a page", () => {
+    const startTurn = vi.fn();
+    component = mountLayout({
+      activeSurface: "pages",
+      pagesStore: mockPagesStore(),
+      conversationStore: mockConversationStoreWithMessages([]),
+      streamingStore: { ...mockStreamingStore(), startTurn },
+    });
+    const message = document.querySelector(
+      'main.pages-surface [aria-label="Conversation"] textarea[aria-label="Message"]',
+    ) as HTMLTextAreaElement;
+    message.value = "Add a rollback step";
+    message.dispatchEvent(new Event("input", { bubbles: true }));
+    flushSync();
+    (document.querySelector("button.send") as HTMLButtonElement).click();
+
+    expect(startTurn).toHaveBeenCalledWith("Add a rollback step", null, null, null);
+  });
+
+  it("keeps the conversation and its history across a move to the work surface", () => {
+    const conversationStore = mockConversationStoreWithMessages([
+      { role: "user", content: "What is left to ship?", timestamp: "2026-08-29T10:00:01Z", turn_state: "completed" },
+    ]);
+    const selectConversation = vi.spyOn(conversationStore, "selectConversation");
+    const loadConversations = vi.spyOn(conversationStore, "loadConversations");
+    const refreshActiveConversation = vi.spyOn(conversationStore, "refreshActiveConversation");
+    const connectionStore = mockConnectionStore();
+    const disconnect = vi.spyOn(connectionStore, "disconnect");
+    const layout = createClassComponent({
+      component: AppLayout,
+      target: document.body,
+      props: {
+        conversationStore,
+        connectionStore,
+        streamingStore: mockStreamingStore(),
+        spaceStore: mockSpaceStore(),
+        onRetry: () => {},
+        activeSurface: "conversation",
+        pagesStore: mockPagesStore(),
+        onSelectSurface: () => {},
+      },
+    });
+    expect(document.querySelector('main.conversation [aria-label="Conversation"]')?.textContent)
+      .toContain("What is left to ship?");
+
+    layout.$set({ activeSurface: "pages" });
+    flushSync();
+
+    expect(document.querySelector('main.pages-surface [aria-label="Conversation"]')?.textContent)
+      .toContain("What is left to ship?");
+    expect(selectConversation).not.toHaveBeenCalled();
+    expect(loadConversations).not.toHaveBeenCalled();
+    expect(refreshActiveConversation).not.toHaveBeenCalled();
+    expect(disconnect).not.toHaveBeenCalled();
+
+    layout.$set({ activeSurface: "conversation" });
+    flushSync();
+
+    expect(document.querySelector('main.conversation [aria-label="Conversation"]')?.textContent)
+      .toContain("What is left to ship?");
+    expect(selectConversation).not.toHaveBeenCalled();
+    layout.$destroy();
   });
 });
