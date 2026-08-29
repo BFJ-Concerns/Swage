@@ -49,7 +49,7 @@ fn failed(message: impl std::fmt::Display) -> ToolError {
 /// Reach the live gateway state through the host tool context. A call that
 /// never reached the host path is a wiring bug, reported as an execution
 /// failure rather than silently degrading.
-fn gateway_state<'ctx>(ctx: &'ctx dyn ToolContext) -> Result<&'ctx AppState, ToolError> {
+fn gateway_state(ctx: &dyn ToolContext) -> Result<&AppState, ToolError> {
     ctx.as_any()
         .downcast_ref::<GatewayToolContext>()
         .and_then(GatewayToolContext::app_state)
