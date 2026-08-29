@@ -225,6 +225,14 @@ pub fn build_router(state: AppState) -> Router {
             post(page::write_page_module_handler),
         )
         .route(
+            "/api/pages/{page_id}/annotations",
+            post(page::create_page_annotation_handler),
+        )
+        .route(
+            "/api/page-annotations/{annotation_id}",
+            post(page::update_page_annotation_handler).delete(page::delete_page_annotation_handler),
+        )
+        .route(
             "/api/operator/agent-definitions",
             get(handlers::list_agent_definitions).post(handlers::create_agent_definition),
         )
