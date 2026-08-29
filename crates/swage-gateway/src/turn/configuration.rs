@@ -835,6 +835,8 @@ mod tests {
     #[test]
     fn reserved_workflow_agent_config_does_not_replace_runtime_configuration() {
         let root = tempfile::tempdir().expect("temporary root");
+        let space_config = root.path().join("spaces/dispatch/config.toml");
+        let global_instructions = root.path().join("instructions/01-runtime.md");
         let reserved_config = root
             .path()
             .join("spaces/dispatch/agents")
@@ -843,6 +845,17 @@ mod tests {
         let ordinary_config = root
             .path()
             .join("spaces/dispatch/agents/reviewer/config.toml");
+        std::fs::create_dir_all(space_config.parent().expect("space directory"))
+            .expect("create space directory");
+        std::fs::create_dir_all(global_instructions.parent().expect("instructions directory"))
+            .expect("create instructions directory");
+        std::fs::write(&global_instructions, "RUNTIME_ONLY_MARKER\n")
+            .expect("write runtime instructions");
+        std::fs::write(
+            &space_config,
+            "[communication]\nmessage_ttl_secs = 73\n",
+        )
+        .expect("write space overlay");
         for config in [&reserved_config, &ordinary_config] {
             std::fs::create_dir_all(config.parent().expect("config directory"))
                 .expect("create agent directory");
@@ -864,9 +877,14 @@ mod tests {
         let ordinary = load_session_config_from_root(root.path(), active, "dispatch", "reviewer")
             .expect("ordinary agent config");
 
+        assert!(
+            reserved.instructions.contains(&runtime_instructions),
+            "a reserved directory must not replace the running configuration: {}",
+            reserved.instructions
+        );
         assert_eq!(
-            reserved.instructions, runtime_instructions,
-            "a reserved directory must not replace the running configuration"
+            reserved.communication.message_ttl_secs, 73,
+            "the reserved workflow worker must retain its space configuration overlay"
         );
         assert_eq!(
             ordinary.server.port, 4100,
