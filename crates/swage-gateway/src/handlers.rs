@@ -4486,7 +4486,8 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[tokio::test]
-    async fn operator_history_reconstructs_only_configuration_and_experiment_records() {
+    async fn operator_history_reconstructs_only_configuration_and_experiment_records_newest_first()
+    {
         use swage_storage::model::{NewAuditEvent, NewSession, NewTurn, TurnState};
         use swage_storage::store::{AuditStore, ContextSnapshotStore, TurnStore};
 
@@ -4583,6 +4584,23 @@ mod tests {
             })
             .await
             .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        storage
+            .create_audit_event(NewAuditEvent {
+                id: "variant-2".into(),
+                session_id: Some(session.id),
+                entity_kind: "experiment_location".into(),
+                entity_id: "task_prompt".into(),
+                event_kind: "variant_selected".into(),
+                summary: "selected task prompt variant".into(),
+                metadata: serde_json::json!({
+                    "variant": "focused",
+                    "reason": "drawn",
+                    "turn_id": turn.id
+                }),
+            })
+            .await
+            .unwrap();
         let report = swage_protocol::client::context::AssemblyReport {
             assembly_name: "balanced".into(),
             total_tokens: 321,
@@ -4590,6 +4608,29 @@ mod tests {
         };
         storage
             .store_snapshot(turn.id, &serde_json::to_string(&report).unwrap())
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        let later_turn = storage
+            .create_turn(NewTurn {
+                thread_id: thread.id,
+                agent_id: "operator".into(),
+                state: TurnState::Completed,
+                user_input: Some("inspect newer history".into()),
+                parent_turn_id: None,
+            })
+            .await
+            .unwrap();
+        let later_report = swage_protocol::client::context::AssemblyReport {
+            assembly_name: "focused".into(),
+            total_tokens: 123,
+            ..Default::default()
+        };
+        storage
+            .store_snapshot(
+                later_turn.id,
+                &serde_json::to_string(&later_report).unwrap(),
+            )
             .await
             .unwrap();
 
@@ -4624,15 +4665,22 @@ mod tests {
         assert_eq!(changes[1]["prior_state"]["api_key"], "[REDACTED]");
         assert!(!body.to_string().contains("must not leak"));
 
-        assert_eq!(body["variant_selections"][0]["variant"], "compact");
-        assert_eq!(body["variant_selections"][0]["reason"], "drawn");
+        let variants = body["variant_selections"].as_array().unwrap();
+        assert_eq!(variants.len(), 2);
+        assert_eq!(variants[0]["variant"], "focused", "newest first");
+        assert_eq!(variants[0]["reason"], "drawn");
+        assert_eq!(variants[1]["turn_id"], turn.id.to_string());
+        let assemblies = body["assembly_reports"].as_array().unwrap();
+        assert_eq!(assemblies.len(), 2);
         assert_eq!(
-            body["variant_selections"][0]["turn_id"],
-            turn.id.to_string()
+            assemblies[0]["turn_id"],
+            later_turn.id.to_string(),
+            "newest first"
         );
-        assert_eq!(body["assembly_reports"][0]["turn_id"], turn.id.to_string());
-        assert_eq!(body["assembly_reports"][0]["assembly_name"], "balanced");
-        assert!(body["assembly_reports"][0].get("report").is_none());
+        assert_eq!(assemblies[0]["assembly_name"], "focused");
+        assert_eq!(assemblies[1]["turn_id"], turn.id.to_string());
+        assert_eq!(assemblies[1]["assembly_name"], "balanced");
+        assert!(assemblies[0].get("report").is_none());
         assert_eq!(storage.last_snapshot_list_limit(), 100);
     }
 
