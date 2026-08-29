@@ -13996,8 +13996,8 @@ mod tests {
                 args: Value::Null,
                 budget: Some(WorkflowBudget {
                     max_agent_calls: Some(3),
-                    max_total_tokens: Some(6),
-                    reserved_closing_tokens: Some(2),
+                    max_total_tokens: Some(8),
+                    reserved_closing_tokens: Some(4),
                     max_concurrent_agent_calls: Some(1),
                 }),
             }),
@@ -14017,9 +14017,22 @@ mod tests {
         assert_eq!(output["closing_report"], "the real closing report");
         assert_eq!(output["before_closing"]["winding_down"], true);
         assert_eq!(output["before_closing"]["working_remaining"], 0);
-        assert_eq!(output["before_closing"]["closing_remaining"], 2);
-        assert_eq!(output["after_closing"]["closing_remaining"], 0);
+        assert_eq!(output["before_closing"]["closing_remaining"], 4);
+        assert_eq!(output["after_closing"]["closing_remaining"], 2);
         assert_eq!(provider.requests.lock().expect("requests").len(), 3);
+
+        let journal = storage
+            .list_workflow_journal(started.id)
+            .await
+            .expect("terminal budget journal");
+        let terminal = journal
+            .iter()
+            .find(|entry| entry.kind == "terminal_budget")
+            .expect("terminal budget entry");
+        let reading = terminal.result.as_ref().expect("terminal budget reading");
+        assert_eq!(reading["spent"], 6);
+        assert_eq!(reading["remaining"], 2);
+        assert_eq!(reading["closing_remaining"], 2);
 
         storage
             .update_workflow_run_state(started.id, "interrupted", None, None, None)
