@@ -52,7 +52,7 @@ use crate::{
         RecoveryExportListResponse, RedeemDevicePairingRequest,
     },
     operator::OperatorOverviewResponse,
-    presence::{MachineHeartbeatRequest, PresenceSnapshotResponse},
+    presence::{DeviceHeartbeatRequest, PresenceSnapshotResponse},
     secret::{
         CreateSecretRequest, GenerateSecretRequest, RotateSecretRequest, SecretListResponse,
         SecretResponse, SecretValidationResponse,
@@ -833,29 +833,29 @@ pub async fn delete_schedule(
     }
 }
 
-/// `GET /api/presence` — inspect gateway, client, and machine presence.
+/// `GET /api/presence` — inspect gateway, client, and device presence.
 pub async fn presence_snapshot(State(state): State<AppState>) -> Json<PresenceSnapshotResponse> {
     Json(crate::presence::snapshot_presence(&state).await)
 }
 
-/// `POST /api/presence/machines/heartbeat` — register or refresh a machine heartbeat.
-pub async fn machine_heartbeat(
+/// `POST /api/presence/devices/heartbeat` — register or refresh a device heartbeat.
+pub async fn device_heartbeat(
     State(state): State<AppState>,
-    Json(req): Json<MachineHeartbeatRequest>,
+    Json(req): Json<DeviceHeartbeatRequest>,
 ) -> StatusCode {
-    crate::presence::upsert_machine_heartbeat(&state, req).await;
+    crate::presence::upsert_device_heartbeat(&state, req).await;
     StatusCode::ACCEPTED
 }
 
-/// `DELETE /api/presence/machines/:id` — mark a machine disconnected.
-pub async fn disconnect_machine(
+/// `DELETE /api/presence/devices/:id` — mark a device disconnected.
+pub async fn disconnect_device(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
-    if crate::presence::disconnect_machine(&state, &id).await {
+    if crate::presence::disconnect_device(&state, &id).await {
         Ok(StatusCode::NO_CONTENT)
     } else {
-        Err(ApiError::not_found_str("machine", &id))
+        Err(ApiError::not_found_str("device", &id))
     }
 }
 
@@ -891,22 +891,22 @@ pub async fn register_device(
         ));
     }
 
-    let host = crate::device::register_remote_device(&state, request).await?;
+    let device = crate::device::register_remote_device(&state, request).await?;
     Ok((
         StatusCode::CREATED,
         Json(DeviceResponse {
-            device_id: host.device_id,
-            label: host.label,
-            kind: host.kind.to_string(),
-            base_url: host.base_url,
-            workspace_root: host.workspace_root.to_string_lossy().into_owned(),
-            workspace_roots: host
+            device_id: device.device_id,
+            label: device.label,
+            kind: device.kind.to_string(),
+            base_url: device.base_url,
+            workspace_root: device.workspace_root.to_string_lossy().into_owned(),
+            workspace_roots: device
                 .workspace_roots
                 .iter()
                 .map(|path| path.to_string_lossy().into_owned())
                 .collect(),
-            capabilities: host.capabilities,
-            registered_at: host.registered_at,
+            capabilities: device.capabilities,
+            registered_at: device.registered_at,
         }),
     ))
 }
@@ -1079,7 +1079,7 @@ pub async fn list_space_workspaces(
     State(state): State<AppState>,
     Path(space_id): Path<Uuid>,
 ) -> Result<Json<WorkspaceAttachmentListResponse>, ApiError> {
-    let svc = WorkspaceAttachmentService::new(state.storage, state.space_store);
+    let svc = WorkspaceAttachmentService::from_state(state);
     Ok(Json(svc.list_workspaces(space_id).await?))
 }
 
@@ -1089,7 +1089,7 @@ pub async fn attach_space_workspace(
     Path(space_id): Path<Uuid>,
     Json(req): Json<CreateWorkspaceAttachmentRequest>,
 ) -> Result<(StatusCode, Json<WorkspaceAttachmentResponse>), ApiError> {
-    let svc = WorkspaceAttachmentService::new(state.storage, state.space_store);
+    let svc = WorkspaceAttachmentService::from_state(state);
     Ok((
         StatusCode::CREATED,
         Json(svc.attach_workspace(space_id, req).await?),
@@ -1102,7 +1102,7 @@ pub async fn update_space_workspace_trust(
     Path((space_id, workspace_id)): Path<(Uuid, Uuid)>,
     Json(req): Json<UpdateWorkspaceTrustRequest>,
 ) -> Result<Json<WorkspaceAttachmentResponse>, ApiError> {
-    let svc = WorkspaceAttachmentService::new(state.storage, state.space_store);
+    let svc = WorkspaceAttachmentService::from_state(state);
     Ok(Json(svc.set_trust(space_id, workspace_id, req).await?))
 }
 
@@ -1111,7 +1111,7 @@ pub async fn detach_space_workspace(
     State(state): State<AppState>,
     Path((space_id, workspace_id)): Path<(Uuid, Uuid)>,
 ) -> Result<StatusCode, ApiError> {
-    let svc = WorkspaceAttachmentService::new(state.storage, state.space_store);
+    let svc = WorkspaceAttachmentService::from_state(state);
     svc.detach_workspace(space_id, workspace_id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -1195,15 +1195,8 @@ pub async fn list_skills(
     // Skill discovery is best-effort beneath the root retained by this gateway.
     let root = state.config_root.clone();
 
-    let space_dir = root.join("spaces").join(&space.slug);
-    let agent_dir = params
-        .agent_id
-        .as_deref()
-        .filter(|agent_id| *agent_id != swage_config::RESERVED_WORKFLOW_AGENT_ID)
-        .map(|agent_id| space_dir.join("agents").join(agent_id));
-    let agent_dir = agent_dir.as_deref().filter(|path| path.is_dir());
-    let (skills, _warnings) =
-        crate::skill::SkillManager::discover_available(&root, &space_dir, agent_dir);
+    let skills =
+        crate::skill::discover_available_for_scope(&root, &space.slug, params.agent_id.as_deref());
 
     let skill_items: Vec<SkillItem> = skills
         .into_iter()
@@ -4797,6 +4790,9 @@ mod tests {
         let turn_id = Uuid::new_v4();
         let report = swage_protocol::client::context::AssemblyReport {
             total_tokens: 1024,
+            tool_scope: Some(serde_json::json!({
+                "effective_root": "/var/lib/swage/scratch/spaces/example/sessions/example",
+            })),
             ..Default::default()
         };
         let report_json = serde_json::to_string(&report).unwrap();
@@ -4819,5 +4815,9 @@ mod tests {
         let body = body_json(resp).await;
         assert_eq!(body["turn_id"].as_str().unwrap(), turn_id.to_string());
         assert_eq!(body["report"]["total_tokens"].as_i64().unwrap(), 1024);
+        assert_eq!(
+            body["report"]["tool_scope"]["effective_root"],
+            "/var/lib/swage/scratch/spaces/example/sessions/example"
+        );
     }
 }

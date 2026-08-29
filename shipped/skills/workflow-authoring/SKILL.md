@@ -45,20 +45,35 @@ Two consequences for how you write scripts:
 
 ```js
 // Optional headers, in this order, before any other code:
-export const meta = { name: "readme-digest", description: "Summarise the README." };
+export const meta = {
+  name: "readme-digest",
+  description: "Summarise the README.",
+  argumentSchema: {
+    "type": "object",
+    "required": ["topic"],
+    "properties": { "topic": { "type": "string" } }
+  }
+};
 export const defaults = { model: "gpt-5.6-terra", effort: "low" };
 
-const reply = await agent("Summarise this repo's README.", {
+// The injected `args` global contains the values supplied when this workflow run
+// was started.
+
+const reply = await agent(`Summarise the README's coverage of ${args.topic}.`, {
   model: "claude-sonnet-5",
   effort: "low",
 });
 return { reply };
 ```
 
-- **`export const meta`** — optional name/description header. On save, a
-  header's `name` and `description` override the request's, and the run
-  record carries them, so a portable script names itself. When present it
-  must be the file's first statement (comments may precede it).
+- **`export const meta`** — optional name, description, and argument-contract
+  header. `argumentSchema` is a JSON Schema applied to the arguments of saved
+  workflow runs before a run or journal entry is created. Its value must be
+  JSON, including double-quoted object keys, even though the surrounding
+  metadata may use JavaScript-style unquoted keys. On save, a header's `name`
+  and `description` override the request's, and the run record carries them,
+  so a portable script names itself. When present it must be the file's first
+  statement (comments may precede it).
 - **`export const defaults`** — optional per-call policy every `agent()`
   call inherits; call-site values override. Follows `meta`, or opens the
   file when there is no `meta`. These two are the only permitted
@@ -82,18 +97,21 @@ return { reply };
   prompt suffice, and its tool grants derive from this run's own
   dispatching context — a definition never widens them.
 - **Return contract:** without `schema`, the worker's final text; with
-  `schema`, a validated JSON value. A bare `await agent(...)` with a
-  schema THROWS once `maxAttempts` is exhausted without a valid value —
-  it does not return `null` — so catch it, or run schema workers inside
-  `parallel`/`pipeline`, where a failed slot collapses to `null`
-  instead of rejecting. Give fan-in schemas an **object** top level so
-  a slot's `null` can only mean failure and `.filter(Boolean)` is
-  safe. Extraction reads a reply as the whole text parsed as JSON, or
+  `schema`, a validated JSON value or `null` when `maxAttempts` is
+  exhausted without one. Treat that `null` as an absent result and
+  handle it before using the value. Other agent failures still throw;
+  inside `parallel`/`pipeline`, a failed slot also collapses to `null`.
+  Give fan-in schemas an **object** top level so a slot's `null` can
+  only mean absence or failure and `.filter(Boolean)` is safe.
+  Extraction reads a reply as the whole text parsed as JSON, or
   else the FIRST fenced code block — so tell workers: reason first if
   needed, then exactly one ```json fence carrying the value (or the
   bare JSON alone); JSON trailing prose outside a fence is not found.
 - **`agentStart(prompt, options)`** — dispatch without awaiting;
-  returns a handle (`result`, `done`, `label`, session token). Pair
+  returns a handle (`result`, `done`, `label`, session token,
+  `workingDirectory`). After completion, `workingDirectory` is the
+  host-resolved directory where the child ran, including a provisioned
+  isolated worktree. Pair
   with **`wait({ watches, timerMs })`** to race handles against a
   timer; the journal records which won, and replay repeats the winner.
 - **`parallel(thunks)`** — run thunks concurrently; a failed slot

@@ -74,6 +74,7 @@ async fn activity_recording_middleware(
 /// - `POST /api/spaces` / `GET /api/spaces` - space management
 /// - conversation, thread, turn, approval, and agent-message APIs
 /// - `GET /api/conversations/{id}/ws` - WebSocket upgrade for live turn events
+/// - `GET /api/work-surface/ws` - listen-only WebSocket for work-surface signals
 /// - `GET /api/skills`, `POST /api/shutdown`, `GET /api/health`
 /// - `*` - embedded frontend SPA (with fallback)
 pub fn build_router(state: AppState) -> Router {
@@ -141,6 +142,10 @@ pub fn build_router(state: AppState) -> Router {
             get(handlers::get_conversation).delete(handlers::delete_conversation),
         )
         .route("/api/conversations/{id}/ws", get(websocket::ws_handler))
+        .route(
+            "/api/work-surface/ws",
+            get(websocket::work_surface_ws_handler),
+        )
         .route(
             "/api/sessions/{id}/attachments",
             get(handlers::list_session_attachments),
@@ -223,6 +228,14 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/api/pages/{page_id}/modules",
             post(page::write_page_module_handler),
+        )
+        .route(
+            "/api/pages/{page_id}/annotations",
+            post(page::create_page_annotation_handler),
+        )
+        .route(
+            "/api/page-annotations/{annotation_id}",
+            post(page::update_page_annotation_handler).delete(page::delete_page_annotation_handler),
         )
         .route(
             "/api/operator/agent-definitions",
@@ -318,12 +331,12 @@ pub fn build_router(state: AppState) -> Router {
         // Runtime presence and liveness.
         .route("/api/presence", get(handlers::presence_snapshot))
         .route(
-            "/api/presence/machines/heartbeat",
-            post(handlers::machine_heartbeat),
+            "/api/presence/devices/heartbeat",
+            post(handlers::device_heartbeat),
         )
         .route(
-            "/api/presence/machines/{id}",
-            axum::routing::delete(handlers::disconnect_machine),
+            "/api/presence/devices/{id}",
+            axum::routing::delete(handlers::disconnect_device),
         )
         // Devices and attached devices.
         .route("/api/devices", get(handlers::list_devices))

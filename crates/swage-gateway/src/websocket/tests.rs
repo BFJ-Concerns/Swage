@@ -440,7 +440,7 @@ async fn failed_bare_skill_activation_emits_only_the_activation_error() {
         "---\ndescription: Review code\n---\n\nReview the code.",
     )
     .expect("write skill");
-    let _skill_root = SessionSkillRootGuard::at(session_id, skill_root.path());
+    let _skill_root = crate::skill::TestSkillRootGuard::at(session_id, skill_root.path());
     storage.fail_skill_activations();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ServerEvent>();
     let keepalive = tx.clone();
@@ -481,7 +481,7 @@ async fn failed_bare_skill_activation_emits_only_the_activation_error() {
 #[tokio::test(flavor = "current_thread")]
 async fn activate_skill_event_for_unknown_skill_sends_not_found_error() {
     let (state, session_id) = make_state_with_session().await;
-    let _skill_root = SessionSkillRootGuard::empty(session_id);
+    let _skill_root = crate::skill::TestSkillRootGuard::empty(session_id);
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ServerEvent>();
     let sub = Arc::new(Mutex::new(crate::subscription::SubscriptionState::new(
         false,
@@ -509,7 +509,7 @@ async fn activate_skill_event_for_unknown_skill_sends_not_found_error() {
 #[tokio::test(flavor = "current_thread")]
 async fn deactivate_skill_event_sends_skill_deactivated() {
     let (state, session_id) = make_state_with_session().await;
-    let _skill_root = SessionSkillRootGuard::empty(session_id);
+    let _skill_root = crate::skill::TestSkillRootGuard::empty(session_id);
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ServerEvent>();
     let sub = Arc::new(Mutex::new(crate::subscription::SubscriptionState::new(
         false,
