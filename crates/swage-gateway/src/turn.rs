@@ -130,23 +130,43 @@ pub(crate) async fn redact_provider_visible_request(
 /// Apply a provider diagnostic event to its durable context report. Both the
 /// ordinary and delegated turn paths use this seam so request redaction cannot
 /// drift from response and reasoning capture.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum ProviderSnapshotCapturePath {
+    Ordinary,
+    Delegated,
+}
+
 pub(crate) async fn apply_provider_snapshot_event(
     state: &AppState,
     report_json: &mut serde_json::Value,
     event: AgentEvent,
-) -> Result<Option<Uuid>, AgentError> {
+    capture_path: ProviderSnapshotCapturePath,
+) {
     let turn_id = match &event {
         AgentEvent::ProviderRequestPrepared { turn_id, .. }
         | AgentEvent::ProviderResponseCaptured { turn_id, .. }
         | AgentEvent::ProviderReasoningCaptured { turn_id, .. } => *turn_id,
-        _ => return Ok(None),
+        _ => return,
     };
     match event {
         AgentEvent::ProviderRequestPrepared { round, request, .. } => {
             match redact_provider_visible_request(state, request).await {
                 Ok(request) => append_provider_visible_request(report_json, round, request),
                 Err(error) => {
-                    tracing::error!(turn_id = %turn_id, round, error = %error, "provider-visible request capture omitted because secret redaction was unavailable");
+                    match capture_path {
+                        ProviderSnapshotCapturePath::Ordinary => tracing::error!(
+                            turn_id = %turn_id,
+                            round,
+                            error = %error,
+                            "provider-visible request capture omitted because secret redaction was unavailable"
+                        ),
+                        ProviderSnapshotCapturePath::Delegated => tracing::error!(
+                            turn_id = %turn_id,
+                            round,
+                            error = %error,
+                            "delegated provider-visible request capture omitted because secret redaction was unavailable"
+                        ),
+                    }
                     append_provider_visible_capture_error(report_json, round);
                 }
             }
@@ -164,7 +184,6 @@ pub(crate) async fn apply_provider_snapshot_event(
         }
         _ => unreachable!("non-provider event returned above"),
     }
-    Ok(Some(turn_id))
 }
 
 async fn known_secret_values(state: &AppState) -> Result<Vec<String>, swage_core::StorageError> {
@@ -1689,8 +1708,9 @@ async fn process_turn_with_composition_and_focus(
                         round,
                         request,
                     },
+                    ProviderSnapshotCapturePath::Ordinary,
                 )
-                .await?;
+                .await;
                 if let Err(e) = state
                     .storage
                     .store_snapshot(snapshot_turn_id, &report_json.to_string())
@@ -1731,8 +1751,9 @@ async fn process_turn_with_composition_and_focus(
                         content,
                         details,
                     },
+                    ProviderSnapshotCapturePath::Ordinary,
                 )
-                .await?;
+                .await;
                 if let Err(e) = state
                     .storage
                     .store_snapshot(snapshot_turn_id, &report_json.to_string())
@@ -1771,8 +1792,9 @@ async fn process_turn_with_composition_and_focus(
                         round,
                         witness,
                     },
+                    ProviderSnapshotCapturePath::Ordinary,
                 )
-                .await?;
+                .await;
                 if let Err(e) = state
                     .storage
                     .store_snapshot(snapshot_turn_id, &report_json.to_string())

@@ -180,12 +180,21 @@ impl AppState {
             .map(|run| run.id)
             .collect::<HashSet<_>>();
 
+        let space_ids = self
+            .space_store
+            .list_all()
+            .await
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .map(|space| space.id)
+            .collect::<HashSet<_>>();
         owners.extend(
             self.storage
                 .list_parked_workflow_runs()
                 .await
                 .map_err(|error| error.to_string())?
                 .into_iter()
+                .filter(|run| space_ids.contains(&run.space_id))
                 .map(|run| run.id),
         );
         Ok(owners)

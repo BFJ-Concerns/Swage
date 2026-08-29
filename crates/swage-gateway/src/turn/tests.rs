@@ -40,7 +40,7 @@ use swage_storage::{
 
 use super::history::parse_model_arguments;
 
-use swage_agent::{AgentEvent, DelegationOutcome};
+use swage_agent::{AgentEvent, DelegationOutcome, DelegationSnapshotRecorder};
 use swage_sandbox::ToolCallResult;
 
 use super::*;
@@ -78,6 +78,57 @@ fn provider_response_witness_is_appended_without_content_fields() {
     assert_eq!(response["witness"]["content_blocks"][0]["bytes"], 42);
     assert!(response["witness"].get("content").is_none());
     assert!(response["witness"].get("thinking").is_none());
+}
+
+#[tokio::test]
+async fn ordinary_and_delegated_snapshot_paths_record_provider_events_identically() {
+    let storage = Arc::new(MockStorage::new());
+    let (state, session_id) = make_state_with_storage(vec![], Arc::clone(&storage)).await;
+    let ordinary_turn_id = Uuid::new_v4();
+    let delegated_turn_id = Uuid::new_v4();
+    let mut ordinary_report = serde_json::json!({"assembly": "same input"});
+    let delegated_report = serde_json::json!({"assembly": "same input"});
+
+    apply_provider_snapshot_event(
+        &state,
+        &mut ordinary_report,
+        AgentEvent::ProviderRequestPrepared {
+            turn_id: ordinary_turn_id,
+            round: 3,
+            request: serde_json::json!({"messages": ["same request"]}),
+        },
+        ProviderSnapshotCapturePath::Ordinary,
+    )
+    .await;
+
+    storage
+        .store_snapshot(delegated_turn_id, &delegated_report.to_string())
+        .await
+        .expect("seed delegated snapshot");
+    delegation_snapshot_recorder_for_state(state.clone())
+        .record_event(
+            session_id,
+            AgentEvent::ProviderRequestPrepared {
+                turn_id: delegated_turn_id,
+                round: 3,
+                request: serde_json::json!({"messages": ["same request"]}),
+            },
+        )
+        .await
+        .expect("record delegated provider event");
+    let delegated_report: serde_json::Value = serde_json::from_str(
+        &storage
+            .get_snapshot(delegated_turn_id)
+            .await
+            .expect("read delegated snapshot")
+            .expect("delegated snapshot"),
+    )
+    .expect("delegated snapshot JSON");
+
+    assert_eq!(
+        ordinary_report["provider_visible"], delegated_report["provider_visible"],
+        "both paths must record the same provider-visible request through the shared dispatcher"
+    );
 }
 
 #[test]
