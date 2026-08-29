@@ -49,6 +49,7 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- Gateway runtime discovery no longer reads a partially written metadata file during startup.
 - Compaction audit records now report the messages actually removed after a failed summarisation.
 - A native compaction-threshold breach now remains actionable when a later count is unavailable.
 - Context compaction now counts tokens with the selected completion model.
