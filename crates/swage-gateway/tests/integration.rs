@@ -33,6 +33,8 @@ mod operator_audit_usage_integration;
 mod operator_control_integration;
 #[path = "integration/output_schema_validation_integration.rs"]
 mod output_schema_validation_integration;
+#[path = "integration/page_template_integration.rs"]
+mod page_template_integration;
 #[path = "integration/presence_liveness_integration.rs"]
 mod presence_liveness_integration;
 #[path = "integration/ptc_integration.rs"]
