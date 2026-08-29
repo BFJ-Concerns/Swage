@@ -101,8 +101,39 @@ pub(crate) mod test_support {
         path::{Path, PathBuf},
     };
 
+    use async_trait::async_trait;
+    use serde_json::{Value, json};
+    use swage_core::ToolError;
+    use swage_tool::{context::ToolContext, tool::Tool};
+
     static SWAGE_HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     static XDG_RUNTIME_DIR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Minimal named tool for tests that exercise dispatcher selection only.
+    pub(crate) struct NamedTool(pub &'static str);
+
+    #[async_trait]
+    impl Tool for NamedTool {
+        fn name(&self) -> &str {
+            self.0
+        }
+
+        fn description(&self) -> &str {
+            "Test tool"
+        }
+
+        fn parameters(&self) -> Value {
+            json!({ "type": "object" })
+        }
+
+        async fn execute(
+            &self,
+            _arguments: Value,
+            _ctx: &dyn ToolContext,
+        ) -> Result<Value, ToolError> {
+            Ok(json!({ "ok": true }))
+        }
+    }
 
     /// Serialises tests that mutate `SWAGE_HOME`, which is process-wide state.
     pub(crate) struct SwageHomeGuard {

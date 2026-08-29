@@ -58,10 +58,7 @@ pub fn parse_slash_command(input: &str) -> SlashCommandResult {
 
     // Validate: only lowercase ASCII letters, digits, and hyphens are allowed.
     // Anything else (uppercase, `/`, `.`, etc.) is treated as a non-command.
-    if !candidate
-        .chars()
-        .all(|c| matches!(c, 'a'..='z' | '0'..='9' | '-'))
-    {
+    if !crate::service::is_lowercase_identifier(candidate) {
         return SlashCommandResult::NotACommand;
     }
 

@@ -289,20 +289,6 @@ async fn ws_recv(stream: &mut WsStream) -> Value {
     }
 }
 
-/// Like ws_recv but returns None on close instead of panicking.
-async fn ws_recv_lenient(stream: &mut WsStream) -> Option<Value> {
-    loop {
-        match stream.next().await {
-            Some(Ok(tungstenite::Message::Text(text))) => {
-                return Some(serde_json::from_str(&text).unwrap_or(Value::Null));
-            }
-            Some(Ok(tungstenite::Message::Close(_))) => return None,
-            None => return None,
-            _ => continue,
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Cross-task integration tests
 // ---------------------------------------------------------------------------
