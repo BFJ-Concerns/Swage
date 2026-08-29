@@ -49,6 +49,8 @@ mod sandbox_observability_integration;
 mod schedule_integration;
 #[path = "integration/workflow_metadata_gateway_integration.rs"]
 mod workflow_metadata_gateway_integration;
+#[path = "integration/workflow_resume_gateway_integration.rs"]
+mod workflow_resume_gateway_integration;
 #[path = "integration/workflow_run_gateway_integration.rs"]
 mod workflow_run_gateway_integration;
 

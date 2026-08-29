@@ -62,9 +62,19 @@ async fn recovery_continues_past_an_uninspectable_candidate_and_reclaims_the_lat
     tokio::fs::create_dir(&wrapper_dir).await.unwrap();
     let command_log = fixture.path().join("recovery-git-order.log");
     let wrapper = wrapper_dir.join("git");
+    let real_git = Command::new("sh")
+        .args(["-c", "command -v git"])
+        .output()
+        .await
+        .unwrap();
+    assert!(real_git.status.success());
+    let real_git = String::from_utf8(real_git.stdout).unwrap();
+    let real_git = real_git.trim().replace('"', "\\\"");
     tokio::fs::write(
         &wrapper,
-        "#!/bin/sh\nprintf '%s\\n' \"$2\" >> \"$SWAGE_RECOVERY_GIT_LOG\"\nexec /usr/bin/git \"$@\"\n",
+        format!(
+            "#!/bin/sh\n# Recovery invokes git as -C <candidate>; argv[2] is that inspected path.\nprintf '%s\\n' \"$2\" >> \"$SWAGE_RECOVERY_GIT_LOG\"\nexec \"{real_git}\" \"$@\"\n"
+        ),
     )
     .await
     .unwrap();
