@@ -2,7 +2,13 @@
      SettingsPage; this component only reads space-owned data. -->
 <script lang="ts">
   import { onMount } from "svelte";
-  import { listSpaceSessions, listSpaceWorkspaces } from "../api/spaces";
+  import {
+    attachSpaceWorkspace,
+    detachSpaceWorkspace,
+    listSpaceSessions,
+    listSpaceWorkspaces,
+    updateSpaceWorkspaceTrust,
+  } from "../api/spaces";
   import type { SpaceSettingsTab } from "../router";
   import type { Space, ConversationSummary, WorkspaceAttachment } from "../types";
 
@@ -17,6 +23,9 @@
   let sessions = $state<ConversationSummary[]>([]);
   let isLoading = $state(false);
   let error = $state<string | null>(null);
+  let workspacePath = $state("");
+  let workspaceLabel = $state("");
+  let isMutating = $state(false);
 
   onMount(loadSpaceSettings);
 
@@ -35,6 +44,50 @@
       error = err instanceof Error ? err.message : "Failed to load space settings.";
     } finally {
       isLoading = false;
+    }
+  }
+
+  async function attachWorkspace(): Promise<void> {
+    if (!space || !workspacePath.trim()) return;
+    isMutating = true;
+    try {
+      await attachSpaceWorkspace(space.id, {
+        path: workspacePath.trim(),
+        label: workspaceLabel.trim() || undefined,
+      });
+      workspacePath = "";
+      workspaceLabel = "";
+      await loadSpaceSettings();
+    } catch (err) {
+      error = err instanceof Error ? err.message : "Failed to attach workspace.";
+    } finally {
+      isMutating = false;
+    }
+  }
+
+  async function setWorkspaceTrust(workspace: WorkspaceAttachment, isTrusted: boolean): Promise<void> {
+    if (!space) return;
+    isMutating = true;
+    try {
+      await updateSpaceWorkspaceTrust(space.id, workspace.id, { is_trusted: isTrusted });
+      await loadSpaceSettings();
+    } catch (err) {
+      error = err instanceof Error ? err.message : "Failed to update workspace trust.";
+    } finally {
+      isMutating = false;
+    }
+  }
+
+  async function detachWorkspace(workspace: WorkspaceAttachment): Promise<void> {
+    if (!space) return;
+    isMutating = true;
+    try {
+      await detachSpaceWorkspace(space.id, workspace.id);
+      await loadSpaceSettings();
+    } catch (err) {
+      error = err instanceof Error ? err.message : "Failed to detach workspace.";
+    } finally {
+      isMutating = false;
     }
   }
 </script>
@@ -85,12 +138,34 @@
     {:else if tab === "workspaces"}
       <section class="shell-section">
         <h2 class="shell-section-title">Workspaces</h2>
+        <p class="workspace-note">Trusted workspace content can supply instructions to agents working in this space.</p>
+        <form class="workspace-form" onsubmit={(event) => { event.preventDefault(); void attachWorkspace(); }}>
+          <label>
+            Repository folder
+            <input bind:value={workspacePath} required placeholder="/path/to/repository" disabled={isMutating} />
+          </label>
+          <label>
+            Label <span>(optional)</span>
+            <input bind:value={workspaceLabel} placeholder="Repository name" disabled={isMutating} />
+          </label>
+          <button type="submit" disabled={isMutating || !workspacePath.trim()}>
+            {isMutating ? "Saving…" : "Attach workspace"}
+          </button>
+        </form>
         <div class="record-list">
           {#each workspaces as workspace (workspace.id)}
             <article class="record-row">
               <strong>{workspace.label}</strong>
               <span>{workspace.path}</span>
               <span>{workspace.is_trusted ? "trusted" : "untrusted"} · {workspace.permissions.join(", ")}</span>
+              <div class="workspace-actions">
+                {#if workspace.is_trusted}
+                  <button type="button" onclick={() => void setWorkspaceTrust(workspace, false)} disabled={isMutating}>Revoke trust</button>
+                {:else}
+                  <button type="button" onclick={() => void setWorkspaceTrust(workspace, true)} disabled={isMutating}>Trust workspace</button>
+                {/if}
+                <button type="button" class="danger" onclick={() => void detachWorkspace(workspace)} disabled={isMutating}>Detach</button>
+              </div>
             </article>
           {:else}
             <p class="shell-empty">No workspace folders are attached to this space.</p>
@@ -159,7 +234,8 @@
   .sub,
   .shell-empty,
   .shell-value,
-  .record-row span {
+  .record-row span,
+  .workspace-note {
     margin: 0;
     color: var(--ink-soft);
     font-size: 13px;
@@ -222,6 +298,19 @@
     color: var(--ink);
     font-size: 14px;
   }
+
+  .workspace-note { max-width: 64ch; }
+
+  .workspace-form { display: grid; grid-template-columns: minmax(14rem, 1fr) minmax(10rem, .6fr) auto; gap: 10px; align-items: end; padding: 12px 0; border-bottom: 1px dotted var(--rule-soft); }
+  .workspace-form label { display: grid; gap: 5px; font-family: var(--font-mono); font-size: 10px; letter-spacing: .08em; text-transform: uppercase; }
+  .workspace-form label span { color: var(--ink-soft); }
+  input { min-width: 0; padding: 9px 10px; border: 1px solid var(--ink); background: var(--paper); color: var(--ink); font: inherit; letter-spacing: normal; text-transform: none; }
+  button { padding: 9px 11px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font: inherit; cursor: pointer; }
+  button:disabled { cursor: wait; opacity: .6; }
+  .workspace-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
+  .workspace-actions button { background: var(--paper); color: var(--ink); }
+  .workspace-actions .danger { border-color: var(--accent); color: var(--accent); }
+  @media (max-width: 760px) { .workspace-form { grid-template-columns: 1fr; } }
 
   .notice {
     margin-bottom: 14px;
