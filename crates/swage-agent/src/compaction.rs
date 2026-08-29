@@ -117,15 +117,13 @@ pub async fn compact_with_model(
     {
         return Ok((messages, None));
     }
-    let messages_before = messages.len();
     let tokens_before = estimated_tokens(&messages);
 
     // Tier 1 — Summarise: condense older half via an LLM call. Falls back
     // gracefully if the provider call fails.
-    let messages = try_summarise(messages, provider, focus).await;
+    let (messages, mut messages_removed) = try_summarise(messages, provider, focus).await;
     if !exceeds_threshold_with_model(&messages, threshold, provider, model).await {
         let tokens_after = estimated_tokens(&messages);
-        let messages_removed = messages_before.saturating_sub(messages.len());
         return Ok((
             messages,
             Some(compaction_record(
@@ -139,10 +137,11 @@ pub async fn compact_with_model(
     }
 
     // Tier 2 — Truncate: drop oldest non-system messages.
+    let messages_before_tier = messages.len();
     let messages = truncate(messages, threshold);
+    messages_removed += messages_before_tier.saturating_sub(messages.len());
     if !exceeds_threshold_with_model(&messages, threshold, provider, model).await {
         let tokens_after = estimated_tokens(&messages);
-        let messages_removed = messages_before.saturating_sub(messages.len());
         return Ok((
             messages,
             Some(compaction_record(
@@ -157,10 +156,11 @@ pub async fn compact_with_model(
 
     // Tier 3 — Aggressive truncate: keep system messages + single most recent
     // message. All dropped messages are already persisted to storage.
+    let messages_before_tier = messages.len();
     let messages = aggressive_truncate(messages);
+    messages_removed += messages_before_tier.saturating_sub(messages.len());
     if !exceeds_threshold_with_model(&messages, threshold, provider, model).await {
         let tokens_after = estimated_tokens(&messages);
-        let messages_removed = messages_before.saturating_sub(messages.len());
         return Ok((
             messages,
             Some(compaction_record(
@@ -227,15 +227,16 @@ fn counting_request(messages: &[ChatMessage], model: Option<&str>) -> Completion
 
 /// Attempt to summarise the older half of the message history with an LLM call.
 ///
-/// Returns the compacted list on success, or the original unchanged list when
-/// the provider call fails (allowing tier 2 to handle it).
+/// Returns the compacted list and the number of source messages it removed.
+/// A provider failure returns the original list and zero removals so tier 2 can
+/// continue without attributing a list change that did not happen.
 async fn try_summarise(
     messages: Vec<ChatMessage>,
     provider: &dyn LlmProvider,
     focus: Option<&str>,
-) -> Vec<ChatMessage> {
+) -> (Vec<ChatMessage>, usize) {
     if messages.len() < 2 {
-        return messages;
+        return (messages, 0);
     }
 
     let midpoint = messages.len() / 2;
@@ -280,10 +281,10 @@ async fn try_summarise(
             );
             let mut compacted = vec![summary];
             compacted.extend(new_messages);
-            compacted
+            (compacted, midpoint)
         }
         // Summarisation failed — return unchanged so tier 2 can take over.
-        Err(_) => messages,
+        Err(_) => (messages, 0),
     }
 }
 
