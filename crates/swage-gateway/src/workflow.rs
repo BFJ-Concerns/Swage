@@ -5874,7 +5874,7 @@ mod tests {
             Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![
-                Arc::new(WorkflowNamedTool("shell")) as Arc<dyn crate::tool::Tool>
+                Arc::new(NamedTool("shell")) as Arc<dyn crate::tool::Tool>
             ]),
             None,
         );
@@ -6002,10 +6002,10 @@ mod tests {
             Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all([
-                Arc::new(WorkflowNamedTool("knowledge_record")) as Arc<dyn crate::tool::Tool>,
-                Arc::new(WorkflowNamedTool("web_search")) as Arc<dyn crate::tool::Tool>,
-                Arc::new(WorkflowNamedTool("shell")) as Arc<dyn crate::tool::Tool>,
-                Arc::new(WorkflowNamedTool("config_apply")) as Arc<dyn crate::tool::Tool>,
+                Arc::new(NamedTool("knowledge_record")) as Arc<dyn crate::tool::Tool>,
+                Arc::new(NamedTool("web_search")) as Arc<dyn crate::tool::Tool>,
+                Arc::new(NamedTool("shell")) as Arc<dyn crate::tool::Tool>,
+                Arc::new(NamedTool("config_apply")) as Arc<dyn crate::tool::Tool>,
             ]),
             None,
         );
@@ -6138,7 +6138,7 @@ mod tests {
         ];
         let mut tools = placeholder_tool_names
             .into_iter()
-            .map(|name| Arc::new(WorkflowNamedTool(name)) as Arc<dyn crate::tool::Tool>)
+            .map(|name| Arc::new(NamedTool(name)) as Arc<dyn crate::tool::Tool>)
             .collect::<Vec<_>>();
         tools.extend([
             Arc::new(crate::tool::knowledge::KnowledgeRecordTool) as Arc<dyn crate::tool::Tool>,
@@ -6968,30 +6968,7 @@ mod tests {
         }
     }
 
-    struct WorkflowNamedTool(&'static str);
-
-    #[async_trait::async_trait]
-    impl crate::tool::Tool for WorkflowNamedTool {
-        fn name(&self) -> &str {
-            self.0
-        }
-
-        fn description(&self) -> &str {
-            "Test workflow tool"
-        }
-
-        fn parameters(&self) -> serde_json::Value {
-            serde_json::json!({ "type": "object" })
-        }
-
-        async fn execute(
-            &self,
-            _arguments: serde_json::Value,
-            _ctx: &dyn swage_tool::context::ToolContext,
-        ) -> Result<serde_json::Value, swage_core::ToolError> {
-            Ok(serde_json::json!({ "unexpected": "execution" }))
-        }
-    }
+    use crate::test_support::NamedTool;
 
     #[async_trait::async_trait]
     impl DeliveryCapability for CancellingDeliveryCapability {
@@ -7813,7 +7790,7 @@ mod tests {
             Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![
-                Arc::new(WorkflowNamedTool("shell")) as Arc<dyn crate::tool::Tool>
+                Arc::new(NamedTool("shell")) as Arc<dyn crate::tool::Tool>
             ]),
             None,
         );
@@ -8082,7 +8059,7 @@ mod tests {
             Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![
-                Arc::new(WorkflowNamedTool("shell")) as Arc<dyn crate::tool::Tool>
+                Arc::new(NamedTool("shell")) as Arc<dyn crate::tool::Tool>
             ]),
             None,
         );
@@ -8334,7 +8311,7 @@ mod tests {
             Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
             config,
             crate::tool::ToolDispatcher::allow_all(vec![
-                Arc::new(WorkflowNamedTool("shell")) as Arc<dyn crate::tool::Tool>
+                Arc::new(NamedTool("shell")) as Arc<dyn crate::tool::Tool>
             ]),
             None,
         );
@@ -8469,7 +8446,7 @@ mod tests {
             config,
             crate::tool::ToolDispatcher::allow_all(vec![
                 Arc::new(crate::tool::workflow_run::WorkflowRunTool) as Arc<dyn crate::tool::Tool>,
-                Arc::new(WorkflowNamedTool("shell")) as Arc<dyn crate::tool::Tool>,
+                Arc::new(NamedTool("shell")) as Arc<dyn crate::tool::Tool>,
             ]),
             None,
         );
@@ -8574,7 +8551,7 @@ mod tests {
             Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
             config,
             crate::tool::ToolDispatcher::allow_all(vec![
-                Arc::new(WorkflowNamedTool("shell")) as Arc<dyn crate::tool::Tool>
+                Arc::new(NamedTool("shell")) as Arc<dyn crate::tool::Tool>
             ]),
             None,
         );

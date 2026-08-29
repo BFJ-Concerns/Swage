@@ -808,29 +808,11 @@ fn provider_error(error: swage_codex::ClientError) -> AgentError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use async_trait::async_trait;
-    use swage_core::ToolError;
     use swage_storage::NewTurn;
     use swage_tool::permission::RequireApprovalEntry;
-    use swage_tool::{context::ToolContext, tool::Tool};
+    use swage_tool::tool::Tool;
 
-    struct NamedTool(&'static str);
-
-    #[async_trait]
-    impl Tool for NamedTool {
-        fn name(&self) -> &str {
-            self.0
-        }
-        fn description(&self) -> &str {
-            "test tool"
-        }
-        fn parameters(&self) -> Value {
-            json!({"type":"object"})
-        }
-        async fn execute(&self, params: Value, _ctx: &dyn ToolContext) -> Result<Value, ToolError> {
-            Ok(params)
-        }
-    }
+    use crate::test_support::NamedTool;
 
     fn permissions(allow: &[&str], approval: &[&str]) -> PermissionConfig {
         PermissionConfig {

@@ -44,7 +44,7 @@ use swage_storage::{
     store::{ApprovalStore, SpaceStore, ToolCallStore},
 };
 
-use crate::support::{ProcessEnvGuard, live_http_json};
+use crate::support::{ProcessEnvGuard, WsStream, live_http_json, ws_recv_lenient};
 
 const WEBSOCKET_EVENT_DEADLINE: Duration = Duration::from_secs(120);
 
@@ -204,9 +204,6 @@ type WsSink = futures::stream::SplitSink<
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
     tungstenite::Message,
 >;
-type WsStream = futures::stream::SplitStream<
-    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
->;
 
 async fn connect_ws(addr: SocketAddr, conversation_id: &str) -> (WsSink, WsStream) {
     let url = format!("ws://{addr}/api/conversations/{conversation_id}/ws");
@@ -220,19 +217,6 @@ async fn ws_send(sink: &mut WsSink, payload: Value) {
     sink.send(tungstenite::Message::Text(payload.to_string().into()))
         .await
         .expect("ws send should succeed");
-}
-
-async fn ws_recv_lenient(stream: &mut WsStream) -> Option<Value> {
-    loop {
-        match stream.next().await {
-            Some(Ok(tungstenite::Message::Text(text))) => {
-                return Some(serde_json::from_str(&text).unwrap_or(Value::Null));
-            }
-            Some(Ok(tungstenite::Message::Close(_))) => return None,
-            None => return None,
-            _ => continue,
-        }
-    }
 }
 
 async fn ws_collect_events(stream: &mut WsStream, timeout: Duration) -> Vec<Value> {

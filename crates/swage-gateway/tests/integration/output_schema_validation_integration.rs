@@ -184,19 +184,6 @@ async fn ws_send(sink: &mut WsSink, payload: Value) {
         .expect("ws send should succeed");
 }
 
-async fn ws_recv_lenient(stream: &mut WsStream) -> Option<Value> {
-    loop {
-        match stream.next().await {
-            Some(Ok(tungstenite::Message::Text(text))) => {
-                return Some(serde_json::from_str(&text).unwrap_or(Value::Null));
-            }
-            Some(Ok(tungstenite::Message::Close(_))) => return None,
-            None => return None,
-            _ => continue,
-        }
-    }
-}
-
 /// Build a ResolvedConfig with an output schema and optional retry override.
 fn config_with_schema(schema: Value, max_retries: u32) -> ResolvedConfig {
     let mut config = ResolvedConfig::default();
