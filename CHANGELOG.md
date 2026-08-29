@@ -49,6 +49,7 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- Terminal Chat Completions stream events now preserve reported token usage when it arrives alongside the finish reason.
 - Gateway startup now reclaims worker worktrees and their Git registrations left behind by an unclean exit.
 - Provider-facing tool schemas now retain stripped validation requirements in their descriptions, helping models form valid schedule delivery targets on the first call.
 - Portable JavaScript workflow `meta` headers now seed saved script details, and the unused workflow-script `agent_id` query has been removed.
