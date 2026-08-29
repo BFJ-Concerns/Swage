@@ -8674,14 +8674,25 @@ mod tests {
             .list_workflow_journal(started.id)
             .await
             .expect("journal");
-        assert_eq!(journal.len(), 1);
-        assert_eq!(journal[0].kind, "agent_call");
-        assert_eq!(journal[0].status, "failed");
+        assert_eq!(journal.len(), 2);
+        let agent_call = journal
+            .iter()
+            .find(|entry| entry.kind == "agent_call")
+            .expect("failed schema-constrained agent call");
+        assert_eq!(agent_call.status, "failed");
         assert!(
-            journal[0]
+            agent_call
                 .error_message
                 .as_deref()
                 .is_some_and(|error| error.starts_with("SchemaExhaustedError:"))
+        );
+        assert_eq!(
+            journal
+                .iter()
+                .find(|entry| entry.kind == "terminal_budget")
+                .expect("terminal budget audit")
+                .status,
+            "completed"
         );
         assert_eq!(provider.requests.lock().expect("requests").len(), 2);
 
@@ -8701,13 +8712,22 @@ mod tests {
             .expect("present");
         assert_eq!(replayed.state, "completed");
         assert_eq!(replayed.final_output, Some(Value::Null));
+        let replayed_journal = storage
+            .list_workflow_journal(started.id)
+            .await
+            .expect("journal");
+        assert_eq!(replayed_journal.len(), 2);
         assert_eq!(
-            storage
-                .list_workflow_journal(started.id)
-                .await
-                .expect("journal")
+            replayed_journal
                 .iter()
                 .filter(|entry| entry.kind == "agent_call")
+                .count(),
+            1
+        );
+        assert_eq!(
+            replayed_journal
+                .iter()
+                .filter(|entry| entry.kind == "terminal_budget")
                 .count(),
             1
         );
