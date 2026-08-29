@@ -331,12 +331,12 @@ pub fn build_router(state: AppState) -> Router {
         // Runtime presence and liveness.
         .route("/api/presence", get(handlers::presence_snapshot))
         .route(
-            "/api/presence/machines/heartbeat",
-            post(handlers::machine_heartbeat),
+            "/api/presence/devices/heartbeat",
+            post(handlers::device_heartbeat),
         )
         .route(
-            "/api/presence/machines/{id}",
-            axum::routing::delete(handlers::disconnect_machine),
+            "/api/presence/devices/{id}",
+            axum::routing::delete(handlers::disconnect_device),
         )
         // Devices and attached devices.
         .route("/api/devices", get(handlers::list_devices))

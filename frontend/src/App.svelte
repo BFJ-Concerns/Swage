@@ -80,8 +80,16 @@
   // Child components receive a proxy shaped like ConversationStore that calls
   // these instead of the originals, keeping the URL and connection in sync.
 
+  // Selecting or starting a session is not navigation: the channel rides the
+  // surface the user is standing on, so reaching a conversation must not move
+  // them off their work. Only the operator surface, which carries no channel,
+  // hands them back to the conversation surface.
+  function keepSurfaceForConversation(): void {
+    if (activeSurface === "operator") activeSurface = "conversation";
+  }
+
   async function selectAndNavigateOrThrow(id: string): Promise<void> {
-    activeSurface = "conversation";
+    keepSurfaceForConversation();
     await conversationStore.selectConversation(id);
 
     // A deep-linked conversation may belong to a space other than the one
@@ -116,7 +124,7 @@
     effort?: import("./lib/protocol/Effort").Effort | null,
   ): Promise<string | null> {
     try {
-      activeSurface = "conversation";
+      keepSurfaceForConversation();
       // Use the currently selected space — should always be set after startup.
       const spaceId = spaceStore.currentSpace?.id ?? "";
       await conversationStore.createConversation(spaceId, selectedModelId, agentId, effort);
@@ -134,7 +142,7 @@
   }
 
   function startNewConversation(): void {
-    activeSurface = "conversation";
+    keepSurfaceForConversation();
     connectionStore.disconnect();
     conversationStore.clearActiveConversation();
     router.navigate("/");
@@ -322,6 +330,7 @@
   }
 
   function handleSelectSurface(next: Surface): void {
+    const previous = activeSurface;
     activeSurface = next;
 
     // The pages surface keeps the conversation socket: the conversation is
@@ -333,8 +342,13 @@
       return;
     }
 
-    const id = conversationStore.activeConversation?.id;
-    if (id) connectionStore.connectTo(id);
+    // Conversations and Pages share the same ambient channel. Moving between
+    // them must retain its socket and in-memory history; only returning from
+    // Operator needs to establish the connection again.
+    if (previous === "operator") {
+      const id = conversationStore.activeConversation?.id;
+      if (id) connectionStore.connectTo(id);
+    }
   }
 
   function navigate(path: string): void {

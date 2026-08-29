@@ -1573,17 +1573,17 @@ impl WorkspaceAttachmentStore for MockStorage {
 impl DeviceStore for MockStorage {
     async fn upsert_device(
         &self,
-        host: NewDeviceRegistration,
+        device: NewDeviceRegistration,
     ) -> Result<DeviceRegistration, StorageError> {
         let registration = DeviceRegistration {
-            device_id: host.device_id,
-            label: host.label,
-            kind: host.kind,
-            base_url: host.base_url,
-            shared_token: host.shared_token,
-            workspace_root: host.workspace_root,
-            workspace_roots: host.workspace_roots,
-            capabilities: host.capabilities,
+            device_id: device.device_id,
+            label: device.label,
+            kind: device.kind,
+            base_url: device.base_url,
+            shared_token: device.shared_token,
+            workspace_root: device.workspace_root,
+            workspace_roots: device.workspace_roots,
+            capabilities: device.capabilities,
             registered_at: chrono::Utc::now(),
         };
         self.db
@@ -5238,6 +5238,114 @@ async fn unattended_sandbox_failure_records_unattended_attendance() {
         event.event_kind == "execution_isolation_degraded"
             && event.metadata["execution_context"] == "unattended turn"
     }));
+}
+
+#[tokio::test]
+async fn unattended_turn_rejects_a_relative_managed_scratch_root() {
+    let storage = Arc::new(MockStorage::new());
+    let (state, session_id) = make_state_with_storage_and_root(
+        vec![],
+        Arc::clone(&storage),
+        Some(std::path::PathBuf::from(".")),
+    )
+    .await;
+
+    let error = process_turn_with_composition(
+        &state,
+        session_id,
+        None,
+        "message".to_string(),
+        mpsc::unbounded_channel().0,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+        None,
+        None,
+        None,
+        None,
+        TurnAttendance::Unattended,
+        DispatchContextComposition::default(),
+        None,
+    )
+    .await
+    .expect_err("an unattended relative scratch root must not inherit the launch directory");
+
+    assert!(
+        error
+            .to_string()
+            .contains("attach a workspace or configure an absolute managed scratch root"),
+        "the refusal must explain how to establish a deliberate root: {error}"
+    );
+    let thread = storage
+        .list_by_session(session_id)
+        .await
+        .expect("thread")
+        .remove(0);
+    let turns = storage
+        .list_turns_by_thread(thread.id)
+        .await
+        .expect("turns");
+    assert_eq!(turns[0].state, TurnState::Failed);
+    assert!(
+        !state.active_turns.lock().await.contains_key(&session_id),
+        "the rejected turn must release its active-turn guard"
+    );
+}
+
+#[tokio::test]
+async fn unattended_turn_accepts_an_active_workspace_when_scratch_root_is_relative() {
+    let storage = Arc::new(MockStorage::new());
+    let (state, session_id) = make_state_with_storage_and_root(
+        vec![
+            StreamChunk::Delta {
+                content: "configured root".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ],
+        Arc::clone(&storage),
+        Some(std::path::PathBuf::from(".")),
+    )
+    .await;
+    let workspace = tempfile::tempdir().expect("workspace root");
+    let session = storage
+        .get_session(session_id)
+        .await
+        .expect("session lookup")
+        .expect("session");
+    let attachment = storage
+        .create_workspace_attachment(NewWorkspaceAttachment {
+            space_id: session.space_id,
+            label: "configured workspace".into(),
+            path: workspace.path().to_string_lossy().into_owned(),
+            permissions: vec!["read".into(), "write".into()],
+            is_trusted: true,
+        })
+        .await
+        .expect("workspace attachment");
+    storage
+        .set_session_active_workspace(session_id, Some(attachment.id))
+        .await
+        .expect("select workspace attachment");
+
+    process_turn_with_composition(
+        &state,
+        session_id,
+        None,
+        "message".to_string(),
+        mpsc::unbounded_channel().0,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+        None,
+        None,
+        None,
+        None,
+        TurnAttendance::Unattended,
+        DispatchContextComposition::default(),
+        None,
+    )
+    .await
+    .expect("an active workspace is a deliberate unattended tool root");
 }
 
 #[tokio::test]
@@ -9286,7 +9394,15 @@ async fn delegate_worktree_provisions_isolated_cwd_and_records_resolved_placemen
         )
         .await
         .expect("wait-mode worktree delegation should complete");
-    assert!(matches!(wait_outcome, DelegationOutcome::Completed(_)));
+    let wait_result = match wait_outcome {
+        DelegationOutcome::Completed(result) => result,
+        DelegationOutcome::Detached(_) => panic!("wait-mode delegation must complete"),
+    };
+    assert_eq!(
+        wait_result["working_directory"],
+        wait_worktree.to_string_lossy().as_ref(),
+        "the waiting dispatcher receives the real provisioned directory"
+    );
     assert!(
         storage.list_approvals().await.unwrap().is_empty(),
         "the waiting delegated turn must use its enforced grant without parking"
@@ -9375,12 +9491,17 @@ async fn delegate_worktree_provisions_isolated_cwd_and_records_resolved_placemen
         storage.list_approvals().await.unwrap().is_empty(),
         "the detached delegated turn must use its enforced grant without parking"
     );
-    assert!(
-        result_messages.iter().any(|message| {
+    let result = result_messages
+        .iter()
+        .find(|message| {
             message.kind == swage_core::MessageKind::Result
                 && message.payload.get("error").is_none()
-        }),
-        "the detached delegate should record a successful terminal result"
+        })
+        .expect("the detached delegate should record a successful terminal result");
+    assert_eq!(
+        result.payload["working_directory"],
+        worktree.to_string_lossy().as_ref(),
+        "the durable completion reports the real provisioned directory"
     );
     for _ in 0..20 {
         if state.worktree_host.list_owner(owner_id).await.is_empty() && !worktree.exists() {
@@ -12735,6 +12856,24 @@ async fn context_assembled_precedes_first_token() {
                 !report.elements.is_empty(),
                 "report should contain elements key"
             );
+            let session = state
+                .storage
+                .get_session(session_id)
+                .await
+                .expect("session lookup")
+                .expect("session");
+            assert_eq!(
+                report
+                    .tool_scope
+                    .as_ref()
+                    .and_then(|scope| scope.get("effective_root")),
+                Some(&serde_json::json!(managed_scratch_workspace(
+                    &state.config_root,
+                    session.space_id,
+                    session_id
+                ))),
+                "live turn diagnostics must report the root passed to tools"
+            );
         }
         other => panic!("expected ContextAssembled, got: {other:?}"),
     }
@@ -12791,6 +12930,21 @@ async fn assembly_report_persisted_as_context_snapshot() {
     assert!(
         parsed.get("elements").is_some(),
         "snapshot should contain elements key"
+    );
+    let session = state
+        .storage
+        .get_session(session_id)
+        .await
+        .expect("session lookup")
+        .expect("session");
+    assert_eq!(
+        parsed["tool_scope"]["effective_root"],
+        serde_json::json!(managed_scratch_workspace(
+            &state.config_root,
+            session.space_id,
+            session_id
+        )),
+        "turn diagnostics must record the root passed to tools"
     );
     let provider_request = &parsed["provider_visible"]["requests"][0];
     assert_eq!(provider_request["round"], serde_json::json!(1));

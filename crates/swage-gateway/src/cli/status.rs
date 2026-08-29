@@ -109,9 +109,9 @@ pub(crate) fn format_uptime(duration: chrono::Duration) -> String {
 
 pub(crate) fn format_presence_summary(presence: &PresenceSnapshotResponse) -> String {
     format!(
-        "{} client(s), {} machine(s), {} active turn(s)",
+        "{} client(s), {} device(s), {} active turn(s)",
         presence.gateway.active_connection_count,
-        presence.machines.len(),
+        presence.devices.len(),
         presence.gateway.active_turn_count
     )
 }
@@ -120,9 +120,9 @@ pub(crate) fn classify_presence(presence: &PresenceSnapshotResponse) -> &'static
     if presence.gateway.shutdown_requested {
         "degraded: shutting down"
     } else if presence
-        .machines
+        .devices
         .iter()
-        .any(|machine| machine.state != "connected")
+        .any(|device| device.state != "connected")
     {
         "degraded: disconnected device"
     } else if presence.gateway.active_turn_count > 0 {
@@ -141,7 +141,7 @@ mod tests {
     use super::*;
     use chrono::{Duration, Utc};
     use swage_client::http::{
-        ClientPresenceResponse, MachinePresenceResponse, PresenceGatewayResponse,
+        ClientPresenceResponse, DevicePresenceResponse, PresenceGatewayResponse,
         PresenceSnapshotResponse,
     };
     use uuid::Uuid;
@@ -207,8 +207,8 @@ mod tests {
                 last_seen_at: None,
                 disconnected_at: None,
             }],
-            machines: vec![MachinePresenceResponse {
-                machine_id: "device-a".to_string(),
+            devices: vec![DevicePresenceResponse {
+                device_id: "device-a".to_string(),
                 label: Some("Device A".to_string()),
                 state: "connected".to_string(),
                 registered_at: Utc::now(),
@@ -220,7 +220,7 @@ mod tests {
 
         assert_eq!(
             format_presence_summary(&presence),
-            "2 client(s), 1 machine(s), 3 active turn(s)"
+            "2 client(s), 1 device(s), 3 active turn(s)"
         );
     }
 
@@ -235,8 +235,8 @@ mod tests {
                 active_connection_count: 0,
             },
             clients: vec![],
-            machines: vec![MachinePresenceResponse {
-                machine_id: "device-a".to_string(),
+            devices: vec![DevicePresenceResponse {
+                device_id: "device-a".to_string(),
                 label: Some("Device A".to_string()),
                 state: "stale".to_string(),
                 registered_at: Utc::now(),

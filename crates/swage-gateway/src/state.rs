@@ -104,7 +104,7 @@ pub struct AppState {
     pub hook_registry: Option<Arc<HookRegistry>>,
     /// Session routing map for external channels.
     pub channel_routes: Arc<AsyncMutex<HashMap<ChannelOrigin, Uuid>>>,
-    /// Runtime presence for recent clients and registered machines.
+    /// Runtime presence for recent clients and registered devices.
     pub presence: Arc<AsyncMutex<PresenceRuntime>>,
     /// Registered local and attached devices.
     pub devices: Arc<AsyncMutex<DeviceRuntime>>,
