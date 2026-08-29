@@ -595,6 +595,10 @@ fn terminal_budget_reading(accounting: &TokenBudgetState, budget: &WorkflowBudge
 
 const TERMINAL_BUDGET_SEQUENCE: u64 = i64::MAX as u64;
 
+fn is_positional_journal_entry(entry: &WorkflowJournalRecord) -> bool {
+    entry.kind != "terminal_budget"
+}
+
 async fn record_terminal_budget(
     state: &AppState,
     run_id: Uuid,
@@ -4663,7 +4667,11 @@ async fn failed_agent_call_handover(
             })
         })
         .collect::<Vec<_>>();
-    let last_journal_seq = journal.iter().map(|entry| entry.seq).max()?;
+    let last_journal_seq = journal
+        .iter()
+        .filter(|entry| is_positional_journal_entry(entry))
+        .map(|entry| entry.seq)
+        .max()?;
     let events_delivered_to_failed_call = events
         .iter()
         .filter(|event| event.delivery == WorkflowHandoverEventDelivery::DeliveredToFailedCall)
@@ -4787,7 +4795,7 @@ async fn launch_existing_run(
     // failed or cancelled run is later resumed for recovery.
     let replay = journal
         .into_iter()
-        .filter(|entry| entry.kind != "terminal_budget")
+        .filter(is_positional_journal_entry)
         .collect::<Vec<_>>();
     // These prefixes are produced by both budget-refusal paths in the host-command loop.
     let initial_agent_calls = replay
@@ -14059,10 +14067,17 @@ mod tests {
             failed_call.id.to_string()
         );
         assert_eq!(handover["failed_call"]["seq"], failed_call.seq);
+        let last_positional_seq = journal
+            .iter()
+            .filter(|entry| is_positional_journal_entry(entry))
+            .map(|entry| entry.seq)
+            .max()
+            .expect("positional journal entry");
         assert_eq!(
-            handover["last_journal_seq"],
-            journal.last().expect("last journal entry").seq
+            handover["last_journal_seq"], last_positional_seq,
+            "the terminal budget audit record is not a replay position"
         );
+        assert_ne!(last_positional_seq, TERMINAL_BUDGET_SEQUENCE);
 
         let events = storage
             .list_workflow_run_events(started.id)
