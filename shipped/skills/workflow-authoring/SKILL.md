@@ -56,6 +56,9 @@ export const meta = {
 };
 export const defaults = { model: "gpt-5.6-terra", effort: "low" };
 
+The injected `args` global contains the values supplied when this workflow run
+was started.
+
 const reply = await agent(`Summarise the README's coverage of ${args.topic}.`, {
   model: "claude-sonnet-5",
   effort: "low",
