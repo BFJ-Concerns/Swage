@@ -1,10 +1,31 @@
 // Pages store — list/open behaviour and the live-refresh contract: a
-// page_updated event is a signal only, answered by refetching the page
+// page_updated signal is a signal only, answered by refetching the page
 // through the authoritative read path.
+//
+// Signals are delivered the way the product delivers them — through the
+// work-surface channel the store opens for itself. The store exposes no
+// direct event entry point, so a test cannot reach past the wiring: if the
+// store stopped subscribing, every live test here would fail.
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { createPagesStore } from "../stores/pages";
+import type { WorkSurfaceChannel } from "../api/work-surface";
 import type { ServerEvent } from "../types";
+
+// A stand-in for the server end of the work-surface channel: whatever the
+// store subscribed with is what `emit` pushes into.
+function fakeChannel(): WorkSurfaceChannel & { emit(event: unknown): void } {
+  const handlers: ((event: ServerEvent) => void)[] = [];
+  return {
+    onSignal(handler) {
+      handlers.push(handler);
+    },
+    close() {},
+    emit(event: unknown) {
+      for (const handler of handlers) handler(event as ServerEvent);
+    },
+  };
+}
 
 const PAGE_ID = "11111111-1111-4111-8111-111111111111";
 const MODULE_ID = "22222222-2222-4222-8222-222222222222";
@@ -69,7 +90,7 @@ describe("pages store", () => {
       .mockResolvedValueOnce(jsonResponse(pageBody("# Hello")));
     vi.stubGlobal("fetch", fetchMock);
 
-    const store = createPagesStore();
+    const store = createPagesStore({ channelFactory: fakeChannel });
     await store.loadPages(SPACE_ID);
     expect(store.pages).toHaveLength(1);
     expect(store.pages[0].title).toBe("Planning");
@@ -92,16 +113,17 @@ describe("pages store", () => {
       .mockResolvedValueOnce(jsonResponse(listBody));
     vi.stubGlobal("fetch", fetchMock);
 
-    const store = createPagesStore();
+    const channel = fakeChannel();
+    const store = createPagesStore({ channelFactory: () => channel });
     await store.loadPages(SPACE_ID);
     await store.openPage(PAGE_ID);
     expect(store.activePage?.modules[0].source).toBe("before");
 
-    store.handleServerEvent({
+    channel.emit({
       type: "page_updated",
       page_id: PAGE_ID,
       module_id: MODULE_ID,
-    } as ServerEvent);
+    });
     await vi.waitFor(() => {
       expect(store.activePage?.modules[0].source).toBe("after");
     });
@@ -124,19 +146,20 @@ describe("pages store", () => {
       .mockResolvedValueOnce(jsonResponse(listBody));
     vi.stubGlobal("fetch", fetchMock);
 
-    const store = createPagesStore();
+    const channel = fakeChannel();
+    const store = createPagesStore({ channelFactory: () => channel });
     await store.loadPages(SPACE_ID);
     await store.openPage(PAGE_ID);
     expect(store.activePage?.modules[0].annotations).toEqual([]);
 
-    store.handleServerEvent({
+    channel.emit({
       type: "page_updated",
       page_id: PAGE_ID,
       module_id: MODULE_ID,
       // A payload the store must never render: content comes from the
       // refetch, so nothing shaped like this may reach the surface.
       body: "words smuggled on the event",
-    } as unknown as ServerEvent);
+    });
 
     await vi.waitFor(() => {
       expect(store.activePage?.modules[0].annotations).toHaveLength(1);
@@ -163,7 +186,7 @@ describe("pages store", () => {
       );
     vi.stubGlobal("fetch", fetchMock);
 
-    const store = createPagesStore();
+    const store = createPagesStore({ channelFactory: fakeChannel });
     await store.loadPages(SPACE_ID);
     await store.openPage(PAGE_ID);
 
@@ -185,12 +208,13 @@ describe("pages store", () => {
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse(listBody));
     vi.stubGlobal("fetch", fetchMock);
 
-    const store = createPagesStore();
-    store.handleServerEvent({
+    const channel = fakeChannel();
+    const store = createPagesStore({ channelFactory: () => channel });
+    channel.emit({
       type: "page_updated",
       page_id: PAGE_ID,
       module_id: MODULE_ID,
-    } as ServerEvent);
+    });
     // No space loaded, nothing open: the signal is inert.
     expect(fetchMock).not.toHaveBeenCalled();
     expect(store.activePage).toBeNull();

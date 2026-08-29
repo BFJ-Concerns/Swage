@@ -2,11 +2,13 @@ mod connection;
 mod dispatch;
 pub mod error_codes;
 mod protocol;
+mod work_surface;
 
 #[allow(unused_imports)]
 pub(crate) use connection::check_upgrade_preconditions;
 pub use connection::ws_handler;
 pub use protocol::{ClientEvent, SchemaValidationError, ServerEvent};
+pub use work_surface::work_surface_ws_handler;
 
 #[cfg(test)]
 use crate::state::AppState;
