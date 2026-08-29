@@ -107,10 +107,14 @@ const gathered = await pipeline(
     ),
 );
 
-const landed = gathered.filter((entry) => entry && entry.recorded);
+const captured = await capturedSources();
+const capturedByUrl = new Map(captured.sources.map((source) => [source.url, source]));
+const landed = plan.sources
+  .map((source) => capturedByUrl.get(source.url))
+  .filter(Boolean);
 const failed = plan.sources
-  .map((source, index) => ({ source, outcome: gathered[index] }))
-  .filter(({ outcome }) => !outcome || !outcome.recorded)
+  .map((source, index) => ({ source, outcome: gathered[index], captured: capturedByUrl.get(source.url) }))
+  .filter(({ captured }) => !captured)
   .map(({ source, outcome }) => ({
     url: source.url,
     reason: outcome ? outcome.note : "gather worker failed",

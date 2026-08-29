@@ -447,6 +447,7 @@ fn journal_wire(
         "await_event" => WorkflowJournalEntryKind::AwaitEvent,
         "gate" => WorkflowJournalEntryKind::Gate,
         "budget" => WorkflowJournalEntryKind::Budget,
+        "captured_sources" => WorkflowJournalEntryKind::CapturedSources,
         "wind_down" => WorkflowJournalEntryKind::WindDown,
         other => return Err(format!("unknown workflow entry kind: {other}")),
     };
@@ -803,6 +804,9 @@ enum HostCommand {
     ListWorkerPlacements {
         reply: oneshot::Sender<Result<Value, String>>,
     },
+    CapturedSources {
+        reply: oneshot::Sender<Result<Value, String>>,
+    },
     Deliver {
         payload: EffectPayload,
         cancellation: CancellationToken,
@@ -954,6 +958,16 @@ impl WorkflowHost for ChannelWorkflowHost {
         receive
             .await
             .map_err(|_| "workflow host dropped placement-list reply".to_string())?
+    }
+
+    async fn captured_sources(&self, _cancellation: CancellationToken) -> Result<Value, String> {
+        let (reply, receive) = oneshot::channel();
+        self.tx
+            .send(HostCommand::CapturedSources { reply })
+            .map_err(|_| "workflow host stopped".to_string())?;
+        receive
+            .await
+            .map_err(|_| "workflow host dropped captured-sources reply".to_string())?
     }
 
     async fn deliver(
@@ -1987,6 +2001,46 @@ async fn run_host_commands_inner(
                         }
                         Err(error) => Err(error.to_string()),
                     }
+                };
+                let _ = reply.send(result);
+            }
+            HostCommand::CapturedSources { reply } => {
+                let current_seq = seq.fetch_add(1, Ordering::SeqCst);
+                let request = serde_json::json!({"action": "captured_sources"});
+                let hash = journal_args_hash(&request);
+                let result = match replay.get(current_seq as usize) {
+                    Some(entry) if entry.kind != "captured_sources" || entry.args_hash != hash => {
+                        Err("NondeterministicReplayError".into())
+                    }
+                    Some(entry) if entry.status == "completed" => entry
+                        .result
+                        .clone()
+                        .ok_or_else(|| "completed captured-sources entry has no result".into()),
+                    Some(entry) if entry.status == "failed" => Err(entry
+                        .error_message
+                        .clone()
+                        .unwrap_or_else(|| "recorded captured-sources failure".into())),
+                    Some(entry) => {
+                        complete_captured_sources(&state, run_id, space_id, entry.id).await
+                    }
+                    None => match state
+                        .create_workflow_journal_intent(NewWorkflowJournalIntent {
+                            run_id,
+                            seq: current_seq,
+                            kind: "captured_sources".into(),
+                            args_hash: hash,
+                            request,
+                            effect_kind: None,
+                            idempotency_key: None,
+                            target_kind: None,
+                        })
+                        .await
+                    {
+                        Ok(intent) => {
+                            complete_captured_sources(&state, run_id, space_id, intent.id).await
+                        }
+                        Err(error) => Err(error.to_string()),
+                    },
                 };
                 let _ = reply.send(result);
             }
@@ -3352,6 +3406,42 @@ async fn complete_worker_placement_listing(
     Ok(result)
 }
 
+async fn complete_captured_sources(
+    state: &AppState,
+    run_id: Uuid,
+    space_id: Uuid,
+    entry_id: Uuid,
+) -> Result<Value, String> {
+    let scopes = state
+        .storage
+        .list_workflow_journal(run_id)
+        .await
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .filter(|entry| entry.kind == "agent_call")
+        .map(|entry| entry.id.to_string())
+        .collect();
+    let sources = state
+        .storage
+        .list_observations_by_capture_scopes(space_id, scopes)
+        .await
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .filter_map(|observation| {
+            observation
+                .origin
+                .url
+                .map(|url| serde_json::json!({"url": url, "observation_id": observation.id}))
+        })
+        .collect::<Vec<_>>();
+    let result = serde_json::json!({"sources": sources});
+    state
+        .complete_workflow_journal_entry(entry_id, result.clone())
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(result)
+}
+
 async fn await_replay_release(rank: u64, next: &AtomicU64, notify: &Notify) {
     loop {
         if next
@@ -4516,6 +4606,7 @@ async fn launch_existing_run(
     let capabilities = ScriptCapabilities {
         delivery: delivery_grant.is_some(),
         composition: record.parent_run_id.is_none(),
+        captured_sources: record.script_name.as_deref() == Some("research-sweep"),
     };
     std::thread::Builder::new()
         .name(format!("workflow-{}", record.id))
@@ -5102,9 +5193,10 @@ mod tests {
     use swage_protocol::client::workflow::{WorkflowJournalEntryKind, WorkflowJournalEntryStatus};
     use swage_storage::{
         AgentDefinitionStore, AuditStore, CitationStore, ContextSnapshotStore,
-        NewWorkspaceAttachment, ObservationStore, OrientationCardStore, SessionStore, SpaceStore,
-        SqliteStorage, Storage, TaskDefinitionStore, ToolCallStore, TurnState, TurnStore,
-        WorkflowStore, WorkspaceAttachmentStore,
+        NewSourceObservation, NewWorkspaceAttachment, ObservationOrigin, ObservationStore,
+        OrientationCardStore, SessionStore, SpaceStore, SqliteStorage, Storage,
+        TaskDefinitionStore, ToolCallStore, TurnState, TurnStore, WorkflowStore,
+        WorkspaceAttachmentStore,
     };
     use swage_workflow::AgentSessionRef;
 
@@ -8725,6 +8817,118 @@ mod tests {
             "unexpected missing-task error: {error}"
         );
         assert_eq!(provider.requests.lock().expect("requests").len(), 3);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn captured_sources_query_journals_the_run_scoped_store_read() {
+        let (state, storage) = workflow_test_state();
+        let space = storage.get_or_create_default().await.expect("space");
+        let run = storage
+            .create_workflow_run(NewWorkflowRun {
+                space_id: space.id,
+                parent_run_id: None,
+                parent_seq: None,
+                script_version_id: None,
+                inline_workflow_id: None,
+                inline_workflow_name: None,
+                inline_workflow_version: None,
+                carrying_skill: None,
+                source: Some("return null".into()),
+                source_hash: source_hash("return null"),
+                args: Value::Null,
+                budget: serde_json::json!({}),
+                engine_version: "test".into(),
+                dispatch_bound_agent_ids: vec![],
+                dispatch_bound_task_definition_ids: vec![],
+                workflow_call_tools: None,
+                inherited_worker_placement: None,
+            })
+            .await
+            .expect("run");
+        let worker = storage
+            .create_workflow_journal_intent(NewWorkflowJournalIntent {
+                run_id: run.id,
+                seq: 0,
+                kind: "agent_call".into(),
+                args_hash: "worker".into(),
+                request: serde_json::json!({}),
+                effect_kind: None,
+                idempotency_key: None,
+                target_kind: None,
+            })
+            .await
+            .expect("worker entry");
+        let recorded = storage
+            .record_observation(NewSourceObservation {
+                space_id: space.id,
+                origin: ObservationOrigin {
+                    url: Some("https://example.test/first".into()),
+                    local_path: None,
+                },
+                retrieved_at: chrono::Utc::now(),
+                body_sha256: "a".repeat(64),
+                body_bytes: 5,
+                media_type: "text/plain".into(),
+                capture_scope: Some(worker.id.to_string()),
+            })
+            .await
+            .expect("record source");
+        let query = state
+            .create_workflow_journal_intent(NewWorkflowJournalIntent {
+                run_id: run.id,
+                seq: 1,
+                kind: "captured_sources".into(),
+                args_hash: journal_args_hash(&serde_json::json!({"action": "captured_sources"})),
+                request: serde_json::json!({"action": "captured_sources"}),
+                effect_kind: None,
+                idempotency_key: None,
+                target_kind: None,
+            })
+            .await
+            .expect("query intent");
+        let reading = complete_captured_sources(&state, run.id, space.id, query.id)
+            .await
+            .expect("complete query");
+        assert_eq!(
+            reading,
+            serde_json::json!({"sources": [{"url": "https://example.test/first", "observation_id": recorded.id}]})
+        );
+        let independent = storage
+            .list_observations_by_capture_scopes(space.id, vec![worker.id.to_string()])
+            .await
+            .expect("independent store read");
+        assert_eq!(
+            independent
+                .iter()
+                .map(|source| source.id)
+                .collect::<Vec<_>>(),
+            vec![recorded.id]
+        );
+
+        storage
+            .record_observation(NewSourceObservation {
+                space_id: space.id,
+                origin: ObservationOrigin {
+                    url: Some("https://example.test/later".into()),
+                    local_path: None,
+                },
+                retrieved_at: chrono::Utc::now(),
+                body_sha256: "b".repeat(64),
+                body_bytes: 5,
+                media_type: "text/plain".into(),
+                capture_scope: Some(worker.id.to_string()),
+            })
+            .await
+            .expect("record later source");
+        let replayed = storage
+            .list_workflow_journal(run.id)
+            .await
+            .expect("journal")
+            .into_iter()
+            .find(|entry| entry.id == query.id)
+            .and_then(|entry| entry.result)
+            .expect("completed query result");
+        assert_eq!(replayed, reading, "replay must use the journalled reading");
     }
 
     #[tokio::test(flavor = "multi_thread")]

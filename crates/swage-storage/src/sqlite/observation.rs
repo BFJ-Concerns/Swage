@@ -180,6 +180,34 @@ impl ObservationStore for SqliteStorage {
         .await
     }
 
+    async fn list_observations_by_capture_scopes(
+        &self,
+        space_id: Uuid,
+        capture_scopes: Vec<String>,
+    ) -> Result<Vec<SourceObservation>, StorageError> {
+        if capture_scopes.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.with_conn(move |conn| {
+            let placeholders = std::iter::repeat_n("?", capture_scopes.len())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let query = format!(
+                "SELECT {OBSERVATION_COLUMNS} FROM source_observations
+                 WHERE space_id = ?1 AND capture_scope IN ({placeholders})
+                 ORDER BY retrieved_at DESC"
+            );
+            let mut parameters = Vec::with_capacity(capture_scopes.len() + 1);
+            parameters.push(space_id.to_string());
+            parameters.extend(capture_scopes);
+            let mut statement = conn.prepare(&query)?;
+            let rows =
+                statement.query_map(rusqlite::params_from_iter(parameters), row_to_observation)?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+        })
+        .await
+    }
+
     async fn add_extraction(
         &self,
         observation_id: Uuid,

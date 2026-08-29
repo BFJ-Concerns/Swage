@@ -92,6 +92,10 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
         ),
         ("056_turn_delegated_tokens", ADD_TURN_DELEGATED_TOKENS),
         ("057_pages", CREATE_PAGE_TABLES),
+        (
+            "058_workflow_captured_sources",
+            ADD_WORKFLOW_CAPTURED_SOURCES,
+        ),
     ]
 }
 
@@ -319,6 +323,35 @@ const ADD_WORKFLOW_RUN_PARENTAGE: &str = "
     INSERT INTO workflow_journal_new SELECT * FROM workflow_journal;
     DROP TABLE workflow_journal;
     ALTER TABLE workflow_journal_new RENAME TO workflow_journal;
+    CREATE INDEX IF NOT EXISTS idx_workflow_journal_run_seq
+        ON workflow_journal(run_id, seq);
+";
+
+/// Captured-source reads are journalled so replay uses the corpus view its
+/// original script execution observed.
+const ADD_WORKFLOW_CAPTURED_SOURCES: &str = "
+    CREATE TABLE workflow_journal_captured_sources_new (
+        id                TEXT NOT NULL PRIMARY KEY,
+        run_id            TEXT NOT NULL REFERENCES workflow_runs(id) ON DELETE CASCADE,
+        seq               INTEGER NOT NULL,
+        completed_order   INTEGER,
+        kind              TEXT NOT NULL CHECK (kind IN ('agent_call', 'worker_placement', 'effect', 'log', 'phase', 'workflow_call', 'timer', 'event', 'await_event', 'gate', 'budget', 'wind_down', 'captured_sources')),
+        status            TEXT NOT NULL CHECK (status IN ('started', 'completed', 'failed')),
+        args_hash         TEXT NOT NULL,
+        request_json      TEXT NOT NULL,
+        result_json       TEXT,
+        error_message     TEXT,
+        effect_kind       TEXT,
+        idempotency_key   TEXT,
+        target_kind       TEXT,
+        started_at        TEXT NOT NULL,
+        completed_at      TEXT,
+        UNIQUE (run_id, seq),
+        UNIQUE (run_id, completed_order)
+    );
+    INSERT INTO workflow_journal_captured_sources_new SELECT * FROM workflow_journal;
+    DROP TABLE workflow_journal;
+    ALTER TABLE workflow_journal_captured_sources_new RENAME TO workflow_journal;
     CREATE INDEX IF NOT EXISTS idx_workflow_journal_run_seq
         ON workflow_journal(run_id, seq);
 ";

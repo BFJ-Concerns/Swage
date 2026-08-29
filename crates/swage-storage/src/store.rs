@@ -284,6 +284,13 @@ pub trait ObservationStore: Send + Sync {
         space_id: Uuid,
     ) -> Result<Vec<SourceObservation>, StorageError>;
 
+    /// Read observations belonging to the supplied workflow worker scopes.
+    async fn list_observations_by_capture_scopes(
+        &self,
+        space_id: Uuid,
+        capture_scopes: Vec<String>,
+    ) -> Result<Vec<SourceObservation>, StorageError>;
+
     /// Add the next extraction version for an observation. The store assigns
     /// the version; existing derivations are never touched.
     async fn add_extraction(
@@ -1605,6 +1612,14 @@ mod tests {
         async fn list_observations_by_space(
             &self,
             _: Uuid,
+        ) -> Result<Vec<SourceObservation>, StorageError> {
+            unimplemented!()
+        }
+
+        async fn list_observations_by_capture_scopes(
+            &self,
+            _: Uuid,
+            _: Vec<String>,
         ) -> Result<Vec<SourceObservation>, StorageError> {
             unimplemented!()
         }
