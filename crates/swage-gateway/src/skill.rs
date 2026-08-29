@@ -336,13 +336,8 @@ impl SkillManager {
             }
         }
         authored.sort_by(|left, right| {
-            let specificity = |level: &HierarchyLevel| match level {
-                HierarchyLevel::Agent => 0,
-                HierarchyLevel::Space => 1,
-                HierarchyLevel::Global => 2,
-            };
-            specificity(&left.level)
-                .cmp(&specificity(&right.level))
+            swage_config::skill::level_specificity(&left.level)
+                .cmp(&swage_config::skill::level_specificity(&right.level))
                 .then_with(|| left.name.cmp(&right.name))
         });
         (authored, warnings)
