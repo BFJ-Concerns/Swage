@@ -100,7 +100,7 @@ pub fn resolve_context_path(
     ctx: &dyn ToolContext,
     requested: &str,
 ) -> Result<ResolvedToolPath, String> {
-    let working_directory = canonical_existing_root(ctx.working_directory(), "Tool root")?;
+    let working_directory = canonical_existing_root(ctx.working_directory())?;
     let allowed_roots = context_roots(ctx)?;
 
     if Path::new(requested).is_absolute() {
@@ -128,7 +128,7 @@ pub fn resolve_new_context_path(
     ctx: &dyn ToolContext,
     requested: &str,
 ) -> Result<ResolvedToolPath, String> {
-    let working_directory = canonical_existing_root(ctx.working_directory(), "Tool root")?;
+    let working_directory = canonical_existing_root(ctx.working_directory())?;
     let allowed_roots = context_roots(ctx)?;
 
     if Path::new(requested).is_absolute() {
@@ -359,12 +359,9 @@ fn normalise_path(path: &Path) -> PathBuf {
 }
 
 fn context_roots(ctx: &dyn ToolContext) -> Result<Vec<PathBuf>, String> {
-    let mut roots = vec![canonical_existing_root(
-        ctx.working_directory(),
-        "Tool root",
-    )?];
+    let mut roots = vec![canonical_existing_root(ctx.working_directory())?];
     for path in ctx.allowed_paths() {
-        let root = canonical_existing_root(path, "Attachment root")?;
+        let root = canonical_existing_root(path)?;
         if !roots.contains(&root) {
             roots.push(root);
         }
@@ -372,13 +369,13 @@ fn context_roots(ctx: &dyn ToolContext) -> Result<Vec<PathBuf>, String> {
     Ok(roots)
 }
 
-fn canonical_existing_root(path: &Path, root_name: &str) -> Result<PathBuf, String> {
+fn canonical_existing_root(path: &Path) -> Result<PathBuf, String> {
     let root = path
         .canonicalize()
-        .map_err(|error| format!("{root_name} is unavailable: {}: {error}", path.display()))?;
+        .map_err(|error| format!("Workspace root is unavailable: {}: {error}", path.display()))?;
     if !root.is_dir() {
         return Err(format!(
-            "{root_name} is not a directory: {}",
+            "Workspace root is not a directory: {}",
             path.display()
         ));
     }
@@ -636,7 +633,7 @@ mod tests {
     }
 
     #[test]
-    fn canonical_root_checker_preserves_tool_and_attachment_root_wording() {
+    fn canonical_root_checker_preserves_workspace_root_wording_at_both_call_sites() {
         let dir = tmp_workspace();
         let tool_root = dir.path().join("not-a-directory");
         std::fs::write(&tool_root, b"").unwrap();
@@ -652,7 +649,7 @@ mod tests {
 
         assert_eq!(
             resolve_context_path(&tool_context, "readme.md").unwrap_err(),
-            format!("Tool root is not a directory: {}", tool_root.display())
+            format!("Workspace root is not a directory: {}", tool_root.display())
         );
 
         let attachment_root = dir.path().join("missing");
@@ -669,7 +666,7 @@ mod tests {
             resolve_context_path(&attachment_context, attachment_root.to_str().unwrap())
                 .unwrap_err()
                 .starts_with(&format!(
-                    "Attachment root is unavailable: {}:",
+                    "Workspace root is unavailable: {}:",
                     attachment_root.display()
                 ))
         );
