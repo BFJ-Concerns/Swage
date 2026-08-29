@@ -397,6 +397,7 @@ mod tests {
                 script.id,
                 None,
                 Some(json!({"targets": [{"kind": "webhook", "url": "https://example.invalid/"}]})),
+                None,
             )
             .await
             .expect("an operator-side column write");
@@ -484,5 +485,116 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].name, shipped);
         assert_eq!(rows[0].authoring_session_id, Some(session_id));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn saving_over_an_operator_script_leaves_the_model_no_delivery() {
+        let (state, storage) = state();
+        let (space_id, session_id) = saving_session(&state, &storage).await;
+        let (context, _ws) = host_context(&state, &storage, session_id);
+
+        // The space already keeps an operator's script by this name, with no
+        // grant on it yet — the case a save-by-name overwrites.
+        let operator = crate::service::create_workflow_script(
+            &state,
+            crate::service::WorkflowScriptDraft {
+                space_id,
+                name: "keeper".into(),
+                description: "The operator's own.".into(),
+                source: "return { delivery: typeof deliver };".into(),
+                delivery_grant: None,
+                authoring_session_id: None,
+            },
+            "operator_http",
+            None,
+        )
+        .await
+        .expect("the operator's script");
+
+        let saved = WorkflowSaveTool
+            .execute(
+                json!({
+                    "action": "save",
+                    "name": "keeper",
+                    "source": "return { delivery: typeof deliver };"
+                }),
+                &context,
+            )
+            .await
+            .expect("the model writes its own version");
+        assert_eq!(saved["created"], false);
+
+        // Writing the grant onto the row afterwards is the operator-side
+        // field write the seam has to survive: the script is the model's now.
+        storage
+            .update_workflow_script(
+                operator.script_id,
+                None,
+                Some(json!({"targets": [{"kind": "webhook", "url": "https://example.invalid/"}]})),
+                None,
+            )
+            .await
+            .expect("an operator-side column write");
+
+        let run = crate::tool::workflow_run::WorkflowRunTool
+            .execute(json!({"name": "keeper", "wait": true}), &context)
+            .await
+            .expect("the saved workflow runs by name");
+        assert_eq!(run["state"], "completed");
+        assert_eq!(
+            run["final_output"],
+            json!({"delivery": "undefined"}),
+            "a script the model rewrote must run without any delivery capability"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_delivering_operator_script_cannot_be_saved_over() {
+        let (state, storage) = state();
+        let (space_id, session_id) = saving_session(&state, &storage).await;
+        let (context, _ws) = host_context(&state, &storage, session_id);
+        let grant = json!({"targets": [{"kind": "webhook", "url": "https://example.invalid/"}]});
+
+        crate::service::create_workflow_script(
+            &state,
+            crate::service::WorkflowScriptDraft {
+                space_id,
+                name: "announce".into(),
+                description: "The operator's delivering script.".into(),
+                source: "return { delivery: typeof deliver };".into(),
+                delivery_grant: Some(grant.clone()),
+                authoring_session_id: None,
+            },
+            "operator_http",
+            None,
+        )
+        .await
+        .expect("the operator's delivering script");
+
+        let error = WorkflowSaveTool
+            .execute(
+                json!({
+                    "action": "save",
+                    "name": "announce",
+                    "source": "return { delivery: typeof deliver };"
+                }),
+                &context,
+            )
+            .await
+            .expect_err("a delivering script is not the model's to rewrite");
+        assert!(
+            format!("{error}").contains("carries delivery targets"),
+            "unexpected error: {error}"
+        );
+
+        let row = storage
+            .list_workflow_scripts(space_id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|script| script.name == "announce")
+            .expect("the operator's row");
+        assert_eq!(row.authoring_session_id, None);
+        assert_eq!(row.effective_delivery_grant(), Some(grant));
     }
 }

@@ -57,6 +57,10 @@ pub struct WorkflowScriptEdit {
     pub description: Option<String>,
     pub source: Option<String>,
     pub delivery_grant: Option<serde_json::Value>,
+    /// Set when a conversation is writing this version. The row records it,
+    /// so a script a model rewrote is a model's script from then on however
+    /// it began; it is never cleared here, only by an operator re-creating
+    /// the script through the operator surface.
     pub authoring_session_id: Option<Uuid>,
 }
 
@@ -145,6 +149,16 @@ pub async fn update_workflow_script(
                 .replace("{name}", &record.name),
         ));
     }
+    // A delivering script is the operator's own configuration: a conversation
+    // neither inherits its grant by writing a new version over it nor gets to
+    // silently take delivery away from it.
+    if edit.authoring_session_id.is_some() && record.delivery_grant.is_some() {
+        return Err(GatewayError::ValidationError(
+            "'{name}' carries delivery targets and was not authored in a conversation; \
+             save your workflow under a different name"
+                .replace("{name}", &record.name),
+        ));
+    }
     if let Some(source) = &edit.source {
         validate_source(source)?;
     }
@@ -152,10 +166,18 @@ pub async fn update_workflow_script(
     let prior_version = head_version(state, id).await?;
     let prior = Some(snapshot(&record, prior_version));
 
-    if edit.description.is_some() || edit.delivery_grant.is_some() {
+    if edit.description.is_some()
+        || edit.delivery_grant.is_some()
+        || edit.authoring_session_id.is_some()
+    {
         state
             .storage
-            .update_workflow_script(id, edit.description.as_deref(), edit.delivery_grant)
+            .update_workflow_script(
+                id,
+                edit.description.as_deref(),
+                edit.delivery_grant,
+                edit.authoring_session_id,
+            )
             .await
             .map_err(GatewayError::from)?;
     }
@@ -426,6 +448,7 @@ mod tests {
                 change.script_id,
                 None,
                 Some(serde_json::json!({"targets": ["webhook"]})),
+                None,
             )
             .await
             .unwrap();
@@ -559,5 +582,128 @@ mod tests {
         assert_eq!(event.metadata["new_state"]["name"], "recorded");
         assert_eq!(event.metadata["new_state"]["head_version"], 1);
         assert_eq!(event.metadata["new_state"]["can_deliver"], false);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn saving_over_an_operator_script_makes_it_the_conversation_s_own() {
+        let state = state();
+        let space = state.space_store.get_or_create_default().await.unwrap();
+        let session = session(&state, space.id).await;
+        let operator =
+            save_workflow_script(&state, draft(space.id, "sweep"), "operator_http", None)
+                .await
+                .unwrap();
+        assert_eq!(
+            state
+                .storage
+                .get_workflow_script(operator.script_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .authoring_session_id,
+            None
+        );
+
+        let mut agent = draft(space.id, "sweep");
+        agent.source = "return 2;".into();
+        agent.authoring_session_id = Some(session);
+        let saved = save_workflow_script(&state, agent, "workflow_save", Some(session))
+            .await
+            .unwrap();
+        assert_eq!(saved.script_id, operator.script_id);
+        let record = state
+            .storage
+            .get_workflow_script(operator.script_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            record.authoring_session_id,
+            Some(session),
+            "a version written by a conversation makes the script the conversation's"
+        );
+
+        // The row a conversation now owns cannot be granted delivery, by the
+        // operator surface or by a field write.
+        let error = update_workflow_script(
+            &state,
+            operator.script_id,
+            WorkflowScriptEdit {
+                delivery_grant: Some(serde_json::json!({"targets": ["webhook"]})),
+                ..Default::default()
+            },
+            "operator_http",
+            None,
+        )
+        .await
+        .expect_err("granting delivery to a conversation's script must be refused");
+        assert!(matches!(error, GatewayError::ValidationError(_)));
+        state
+            .storage
+            .update_workflow_script(
+                operator.script_id,
+                None,
+                Some(serde_json::json!({"targets": ["webhook"]})),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            state
+                .storage
+                .get_workflow_script(operator.script_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .effective_delivery_grant(),
+            None
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_conversation_cannot_save_over_a_delivering_script() {
+        let state = state();
+        let space = state.space_store.get_or_create_default().await.unwrap();
+        let session = session(&state, space.id).await;
+        let mut operator = draft(space.id, "delivering");
+        operator.delivery_grant = Some(serde_json::json!({"targets": ["webhook"]}));
+        let operator = save_workflow_script(&state, operator, "operator_http", None)
+            .await
+            .unwrap();
+
+        let mut agent = draft(space.id, "delivering");
+        agent.source = "return 2;".into();
+        agent.authoring_session_id = Some(session);
+        let error = save_workflow_script(&state, agent, "workflow_save", Some(session))
+            .await
+            .expect_err("a conversation must not write over a delivering script");
+        assert!(
+            matches!(&error, GatewayError::ValidationError(message)
+                if message.contains("carries delivery targets")),
+            "unexpected error: {error}"
+        );
+
+        let record = state
+            .storage
+            .get_workflow_script(operator.script_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.authoring_session_id, None);
+        assert!(
+            record.effective_delivery_grant().is_some(),
+            "the operator's delivering script is untouched"
+        );
+        assert_eq!(
+            state
+                .storage
+                .get_workflow_script_head(operator.script_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .source,
+            SOURCE,
+            "the refused save must not have appended a version"
+        );
     }
 }

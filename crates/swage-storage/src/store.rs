@@ -1011,11 +1011,17 @@ pub trait WorkflowStore: Send + Sync {
         &self,
         id: Uuid,
     ) -> Result<Option<WorkflowScriptVersion>, StorageError>;
+    /// Change a script row's mutable fields; every argument left `None`
+    /// leaves its column alone. Setting `authoring_session_id` marks the row
+    /// as a conversation's own work, which
+    /// [`WorkflowScriptRecord::effective_delivery_grant`] reads as "this
+    /// script never delivers".
     async fn update_workflow_script(
         &self,
         id: Uuid,
         description: Option<&str>,
         delivery_grant: Option<serde_json::Value>,
+        authoring_session_id: Option<Uuid>,
     ) -> Result<WorkflowScriptRecord, StorageError>;
     async fn list_workflow_scripts(
         &self,
@@ -2337,6 +2343,7 @@ mod tests {
             _: Uuid,
             _: Option<&str>,
             _: Option<serde_json::Value>,
+            _: Option<Uuid>,
         ) -> Result<WorkflowScriptRecord, StorageError> {
             unimplemented!()
         }

@@ -327,14 +327,16 @@ impl WorkflowStore for SqliteStorage {
         id: Uuid,
         description: Option<&str>,
         delivery_grant: Option<serde_json::Value>,
+        authoring_session_id: Option<Uuid>,
     ) -> Result<WorkflowScriptRecord, StorageError> {
         let description = description.map(str::to_string);
         let grant = delivery_grant
             .map(|value| serde_json::to_string(&value))
             .transpose()
             .map_err(|error| StorageError::QueryFailed(error.to_string()))?;
+        let authoring_session_id = authoring_session_id.map(|id| id.to_string());
         let now = Utc::now().to_rfc3339();
-        self.with_conn(move |conn| { conn.execute("UPDATE workflow_scripts SET description=COALESCE(?2,description), delivery_grant_json=COALESCE(?3,delivery_grant_json), updated_at=?4 WHERE id=?1",params![id.to_string(),description,grant,now])?; conn.query_row(&format!("SELECT {SCRIPT_COLUMNS} FROM workflow_scripts WHERE id=?1"),[id.to_string()],script_row) }).await
+        self.with_conn(move |conn| { conn.execute("UPDATE workflow_scripts SET description=COALESCE(?2,description), delivery_grant_json=COALESCE(?3,delivery_grant_json), authoring_session_id=COALESCE(?4,authoring_session_id), updated_at=?5 WHERE id=?1",params![id.to_string(),description,grant,authoring_session_id,now])?; conn.query_row(&format!("SELECT {SCRIPT_COLUMNS} FROM workflow_scripts WHERE id=?1"),[id.to_string()],script_row) }).await
     }
 
     async fn list_workflow_scripts(
