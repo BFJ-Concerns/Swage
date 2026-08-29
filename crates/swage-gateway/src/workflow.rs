@@ -1116,7 +1116,7 @@ async fn run_ephemeral_agent_call(
     request: AgentCallRequest,
     resolved_working_directory: Option<ResolvedWorkerPlacement>,
     cancellation: CancellationToken,
-) -> Result<AgentCallResult, String> {
+) -> Result<AgentCallResult, WorkflowHostError> {
     let inherited_workflow_call_tools = state
         .storage
         .get_workflow_run(run_id)
@@ -1154,7 +1154,8 @@ async fn run_ephemeral_agent_call(
             if let Some(task) = request.task.as_deref() {
                 return Err(format!(
                     "AgentCallError: task {task:?} cannot be selected on a continued session; select it when creating the worker"
-                ));
+                )
+                .into());
             }
             let created_here = state
                 .storage
@@ -1173,7 +1174,8 @@ async fn run_ephemeral_agent_call(
                     "AgentCallError: session {} was not created by this run; \
                      continuation tokens come from this run's own agentStart handles",
                     session_ref.session_id
-                ));
+                )
+                .into());
             }
             let session = state
                 .storage
@@ -1293,7 +1295,7 @@ async fn run_ephemeral_agent_call(
             (session.id, thread.id)
         }
     };
-    let (events, _events_rx) = mpsc::unbounded_channel::<ServerEvent>();
+    let (events, mut events_rx) = mpsc::unbounded_channel::<ServerEvent>();
     let request_schema = request.schema.clone();
     let request_schema_retries = request
         .schema
@@ -1364,7 +1366,8 @@ async fn run_ephemeral_agent_call(
             return Err(format!(
                 "AgentCallTimeoutError: agent call exceeded its {}ms deadline",
                 request.timeout_ms.expect("timeout branch requires a deadline")
-            ));
+            )
+            .into());
         }
     }
     let turn = state
@@ -1375,11 +1378,26 @@ async fn run_ephemeral_agent_call(
         .into_iter()
         .max_by_key(|turn| turn.created_at)
         .ok_or_else(|| "agent call produced no turn".to_string())?;
+    let schema_exhausted = std::iter::from_fn(|| events_rx.try_recv().ok()).any(|event| {
+        matches!(
+            event,
+            ServerEvent::OutputSchemaFailed { turn_id, .. } if turn_id == turn.id
+        )
+    });
     // The turn's failure must surface as this call's error — the shared turn
     // path reports failures over its event channel, which nobody holds here.
     // Falling through would hand the script raw text (or an empty string)
     // where its schema promised an object, silently.
     if turn.state != swage_storage::TurnState::Completed {
+        if schema_exhausted {
+            return Err(WorkflowHostError::SchemaExhausted {
+                host_reference: None,
+                message: format!(
+                    "SchemaExhaustedError: agent turn {} produced no schema-valid output",
+                    turn.id
+                ),
+            });
+        }
         return Err(format!(
             "AgentCallError: agent turn {} {}",
             turn.id,
@@ -1387,17 +1405,21 @@ async fn run_ephemeral_agent_call(
                 swage_storage::TurnState::Failed => "failed".to_string(),
                 other => format!("ended {other:?}"),
             }
-        ));
+        )
+        .into());
     }
     let output = match (&request_schema, turn.structured_output) {
         (Some(_), Some(structured)) => structured,
         (Some(_), None) => {
             // Schema demanded, none produced: the validated-object contract
             // cannot be met, and unvalidated text must not impersonate it.
-            return Err(format!(
-                "AgentCallError: agent turn {} produced no schema-valid output",
-                turn.id
-            ));
+            return Err(WorkflowHostError::SchemaExhausted {
+                host_reference: None,
+                message: format!(
+                    "SchemaExhaustedError: agent turn {} produced no schema-valid output",
+                    turn.id
+                ),
+            });
         }
         (None, structured) => {
             structured.unwrap_or_else(|| Value::String(turn.assistant_response.unwrap_or_default()))
@@ -2272,7 +2294,9 @@ async fn run_host_commands_inner(
                         if entry.args_hash != hash {
                             (
                                 Some(journal_entry_id),
-                                Err("NondeterministicReplayError".into()),
+                                Err(WorkflowHostError::Message(
+                                    "NondeterministicReplayError".into(),
+                                )),
                             )
                         } else if entry.status == "failed" {
                             // The original run observed this failure (and may
@@ -2280,10 +2304,12 @@ async fn run_host_commands_inner(
                             // error rather than re-executing the call.
                             (
                                 Some(journal_entry_id),
-                                Err(entry
-                                    .error_message
-                                    .clone()
-                                    .unwrap_or_else(|| "recorded agent failure".to_string())),
+                                Err(WorkflowHostError::Message(
+                                    entry
+                                        .error_message
+                                        .clone()
+                                        .unwrap_or_else(|| "recorded agent failure".to_string()),
+                                )),
                             )
                         } else if entry.status == "completed" {
                             let result = entry
@@ -2292,7 +2318,8 @@ async fn run_host_commands_inner(
                                 .ok_or_else(|| "completed agent entry has no result".to_string())
                                 .and_then(|value| {
                                     serde_json::from_value(value).map_err(|error| error.to_string())
-                                });
+                                })
+                                .map_err(WorkflowHostError::Message);
                             if let Some(rank) = replay_agent_ranks.get(&current_seq).copied() {
                                 await_replay_release(
                                     rank,
@@ -2351,7 +2378,9 @@ async fn run_host_commands_inner(
                                     .await,
                                 )
                             }
-                            Err(error) => (None, Err(error.to_string())),
+                            Err(error) => {
+                                (None, Err(WorkflowHostError::Message(error.to_string())))
+                            }
                         }
                     };
                     let result = if result.is_err()
@@ -2365,12 +2394,11 @@ async fn run_host_commands_inner(
                             .lock()
                             .await
                             .insert(failed_call_ref.host_reference(), failed_call_ref);
-                        result.map_err(|message| WorkflowHostError::AgentCall {
-                            host_reference: failed_call_ref.host_reference(),
-                            message,
+                        result.map_err(|error| {
+                            classify_agent_call_failure(error, failed_call_ref.host_reference())
                         })
                     } else {
-                        result.map_err(WorkflowHostError::Message)
+                        result
                     };
                     let actual = if !completed_replay {
                         result
@@ -3398,7 +3426,7 @@ async fn complete_agent_entry(
     request: AgentCallRequest,
     resolved_working_directory: Option<ResolvedWorkerPlacement>,
     cancellation: CancellationToken,
-) -> Result<AgentCallResult, String> {
+) -> Result<AgentCallResult, WorkflowHostError> {
     match run_ephemeral_agent_call(
         state,
         run_id,
@@ -3428,11 +3456,36 @@ async fn complete_agent_entry(
         // resumed path. Cancellation is settled for every in-flight entry at
         // the owning run boundary after the host loop drains.
         Err(error) => {
-            if !error.starts_with("WorkflowCancelledError") {
-                let _ = state.fail_workflow_journal_entry(entry_id, &error).await;
+            if !error.to_string().starts_with("WorkflowCancelledError") {
+                let _ = state
+                    .fail_workflow_journal_entry(entry_id, &error.to_string())
+                    .await;
             }
             Err(error)
         }
+    }
+}
+
+fn classify_agent_call_failure(
+    error: WorkflowHostError,
+    host_reference: String,
+) -> WorkflowHostError {
+    match error {
+        WorkflowHostError::SchemaExhausted { message, .. } => WorkflowHostError::SchemaExhausted {
+            host_reference: Some(host_reference),
+            message,
+        },
+        WorkflowHostError::Message(message) if message.starts_with("SchemaExhaustedError:") => {
+            WorkflowHostError::SchemaExhausted {
+                host_reference: Some(host_reference),
+                message,
+            }
+        }
+        WorkflowHostError::AgentCall { .. } => error,
+        WorkflowHostError::Message(message) => WorkflowHostError::AgentCall {
+            host_reference,
+            message,
+        },
     }
 }
 
@@ -8255,6 +8308,92 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn schema_exhaustion_returns_null_and_replays_without_a_new_agent_call() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let provider = Arc::new(ScriptedRecordingProvider {
+            outputs: std::sync::Mutex::new(std::collections::VecDeque::from([
+                scripted_text_output("not JSON"),
+                scripted_text_output("still not JSON"),
+            ])),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let source = r#"return await agent("return a JSON object", {
+            schema: {type: "object", required: ["answer"]}, maxAttempts: 2
+        });"#;
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(space.id),
+            Json(StartInlineWorkflowRunRequest {
+                source: source.into(),
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start schema-constrained run");
+        wait_for_terminal(&state, started.id).await;
+
+        let completed = storage
+            .get_workflow_run(started.id)
+            .await
+            .expect("run")
+            .expect("present");
+        assert_eq!(completed.state, "completed");
+        assert_eq!(completed.final_output, Some(Value::Null));
+        let journal = storage
+            .list_workflow_journal(started.id)
+            .await
+            .expect("journal");
+        assert_eq!(journal.len(), 1);
+        assert_eq!(journal[0].kind, "agent_call");
+        assert_eq!(journal[0].status, "failed");
+        assert!(
+            journal[0]
+                .error_message
+                .as_deref()
+                .is_some_and(|error| error.starts_with("SchemaExhaustedError:"))
+        );
+        assert_eq!(provider.requests.lock().expect("requests").len(), 2);
+
+        storage
+            .update_workflow_run_state(started.id, "interrupted", None, None, None)
+            .await
+            .expect("simulate restart");
+        let _ = resume_run(State(state.clone()), Path(started.id))
+            .await
+            .expect("replay schema-constrained run");
+        wait_for_terminal(&state, started.id).await;
+
+        let replayed = storage
+            .get_workflow_run(started.id)
+            .await
+            .expect("run")
+            .expect("present");
+        assert_eq!(replayed.state, "completed");
+        assert_eq!(replayed.final_output, Some(Value::Null));
+        assert_eq!(
+            storage
+                .list_workflow_journal(started.id)
+                .await
+                .expect("journal")
+                .iter()
+                .filter(|entry| entry.kind == "agent_call")
+                .count(),
+            1
+        );
+        assert_eq!(provider.requests.lock().expect("requests").len(), 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn workflow_launched_by_a_placed_worker_keeps_its_exact_filesystem_authority() {
         let fixture = tempfile::tempdir().expect("workspace fixture");
         let workspace = fixture.path().join("workspace");
@@ -8814,7 +8953,9 @@ mod tests {
         .await
         .expect_err("missing task must fail before provider dispatch");
         assert!(
-            error.contains("no task definition 'missing' exists"),
+            error
+                .to_string()
+                .contains("no task definition 'missing' exists"),
             "unexpected missing-task error: {error}"
         );
         assert_eq!(provider.requests.lock().expect("requests").len(), 3);
@@ -9950,7 +10091,11 @@ mod tests {
         .await
         .expect_err("continued calls must not silently ignore a task selector");
 
-        assert!(error.contains("cannot be selected on a continued session"));
+        assert!(
+            error
+                .to_string()
+                .contains("cannot be selected on a continued session")
+        );
     }
 
     /// Serves scripted gate verdicts through `complete` and counts calls, so
@@ -13279,7 +13424,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn exhausted_agent_call_leaves_a_durable_handover() {
+    async fn exhausted_schema_agent_call_completes_without_a_durable_handover() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
         let space = storage.get_or_create_default().await.expect("space");
         let provider = Arc::new(ScriptedRecordingProvider {
@@ -13305,7 +13450,7 @@ mod tests {
         let source = r#"
             await postEvent("operator.escalation", { decisionQueued: true });
             const grounding = await deliverEvents(1);
-            await agent(`make the lead decision from ${JSON.stringify(grounding)}`, {
+            return await agent(`make the lead decision from ${JSON.stringify(grounding)}`, {
                 agent: "default",
                 label: "lead segment 3",
                 maxAttempts: 3,
@@ -13314,6 +13459,110 @@ mod tests {
                     required: ["decision"],
                     properties: { decision: { type: "string" } }
                 }
+            });
+        "#;
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(space.id),
+            Json(StartInlineWorkflowRunRequest {
+                source: source.into(),
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start inline run");
+
+        wait_for_terminal(&state, started.id).await;
+
+        let run = storage
+            .get_workflow_run(started.id)
+            .await
+            .expect("run")
+            .expect("present");
+        assert_eq!(run.state, "completed");
+        assert_eq!(run.final_output, Some(Value::Null));
+        assert!(run.handover.is_none());
+        assert!(run.error_message.is_none());
+
+        let journal = storage
+            .list_workflow_journal(started.id)
+            .await
+            .expect("journal");
+        let failed_call = journal
+            .iter()
+            .find(|entry| entry.kind == "agent_call")
+            .expect("failed agent call");
+        assert_eq!(failed_call.status, "failed");
+        assert!(
+            failed_call
+                .error_message
+                .as_deref()
+                .is_some_and(|error| error.starts_with("SchemaExhaustedError:"))
+        );
+
+        let events = storage
+            .list_workflow_run_events(started.id)
+            .await
+            .expect("events");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, "operator.escalation");
+        assert!(events[0].delivered_at.is_some());
+        assert_eq!(provider.requests.lock().expect("requests").len(), 3);
+        assert!(provider.requests.lock().expect("requests")[0]
+            .messages
+            .iter()
+            .flat_map(|message| message.content())
+            .any(|part| matches!(part, swage_core::ContentPart::Text { text } if text.contains(r#""delivered":1"#))));
+
+        let Json(detail) = get_run(State(state.clone()), Path(started.id))
+            .await
+            .expect("run detail");
+        assert_eq!(detail.run.final_output, Some(Value::Null));
+        assert!(detail.run.handover.is_none());
+        assert_eq!(detail.journal.len(), journal.len());
+        assert_eq!(detail.wake_metrics.events_pending, 0);
+
+        assert_eq!(resume_owed_workflow_runs(&state).await, 0);
+        assert_eq!(provider.requests.lock().expect("requests").len(), 3);
+        assert_eq!(
+            storage
+                .get_workflow_run(started.id)
+                .await
+                .expect("run")
+                .expect("present")
+                .state,
+            "completed"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn ordinary_failed_agent_call_keeps_interrupted_handover_event_accounting() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let provider = Arc::new(ScriptedRecordingProvider {
+            outputs: std::sync::Mutex::new(std::collections::VecDeque::from(vec![vec![
+                swage_core::StreamChunk::Error {
+                    message: "ordinary provider failure".into(),
+                },
+            ]])),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let source = r#"
+            await postEvent("operator.escalation", { decisionQueued: true });
+            const grounding = await deliverEvents(1);
+            await agent(`make the lead decision from ${JSON.stringify(grounding)}`, {
+                agent: "default",
+                label: "lead segment 3",
+                maxAttempts: 1,
             });
             return "unexpected";
         "#;
@@ -13386,7 +13635,7 @@ mod tests {
             handover["events"][0]["delivery"],
             "delivered_to_failed_call"
         );
-        assert_eq!(provider.requests.lock().expect("requests").len(), 3);
+        assert_eq!(provider.requests.lock().expect("requests").len(), 1);
         assert!(provider.requests.lock().expect("requests")[0]
             .messages
             .iter()
@@ -13413,7 +13662,7 @@ mod tests {
         assert_eq!(detail.wake_metrics.events_pending, 0);
 
         assert_eq!(resume_owed_workflow_runs(&state).await, 0);
-        assert_eq!(provider.requests.lock().expect("requests").len(), 3);
+        assert_eq!(provider.requests.lock().expect("requests").len(), 1);
         assert_eq!(
             storage
                 .get_workflow_run(started.id)
