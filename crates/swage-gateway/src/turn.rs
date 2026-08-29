@@ -253,13 +253,6 @@ fn record_effective_model_snapshot(
     });
 }
 
-fn record_effective_tool_root_snapshot(report_json: &mut serde_json::Value, root: &Path) {
-    normalise_report_object(report_json);
-    report_json["tool_scope"] = serde_json::json!({
-        "effective_root": root,
-    });
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SandboxDegradationApproval {
     Approved,
@@ -1229,7 +1222,10 @@ async fn process_turn_with_composition_and_focus(
         &session.agent_id,
         &session_variables,
     );
-    let (assembled_messages, assembly_report) = (output.messages, output.report);
+    let (assembled_messages, mut assembly_report) = (output.messages, output.report);
+    assembly_report.tool_scope = Some(serde_json::json!({
+        "effective_root": workspace_root,
+    }));
 
     tracing::debug!(
         total_tokens = assembly_report.total_tokens,
@@ -1255,8 +1251,6 @@ async fn process_turn_with_composition_and_focus(
             effective_model_source,
         );
     }
-    record_effective_tool_root_snapshot(&mut report_json, &workspace_root);
-
     let session_approval_grants = state
         .session_approval_grants
         .lock()
