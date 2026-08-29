@@ -68,7 +68,6 @@ function pageBody(source: string, annotations: unknown[] = []) {
         annotations,
       },
     ],
-    annotations: [],
   };
 }
 

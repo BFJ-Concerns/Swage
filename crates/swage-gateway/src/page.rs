@@ -76,7 +76,6 @@ pub async fn create_page(
         created_at: page.created_at,
         updated_at: page.updated_at,
         modules: Vec::new(),
-        annotations: Vec::new(),
     })
 }
 
@@ -184,14 +183,14 @@ pub async fn write_page_module(
         .list_page_annotations(page.id)
         .await?
         .into_iter()
-        .filter(|annotation| annotation.module_id == Some(module.id))
+        .filter(|annotation| annotation.module_id == module.id)
         .map(annotation_view)
         .collect();
     Ok(module_view(module, annotations))
 }
 
-/// Leave a note on a page, or on one of its modules. `author` names who left
-/// it in the provenance record (an agent id, or "user" for the web surface).
+/// Leave a note on one of a page's modules. `author` names who left it in the
+/// provenance record (an agent id, or "user" for the web surface).
 ///
 /// A note carries no authority: it is one party's words recorded against a
 /// stable id, and nothing keys any permission off it.
@@ -214,16 +213,15 @@ pub async fn create_page_annotation(
     }
     // The anchor must be real and must be on this page: a note addressed to
     // another page's module would name a location neither party can see.
-    if let Some(module_id) = request.module_id {
-        state
-            .storage
-            .get_page_module(module_id)
-            .await?
-            .filter(|module| module.page_id == page.id)
-            .ok_or_else(|| {
-                GatewayError::ValidationError(format!("no module {module_id} on page {page_id}"))
-            })?;
-    }
+    let module_id = request.module_id;
+    state
+        .storage
+        .get_page_module(module_id)
+        .await?
+        .filter(|module| module.page_id == page.id)
+        .ok_or_else(|| {
+            GatewayError::ValidationError(format!("no module {module_id} on page {page_id}"))
+        })?;
     let tags: Vec<String> = request
         .tags
         .iter()
@@ -235,7 +233,7 @@ pub async fn create_page_annotation(
         .storage
         .create_page_annotation(NewPageAnnotation {
             page_id: page.id,
-            module_id: request.module_id,
+            module_id,
             body: body.to_string(),
             tags,
             author: author.to_string(),
@@ -255,7 +253,7 @@ pub async fn create_page_annotation(
 
     let _ = state.broadcast.send(ServerEvent::PageUpdated {
         page_id: page.id,
-        module_id: annotation.module_id,
+        module_id: Some(annotation.module_id),
     });
 
     Ok(annotation_view(annotation))
@@ -321,7 +319,7 @@ pub async fn update_page_annotation(
 
     let _ = state.broadcast.send(ServerEvent::PageUpdated {
         page_id: updated.page_id,
-        module_id: updated.module_id,
+        module_id: Some(updated.module_id),
     });
 
     Ok(annotation_view(updated))
@@ -358,7 +356,7 @@ pub async fn delete_page_annotation(
 
     let _ = state.broadcast.send(ServerEvent::PageUpdated {
         page_id: existing.page_id,
-        module_id: existing.module_id,
+        module_id: Some(existing.module_id),
     });
     Ok(())
 }
@@ -411,14 +409,7 @@ pub async fn page_response(state: &AppState, page_id: Uuid) -> Result<PageRespon
     let modules = state.storage.list_page_modules(page.id).await?;
     let annotations = state.storage.list_page_annotations(page.id).await?;
     // Each note travels with the module it hangs on, so the reader finds it
-    // where the location is rather than having to match ids by hand; the
-    // page-level notes are the ones naming no module.
-    let page_level = annotations
-        .iter()
-        .filter(|annotation| annotation.module_id.is_none())
-        .cloned()
-        .map(annotation_view)
-        .collect();
+    // where the location is rather than having to match ids by hand.
     Ok(PageResponse {
         id: page.id,
         space_id: page.space_id,
@@ -430,14 +421,13 @@ pub async fn page_response(state: &AppState, page_id: Uuid) -> Result<PageRespon
             .map(|module| {
                 let hung_here = annotations
                     .iter()
-                    .filter(|annotation| annotation.module_id == Some(module.id))
+                    .filter(|annotation| annotation.module_id == module.id)
                     .cloned()
                     .map(annotation_view)
                     .collect();
                 module_view(module, hung_here)
             })
             .collect(),
-        annotations: page_level,
     })
 }
 
@@ -622,7 +612,7 @@ mod tests {
         (state, storage, page.id, module.id, other_module.id)
     }
 
-    fn annotation(module_id: Option<Uuid>, body: &str) -> CreatePageAnnotationRequest {
+    fn annotation(module_id: Uuid, body: &str) -> CreatePageAnnotationRequest {
         CreatePageAnnotationRequest {
             module_id,
             body: body.into(),
@@ -632,12 +622,12 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn an_annotation_reaches_the_reader_at_the_module_it_names() {
-        let (state, _storage, page_id, module_id, _) = seeded().await;
+        let (state, _storage, page_id, module_id, other_module_id) = seeded().await;
 
         create_page_annotation(
             &state,
             page_id,
-            annotation(Some(module_id), "the second claim needs a source"),
+            annotation(module_id, "the second claim needs a source"),
             "user",
         )
         .await
@@ -645,11 +635,11 @@ mod tests {
         create_page_annotation(
             &state,
             page_id,
-            annotation(None, "needs a second pass"),
+            annotation(other_module_id, "needs a second pass"),
             "user",
         )
         .await
-        .unwrap();
+        .expect_err("a module on another page is not an anchor");
 
         let response = page_response(&state, page_id).await.unwrap();
         let module = response
@@ -666,25 +656,15 @@ mod tests {
             vec!["the second claim needs a source"],
             "the module carries the note addressed to it, and only that one"
         );
-        assert_eq!(
-            response
-                .annotations
-                .iter()
-                .map(|a| a.body.as_str())
-                .collect::<Vec<_>>(),
-            vec!["needs a second pass"],
-            "page-level notes stay on the page, not on a module"
-        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn an_empty_body_is_refused_before_anything_lands() {
         let (state, storage, page_id, module_id, _) = seeded().await;
 
-        let error =
-            create_page_annotation(&state, page_id, annotation(Some(module_id), "   "), "user")
-                .await
-                .expect_err("an empty note names no reference");
+        let error = create_page_annotation(&state, page_id, annotation(module_id, "   "), "user")
+            .await
+            .expect_err("an empty note names no reference");
         assert!(error.to_string().contains("non-empty"), "{error}");
         assert!(
             storage
@@ -703,7 +683,7 @@ mod tests {
         let error = create_page_annotation(
             &state,
             page_id,
-            annotation(Some(other_module_id), "hangs nowhere either party can see"),
+            annotation(other_module_id, "hangs nowhere either party can see"),
             "user",
         )
         .await
@@ -729,7 +709,7 @@ mod tests {
             &state,
             page_id,
             CreatePageAnnotationRequest {
-                module_id: Some(module_id),
+                module_id,
                 body: "first reading".into(),
                 tags: vec!["draft".into()],
             },
@@ -784,7 +764,7 @@ mod tests {
         let created = create_page_annotation(
             &state,
             page_id,
-            annotation(Some(module_id), "withdrawn on reflection"),
+            annotation(module_id, "withdrawn on reflection"),
             "user",
         )
         .await
@@ -821,7 +801,7 @@ mod tests {
         create_page_annotation(
             &state,
             page_id,
-            annotation(Some(module_id), "secret words that must not ride the wire"),
+            annotation(module_id, "secret words that must not ride the wire"),
             "user",
         )
         .await

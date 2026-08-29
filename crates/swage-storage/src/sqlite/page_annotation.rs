@@ -31,14 +31,14 @@ fn decode_tags(raw: &str) -> Vec<String> {
 fn row_to_annotation(row: &rusqlite::Row<'_>) -> rusqlite::Result<PageAnnotation> {
     let id: String = row.get(0)?;
     let page_id: String = row.get(1)?;
-    let module_id: Option<String> = row.get(2)?;
+    let module_id: String = row.get(2)?;
     let tags: String = row.get(4)?;
     let created: String = row.get(6)?;
     let updated: String = row.get(7)?;
     Ok(PageAnnotation {
         id: parse_uuid(&id)?,
         page_id: parse_uuid(&page_id)?,
-        module_id: module_id.as_deref().map(parse_uuid).transpose()?,
+        module_id: parse_uuid(&module_id)?,
         body: row.get(3)?,
         tags: decode_tags(&tags),
         author: row.get(5)?,
@@ -67,7 +67,7 @@ impl PageAnnotationStore for SqliteStorage {
                 params![
                     id.to_string(),
                     annotation.page_id.to_string(),
-                    annotation.module_id.map(|m| m.to_string()),
+                    annotation.module_id.to_string(),
                     &annotation.body,
                     &tags,
                     &annotation.author,
@@ -164,6 +164,19 @@ mod tests {
 
     use super::*;
 
+    async fn add_module(storage: &SqliteStorage, page_id: Uuid, position: i32) -> Uuid {
+        storage
+            .create_page_module(NewPageModule {
+                page_id,
+                kind: "document".into(),
+                position,
+                source: "# Draft".into(),
+            })
+            .await
+            .unwrap()
+            .id
+    }
+
     async fn seeded() -> (SqliteStorage, Uuid, Uuid) {
         let storage = SqliteStorage::in_memory().unwrap();
         let space = SpaceStore::create(
@@ -182,37 +195,31 @@ mod tests {
             })
             .await
             .unwrap();
-        let module = storage
-            .create_page_module(NewPageModule {
-                page_id: page.id,
-                kind: "document".into(),
-                position: 0,
-                source: "# Draft".into(),
-            })
-            .await
-            .unwrap();
-        (storage, page.id, module.id)
+        let module = add_module(&storage, page.id, 0).await;
+        (storage, page.id, module)
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn annotations_round_trip_addressed_to_their_module() {
         let (storage, page_id, module_id) = seeded().await;
 
-        let on_module = storage
+        let second_module = add_module(&storage, page_id, 1).await;
+
+        let first = storage
             .create_page_annotation(NewPageAnnotation {
                 page_id,
-                module_id: Some(module_id),
+                module_id,
                 body: "this paragraph contradicts the summary".into(),
                 tags: vec!["question".into(), "blocking".into()],
                 author: "user".into(),
             })
             .await
             .unwrap();
-        let on_page = storage
+        let second = storage
             .create_page_annotation(NewPageAnnotation {
                 page_id,
-                module_id: None,
-                body: "whole page needs a second pass".into(),
+                module_id: second_module,
+                body: "needs a second pass".into(),
                 tags: Vec::new(),
                 author: "assistant".into(),
             })
@@ -222,24 +229,23 @@ mod tests {
         let listed = storage.list_page_annotations(page_id).await.unwrap();
         assert_eq!(
             listed.iter().map(|a| a.id).collect::<Vec<_>>(),
-            vec![on_module.id, on_page.id],
+            vec![first.id, second.id],
             "annotations list oldest first"
         );
         let read = storage
-            .get_page_annotation(on_module.id)
+            .get_page_annotation(first.id)
             .await
             .unwrap()
             .unwrap();
         assert_eq!(
-            read.module_id,
-            Some(module_id),
+            read.module_id, module_id,
             "the note is addressed to the module it hangs on"
         );
         assert_eq!(read.tags, vec!["question", "blocking"]);
         assert_eq!(read.author, "user");
         assert_eq!(
-            listed[1].module_id, None,
-            "a page-level note names no module"
+            listed[1].module_id, second_module,
+            "each note names its own module — the page as a whole is not an anchor"
         );
     }
 
@@ -249,7 +255,7 @@ mod tests {
         let annotation = storage
             .create_page_annotation(NewPageAnnotation {
                 page_id,
-                module_id: Some(module_id),
+                module_id,
                 body: "before".into(),
                 tags: vec!["draft".into()],
                 author: "user".into(),
@@ -275,11 +281,12 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn deleting_a_module_takes_its_annotations_with_it() {
         let (storage, page_id, module_id) = seeded().await;
+        let survivor = add_module(&storage, page_id, 1).await;
         storage
             .create_page_annotation(NewPageAnnotation {
                 page_id,
-                module_id: Some(module_id),
-                body: "hangs on the module".into(),
+                module_id,
+                body: "hangs on the deleted module".into(),
                 tags: Vec::new(),
                 author: "user".into(),
             })
@@ -288,8 +295,8 @@ mod tests {
         storage
             .create_page_annotation(NewPageAnnotation {
                 page_id,
-                module_id: None,
-                body: "hangs on the page".into(),
+                module_id: survivor,
+                body: "hangs on the module that stays".into(),
                 tags: Vec::new(),
                 author: "user".into(),
             })
@@ -311,8 +318,8 @@ mod tests {
         assert_eq!(
             remaining.len(),
             1,
-            "the module's note goes with the module; the page-level note stays"
+            "a note goes with the module it hangs on, and only that one"
         );
-        assert_eq!(remaining[0].body, "hangs on the page");
+        assert_eq!(remaining[0].body, "hangs on the module that stays");
     }
 }
