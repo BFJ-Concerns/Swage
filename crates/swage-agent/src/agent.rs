@@ -266,7 +266,7 @@ impl Agent {
                 thread_id,
                 compaction_focus.as_deref(),
                 self.config.model_id.as_deref(),
-                false,
+                true,
             )
             .await
             {
