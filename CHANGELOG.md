@@ -13,6 +13,7 @@ All notable changes to Swage are documented in this file.
 - Workspace attachment, trust, and detach controls are now reachable from the selected space's Settings workspaces section.
 - Shipped development workflows are now syntax-checked at the gate, and the assembly build-and-verify workflow is runnable.
 - Agents can now list the workflows available to their session before starting one.
+- Agents can save and revise named workflow scripts for their space, versioned alongside operator-authored ones; a workflow authored in a conversation never carries a delivery grant, so it cannot send anything off the machine, and a workflow that already delivers can only be revised by an operator.
 - Asynchronous turn callers can select a configured model for one request, with the effective selection retained in that turn's audit snapshot.
 - Context assembly alternatives can now be configured under `context.alternatives` for controlled selection experiments.
 - Fresh spaces now include immutable researcher, organiser, and synthesist agent definitions for the shipped research-sweep workflow, with same-named authored definitions taking precedence.
