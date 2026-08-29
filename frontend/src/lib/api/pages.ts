@@ -7,6 +7,9 @@ import type { PageListResponse } from "../protocol/PageListResponse";
 import type { PageResponse } from "../protocol/PageResponse";
 import type { PageModuleView } from "../protocol/PageModuleView";
 import type { WritePageModuleRequest } from "../protocol/WritePageModuleRequest";
+import type { PageAnnotationView } from "../protocol/PageAnnotationView";
+import type { CreatePageAnnotationRequest } from "../protocol/CreatePageAnnotationRequest";
+import type { UpdatePageAnnotationRequest } from "../protocol/UpdatePageAnnotationRequest";
 
 let baseUrl = "";
 
@@ -58,4 +61,34 @@ export async function writePageModule(
 ): Promise<PageModuleView> {
   const response = await request(`/api/pages/${pageId}/modules`, "POST", body);
   return (await response.json()) as PageModuleView;
+}
+
+export async function createPageAnnotation(
+  pageId: string,
+  body: CreatePageAnnotationRequest,
+): Promise<PageAnnotationView> {
+  const response = await request(
+    `/api/pages/${pageId}/annotations`,
+    "POST",
+    body,
+  );
+  return (await response.json()) as PageAnnotationView;
+}
+
+export async function updatePageAnnotation(
+  annotationId: string,
+  body: UpdatePageAnnotationRequest,
+): Promise<PageAnnotationView> {
+  const response = await request(
+    `/api/page-annotations/${annotationId}`,
+    "POST",
+    body,
+  );
+  return (await response.json()) as PageAnnotationView;
+}
+
+export async function deletePageAnnotation(
+  annotationId: string,
+): Promise<void> {
+  await request(`/api/page-annotations/${annotationId}`, "DELETE");
 }
