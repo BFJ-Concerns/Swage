@@ -1130,17 +1130,17 @@ pub struct NewPageModule {
     pub source: String,
 }
 
-/// A note hung on a page or one of its modules — the shared reference a user
-/// and an agent both point at instead of describing a location to each other.
+/// A note hung on one of a page's modules — the shared reference a user and
+/// an agent both point at instead of describing a location to each other.
 ///
-/// Anchoring is at module grain: `module_id` names the module the note is
-/// about, or is absent for a note on the page as a whole. Nothing here
+/// Anchoring is at module grain and only there: `module_id` names the module
+/// the note is about. Nothing here addresses the page as a whole, and nothing
 /// addresses a position inside a module's content.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PageAnnotation {
     pub id: Uuid,
     pub page_id: Uuid,
-    pub module_id: Option<Uuid>,
+    pub module_id: Uuid,
     /// The note's text, in whatever words its author used.
     pub body: String,
     /// Free-form labels the author attached, for sorting and filtering.
@@ -1155,7 +1155,7 @@ pub struct PageAnnotation {
 #[derive(Debug, Clone)]
 pub struct NewPageAnnotation {
     pub page_id: Uuid,
-    pub module_id: Option<Uuid>,
+    pub module_id: Uuid,
     pub body: String,
     pub tags: Vec<String>,
     pub author: String,

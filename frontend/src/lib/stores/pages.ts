@@ -29,10 +29,10 @@ export interface PagesStore {
     moduleId: string | null,
     source: string,
   ): Promise<void>;
-  // Leave a note on a module, or on the page when moduleId is null.
+  // Leave a note on one of the page's modules — the only anchor there is.
   annotate(
     pageId: string,
-    moduleId: string | null,
+    moduleId: string,
     body: string,
     tags?: string[],
   ): Promise<void>;
@@ -131,12 +131,12 @@ export function createPagesStore(options?: PagesStoreOptions): PagesStore {
 
     async annotate(
       pageId: string,
-      moduleId: string | null,
+      moduleId: string,
       body: string,
       tags: string[] = [],
     ): Promise<void> {
       await pagesApi.createPageAnnotation(pageId, {
-        module_id: moduleId ?? undefined,
+        module_id: moduleId,
         body,
         tags,
       });
