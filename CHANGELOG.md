@@ -8,6 +8,7 @@ All notable changes to Swage are documented in this file.
 
 - Users and agents can leave durable notes on a page's modules, appearing on an open page as they are written and readable by the agent alongside the module they hang on.
 - Work surfaces receive server-wide page signals over their own listen-only WebSocket, so an open page stays current whether or not a conversation is selected.
+- Workflows may declare an argument schema in portable metadata; saved runs validate it before starting and workflow listings expose the declared or unconstrained contract.
 - The conversation now rides every work surface: pages carry the same live conversation beside them, with earlier conversations picked up and new ones started from the channel itself, so moving between pages neither leaves the conversation behind nor resets it.
 - Workspace attachment, trust, and detach controls are now reachable from the selected space's Settings workspaces section.
 - Shipped development workflows are now syntax-checked at the gate, and the assembly build-and-verify workflow is runnable.
@@ -43,6 +44,7 @@ All notable changes to Swage are documented in this file.
 
 ### Changed
 
+- The `workspace.path` key is removed; workspace attachments and managed scratch roots define tool scope, and local execution is no longer listed as an attached device.
 - Presence APIs and protocol types now consistently identify attached devices; the former machine-named routes and fields are removed in this private alpha.
 - Context compaction now uses provider-native prompt token counts when available, while retaining conservative local screening and estimate fallback when counting is unavailable.
 - Async turn submissions now reject unrecognised request fields instead of silently ignoring them.
