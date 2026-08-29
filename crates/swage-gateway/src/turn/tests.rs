@@ -1573,17 +1573,17 @@ impl WorkspaceAttachmentStore for MockStorage {
 impl DeviceStore for MockStorage {
     async fn upsert_device(
         &self,
-        host: NewDeviceRegistration,
+        device: NewDeviceRegistration,
     ) -> Result<DeviceRegistration, StorageError> {
         let registration = DeviceRegistration {
-            device_id: host.device_id,
-            label: host.label,
-            kind: host.kind,
-            base_url: host.base_url,
-            shared_token: host.shared_token,
-            workspace_root: host.workspace_root,
-            workspace_roots: host.workspace_roots,
-            capabilities: host.capabilities,
+            device_id: device.device_id,
+            label: device.label,
+            kind: device.kind,
+            base_url: device.base_url,
+            shared_token: device.shared_token,
+            workspace_root: device.workspace_root,
+            workspace_roots: device.workspace_roots,
+            capabilities: device.capabilities,
             registered_at: chrono::Utc::now(),
         };
         self.db

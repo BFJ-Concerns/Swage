@@ -37,25 +37,25 @@ pub async fn operator_overview(state: &AppState) -> Result<OperatorOverviewRespo
         .devices
         .into_iter()
         .map(|device| {
-            let machine_presence = presence
-                .machines
+            let device_presence = presence
+                .devices
                 .iter()
-                .find(|machine| machine.machine_id == device.device_id);
+                .find(|presence| presence.device_id == device.device_id);
             OperatorDeviceSummary {
                 device_id: device.device_id,
                 label: device
                     .label
-                    .or_else(|| machine_presence.and_then(|machine| machine.label.clone())),
+                    .or_else(|| device_presence.and_then(|presence| presence.label.clone())),
                 kind: device.kind,
                 base_url: device.base_url,
                 workspace_root: device.workspace_root,
                 capabilities: device.capabilities,
                 registered_at: device.registered_at,
-                state: machine_presence
-                    .map(|machine| machine.state.clone())
+                state: device_presence
+                    .map(|presence| presence.state.clone())
                     .unwrap_or_else(|| "connected".to_string()),
-                last_seen_at: machine_presence.map(|machine| machine.last_seen_at),
-                disconnected_at: machine_presence.and_then(|machine| machine.disconnected_at),
+                last_seen_at: device_presence.map(|presence| presence.last_seen_at),
+                disconnected_at: device_presence.and_then(|presence| presence.disconnected_at),
             }
         })
         .collect();
@@ -76,9 +76,9 @@ fn classify_gateway_health(
 ) -> &'static str {
     if presence.gateway.shutdown_requested
         || presence
-            .machines
+            .devices
             .iter()
-            .any(|machine| machine.state != "connected")
+            .any(|device| device.state != "connected")
         || channels
             .channels
             .iter()
