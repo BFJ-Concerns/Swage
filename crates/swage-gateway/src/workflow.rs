@@ -674,6 +674,51 @@ fn completed_agent_tokens_before(replay: &[WorkflowJournalRecord], transition_se
         })
 }
 
+fn terminal_budget_accounting_from_journal(
+    journal: &[WorkflowJournalRecord],
+    budget: &WorkflowBudget,
+) -> TokenBudgetState {
+    let spent = completed_agent_tokens_before(journal, TERMINAL_BUDGET_SEQUENCE);
+    let closing_limit = journal
+        .iter()
+        .filter(|entry| {
+            entry.status == "completed"
+                && (entry.kind == "wind_down"
+                    || (entry.kind == "budget"
+                        && entry
+                            .result
+                            .as_ref()
+                            .is_some_and(|reading| reading["winding_down"] == true)))
+        })
+        .map(|entry| entry.seq)
+        .min()
+        .map(|transition_seq| {
+            completed_agent_tokens_before(journal, transition_seq)
+                .saturating_add(budget.reserved_closing_tokens.unwrap_or(0))
+        });
+    TokenBudgetState {
+        spent,
+        working_reserved: 0,
+        closing_reserved: 0,
+        closing_limit,
+        replayed_working_credit: 0,
+    }
+}
+
+async fn record_terminal_budget_from_journal(
+    state: &AppState,
+    run_id: Uuid,
+    budget: &WorkflowBudget,
+) -> Result<(), String> {
+    let journal = state
+        .storage
+        .list_workflow_journal(run_id)
+        .await
+        .map_err(|error| error.to_string())?;
+    let accounting = Mutex::new(terminal_budget_accounting_from_journal(&journal, budget));
+    record_terminal_budget(state, run_id, budget, &accounting).await
+}
+
 #[derive(Clone, Copy)]
 struct FailedAgentCallRef {
     journal_entry_id: Uuid,
@@ -5203,6 +5248,10 @@ pub async fn cancel_run(
     // waker never relaunches it.
     if run.state == "parked" {
         settle_cancelled_workflow_journal(state.storage.as_ref(), id).await;
+        let budget = budget_wire(&run.budget);
+        if let Err(problem) = record_terminal_budget_from_journal(&state, id, &budget).await {
+            tracing::warn!(%id, %problem, "could not record terminal budget audit entry");
+        }
         state
             .storage
             .update_workflow_run_state(id, "cancelled", None, None, None)
@@ -10208,11 +10257,16 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn cancelling_a_parked_run_settles_its_started_journal_entry() {
+    async fn cancelling_a_parked_run_settles_journal_and_records_terminal_budget() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
         let space = storage.get_or_create_default().await.expect("space");
         let source = format!(
-            "return await wait({{ timerMs: {} }});",
+            r#"
+                await agent("working segment", {{agent: "default"}});
+                await budgetSnapshot();
+                await agent("closing segment", {{agent: "default"}});
+                return await wait({{ timerMs: {} }});
+            "#,
             PARK_TIMER_THRESHOLD_MS + 1
         );
         let run = storage
@@ -10228,7 +10282,13 @@ mod tests {
                 source: Some(source.clone()),
                 source_hash: source_hash(&source),
                 args: Value::Null,
-                budget: serde_json::json!({}),
+                budget: serde_json::to_value(WorkflowBudget {
+                    max_agent_calls: Some(3),
+                    max_total_tokens: Some(10),
+                    reserved_closing_tokens: Some(4),
+                    max_concurrent_agent_calls: Some(1),
+                })
+                .expect("budget"),
                 engine_version: "test".into(),
                 dispatch_bound_agent_ids: vec![],
                 dispatch_bound_task_definition_ids: vec![],
@@ -10237,10 +10297,17 @@ mod tests {
             })
             .await
             .expect("run");
+        let provider = Arc::new(ScriptedRecordingProvider {
+            outputs: std::sync::Mutex::new(std::collections::VecDeque::from(vec![
+                scripted_text_output_with_usage("working segment", 2, 3),
+                scripted_text_output_with_usage("closing segment", 1, 1),
+            ])),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn SpaceStore>,
-            Arc::new(crate::turn::tests::PendingProvider),
+            provider,
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
             None,
@@ -10278,12 +10345,29 @@ mod tests {
             .list_workflow_journal(run.id)
             .await
             .expect("cancelled journal");
-        assert_eq!(journal.len(), 1);
-        assert_eq!(journal[0].kind, "timer");
-        assert_eq!(journal[0].status, "failed");
+        let timer = journal
+            .iter()
+            .find(|entry| entry.kind == "timer")
+            .expect("timer entry");
+        assert_eq!(timer.status, "failed");
         assert_eq!(
-            journal[0].error_message.as_deref(),
+            timer.error_message.as_deref(),
             Some("WorkflowCancelledError: run cancelled")
+        );
+        let terminal = journal
+            .iter()
+            .find(|entry| entry.kind == "terminal_budget")
+            .expect("terminal budget entry");
+        assert_eq!(terminal.status, "completed");
+        assert_eq!(terminal.result.as_ref().unwrap()["spent"], 7);
+        assert_eq!(terminal.result.as_ref().unwrap()["remaining"], 3);
+        assert_eq!(terminal.result.as_ref().unwrap()["closing_remaining"], 2);
+        assert_eq!(
+            journal
+                .iter()
+                .filter(|entry| entry.kind == "terminal_budget")
+                .count(),
+            1
         );
     }
 
