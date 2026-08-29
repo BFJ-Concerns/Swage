@@ -37,8 +37,6 @@ mod output_schema_validation_integration;
 mod presence_liveness_integration;
 #[path = "integration/ptc_integration.rs"]
 mod ptc_integration;
-#[path = "integration/review_sweep_engine_integration.rs"]
-mod review_sweep_engine_integration;
 #[path = "integration/run_supervision_integration.rs"]
 mod run_supervision_integration;
 #[path = "integration/sandbox_entrypoint_integration.rs"]
@@ -47,6 +45,10 @@ mod sandbox_entrypoint_integration;
 mod sandbox_observability_integration;
 #[path = "integration/schedule_integration.rs"]
 mod schedule_integration;
+#[path = "integration/workflow_metadata_gateway_integration.rs"]
+mod workflow_metadata_gateway_integration;
+#[path = "integration/workflow_run_gateway_integration.rs"]
+mod workflow_run_gateway_integration;
 
 #[path = "integration/schedule_tools_integration.rs"]
 mod schedule_tools_integration;
@@ -62,9 +64,13 @@ mod space_integration;
 mod tool_approval_integration;
 #[path = "integration/tui_cli_integration.rs"]
 mod tui_cli_integration;
+#[path = "integration/turn_model_gateway_integration.rs"]
+mod turn_model_gateway_integration;
 #[path = "integration/unified_turn_loop_integration.rs"]
 mod unified_turn_loop_integration;
 #[path = "integration/web_interface_integration.rs"]
 mod web_interface_integration;
 #[path = "integration/workflow_integration.rs"]
 mod workflow_integration;
+#[path = "integration/worktree_recovery_gateway_integration.rs"]
+mod worktree_recovery_gateway_integration;
