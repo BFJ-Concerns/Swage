@@ -525,13 +525,9 @@ fn check_frontend_design_tokens() -> Result<()> {
 }
 
 fn component_style_lines(contents: &str) -> impl Iterator<Item = (usize, &str, usize)> {
-    #[derive(Default)]
     enum StyleRegion {
-        #[default]
         Outside,
-        OpeningTag {
-            quote: Option<char>,
-        },
+        OpeningTag { quote: Option<char> },
         Contents,
     }
 
