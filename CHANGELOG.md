@@ -50,6 +50,7 @@ All notable changes to Swage are documented in this file.
 ### Fixed
 
 - Rejected tool approvals now render as failed calls in the conversation transcript.
+- Accepted sandbox-degradation approvals now resume attended turns so ordinary tool approval, execution, and assistant output can continue.
 - Gateway startup now reclaims worker worktrees and their Git registrations left behind by an unclean exit.
 - Provider-facing tool schemas now retain stripped validation requirements in their descriptions, helping models form valid schedule delivery targets on the first call.
 - Portable JavaScript workflow `meta` headers now seed saved script details, and the unused workflow-script `agent_id` query has been removed.
