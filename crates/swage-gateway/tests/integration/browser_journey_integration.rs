@@ -973,22 +973,17 @@ async fn spawn_probe_browser(
     tokio::fs::create_dir_all(&profile)
         .await
         .expect("probe profile");
-    let child = tokio::process::Command::new(binary)
-        .arg("--headless=new")
-        .arg(format!("--user-data-dir={}", profile.display()))
-        .arg("--disable-gpu")
-        .arg("--password-store=basic")
-        .arg("--force-renderer-accessibility")
-        .arg("--no-first-run")
-        .arg("--no-default-browser-check")
-        .arg("--remote-debugging-address=127.0.0.1")
-        .arg(format!("--remote-debugging-port={port}"))
-        .arg("about:blank")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn probe Chromium");
+    let child = swage_gateway::browser::chromium_command(
+        std::path::Path::new(binary),
+        &profile,
+        port,
+        false,
+    )
+    .stdin(Stdio::null())
+    .stdout(Stdio::null())
+    .stderr(Stdio::null())
+    .spawn()
+    .expect("spawn probe Chromium");
     let endpoint = format!("http://127.0.0.1:{port}");
     wait_for_probe_devtools(&endpoint).await;
     let (browser, mut events) = Browser::connect(endpoint).await.expect("connect probe CDP");
