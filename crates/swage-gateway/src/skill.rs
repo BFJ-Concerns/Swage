@@ -88,7 +88,7 @@ use uuid::Uuid;
 use crate::state::AppState;
 
 #[cfg(test)]
-static TEST_SPACE_SKILL_ROOTS: std::sync::LazyLock<
+pub(crate) static TEST_SKILL_ROOTS: std::sync::LazyLock<
     std::sync::Mutex<std::collections::HashMap<Uuid, std::path::PathBuf>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
@@ -235,7 +235,7 @@ pub(crate) async fn discover_available_for_space_from_config(
 
 #[cfg(test)]
 fn skill_root_for_space(space_id: Uuid) -> Option<std::path::PathBuf> {
-    TEST_SPACE_SKILL_ROOTS
+    TEST_SKILL_ROOTS
         .lock()
         .unwrap_or_else(|error| error.into_inner())
         .get(&space_id)
@@ -248,44 +248,41 @@ fn skill_root_for_space(_space_id: Uuid) -> Option<std::path::PathBuf> {
 }
 
 #[cfg(test)]
-pub(crate) struct SpaceSkillRootGuard {
-    space_id: Uuid,
+pub(crate) struct TestSkillRootGuard {
+    id: Uuid,
     _root: Option<tempfile::TempDir>,
 }
 
 #[cfg(test)]
-impl SpaceSkillRootGuard {
-    pub(crate) fn at(space_id: Uuid, root: &Path) -> Self {
-        TEST_SPACE_SKILL_ROOTS
+impl TestSkillRootGuard {
+    pub(crate) fn at(id: Uuid, root: &Path) -> Self {
+        TEST_SKILL_ROOTS
             .lock()
             .unwrap_or_else(|error| error.into_inner())
-            .insert(space_id, root.to_path_buf());
-        Self {
-            space_id,
-            _root: None,
-        }
+            .insert(id, root.to_path_buf());
+        Self { id, _root: None }
     }
 
-    pub(crate) fn empty(space_id: Uuid) -> Self {
+    pub(crate) fn empty(id: Uuid) -> Self {
         let root = tempfile::TempDir::new().expect("temp skill root");
-        TEST_SPACE_SKILL_ROOTS
+        TEST_SKILL_ROOTS
             .lock()
             .unwrap_or_else(|error| error.into_inner())
-            .insert(space_id, root.path().to_path_buf());
+            .insert(id, root.path().to_path_buf());
         Self {
-            space_id,
+            id,
             _root: Some(root),
         }
     }
 }
 
 #[cfg(test)]
-impl Drop for SpaceSkillRootGuard {
+impl Drop for TestSkillRootGuard {
     fn drop(&mut self) {
-        TEST_SPACE_SKILL_ROOTS
+        TEST_SKILL_ROOTS
             .lock()
             .unwrap_or_else(|error| error.into_inner())
-            .remove(&self.space_id);
+            .remove(&self.id);
     }
 }
 

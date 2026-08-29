@@ -444,10 +444,8 @@ mod tests {
             })
             .await
             .expect("second session");
-        let _first_root =
-            crate::websocket::SessionSkillRootGuard::at(first_session.id, root.path());
-        let _second_root =
-            crate::websocket::SessionSkillRootGuard::at(second_session.id, root.path());
+        let _first_root = crate::skill::TestSkillRootGuard::at(first_session.id, root.path());
+        let _second_root = crate::skill::TestSkillRootGuard::at(second_session.id, root.path());
 
         let first_context = context_for(
             state(Arc::clone(&storage)),
