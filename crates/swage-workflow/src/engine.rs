@@ -506,10 +506,17 @@ impl WorkflowEngine {
                                             "working_directory": result.working_directory,
                                         }).to_string()
                                     }
+                                    Err(WorkflowHostError::SchemaExhausted { .. }) => {
+                                        // Exhausting a schema's validation attempts is a
+                                        // script-visible absence, not an ordinary agent
+                                        // failure. Keep this typed so other failures throw.
+                                        serde_json::json!({"ok": true, "value": null, "session": null}).to_string()
+                                    }
                                     Err(error) => {
                                         let (host_reference, error) = match error {
                                             WorkflowHostError::AgentCall { host_reference, message } => (Some(host_reference), message),
                                             WorkflowHostError::Message(message) => (None, message),
+                                            WorkflowHostError::SchemaExhausted { .. } => unreachable!("schema exhaustion is handled above"),
                                         };
                                         let (name, message) = named_host_error(&error, "AgentCallError");
                                         serde_json::json!({
