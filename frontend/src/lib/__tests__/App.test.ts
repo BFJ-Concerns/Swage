@@ -12,6 +12,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mount, unmount } from "svelte";
 import App from "../../App.svelte";
+import { getConversation } from "../api/conversations";
 import type { WebSocketClient } from "../api/websocket";
 
 const space = {
@@ -149,6 +150,7 @@ describe("ambient channel control path", () => {
   it("keeps the conversation socket when the user moves to the work surface", async () => {
     component = await mountAppOnConversation();
     wsClient.connect.mockClear();
+    vi.mocked(getConversation).mockClear();
 
     surfaceButton("Pages").click();
     await vi.waitFor(() => {
@@ -157,7 +159,8 @@ describe("ambient channel control path", () => {
 
     // The socket is the conversation's: the work surface must not cost it.
     expect(wsClient.disconnect).not.toHaveBeenCalled();
-    expect(wsClient.connect).toHaveBeenCalledWith("conv-1");
+    expect(wsClient.connect).not.toHaveBeenCalled();
+    expect(getConversation).not.toHaveBeenCalled();
     expect(document.querySelector('main.pages-surface [aria-label="Conversation"]')?.textContent)
       .toContain("History of conv-1");
   });

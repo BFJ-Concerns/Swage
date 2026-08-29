@@ -330,6 +330,7 @@
   }
 
   function handleSelectSurface(next: Surface): void {
+    const previous = activeSurface;
     activeSurface = next;
 
     // The pages surface keeps the conversation socket: page_updated rides
@@ -340,8 +341,13 @@
       return;
     }
 
-    const id = conversationStore.activeConversation?.id;
-    if (id) connectionStore.connectTo(id);
+    // Conversations and Pages share the same ambient channel. Moving between
+    // them must retain its socket and in-memory history; only returning from
+    // Operator needs to establish the connection again.
+    if (previous === "operator") {
+      const id = conversationStore.activeConversation?.id;
+      if (id) connectionStore.connectTo(id);
+    }
   }
 
   function navigate(path: string): void {
