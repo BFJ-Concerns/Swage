@@ -851,6 +851,7 @@ pub(crate) struct MockStorage {
     fail_turn_state_writes: AtomicBool,
     fail_turn_state_write_at: AtomicUsize,
     turn_state_write_calls: AtomicUsize,
+    idle_thread_state_write_calls: AtomicUsize,
     fail_inbound_audit_writes: AtomicBool,
     fail_append_message_at: AtomicUsize,
     append_message_calls: AtomicUsize,
@@ -1124,6 +1125,7 @@ impl MockStorage {
             fail_turn_state_writes: AtomicBool::new(false),
             fail_turn_state_write_at: AtomicUsize::new(0),
             turn_state_write_calls: AtomicUsize::new(0),
+            idle_thread_state_write_calls: AtomicUsize::new(0),
             fail_inbound_audit_writes: AtomicBool::new(false),
             fail_append_message_at: AtomicUsize::new(0),
             append_message_calls: AtomicUsize::new(0),
@@ -1151,6 +1153,10 @@ impl MockStorage {
 
     pub(crate) fn turn_state_write_calls(&self) -> usize {
         self.turn_state_write_calls.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn idle_thread_state_write_calls(&self) -> usize {
+        self.idle_thread_state_write_calls.load(Ordering::SeqCst)
     }
 
     fn fail_inbound_audit_writes(&self) {
@@ -2429,6 +2435,10 @@ impl ThreadStore for MockStorage {
     }
 
     async fn update_state(&self, id: Uuid, state: ThreadState) -> Result<(), StorageError> {
+        if state == ThreadState::Idle {
+            self.idle_thread_state_write_calls
+                .fetch_add(1, Ordering::SeqCst);
+        }
         let mut db = self.db.lock().await;
         match db.threads.get_mut(&id) {
             None => Err(StorageError::NotFound {

@@ -41,7 +41,7 @@ use swage_gateway::{server::build_router, state::AppState};
 use swage_provider::LlmProvider;
 use swage_storage::{
     SqliteStorage,
-    store::{ApprovalStore, SpaceStore, ToolCallStore},
+    store::{ApprovalStore, SessionStore, SpaceStore, ThreadStore, ToolCallStore, TurnStore},
 };
 
 use crate::support::{ProcessEnvGuard, live_http_json};
@@ -158,16 +158,26 @@ async fn start_test_server_with_config(
     provider: impl LlmProvider + 'static,
     config: ResolvedConfig,
 ) -> (Router, SocketAddr, Arc<SqliteStorage>) {
+    start_test_server_with_tools(
+        provider,
+        config,
+        vec![Arc::new(WriteFileTool) as Arc<dyn swage_tool::tool::Tool>],
+    )
+    .await
+}
+
+async fn start_test_server_with_tools(
+    provider: impl LlmProvider + 'static,
+    config: ResolvedConfig,
+    tools: Vec<Arc<dyn swage_tool::tool::Tool>>,
+) -> (Router, SocketAddr, Arc<SqliteStorage>) {
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-    let dispatcher = swage_gateway::tool::ToolDispatcher::allow_all(vec![
-        Arc::new(WriteFileTool) as Arc<dyn swage_tool::tool::Tool>
-    ]);
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn SpaceStore>,
         Arc::new(provider),
         config,
-        dispatcher,
+        swage_gateway::tool::ToolDispatcher::allow_all(tools),
         None,
     );
     let router = build_router(state);
@@ -442,6 +452,252 @@ async fn tool_approval_approve_continues_turn() {
         .await
         .expect("turn should complete after approval");
     assert!(complete["turn_id"].is_string());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn session_location_approval_authorises_only_the_granting_sessions_delegated_worker() {
+    let _guard = SwageHomeGuard::isolate();
+    let location = tempfile::TempDir::new().expect("approved location");
+    let readable = location.path().join("readable.txt");
+    std::fs::write(&readable, "session-scoped delegated proof").expect("write location fixture");
+    let location_path = location.path().to_string_lossy().into_owned();
+    let readable_path = readable.to_string_lossy().into_owned();
+
+    let provider = MockProvider::new(vec![
+        vec![
+            StreamChunk::ToolUse {
+                call_id: "request-location".into(),
+                name: "file_read".into(),
+                arguments: json!({"path": readable_path}),
+            },
+            StreamChunk::Done {
+                finish_reason: Some(FinishReason::ToolUse),
+            },
+        ],
+        vec![
+            StreamChunk::ToolUse {
+                call_id: "delegate-with-session-grant".into(),
+                name: "delegate".into(),
+                arguments: json!({
+                    "target_agent": "agent-b",
+                    "task": "Read readable.txt and report its contents",
+                    "cwd": location_path,
+                    "completion_mode": "wait"
+                }),
+            },
+            StreamChunk::Done {
+                finish_reason: Some(FinishReason::ToolUse),
+            },
+        ],
+        vec![
+            StreamChunk::ToolUse {
+                call_id: "delegated-read".into(),
+                name: "file_read".into(),
+                arguments: json!({"path": "readable.txt"}),
+            },
+            StreamChunk::Done {
+                finish_reason: Some(FinishReason::ToolUse),
+            },
+        ],
+        vec![
+            StreamChunk::Delta {
+                content: "delegated read completed".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: Some(FinishReason::Stop),
+            },
+        ],
+        vec![
+            StreamChunk::Delta {
+                content: "granting session completed".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: Some(FinishReason::Stop),
+            },
+        ],
+        vec![
+            StreamChunk::ToolUse {
+                call_id: "delegate-without-session-grant".into(),
+                name: "delegate".into(),
+                arguments: json!({
+                    "target_agent": "agent-b",
+                    "task": "Read readable.txt and report its contents",
+                    "cwd": location.path().to_string_lossy(),
+                    "completion_mode": "wait"
+                }),
+            },
+            StreamChunk::Done {
+                finish_reason: Some(FinishReason::ToolUse),
+            },
+        ],
+        vec![
+            StreamChunk::Delta {
+                content: "non-granting session completed".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: Some(FinishReason::Stop),
+            },
+        ],
+    ]);
+    let mut config = ResolvedConfig::default();
+    config.sandbox.enabled = false;
+    config.sandbox.allow_degraded_execution = true;
+    config.communication.context_transfer.mode = swage_config::ContextTransferMode::Explicit;
+    config.communication.context_transfer.allowed_fields.clear();
+    let (router, addr, storage) = start_test_server_with_tools(
+        provider,
+        config,
+        vec![
+            Arc::new(swage_gateway::tool::file_read::FileReadTool {
+                max_output_bytes: 64 * 1024,
+            }) as Arc<dyn swage_tool::tool::Tool>,
+            Arc::new(swage_tool::delegate::DelegateTool) as Arc<dyn swage_tool::tool::Tool>,
+        ],
+    )
+    .await;
+
+    let (status, granting_conversation) = http(&router, "POST", "/api/conversations").await;
+    assert_eq!(status, StatusCode::CREATED);
+    let granting_id = granting_conversation["id"]
+        .as_str()
+        .expect("granting session id");
+    let (mut granting_sink, mut granting_stream) = connect_ws(addr, granting_id).await;
+    ws_send(
+        &mut granting_sink,
+        json!({"type": "send_message", "content": "Request the location, then delegate there"}),
+    )
+    .await;
+
+    let mut granting_events = Vec::new();
+    let approval = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let event = ws_recv_lenient(&mut granting_stream)
+                .await
+                .expect("granting session websocket closed");
+            if event["type"] == "approval_required" {
+                break event;
+            }
+            assert_ne!(
+                event["type"], "error",
+                "turn failed before approval: {event:?}"
+            );
+            assert_ne!(
+                event["type"], "turn_complete",
+                "turn completed without requesting approval: {granting_events:?}"
+            );
+            granting_events.push(event);
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("the turn should request location approval: {granting_events:?}"));
+    assert_eq!(approval["kind"], "location");
+    assert_eq!(
+        approval["context"]["path"],
+        location.path().to_string_lossy().as_ref()
+    );
+    assert_eq!(approval["context"]["access"], "read");
+    let approval_id = approval["approval_id"].as_str().expect("approval id");
+
+    let (approval_status, approval_body) = live_http_json(
+        addr,
+        reqwest::Method::POST,
+        &format!("/api/approvals/{approval_id}"),
+        Some(json!({
+            "decision": "approved",
+            "scope": "session",
+            "reason": "delegated location proof"
+        })),
+    )
+    .await;
+    assert_eq!(approval_status, StatusCode::OK, "{approval_body:?}");
+    assert_eq!(approval_body["decision"], "approved");
+    ws_wait_for_event(
+        &mut granting_stream,
+        "turn_complete",
+        WEBSOCKET_EVENT_DEADLINE,
+    )
+    .await
+    .expect("the granting session should complete its delegated turn");
+
+    let child_sessions = storage
+        .list_sessions_by_agent_id("agent-b")
+        .await
+        .expect("list delegated sessions");
+    assert_eq!(
+        child_sessions.len(),
+        1,
+        "the approved delegation should create one child"
+    );
+    let child_threads = storage
+        .list_by_session(child_sessions[0].id)
+        .await
+        .expect("list delegated threads");
+    let child_turns = storage
+        .list_turns_by_thread(child_threads[0].id)
+        .await
+        .expect("list delegated turns");
+    let child_calls = storage
+        .list_tool_calls_by_turn(child_turns[0].id)
+        .await
+        .expect("list delegated tool calls");
+    assert_eq!(child_calls.len(), 1);
+    assert_eq!(child_calls[0].call_id, "delegated-read");
+    assert_eq!(child_calls[0].status.as_deref(), Some("success"));
+    assert!(
+        child_calls[0]
+            .result
+            .as_deref()
+            .is_some_and(|result| result.contains("session-scoped delegated proof")),
+        "the delegated worker must read through the session grant: {child_calls:?}"
+    );
+
+    let (status, other_conversation) = http(&router, "POST", "/api/conversations").await;
+    assert_eq!(status, StatusCode::CREATED);
+    let other_id = other_conversation["id"].as_str().expect("other session id");
+    let (mut other_sink, mut other_stream) = connect_ws(addr, other_id).await;
+    ws_send(
+        &mut other_sink,
+        json!({"type": "send_message", "content": "Try the same delegated location without a grant"}),
+    )
+    .await;
+    ws_wait_for_event(&mut other_stream, "turn_complete", WEBSOCKET_EVENT_DEADLINE)
+        .await
+        .expect("the non-granting control turn should report the refused delegation");
+
+    assert_eq!(
+        storage
+            .list_sessions_by_agent_id("agent-b")
+            .await
+            .expect("list delegated sessions after control")
+            .len(),
+        1,
+        "another session must not inherit the location grant"
+    );
+    let other_session_id = other_id.parse().expect("other session UUID");
+    let other_threads = storage
+        .list_by_session(other_session_id)
+        .await
+        .expect("list other session threads");
+    let other_turns = storage
+        .list_turns_by_thread(other_threads[0].id)
+        .await
+        .expect("list other session turns");
+    let other_calls = storage
+        .list_tool_calls_by_turn(other_turns[0].id)
+        .await
+        .expect("list other session tool calls");
+    assert_eq!(other_calls.len(), 1);
+    assert_eq!(other_calls[0].call_id, "delegate-without-session-grant");
+    assert_eq!(other_calls[0].status.as_deref(), Some("error"));
+    assert!(
+        other_calls[0]
+            .result
+            .as_deref()
+            .is_some_and(|result| result.contains(
+                "outside the dispatching context's permitted workspace roots and location grants"
+            )),
+        "the non-granting session should be refused at worker placement: {other_calls:?}"
+    );
 }
 
 /// Journey: Reject an approval → agent receives feedback → turn continues.
