@@ -56,7 +56,7 @@ mod tests {
             .get_or_create_default()
             .await
             .expect("default space should exist");
-        let service = WorkspaceAttachmentService::new(
+        let service = WorkspaceAttachmentService::new_for_tests(
             Arc::clone(&storage) as Arc<dyn Storage>,
             storage as Arc<dyn SpaceStore>,
         );
