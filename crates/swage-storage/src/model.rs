@@ -1960,8 +1960,29 @@ pub struct WorkflowScriptRecord {
     pub name: String,
     pub description: String,
     pub delivery_grant: Option<serde_json::Value>,
+    /// The conversation that authored this script, when a model authored it
+    /// rather than an operator. Its presence is the durable mark that the
+    /// script's authority is the authoring session's and no more.
+    pub authoring_session_id: Option<Uuid>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+impl WorkflowScriptRecord {
+    /// The delivery grant a run resolved from this script may actually use.
+    ///
+    /// Delivery is how a run's effects leave the machine, so a script a model
+    /// wrote never carries one: were it otherwise, a model could author a
+    /// script naming any delivery target and then start it, minting itself
+    /// authority its own session never held. The stored column stays readable
+    /// so an operator can see what was asked for; every run-start path reads
+    /// the grant through here.
+    pub fn effective_delivery_grant(&self) -> Option<serde_json::Value> {
+        if self.authoring_session_id.is_some() {
+            return None;
+        }
+        self.delivery_grant.clone()
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1971,6 +1992,9 @@ pub struct NewWorkflowScript {
     pub description: String,
     pub source: String,
     pub delivery_grant: Option<serde_json::Value>,
+    /// Set when a model authored the script; see
+    /// [`WorkflowScriptRecord::effective_delivery_grant`].
+    pub authoring_session_id: Option<Uuid>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
