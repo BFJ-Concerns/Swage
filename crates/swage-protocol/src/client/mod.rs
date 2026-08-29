@@ -42,6 +42,8 @@ pub struct ClientSurface {
     create_space_request: space::CreateSpaceRequest,
     create_page_request: page::CreatePageRequest,
     write_page_module_request: page::WritePageModuleRequest,
+    create_page_annotation_request: page::CreatePageAnnotationRequest,
+    update_page_annotation_request: page::UpdatePageAnnotationRequest,
     page: page::PageResponse,
     page_list: page::PageListResponse,
     update_space_request: space::UpdateSpaceRequest,

@@ -92,8 +92,29 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
         ),
         ("056_turn_delegated_tokens", ADD_TURN_DELEGATED_TOKENS),
         ("057_pages", CREATE_PAGE_TABLES),
+        ("058_page_annotations", CREATE_PAGE_ANNOTATION_TABLE),
     ]
 }
+
+/// Annotations on a page's modules: the notes a user and an agent both hang
+/// on the same module, so neither has to describe a location to the other.
+/// Anchoring is at module grain and only there — `module_id` names the module
+/// the note hangs on, and every note has one. Nothing addresses the page as a
+/// whole, and nothing addresses a position inside a module's content.
+const CREATE_PAGE_ANNOTATION_TABLE: &str = "
+CREATE TABLE IF NOT EXISTS page_annotations (
+    id          TEXT NOT NULL PRIMARY KEY,
+    page_id     TEXT NOT NULL REFERENCES pages(id) ON DELETE CASCADE,
+    module_id   TEXT NOT NULL REFERENCES page_modules(id) ON DELETE CASCADE,
+    body        TEXT NOT NULL,
+    tags        TEXT NOT NULL,
+    author      TEXT NOT NULL,
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_page_annotations_page ON page_annotations(page_id);
+CREATE INDEX IF NOT EXISTS idx_page_annotations_module ON page_annotations(module_id);
+";
 
 /// Pages — agent-run tabs on a space — and their module instances. The
 /// database is authoritative for page content; the alpha wipe-and-rebuild

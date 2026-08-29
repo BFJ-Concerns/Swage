@@ -40,6 +40,10 @@ fn typescript_bindings_are_regenerated() {
     client::page::WritePageModuleRequest::export_all(&cfg).expect("export write page module");
     client::page::PageResponse::export_all(&cfg).expect("export page");
     client::page::PageListResponse::export_all(&cfg).expect("export pages");
+    client::page::CreatePageAnnotationRequest::export_all(&cfg)
+        .expect("export create page annotation");
+    client::page::UpdatePageAnnotationRequest::export_all(&cfg)
+        .expect("export update page annotation");
     client::space::CreateWorkspaceAttachmentRequest::export_all(&cfg)
         .expect("export attach workspace");
     client::space::WorkspaceAttachmentListResponse::export_all(&cfg).expect("export workspaces");
