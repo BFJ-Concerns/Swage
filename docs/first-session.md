@@ -32,19 +32,22 @@ to work with — for example, the project you want agents to know about —
 and click **Attach workspace**.
 
 The attachment appears in the list, showing the directory path and a trust
-indicator: `untrusted · read`. Swage can read files in the workspace but
-does not yet trust it to supply guidance.
+indicator: `untrusted · read`. The `read` label is the access mode
+configured on the attachment — the permission that activates once the
+workspace is trusted. While untrusted, the attachment carries no active
+grants: the workspace's files are not read, and its `AGENTS.md` is not
+loaded.
 
 ## Trust the workspace
 
-Newly attached workspaces start untrusted. Until a workspace is trusted,
-its `AGENTS.md` and any instruction files at its root are ignored — the
-workspace is visible to tools but contributes nothing to the instructions
-an agent session receives.
+Newly attached workspaces start untrusted. An untrusted workspace
+contributes nothing — no file access grants and no guidance. Its
+`AGENTS.md` is not read into agent context until the workspace is trusted.
 
 Click **Trust workspace** on the attachment row. The indicator changes to
-`trusted · read`, and from this point the workspace's `AGENTS.md` is
-folded into agent context for sessions in this space. If the repository
+`trusted · read`, and from this point the configured read permission is
+active: the workspace's `AGENTS.md` is folded into agent context for
+sessions in this space. If the repository
 carries project-specific instructions or conventions in that file, agents
 will read them alongside the global guidance in `~/.swage/AGENTS.md`.
 
@@ -55,8 +58,8 @@ what happens when multiple workspaces are attached.
 ## Revoke trust or detach
 
 Trust is reversible. **Revoke trust** returns the workspace to
-`untrusted · read` — its guidance drops out of future turns without
-removing the attachment itself. **Detach** removes the workspace from the
+`untrusted · read` — its read grant and guidance drop out of future turns
+without removing the attachment itself. **Detach** removes the workspace from the
 space entirely.
 
 ## What to do next
