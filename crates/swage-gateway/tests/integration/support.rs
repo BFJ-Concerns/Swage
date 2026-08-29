@@ -3,8 +3,14 @@ use std::sync::{Mutex, MutexGuard};
 
 use axum::http::StatusCode;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use futures::StreamExt;
 use serde_json::Value;
 use swage_storage::MANAGED_SECRET_KEY_ENV;
+use tokio_tungstenite::tungstenite;
+
+pub type WsStream = futures::stream::SplitStream<
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+>;
 
 static PROCESS_ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -23,6 +29,44 @@ pub async fn live_http_json(
     let status = response.status();
     let body = response.json().await.unwrap_or(Value::Null);
     (status, body)
+}
+
+/// Returns None on close instead of panicking.
+pub async fn ws_recv_lenient(stream: &mut WsStream) -> Option<Value> {
+    loop {
+        match stream.next().await {
+            Some(Ok(tungstenite::Message::Text(text))) => {
+                return Some(serde_json::from_str(&text).unwrap_or(Value::Null));
+            }
+            Some(Ok(tungstenite::Message::Close(_))) => return None,
+            None => return None,
+            _ => continue,
+        }
+    }
+}
+
+/// Collect WebSocket events through the named terminal event.
+pub async fn ws_collect_until(
+    stream: &mut WsStream,
+    terminal_event: &str,
+    timeout: std::time::Duration,
+) -> Vec<Value> {
+    let mut events = Vec::new();
+    tokio::time::timeout(timeout, async {
+        loop {
+            let event = ws_recv_lenient(stream)
+                .await
+                .unwrap_or_else(|| panic!("websocket closed before {terminal_event}: {events:?}"));
+            let reached_terminal = event["type"] == terminal_event;
+            events.push(event);
+            if reached_terminal {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("timed out waiting for {terminal_event}: {events:?}"));
+    events
 }
 
 pub struct ProcessEnvGuard {

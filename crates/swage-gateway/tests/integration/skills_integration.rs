@@ -13,7 +13,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::support::ProcessEnvGuard;
+use crate::support::{ProcessEnvGuard, WsStream, ws_collect_until};
 
 /// RAII guard that sets SWAGE_HOME for a test and restores it on drop.
 struct SwageHomeGuard {
@@ -263,9 +263,6 @@ type WsSink = futures::stream::SplitSink<
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
     tungstenite::Message,
 >;
-type WsStream = futures::stream::SplitStream<
-    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
->;
 
 async fn connect_ws(addr: SocketAddr, conversation_id: &str) -> (WsSink, WsStream) {
     let url = format!("ws://{addr}/api/conversations/{conversation_id}/ws");
@@ -279,30 +276,6 @@ async fn ws_send(sink: &mut WsSink, payload: Value) {
     sink.send(tungstenite::Message::Text(payload.to_string().into()))
         .await
         .expect("ws send should succeed");
-}
-
-/// Collect WebSocket events through the named terminal event.
-async fn ws_collect_until(
-    stream: &mut WsStream,
-    terminal_event: &str,
-    timeout: Duration,
-) -> Vec<Value> {
-    let mut events = Vec::new();
-    tokio::time::timeout(timeout, async {
-        loop {
-            let event = ws_recv_lenient(stream)
-                .await
-                .unwrap_or_else(|| panic!("websocket closed before {terminal_event}: {events:?}"));
-            let reached_terminal = event["type"] == terminal_event;
-            events.push(event);
-            if reached_terminal {
-                break;
-            }
-        }
-    })
-    .await
-    .unwrap_or_else(|_| panic!("timed out waiting for {terminal_event}: {events:?}"));
-    events
 }
 
 /// Wait for a specific event type, ignoring interleaved stream events.
