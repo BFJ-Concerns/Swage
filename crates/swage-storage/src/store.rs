@@ -135,7 +135,7 @@ pub trait SessionStore: Send + Sync {
 pub trait DeviceStore: Send + Sync {
     async fn upsert_device(
         &self,
-        host: NewDeviceRegistration,
+        device: NewDeviceRegistration,
     ) -> Result<DeviceRegistration, StorageError>;
     async fn list_devices(&self) -> Result<Vec<DeviceRegistration>, StorageError>;
     async fn delete_device(&self, device_id: &str) -> Result<bool, StorageError>;

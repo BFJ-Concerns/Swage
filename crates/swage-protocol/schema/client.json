@@ -376,6 +376,7 @@
           }
         },
         "provider_visible": true,
+        "tool_scope": true,
         "total_tokens": {
           "type": "integer",
           "format": "uint",

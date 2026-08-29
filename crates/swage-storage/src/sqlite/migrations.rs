@@ -739,7 +739,7 @@ const COMPLETE_SCHEMA: &str = "
     CREATE UNIQUE INDEX IF NOT EXISTS idx_spaces_single_default
         ON spaces(is_default) WHERE is_default = 1;
 
-    -- Devices: local or paired machines available for tool execution.
+    -- Devices: local or paired devices available for tool execution.
     CREATE TABLE IF NOT EXISTS devices (
         device_id              TEXT NOT NULL PRIMARY KEY,
         label                TEXT,
