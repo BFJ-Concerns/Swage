@@ -137,7 +137,7 @@ async fn start_test_server(
         register_local_device(&state).await;
     }
     let router: Router = build_router(state.clone());
-    let addr = start_live_server(router).await;
+    let (addr, _server) = start_live_server(router).await;
     (addr, state)
 }
 

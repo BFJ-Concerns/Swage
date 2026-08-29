@@ -916,8 +916,7 @@ mod tests {
 
     #[test]
     fn every_completion_effort_maps_to_openai_reasoning_effort() {
-        let provider =
-            OpenAiProvider::from_config(ProviderConfig::new("key", "model", "http://localhost"));
+        let provider = OpenAiProvider::from_config(local_provider_config());
         for (effort, expected) in [
             (swage_core::Effort::Low, "low"),
             (swage_core::Effort::Medium, "medium"),
@@ -1010,18 +1009,8 @@ mod tests {
 
     #[test]
     fn build_request_serialises_stream_usage_options_only_for_streaming() {
-        let provider =
-            OpenAiProvider::from_config(ProviderConfig::new("key", "model", "http://localhost"));
-        let request = CompletionRequest {
-            effort: None,
-            messages: vec![],
-            model: None,
-            max_tokens: None,
-            temperature: None,
-            stop_sequences: None,
-            metadata: None,
-            tool_definitions: vec![],
-        };
+        let provider = OpenAiProvider::from_config(local_provider_config());
+        let request = empty_completion_request();
 
         let non_streaming = serde_json::to_value(provider.build_request(&request, false)).unwrap();
         assert!(non_streaming.get("stream").is_none());

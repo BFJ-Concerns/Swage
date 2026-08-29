@@ -48,12 +48,16 @@ mod tests {
             include_str!("../../../examples/workflows/research-sweep.js"),
         )];
 
-        assert_eq!(BUILTIN_WORKFLOWS.len(), expected.len());
         for (name, source) in &expected {
             let workflow = find_by_name(name).expect("catalogue entry");
             assert_eq!(workflow.source.as_bytes(), source.as_bytes());
         }
         for workflow in BUILTIN_WORKFLOWS {
+            assert!(
+                expected.iter().any(|(name, _)| *name == workflow.name),
+                "catalogue entry has an authored script: {}",
+                workflow.name
+            );
             let (_, source) = expected
                 .iter()
                 .find(|(name, _)| *name == workflow.name)

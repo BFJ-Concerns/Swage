@@ -110,12 +110,36 @@ pub(crate) mod test_support {
     static XDG_RUNTIME_DIR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// Minimal named tool for tests that exercise dispatcher selection only.
-    pub(crate) struct NamedTool(pub &'static str);
+    pub(crate) struct NamedTool {
+        name: &'static str,
+        result: NamedToolResult,
+    }
+
+    enum NamedToolResult {
+        Sentinel,
+        EchoArguments,
+    }
+
+    impl NamedTool {
+        pub(crate) fn new(name: &'static str) -> Self {
+            Self {
+                name,
+                result: NamedToolResult::Sentinel,
+            }
+        }
+
+        pub(crate) fn echoing(name: &'static str) -> Self {
+            Self {
+                name,
+                result: NamedToolResult::EchoArguments,
+            }
+        }
+    }
 
     #[async_trait]
     impl Tool for NamedTool {
         fn name(&self) -> &str {
-            self.0
+            self.name
         }
 
         fn description(&self) -> &str {
@@ -128,10 +152,13 @@ pub(crate) mod test_support {
 
         async fn execute(
             &self,
-            _arguments: Value,
+            arguments: Value,
             _ctx: &dyn ToolContext,
         ) -> Result<Value, ToolError> {
-            Ok(json!({ "unexpected": "execution" }))
+            Ok(match self.result {
+                NamedToolResult::Sentinel => json!({ "unexpected": "execution" }),
+                NamedToolResult::EchoArguments => arguments,
+            })
         }
     }
 

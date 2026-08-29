@@ -28,14 +28,13 @@ use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use serde_json::{Value, json};
-use tokio::net::TcpListener;
 use tower::ServiceExt;
 
 use swage_gateway::server::build_router;
 use swage_gateway::state::AppState;
 use swage_storage::SqliteStorage;
 
-use crate::support::ProcessEnvGuard;
+use crate::support::{ProcessEnvGuard, start_live_server};
 
 // ---------------------------------------------------------------------------
 // Test helpers
@@ -236,11 +235,7 @@ async fn sessions_are_isolated_between_spaces() {
 #[tokio::test(flavor = "multi_thread")]
 async fn default_conversation_rejects_explicit_space_target_without_creating_session() {
     let (router, _storage) = make_test_router();
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let server = tokio::spawn(async move {
-        axum::serve(listener, router).await.unwrap();
-    });
+    let (address, server) = start_live_server(router).await;
     let client = reqwest::Client::new();
     let base_url = format!("http://{address}");
 

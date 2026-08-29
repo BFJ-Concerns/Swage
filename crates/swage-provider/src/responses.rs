@@ -857,8 +857,7 @@ mod tests {
 
     #[test]
     fn build_request_pins_the_native_envelope_constants() {
-        let provider =
-            ResponsesProvider::from_config(ProviderConfig::new("key", "model", "http://localhost"));
+        let provider = ResponsesProvider::from_config(local_provider_config());
         let body = serde_json::to_value(provider.build_request(&empty_completion_request(), false))
             .unwrap();
         assert_eq!(body["parallel_tool_calls"], false);

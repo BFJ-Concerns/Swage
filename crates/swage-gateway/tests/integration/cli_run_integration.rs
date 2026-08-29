@@ -119,7 +119,7 @@ async fn start_test_server(
     }
     let router: Router = build_router(state);
 
-    start_live_server(router).await
+    start_live_server(router).await.0
 }
 
 #[tokio::test(flavor = "multi_thread")]
