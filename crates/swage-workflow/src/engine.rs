@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use serde_json::Value;
+
 use rquickjs::{
     AsyncContext, AsyncRuntime, CatchResultExt, Function, Promise,
     context::intrinsic::{Eval, Json, MapSet, Promise as PromiseIntrinsic, RegExp, RegExpCompiler},
@@ -65,6 +67,9 @@ pub struct ScriptCapabilities {
 pub struct ScriptMeta {
     pub name: Option<String>,
     pub description: Option<String>,
+    /// Optional JSON Schema governing the value passed as this workflow's
+    /// arguments. Header metadata stays outside the caged runtime.
+    pub argument_schema: Option<Value>,
 }
 
 /// Read an optional leading portable `export const meta = { … };` header.
@@ -75,6 +80,7 @@ pub fn script_meta(source: &str) -> Result<ScriptMeta, String> {
     Ok(ScriptMeta {
         name: meta_string_field(object, "name"),
         description: meta_string_field(object, "description"),
+        argument_schema: meta_json_field(object, "argumentSchema")?,
     })
 }
 
@@ -152,6 +158,64 @@ fn meta_string_field(object: &str, field: &str) -> Option<String> {
         index = skip_meta_value(object, index);
     }
     None
+}
+
+/// Read one metadata value as JSON. Schema values deliberately use JSON even
+/// though metadata accepts JavaScript-style unquoted keys around them: JSON
+/// Schema itself is a JSON document and must be portable across script hosts.
+fn meta_json_field(object: &str, field: &str) -> Result<Option<Value>, String> {
+    let bytes = object.as_bytes();
+    let mut index = 1;
+    while index < bytes.len() {
+        while bytes.get(index).is_some_and(u8::is_ascii_whitespace)
+            || bytes.get(index) == Some(&b',')
+        {
+            index += 1;
+        }
+        let (key, after_key) = if bytes.get(index) == Some(&b'"') {
+            match json_string_at(object, index) {
+                Some(value) => value,
+                None => return Ok(None),
+            }
+        } else {
+            let key_start = index;
+            while bytes
+                .get(index)
+                .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+            {
+                index += 1;
+            }
+            if key_start == index {
+                return Ok(None);
+            }
+            (object[key_start..index].to_owned(), index)
+        };
+        index = after_key;
+        while bytes.get(index).is_some_and(u8::is_ascii_whitespace) {
+            index += 1;
+        }
+        if bytes.get(index) != Some(&b':') {
+            return Ok(None);
+        }
+        index += 1;
+        while bytes.get(index).is_some_and(u8::is_ascii_whitespace) {
+            index += 1;
+        }
+        let value_start = index;
+        let mut value_end = skip_meta_value(object, index);
+        if bytes.get(value_end.saturating_sub(1)) == Some(&b',') {
+            value_end -= 1;
+        }
+        if key == field {
+            return serde_json::from_str(&object[value_start..value_end])
+                .map(Some)
+                .map_err(|error| {
+                    format!("workflow meta {field} must be valid JSON Schema: {error}")
+                });
+        }
+        index = value_end;
+    }
+    Ok(None)
 }
 
 /// Return the decoded JSON string at `start` and the first byte after it.
@@ -1504,7 +1568,8 @@ mod tests {
             .unwrap(),
             ScriptMeta {
                 name: Some("portable".into()),
-                description: Some("runs unchanged".into())
+                description: Some("runs unchanged".into()),
+                argument_schema: None,
             }
         );
     }
@@ -1524,6 +1589,7 @@ mod tests {
             ScriptMeta {
                 name: Some("json".into()),
                 description: Some("quoted keys".into()),
+                argument_schema: None,
             }
         );
         assert_eq!(
@@ -1531,7 +1597,25 @@ mod tests {
             ScriptMeta {
                 name: Some("javascript".into()),
                 description: Some("bare keys".into()),
+                argument_schema: None,
             }
+        );
+    }
+
+    #[test]
+    fn portable_meta_header_reads_an_argument_schema() {
+        let meta = script_meta(
+            r#"export const meta = { name: "constrained", argumentSchema: {"type":"object","required":["task"],"properties":{"task":{"type":"string"}}} };"#,
+        )
+        .expect("portable metadata");
+
+        assert_eq!(
+            meta.argument_schema,
+            Some(json!({
+                "type": "object",
+                "required": ["task"],
+                "properties": {"task": {"type": "string"}}
+            }))
         );
     }
 
