@@ -12,7 +12,7 @@ use swage_provider::LlmProvider;
 use swage_storage::{SpaceStore, SqliteStorage, Storage};
 use tokio::net::TcpListener;
 
-use crate::support::ProcessEnvGuard;
+use crate::support::{ProcessEnvGuard, scratch_tempdir};
 
 struct StubProvider;
 
@@ -40,7 +40,7 @@ impl LlmProvider for StubProvider {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn workflow_metadata_headers_override_and_persist_through_live_gateway_requests() {
-    let root = tempfile::tempdir().unwrap();
+    let root = scratch_tempdir();
     let mut environment = ProcessEnvGuard::new();
     environment.set_swage_home(root.path());
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());

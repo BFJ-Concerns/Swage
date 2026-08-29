@@ -6,7 +6,7 @@ use swage_gateway::worktree::{WorktreeConfig, WorktreeHost};
 use tokio::process::Command;
 use uuid::Uuid;
 
-use crate::support::ProcessEnvGuard;
+use crate::support::{ProcessEnvGuard, scratch_tempdir};
 
 async fn git(repo: &std::path::Path, args: &[&str]) {
     assert!(
@@ -25,7 +25,7 @@ async fn git(repo: &std::path::Path, args: &[&str]) {
 #[tokio::test]
 async fn recovery_continues_past_an_uninspectable_candidate_and_reclaims_the_later_registered_worktree()
  {
-    let fixture = tempfile::tempdir().unwrap();
+    let fixture = scratch_tempdir();
     let repo = fixture.path().join("repo");
     tokio::fs::create_dir(&repo).await.unwrap();
     git(&repo, &["init"]).await;
