@@ -5266,12 +5266,20 @@ async fn approved_sandbox_degradation_resumes_to_tool_approval_and_completion() 
     task.await
         .expect("turn task should finish")
         .expect("accepted degradation should continue the turn");
-    assert!(saw_tool_approval, "ordinary tool approval should be rendered");
+    assert!(
+        saw_tool_approval,
+        "ordinary tool approval should be rendered"
+    );
     assert!(saw_tool_start, "approved tool should execute");
     assert!(saw_tool_end, "tool execution should finish successfully");
     assert!(saw_token, "the final assistant output should stream");
 
-    let thread = state.storage.list_by_session(session_id).await.unwrap().remove(0);
+    let thread = state
+        .storage
+        .list_by_session(session_id)
+        .await
+        .unwrap()
+        .remove(0);
     let turn = state
         .storage
         .list_turns_by_thread(thread.id)
@@ -5284,9 +5292,13 @@ async fn approved_sandbox_degradation_resumes_to_tool_approval_and_completion() 
         Some("The fallback turn completed."),
         "the assistant result should persist after the approved fallback"
     );
-    let calls = state.storage.list_tool_calls_by_turn(turn.id).await.unwrap();
+    let calls = state
+        .storage
+        .list_tool_calls_by_turn(turn.id)
+        .await
+        .unwrap();
     assert_eq!(calls.len(), 1, "the approved echo call should persist");
-    assert_eq!(calls[0].status.as_deref(), Some("completed"));
+    assert_eq!(calls[0].status.as_deref(), Some("success"));
 }
 
 #[tokio::test]
