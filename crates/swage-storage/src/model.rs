@@ -1929,6 +1929,7 @@ pub struct WorkflowScriptRecord {
     pub name: String,
     pub description: String,
     pub delivery_grant: Option<serde_json::Value>,
+    pub captured_sources_grant: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

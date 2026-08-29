@@ -1023,6 +1023,7 @@ pub trait WorkflowStore: Send + Sync {
         id: Uuid,
         description: Option<&str>,
         delivery_grant: Option<serde_json::Value>,
+        captured_sources_grant: Option<bool>,
     ) -> Result<WorkflowScriptRecord, StorageError>;
     async fn list_workflow_scripts(
         &self,
@@ -2352,6 +2353,7 @@ mod tests {
             _: Uuid,
             _: Option<&str>,
             _: Option<serde_json::Value>,
+            _: Option<bool>,
         ) -> Result<WorkflowScriptRecord, StorageError> {
             unimplemented!()
         }

@@ -907,6 +907,7 @@ impl swage_storage::WorkflowStore for MockStorage {
         _: Uuid,
         _: Option<&str>,
         _: Option<serde_json::Value>,
+        _: Option<bool>,
     ) -> Result<swage_storage::WorkflowScriptRecord, StorageError> {
         unimplemented!()
     }

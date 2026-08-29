@@ -16,6 +16,7 @@ pub struct WorkflowScript {
     pub head_version: u32,
     pub built_in: bool,
     pub has_delivery_grant: bool,
+    pub has_captured_sources_grant: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -39,6 +40,7 @@ pub struct UpdateWorkflowScriptRequest {
     #[serde(default)]
     #[ts(type = "unknown")]
     pub delivery_grant: Option<Value>,
+    pub captured_sources_grant: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]

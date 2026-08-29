@@ -11,6 +11,7 @@ pub(crate) struct BuiltinWorkflow {
     pub(crate) name: &'static str,
     pub(crate) description: &'static str,
     pub(crate) source: &'static str,
+    pub(crate) captured_sources_grant: bool,
     pub(crate) released_at: &'static str,
 }
 
@@ -18,6 +19,7 @@ pub(crate) const BUILTIN_WORKFLOWS: &[BuiltinWorkflow] = &[BuiltinWorkflow {
     name: "research-sweep",
     description: "Gather, organise, and synthesise live web research into the space knowledge base.",
     source: include_str!("../../../examples/workflows/research-sweep.js"),
+    captured_sources_grant: true,
     released_at: "2026-08-11T17:56:09+01:00",
 }];
 
