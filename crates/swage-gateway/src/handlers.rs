@@ -52,7 +52,7 @@ use crate::{
         RecoveryExportListResponse, RedeemDevicePairingRequest,
     },
     operator::OperatorOverviewResponse,
-    presence::{MachineHeartbeatRequest, PresenceSnapshotResponse},
+    presence::{DeviceHeartbeatRequest, PresenceSnapshotResponse},
     secret::{
         CreateSecretRequest, GenerateSecretRequest, RotateSecretRequest, SecretListResponse,
         SecretResponse, SecretValidationResponse,
@@ -833,29 +833,29 @@ pub async fn delete_schedule(
     }
 }
 
-/// `GET /api/presence` — inspect gateway, client, and machine presence.
+/// `GET /api/presence` — inspect gateway, client, and device presence.
 pub async fn presence_snapshot(State(state): State<AppState>) -> Json<PresenceSnapshotResponse> {
     Json(crate::presence::snapshot_presence(&state).await)
 }
 
-/// `POST /api/presence/machines/heartbeat` — register or refresh a machine heartbeat.
-pub async fn machine_heartbeat(
+/// `POST /api/presence/devices/heartbeat` — register or refresh a device heartbeat.
+pub async fn device_heartbeat(
     State(state): State<AppState>,
-    Json(req): Json<MachineHeartbeatRequest>,
+    Json(req): Json<DeviceHeartbeatRequest>,
 ) -> StatusCode {
-    crate::presence::upsert_machine_heartbeat(&state, req).await;
+    crate::presence::upsert_device_heartbeat(&state, req).await;
     StatusCode::ACCEPTED
 }
 
-/// `DELETE /api/presence/machines/:id` — mark a machine disconnected.
-pub async fn disconnect_machine(
+/// `DELETE /api/presence/devices/:id` — mark a device disconnected.
+pub async fn disconnect_device(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
-    if crate::presence::disconnect_machine(&state, &id).await {
+    if crate::presence::disconnect_device(&state, &id).await {
         Ok(StatusCode::NO_CONTENT)
     } else {
-        Err(ApiError::not_found_str("machine", &id))
+        Err(ApiError::not_found_str("device", &id))
     }
 }
 
@@ -891,22 +891,22 @@ pub async fn register_device(
         ));
     }
 
-    let host = crate::device::register_remote_device(&state, request).await?;
+    let device = crate::device::register_remote_device(&state, request).await?;
     Ok((
         StatusCode::CREATED,
         Json(DeviceResponse {
-            device_id: host.device_id,
-            label: host.label,
-            kind: host.kind.to_string(),
-            base_url: host.base_url,
-            workspace_root: host.workspace_root.to_string_lossy().into_owned(),
-            workspace_roots: host
+            device_id: device.device_id,
+            label: device.label,
+            kind: device.kind.to_string(),
+            base_url: device.base_url,
+            workspace_root: device.workspace_root.to_string_lossy().into_owned(),
+            workspace_roots: device
                 .workspace_roots
                 .iter()
                 .map(|path| path.to_string_lossy().into_owned())
                 .collect(),
-            capabilities: host.capabilities,
-            registered_at: host.registered_at,
+            capabilities: device.capabilities,
+            registered_at: device.registered_at,
         }),
     ))
 }
