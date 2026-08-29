@@ -8,6 +8,7 @@ All notable changes to Swage are documented in this file.
 
 - Users and agents can leave durable notes on a page's modules, appearing on an open page as they are written and readable by the agent alongside the module they hang on.
 - Work surfaces receive server-wide page signals over their own listen-only WebSocket, so an open page stays current whether or not a conversation is selected.
+- Workflow runs now journal their terminal budget balance.
 - Workflows may declare an argument schema in portable metadata; saved runs validate it before starting and workflow listings expose the declared or unconstrained contract.
 - The conversation now rides every work surface: pages carry the same live conversation beside them, with earlier conversations picked up and new ones started from the channel itself, so moving between pages neither leaves the conversation behind nor resets it.
 - Workspace attachment, trust, and detach controls are now reachable from the selected space's Settings workspaces section.
