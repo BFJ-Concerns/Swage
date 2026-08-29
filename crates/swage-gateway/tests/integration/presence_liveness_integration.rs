@@ -177,11 +177,8 @@ async fn presence_snapshot_marks_device_stale_after_missed_heartbeat() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::ACCEPTED);
 
-    let obsolete_presence_segment = ["ma", "chines"].concat();
     let obsolete_heartbeat = http
-        .post(format!(
-            "http://{addr}/api/presence/{obsolete_presence_segment}/heartbeat"
-        ))
+        .post(format!("http://{addr}/api/presence/machines/heartbeat"))
         .send()
         .await
         .unwrap();
@@ -213,9 +210,7 @@ async fn presence_snapshot_marks_device_stale_after_missed_heartbeat() {
     assert_eq!(disconnected.status(), StatusCode::NO_CONTENT);
 
     let obsolete_disconnect = http
-        .delete(format!(
-            "http://{addr}/api/presence/{obsolete_presence_segment}/device-a"
-        ))
+        .delete(format!("http://{addr}/api/presence/machines/device-a"))
         .send()
         .await
         .unwrap();

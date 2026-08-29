@@ -40,7 +40,7 @@ pub async fn operator_overview(state: &AppState) -> Result<OperatorOverviewRespo
             let device_presence = presence
                 .devices
                 .iter()
-                .find(|presence| presence.device_id == device.device_id);
+                .find(|record| record.device_id == device.device_id);
             OperatorDeviceSummary {
                 device_id: device.device_id,
                 label: device

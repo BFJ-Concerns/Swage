@@ -891,22 +891,22 @@ pub async fn register_device(
         ));
     }
 
-    let host = crate::device::register_remote_device(&state, request).await?;
+    let device = crate::device::register_remote_device(&state, request).await?;
     Ok((
         StatusCode::CREATED,
         Json(DeviceResponse {
-            device_id: host.device_id,
-            label: host.label,
-            kind: host.kind.to_string(),
-            base_url: host.base_url,
-            workspace_root: host.workspace_root.to_string_lossy().into_owned(),
-            workspace_roots: host
+            device_id: device.device_id,
+            label: device.label,
+            kind: device.kind.to_string(),
+            base_url: device.base_url,
+            workspace_root: device.workspace_root.to_string_lossy().into_owned(),
+            workspace_roots: device
                 .workspace_roots
                 .iter()
                 .map(|path| path.to_string_lossy().into_owned())
                 .collect(),
-            capabilities: host.capabilities,
-            registered_at: host.registered_at,
+            capabilities: device.capabilities,
+            registered_at: device.registered_at,
         }),
     ))
 }
