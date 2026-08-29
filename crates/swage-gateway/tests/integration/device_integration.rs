@@ -1,7 +1,6 @@
 #![allow(clippy::unwrap_used)]
 
 use std::net::SocketAddr;
-use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -28,7 +27,7 @@ use swage_gateway::{
     state::AppState,
 };
 use swage_provider::LlmProvider;
-use swage_storage::{SessionStore, SqliteStorage};
+use swage_storage::SqliteStorage;
 use swage_tool::context::{MockToolContext, ToolContext};
 use swage_tool::tool::Tool;
 
