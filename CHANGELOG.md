@@ -41,6 +41,7 @@ All notable changes to Swage are documented in this file.
 
 ### Changed
 
+- Presence APIs and protocol types now consistently identify attached devices; the former machine-named routes and fields are removed in this private alpha.
 - Context compaction now uses provider-native prompt token counts when available, while retaining conservative local screening and estimate fallback when counting is unavailable.
 - Async turn submissions now reject unrecognised request fields instead of silently ignoring them.
 - JavaScript context assemblies now expose `render()` only on template-backed briefing elements; calling it on literal elements fails the script and records the fallback to the default assembly.

@@ -35,8 +35,8 @@ pub struct ClientPresenceRecord {
 }
 
 #[derive(Debug, Clone)]
-pub struct MachinePresenceRecord {
-    pub machine_id: String,
+pub struct DevicePresenceRecord {
+    pub device_id: String,
     pub label: Option<String>,
     pub registered_at: DateTime<Utc>,
     pub last_seen_at: DateTime<Utc>,
@@ -47,11 +47,11 @@ pub struct MachinePresenceRecord {
 #[derive(Debug, Default)]
 pub struct PresenceRuntime {
     pub clients: HashMap<Uuid, ClientPresenceRecord>,
-    pub machines: HashMap<String, MachinePresenceRecord>,
+    pub devices: HashMap<String, DevicePresenceRecord>,
 }
 
 pub use swage_protocol::hosting::{
-    ClientPresenceResponse, MachineHeartbeatRequest, MachinePresenceResponse,
+    ClientPresenceResponse, DeviceHeartbeatRequest, DevicePresenceResponse,
     PresenceGatewayResponse, PresenceSnapshotResponse,
 };
 
@@ -69,14 +69,14 @@ pub async fn snapshot_presence(state: &AppState) -> PresenceSnapshotResponse {
             disconnected_at: record.disconnected_at,
         })
         .collect::<Vec<_>>();
-    let machines = presence
-        .machines
+    let devices = presence
+        .devices
         .values()
         .cloned()
         .map(|record| {
-            let state = machine_state_at(&record, now).to_string();
-            MachinePresenceResponse {
-                machine_id: record.machine_id,
+            let state = device_state_at(&record, now).to_string();
+            DevicePresenceResponse {
+                device_id: record.device_id,
                 label: record.label,
                 state,
                 registered_at: record.registered_at,
@@ -103,7 +103,7 @@ pub async fn snapshot_presence(state: &AppState) -> PresenceSnapshotResponse {
             active_connection_count,
         },
         clients,
-        machines,
+        devices,
     }
 }
 
@@ -158,12 +158,12 @@ pub async fn record_client_disconnected(state: &AppState, session_id: Uuid) {
     entry.disconnected_at = Some(now);
 }
 
-pub async fn upsert_machine_heartbeat(state: &AppState, request: MachineHeartbeatRequest) {
+pub async fn upsert_device_heartbeat(state: &AppState, request: DeviceHeartbeatRequest) {
     let now = Utc::now();
     let mut presence = state.presence.lock().await;
-    let existing = presence.machines.get(&request.machine_id).cloned();
-    let record = MachinePresenceRecord {
-        machine_id: request.machine_id.clone(),
+    let existing = presence.devices.get(&request.device_id).cloned();
+    let record = DevicePresenceRecord {
+        device_id: request.device_id.clone(),
         label: request
             .label
             .or_else(|| existing.as_ref().and_then(|value| value.label.clone())),
@@ -172,20 +172,20 @@ pub async fn upsert_machine_heartbeat(state: &AppState, request: MachineHeartbea
         disconnected_at: None,
         stale_after_secs: request.stale_after_secs,
     };
-    presence.machines.insert(request.machine_id, record);
+    presence.devices.insert(request.device_id, record);
 }
 
-pub async fn disconnect_machine(state: &AppState, machine_id: &str) -> bool {
+pub async fn disconnect_device(state: &AppState, device_id: &str) -> bool {
     let now = Utc::now();
     let mut presence = state.presence.lock().await;
-    if let Some(machine) = presence.machines.get_mut(machine_id) {
-        machine.disconnected_at = Some(now);
+    if let Some(device) = presence.devices.get_mut(device_id) {
+        device.disconnected_at = Some(now);
         return true;
     }
     false
 }
 
-fn machine_state_at(record: &MachinePresenceRecord, now: DateTime<Utc>) -> PresenceState {
+fn device_state_at(record: &DevicePresenceRecord, now: DateTime<Utc>) -> PresenceState {
     if record.disconnected_at.is_some() {
         PresenceState::Disconnected
     } else if now
