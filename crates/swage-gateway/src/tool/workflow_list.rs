@@ -359,6 +359,7 @@ mod tests {
                 description: String::new(),
                 source: r#"export const meta = { argumentSchema: {"type":"object","required":["topic"]} }; return {};"#.into(),
                 delivery_grant: None,
+                authoring_session_id: None,
             })
             .await
             .expect("constrained workflow");
@@ -369,6 +370,7 @@ mod tests {
                 description: String::new(),
                 source: "return {};".into(),
                 delivery_grant: None,
+                authoring_session_id: None,
             })
             .await
             .expect("unconstrained workflow");

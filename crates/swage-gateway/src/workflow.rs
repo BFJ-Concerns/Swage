@@ -5557,6 +5557,7 @@ mod tests {
                 description: String::new(),
                 source: r#"export const meta = { argumentSchema: {"type":"object","required":["task"],"properties":{"task":{"type":"string"}}} }; return {};"#.into(),
                 delivery_grant: None,
+                authoring_session_id: None,
             })
             .await
             .expect("workflow");
