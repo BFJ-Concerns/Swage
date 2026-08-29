@@ -1,7 +1,7 @@
 #![allow(clippy::unwrap_used)]
 
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -182,7 +182,6 @@ async fn get_json(addr: SocketAddr, path: &str) -> (StatusCode, Value) {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn recovery_exports_are_listed_and_downloadable() {
-    let workspace = tempfile::TempDir::new().unwrap();
     let provider = ChannelProvider::new(vec![]);
     let dispatcher = swage_gateway::tool::ToolDispatcher::allow_all(vec![]);
     let (addr, _state) = start_test_server(None, provider, dispatcher).await;
@@ -313,7 +312,6 @@ async fn channel_onboarding_pairs_device_and_delivers_first_message() {
 #[tokio::test(flavor = "multi_thread")]
 async fn recovery_bundle_exports_and_imports_operator_state_into_fresh_instance() {
     let _guard = with_secret_env();
-    let gateway_workspace = tempfile::TempDir::new().unwrap();
     let device_workspace = tempfile::TempDir::new().unwrap();
     let origin_dir = tempfile::tempdir().unwrap();
     let destination_dir = tempfile::tempdir().unwrap();
@@ -441,7 +439,6 @@ async fn recovery_bundle_exports_and_imports_operator_state_into_fresh_instance(
 #[tokio::test(flavor = "multi_thread")]
 async fn recovery_bundle_restores_service_after_installation_move() {
     let _guard = with_secret_env();
-    let gateway_workspace = tempfile::TempDir::new().unwrap();
     let device_workspace = tempfile::TempDir::new().unwrap();
     let origin_dir = tempfile::tempdir().unwrap();
     let destination_dir = tempfile::tempdir().unwrap();
