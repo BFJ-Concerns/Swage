@@ -257,6 +257,31 @@ describe("settled partial responses", () => {
 // ---------------------------------------------------------------------------
 
 describe("historical tool calls from committed messages", () => {
+  it("renders persisted rejected approvals as failed beside successful calls", () => {
+    const store = makeConversationStore([
+      makeAssistantMessage("The request was denied and the turn continued.", [
+        makeToolCall({ call_id: "successful", tool: "read_file", status: "success" }),
+        makeToolCall({
+          call_id: "rejected",
+          tool: "write_file",
+          result: "Tool call rejected: reviewer denied access",
+          status: "rejected",
+        }),
+      ]),
+    ]);
+
+    component = mount(MessageDisplay, {
+      target: document.body,
+      props: { store, streamingStore: makeStreamingStore() },
+    });
+
+    const calls = document.querySelectorAll(".tool-calls-history .tool-call");
+    expect(calls).toHaveLength(2);
+    expect(calls[0].classList.contains("error")).toBe(false);
+    expect(calls[1].classList.contains("error")).toBe(true);
+    expect(calls[1].querySelector(".error-icon")?.textContent).toBe("✗");
+  });
+
   it("renders a .tool-call element for each tool call on an assistant message", () => {
     const store = makeConversationStore([
       makeAssistantMessage("Here is the file:", [makeToolCall()]),
@@ -446,6 +471,33 @@ describe("historical tool calls from committed messages", () => {
 // ---------------------------------------------------------------------------
 
 describe("live tool calls from streaming store", () => {
+  it("renders a live rejected approval as failed beside a successful call", () => {
+    const store = makeConversationStore([]);
+    const streaming = makeStreamingStore(
+      [
+        makeToolCall({ call_id: "successful", tool: "read_file", status: "success" }),
+        makeToolCall({
+          call_id: "rejected",
+          tool: "write_file",
+          result: "Tool call rejected: reviewer denied access",
+          status: "rejected",
+        }),
+      ],
+      true,
+    );
+
+    component = mount(MessageDisplay, {
+      target: document.body,
+      props: { store, streamingStore: streaming },
+    });
+
+    const calls = document.querySelectorAll(".tool-calls-live .tool-call");
+    expect(calls).toHaveLength(2);
+    expect(calls[0].classList.contains("error")).toBe(false);
+    expect(calls[1].classList.contains("error")).toBe(true);
+    expect(calls[1].querySelector(".error-icon")?.textContent).toBe("✗");
+  });
+
   it("renders live tool calls before the streamed response", () => {
     const store = makeConversationStore([]);
     const streaming = {
