@@ -618,8 +618,10 @@ async fn live_listener_default_assembly_delivers_working_norms_to_the_provider()
     let mut environment = crate::support::ProcessEnvGuard::new();
     environment.set_swage_home(swage_home.path());
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-    let mut config = swage_config::ResolvedConfig::default();
-    config.instructions = "Default-route prompt".into();
+    let config = swage_config::ResolvedConfig {
+        instructions: "Default-route prompt".into(),
+        ..Default::default()
+    };
     let state = AppState::new(
         storage.clone() as Arc<dyn Storage>,
         storage.clone(),
