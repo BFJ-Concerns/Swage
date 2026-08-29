@@ -1,7 +1,7 @@
 #![allow(clippy::unwrap_used)]
 
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -15,9 +15,7 @@ use swage_core::{
     ToolCompletionResponse, ToolError,
 };
 use swage_gateway::{
-    device::{register_local_device, spawn_attached_device},
-    secret::CreateSecretRequest,
-    server::build_router,
+    device::spawn_attached_device, secret::CreateSecretRequest, server::build_router,
     state::AppState,
 };
 use swage_provider::LlmProvider;
@@ -116,15 +114,12 @@ async fn start_test_server(
     db_path: Option<&Path>,
     provider: impl LlmProvider + 'static,
     dispatcher: swage_gateway::tool::ToolDispatcher,
-    workspace_root: PathBuf,
-    include_local_device: bool,
 ) -> (SocketAddr, AppState) {
     let storage = Arc::new(match db_path {
         Some(path) => SqliteStorage::open(path).unwrap(),
         None => SqliteStorage::in_memory().unwrap(),
     });
-    let mut config = swage_config::ResolvedConfig::default();
-    config.workspace.path = workspace_root.to_string_lossy().into_owned();
+    let config = swage_config::ResolvedConfig::default();
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn SpaceStore>,
@@ -133,9 +128,6 @@ async fn start_test_server(
         dispatcher,
         None,
     );
-    if include_local_device {
-        register_local_device(&state).await;
-    }
     let router: Router = build_router(state.clone());
     let (addr, _server) = start_live_server(router).await;
     (addr, state)
@@ -185,17 +177,9 @@ async fn get_json(addr: SocketAddr, path: &str) -> (StatusCode, Value) {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn recovery_exports_are_listed_and_downloadable() {
-    let workspace = tempfile::TempDir::new().unwrap();
     let provider = ChannelProvider::new(vec![]);
     let dispatcher = swage_gateway::tool::ToolDispatcher::allow_all(vec![]);
-    let (addr, _state) = start_test_server(
-        None,
-        provider,
-        dispatcher,
-        workspace.path().to_path_buf(),
-        false,
-    )
-    .await;
+    let (addr, _state) = start_test_server(None, provider, dispatcher).await;
 
     let (empty_status, empty_body) = get_json(addr, "/api/recovery/exports").await;
     assert_eq!(empty_status, StatusCode::OK);
@@ -231,14 +215,7 @@ async fn channel_onboarding_pairs_device_and_delivers_first_message() {
         swage_gateway::tool::ToolDispatcher::allow_all(vec![Arc::new(DeviceIdentityTool {
             marker: "gateway-unused",
         }) as Arc<dyn Tool>]);
-    let (addr, state) = start_test_server(
-        None,
-        provider,
-        dispatcher,
-        workspace.path().to_path_buf(),
-        false,
-    )
-    .await;
+    let (addr, state) = start_test_server(None, provider, dispatcher).await;
     let shared_token_secret_ref = create_secret_ref(&state, "Pair token", "pair-secret").await;
 
     let device_dispatcher =
@@ -330,7 +307,6 @@ async fn channel_onboarding_pairs_device_and_delivers_first_message() {
 #[tokio::test(flavor = "multi_thread")]
 async fn recovery_bundle_exports_and_imports_operator_state_into_fresh_instance() {
     let _guard = with_secret_env();
-    let gateway_workspace = tempfile::TempDir::new().unwrap();
     let device_workspace = tempfile::TempDir::new().unwrap();
     let origin_dir = tempfile::tempdir().unwrap();
     let destination_dir = tempfile::tempdir().unwrap();
@@ -342,14 +318,8 @@ async fn recovery_bundle_exports_and_imports_operator_state_into_fresh_instance(
         swage_gateway::tool::ToolDispatcher::allow_all(vec![Arc::new(DeviceIdentityTool {
             marker: "gateway-unused",
         }) as Arc<dyn Tool>]);
-    let (origin_addr, origin_state) = start_test_server(
-        Some(&origin_db),
-        origin_provider,
-        origin_dispatcher,
-        gateway_workspace.path().to_path_buf(),
-        false,
-    )
-    .await;
+    let (origin_addr, origin_state) =
+        start_test_server(Some(&origin_db), origin_provider, origin_dispatcher).await;
     let recovery_secret_ref =
         create_secret_ref(&origin_state, "Recovery token", "recovery-secret").await;
 
@@ -426,8 +396,6 @@ async fn recovery_bundle_exports_and_imports_operator_state_into_fresh_instance(
         Some(&destination_db),
         destination_provider,
         destination_dispatcher,
-        gateway_workspace.path().to_path_buf(),
-        false,
     )
     .await;
 
@@ -466,7 +434,6 @@ async fn recovery_bundle_exports_and_imports_operator_state_into_fresh_instance(
 #[tokio::test(flavor = "multi_thread")]
 async fn recovery_bundle_restores_service_after_installation_move() {
     let _guard = with_secret_env();
-    let gateway_workspace = tempfile::TempDir::new().unwrap();
     let device_workspace = tempfile::TempDir::new().unwrap();
     let origin_dir = tempfile::tempdir().unwrap();
     let destination_dir = tempfile::tempdir().unwrap();
@@ -478,14 +445,8 @@ async fn recovery_bundle_restores_service_after_installation_move() {
         swage_gateway::tool::ToolDispatcher::allow_all(vec![Arc::new(DeviceIdentityTool {
             marker: "gateway-unused",
         }) as Arc<dyn Tool>]);
-    let (origin_addr, origin_state) = start_test_server(
-        Some(&origin_db),
-        origin_provider,
-        origin_dispatcher,
-        gateway_workspace.path().to_path_buf(),
-        false,
-    )
-    .await;
+    let (origin_addr, origin_state) =
+        start_test_server(Some(&origin_db), origin_provider, origin_dispatcher).await;
     let moved_secret_ref = create_secret_ref(&origin_state, "Moved token", "moved-secret").await;
 
     let device_dispatcher =
@@ -543,8 +504,6 @@ async fn recovery_bundle_restores_service_after_installation_move() {
         Some(&destination_db),
         destination_provider,
         destination_dispatcher,
-        gateway_workspace.path().to_path_buf(),
-        false,
     )
     .await;
 
