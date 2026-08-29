@@ -93,6 +93,10 @@ pub struct AgentCallResult {
     pub output: Value,
     pub input_tokens: u64,
     pub output_tokens: u64,
+    /// Host-resolved directory in which this worker ran. This is reported
+    /// separately from the caller's journalled `cwd` request.
+    #[serde(default)]
+    pub working_directory: Option<String>,
     #[serde(default)]
     pub session_id: Option<Uuid>,
     #[serde(default)]
