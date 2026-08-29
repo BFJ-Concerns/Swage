@@ -1581,6 +1581,32 @@ mod tests {
         );
     }
 
+    #[test]
+    fn workflow_authoring_guide_teaches_a_parseable_argument_schema() {
+        let guide = include_str!("../../../shipped/skills/workflow-authoring/SKILL.md");
+        let script_surface = guide
+            .split_once("## The script surface")
+            .expect("script surface section")
+            .1;
+        let example = script_surface
+            .split_once("```js\n")
+            .expect("JavaScript example")
+            .1
+            .split_once("\n```")
+            .expect("complete JavaScript example")
+            .0;
+
+        let meta = script_meta(example).expect("documented metadata must parse");
+        assert_eq!(
+            meta.argument_schema,
+            Some(json!({
+                "type": "object",
+                "required": ["topic"],
+                "properties": {"topic": {"type": "string"}}
+            }))
+        );
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn agent_call_without_a_definition_omits_agent_from_the_host_request() {
         let host = Arc::new(SurfaceHost::new());
