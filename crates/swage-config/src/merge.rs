@@ -7,7 +7,7 @@ use crate::model::{
     ModelEndpointConfig, ModelPricing, ObservabilityConfig, OutputConfig, PricingConfig,
     ProviderCatalogConfig, ProviderEndpointConfig, PythonExecuteToolConfig, PythonRuntimePolicy,
     RequireApprovalEntry, ResolvedConfig, SandboxConfig, SchedulingConfig, SearchProviderConfig,
-    ServerConfig, TelegramChannelConfig, ToolConfig, ToolPermissionConfig, WorkspaceConfig,
+    ServerConfig, TelegramChannelConfig, ToolConfig, ToolPermissionConfig,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -37,12 +37,6 @@ pub struct PartialModelCatalogConfig {
     pub default: Option<String>,
     pub default_model_id: Option<String>,
     pub entries: Option<HashMap<String, ModelEndpointConfig>>,
-}
-
-/// Partial mirror of `WorkspaceConfig`.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct PartialWorkspaceConfig {
-    pub path: Option<String>,
 }
 
 /// Partial mirror of `SandboxConfig`.
@@ -241,7 +235,6 @@ pub struct PartialConfig {
     pub server: Option<PartialServerConfig>,
     pub providers: Option<PartialProviderCatalogConfig>,
     pub models: Option<PartialModelCatalogConfig>,
-    pub workspace: Option<PartialWorkspaceConfig>,
     pub sandbox: Option<PartialSandboxConfig>,
     pub logging: Option<PartialLoggingConfig>,
     pub context: Option<PartialContextConfig>,
@@ -288,9 +281,6 @@ impl From<ResolvedConfig> for PartialConfig {
                 } else {
                     Some(r.models.entries)
                 },
-            }),
-            workspace: Some(PartialWorkspaceConfig {
-                path: Some(r.workspace.path),
             }),
             sandbox: Some(PartialSandboxConfig {
                 enabled: Some(r.sandbox.enabled),
@@ -471,7 +461,6 @@ macro_rules! impl_merge_overlay {
 }
 
 impl_merge_overlay!(PartialServerConfig { host, port });
-impl_merge_overlay!(PartialWorkspaceConfig { path });
 impl_merge_overlay!(PartialSandboxConfig {
     enabled,
     allow_degraded_execution,
@@ -579,7 +568,6 @@ pub fn merge_partial(base: PartialConfig, overlay: PartialConfig) -> PartialConf
                 entries,
             }
         }),
-        workspace: merge_overlay_section(base.workspace, overlay.workspace),
         sandbox: merge_overlay_section(base.sandbox, overlay.sandbox),
         logging: merge_overlay_section(base.logging, overlay.logging),
         context: merge_overlay_section(base.context, overlay.context),
@@ -710,7 +698,6 @@ pub fn merge_chain(configs: Vec<PartialConfig>) -> PartialConfig {
 /// fields with their default values.
 pub fn resolve(partial: PartialConfig) -> ResolvedConfig {
     let ds = ServerConfig::default();
-    let dw = WorkspaceConfig::default();
     let dsb = SandboxConfig::default();
     let dlg = LoggingConfig::default();
 
@@ -718,7 +705,6 @@ pub fn resolve(partial: PartialConfig) -> ResolvedConfig {
     let providers = partial.providers.unwrap_or_default();
     let models = partial.models.unwrap_or_default();
     let default_model_id_override = models.default_model_id.clone();
-    let w = partial.workspace.unwrap_or_default();
     let sb = partial.sandbox.unwrap_or_default();
     let lg = partial.logging.unwrap_or_default();
 
@@ -767,9 +753,6 @@ pub fn resolve(partial: PartialConfig) -> ResolvedConfig {
         },
         providers: provider_catalog,
         models: model_catalog,
-        workspace: WorkspaceConfig {
-            path: w.path.unwrap_or(dw.path),
-        },
         sandbox: SandboxConfig {
             enabled: sb.enabled.unwrap_or(dsb.enabled),
             allow_degraded_execution: sb
@@ -1445,13 +1428,11 @@ mod tests {
         assert_eq!(resolved.tools.permissions.allow, vec!["*".to_string()]);
         assert!(resolved.tools.permissions.deny.is_empty());
         assert!(resolved.tools.permissions.bundles.contains_key("browsing"));
-        assert!(
-            resolved
-                .tools
-                .permissions
-                .bundles
-                .contains_key("browser_actions")
-        );
+        assert!(resolved
+            .tools
+            .permissions
+            .bundles
+            .contains_key("browser_actions"));
     }
 
     #[test]

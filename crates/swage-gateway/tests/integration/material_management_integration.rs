@@ -57,10 +57,9 @@ impl LlmProvider for MockProvider {
     }
 }
 
-fn test_state(db_path: &Path, workspace_root: &Path) -> (AppState, Arc<SqliteStorage>) {
+fn test_state(db_path: &Path, _workspace_root: &Path) -> (AppState, Arc<SqliteStorage>) {
     let storage = Arc::new(SqliteStorage::open(db_path).unwrap());
-    let mut config = swage_config::ResolvedConfig::default();
-    config.workspace.path = workspace_root.to_string_lossy().into_owned();
+    let config = swage_config::ResolvedConfig::default();
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn SpaceStore>,

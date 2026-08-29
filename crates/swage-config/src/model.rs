@@ -117,23 +117,6 @@ impl ModelCatalogConfig {
     }
 }
 
-/// Legacy workspace hint for process-local surfaces.
-///
-/// Agent execution roots are derived from space/session workspace attachments
-/// or managed scratch directories, not this global fallback.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct WorkspaceConfig {
-    pub path: String,
-}
-
-impl Default for WorkspaceConfig {
-    fn default() -> Self {
-        Self {
-            path: ".".to_string(),
-        }
-    }
-}
-
 /// Sandbox isolation settings.
 pub use swage_protocol::client::settings::SandboxConfig;
 
@@ -766,7 +749,6 @@ pub struct ResolvedConfig {
     pub providers: ProviderCatalogConfig,
     /// Canonical model catalogue. Model entries point at provider catalogue ids.
     pub models: ModelCatalogConfig,
-    pub workspace: WorkspaceConfig,
     pub sandbox: SandboxConfig,
     pub logging: LoggingConfig,
     pub tools: ToolConfig,
@@ -885,12 +867,6 @@ mod tests {
     }
 
     #[test]
-    fn workspace_config_defaults() {
-        let cfg = WorkspaceConfig::default();
-        assert_eq!(cfg.path, ".");
-    }
-
-    #[test]
     fn sandbox_config_defaults() {
         let cfg = SandboxConfig::default();
         assert!(cfg.enabled);
@@ -913,7 +889,6 @@ mod tests {
         assert_eq!(cfg.models.default, "");
         assert!(cfg.models.entries.is_empty());
         assert_eq!(cfg.default_model_id(), "");
-        assert_eq!(cfg.workspace.path, ".");
         assert!(cfg.sandbox.enabled);
         assert!(!cfg.sandbox.allow_degraded_execution);
         assert_eq!(cfg.logging.level, LogLevel::Info);

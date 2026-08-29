@@ -23,7 +23,6 @@ use swage_tool::dispatch::ToolDispatcher;
 
 use crate::secret::SecretManager;
 use crate::state::AppState;
-use crate::tool::workspace::resolve_workspace_root;
 
 pub const LOCAL_DEVICE_ID: &str = "local";
 
@@ -92,37 +91,6 @@ struct TransportBackedDeviceState {
     dispatcher: Arc<ToolDispatcher>,
     capabilities: Vec<String>,
     workspace_roots: Vec<PathBuf>,
-}
-
-pub fn make_local_device(
-    config: &swage_config::ResolvedConfig,
-    dispatcher: &ToolDispatcher,
-) -> RegisteredDevice {
-    let workspace_root = resolve_workspace_root(config);
-    RegisteredDevice {
-        device_id: LOCAL_DEVICE_ID.to_string(),
-        label: Some("Local machine".to_string()),
-        kind: DeviceKind::Local,
-        base_url: None,
-        shared_token_secret_ref: None,
-        workspace_root: workspace_root.clone(),
-        workspace_roots: vec![workspace_root],
-        capabilities: dispatcher
-            .registry()
-            .list()
-            .into_iter()
-            .map(ToOwned::to_owned)
-            .collect(),
-        registered_at: Utc::now(),
-    }
-}
-
-pub async fn register_local_device(state: &AppState) {
-    let local_device = make_local_device(&state.config, state.tool_dispatcher.as_ref());
-    let mut runtime = state.devices.lock().await;
-    runtime
-        .devices
-        .insert(local_device.device_id.clone(), local_device);
 }
 
 pub async fn register_remote_device(
