@@ -83,6 +83,11 @@ describe("parseRoute", () => {
     expect(parseRoute("/settings/agents").settingsTab).toBe("agents");
   });
 
+  it("maps command and skill settings routes", () => {
+    expect(parseRoute("/settings/commands").settingsTab).toBe("commands");
+    expect(parseRoute("/settings/skills").settingsTab).toBe("skills");
+  });
+
   it("maps space settings routes to their space slug and tab", () => {
     expect(parseRoute("/settings/space/research/workspaces")).toEqual({
       path: "/settings/space/research/workspaces",
