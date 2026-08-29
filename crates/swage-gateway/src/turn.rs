@@ -1191,7 +1191,7 @@ async fn process_turn_with_composition_and_focus(
         available_skills_for_agent(&space_slug, &session.agent_id, Some(swage_root));
 
     let operator_guidance = operator_guidance_rules(Some(swage_root), &workspace_policy);
-    let hierarchy = configuration_hierarchy(swage_root, &space_slug, &session.agent_id);
+    let hierarchy = configuration_hierarchy(swage_root, &space_slug, Some(&session.agent_id));
 
     let elements = build_assembly_elements(
         &config.instructions,
@@ -2181,7 +2181,7 @@ fn execute_context_assembly(
     }
 
     let search_levels = swage_root
-        .map(|root| configuration_hierarchy(root, space_slug, agent_id))
+        .map(|root| configuration_hierarchy(root, space_slug, Some(agent_id)))
         .unwrap_or_default();
     let level_refs: Vec<(swage_config::HierarchyLevel, &Path)> = search_levels
         .iter()
