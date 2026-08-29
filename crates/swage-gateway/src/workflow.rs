@@ -9115,6 +9115,45 @@ mod tests {
             Some(Value::String("function".into()))
         );
 
+        let (_, ungranted_version) = storage
+            .create_workflow_script(NewWorkflowScript {
+                space_id: space.id,
+                name: "saved-ungranted-sweep".into(),
+                description: String::new(),
+                source: source.into(),
+                delivery_grant: None,
+            })
+            .await
+            .expect("ungranted saved script");
+        let ungranted = storage
+            .create_workflow_run(NewWorkflowRun {
+                space_id: space.id,
+                parent_run_id: None,
+                parent_seq: None,
+                script_version_id: Some(ungranted_version.id),
+                inline_workflow_id: None,
+                inline_workflow_name: None,
+                inline_workflow_version: None,
+                carrying_skill: None,
+                source: None,
+                source_hash: source_hash(source),
+                args: Value::Null,
+                budget: serde_json::json!({}),
+                engine_version: "test".into(),
+                dispatch_bound_agent_ids: vec![],
+                dispatch_bound_task_definition_ids: vec![],
+                workflow_call_tools: None,
+                inherited_worker_placement: None,
+            })
+            .await
+            .expect("ungranted saved run");
+        assert!(
+            !captured_sources_grant_for_run(&state, &ungranted)
+                .await
+                .expect("resolve ungranted saved-script grant"),
+            "a saved script without the grant must retain its persisted denial"
+        );
+
         let carried = storage
             .create_workflow_run(NewWorkflowRun {
                 space_id: space.id,
