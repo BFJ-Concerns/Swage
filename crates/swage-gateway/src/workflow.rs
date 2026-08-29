@@ -3811,9 +3811,13 @@ async fn evaluate_run_gate(
     }
     let config = state.active_config();
     let model_id = match &request.model {
-        Some(model) => crate::schedule::resolve_gate_model(&config, model).ok_or_else(|| {
-            format!("RunEventError: gate model '{model}' is not in the configured model catalogue")
-        })?,
+        Some(model) => crate::turn::resolve_model_catalogue_entry(&config.models, model)
+            .map(|(_, model)| model.model_id.clone())
+            .ok_or_else(|| {
+                format!(
+                    "RunEventError: gate model '{model}' is not in the configured model catalogue"
+                )
+            })?,
         None => config.default_model_id().to_string(),
     };
     let prompt = build_run_gate_prompt(&request.criteria, &events);
@@ -5285,7 +5289,7 @@ mod tests {
     async fn empty_space_lists_shipped_carried_and_built_in_workflows() {
         let (state, storage) = workflow_test_state();
         let space = storage.get_or_create_default().await.expect("space");
-        let _skill_root = crate::skill::SpaceSkillRootGuard::empty(space.id);
+        let _skill_root = crate::skill::TestSkillRootGuard::empty(space.id);
 
         let Json(list) = list_scripts(State(state), Path(space.id))
             .await
@@ -5317,7 +5321,7 @@ mod tests {
     async fn authored_workflow_shadows_the_same_named_builtin() {
         let (state, storage) = workflow_test_state();
         let space = storage.get_or_create_default().await.expect("space");
-        let _skill_root = crate::skill::SpaceSkillRootGuard::empty(space.id);
+        let _skill_root = crate::skill::TestSkillRootGuard::empty(space.id);
         let router = crate::server::build_router(state.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -5472,7 +5476,7 @@ mod tests {
 
         let (state, storage) = workflow_test_state();
         let space = storage.get_or_create_default().await.expect("space");
-        let _skill_root = crate::skill::SpaceSkillRootGuard::at(space.id, root.path());
+        let _skill_root = crate::skill::TestSkillRootGuard::at(space.id, root.path());
 
         let Json(list) = list_scripts(State(state.clone()), Path(space.id))
             .await
@@ -5531,7 +5535,7 @@ mod tests {
 
         let (state, storage) = workflow_test_state();
         let space = storage.get_or_create_default().await.expect("space");
-        let _skill_root = crate::skill::SpaceSkillRootGuard::at(space.id, root.path());
+        let _skill_root = crate::skill::TestSkillRootGuard::at(space.id, root.path());
 
         let Json(list) = list_scripts(State(state), Path(space.id))
             .await
@@ -5590,7 +5594,7 @@ mod tests {
     async fn listed_builtin_can_be_read_and_started_but_not_updated() {
         let (state, storage) = workflow_test_state();
         let space = storage.get_or_create_default().await.expect("space");
-        let _skill_root = crate::skill::SpaceSkillRootGuard::empty(space.id);
+        let _skill_root = crate::skill::TestSkillRootGuard::empty(space.id);
         let Json(list) = list_scripts(State(state.clone()), Path(space.id))
             .await
             .expect("workflow list");
@@ -5664,7 +5668,7 @@ mod tests {
     async fn listed_shipped_carried_workflow_can_start_but_not_update() {
         let (state, storage) = workflow_test_state();
         let space = storage.get_or_create_default().await.expect("space");
-        let _skill_root = crate::skill::SpaceSkillRootGuard::empty(space.id);
+        let _skill_root = crate::skill::TestSkillRootGuard::empty(space.id);
         let Json(list) = list_scripts(State(state.clone()), Path(space.id))
             .await
             .expect("workflow list");
@@ -5747,7 +5751,7 @@ mod tests {
             })
             .await
             .expect("session");
-        let _skill_root = crate::websocket::SessionSkillRootGuard::empty(session.id);
+        let _skill_root = crate::skill::TestSkillRootGuard::empty(session.id);
 
         let started = GatewayWorkflowLauncher::new(state.clone())
             .start_by_name(session.id, "research-sweep", Value::Null, None, false)
@@ -5780,7 +5784,7 @@ mod tests {
     async fn workflow_composition_resolves_a_builtin_child() {
         let (state, storage) = workflow_test_state();
         let space = storage.get_or_create_default().await.expect("space");
-        let _skill_root = crate::skill::SpaceSkillRootGuard::empty(space.id);
+        let _skill_root = crate::skill::TestSkillRootGuard::empty(space.id);
         let (parent, _) = storage
             .create_workflow_script(NewWorkflowScript {
                 space_id: space.id,
@@ -5874,7 +5878,7 @@ mod tests {
             })
             .await
             .expect("session");
-        let _skill_root = crate::websocket::SessionSkillRootGuard::at(session.id, root.path());
+        let _skill_root = crate::skill::TestSkillRootGuard::at(session.id, root.path());
 
         let available = crate::websocket::discover_available_for_session(&state, session.id)
             .await
@@ -5950,7 +5954,7 @@ mod tests {
     async fn composed_shipped_workflow_retains_embedded_source_and_skill_attribution() {
         let (state, storage) = workflow_test_state();
         let space = storage.get_or_create_default().await.expect("space");
-        let _skill_root = crate::skill::SpaceSkillRootGuard::empty(space.id);
+        let _skill_root = crate::skill::TestSkillRootGuard::empty(space.id);
         let (parent, _) = storage
             .create_workflow_script(NewWorkflowScript {
                 space_id: space.id,
@@ -8674,7 +8678,7 @@ mod tests {
             })
             .await
             .expect("session");
-        let _skill_root = crate::websocket::SessionSkillRootGuard::empty(session.id);
+        let _skill_root = crate::skill::TestSkillRootGuard::empty(session.id);
         let provider = Arc::new(ScriptedRecordingProvider {
             outputs: std::sync::Mutex::new(std::collections::VecDeque::from([
                 scripted_text_output("bounded work completed"),
@@ -8810,7 +8814,7 @@ mod tests {
             })
             .await
             .expect("call-scoped worker session");
-        let _skill_root = crate::websocket::SessionSkillRootGuard::empty(session.id);
+        let _skill_root = crate::skill::TestSkillRootGuard::empty(session.id);
         let provider = Arc::new(ScriptedRecordingProvider {
             outputs: std::sync::Mutex::new(std::collections::VecDeque::from([
                 scripted_text_output("nested bounded work completed"),
@@ -15194,7 +15198,7 @@ mod tests {
     async fn composed_run_executes_the_child_and_journals_its_output() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
         let space = storage.get_or_create_default().await.expect("space");
-        let _skill_root = crate::skill::SpaceSkillRootGuard::empty(space.id);
+        let _skill_root = crate::skill::TestSkillRootGuard::empty(space.id);
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn SpaceStore>,
@@ -15272,7 +15276,7 @@ mod tests {
     async fn a_child_run_cannot_compose_further() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
         let space = storage.get_or_create_default().await.expect("space");
-        let _skill_root = crate::skill::SpaceSkillRootGuard::empty(space.id);
+        let _skill_root = crate::skill::TestSkillRootGuard::empty(space.id);
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn SpaceStore>,
