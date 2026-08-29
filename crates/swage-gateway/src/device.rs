@@ -101,7 +101,7 @@ pub fn make_local_device(
     let workspace_root = resolve_workspace_root(config);
     RegisteredDevice {
         device_id: LOCAL_DEVICE_ID.to_string(),
-        label: Some("Local machine".to_string()),
+        label: Some("Local device".to_string()),
         kind: DeviceKind::Local,
         base_url: None,
         shared_token_secret_ref: None,
@@ -169,10 +169,10 @@ pub async fn register_remote_device(
         .insert(device.device_id.clone(), device.clone());
     drop(runtime);
 
-    crate::presence::upsert_machine_heartbeat(
+    crate::presence::upsert_device_heartbeat(
         state,
-        crate::presence::MachineHeartbeatRequest {
-            machine_id: device.device_id.clone(),
+        crate::presence::DeviceHeartbeatRequest {
+            device_id: device.device_id.clone(),
             label: device.label.clone(),
             stale_after_secs: 30,
         },
