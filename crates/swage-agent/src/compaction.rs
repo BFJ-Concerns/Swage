@@ -391,7 +391,10 @@ fn aggressive_truncate(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
 #[cfg(test)]
 mod tests {
     use std::pin::Pin;
-    use std::sync::{Arc, Mutex};
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
 
     use async_trait::async_trait;
     use futures::Stream;
@@ -513,6 +516,63 @@ mod tests {
                 outcome,
                 count_requests: Mutex::new(Vec::new()),
             })
+        }
+    }
+
+    /// A provider that detects an initial oversized prompt but then loses its
+    /// native count while summarisation is unavailable.
+    struct TransientCountFailureProvider {
+        count_calls: AtomicUsize,
+    }
+
+    impl TransientCountFailureProvider {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                count_calls: AtomicUsize::new(0),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl LlmProvider for TransientCountFailureProvider {
+        fn model_id(&self) -> &str {
+            "transient-count-failure"
+        }
+
+        async fn count_tokens(
+            &self,
+            _request: &CompletionRequest,
+        ) -> Result<Option<u64>, ProviderError> {
+            if self.count_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                Ok(Some(100))
+            } else {
+                Err(ProviderError::InvalidResponse(
+                    "native count unavailable".into(),
+                ))
+            }
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, ProviderError> {
+            Err(ProviderError::InvalidResponse(
+                "summarisation unavailable".into(),
+            ))
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _request: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, ProviderError> {
+            unreachable!("compaction does not request tools")
+        }
+
+        fn stream(
+            &self,
+            _request: CompletionRequest,
+        ) -> Pin<Box<dyn Stream<Item = StreamChunk> + Send>> {
+            unreachable!("compaction does not stream")
         }
     }
 
@@ -873,6 +933,7 @@ mod tests {
 
         let record = record.expect("compaction should emit an audit record");
         assert!(record.focus.is_none());
+        assert_eq!(record.messages_removed, 2);
         let requests = provider.requests.lock().expect("request lock");
         let prompt = match &requests[0].messages[0].content()[0] {
             ContentPart::Text { text } => text,
@@ -963,6 +1024,35 @@ mod tests {
             "result should be within threshold, got {} messages",
             result.len()
         );
+    }
+
+    #[tokio::test]
+    async fn failed_summarisation_reports_no_removals_when_counting_falls_back_below_threshold() {
+        let messages = vec![
+            text_msg(Role::User, "a"),
+            text_msg(Role::Assistant, "b"),
+            text_msg(Role::User, "c"),
+            text_msg(Role::Assistant, "d"),
+        ];
+        let storage = stub_storage();
+        let provider = TransientCountFailureProvider::new();
+
+        let (result, record) = compact(
+            messages,
+            &CompactionThreshold::TokenCount(20),
+            provider.as_ref(),
+            storage.as_ref(),
+            Uuid::new_v4(),
+            None,
+        )
+        .await
+        .expect("fallback estimate places the unchanged prompt below the threshold");
+
+        let record = record.expect("compaction emits the attempted summarisation record");
+        assert_eq!(record.actual_strategy, "summarisation");
+        assert_eq!(record.messages_removed, 0);
+        assert_eq!(record.tokens_before, record.tokens_after);
+        assert_eq!(result.len(), 4);
     }
 
     #[tokio::test]
