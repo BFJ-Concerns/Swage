@@ -4013,6 +4013,127 @@ async fn active_skill_loading_keeps_agent_skills_out_of_reserved_workflow_contex
     );
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn process_turn_loads_agent_skills_and_excludes_reserved_workflow_skills() {
+    let root = SwageHomeGuard::new();
+    let normal_skill = root
+        .path()
+        .join("spaces/default/agents/gateway/skills/normal-agent-skill/SKILL.md");
+    let reserved_skill = root
+        .path()
+        .join("spaces/default/agents")
+        .join(swage_config::RESERVED_WORKFLOW_AGENT_ID)
+        .join("skills/reserved-agent-skill/SKILL.md");
+    for (path, instructions) in [
+        (&normal_skill, "Normal agent skill instructions."),
+        (
+            &reserved_skill,
+            "Reserved worker instructions must not reach a provider.",
+        ),
+    ] {
+        std::fs::create_dir_all(path.parent().expect("skill directory"))
+            .expect("create skill directory");
+        std::fs::write(
+            path,
+            format!("---\ndescription: Test skill\n---\n{instructions}\n"),
+        )
+        .expect("write skill fixture");
+    }
+
+    let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
+    let space = storage
+        .get_or_create_default()
+        .await
+        .expect("create default space");
+    let mut session_ids = Vec::new();
+    for agent_id in ["gateway", swage_config::RESERVED_WORKFLOW_AGENT_ID] {
+        let session = storage
+            .create_session(NewSession {
+                space_id: space.id,
+                agent_id: agent_id.to_string(),
+                metadata: None,
+                active_workspace_attachment_id: None,
+            })
+            .await
+            .expect("create skill fixture session");
+        ThreadStore::create(
+            storage.as_ref(),
+            NewThread {
+                session_id: session.id,
+                agent_id: agent_id.to_string(),
+            },
+        )
+        .await
+        .expect("create skill fixture thread");
+        session_ids.push(session.id);
+    }
+    let (provider, captured_requests) = CapturingMultiRoundProvider::new(vec![
+        vec![
+            StreamChunk::Delta {
+                content: "normal reply".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ],
+        vec![
+            StreamChunk::Delta {
+                content: "reserved reply".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ],
+    ]);
+    let state = AppState::new_with_config_root(
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
+        Arc::new(provider) as Arc<dyn LlmProvider>,
+        swage_config::ResolvedConfig::default(),
+        crate::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+        root.path().to_path_buf(),
+    );
+    for session_id in session_ids {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        process_turn(
+            &state,
+            session_id,
+            None,
+            "exercise agent skill loading".into(),
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
+        )
+        .await
+        .expect("turn should complete");
+    }
+
+    let requests = captured_requests.lock().expect("captured requests");
+    assert_eq!(
+        requests.len(),
+        2,
+        "one provider request per foreground turn"
+    );
+    let request_text = |request: &CompletionRequest| {
+        request
+            .messages
+            .iter()
+            .map(ChatMessage::text_content)
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    assert!(
+        request_text(&requests[0]).contains("Normal agent skill instructions."),
+        "process_turn must load the normal agent-level skill before calling the provider"
+    );
+    assert!(
+        !request_text(&requests[1])
+            .contains("Reserved worker instructions must not reach a provider."),
+        "process_turn must exclude reserved workflow-agent directory skills from the provider context"
+    );
+}
+
 pub(crate) async fn make_state_with_storage(
     provider_chunks: Vec<StreamChunk>,
     storage: Arc<MockStorage>,
