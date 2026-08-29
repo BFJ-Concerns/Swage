@@ -25,17 +25,22 @@ select **Workspaces** in the settings section navigation.
 The workspace form takes an absolute filesystem path to a repository
 directory. Enter the path and select **Attach workspace**.
 
-The attachment appears with its trust state: `untrusted · read`.
+The attachment appears with its trust state and configured access mode:
+`untrusted · read`. The `read` label is the access mode the attachment was
+created with — the permissions that will take effect once the workspace is
+trusted. While untrusted, the attachment carries no active grants: the
+workspace's files are not read, and its `AGENTS.md` is not loaded.
 
 ## Trust the workspace
 
-A newly attached workspace is untrusted. An untrusted workspace's
-`AGENTS.md` and instructions are not read into agent context — the
-workspace contributes nothing until trusted.
+A newly attached workspace is untrusted. An untrusted workspace contributes
+nothing — no file access grants and no guidance. Its `AGENTS.md` is not
+read into agent context until the workspace is trusted.
 
-Select **Trust workspace** on the attachment. The trust state changes to
-`trusted · read`. The workspace's `AGENTS.md` now feeds the agent context
-for sessions in this space.
+Select **Trust workspace** on the attachment. The indicator changes to
+`trusted · read`. The configured read permission is now active: the
+workspace's `AGENTS.md` feeds the agent context for sessions in this
+space.
 
 See [Agents and permissions — Operator guidance](agents-and-permissions.md#operator-guidance-agentsmd)
 for how trusted workspace guidance layers into the instruction chain
@@ -45,5 +50,5 @@ instructions).
 ## Revoke trust and detach
 
 **Revoke trust** returns the workspace to `untrusted · read` — its
-guidance is removed from future turns. **Detach** removes the attachment
+read grant and guidance are removed from future turns. **Detach** removes the attachment
 entirely.
