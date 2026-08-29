@@ -657,7 +657,8 @@ async fn live_listener_default_assembly_delivers_working_norms_to_the_provider()
                     report = Some(event["report"].clone());
                 }
                 if event["type"] == "turn_complete" {
-                    return report.expect("default turn emitted a context report before completion");
+                    return report
+                        .expect("default turn emitted a context report before completion");
                 }
             }
         }
@@ -685,7 +686,10 @@ async fn live_listener_default_assembly_delivers_working_norms_to_the_provider()
         requests[0].messages
     );
     drop(requests);
-    let audit = storage.list_audit_events_by_session(session_id).await.unwrap();
+    let audit = storage
+        .list_audit_events_by_session(session_id)
+        .await
+        .unwrap();
     assert!(
         audit.iter().any(|event| {
             event.entity_id == swage_gateway::experimentation::LOCATION_WORKING_NORMS

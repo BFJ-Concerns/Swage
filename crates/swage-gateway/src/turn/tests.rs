@@ -3925,7 +3925,10 @@ async fn active_skill_loading_keeps_agent_skills_out_of_reserved_workflow_contex
         .join("skills/reserved-agent-skill/SKILL.md");
     for (path, instructions) in [
         (&normal_skill, "Normal agent skill instructions."),
-        (&reserved_skill, "Reserved worker instructions must not load."),
+        (
+            &reserved_skill,
+            "Reserved worker instructions must not load.",
+        ),
     ] {
         std::fs::create_dir_all(path.parent().expect("skill directory"))
             .expect("create skill directory");
@@ -3965,9 +3968,14 @@ async fn active_skill_loading_keeps_agent_skills_out_of_reserved_workflow_contex
         &root.path().join("spaces/default"),
         Some(&root.path().join("spaces/default/agents/gateway")),
     );
-    assert!(warnings.is_empty(), "fixture skills must parse: {warnings:?}");
     assert!(
-        available.iter().any(|skill| skill.name == "normal-agent-skill"),
+        warnings.is_empty(),
+        "fixture skills must parse: {warnings:?}"
+    );
+    assert!(
+        available
+            .iter()
+            .any(|skill| skill.name == "normal-agent-skill"),
         "normal fixture skill must be discoverable: {available:?}"
     );
     let normal = load_active_skills_for_agent(

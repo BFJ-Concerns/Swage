@@ -847,15 +847,16 @@ mod tests {
             .join("spaces/dispatch/agents/reviewer/config.toml");
         std::fs::create_dir_all(space_config.parent().expect("space directory"))
             .expect("create space directory");
-        std::fs::create_dir_all(global_instructions.parent().expect("instructions directory"))
-            .expect("create instructions directory");
+        std::fs::create_dir_all(
+            global_instructions
+                .parent()
+                .expect("instructions directory"),
+        )
+        .expect("create instructions directory");
         std::fs::write(&global_instructions, "RUNTIME_ONLY_MARKER\n")
             .expect("write runtime instructions");
-        std::fs::write(
-            &space_config,
-            "[communication]\nmessage_ttl_secs = 73\n",
-        )
-        .expect("write space overlay");
+        std::fs::write(&space_config, "[communication]\nmessage_ttl_secs = 73\n")
+            .expect("write space overlay");
         for config in [&reserved_config, &ordinary_config] {
             std::fs::create_dir_all(config.parent().expect("config directory"))
                 .expect("create agent directory");
