@@ -1079,7 +1079,7 @@ pub async fn list_space_workspaces(
     State(state): State<AppState>,
     Path(space_id): Path<Uuid>,
 ) -> Result<Json<WorkspaceAttachmentListResponse>, ApiError> {
-    let svc = WorkspaceAttachmentService::new(state.storage, state.space_store);
+    let svc = WorkspaceAttachmentService::from_state(state);
     Ok(Json(svc.list_workspaces(space_id).await?))
 }
 
@@ -1089,7 +1089,7 @@ pub async fn attach_space_workspace(
     Path(space_id): Path<Uuid>,
     Json(req): Json<CreateWorkspaceAttachmentRequest>,
 ) -> Result<(StatusCode, Json<WorkspaceAttachmentResponse>), ApiError> {
-    let svc = WorkspaceAttachmentService::new(state.storage, state.space_store);
+    let svc = WorkspaceAttachmentService::from_state(state);
     Ok((
         StatusCode::CREATED,
         Json(svc.attach_workspace(space_id, req).await?),
@@ -1102,7 +1102,7 @@ pub async fn update_space_workspace_trust(
     Path((space_id, workspace_id)): Path<(Uuid, Uuid)>,
     Json(req): Json<UpdateWorkspaceTrustRequest>,
 ) -> Result<Json<WorkspaceAttachmentResponse>, ApiError> {
-    let svc = WorkspaceAttachmentService::new(state.storage, state.space_store);
+    let svc = WorkspaceAttachmentService::from_state(state);
     Ok(Json(svc.set_trust(space_id, workspace_id, req).await?))
 }
 
@@ -1111,7 +1111,7 @@ pub async fn detach_space_workspace(
     State(state): State<AppState>,
     Path((space_id, workspace_id)): Path<(Uuid, Uuid)>,
 ) -> Result<StatusCode, ApiError> {
-    let svc = WorkspaceAttachmentService::new(state.storage, state.space_store);
+    let svc = WorkspaceAttachmentService::from_state(state);
     svc.detach_workspace(space_id, workspace_id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
