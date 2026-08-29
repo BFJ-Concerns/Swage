@@ -308,6 +308,7 @@ mod tests {
                 description: "Produce an operator report.".into(),
                 source: "return {};".into(),
                 delivery_grant: None,
+                authoring_session_id: None,
             })
             .await
             .expect("saved workflow");
@@ -366,6 +367,7 @@ mod tests {
                 description: "Only in the first space.".into(),
                 source: "return {};".into(),
                 delivery_grant: None,
+                authoring_session_id: None,
             })
             .await
             .expect("saved workflow");
