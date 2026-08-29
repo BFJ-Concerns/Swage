@@ -82,13 +82,13 @@ return { reply };
   prompt suffice, and its tool grants derive from this run's own
   dispatching context — a definition never widens them.
 - **Return contract:** without `schema`, the worker's final text; with
-  `schema`, a validated JSON value. A bare `await agent(...)` with a
-  schema THROWS once `maxAttempts` is exhausted without a valid value —
-  it does not return `null` — so catch it, or run schema workers inside
-  `parallel`/`pipeline`, where a failed slot collapses to `null`
-  instead of rejecting. Give fan-in schemas an **object** top level so
-  a slot's `null` can only mean failure and `.filter(Boolean)` is
-  safe. Extraction reads a reply as the whole text parsed as JSON, or
+  `schema`, a validated JSON value or `null` when `maxAttempts` is
+  exhausted without one. Treat that `null` as an absent result and
+  handle it before using the value. Other agent failures still throw;
+  inside `parallel`/`pipeline`, a failed slot also collapses to `null`.
+  Give fan-in schemas an **object** top level so a slot's `null` can
+  only mean absence or failure and `.filter(Boolean)` is safe.
+  Extraction reads a reply as the whole text parsed as JSON, or
   else the FIRST fenced code block — so tell workers: reason first if
   needed, then exactly one ```json fence carrying the value (or the
   bare JSON alone); JSON trailing prose outside a fence is not found.
