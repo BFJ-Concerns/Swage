@@ -6352,7 +6352,7 @@ mod tests {
         .await
         .expect_err("unavailable workflow skill must refuse the dispatch");
         assert!(
-            error.contains("missing-workflow-skill"),
+            error.to_string().contains("missing-workflow-skill"),
             "error was: {error}"
         );
         assert_eq!(
