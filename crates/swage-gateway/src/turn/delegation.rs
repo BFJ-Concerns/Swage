@@ -32,6 +32,31 @@ pub(crate) fn delegate_worktree_owner(sender_turn_id: Uuid, delegate_call_id: &s
     Uuid::from_bytes(digest[..16].try_into().expect("SHA-256 prefix"))
 }
 
+/// Add the host-resolved child directory to the completion the dispatcher
+/// receives. The delegate request retains its verbatim requested `cwd`; this
+/// is the separately recorded outcome of host-side placement.
+async fn record_delegation_working_directory(
+    state: &AppState,
+    mut result: swage_storage::AgentMessage,
+    placement: Option<&ResolvedWorkerDirectory>,
+) -> Result<swage_storage::AgentMessage, AgentError> {
+    let Some(placement) = placement else {
+        return Ok(result);
+    };
+    let Some(payload) = result.payload.as_object_mut() else {
+        return Ok(result);
+    };
+    payload.insert(
+        "working_directory".into(),
+        serde_json::Value::String(placement.path.to_string_lossy().into_owned()),
+    );
+    state
+        .storage
+        .update_agent_message_payload(result.id, result.payload.clone())
+        .await?;
+    Ok(result)
+}
+
 struct GatewayDelegatedContextAssembler {
     state: AppState,
     space: swage_storage::Space,
@@ -649,6 +674,12 @@ impl DelegationHandler for GatewayDelegationHandler {
                         return Err(error);
                     }
                 };
+                let result_msg = record_delegation_working_directory(
+                    &self.state,
+                    result_msg,
+                    placement.as_ref(),
+                )
+                .await?;
                 shutdown_sandbox_guard(
                     &target_sandbox_guard,
                     "failed to shut down delegated sandbox",
@@ -677,6 +708,8 @@ impl DelegationHandler for GatewayDelegationHandler {
                 let (started_tx, started_rx) = tokio::sync::oneshot::channel();
                 let detached_router = router.clone();
                 let worktree_host = Arc::clone(&self.state.worktree_host);
+                let state = self.state.clone();
+                let placement = placement.clone();
 
                 tokio::spawn(async move {
                     let result = executor
@@ -704,6 +737,26 @@ impl DelegationHandler for GatewayDelegationHandler {
                         // The parent's next turn owns its delivery: Step 7 appends
                         // it to the parent thread before claiming it Delivered.
                         Ok(result_msg) => {
+                            let result_msg = match record_delegation_working_directory(
+                                &state,
+                                result_msg,
+                                placement.as_ref(),
+                            )
+                            .await
+                            {
+                                Ok(result_msg) => result_msg,
+                                Err(error) => {
+                                    let _ = detached_router
+                                        .fail_message(delegate_message_id, &error.to_string())
+                                        .await;
+                                    tracing::warn!(
+                                        delegate_message_id = %delegate_message_id,
+                                        error = ?error,
+                                        "failed to record detached delegation working directory"
+                                    );
+                                    return;
+                                }
+                            };
                             if result_msg.payload.get("error").is_none()
                                 && let Some(owner_id) = worktree_owner_id
                             {

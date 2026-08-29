@@ -9253,7 +9253,15 @@ async fn delegate_worktree_provisions_isolated_cwd_and_records_resolved_placemen
         )
         .await
         .expect("wait-mode worktree delegation should complete");
-    assert!(matches!(wait_outcome, DelegationOutcome::Completed(_)));
+    let wait_result = match wait_outcome {
+        DelegationOutcome::Completed(result) => result,
+        DelegationOutcome::Detached(_) => panic!("wait-mode delegation must complete"),
+    };
+    assert_eq!(
+        wait_result["working_directory"],
+        wait_worktree.to_string_lossy().as_ref(),
+        "the waiting dispatcher receives the real provisioned directory"
+    );
     assert!(
         storage.list_approvals().await.unwrap().is_empty(),
         "the waiting delegated turn must use its enforced grant without parking"
@@ -9342,12 +9350,17 @@ async fn delegate_worktree_provisions_isolated_cwd_and_records_resolved_placemen
         storage.list_approvals().await.unwrap().is_empty(),
         "the detached delegated turn must use its enforced grant without parking"
     );
-    assert!(
-        result_messages.iter().any(|message| {
+    let result = result_messages
+        .iter()
+        .find(|message| {
             message.kind == swage_core::MessageKind::Result
                 && message.payload.get("error").is_none()
-        }),
-        "the detached delegate should record a successful terminal result"
+        })
+        .expect("the detached delegate should record a successful terminal result");
+    assert_eq!(
+        result.payload["working_directory"],
+        worktree.to_string_lossy().as_ref(),
+        "the durable completion reports the real provisioned directory"
     );
     for _ in 0..20 {
         if state.worktree_host.list_owner(owner_id).await.is_empty() && !worktree.exists() {

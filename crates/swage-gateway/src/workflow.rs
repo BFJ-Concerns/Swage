@@ -1398,6 +1398,7 @@ async fn run_ephemeral_agent_call(
         output,
         input_tokens: turn.input_tokens.unwrap_or(0).max(0) as u64,
         output_tokens: turn.output_tokens.unwrap_or(0).max(0) as u64,
+        working_directory: resolved_working_directory.map(|placement| placement.path),
         session_id: Some(session_id),
         thread_id: Some(thread_id),
         turn_id: Some(turn.id),
@@ -9154,12 +9155,10 @@ mod tests {
         let cwd = serde_json::to_string(&repo.to_string_lossy()).unwrap();
         let source = format!(
             r#"
-            const calls = [
-                agent("write first-marker", {{ cwd: {cwd}, isolation: "worktree", maxAttempts: 1 }}),
-                agent("write second-marker", {{ cwd: {cwd}, isolation: "worktree", maxAttempts: 1 }})
-            ];
-            await Promise.all(calls);
-            return await workerPlacements();
+            const first = agentStart("write first-marker", {{ cwd: {cwd}, isolation: "worktree", maxAttempts: 1 }});
+            const second = agentStart("write second-marker", {{ cwd: {cwd}, isolation: "worktree", maxAttempts: 1 }});
+            await Promise.all([first.result, second.result]);
+            return {{ first: first.workingDirectory, second: second.workingDirectory }};
         "#
         );
         let Json(started) = start_inline_run(
@@ -9187,6 +9186,32 @@ mod tests {
             .map(std::path::PathBuf::from)
             .collect::<Vec<_>>();
         assert_eq!(paths.len(), 2);
+        let agent_call_results = journal
+            .iter()
+            .filter(|entry| entry.kind == "agent_call")
+            .map(|entry| {
+                assert_eq!(
+                    entry.request["cwd"],
+                    repo.to_string_lossy().as_ref(),
+                    "the journal retains the caller's requested directory"
+                );
+                entry
+                    .result
+                    .as_ref()
+                    .and_then(|result| result["working_directory"].as_str())
+                    .map(std::path::PathBuf::from)
+                    .expect("completed worker call records its host-resolved directory")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(agent_call_results.len(), 2);
+        assert!(
+            agent_call_results.iter().all(|path| paths.contains(path)),
+            "each call result must report one of this run's provisioned paths"
+        );
+        assert_ne!(
+            agent_call_results[0], agent_call_results[1],
+            "parallel isolated siblings expose independently verifiable directories"
+        );
         let writes = placement_tool.writes.lock().expect("placement writes");
         assert_eq!(writes.len(), 2);
         assert!(
@@ -11514,6 +11539,7 @@ mod tests {
                     output: Value::String("restated".into()),
                     input_tokens: 1,
                     output_tokens: 1,
+                    working_directory: None,
                     session_id: Some(session.id),
                     thread_id: Some(thread.id),
                     turn_id: Some(Uuid::new_v4()),
@@ -12467,6 +12493,7 @@ mod tests {
                     output: Value::String("completed work".into()),
                     input_tokens: 1,
                     output_tokens: 1,
+                    working_directory: None,
                     session_id: None,
                     thread_id: None,
                     turn_id: None,
@@ -12710,6 +12737,7 @@ mod tests {
                     output: Value::String("completed work".into()),
                     input_tokens: 1,
                     output_tokens: 1,
+                    working_directory: None,
                     session_id: None,
                     thread_id: None,
                     turn_id: None,
