@@ -8,6 +8,14 @@ use swage_storage::MANAGED_SECRET_KEY_ENV;
 
 static PROCESS_ENV_LOCK: Mutex<()> = Mutex::new(());
 
+/// Create a disposable test root off the nearly-full system volume.
+pub fn scratch_tempdir() -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix("swage-gateway-test-")
+        .tempdir_in("/tmp/scratch")
+        .expect("create gateway test root in scratch")
+}
+
 pub async fn live_http_json(
     address: std::net::SocketAddr,
     method: reqwest::Method,

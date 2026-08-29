@@ -19,6 +19,8 @@ use swage_provider::LlmProvider;
 use swage_storage::{ObservationStore, SpaceStore, SqliteStorage, Storage, WorkflowStore};
 use tokio::net::TcpListener;
 
+use crate::support::scratch_tempdir;
+
 struct InterruptedKnowledgeProvider {
     rounds: AtomicUsize,
 }
@@ -91,7 +93,7 @@ impl LlmProvider for InterruptedKnowledgeProvider {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn interrupted_knowledge_record_worker_resumes_and_deduplicates_its_capture_over_http() {
-    let root = tempfile::tempdir().unwrap();
+    let root = scratch_tempdir();
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
     let space = storage.get_or_create_default().await.unwrap();
     let provider = Arc::new(InterruptedKnowledgeProvider {

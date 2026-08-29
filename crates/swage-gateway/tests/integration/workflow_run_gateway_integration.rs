@@ -20,7 +20,7 @@ use tokio::net::TcpListener;
 use tokio::process::Command;
 use uuid::Uuid;
 
-use crate::support::ProcessEnvGuard;
+use crate::support::{ProcessEnvGuard, scratch_tempdir};
 
 struct PlacementProvider;
 
@@ -132,7 +132,7 @@ impl LlmProvider for ResearchSweepProvider {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn saved_workflow_runs_through_the_gateway_engine_and_persists_its_final_output() {
-    let root = tempfile::tempdir().unwrap();
+    let root = scratch_tempdir();
     let mut environment = ProcessEnvGuard::new();
     environment.set_swage_home(root.path());
     let repo = root.path().join("placement-repo");
@@ -230,7 +230,7 @@ async fn saved_workflow_runs_through_the_gateway_engine_and_persists_its_final_o
 
 #[tokio::test(flavor = "multi_thread")]
 async fn shipped_research_sweep_runs_valid_arguments_through_each_staged_role() {
-    let root = tempfile::tempdir().unwrap();
+    let root = scratch_tempdir();
     let mut environment = ProcessEnvGuard::new();
     environment.set_swage_home(root.path());
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());

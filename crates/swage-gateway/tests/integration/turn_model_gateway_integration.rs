@@ -17,7 +17,7 @@ use swage_provider::LlmProvider;
 use swage_storage::{ContextSnapshotStore, SessionStore, SpaceStore, SqliteStorage, Storage};
 use tokio::{net::TcpListener, task::JoinHandle};
 
-use crate::support::ProcessEnvGuard;
+use crate::support::{ProcessEnvGuard, scratch_tempdir};
 
 struct CapturingProvider {
     requests: Mutex<Vec<CompletionRequest>>,
@@ -126,7 +126,7 @@ async fn submit_and_wait(base: &str, conversation_id: &str, model: Value) -> Str
 #[tokio::test(flavor = "multi_thread")]
 async fn turn_request_alias_uses_the_canonical_provider_model_without_reselecting_the_conversation()
 {
-    let root = tempfile::tempdir().unwrap();
+    let root = scratch_tempdir();
     let mut environment = ProcessEnvGuard::new();
     environment.set_swage_home(root.path());
     let provider = Arc::new(CapturingProvider {
@@ -173,7 +173,7 @@ async fn turn_request_alias_uses_the_canonical_provider_model_without_reselectin
 
 #[tokio::test(flavor = "multi_thread")]
 async fn turn_without_a_model_records_the_persisted_conversation_selection_as_its_provenance() {
-    let root = tempfile::tempdir().unwrap();
+    let root = scratch_tempdir();
     let mut environment = ProcessEnvGuard::new();
     environment.set_swage_home(root.path());
     let provider = Arc::new(CapturingProvider {
