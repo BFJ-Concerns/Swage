@@ -7543,14 +7543,16 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
         "---\ndescription: Definition-declared behaviour\n---\nUse the definition-declared skill.\n",
     )
     .expect("write declared skill");
-    let target_agent_dir = swage_home.path().join("spaces/default/agents/agent-b");
-    std::fs::create_dir_all(target_agent_dir.join("skills/delegated-specialist"))
-        .expect("create delegated agent directory");
+    let requested_skill_dir = swage_home
+        .path()
+        .join("spaces/default/skills/delegated-specialist");
+    std::fs::create_dir_all(&requested_skill_dir)
+        .expect("create requested delegated skill directory");
     std::fs::write(
-            target_agent_dir.join("skills/delegated-specialist/SKILL.md"),
+            requested_skill_dir.join("SKILL.md"),
             "---\ndescription: Delegated specialist behaviour\n---\nUse the delegated specialist skill.\n",
         )
-        .expect("write delegated agent skill");
+        .expect("write requested delegated skill");
     let _guard = SwageHomeGuard::set_to(swage_home.path());
     storage
         .activate_skill(session_id, "foreground-only")
