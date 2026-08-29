@@ -87,6 +87,21 @@ mod tests {
             !stray.exists(),
             "whole-directory replacement removes strays"
         );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            assert_eq!(
+                std::fs::metadata(&projected)
+                    .expect("restored projected script metadata")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o755,
+                "restoring a damaged projection must also restore executable script mode"
+            );
+        }
     }
 
     #[tokio::test]
