@@ -1428,11 +1428,13 @@ mod tests {
         assert_eq!(resolved.tools.permissions.allow, vec!["*".to_string()]);
         assert!(resolved.tools.permissions.deny.is_empty());
         assert!(resolved.tools.permissions.bundles.contains_key("browsing"));
-        assert!(resolved
-            .tools
-            .permissions
-            .bundles
-            .contains_key("browser_actions"));
+        assert!(
+            resolved
+                .tools
+                .permissions
+                .bundles
+                .contains_key("browser_actions")
+        );
     }
 
     #[test]
