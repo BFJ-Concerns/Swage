@@ -38,6 +38,8 @@
 
 :root {
   --accent: #f06a3a;
+  /* Dark ink reserved for text on the fluoro primary-action fill (AA). */
+  --primary-fill-ink: #321008;
 
   /* Type stacks */
   --font-display: "Bebas Neue", sans-serif;
@@ -250,7 +252,7 @@
 
 .riso-btn.primary {
   background: var(--accent);
-  color: var(--paper);
+  color: var(--primary-fill-ink);
   border-color: var(--accent);
 }
 
