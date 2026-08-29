@@ -7553,6 +7553,16 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
             "---\ndescription: Delegated specialist behaviour\n---\nUse the delegated specialist skill.\n",
         )
         .expect("write requested delegated skill");
+    let agent_skill_dir = swage_home
+        .path()
+        .join("spaces/default/agents/agent-b/skills/agent-owned-specialist");
+    std::fs::create_dir_all(&agent_skill_dir)
+        .expect("create delegated agent-level skill directory");
+    std::fs::write(
+        agent_skill_dir.join("SKILL.md"),
+        "---\ndescription: Agent-owned specialist behaviour\n---\nUse the agent-owned specialist skill.\n",
+    )
+    .expect("write delegated agent-level skill");
     let _guard = SwageHomeGuard::set_to(swage_home.path());
     storage
         .activate_skill(session_id, "foreground-only")
@@ -7920,8 +7930,9 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
     );
     assert!(
         child_request_text.contains("## Skills available in this session")
-            && child_request_text.contains("delegated-specialist — Delegated specialist behaviour"),
-        "delegated provider request should include the target skill catalogue: {child_request_text}"
+            && child_request_text
+                .contains("agent-owned-specialist — Agent-owned specialist behaviour"),
+        "delegated provider request should catalogue the target agent's own skill: {child_request_text}"
     );
     assert!(
         child_request_text.contains("Inherited Background Context"),
@@ -7936,8 +7947,8 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
         "delegated provider request should fence the task separately: {child_request_text}"
     );
     assert!(
-        child_request_text.contains("Use the delegated specialist skill."),
-        "delegated provider request should include target agent-level skill instructions: {child_request_text}"
+        child_request_text.contains("Use the agent-owned specialist skill."),
+        "delegated provider request should activate the target agent's own skill instructions: {child_request_text}"
     );
     assert!(
         child_request_text.contains("Use the definition-declared skill."),
@@ -7986,8 +7997,8 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
         .collect::<Vec<_>>()
         .join("\n\n");
     assert!(
-        !resumed_parent_request_text.contains("Use the delegated specialist skill."),
-        "target agent skill instructions must not bleed into the resumed parent request"
+        !resumed_parent_request_text.contains("Use the agent-owned specialist skill."),
+        "the target agent's own skill instructions must not bleed into the resumed parent request"
     );
     let next_parent_request_text = captured_requests[4]
         .messages
