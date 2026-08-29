@@ -726,7 +726,7 @@ async fn validate_session_policy(
 
 fn validate_gate(state: &AppState, gate: &GateConfig) -> Result<(), GatewayError> {
     let config = state.active_config();
-    resolve_gate_model(&config, &gate.model)
+    crate::turn::resolve_model_catalogue_entry(&config.models, &gate.model)
         .map(|_| ())
         .ok_or_else(|| {
             GatewayError::ValidationError(format!(
@@ -734,22 +734,6 @@ fn validate_gate(state: &AppState, gate: &GateConfig) -> Result<(), GatewayError
                 gate.model
             ))
         })
-}
-
-/// Resolve a catalogue entry id or alias to the provider-facing model id.
-pub(crate) fn resolve_gate_model(
-    config: &swage_config::ResolvedConfig,
-    name: &str,
-) -> Option<String> {
-    if let Some(entry) = config.models.entries.get(name) {
-        return Some(entry.model_id.clone());
-    }
-    config
-        .models
-        .entries
-        .values()
-        .find(|entry| entry.aliases.iter().any(|alias| alias == name))
-        .map(|entry| entry.model_id.clone())
 }
 
 fn routing_to_value(routing: &DeliveryRoutingRequest) -> Result<serde_json::Value, GatewayError> {
@@ -1475,12 +1459,14 @@ async fn run_gate_check(
     gate: &GateConfig,
 ) -> Result<GateDecision, GatewayError> {
     let config = state.active_config();
-    let model_id = resolve_gate_model(&config, &gate.model).ok_or_else(|| {
-        GatewayError::ValidationError(format!(
-            "gate model '{}' is not in the configured model catalogue",
-            gate.model
-        ))
-    })?;
+    let model_id = crate::turn::resolve_model_catalogue_entry(&config.models, &gate.model)
+        .map(|(_, model)| model.model_id.clone())
+        .ok_or_else(|| {
+            GatewayError::ValidationError(format!(
+                "gate model '{}' is not in the configured model catalogue",
+                gate.model
+            ))
+        })?;
 
     let digest = assemble_gate_state_digest(state.storage.as_ref(), schedule).await?;
     let prompt = build_gate_prompt(schedule, gate, &digest);

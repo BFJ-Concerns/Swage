@@ -3695,9 +3695,13 @@ async fn evaluate_run_gate(
     }
     let config = state.active_config();
     let model_id = match &request.model {
-        Some(model) => crate::schedule::resolve_gate_model(&config, model).ok_or_else(|| {
-            format!("RunEventError: gate model '{model}' is not in the configured model catalogue")
-        })?,
+        Some(model) => crate::turn::resolve_model_catalogue_entry(&config.models, model)
+            .map(|(_, model)| model.model_id.clone())
+            .ok_or_else(|| {
+                format!(
+                    "RunEventError: gate model '{model}' is not in the configured model catalogue"
+                )
+            })?,
         None => config.default_model_id().to_string(),
     };
     let prompt = build_run_gate_prompt(&request.criteria, &events);
