@@ -39,13 +39,27 @@ pub async fn exceeds_threshold(
     threshold: &CompactionThreshold,
     provider: &dyn LlmProvider,
 ) -> bool {
+    exceeds_threshold_with_model(messages, threshold, provider, None).await
+}
+
+/// Check whether the message history exceeds the compaction threshold for the
+/// model that will receive the completion.
+pub async fn exceeds_threshold_with_model(
+    messages: &[ChatMessage],
+    threshold: &CompactionThreshold,
+    provider: &dyn LlmProvider,
+    model: Option<&str>,
+) -> bool {
     match threshold {
         CompactionThreshold::TokenCount(max_tokens) => {
             if token_count_byte_upper_bound(messages).is_some_and(|bound| bound <= *max_tokens) {
                 return false;
             }
 
-            match provider.count_tokens(&counting_request(messages)).await {
+            match provider
+                .count_tokens(&counting_request(messages, model))
+                .await
+            {
                 Ok(Some(count)) => count > *max_tokens,
                 Ok(None) | Err(_) => estimated_tokens(messages) > *max_tokens as usize,
             }
@@ -76,17 +90,40 @@ pub async fn compact(
     _thread_id: Uuid,
     focus: Option<&str>,
 ) -> Result<(Vec<ChatMessage>, Option<CompactionRecord>), AgentError> {
-    let messages_before = messages.len();
-    let tokens_before = estimated_tokens(&messages);
-    // Fast path: already within bounds.
-    if !exceeds_threshold(&messages, threshold, provider).await {
+    compact_with_model(
+        messages, threshold, provider, _storage, _thread_id, focus, None, false,
+    )
+    .await
+}
+
+/// Compact a history using the tokenizer and completion model selected for the
+/// turn.
+///
+/// Set `threshold_known_exceeded` when the caller has just established that
+/// the prompt exceeds its native tokenizer threshold. This preserves that
+/// breach if a later count is transiently unavailable.
+pub async fn compact_with_model(
+    messages: Vec<ChatMessage>,
+    threshold: &CompactionThreshold,
+    provider: &dyn LlmProvider,
+    _storage: &dyn Storage,
+    _thread_id: Uuid,
+    focus: Option<&str>,
+    model: Option<&str>,
+    threshold_known_exceeded: bool,
+) -> Result<(Vec<ChatMessage>, Option<CompactionRecord>), AgentError> {
+    if !threshold_known_exceeded
+        && !exceeds_threshold_with_model(&messages, threshold, provider, model).await
+    {
         return Ok((messages, None));
     }
+    let messages_before = messages.len();
+    let tokens_before = estimated_tokens(&messages);
 
     // Tier 1 — Summarise: condense older half via an LLM call. Falls back
     // gracefully if the provider call fails.
     let messages = try_summarise(messages, provider, focus).await;
-    if !exceeds_threshold(&messages, threshold, provider).await {
+    if !exceeds_threshold_with_model(&messages, threshold, provider, model).await {
         let tokens_after = estimated_tokens(&messages);
         let messages_removed = messages_before.saturating_sub(messages.len());
         return Ok((
@@ -103,7 +140,7 @@ pub async fn compact(
 
     // Tier 2 — Truncate: drop oldest non-system messages.
     let messages = truncate(messages, threshold);
-    if !exceeds_threshold(&messages, threshold, provider).await {
+    if !exceeds_threshold_with_model(&messages, threshold, provider, model).await {
         let tokens_after = estimated_tokens(&messages);
         let messages_removed = messages_before.saturating_sub(messages.len());
         return Ok((
@@ -121,7 +158,7 @@ pub async fn compact(
     // Tier 3 — Aggressive truncate: keep system messages + single most recent
     // message. All dropped messages are already persisted to storage.
     let messages = aggressive_truncate(messages);
-    if !exceeds_threshold(&messages, threshold, provider).await {
+    if !exceeds_threshold_with_model(&messages, threshold, provider, model).await {
         let tokens_after = estimated_tokens(&messages);
         let messages_removed = messages_before.saturating_sub(messages.len());
         return Ok((
@@ -174,12 +211,11 @@ fn token_count_byte_upper_bound(messages: &[ChatMessage]) -> Option<u64> {
 /// Build the provider request used only to count the active prompt.
 ///
 /// Counting generates no response, so generation settings and tools are left
-/// empty; the provider's configured model remains the authority for tokenizer
-/// selection.
-fn counting_request(messages: &[ChatMessage]) -> CompletionRequest {
+/// empty; the completion model is retained for tokenizer selection.
+fn counting_request(messages: &[ChatMessage], model: Option<&str>) -> CompletionRequest {
     CompletionRequest {
         messages: messages.to_vec(),
-        model: None,
+        model: model.map(str::to_owned),
         effort: None,
         max_tokens: None,
         temperature: None,
@@ -759,6 +795,27 @@ mod tests {
                 .expect("count request lock")
                 .len(),
             1
+        );
+    }
+
+    #[tokio::test]
+    async fn counting_uses_the_selected_completion_model() {
+        let messages = vec![text_msg(Role::User, "abcdefgh")];
+        let provider = CapturingCountProvider::new(CountOutcome::Count(10));
+
+        assert!(
+            exceeds_threshold_with_model(
+                &messages,
+                &CompactionThreshold::TokenCount(1),
+                provider.as_ref(),
+                Some("selected-completion-model"),
+            )
+            .await
+        );
+        let requests = provider.count_requests.lock().expect("count request lock");
+        assert_eq!(
+            requests[0].model.as_deref(),
+            Some("selected-completion-model")
         );
     }
 
