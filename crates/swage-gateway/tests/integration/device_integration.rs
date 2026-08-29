@@ -405,15 +405,7 @@ async fn attached_device_registers_with_remote_gateway_and_executes_work() {
         "remote tool result: {result:?}"
     );
 
-    let local_result = run_turn_and_collect_tool_result(
-        addr,
-        &state,
-        tx3,
-        tx4,
-        Some(device_workspace.path()),
-        None,
-    )
-    .await;
+    let local_result = run_turn_and_collect_tool_result(addr, &state, tx3, tx4, None, None).await;
     assert_eq!(
         local_result["device"], "gateway-unused",
         "an unannotated turn must execute locally even with an attached device: {local_result:?}"
