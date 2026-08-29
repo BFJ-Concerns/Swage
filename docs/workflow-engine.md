@@ -32,8 +32,10 @@ A run progresses through these states:
 Three entry points create runs — an HTTP endpoint with inline source, an HTTP
 endpoint referencing a saved script, and a programmatic launcher used by agent
 dispatch — and all converge on a shared `start_run` path that validates the
-budget, enforces a hard limit of four concurrent active runs, and persists the
-run record before launching.
+budget, checks an active-run cap of four, and persists the
+run record before launching. The cap is a soft admission gate on `start_run`
+callers: child runs created through composition and resumed runs bypass it,
+and concurrent `start_run` calls race the async mutex without serialisation.
 
 The launch path (`launch_existing_run`) is shared between new and resumed runs.
 It loads the journal replay, computes initial token and call counts from
@@ -49,7 +51,7 @@ Map/Set, and regular expressions, but no `Date`, `setTimeout`, `fetch`, or
 `process`. `Math.random` throws to prevent non-deterministic branching, since
 replay depends on the script producing the same host-call sequence.
 
-A script may open with `export const defaults = { ... }` to set default
+A script may open with `export const defaults = { ... };` to set default
 options (agent name, model, schema) merged into every `agent()` and
 `agentStart()` call. Call-site values override; unset fields fall through to
 the default.
@@ -126,7 +128,9 @@ as `started` — the journal records which leg actually won.
 
 Delivery effects carry an `idempotency_key` and an `effect_kind` that
 determines the recovery strategy when a `started` effect entry is found on
-replay. `IdempotencyKey` resends directly (the key makes re-delivery safe).
+replay. `IdempotencyKey` resends directly without probing. Re-delivery is only safe
+when the receiver implements duplicate suppression keyed on the idempotency
+key; the strategy assumes this, it does not provide it.
 `CheckBeforeRedo` probes for evidence of prior delivery first, falling back
 to resend only when the probe finds nothing.
 
@@ -147,16 +151,25 @@ to 4).
 
 ### Wind-down
 
-Each new agent call reserves one equal share of the working partition per
-declared `max_agent_calls`, or per `max_concurrent_agent_calls` slot when no
-total call count is declared. The reservation is an admission estimate; the
-call's actual token usage replaces it at settlement. Wind-down triggers when a
-new agent call (or a journalled `budgetSnapshot()`) finds the working
-partition's remaining capacity has dropped below that estimate. At that point:
+Each new working-partition agent call reserves one equal share of the working
+partition per declared `max_agent_calls`, or per `max_concurrent_agent_calls`
+slot when no total call count is declared. The reservation is an admission
+estimate; the call's actual token usage replaces it at settlement. After
+wind-down, closing-partition calls use a larger estimate computed from the full
+`max_total_tokens` ceiling rather than the working partition's share — shrinking
+the estimate a second time would admit work the closing partition cannot fund.
+
+Wind-down triggers when a new agent call or a journalled `budgetSnapshot()`
+finds the working partition's remaining capacity has dropped below that
+estimate. At that point:
 
 1. A `wind_down` journal entry is written with a budget reading.
 2. The `closing_limit` latches to `spent + reserved_closing_tokens`.
-3. The triggering call is refused with `BudgetWindDownError`.
+
+When an agent call triggers the transition, that call is refused with
+`BudgetWindDownError`. When `budgetSnapshot()` triggers it, the snapshot
+succeeds and returns a reading with `winding_down: true` — it is the next
+agent call that is refused, not the snapshot itself.
 
 After wind-down, new agent calls are admitted against `closing_limit` rather
 than `max_total_tokens`. When the closing partition is also exhausted, calls
@@ -307,8 +320,8 @@ run's wire representation.
 
 Four mechanisms bound concurrent work:
 
-- **Active-run limit**: at most four runs execute concurrently across the
-  gateway.
+- **Active-run cap**: `start_run` checks the count of active runs and rejects
+  new runs beyond four. Child runs and resumed runs bypass this check.
 - **Agent-call semaphore**: each run holds a per-run semaphore (default size 4)
   gating concurrent agent dispatches.
 - **In-flight counter**: tracks outstanding agent calls, workflow calls, and

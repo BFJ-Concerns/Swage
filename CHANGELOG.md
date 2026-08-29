@@ -6,6 +6,9 @@ All notable changes to Swage are documented in this file.
 
 ### Added
 
+- The conversation now rides every work surface: pages carry the same live conversation beside them, with earlier conversations picked up and new ones started from the channel itself, so moving between pages neither leaves the conversation behind nor resets it.
+- Workspace attachment, trust, and detach controls are now reachable from the selected space's Settings workspaces section.
+- Shipped development workflows are now syntax-checked at the gate, and the assembly build-and-verify workflow is runnable.
 - Agents can now list the workflows available to their session before starting one.
 - Asynchronous turn callers can select a configured model for one request, with the effective selection retained in that turn's audit snapshot.
 - Context assembly alternatives can now be configured under `context.alternatives` for controlled selection experiments.
@@ -50,6 +53,8 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- Unattended turns now refuse a relative managed scratch root with an error naming how to configure a deliberate root, and record their resolved tool root in turn diagnostics.
+- Terminal Chat Completions stream events now preserve reported token usage when it arrives alongside the finish reason.
 - Gateway startup now reclaims worker worktrees and their Git registrations left behind by an unclean exit.
 - Provider-facing tool schemas now retain stripped validation requirements in their descriptions, helping models form valid schedule delivery targets on the first call.
 - Portable JavaScript workflow `meta` headers now seed saved script details, and the unused workflow-script `agent_id` query has been removed.

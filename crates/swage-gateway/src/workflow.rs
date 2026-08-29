@@ -5514,7 +5514,16 @@ mod tests {
             State(state.clone()),
             Path(listed.id),
             Json(StartWorkflowRunRequest {
-                args: Value::Null,
+                args: serde_json::json!({
+                    "briefPath": "/workspace/brief.md",
+                    "worktree": "/workspace",
+                    "commissionPath": "/workspace/commission.md",
+                    "spinePath": "/workspace/spine.md",
+                    "verificationPath": "/workspace/verification.md",
+                    "unitDir": "/workspace/unit",
+                    "mergePolicy": "direct-merge",
+                    "annexeConfigPath": "/workspace/config.toml"
+                }),
                 budget: None,
             }),
         )
@@ -5533,6 +5542,17 @@ mod tests {
         assert_eq!(run.carrying_skill.as_deref(), Some("assembly"));
         assert_eq!(run.source.as_deref(), Some(embedded));
         assert_eq!(run.source_hash, source_hash(embedded));
+        let journal = storage
+            .list_workflow_journal(started.id)
+            .await
+            .expect("workflow journal");
+        assert!(
+            journal.iter().any(|entry| {
+                entry.kind == "phase"
+                    && entry.request == serde_json::json!({ "message": "restate" })
+            }),
+            "run: {run:?}; journal: {journal:?}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -6432,6 +6452,7 @@ mod tests {
         assert!(journal.iter().all(|entry| entry.request == expected));
 
         let mut reports = Vec::new();
+        let mut tool_roots = Vec::new();
         for result in [&first_result, &replayed_result] {
             let report = storage
                 .get_snapshot(result.turn_id.expect("turn id"))
@@ -6457,6 +6478,13 @@ mod tests {
             report.as_object_mut().unwrap().remove("duration");
             report.as_object_mut().unwrap().remove("provider_visible");
             report.as_object_mut().unwrap().remove("total_tokens");
+            tool_roots.push(
+                report["tool_scope"]["effective_root"]
+                    .as_str()
+                    .expect("effective tool root")
+                    .to_owned(),
+            );
+            report.as_object_mut().unwrap().remove("tool_scope");
             if let Some(orientation) = report["elements"].as_array_mut().and_then(|elements| {
                 elements
                     .iter_mut()
@@ -6465,6 +6493,22 @@ mod tests {
                 orientation.as_object_mut().unwrap().remove("token_count");
             }
             reports.push(report);
+        }
+        assert_ne!(
+            tool_roots[0], tool_roots[1],
+            "separate workflow calls must receive separate managed scratch roots"
+        );
+        for (result, root) in [&first_result, &replayed_result]
+            .into_iter()
+            .zip(tool_roots)
+        {
+            assert!(
+                root.ends_with(&format!(
+                    "/sessions/{}",
+                    result.session_id.expect("session id")
+                )),
+                "effective tool root must belong to the workflow call's session: {root}"
+            );
         }
         assert_eq!(reports[0], reports[1]);
         let requests = provider.requests.lock().expect("provider requests");
