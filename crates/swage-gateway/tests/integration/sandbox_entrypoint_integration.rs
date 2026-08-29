@@ -47,7 +47,7 @@ async fn bubblewrap_sandbox_real_binary_runs_git_and_standard_device_io_through_
     let result = sandbox
         .execute_tool(
             "shell",
-            json!({ "command": "export HOME=/tmp GIT_CONFIG_NOSYSTEM=1; for device in /dev/full /dev/null /dev/random /dev/tty /dev/urandom /dev/zero; do test -c \"$device\"; done && printf device-io > /dev/null && head -c 1 /dev/zero >/dev/null && head -c 1 /dev/urandom >/dev/null && ! printf device-io > /dev/full 2>/dev/null && test ! -e /dev/kvm && test -e /dev/ptmx && ! dd if=/dev/ptmx of=/dev/null count=0 status=none 2>/dev/null && git init repo && git -C repo config user.email test@example.invalid && git -C repo config user.name test && touch repo/note && git -C repo add note && git -C repo commit -m initial" }),
+            json!({ "command": "export HOME=/tmp GIT_CONFIG_NOSYSTEM=1; for device in /dev/full /dev/null /dev/random /dev/tty /dev/urandom /dev/zero; do test -c \"$device\"; done && printf device-io >/dev/null && head -c 1 /dev/zero >/dev/null && head -c 1 /dev/urandom >/dev/null && head -c 1 /dev/random >/dev/null && git init repo && git -C repo config user.email test@example.invalid && git -C repo config user.name test && touch repo/note && git -C repo add note && git -C repo commit -m initial" }),
         )
         .await
         .unwrap();
@@ -58,6 +58,41 @@ async fn bubblewrap_sandbox_real_binary_runs_git_and_standard_device_io_through_
         result.error
     );
     assert_eq!(result.output["exit_code"], 0, "shell result: {result:?}");
+
+    let full = sandbox
+        .execute_tool("shell", json!({ "command": "printf device-io >/dev/full" }))
+        .await
+        .unwrap();
+    assert!(full.error.is_none(), "shell dispatch failed: {full:?}");
+    assert_ne!(
+        full.output["exit_code"], 0,
+        "/dev/full must reject writes: {full:?}"
+    );
+    assert!(
+        full.output["output"]
+            .as_str()
+            .is_some_and(|output| output.contains("No space left on device")),
+        "/dev/full failure must remain ENOSPC rather than a sandbox denial: {full:?}"
+    );
+
+    let denied = sandbox
+        .execute_tool(
+            "shell",
+            json!({ "command": "dd if=/dev/ptmx of=/dev/null count=0 status=none" }),
+        )
+        .await
+        .unwrap();
+    assert!(denied.error.is_none(), "shell dispatch failed: {denied:?}");
+    assert_ne!(
+        denied.output["exit_code"], 0,
+        "an ungranted device operation must be rejected by Landlock: {denied:?}"
+    );
+    assert!(
+        denied.output["output"]
+            .as_str()
+            .is_some_and(|output| output.contains("Permission denied")),
+        "Landlock denial must be EACCES rather than the /dev/full ENOSPC result: {denied:?}"
+    );
     sandbox.shutdown().await.unwrap();
 }
 
