@@ -45,20 +45,35 @@ Two consequences for how you write scripts:
 
 ```js
 // Optional headers, in this order, before any other code:
-export const meta = { name: "readme-digest", description: "Summarise the README." };
+export const meta = {
+  name: "readme-digest",
+  description: "Summarise the README.",
+  argumentSchema: {
+    "type": "object",
+    "required": ["topic"],
+    "properties": { "topic": { "type": "string" } }
+  }
+};
 export const defaults = { model: "gpt-5.6-terra", effort: "low" };
 
-const reply = await agent("Summarise this repo's README.", {
+// The injected `args` global contains the values supplied when this workflow run
+// was started.
+
+const reply = await agent(`Summarise the README's coverage of ${args.topic}.`, {
   model: "claude-sonnet-5",
   effort: "low",
 });
 return { reply };
 ```
 
-- **`export const meta`** — optional name/description header. On save, a
-  header's `name` and `description` override the request's, and the run
-  record carries them, so a portable script names itself. When present it
-  must be the file's first statement (comments may precede it).
+- **`export const meta`** — optional name, description, and argument-contract
+  header. `argumentSchema` is a JSON Schema applied to the arguments of saved
+  workflow runs before a run or journal entry is created. Its value must be
+  JSON, including double-quoted object keys, even though the surrounding
+  metadata may use JavaScript-style unquoted keys. On save, a header's `name`
+  and `description` override the request's, and the run record carries them,
+  so a portable script names itself. When present it must be the file's first
+  statement (comments may precede it).
 - **`export const defaults`** — optional per-call policy every `agent()`
   call inherits; call-site values override. Follows `meta`, or opens the
   file when there is no `meta`. These two are the only permitted
