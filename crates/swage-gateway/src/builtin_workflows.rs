@@ -48,6 +48,7 @@ mod tests {
             include_str!("../../../examples/workflows/research-sweep.js"),
         )];
 
+        assert_eq!(BUILTIN_WORKFLOWS.len(), expected.len());
         for (name, source) in &expected {
             let workflow = find_by_name(name).expect("catalogue entry");
             assert_eq!(workflow.source.as_bytes(), source.as_bytes());
