@@ -37,6 +37,13 @@ describe("status register hues", () => {
     }
   });
 
+  it("routes shared primary-button foreground paint through the AA-safe role", () => {
+    const risoCss = readFileSync(RISO_CSS_PATH, "utf8");
+    expect(risoCss).toMatch(
+      /\.riso-btn\.primary\s*\{[^}]*color:\s*var\(--primary-fill-ink\)\s*;/s,
+    );
+  });
+
   it("keeps the dark error red clear of the action orange (the collision fix)", () => {
     const darkErrorVsAccent = result.rows.find(
       (r) => r.scheme === "dark" && r.errorVsAccent != null,
