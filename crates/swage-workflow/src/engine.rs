@@ -115,6 +115,14 @@ fn split_meta_header(source: &str) -> Result<Option<(&str, &str)>, String> {
 /// Extract a double-quoted portable metadata value from either JavaScript or
 /// JSON object syntax. The portable runtime emits unquoted JavaScript keys.
 fn meta_string_field(object: &str, field: &str) -> Option<String> {
+    meta_value_range(object, field)
+        .and_then(|(start, end)| serde_json::from_str(&object[start..end]).ok())
+}
+
+/// Locate a metadata value without confusing nested commas for another field.
+/// Both string metadata and JSON-valued metadata use this one walk so their
+/// JavaScript-header handling stays identical.
+fn meta_value_range(object: &str, field: &str) -> Option<(usize, usize)> {
     let bytes = object.as_bytes();
     let mut index = 1;
     while index < bytes.len() {
@@ -149,13 +157,15 @@ fn meta_string_field(object: &str, field: &str) -> Option<String> {
         while bytes.get(index).is_some_and(u8::is_ascii_whitespace) {
             index += 1;
         }
-        let value = (bytes.get(index) == Some(&b'"'))
-            .then(|| json_string_at(object, index))
-            .flatten();
-        if key == field {
-            return value.map(|(value, _)| value);
+        let value_start = index;
+        let mut value_end = skip_meta_value(object, index);
+        if bytes.get(value_end.saturating_sub(1)) == Some(&b',') {
+            value_end -= 1;
         }
-        index = skip_meta_value(object, index);
+        if key == field {
+            return Some((value_start, value_end));
+        }
+        index = value_end;
     }
     None
 }
@@ -164,58 +174,10 @@ fn meta_string_field(object: &str, field: &str) -> Option<String> {
 /// though metadata accepts JavaScript-style unquoted keys around them: JSON
 /// Schema itself is a JSON document and must be portable across script hosts.
 fn meta_json_field(object: &str, field: &str) -> Result<Option<Value>, String> {
-    let bytes = object.as_bytes();
-    let mut index = 1;
-    while index < bytes.len() {
-        while bytes.get(index).is_some_and(u8::is_ascii_whitespace)
-            || bytes.get(index) == Some(&b',')
-        {
-            index += 1;
-        }
-        let (key, after_key) = if bytes.get(index) == Some(&b'"') {
-            match json_string_at(object, index) {
-                Some(value) => value,
-                None => return Ok(None),
-            }
-        } else {
-            let key_start = index;
-            while bytes
-                .get(index)
-                .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
-            {
-                index += 1;
-            }
-            if key_start == index {
-                return Ok(None);
-            }
-            (object[key_start..index].to_owned(), index)
-        };
-        index = after_key;
-        while bytes.get(index).is_some_and(u8::is_ascii_whitespace) {
-            index += 1;
-        }
-        if bytes.get(index) != Some(&b':') {
-            return Ok(None);
-        }
-        index += 1;
-        while bytes.get(index).is_some_and(u8::is_ascii_whitespace) {
-            index += 1;
-        }
-        let value_start = index;
-        let mut value_end = skip_meta_value(object, index);
-        if bytes.get(value_end.saturating_sub(1)) == Some(&b',') {
-            value_end -= 1;
-        }
-        if key == field {
-            return serde_json::from_str(&object[value_start..value_end])
-                .map(Some)
-                .map_err(|error| {
-                    format!("workflow meta {field} must be valid JSON Schema: {error}")
-                });
-        }
-        index = value_end;
-    }
-    Ok(None)
+    meta_value_range(object, field)
+        .map(|(start, end)| serde_json::from_str(&object[start..end]))
+        .transpose()
+        .map_err(|error| format!("workflow meta {field} must be valid JSON Schema: {error}"))
 }
 
 /// Return the decoded JSON string at `start` and the first byte after it.
