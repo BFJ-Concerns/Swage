@@ -52,7 +52,9 @@ function pageBody(source: string, annotations: unknown[] = []) {
 }
 
 const listBody = {
-  pages: [{ id: PAGE_ID, title: "Planning", updated_at: "2026-08-28T00:00:00Z" }],
+  pages: [
+    { id: PAGE_ID, title: "Planning", updated_at: "2026-08-28T00:00:00Z" },
+  ],
 };
 
 describe("pages store", () => {

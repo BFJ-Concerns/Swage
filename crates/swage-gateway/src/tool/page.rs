@@ -250,9 +250,16 @@ impl Tool for PageWriteTool {
         let author = ctx.agent_id().to_string();
 
         if let Some(title) = params.get("title").and_then(Value::as_str) {
-            if ["page_id", "module_id", "kind", "source", "annotation", "tags"]
-                .iter()
-                .any(|other| params.get(other).is_some())
+            if [
+                "page_id",
+                "module_id",
+                "kind",
+                "source",
+                "annotation",
+                "tags",
+            ]
+            .iter()
+            .any(|other| params.get(other).is_some())
             {
                 return Err(invalid(
                     WRITE_TOOL,

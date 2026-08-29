@@ -94,10 +94,7 @@ impl PageAnnotationStore for SqliteStorage {
         .await
     }
 
-    async fn get_page_annotation(
-        &self,
-        id: Uuid,
-    ) -> Result<Option<PageAnnotation>, StorageError> {
+    async fn get_page_annotation(&self, id: Uuid) -> Result<Option<PageAnnotation>, StorageError> {
         self.with_conn(move |conn| {
             conn.query_row(
                 &format!("SELECT {COLUMNS} FROM page_annotations WHERE id = ?1"),

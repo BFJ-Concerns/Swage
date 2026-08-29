@@ -14,8 +14,7 @@ use uuid::Uuid;
 use swage_core::GatewayError;
 use swage_protocol::client::page::{
     CreatePageAnnotationRequest, CreatePageRequest, PageAnnotationView, PageListResponse,
-    PageModuleView, PageResponse, PageSummary, UpdatePageAnnotationRequest,
-    WritePageModuleRequest,
+    PageModuleView, PageResponse, PageSummary, UpdatePageAnnotationRequest, WritePageModuleRequest,
 };
 use swage_protocol::client::websocket::ServerEvent;
 use swage_storage::{
@@ -643,9 +642,14 @@ mod tests {
         )
         .await
         .unwrap();
-        create_page_annotation(&state, page_id, annotation(None, "needs a second pass"), "user")
-            .await
-            .unwrap();
+        create_page_annotation(
+            &state,
+            page_id,
+            annotation(None, "needs a second pass"),
+            "user",
+        )
+        .await
+        .unwrap();
 
         let response = page_response(&state, page_id).await.unwrap();
         let module = response
@@ -677,12 +681,17 @@ mod tests {
     async fn an_empty_body_is_refused_before_anything_lands() {
         let (state, storage, page_id, module_id, _) = seeded().await;
 
-        let error = create_page_annotation(&state, page_id, annotation(Some(module_id), "   "), "user")
-            .await
-            .expect_err("an empty note names no reference");
+        let error =
+            create_page_annotation(&state, page_id, annotation(Some(module_id), "   "), "user")
+                .await
+                .expect_err("an empty note names no reference");
         assert!(error.to_string().contains("non-empty"), "{error}");
         assert!(
-            storage.list_page_annotations(page_id).await.unwrap().is_empty(),
+            storage
+                .list_page_annotations(page_id)
+                .await
+                .unwrap()
+                .is_empty(),
             "validation runs before the store is touched"
         );
     }
@@ -699,9 +708,16 @@ mod tests {
         )
         .await
         .expect_err("the anchor must be on the named page");
-        assert!(error.to_string().contains(&other_module_id.to_string()), "{error}");
         assert!(
-            storage.list_page_annotations(page_id).await.unwrap().is_empty(),
+            error.to_string().contains(&other_module_id.to_string()),
+            "{error}"
+        );
+        assert!(
+            storage
+                .list_page_annotations(page_id)
+                .await
+                .unwrap()
+                .is_empty(),
             "the rejected note never landed"
         );
     }
@@ -739,7 +755,10 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(stored.body, "second reading", "the row holds current truth only");
+        assert_eq!(
+            stored.body, "second reading",
+            "the row holds current truth only"
+        );
 
         let events = storage.list_audit_events().await.unwrap();
         let recorded = events
@@ -771,10 +790,16 @@ mod tests {
         .await
         .unwrap();
 
-        delete_page_annotation(&state, created.id, "user").await.unwrap();
+        delete_page_annotation(&state, created.id, "user")
+            .await
+            .unwrap();
 
         assert!(
-            storage.get_page_annotation(created.id).await.unwrap().is_none(),
+            storage
+                .get_page_annotation(created.id)
+                .await
+                .unwrap()
+                .is_none(),
             "the note is gone from the page"
         );
         let events = storage.list_audit_events().await.unwrap();
