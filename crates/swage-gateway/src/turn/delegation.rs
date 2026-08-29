@@ -576,10 +576,7 @@ impl DelegationHandler for GatewayDelegationHandler {
                 target_agent_config.working_directory.display().to_string(),
                 silent_ws_tx,
                 effective_tool_permissions_record(&effective_target_resolved),
-                DispatchContextComposition {
-                    skills: skills.clone(),
-                    ..composition.clone()
-                },
+                composition.clone(),
             ),
             snapshot_recorder: Some(delegation_snapshot_recorder_for_state(self.state.clone())),
         };

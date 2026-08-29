@@ -269,9 +269,7 @@ pub(crate) fn resolve_requested_skills_for_agent(
                 .iter()
                 .find(|skill| skill.name == *name)
                 .map(|skill| active_skill_from_definition(skill, index as u32))
-                .ok_or_else(|| {
-                    format!("requested skill {name:?} is unavailable for agent {agent_id:?}")
-                })
+                .ok_or_else(|| format!("requested skill {name:?} is unavailable for this dispatch"))
         })
         .collect()
 }
@@ -532,6 +530,8 @@ mod shipped_skill_tests {
         )
         .expect_err("missing requested skill must reject dispatch");
         assert!(error.contains("absent-skill"));
+        assert!(error.contains("this dispatch"));
+        assert!(!error.contains("worker"));
     }
 
     #[test]
