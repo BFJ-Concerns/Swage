@@ -1107,7 +1107,7 @@ async fn run_ephemeral_agent_call(
     request: AgentCallRequest,
     resolved_working_directory: Option<ResolvedWorkerPlacement>,
     cancellation: CancellationToken,
-) -> Result<AgentCallResult, String> {
+) -> Result<AgentCallResult, WorkflowHostError> {
     let inherited_workflow_call_tools = state
         .storage
         .get_workflow_run(run_id)
@@ -1385,10 +1385,13 @@ async fn run_ephemeral_agent_call(
         (Some(_), None) => {
             // Schema demanded, none produced: the validated-object contract
             // cannot be met, and unvalidated text must not impersonate it.
-            return Err(format!(
-                "AgentCallError: agent turn {} produced no schema-valid output",
-                turn.id
-            ));
+            return Err(WorkflowHostError::SchemaExhausted {
+                host_reference: None,
+                message: format!(
+                    "SchemaExhaustedError: agent turn {} produced no schema-valid output",
+                    turn.id
+                ),
+            });
         }
         (None, structured) => {
             structured.unwrap_or_else(|| Value::String(turn.assistant_response.unwrap_or_default()))
@@ -2337,12 +2340,11 @@ async fn run_host_commands_inner(
                             .lock()
                             .await
                             .insert(failed_call_ref.host_reference(), failed_call_ref);
-                        result.map_err(|message| WorkflowHostError::AgentCall {
-                            host_reference: failed_call_ref.host_reference(),
-                            message,
+                        result.map_err(|error| {
+                            classify_agent_call_failure(error, failed_call_ref.host_reference())
                         })
                     } else {
-                        result.map_err(WorkflowHostError::Message)
+                        result
                     };
                     let actual = if !completed_replay {
                         result
@@ -3375,7 +3377,7 @@ async fn complete_agent_entry(
     request: AgentCallRequest,
     resolved_working_directory: Option<ResolvedWorkerPlacement>,
     cancellation: CancellationToken,
-) -> Result<AgentCallResult, String> {
+) -> Result<AgentCallResult, WorkflowHostError> {
     match run_ephemeral_agent_call(
         state,
         run_id,
@@ -3405,11 +3407,36 @@ async fn complete_agent_entry(
         // resumed path. Cancellation is settled for every in-flight entry at
         // the owning run boundary after the host loop drains.
         Err(error) => {
-            if !error.starts_with("WorkflowCancelledError") {
-                let _ = state.fail_workflow_journal_entry(entry_id, &error).await;
+            if !error.to_string().starts_with("WorkflowCancelledError") {
+                let _ = state
+                    .fail_workflow_journal_entry(entry_id, &error.to_string())
+                    .await;
             }
             Err(error)
         }
+    }
+}
+
+fn classify_agent_call_failure(
+    error: WorkflowHostError,
+    host_reference: String,
+) -> WorkflowHostError {
+    match error {
+        WorkflowHostError::SchemaExhausted { message, .. } => WorkflowHostError::SchemaExhausted {
+            host_reference: Some(host_reference),
+            message,
+        },
+        WorkflowHostError::Message(message) if message.starts_with("SchemaExhaustedError:") => {
+            WorkflowHostError::SchemaExhausted {
+                host_reference: Some(host_reference),
+                message,
+            }
+        }
+        WorkflowHostError::AgentCall { .. } => error,
+        WorkflowHostError::Message(message) => WorkflowHostError::AgentCall {
+            host_reference,
+            message,
+        },
     }
 }
 
@@ -8159,6 +8186,92 @@ mod tests {
             Some(Value::String("bounded work completed".into()))
         );
         assert_eq!(provider.requests.lock().expect("requests").len(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn schema_exhaustion_returns_null_and_replays_without_a_new_agent_call() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let provider = Arc::new(ScriptedRecordingProvider {
+            outputs: std::sync::Mutex::new(std::collections::VecDeque::from([
+                scripted_text_output("not JSON"),
+                scripted_text_output("still not JSON"),
+            ])),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let source = r#"return await agent("return a JSON object", {
+            schema: {type: "object", required: ["answer"]}, maxAttempts: 2
+        });"#;
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(space.id),
+            Json(StartInlineWorkflowRunRequest {
+                source: source.into(),
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start schema-constrained run");
+        wait_for_terminal(&state, started.id).await;
+
+        let completed = storage
+            .get_workflow_run(started.id)
+            .await
+            .expect("run")
+            .expect("present");
+        assert_eq!(completed.state, "completed");
+        assert_eq!(completed.final_output, Some(Value::Null));
+        let journal = storage
+            .list_workflow_journal(started.id)
+            .await
+            .expect("journal");
+        assert_eq!(journal.len(), 1);
+        assert_eq!(journal[0].kind, "agent_call");
+        assert_eq!(journal[0].status, "failed");
+        assert!(
+            journal[0]
+                .error_message
+                .as_deref()
+                .is_some_and(|error| error.starts_with("SchemaExhaustedError:"))
+        );
+        assert_eq!(provider.requests.lock().expect("requests").len(), 2);
+
+        storage
+            .update_workflow_run_state(started.id, "interrupted", None, None, None)
+            .await
+            .expect("simulate restart");
+        let _ = resume_run(State(state.clone()), Path(started.id))
+            .await
+            .expect("replay schema-constrained run");
+        wait_for_terminal(&state, started.id).await;
+
+        let replayed = storage
+            .get_workflow_run(started.id)
+            .await
+            .expect("run")
+            .expect("present");
+        assert_eq!(replayed.state, "completed");
+        assert_eq!(replayed.final_output, Some(Value::Null));
+        assert_eq!(
+            storage
+                .list_workflow_journal(started.id)
+                .await
+                .expect("journal")
+                .iter()
+                .filter(|entry| entry.kind == "agent_call")
+                .count(),
+            1
+        );
+        assert_eq!(provider.requests.lock().expect("requests").len(), 2);
     }
 
     #[tokio::test(flavor = "multi_thread")]

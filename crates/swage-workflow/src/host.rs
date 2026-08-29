@@ -14,6 +14,13 @@ pub enum WorkflowHostError {
         host_reference: String,
         message: String,
     },
+    /// A schema-constrained worker exhausted its validation attempts. This is
+    /// distinct from an ordinary failed turn because workflow `agent()` calls
+    /// expose it as `null`, matching the established workflow contract.
+    SchemaExhausted {
+        host_reference: Option<String>,
+        message: String,
+    },
 }
 
 impl std::fmt::Display for WorkflowHostError {
@@ -21,6 +28,7 @@ impl std::fmt::Display for WorkflowHostError {
         match self {
             Self::Message(message) => f.write_str(message),
             Self::AgentCall { message, .. } => f.write_str(message),
+            Self::SchemaExhausted { message, .. } => f.write_str(message),
         }
     }
 }
