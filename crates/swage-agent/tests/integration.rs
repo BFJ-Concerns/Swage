@@ -27,9 +27,6 @@ use swage_storage::{
 use swage_tool::dispatch::ToolDispatcher;
 use swage_tool::tool::Tool;
 
-#[path = "review_sweep_compaction.rs"]
-mod review_sweep_compaction;
-
 struct StreamingProvider {
     rounds: Mutex<Vec<Vec<StreamChunk>>>,
     calls: AtomicUsize,
