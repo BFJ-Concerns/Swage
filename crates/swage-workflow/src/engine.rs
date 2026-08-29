@@ -315,7 +315,7 @@ fn find_balanced_object_end(source: &str) -> Result<usize, String> {
     Err("workflow defaults object is not balanced".into())
 }
 
-/// Skip a quoted JavaScript string, returning the first byte after its closing
+/// Skip a quoted JavaScript string, returning its closing quote's byte offset.
 /// quote. Template literals use a separate scanner because `${...}` can carry
 /// nested strings and templates of its own.
 fn skip_quoted_string(bytes: &[u8], start: usize) -> Result<usize, String> {
@@ -325,7 +325,7 @@ fn skip_quoted_string(bytes: &[u8], start: usize) -> Result<usize, String> {
         if *byte == b'\\' {
             index += 2;
         } else if *byte == quote {
-            return Ok(index + 1);
+            return Ok(index);
         } else {
             index += 1;
         }
@@ -342,7 +342,7 @@ fn skip_template_literal(source: &str, start: usize) -> Result<usize, String> {
     while let Some(byte) = bytes.get(index) {
         match *byte {
             b'\\' => index += 2,
-            b'`' => return Ok(index + 1),
+            b'`' => return Ok(index),
             b'$' if bytes.get(index + 1) == Some(&b'{') => {
                 index = skip_template_interpolation(source, index + 2)?;
             }
@@ -353,7 +353,7 @@ fn skip_template_literal(source: &str, start: usize) -> Result<usize, String> {
 }
 
 /// Skip the expression within a template interpolation, starting immediately
-/// after `${` and returning immediately after its matching `}`.
+/// after `${` and returning its matching `}`.
 fn skip_template_interpolation(source: &str, start: usize) -> Result<usize, String> {
     let bytes = source.as_bytes();
     let mut index = start;
@@ -364,7 +364,7 @@ fn skip_template_interpolation(source: &str, start: usize) -> Result<usize, Stri
             b'}' => {
                 braces -= 1;
                 if braces == 0 {
-                    return Ok(index + 1);
+                    return Ok(index);
                 }
             }
             b'"' | b'\'' => index = skip_quoted_string(bytes, index)?,
