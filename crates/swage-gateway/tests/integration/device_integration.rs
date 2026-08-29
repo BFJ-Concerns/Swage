@@ -356,7 +356,9 @@ async fn attached_device_registers_with_remote_gateway_and_executes_work() {
     let device_workspace = tempfile::TempDir::new().unwrap();
     let (tx1, rx1) = tokio::sync::mpsc::channel(10);
     let (tx2, rx2) = tokio::sync::mpsc::channel(10);
-    let provider = ChannelProvider::new(vec![rx1, rx2]);
+    let (tx3, rx3) = tokio::sync::mpsc::channel(10);
+    let (tx4, rx4) = tokio::sync::mpsc::channel(10);
+    let provider = ChannelProvider::new(vec![rx1, rx2, rx3, rx4]);
     let gateway_dispatcher =
         swage_gateway::tool::ToolDispatcher::allow_all(vec![Arc::new(DeviceIdentityTool {
             marker: "gateway-unused",
@@ -401,6 +403,20 @@ async fn attached_device_registers_with_remote_gateway_and_executes_work() {
     assert_eq!(
         result["device"], "remote-device",
         "remote tool result: {result:?}"
+    );
+
+    let local_result = run_turn_and_collect_tool_result(
+        addr,
+        &state,
+        tx3,
+        tx4,
+        Some(device_workspace.path()),
+        None,
+    )
+    .await;
+    assert_eq!(
+        local_result["device"], "gateway-unused",
+        "an unannotated turn must execute locally even with an attached device: {local_result:?}"
     );
 
     device.join_handle.abort();
