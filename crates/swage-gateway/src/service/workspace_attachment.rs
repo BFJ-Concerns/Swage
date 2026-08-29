@@ -8,7 +8,6 @@ use swage_storage::{
     store::{SpaceStore, Storage},
 };
 
-#[cfg(not(test))]
 use crate::config_change::{ConfigChange, record_config_change};
 use crate::state::AppState;
 
@@ -29,22 +28,17 @@ fn default_workspace_permissions() -> Vec<String> {
 pub struct WorkspaceAttachmentService {
     pub(crate) storage: Arc<dyn Storage>,
     pub(crate) space_store: Arc<dyn SpaceStore>,
-    #[cfg(not(test))]
     audit_state: AppState,
 }
 
 impl WorkspaceAttachmentService {
-    /// Builds an unaudited service for isolated service tests.
-    ///
-    /// Production mutations must use [`Self::from_state`] so they are recorded.
+    /// Builds a service for isolated tests while retaining audit recording.
     #[cfg(test)]
-    pub(crate) fn new_for_tests(
-        storage: Arc<dyn Storage>,
-        space_store: Arc<dyn SpaceStore>,
-    ) -> Self {
+    pub(crate) fn new_for_tests(state: AppState) -> Self {
         Self {
-            storage,
-            space_store,
+            storage: Arc::clone(&state.storage),
+            space_store: Arc::clone(&state.space_store),
+            audit_state: state,
         }
     }
 
@@ -54,7 +48,6 @@ impl WorkspaceAttachmentService {
         Self {
             storage: Arc::clone(&state.storage),
             space_store: Arc::clone(&state.space_store),
-            #[cfg(not(test))]
             audit_state: state,
         }
     }
@@ -221,7 +214,6 @@ impl WorkspaceAttachmentService {
         workspace_snapshot(&workspace)
     }
 
-    #[cfg(not(test))]
     async fn record_change(
         &self,
         action: &str,
@@ -244,18 +236,6 @@ impl WorkspaceAttachmentService {
             },
         )
         .await
-    }
-
-    #[cfg(test)]
-    async fn record_change(
-        &self,
-        _action: &str,
-        _workspace_id: Uuid,
-        _summary: String,
-        _prior_state: Option<serde_json::Value>,
-        _new_state: Option<serde_json::Value>,
-    ) -> Result<(), GatewayError> {
-        Ok(())
     }
 
     async fn ensure_space_exists(&self, space_id: Uuid) -> Result<(), GatewayError> {
