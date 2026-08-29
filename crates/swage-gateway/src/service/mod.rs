@@ -3,6 +3,7 @@ mod conversation;
 mod session_variable;
 mod space;
 mod task_definition;
+mod workflow_script;
 mod workspace_attachment;
 
 pub use agent_definition::*;
@@ -10,7 +11,16 @@ pub use conversation::*;
 pub use session_variable::*;
 pub use space::*;
 pub use task_definition::*;
+pub use workflow_script::*;
 pub use workspace_attachment::*;
+
+/// Whether an identifier is a non-empty lowercase ASCII slug.
+pub(crate) fn is_lowercase_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+}
 
 #[cfg(test)]
 use serde_json::Value as JsonValue;

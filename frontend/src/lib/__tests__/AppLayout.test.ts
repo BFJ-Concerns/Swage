@@ -9,6 +9,8 @@ import type { ConversationStore } from "../stores/conversations";
 import type { ConnectionStore } from "../stores/connection";
 import type { SpaceStore } from "../stores/spaces";
 import type { StreamingStore } from "../stores/streaming";
+import type { PagesStore } from "../stores/pages";
+import type { ConversationDetail, ConversationSummary, MessageView } from "../types";
 
 import * as operatorApi from "../api/operator";
 
@@ -36,6 +38,74 @@ function mockConversationStore(): ConversationStore {
     appendAssistantMessage: () => {},
     clearActiveConversation: () => {},
     refreshActiveConversation: async () => {},
+  };
+}
+
+function mockConversationStoreWithMessages(messages: MessageView[]): ConversationStore {
+  const detail: ConversationDetail = {
+    id: "conv-1",
+    space_id: "default",
+    created_at: "2026-08-29T10:00:00Z",
+    last_activity: "2026-08-29T10:00:00Z",
+    messages,
+  };
+  return { ...mockConversationStore(), get activeConversation() { return detail; } };
+}
+
+function mockConversationStoreWithSessions(
+  previews: string[],
+  activeIndex: number,
+): ConversationStore {
+  const summaries: ConversationSummary[] = previews.map((preview, index) => ({
+    id: `conv-${index + 1}`,
+    created_at: "2026-08-29T10:00:00Z",
+    last_activity: "2026-08-29T10:00:00Z",
+    message_preview: preview,
+    has_interrupted_turn: false,
+  }));
+  const active: ConversationDetail = {
+    id: summaries[activeIndex].id,
+    space_id: "default",
+    created_at: "2026-08-29T10:00:00Z",
+    last_activity: "2026-08-29T10:00:00Z",
+    messages: [],
+  };
+  return {
+    ...mockConversationStore(),
+    get conversations() { return summaries; },
+    get activeConversation() { return active; },
+  };
+}
+
+function mockPagesStore(): PagesStore {
+  const page = {
+    id: "page-1",
+    space_id: "default",
+    title: "Release checklist",
+    created_at: "2026-08-29T10:00:00Z",
+    updated_at: "2026-08-29T10:00:00Z",
+    modules: [
+      {
+        id: "module-1",
+        kind: "document",
+        position: 0,
+        source: "Ship the gateway",
+        updated_at: "2026-08-29T10:00:00Z",
+        annotations: [],
+      },
+    ],
+  };
+  return {
+    get pages() { return [{ id: page.id, title: page.title, updated_at: page.updated_at }]; },
+    get activePage() { return page; },
+    loadPages: async () => {},
+    openPage: async () => {},
+    closePage: () => {},
+    createPage: async () => {},
+    writeModule: async () => {},
+    annotate: async () => {},
+    removeAnnotation: async () => {},
+    stopListening: () => {},
   };
 }
 
@@ -102,6 +172,7 @@ interface MountOptions {
   streamingStore?: StreamingStore;
   conversationStore?: ConversationStore;
   onNewConversation?: () => void;
+  pagesStore?: PagesStore;
 }
 
 function mountLayout(options: MountOptions = {}): MountedComponent {
@@ -119,6 +190,7 @@ function mountLayout(options: MountOptions = {}): MountedComponent {
       route: options.routePath ? parseRoute(options.routePath) : undefined,
       agentDefinitions: options.agentDefinitions ?? [],
       onNewConversation: options.onNewConversation,
+      pagesStore: options.pagesStore,
     },
   });
 }
@@ -327,7 +399,7 @@ describe("AppLayout shell navigation", () => {
   it("marks conversation as the selected surface", () => {
     component = mountLayout();
 
-    expect(surfaceButton("Conversation").getAttribute("aria-pressed")).toBe("true");
+    expect(surfaceButton("Conversations").getAttribute("aria-pressed")).toBe("true");
     expect(surfaceButton("Operator").getAttribute("aria-pressed")).toBe("false");
   });
 
@@ -369,8 +441,8 @@ describe("AppLayout shell navigation", () => {
       });
 
       expect(document.querySelector('[aria-label="Settings"]')).not.toBeNull();
-      expect(surfaceButton("Conversation").getAttribute("aria-pressed")).toBe("false");
-      expect(surfaceButton("Conversation").classList.contains("active")).toBe(false);
+      expect(surfaceButton("Conversations").getAttribute("aria-pressed")).toBe("false");
+      expect(surfaceButton("Conversations").classList.contains("active")).toBe(false);
       expect(surfaceButton("Operator").getAttribute("aria-pressed")).toBe("false");
       expect(surfaceButton("Operator").classList.contains("active")).toBe(false);
       expect(surfaceButton("Settings").getAttribute("aria-pressed")).toBe("true");
@@ -394,6 +466,24 @@ describe("AppLayout shell navigation", () => {
     flushSync(() => agents?.click());
 
     expect(onNavigate).toHaveBeenCalledWith("/settings/agents");
+  });
+
+  it("navigates to command and skill settings tabs", () => {
+    const onNavigate = vi.fn();
+    component = mountLayout({ onNavigate, routePath: "/settings/providers" });
+    const settingsNavigation = document.querySelector('nav[aria-label="Settings sections"]');
+    const command = Array.from(settingsNavigation?.querySelectorAll("button") ?? []).find(
+      (button) => button.textContent?.trim() === "Commands",
+    );
+    const skill = Array.from(settingsNavigation?.querySelectorAll("button") ?? []).find(
+      (button) => button.textContent?.trim() === "Skills",
+    );
+
+    flushSync(() => command?.click());
+    flushSync(() => skill?.click());
+
+    expect(onNavigate).toHaveBeenNthCalledWith(1, "/settings/commands");
+    expect(onNavigate).toHaveBeenNthCalledWith(2, "/settings/skills");
   });
 
   it("navigates to the selected space workspaces from settings", () => {
@@ -434,5 +524,146 @@ describe("AppLayout shell navigation", () => {
 
     expect(document.querySelector('[aria-label="Settings"]')).not.toBeNull();
     expect(document.body.textContent).not.toContain("Choose where to work.");
+  });
+});
+
+describe("ambient conversation channel", () => {
+  let component: MountedComponent | undefined;
+
+  afterEach(() => {
+    if (component) {
+      unmount(component);
+      component = undefined;
+    }
+    document.body.replaceChildren();
+  });
+
+  it("carries the conversation channel beside the pages work surface", () => {
+    component = mountLayout({
+      activeSurface: "pages",
+      pagesStore: mockPagesStore(),
+      conversationStore: mockConversationStoreWithMessages([
+        { role: "user", content: "Draft the checklist", timestamp: "2026-08-29T10:00:01Z", turn_state: "completed" },
+      ]),
+    });
+
+    // The work surface is genuinely on screen...
+    expect(document.querySelector('main.pages-surface [aria-label="Page"] h2')?.textContent)
+      .toBe("Release checklist");
+    // ...and so is the control channel, with the ongoing conversation in it.
+    const channel = document.querySelector('main.pages-surface [aria-label="Conversation"]');
+    expect(channel).not.toBeNull();
+    expect(channel?.textContent).toContain("Draft the checklist");
+    expect(channel?.querySelector('textarea[aria-label="Message"]')).not.toBeNull();
+  });
+
+  it("sends from the channel while standing on a page", () => {
+    const startTurn = vi.fn();
+    component = mountLayout({
+      activeSurface: "pages",
+      pagesStore: mockPagesStore(),
+      conversationStore: mockConversationStoreWithMessages([]),
+      streamingStore: { ...mockStreamingStore(), startTurn },
+    });
+    const message = document.querySelector(
+      'main.pages-surface [aria-label="Conversation"] textarea[aria-label="Message"]',
+    ) as HTMLTextAreaElement;
+    message.value = "Add a rollback step";
+    message.dispatchEvent(new Event("input", { bubbles: true }));
+    flushSync();
+    (document.querySelector("button.send") as HTMLButtonElement).click();
+
+    expect(startTurn).toHaveBeenCalledWith("Add a rollback step", null, null, null);
+  });
+
+  it("keeps the conversation and its history across a move to the work surface", () => {
+    const conversationStore = mockConversationStoreWithMessages([
+      { role: "user", content: "What is left to ship?", timestamp: "2026-08-29T10:00:01Z", turn_state: "completed" },
+    ]);
+    const selectConversation = vi.spyOn(conversationStore, "selectConversation");
+    const loadConversations = vi.spyOn(conversationStore, "loadConversations");
+    const refreshActiveConversation = vi.spyOn(conversationStore, "refreshActiveConversation");
+    const layout = createClassComponent({
+      component: AppLayout,
+      target: document.body,
+      props: {
+        conversationStore,
+        connectionStore: mockConnectionStore(),
+        streamingStore: mockStreamingStore(),
+        spaceStore: mockSpaceStore(),
+        onRetry: () => {},
+        activeSurface: "conversation",
+        pagesStore: mockPagesStore(),
+        onSelectSurface: () => {},
+      },
+    });
+    expect(document.querySelector('main.conversation [aria-label="Conversation"]')?.textContent)
+      .toContain("What is left to ship?");
+
+    layout.$set({ activeSurface: "pages" });
+    flushSync();
+
+    expect(document.querySelector('main.pages-surface [aria-label="Conversation"]')?.textContent)
+      .toContain("What is left to ship?");
+    expect(selectConversation).not.toHaveBeenCalled();
+    expect(loadConversations).not.toHaveBeenCalled();
+    expect(refreshActiveConversation).not.toHaveBeenCalled();
+
+    layout.$set({ activeSurface: "conversation" });
+    flushSync();
+
+    expect(document.querySelector('main.conversation [aria-label="Conversation"]')?.textContent)
+      .toContain("What is left to ship?");
+    expect(selectConversation).not.toHaveBeenCalled();
+    layout.$destroy();
+  });
+
+  it("cycles to another conversation from the work surface", () => {
+    const conversationStore = mockConversationStoreWithSessions(
+      ["Release checklist review", "Ledger migration"],
+      0,
+    );
+    const selectConversation = vi.spyOn(conversationStore, "selectConversation");
+    component = mountLayout({
+      activeSurface: "pages",
+      pagesStore: mockPagesStore(),
+      conversationStore,
+    });
+    const selector = document.querySelector(
+      'main.pages-surface [aria-label="Conversation"] select[aria-label="Active conversation"]',
+    ) as HTMLSelectElement;
+    expect(Array.from(selector.options).map((option) => option.textContent?.trim())).toEqual([
+      "Release checklist review",
+      "Ledger migration",
+    ]);
+    expect(selector.value).toBe("conv-1");
+
+    selector.value = "conv-2";
+    selector.dispatchEvent(new Event("change", { bubbles: true }));
+    flushSync();
+
+    // Reached from where the user was standing: the work surface is still on
+    // screen, so cycling cost no page.
+    expect(selectConversation).toHaveBeenCalledWith("conv-2");
+    expect(document.querySelector('main.pages-surface [aria-label="Page"] h2')?.textContent)
+      .toBe("Release checklist");
+  });
+
+  it("starts a conversation from the work surface", () => {
+    const onNewConversation = vi.fn();
+    component = mountLayout({
+      activeSurface: "pages",
+      pagesStore: mockPagesStore(),
+      conversationStore: mockConversationStoreWithSessions(["Release checklist review"], 0),
+      onNewConversation,
+    });
+
+    flushSync(() =>
+      (document.querySelector(
+        'main.pages-surface [aria-label="Conversation"] button.new-session',
+      ) as HTMLButtonElement).click(),
+    );
+
+    expect(onNewConversation).toHaveBeenCalledOnce();
   });
 });

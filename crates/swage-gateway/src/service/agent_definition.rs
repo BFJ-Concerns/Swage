@@ -246,11 +246,7 @@ pub fn validate_definition(definition: &NewAgentDefinition) -> Result<(), Gatewa
             "an agent definition needs an id".into(),
         ));
     }
-    if !definition
-        .id
-        .chars()
-        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
-    {
+    if !super::is_lowercase_identifier(&definition.id) {
         return Err(GatewayError::ValidationError(
             "agent ids are lowercase ASCII letters, digits, and hyphens".into(),
         ));

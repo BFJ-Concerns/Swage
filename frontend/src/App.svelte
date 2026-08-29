@@ -68,10 +68,10 @@
     streamingStore.handleServerEvent(event),
   );
 
-  // Pages listen on the same relay: page_updated is the live-refresh signal
-  // for the work surfaces, whichever surface is in view.
+  // The pages store opens its own work-surface channel: page signals are not
+  // turn events, and an open page must stay live even with no conversation
+  // selected.
   const pagesStore = createPagesStore();
-  connectionStore.onServerEvent((event) => pagesStore.handleServerEvent(event));
 
   // ---------------------------------------------------------------------------
   // Router-aware conversation actions
@@ -80,8 +80,16 @@
   // Child components receive a proxy shaped like ConversationStore that calls
   // these instead of the originals, keeping the URL and connection in sync.
 
+  // Selecting or starting a session is not navigation: the channel rides the
+  // surface the user is standing on, so reaching a conversation must not move
+  // them off their work. Only the operator surface, which carries no channel,
+  // hands them back to the conversation surface.
+  function keepSurfaceForConversation(): void {
+    if (activeSurface === "operator") activeSurface = "conversation";
+  }
+
   async function selectAndNavigateOrThrow(id: string): Promise<void> {
-    activeSurface = "conversation";
+    keepSurfaceForConversation();
     await conversationStore.selectConversation(id);
 
     // A deep-linked conversation may belong to a space other than the one
@@ -116,7 +124,7 @@
     effort?: import("./lib/protocol/Effort").Effort | null,
   ): Promise<string | null> {
     try {
-      activeSurface = "conversation";
+      keepSurfaceForConversation();
       // Use the currently selected space — should always be set after startup.
       const spaceId = spaceStore.currentSpace?.id ?? "";
       await conversationStore.createConversation(spaceId, selectedModelId, agentId, effort);
@@ -134,7 +142,7 @@
   }
 
   function startNewConversation(): void {
-    activeSurface = "conversation";
+    keepSurfaceForConversation();
     connectionStore.disconnect();
     conversationStore.clearActiveConversation();
     router.navigate("/");
@@ -322,18 +330,25 @@
   }
 
   function handleSelectSurface(next: Surface): void {
+    const previous = activeSurface;
     activeSurface = next;
 
-    // The pages surface keeps the conversation socket: page_updated rides
-    // it, and the conversation is the control channel beside the work
-    // surface rather than a place to navigate away to.
+    // The pages surface keeps the conversation socket: the conversation is
+    // the control channel beside the work surface rather than a place to
+    // navigate away to. Page liveness does not depend on it — the pages
+    // store listens on its own channel.
     if (next === "operator") {
       connectionStore.disconnect();
       return;
     }
 
-    const id = conversationStore.activeConversation?.id;
-    if (id) connectionStore.connectTo(id);
+    // Conversations and Pages share the same ambient channel. Moving between
+    // them must retain its socket and in-memory history; only returning from
+    // Operator needs to establish the connection again.
+    if (previous === "operator") {
+      const id = conversationStore.activeConversation?.id;
+      if (id) connectionStore.connectTo(id);
+    }
   }
 
   function navigate(path: string): void {
