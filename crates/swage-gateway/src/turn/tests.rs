@@ -12810,6 +12810,24 @@ async fn context_assembled_precedes_first_token() {
                 !report.elements.is_empty(),
                 "report should contain elements key"
             );
+            let session = state
+                .storage
+                .get_session(session_id)
+                .await
+                .expect("session lookup")
+                .expect("session");
+            assert_eq!(
+                report
+                    .tool_scope
+                    .as_ref()
+                    .and_then(|scope| scope.get("effective_root")),
+                Some(&serde_json::json!(managed_scratch_workspace(
+                    &state.config_root,
+                    session.space_id,
+                    session_id
+                ))),
+                "live turn diagnostics must report the root passed to tools"
+            );
         }
         other => panic!("expected ContextAssembled, got: {other:?}"),
     }
