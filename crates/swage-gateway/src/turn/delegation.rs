@@ -149,7 +149,8 @@ impl DelegationContextAssembler for GatewayDelegatedContextAssembler {
         )
         .await;
         let operator_guidance = operator_guidance_rules(Some(&self.swage_root), &workspace_policy);
-        let hierarchy = configuration_hierarchy(&self.swage_root, &self.space.slug, &self.agent_id);
+        let hierarchy =
+            configuration_hierarchy(&self.swage_root, &self.space.slug, Some(&self.agent_id));
         let elements = build_assembly_elements(
             &self.config.instructions,
             operator_guidance,

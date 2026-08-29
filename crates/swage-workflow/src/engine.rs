@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use serde_json::Value;
+
 use rquickjs::{
     AsyncContext, AsyncRuntime, CatchResultExt, Context, Function, Promise, Runtime,
     context::intrinsic::{Eval, Json, MapSet, Promise as PromiseIntrinsic, RegExp, RegExpCompiler},
@@ -65,6 +67,9 @@ pub struct ScriptCapabilities {
 pub struct ScriptMeta {
     pub name: Option<String>,
     pub description: Option<String>,
+    /// Optional JSON Schema governing the value passed as this workflow's
+    /// arguments. Header metadata stays outside the caged runtime.
+    pub argument_schema: Option<Value>,
 }
 
 /// Read an optional leading portable `export const meta = { … };` header.
@@ -75,6 +80,7 @@ pub fn script_meta(source: &str) -> Result<ScriptMeta, String> {
     Ok(ScriptMeta {
         name: meta_string_field(object, "name"),
         description: meta_string_field(object, "description"),
+        argument_schema: meta_json_field(object, "argumentSchema")?,
     })
 }
 
@@ -109,6 +115,14 @@ fn split_meta_header(source: &str) -> Result<Option<(&str, &str)>, String> {
 /// Extract a double-quoted portable metadata value from either JavaScript or
 /// JSON object syntax. The portable runtime emits unquoted JavaScript keys.
 fn meta_string_field(object: &str, field: &str) -> Option<String> {
+    meta_value_range(object, field)
+        .and_then(|(start, end)| serde_json::from_str(&object[start..end]).ok())
+}
+
+/// Locate a metadata value without confusing nested commas for another field.
+/// Both string metadata and JSON-valued metadata use this one walk so their
+/// JavaScript-header handling stays identical.
+fn meta_value_range(object: &str, field: &str) -> Option<(usize, usize)> {
     let bytes = object.as_bytes();
     let mut index = 1;
     while index < bytes.len() {
@@ -143,15 +157,27 @@ fn meta_string_field(object: &str, field: &str) -> Option<String> {
         while bytes.get(index).is_some_and(u8::is_ascii_whitespace) {
             index += 1;
         }
-        let value = (bytes.get(index) == Some(&b'"'))
-            .then(|| json_string_at(object, index))
-            .flatten();
-        if key == field {
-            return value.map(|(value, _)| value);
+        let value_start = index;
+        let mut value_end = skip_meta_value(object, index);
+        if bytes.get(value_end.saturating_sub(1)) == Some(&b',') {
+            value_end -= 1;
         }
-        index = skip_meta_value(object, index);
+        if key == field {
+            return Some((value_start, value_end));
+        }
+        index = value_end;
     }
     None
+}
+
+/// Read one metadata value as JSON. Schema values deliberately use JSON even
+/// though metadata accepts JavaScript-style unquoted keys around them: JSON
+/// Schema itself is a JSON document and must be portable across script hosts.
+fn meta_json_field(object: &str, field: &str) -> Result<Option<Value>, String> {
+    meta_value_range(object, field)
+        .map(|(start, end)| serde_json::from_str(&object[start..end]))
+        .transpose()
+        .map_err(|error| format!("workflow meta {field} must be valid JSON Schema: {error}"))
 }
 
 /// Return the decoded JSON string at `start` and the first byte after it.
@@ -1553,7 +1579,8 @@ mod tests {
             .unwrap(),
             ScriptMeta {
                 name: Some("portable".into()),
-                description: Some("runs unchanged".into())
+                description: Some("runs unchanged".into()),
+                argument_schema: None,
             }
         );
     }
@@ -1573,6 +1600,7 @@ mod tests {
             ScriptMeta {
                 name: Some("json".into()),
                 description: Some("quoted keys".into()),
+                argument_schema: None,
             }
         );
         assert_eq!(
@@ -1580,7 +1608,51 @@ mod tests {
             ScriptMeta {
                 name: Some("javascript".into()),
                 description: Some("bare keys".into()),
+                argument_schema: None,
             }
+        );
+    }
+
+    #[test]
+    fn portable_meta_header_reads_an_argument_schema() {
+        let meta = script_meta(
+            r#"export const meta = { name: "constrained", argumentSchema: {"type":"object","required":["task"],"properties":{"task":{"type":"string"}}} };"#,
+        )
+        .expect("portable metadata");
+
+        assert_eq!(
+            meta.argument_schema,
+            Some(json!({
+                "type": "object",
+                "required": ["task"],
+                "properties": {"task": {"type": "string"}}
+            }))
+        );
+    }
+
+    #[test]
+    fn workflow_authoring_guide_teaches_a_parseable_argument_schema() {
+        let guide = include_str!("../../../shipped/skills/workflow-authoring/SKILL.md");
+        let script_surface = guide
+            .split_once("## The script surface")
+            .expect("script surface section")
+            .1;
+        let example = script_surface
+            .split_once("```js\n")
+            .expect("JavaScript example")
+            .1
+            .split_once("\n```")
+            .expect("complete JavaScript example")
+            .0;
+
+        let meta = script_meta(example).expect("documented metadata must parse");
+        assert_eq!(
+            meta.argument_schema,
+            Some(json!({
+                "type": "object",
+                "required": ["topic"],
+                "properties": {"topic": {"type": "string"}}
+            }))
         );
     }
 
