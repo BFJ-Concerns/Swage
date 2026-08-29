@@ -96,6 +96,10 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
             "058_workflow_captured_sources",
             ADD_WORKFLOW_CAPTURED_SOURCES,
         ),
+        (
+            "059_workflow_captured_sources_grant",
+            ADD_WORKFLOW_CAPTURED_SOURCES_GRANT,
+        ),
     ]
 }
 
@@ -354,6 +358,11 @@ const ADD_WORKFLOW_CAPTURED_SOURCES: &str = "
     ALTER TABLE workflow_journal_captured_sources_new RENAME TO workflow_journal;
     CREATE INDEX IF NOT EXISTS idx_workflow_journal_run_seq
         ON workflow_journal(run_id, seq);
+";
+
+const ADD_WORKFLOW_CAPTURED_SOURCES_GRANT: &str = "
+    ALTER TABLE workflow_scripts
+        ADD COLUMN captured_sources_grant INTEGER NOT NULL DEFAULT 0;
 ";
 
 /// Per-turn context assembly report, stored as raw JSON to avoid coupling the

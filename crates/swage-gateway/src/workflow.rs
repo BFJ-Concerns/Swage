@@ -90,6 +90,7 @@ struct EffectiveWorkflow {
     source: String,
     script_version_id: Option<Uuid>,
     delivery_grant: Option<Value>,
+    captured_sources_grant: bool,
     created_at: chrono::DateTime<chrono::Utc>,
     updated_at: chrono::DateTime<chrono::Utc>,
     built_in: bool,
@@ -116,6 +117,7 @@ impl EffectiveWorkflow {
             source: workflow.source.into(),
             script_version_id: None,
             delivery_grant: None,
+            captured_sources_grant: true,
             created_at: released_at,
             updated_at: released_at,
             built_in: true,
@@ -145,6 +147,7 @@ impl EffectiveWorkflow {
             source,
             script_version_id: None,
             delivery_grant: None,
+            captured_sources_grant: false,
             created_at: chrono::DateTime::UNIX_EPOCH,
             updated_at: chrono::DateTime::UNIX_EPOCH,
             built_in: false,
@@ -256,6 +259,7 @@ async fn authored_workflow(
         source: head.source,
         script_version_id: Some(head.id),
         delivery_grant: record.delivery_grant,
+        captured_sources_grant: record.captured_sources_grant,
         created_at: record.created_at,
         updated_at: record.updated_at,
         built_in: false,
@@ -4132,6 +4136,7 @@ fn script_wire(record: WorkflowScriptRecord, head_version: u32) -> WorkflowScrip
         head_version,
         built_in: false,
         has_delivery_grant: record.delivery_grant.is_some(),
+        has_captured_sources_grant: record.captured_sources_grant,
         created_at: record.created_at,
         updated_at: record.updated_at,
     }
@@ -4146,6 +4151,7 @@ fn effective_script_wire(workflow: EffectiveWorkflow) -> WorkflowScript {
         head_version: workflow.head_version,
         built_in: workflow.built_in,
         has_delivery_grant: workflow.delivery_grant.is_some(),
+        has_captured_sources_grant: workflow.captured_sources_grant,
         created_at: workflow.created_at,
         updated_at: workflow.updated_at,
     }
@@ -4305,10 +4311,18 @@ pub async fn update_script(
         .as_ref()
         .and_then(|meta| meta.description.as_deref())
         .or(request.description.as_deref());
-    if description.is_some() || request.delivery_grant.is_some() {
+    if description.is_some()
+        || request.delivery_grant.is_some()
+        || request.captured_sources_grant.is_some()
+    {
         state
             .storage
-            .update_workflow_script(id, description, request.delivery_grant)
+            .update_workflow_script(
+                id,
+                description,
+                request.delivery_grant,
+                request.captured_sources_grant,
+            )
             .await
             .map_err(internal)?;
     }
@@ -4603,10 +4617,32 @@ async fn launch_existing_run(
     let args_json = serde_json::to_string(&record.args).map_err(internal)?;
     // Composition is a top-level capability only: a child run (one carrying
     // parentage) gets no `workflow()`, which bounds nesting to one level.
+    let captured_sources_grant = if let Some(version_id) = record.script_version_id {
+        let version = state
+            .storage
+            .get_workflow_script_version(version_id)
+            .await
+            .map_err(internal)?;
+        let script = match version {
+            Some(version) => state
+                .storage
+                .get_workflow_script(version.script_id)
+                .await
+                .map_err(internal)?,
+            None => None,
+        };
+        script.is_some_and(|script| script.captured_sources_grant)
+    } else {
+        record
+            .script_name
+            .as_deref()
+            .and_then(builtin_workflows::find_by_name)
+            .is_some_and(|workflow| workflow.captured_sources_grant)
+    };
     let capabilities = ScriptCapabilities {
         delivery: delivery_grant.is_some(),
         composition: record.parent_run_id.is_none(),
-        captured_sources: record.script_name.as_deref() == Some("research-sweep"),
+        captured_sources: captured_sources_grant,
     };
     std::thread::Builder::new()
         .name(format!("workflow-{}", record.id))
@@ -8873,6 +8909,56 @@ mod tests {
             })
             .await
             .expect("record source");
+        let other_run = storage
+            .create_workflow_run(NewWorkflowRun {
+                space_id: space.id,
+                parent_run_id: None,
+                parent_seq: None,
+                script_version_id: None,
+                inline_workflow_id: None,
+                inline_workflow_name: None,
+                inline_workflow_version: None,
+                carrying_skill: None,
+                source: Some("return null".into()),
+                source_hash: source_hash("return null"),
+                args: Value::Null,
+                budget: serde_json::json!({}),
+                engine_version: "test".into(),
+                dispatch_bound_agent_ids: vec![],
+                dispatch_bound_task_definition_ids: vec![],
+                workflow_call_tools: None,
+                inherited_worker_placement: None,
+            })
+            .await
+            .expect("other run");
+        let other_worker = storage
+            .create_workflow_journal_intent(NewWorkflowJournalIntent {
+                run_id: other_run.id,
+                seq: 0,
+                kind: "agent_call".into(),
+                args_hash: "other worker".into(),
+                request: serde_json::json!({}),
+                effect_kind: None,
+                idempotency_key: None,
+                target_kind: None,
+            })
+            .await
+            .expect("other worker entry");
+        storage
+            .record_observation(NewSourceObservation {
+                space_id: space.id,
+                origin: ObservationOrigin {
+                    url: Some("https://example.test/other-run".into()),
+                    local_path: None,
+                },
+                retrieved_at: chrono::Utc::now(),
+                body_sha256: "c".repeat(64),
+                body_bytes: 5,
+                media_type: "text/plain".into(),
+                capture_scope: Some(other_worker.id.to_string()),
+            })
+            .await
+            .expect("record other-run source");
         let query = state
             .create_workflow_journal_intent(NewWorkflowJournalIntent {
                 run_id: run.id,
@@ -8920,14 +9006,42 @@ mod tests {
             })
             .await
             .expect("record later source");
-        let replayed = storage
+        let replay = storage
             .list_workflow_journal(run.id)
             .await
-            .expect("journal")
-            .into_iter()
-            .find(|entry| entry.id == query.id)
-            .and_then(|entry| entry.result)
-            .expect("completed query result");
+            .expect("journal");
+        let (tx, rx) = mpsc::unbounded_channel();
+        let host = tokio::spawn(run_host_commands(
+            state.clone(),
+            run.id,
+            space.id,
+            vec![],
+            vec![],
+            None,
+            None,
+            WorkflowBudget::default(),
+            replay,
+            Arc::new(AtomicU32::new(0)),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(Mutex::new(std::collections::HashMap::new())),
+            CancellationToken::new(),
+            PARK_TIMER_THRESHOLD_MS,
+            rx,
+        ));
+        tx.send(HostCommand::Record {
+            kind: "log".into(),
+            message: "consume the recorded worker slot".into(),
+        })
+        .expect("send replay worker slot");
+        let (reply, receive) = oneshot::channel();
+        tx.send(HostCommand::CapturedSources { reply })
+            .expect("send replayed captured-sources query");
+        let replayed = receive
+            .await
+            .expect("receive replayed captured-sources query")
+            .expect("replayed captured-sources query");
+        drop(tx);
+        host.await.expect("host loop");
         assert_eq!(replayed, reading, "replay must use the journalled reading");
     }
 
