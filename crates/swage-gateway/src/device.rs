@@ -24,8 +24,6 @@ use swage_tool::dispatch::ToolDispatcher;
 use crate::secret::SecretManager;
 use crate::state::AppState;
 
-pub const LOCAL_DEVICE_ID: &str = "local";
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum DeviceKind {
@@ -238,17 +236,7 @@ fn select_device(
         }
     }
 
-    if let Some(local) = devices.get(LOCAL_DEVICE_ID) {
-        return Some(local.clone());
-    }
-
-    let mut attached_devices = devices
-        .values()
-        .filter(|device| device.kind != DeviceKind::Local)
-        .cloned()
-        .collect::<Vec<_>>();
-    attached_devices.sort_by(|left, right| left.device_id.cmp(&right.device_id));
-    attached_devices.into_iter().next()
+    None
 }
 
 pub async fn execute_on_remote_device(
@@ -624,8 +612,8 @@ mod tests {
     fn select_device_prefers_metadata_backend_kind() {
         let devices = HashMap::from([
             (
-                LOCAL_DEVICE_ID.to_string(),
-                registered_device(LOCAL_DEVICE_ID, DeviceKind::Local),
+                "local".to_string(),
+                registered_device("local", DeviceKind::Local),
             ),
             (
                 "docker-a".to_string(),
@@ -650,8 +638,8 @@ mod tests {
     fn select_device_prefers_explicit_device_id_over_backend_kind() {
         let devices = HashMap::from([
             (
-                LOCAL_DEVICE_ID.to_string(),
-                registered_device(LOCAL_DEVICE_ID, DeviceKind::Local),
+                "local".to_string(),
+                registered_device("local", DeviceKind::Local),
             ),
             (
                 "docker-a".to_string(),
@@ -673,6 +661,26 @@ mod tests {
         .expect("device should resolve");
 
         assert_eq!(selected.device_id, "docker-a");
+    }
+
+    #[test]
+    fn select_device_leaves_local_turns_unrouted_when_only_remote_devices_exist() {
+        let devices = HashMap::from([(
+            "ssh-a".to_string(),
+            registered_device("ssh-a", DeviceKind::Ssh),
+        )]);
+
+        assert!(select_device(&devices, None).is_none());
+        assert!(
+            select_device(
+                &devices,
+                Some(&serde_json::json!({"execution_backend": "local"})),
+            )
+            .is_none()
+        );
+        assert!(
+            select_device(&devices, Some(&serde_json::json!({"device_id": "local"})),).is_none()
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
