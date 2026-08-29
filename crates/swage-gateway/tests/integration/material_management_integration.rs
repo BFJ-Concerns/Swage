@@ -121,8 +121,6 @@ async fn create_conversation(router: &Router) -> Uuid {
 async fn materials_can_be_created_read_archived_restored_and_promoted() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("materials.db");
-    let workspace_root = dir.path().join("workspace");
-    std::fs::create_dir_all(&workspace_root).unwrap();
 
     let (state, storage) = test_state(&db_path);
     let router = build_router(state.clone());
@@ -230,8 +228,6 @@ async fn materials_can_be_created_read_archived_restored_and_promoted() {
 async fn material_paths_cannot_escape_the_managed_workspace_root() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("materials-permissions.db");
-    let workspace_root = dir.path().join("workspace");
-    std::fs::create_dir_all(&workspace_root).unwrap();
 
     let (state, _storage) = test_state(&db_path);
     let router = build_router(state);
@@ -278,8 +274,6 @@ async fn material_paths_cannot_escape_the_managed_workspace_root() {
 async fn attachment_ingested_and_manual_materials_share_one_surface() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("materials-attachment.db");
-    let workspace_root = dir.path().join("workspace");
-    std::fs::create_dir_all(&workspace_root).unwrap();
 
     let (state, storage) = test_state(&db_path);
     let router = build_router(state.clone());
