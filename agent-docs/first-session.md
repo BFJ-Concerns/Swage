@@ -22,8 +22,11 @@ conversations, agents, instructions, skills, and workspace attachments.
 Inside the opened space, select **Settings** in the top navigation, then
 select **Workspaces** in the settings section navigation.
 
-The workspace form takes an absolute filesystem path to a repository
-directory. Enter the path and select **Attach workspace**.
+The workspace form takes a filesystem path to an existing repository
+directory. The gateway canonicalises whatever it receives, so a relative
+path resolves against the gateway process's working directory — use an
+absolute path to avoid ambiguity. Enter the path and select **Attach
+workspace**.
 
 The attachment appears with its trust state and configured access mode:
 `untrusted · read`. The `read` label is the access mode the attachment was

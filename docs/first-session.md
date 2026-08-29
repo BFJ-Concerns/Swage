@@ -27,9 +27,11 @@ Inside the space, click **Settings** in the top navigation bar. The
 settings panel opens with several section tabs; click **Workspaces**.
 
 The workspaces section shows an empty list and a path field. Type the
-absolute filesystem path to the repository directory you want this space
-to work with — for example, the project you want agents to know about —
-and click **Attach workspace**.
+path to the repository directory you want this space to work with — for
+example, the project you want agents to know about. The gateway
+canonicalises the path, so a relative path resolves against the gateway
+process's working directory; an absolute path is the safer choice. Click
+**Attach workspace**.
 
 The attachment appears in the list, showing the directory path and a trust
 indicator: `untrusted · read`. The `read` label is the access mode
