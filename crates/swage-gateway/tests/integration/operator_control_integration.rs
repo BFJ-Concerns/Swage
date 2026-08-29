@@ -410,7 +410,7 @@ async fn operator_overview_lists_sessions_jobs_approvals_channels_and_devices() 
     )
     .await
     .unwrap();
-    swage_gateway::presence::disconnect_machine(&state, "docker-a").await;
+    swage_gateway::presence::disconnect_device(&state, "docker-a").await;
 
     state.channel_routes.lock().await.insert(
         ChannelOrigin {

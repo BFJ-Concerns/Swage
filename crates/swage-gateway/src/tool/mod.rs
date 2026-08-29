@@ -27,6 +27,7 @@ pub mod url_fetch;
 pub mod web_search;
 pub mod workflow_list;
 pub mod workflow_run;
+pub mod workflow_save;
 pub mod workspace;
 
 // Re-export the canonical Tool trait, ToolRegistry, and ToolDispatcher from swage-tool.
