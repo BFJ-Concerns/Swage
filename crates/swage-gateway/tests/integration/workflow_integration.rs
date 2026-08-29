@@ -294,14 +294,11 @@ async fn inline_run_keeps_anonymous_identity_in_its_public_projection() {
     assert!(started["script_name"].is_null());
     assert!(started["script_version"].is_null());
 
-    let mut mutated_local_copy = started.clone();
-    mutated_local_copy["script_name"] = json!("forged");
     let detail = wait_for_run(&client, &base, run_id).await;
     assert!(detail["run"]["script_id"].is_null());
     assert!(detail["run"]["script_name"].is_null());
     assert!(detail["run"]["script_version"].is_null());
     assert_eq!(detail["run"]["source"], "return { done: true };");
-    assert_ne!(detail["run"], mutated_local_copy);
 
     server.abort();
 }
