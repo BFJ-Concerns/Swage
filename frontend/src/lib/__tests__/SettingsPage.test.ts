@@ -459,7 +459,7 @@ describe("SettingsPage", () => {
     expect(agentDefinitionsApi.listEffectiveAgentDefinitions).toHaveBeenCalledWith("selected-space");
   });
 
-  it("shows command and skill catalogues without loading mutable settings", async () => {
+  it("loads settings alongside the command catalogue so later mutable tabs are ready", async () => {
     component = mount(SettingsPage, {
       target: document.body,
       props: { tab: "commands", spaceId: "selected-space" },
@@ -467,7 +467,7 @@ describe("SettingsPage", () => {
     await flushUi();
 
     expect(skillsApi.listSkills).toHaveBeenCalledWith("selected-space");
-    expect(settingsApi.fetchSettings).not.toHaveBeenCalled();
+    expect(settingsApi.fetchSettings).toHaveBeenCalledTimes(1);
     expect(document.body.textContent).toContain("Commands");
   });
 

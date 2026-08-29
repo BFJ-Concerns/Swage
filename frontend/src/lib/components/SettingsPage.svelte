@@ -72,7 +72,6 @@
   ]);
 
   onMount(async () => {
-    if (SHELL_LAYOUT_TABS.has(tab)) return;
     try {
       settings = await fetchSettings();
       savedProviderIds = new Set(Object.keys(settings.providers));
