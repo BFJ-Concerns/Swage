@@ -67,7 +67,7 @@ mod tests {
             crate::tool::ToolDispatcher::allow_all(vec![]),
             None,
         );
-        let service = WorkspaceAttachmentService::new_for_tests(state);
+        let service = WorkspaceAttachmentService::from_state(state);
         (service, storage, space.id)
     }
 

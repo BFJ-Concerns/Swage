@@ -32,16 +32,6 @@ pub struct WorkspaceAttachmentService {
 }
 
 impl WorkspaceAttachmentService {
-    /// Builds a service for isolated tests while retaining audit recording.
-    #[cfg(test)]
-    pub(crate) fn new_for_tests(state: AppState) -> Self {
-        Self {
-            storage: Arc::clone(&state.storage),
-            space_store: Arc::clone(&state.space_store),
-            audit_state: state,
-        }
-    }
-
     /// Creates the handler-facing mutation surface. Configuration mutations
     /// made through it are recorded with their complete attachment snapshots.
     pub fn from_state(state: AppState) -> Self {
