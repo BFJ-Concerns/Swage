@@ -119,6 +119,12 @@ async function sendNewConversation(page: Page, prompt: string, effort?: "high"):
   await expect(page.getByRole("button", { name: "Send" })).toBeVisible();
 }
 
+const effortJourneyPrompts = [
+  "first high effort conversation",
+  "second high effort conversation",
+  "default effort after switch",
+] as const;
+
 test("resolves light-theme tokens before runtime theme application", async ({ page }) => {
   await page.addInitScript(() => {
     const add = DOMTokenList.prototype.add;
@@ -247,23 +253,26 @@ test("approves a pending tool call through the rendered UI", async ({ page }) =>
 test("clears effort after switching conversations before the following new-conversation send", async ({ page }) => {
   await page.goto("/");
   await openComposer(page);
-  await sendNewConversation(page, "first high effort conversation", "high");
+  await sendNewConversation(page, effortJourneyPrompts[0], "high");
   await page.getByRole("button", { name: "+ New conversation" }).click();
-  await sendNewConversation(page, "second high effort conversation", "high");
+  await sendNewConversation(page, effortJourneyPrompts[1], "high");
 
-  const conversations = page.locator(".conversation-select-btn");
-  await expect(conversations).toHaveCount(2);
-  await conversations.nth(1).click();
+  // Newly created conversations are prepended, so the prior one is index one
+  // even when earlier suite journeys already populated the shared gateway.
+  await page.locator(".conversation-select-btn").nth(1).click();
   await expect(page.getByRole("textbox", { name: "Message" })).toBeVisible();
   await page.getByRole("button", { name: "+ New conversation" }).click();
   await expect(page.getByRole("combobox", { name: "Effort" })).toHaveValue("");
-  await sendNewConversation(page, "default effort after switch");
+  await sendNewConversation(page, effortJourneyPrompts[2]);
 
-  await expect.poll(async () => providerRequests()).toHaveLength(3);
-  await expect.poll(async () => providerRequests()).toEqual([
-    expect.objectContaining({ prompt: "first high effort conversation", effort: "high" }),
-    expect.objectContaining({ prompt: "second high effort conversation", effort: "high" }),
-    expect.objectContaining({ prompt: "default effort after switch", effort: null }),
+  const effortRequests = async () => (await providerRequests()).filter(
+    (request) => typeof request.prompt === "string"
+      && effortJourneyPrompts.includes(request.prompt as typeof effortJourneyPrompts[number]),
+  );
+  await expect.poll(effortRequests).toEqual([
+    expect.objectContaining({ prompt: effortJourneyPrompts[0], effort: "high" }),
+    expect.objectContaining({ prompt: effortJourneyPrompts[1], effort: "high" }),
+    expect.objectContaining({ prompt: effortJourneyPrompts[2], effort: null }),
   ]);
 });
 
