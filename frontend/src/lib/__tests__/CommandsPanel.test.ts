@@ -40,8 +40,14 @@ describe("CommandsPanel", () => {
     await vi.waitFor(() => expect(document.body.textContent).toContain("/research"));
 
     expect(fetchSpy).toHaveBeenCalledWith("/api/skills?space_id=space%20id%2F1", { method: "GET" });
-    expect(document.querySelectorAll(".shipped").length).toBeGreaterThan(0);
+    const research = Array.from(document.querySelectorAll("button")).find((button) => button.textContent?.includes("/research"));
     const notes = Array.from(document.querySelectorAll("button")).find((button) => button.textContent?.includes("/notes"));
+    expect(research?.querySelector(".shipped")?.textContent).toBe("Shipped");
+    expect(notes?.querySelector(".shipped")).toBeNull();
+    flushSync(() => research?.click());
+    const shippedDetail = document.querySelector('[aria-label="/research details"]');
+    expect(shippedDetail?.textContent).toContain("Shipped with Swage");
+    expect(shippedDetail?.querySelector(".shipped")?.textContent).toBe("Shipped");
     flushSync(() => notes?.click());
     const detail = document.querySelector('[aria-label="/notes details"]');
     expect(detail?.textContent).toContain("Maintain project notes.");
