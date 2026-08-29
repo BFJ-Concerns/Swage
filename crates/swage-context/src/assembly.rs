@@ -202,6 +202,7 @@ fn default_assembly_inner(
         warnings: Vec::new(),
         errors: Vec::new(),
         effective_tool_permissions: None,
+        tool_scope: None,
         provider_visible: None,
         duration,
     };
