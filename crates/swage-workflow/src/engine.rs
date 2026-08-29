@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use rquickjs::{
-    AsyncContext, AsyncRuntime, CatchResultExt, Function, Promise,
+    AsyncContext, AsyncRuntime, CatchResultExt, Context, Function, Promise, Runtime,
     context::intrinsic::{Eval, Json, MapSet, Promise as PromiseIntrinsic, RegExp, RegExpCompiler},
     prelude::Async,
 };
@@ -358,6 +358,22 @@ pub enum WorkflowEngineError {
 /// Creates one isolated JavaScript runtime per workflow attempt.
 pub struct WorkflowEngine {
     limits: EngineLimits,
+}
+
+/// Parse a workflow through the same header extraction and async-function body
+/// grammar that execution uses, without evaluating its body.
+pub fn parse_workflow(source: &str) -> Result<(), String> {
+    let (_, source) = extract_defaults(source)?;
+    let runtime = Runtime::new().map_err(|error| error.to_string())?;
+    let context = Context::full(&runtime).map_err(|error| error.to_string())?;
+    let source = serde_json::to_string(source).expect("workflow source serialises");
+    context.with(|ctx| {
+        ctx.eval::<(), _>(format!(
+            "Object.getPrototypeOf(async function() {{}}).constructor({source});"
+        ))
+        .catch(&ctx)
+        .map_err(|error| error.to_string())
+    })
 }
 
 impl WorkflowEngine {
@@ -1489,6 +1505,14 @@ mod tests {
         assert_eq!(requests[1].model.as_deref(), Some("strong"));
         // An explicit `undefined` must fall back, not erase the default.
         assert_eq!(requests[1].agent.as_deref(), Some("worker"));
+    }
+
+    #[test]
+    fn shipped_build_verify_parses() {
+        parse_workflow(include_str!(
+            "../../../shipped/skills/assembly/workflows/build-verify.js"
+        ))
+        .expect("shipped build-verify workflow parses");
     }
 
     #[tokio::test(flavor = "current_thread")]
