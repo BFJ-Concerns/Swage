@@ -13417,6 +13417,144 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn ordinary_failed_agent_call_keeps_interrupted_handover_event_accounting() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let provider = Arc::new(ScriptedRecordingProvider {
+            outputs: std::sync::Mutex::new(std::collections::VecDeque::from(vec![vec![
+                swage_core::StreamChunk::Error {
+                    message: "ordinary provider failure".into(),
+                },
+            ]])),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let source = r#"
+            await postEvent("operator.escalation", { decisionQueued: true });
+            const grounding = await deliverEvents(1);
+            await agent(`make the lead decision from ${JSON.stringify(grounding)}`, {
+                agent: "default",
+                label: "lead segment 3",
+                maxAttempts: 1,
+            });
+            return "unexpected";
+        "#;
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(space.id),
+            Json(StartInlineWorkflowRunRequest {
+                source: source.into(),
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start inline run");
+
+        wait_for_terminal(&state, started.id).await;
+
+        let run = storage
+            .get_workflow_run(started.id)
+            .await
+            .expect("run")
+            .expect("present");
+        assert_eq!(run.state, "failed");
+        assert_eq!(run.final_output, None);
+        let handover = run
+            .handover
+            .unwrap_or_else(|| panic!("durable handover; terminal error: {:?}", run.error_message));
+        assert_eq!(handover["classification"], "interrupted");
+        assert_eq!(handover["failed_call"]["kind"], "agent_call");
+        assert_eq!(handover["failed_call"]["label"], "lead segment 3");
+        let call_error = handover["failed_call"]["error"]
+            .as_str()
+            .expect("failed call error");
+        assert!(call_error.starts_with("AgentCallError:"));
+        let terminal_error = run.error_message.as_deref().expect("terminal error");
+        assert!(terminal_error.contains(call_error));
+        assert!(terminal_error.contains("at <anonymous> (eval_script:"));
+        assert!(!terminal_error.contains("AgentCallError: AgentCallError:"));
+
+        let journal = storage
+            .list_workflow_journal(started.id)
+            .await
+            .expect("journal");
+        let failed_call = journal
+            .iter()
+            .find(|entry| entry.kind == "agent_call")
+            .expect("failed agent call");
+        assert_eq!(failed_call.status, "failed");
+        assert_eq!(
+            handover["failed_call"]["journal_entry_id"],
+            failed_call.id.to_string()
+        );
+        assert_eq!(handover["failed_call"]["seq"], failed_call.seq);
+        assert_eq!(
+            handover["last_journal_seq"],
+            journal.last().expect("last journal entry").seq
+        );
+
+        let events = storage
+            .list_workflow_run_events(started.id)
+            .await
+            .expect("events");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, "operator.escalation");
+        assert!(events[0].delivered_at.is_some());
+        assert_eq!(handover["events_delivered_to_failed_call"], 1);
+        assert_eq!(handover["events_pending"], 0);
+        assert_eq!(handover["events"][0]["id"], events[0].id.to_string());
+        assert_eq!(
+            handover["events"][0]["delivery"],
+            "delivered_to_failed_call"
+        );
+        assert_eq!(provider.requests.lock().expect("requests").len(), 1);
+        assert!(provider.requests.lock().expect("requests")[0]
+            .messages
+            .iter()
+            .flat_map(|message| message.content())
+            .any(|part| matches!(part, swage_core::ContentPart::Text { text } if text.contains(r#""delivered":1"#))));
+
+        let Json(detail) = get_run(State(state.clone()), Path(started.id))
+            .await
+            .expect("run detail");
+        assert_eq!(detail.run.final_output, None);
+        let typed_handover = detail
+            .run
+            .handover
+            .expect("typed handover at the client surface");
+        assert!(matches!(
+            typed_handover,
+            WorkflowRunHandover::Interrupted { .. }
+        ));
+        assert_eq!(
+            serde_json::to_value(&typed_handover).expect("handover value"),
+            handover
+        );
+        assert_eq!(detail.journal.len(), journal.len());
+        assert_eq!(detail.wake_metrics.events_pending, 0);
+
+        assert_eq!(resume_owed_workflow_runs(&state).await, 0);
+        assert_eq!(provider.requests.lock().expect("requests").len(), 1);
+        assert_eq!(
+            storage
+                .get_workflow_run(started.id)
+                .await
+                .expect("run")
+                .expect("present")
+                .state,
+            "failed"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn concurrent_failures_attribute_handover_to_the_terminal_call() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
         let space = storage.get_or_create_default().await.expect("space");
