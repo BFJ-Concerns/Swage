@@ -1329,7 +1329,22 @@ async fn process_turn_with_composition_and_focus(
             )
             .await?;
             match approval {
-                SandboxDegradationApproval::Approved => {}
+                SandboxDegradationApproval::Approved => {
+                    // The approval wait temporarily marks the placeholder as
+                    // Processing. Agent::process_turn_streaming takes over
+                    // existing placeholders only while they are Pending.
+                    record_failed_turn_and_release_on_error(
+                        state,
+                        session_id,
+                        prepared_turn_id,
+                        state
+                            .storage
+                            .update_turn_state(prepared_turn_id, TurnState::Pending)
+                            .await
+                            .map_err(GatewayError::from),
+                    )
+                    .await?;
+                }
                 SandboxDegradationApproval::Rejected => {
                     record_terminal_state_and_release(
                         state,
