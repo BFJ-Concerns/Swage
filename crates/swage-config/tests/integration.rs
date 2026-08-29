@@ -482,9 +482,6 @@ default = "sonnet"
 provider_id = "anthropic"
 model_id = "claude-sonnet-4-20250514"
 
-[workspace]
-path = "/home/user/spaces/test"
-
 [sandbox]
 enabled = true
 allow_degraded_execution = true

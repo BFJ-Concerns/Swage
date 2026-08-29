@@ -204,7 +204,6 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
         std::process::exit(1);
     }
     state.start_agent_message_expiry();
-    crate::device::register_local_device(&state).await;
     if let Err(error) = crate::device::restore_registered_devices(&state).await {
         eprintln!("Failed to restore devices: {error}");
         std::process::exit(1);

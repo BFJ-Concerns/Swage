@@ -1,38 +1,18 @@
-//! Workspace path resolution and scoping for file and shell tools.
+//! Workspace path validation and tool-output handling.
 //!
-//! All file operations and shell commands are scoped to the space's configured
-//! workspace directory. This module provides the shared logic for resolving the
-//! workspace root and validating that paths don't escape it.
+//! File and shell tools receive their working directory and permitted paths
+//! from attached workspaces or managed turn scratch roots. This module keeps
+//! path operations within those runtime-provided boundaries.
 
 use serde_json::{Value, json};
 use std::io;
 use std::path::{Component, Path, PathBuf};
-use swage_config::ResolvedConfig;
 use swage_core::ToolError;
 use swage_tool::context::ToolContext;
 
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
-
-/// Returns the canonical workspace root from config.
-///
-/// Uses `config.workspace.path` if set and non-empty. Canonicalises the
-/// result so that symlinks cannot be used to bypass scoping checks later.
-/// Falls back to the current working directory if canonicalisation fails.
-// TODO Require explicit workspace root resolution
-// Stop falling back to the gateway process CWD or "/" when the configured
-// workspace path cannot be canonicalised. Daemon/global mode must fail clearly
-// or resolve relative paths against a stable config-owned root so tool scope
-// cannot drift between launches.
-// ---
-pub fn resolve_workspace_root(config: &ResolvedConfig) -> PathBuf {
-    let raw = PathBuf::from(&config.workspace.path);
-    // Canonicalize resolves symlinks and makes the path absolute. If it fails
-    // (e.g. the configured path doesn't exist), fall back to current dir.
-    raw.canonicalize()
-        .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")))
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedToolPath {
@@ -604,31 +584,5 @@ mod tests {
         let result = continuable_output_value("abcdef", 0, 0, "file_read", serde_json::Map::new());
 
         assert_eq!(result.unwrap_err(), "max_output_bytes must be positive");
-    }
-
-    // --- resolve_workspace_root ---
-
-    #[test]
-    fn resolve_workspace_root_uses_config_path() {
-        use swage_config::ResolvedConfig;
-        let dir = tmp_workspace();
-        let mut cfg = ResolvedConfig::default();
-        cfg.workspace.path = dir.path().to_string_lossy().into_owned();
-        let root = resolve_workspace_root(&cfg);
-        assert!(
-            root.starts_with(dir.path().canonicalize().unwrap())
-                || root == dir.path().canonicalize().unwrap()
-        );
-    }
-
-    #[test]
-    fn resolve_workspace_root_falls_back_to_home() {
-        use swage_config::ResolvedConfig;
-        let mut cfg = ResolvedConfig::default();
-        // Default workspace path is "." — canonicalises to cwd; just verify
-        // it returns a valid absolute path and doesn't panic.
-        cfg.workspace.path = ".".to_string();
-        let root = resolve_workspace_root(&cfg);
-        assert!(root.is_absolute());
     }
 }
