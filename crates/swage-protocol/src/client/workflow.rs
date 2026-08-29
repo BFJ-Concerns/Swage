@@ -247,6 +247,8 @@ pub enum WorkflowJournalEntryKind {
     /// A journalled budget reading — what the script saw when it checked
     /// its allowance, replayed rather than re-read.
     Budget,
+    /// The authoritative closing-partition balance when the run settled.
+    TerminalBudget,
     /// The working allowance was exhausted. The triggering agent call was
     /// not started; replay returns the same wind-down signal at this point.
     WindDown,
