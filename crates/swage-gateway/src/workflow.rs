@@ -24,8 +24,8 @@ use swage_protocol::client::workflow::{
 use swage_storage::WorkflowJournalRecord;
 use swage_storage::{
     NewAuditEvent, NewSession, NewThread, NewWorkflowJournalIntent, NewWorkflowRun,
-    NewWorkflowRunEvent, NewWorkflowScript, Storage, ThreadStore, WorkflowRunEventRecord,
-    WorkflowRunRecord, WorkflowRunWorkerPlacement, WorkflowScriptRecord,
+    NewWorkflowRunEvent, Storage, ThreadStore, WorkflowRunEventRecord, WorkflowRunRecord,
+    WorkflowRunWorkerPlacement, WorkflowScriptRecord,
 };
 use swage_workflow::{
     AgentCallRequest, AgentCallResult, AwaitEventRequest, EffectPayload, EffectReceipt,
@@ -284,6 +284,10 @@ async fn authored_workflow(
         .await
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "workflow script has no version".to_string())?;
+    // A run resolved from a script reads the grant the script may actually
+    // use, never the stored column: a model-authored script resolves none.
+    // See service::workflow_script.
+    let delivery_grant = record.effective_delivery_grant();
     let argument_schema = swage_workflow::script_meta(&head.source)?.argument_schema;
     Ok(EffectiveWorkflow {
         id: record.id,
@@ -293,7 +297,7 @@ async fn authored_workflow(
         head_version: head.version,
         source: head.source,
         script_version_id: Some(head.id),
-        delivery_grant: record.delivery_grant,
+        delivery_grant,
         created_at: record.created_at,
         updated_at: record.updated_at,
         built_in: false,
@@ -4108,7 +4112,7 @@ async fn complete_workflow_call_entry(
                             .await
                             .map_err(|error| error.to_string())?
                             .ok_or_else(|| "child workflow script is missing".to_string())?;
-                        (version.source, script.delivery_grant)
+                        (version.source, script.effective_delivery_grant())
                     }
                     None => (
                         child.source.clone().ok_or_else(|| {
@@ -4327,25 +4331,6 @@ fn internal(error: impl std::fmt::Display) -> ApiError {
     ApiError::internal(error.to_string())
 }
 
-fn script_wire(
-    record: WorkflowScriptRecord,
-    head_version: u32,
-    argument_schema: Option<Value>,
-) -> WorkflowScript {
-    WorkflowScript {
-        id: record.id,
-        space_id: record.space_id,
-        name: record.name,
-        description: record.description,
-        head_version,
-        built_in: false,
-        has_delivery_grant: record.delivery_grant.is_some(),
-        argument_contract: argument_contract(argument_schema),
-        created_at: record.created_at,
-        updated_at: record.updated_at,
-    }
-}
-
 fn effective_script_wire(workflow: EffectiveWorkflow) -> WorkflowScript {
     WorkflowScript {
         id: workflow.id,
@@ -4445,20 +4430,22 @@ pub async fn create_script(
         .await
         .map_err(internal)?
         .ok_or_else(|| ApiError::not_found("space", space_id))?;
-    let meta = swage_workflow::script_meta(&request.source).map_err(ApiError::validation)?;
-    let argument_schema = meta.argument_schema.clone();
-    let (record, version) = state
-        .storage
-        .create_workflow_script(NewWorkflowScript {
+    let change = crate::service::create_workflow_script(
+        &state,
+        crate::service::WorkflowScriptDraft {
             space_id,
-            name: meta.name.unwrap_or(request.name),
-            description: meta.description.unwrap_or(request.description),
+            name: request.name,
+            description: request.description,
             source: request.source,
             delivery_grant: request.delivery_grant,
-        })
-        .await
-        .map_err(internal)?;
-    Ok(Json(script_wire(record, version.version, argument_schema)))
+            authoring_session_id: None,
+        },
+        OPERATOR_SURFACE,
+        None,
+    )
+    .await
+    .map_err(ApiError::from)?;
+    get_script(State(state), Path(change.script_id)).await
 }
 
 pub async fn list_scripts(
@@ -4527,38 +4514,25 @@ pub async fn update_script(
             "carried and built-in workflow scripts are immutable; create a same-named workflow in the space to customise it".into(),
         ));
     }
-    let _record = state
-        .storage
-        .get_workflow_script(id)
-        .await
-        .map_err(internal)?
-        .ok_or_else(|| ApiError::not_found("workflow script", id))?;
-    let meta = request
-        .source
-        .as_deref()
-        .map(swage_workflow::script_meta)
-        .transpose()
-        .map_err(ApiError::validation)?;
-    let description = meta
-        .as_ref()
-        .and_then(|meta| meta.description.as_deref())
-        .or(request.description.as_deref());
-    if description.is_some() || request.delivery_grant.is_some() {
-        state
-            .storage
-            .update_workflow_script(id, description, request.delivery_grant)
-            .await
-            .map_err(internal)?;
-    }
-    if let Some(source) = request.source {
-        state
-            .storage
-            .append_workflow_script_version(id, &source)
-            .await
-            .map_err(internal)?;
-    }
+    crate::service::update_workflow_script(
+        &state,
+        id,
+        crate::service::WorkflowScriptEdit {
+            description: request.description,
+            source: request.source,
+            delivery_grant: request.delivery_grant,
+            authoring_session_id: None,
+        },
+        OPERATOR_SURFACE,
+        None,
+    )
+    .await
+    .map_err(ApiError::from)?;
     get_script(State(state), Path(id)).await
 }
+
+/// The surface name an operator's own change is recorded under.
+const OPERATOR_SURFACE: &str = "operator_http";
 
 fn source_hash(source: &str) -> String {
     Sha256::digest(source.as_bytes())
@@ -5325,7 +5299,7 @@ async fn resume_workflow_run_record(
             .get_workflow_script(version.script_id)
             .await
             .map_err(internal)?
-            .and_then(|script| script.delivery_grant)
+            .and_then(|script| script.effective_delivery_grant())
     } else {
         None
     };
@@ -5469,7 +5443,7 @@ mod tests {
     use super::*;
     use swage_protocol::client::workflow::{WorkflowJournalEntryKind, WorkflowJournalEntryStatus};
     use swage_storage::{
-        AgentDefinitionStore, AuditStore, CitationStore, ContextSnapshotStore,
+        AgentDefinitionStore, AuditStore, CitationStore, ContextSnapshotStore, NewWorkflowScript,
         NewWorkspaceAttachment, ObservationStore, OrientationCardStore, SessionStore, SpaceStore,
         SqliteStorage, Storage, TaskDefinitionStore, ToolCallStore, TurnState, TurnStore,
         WorkflowStore, WorkspaceAttachmentStore,
@@ -5801,6 +5775,7 @@ mod tests {
                 description: String::new(),
                 source: r#"export const meta = { argumentSchema: {"type":"object","required":["task"],"properties":{"task":{"type":"string"}}} }; return {};"#.into(),
                 delivery_grant: None,
+                authoring_session_id: None,
             })
             .await
             .expect("workflow");
@@ -6031,6 +6006,7 @@ mod tests {
                 description: String::new(),
                 source: "return await workflow('research-sweep', {});".into(),
                 delivery_grant: None,
+                authoring_session_id: None,
             })
             .await
             .expect("parent");
@@ -6164,6 +6140,7 @@ mod tests {
                 description: "Authored shadow".into(),
                 source: "return { source: 'authored' };".into(),
                 delivery_grant: None,
+                authoring_session_id: None,
             })
             .await
             .expect("authored shadow");
@@ -6199,6 +6176,7 @@ mod tests {
                 description: String::new(),
                 source: "return await workflow('teardown-audit', {});".into(),
                 delivery_grant: None,
+                authoring_session_id: None,
             })
             .await
             .expect("parent");
@@ -8811,6 +8789,7 @@ mod tests {
                 description: String::new(),
                 source: "return await agent('attempt sibling read', { maxAttempts: 1 });".into(),
                 delivery_grant: None,
+                authoring_session_id: None,
             })
             .await
             .expect("store workflow");
@@ -8929,6 +8908,7 @@ mod tests {
                 description: String::new(),
                 source: source.into(),
                 delivery_grant: None,
+                authoring_session_id: None,
             })
             .await
             .expect("store workflow");
@@ -9051,6 +9031,7 @@ mod tests {
                 description: String::new(),
                 source: "return await agent('nested bounded work');".into(),
                 delivery_grant: None,
+                authoring_session_id: None,
             })
             .await
             .expect("store inner workflow");
@@ -9061,6 +9042,7 @@ mod tests {
                 description: String::new(),
                 source: "return await workflow('inner-bounded', {});".into(),
                 delivery_grant: None,
+                authoring_session_id: None,
             })
             .await
             .expect("store outer workflow");
@@ -14650,6 +14632,7 @@ mod tests {
                 description: String::new(),
                 source: source.into(),
                 delivery_grant: None,
+                authoring_session_id: None,
             })
             .await
             .expect("script");
@@ -15142,6 +15125,7 @@ mod tests {
                 description: String::new(),
                 source: source.into(),
                 delivery_grant: None,
+                authoring_session_id: None,
             })
             .await
             .expect("script");
@@ -15259,6 +15243,7 @@ mod tests {
                 description: String::new(),
                 source: source.into(),
                 delivery_grant: None,
+                authoring_session_id: None,
             })
             .await
             .expect("script");
@@ -15347,6 +15332,7 @@ mod tests {
                 description: String::new(),
                 source: source.into(),
                 delivery_grant: None,
+                authoring_session_id: None,
             })
             .await
             .expect("script");
@@ -15470,6 +15456,7 @@ mod tests {
                 description: String::new(),
                 source: source.into(),
                 delivery_grant: None,
+                authoring_session_id: None,
             })
             .await
             .expect("script");
@@ -15624,6 +15611,7 @@ mod tests {
                 delivery_grant: Some(
                     serde_json::json!([{"kind":"webhook","url":format!("http://{address}/post")}]),
                 ),
+                authoring_session_id: None,
             })
             .await
             .expect("script");
@@ -15670,6 +15658,7 @@ mod tests {
                 description: String::new(),
                 source: "await parallel([()=>{throw new Error('branch failed')}]); return {spent:budget.spent(),remaining:budget.remaining()};".into(),
                 delivery_grant: None,
+                authoring_session_id: None,
             })
             .await
             .expect("script");
@@ -15730,6 +15719,7 @@ mod tests {
                 description: String::new(),
                 source: "return { doubled: args.value * 2 };".into(),
                 delivery_grant: None,
+                authoring_session_id: None,
             })
             .await
             .expect("child script");
@@ -15741,6 +15731,7 @@ mod tests {
                 source: "const child = await workflow(\"child\", { value: 21 }); return child;"
                     .into(),
                 delivery_grant: None,
+                authoring_session_id: None,
             })
             .await
             .expect("parent script");
@@ -15806,6 +15797,7 @@ mod tests {
                 description: String::new(),
                 source: "return 1;".into(),
                 delivery_grant: None,
+                authoring_session_id: None,
             })
             .await
             .expect("grandchild script");
@@ -15817,6 +15809,7 @@ mod tests {
                 // In a child run `workflow` must be absent entirely.
                 source: "return typeof workflow;".into(),
                 delivery_grant: None,
+                authoring_session_id: None,
             })
             .await
             .expect("child script");
@@ -15827,6 +15820,7 @@ mod tests {
                 description: String::new(),
                 source: "return await workflow(\"child\");".into(),
                 delivery_grant: None,
+                authoring_session_id: None,
             })
             .await
             .expect("parent script");

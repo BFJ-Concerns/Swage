@@ -13,11 +13,13 @@ use uuid::Uuid;
 
 use swage_core::GatewayError;
 use swage_protocol::client::page::{
-    CreatePageRequest, PageListResponse, PageModuleView, PageResponse, PageSummary,
-    WritePageModuleRequest,
+    CreatePageAnnotationRequest, CreatePageRequest, PageAnnotationView, PageListResponse,
+    PageModuleView, PageResponse, PageSummary, UpdatePageAnnotationRequest, WritePageModuleRequest,
 };
 use swage_protocol::client::websocket::ServerEvent;
-use swage_storage::{NewAuditEvent, NewPage, NewPageModule, PageModule};
+use swage_storage::{
+    NewAuditEvent, NewPage, NewPageAnnotation, NewPageModule, PageAnnotation, PageModule,
+};
 
 use crate::error::ApiError;
 use crate::state::AppState;
@@ -176,7 +178,226 @@ pub async fn write_page_module(
         module_id: Some(module.id),
     });
 
-    Ok(module_view(module))
+    let annotations = state
+        .storage
+        .list_page_annotations(page.id)
+        .await?
+        .into_iter()
+        .filter(|annotation| annotation.module_id == module.id)
+        .map(annotation_view)
+        .collect();
+    Ok(module_view(module, annotations))
+}
+
+/// Leave a note on one of a page's modules. `author` names who left it in the
+/// provenance record (an agent id, or "user" for the web surface).
+///
+/// A note carries no authority: it is one party's words recorded against a
+/// stable id, and nothing keys any permission off it.
+pub async fn create_page_annotation(
+    state: &AppState,
+    page_id: Uuid,
+    request: CreatePageAnnotationRequest,
+    author: &str,
+) -> Result<PageAnnotationView, GatewayError> {
+    let page = state
+        .storage
+        .get_page(page_id)
+        .await?
+        .ok_or_else(|| GatewayError::ValidationError(format!("no page with id {page_id}")))?;
+    let body = request.body.trim();
+    if body.is_empty() {
+        return Err(GatewayError::ValidationError(
+            "an annotation needs a non-empty body".into(),
+        ));
+    }
+    // The anchor must be real and must be on this page: a note addressed to
+    // another page's module would name a location neither party can see.
+    let module_id = request.module_id;
+    state
+        .storage
+        .get_page_module(module_id)
+        .await?
+        .filter(|module| module.page_id == page.id)
+        .ok_or_else(|| {
+            GatewayError::ValidationError(format!("no module {module_id} on page {page_id}"))
+        })?;
+    let tags: Vec<String> = request
+        .tags
+        .iter()
+        .map(|tag| tag.trim().to_string())
+        .filter(|tag| !tag.is_empty())
+        .collect();
+
+    let annotation = state
+        .storage
+        .create_page_annotation(NewPageAnnotation {
+            page_id: page.id,
+            module_id,
+            body: body.to_string(),
+            tags,
+            author: author.to_string(),
+        })
+        .await?;
+
+    record_annotation_change(
+        state,
+        &page.title,
+        page.id,
+        &annotation,
+        "page_annotation_created",
+        None,
+        author,
+    )
+    .await?;
+
+    let _ = state.broadcast.send(ServerEvent::PageUpdated {
+        page_id: page.id,
+        module_id: Some(annotation.module_id),
+    });
+
+    Ok(annotation_view(annotation))
+}
+
+/// Replace an annotation's body and tags. The displaced text survives in the
+/// provenance trail, which is the whole of the history — there is no version
+/// row and no undo.
+pub async fn update_page_annotation(
+    state: &AppState,
+    annotation_id: Uuid,
+    request: UpdatePageAnnotationRequest,
+    author: &str,
+) -> Result<PageAnnotationView, GatewayError> {
+    let existing = state
+        .storage
+        .get_page_annotation(annotation_id)
+        .await?
+        .ok_or_else(|| {
+            GatewayError::ValidationError(format!("no annotation with id {annotation_id}"))
+        })?;
+    let body = request.body.trim();
+    if body.is_empty() {
+        return Err(GatewayError::ValidationError(
+            "an annotation needs a non-empty body".into(),
+        ));
+    }
+    let tags: Vec<String> = request
+        .tags
+        .iter()
+        .map(|tag| tag.trim().to_string())
+        .filter(|tag| !tag.is_empty())
+        .collect();
+
+    state
+        .storage
+        .update_page_annotation(existing.id, body, &tags)
+        .await?;
+    // Read the row back rather than patching a copy: the store stamped
+    // updated_at, and the view must carry the stored truth.
+    let updated = state
+        .storage
+        .get_page_annotation(existing.id)
+        .await?
+        .ok_or_else(|| {
+            GatewayError::ValidationError(format!(
+                "annotation {annotation_id} disappeared during the write"
+            ))
+        })?;
+
+    let page = state.storage.get_page(updated.page_id).await?;
+    let title = page.map(|page| page.title).unwrap_or_default();
+    record_annotation_change(
+        state,
+        &title,
+        updated.page_id,
+        &updated,
+        "page_annotation_updated",
+        Some(&existing),
+        author,
+    )
+    .await?;
+
+    let _ = state.broadcast.send(ServerEvent::PageUpdated {
+        page_id: updated.page_id,
+        module_id: Some(updated.module_id),
+    });
+
+    Ok(annotation_view(updated))
+}
+
+/// Remove an annotation. The trail retains what it said, so the deletion is
+/// recoverable by re-writing the note, never by an undo mechanism.
+pub async fn delete_page_annotation(
+    state: &AppState,
+    annotation_id: Uuid,
+    author: &str,
+) -> Result<(), GatewayError> {
+    let existing = state
+        .storage
+        .get_page_annotation(annotation_id)
+        .await?
+        .ok_or_else(|| {
+            GatewayError::ValidationError(format!("no annotation with id {annotation_id}"))
+        })?;
+    state.storage.delete_page_annotation(existing.id).await?;
+
+    let page = state.storage.get_page(existing.page_id).await?;
+    let title = page.map(|page| page.title).unwrap_or_default();
+    record_annotation_change(
+        state,
+        &title,
+        existing.page_id,
+        &existing,
+        "page_annotation_deleted",
+        Some(&existing),
+        author,
+    )
+    .await?;
+
+    let _ = state.broadcast.send(ServerEvent::PageUpdated {
+        page_id: existing.page_id,
+        module_id: Some(existing.module_id),
+    });
+    Ok(())
+}
+
+/// Provenance for an annotation mutation: who changed what, with the
+/// displaced body and tags retained — the row holds only current truth, so
+/// the trail is where a superseded note survives. Recording failure
+/// propagates AFTER the mutation landed, matching write_page_module: a loud
+/// applied-but-unrecorded error, never a success report on an unrecorded
+/// change.
+async fn record_annotation_change(
+    state: &AppState,
+    page_title: &str,
+    page_id: Uuid,
+    annotation: &PageAnnotation,
+    event_kind: &str,
+    prior: Option<&PageAnnotation>,
+    author: &str,
+) -> Result<(), GatewayError> {
+    state
+        .storage
+        .create_audit_event(NewAuditEvent {
+            id: Uuid::new_v4().to_string(),
+            session_id: None,
+            entity_kind: "page".into(),
+            entity_id: page_id.to_string(),
+            event_kind: event_kind.into(),
+            summary: format!("annotation change on page: {page_title}"),
+            metadata: json!({
+                "annotation_id": annotation.id,
+                "module_id": annotation.module_id,
+                "author": author,
+                "annotation_author": annotation.author,
+                "prior_body": prior.map(|prior| prior.body.clone()),
+                "prior_tags": prior.map(|prior| prior.tags.clone()),
+                "new_body": annotation.body,
+                "new_tags": annotation.tags,
+            }),
+        })
+        .await?;
+    Ok(())
 }
 
 pub async fn page_response(state: &AppState, page_id: Uuid) -> Result<PageResponse, GatewayError> {
@@ -186,23 +407,50 @@ pub async fn page_response(state: &AppState, page_id: Uuid) -> Result<PageRespon
         .await?
         .ok_or_else(|| GatewayError::ValidationError(format!("no page with id {page_id}")))?;
     let modules = state.storage.list_page_modules(page.id).await?;
+    let annotations = state.storage.list_page_annotations(page.id).await?;
+    // Each note travels with the module it hangs on, so the reader finds it
+    // where the location is rather than having to match ids by hand.
     Ok(PageResponse {
         id: page.id,
         space_id: page.space_id,
         title: page.title,
         created_at: page.created_at,
         updated_at: page.updated_at,
-        modules: modules.into_iter().map(module_view).collect(),
+        modules: modules
+            .into_iter()
+            .map(|module| {
+                let hung_here = annotations
+                    .iter()
+                    .filter(|annotation| annotation.module_id == module.id)
+                    .cloned()
+                    .map(annotation_view)
+                    .collect();
+                module_view(module, hung_here)
+            })
+            .collect(),
     })
 }
 
-fn module_view(module: PageModule) -> PageModuleView {
+fn module_view(module: PageModule, annotations: Vec<PageAnnotationView>) -> PageModuleView {
     PageModuleView {
         id: module.id,
         kind: module.kind,
         position: module.position,
         source: module.source,
         updated_at: module.updated_at,
+        annotations,
+    }
+}
+
+fn annotation_view(annotation: PageAnnotation) -> PageAnnotationView {
+    PageAnnotationView {
+        id: annotation.id,
+        module_id: annotation.module_id,
+        body: annotation.body,
+        tags: annotation.tags,
+        author: annotation.author,
+        created_at: annotation.created_at,
+        updated_at: annotation.updated_at,
     }
 }
 
@@ -254,4 +502,330 @@ pub async fn write_page_module_handler(
     Ok(Json(
         write_page_module(&state, page_id, request, "user").await?,
     ))
+}
+
+pub async fn create_page_annotation_handler(
+    State(state): State<AppState>,
+    Path(page_id): Path<Uuid>,
+    Json(request): Json<CreatePageAnnotationRequest>,
+) -> Result<Json<PageAnnotationView>, ApiError> {
+    Ok(Json(
+        create_page_annotation(&state, page_id, request, "user").await?,
+    ))
+}
+
+pub async fn update_page_annotation_handler(
+    State(state): State<AppState>,
+    Path(annotation_id): Path<Uuid>,
+    Json(request): Json<UpdatePageAnnotationRequest>,
+) -> Result<Json<PageAnnotationView>, ApiError> {
+    Ok(Json(
+        update_page_annotation(&state, annotation_id, request, "user").await?,
+    ))
+}
+
+pub async fn delete_page_annotation_handler(
+    State(state): State<AppState>,
+    Path(annotation_id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    delete_page_annotation(&state, annotation_id, "user").await?;
+    Ok(Json(json!({ "deleted": true })))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use swage_storage::{
+        AuditStore, NewSpace, PageAnnotationStore, SpaceStore, SqliteStorage, Storage,
+    };
+
+    use super::*;
+
+    fn state(storage: Arc<SqliteStorage>) -> AppState {
+        AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            storage as Arc<dyn SpaceStore>,
+            Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        )
+    }
+
+    /// A page with one module, and a second page with its own module — the
+    /// second is what a cross-page anchor would wrongly reach.
+    async fn seeded() -> (AppState, Arc<SqliteStorage>, Uuid, Uuid, Uuid) {
+        let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+        let space = SpaceStore::create(
+            storage.as_ref(),
+            NewSpace {
+                name: "p".into(),
+                slug: "p".into(),
+            },
+        )
+        .await
+        .unwrap();
+        let state = state(Arc::clone(&storage));
+        let page = create_page(
+            &state,
+            space.id,
+            CreatePageRequest {
+                title: "Planning".into(),
+            },
+        )
+        .await
+        .unwrap();
+        let module = write_page_module(
+            &state,
+            page.id,
+            WritePageModuleRequest {
+                module_id: None,
+                kind: None,
+                source: "# Draft".into(),
+            },
+            "user",
+        )
+        .await
+        .unwrap();
+        let other = create_page(
+            &state,
+            space.id,
+            CreatePageRequest {
+                title: "Elsewhere".into(),
+            },
+        )
+        .await
+        .unwrap();
+        let other_module = write_page_module(
+            &state,
+            other.id,
+            WritePageModuleRequest {
+                module_id: None,
+                kind: None,
+                source: "# Other".into(),
+            },
+            "user",
+        )
+        .await
+        .unwrap();
+        (state, storage, page.id, module.id, other_module.id)
+    }
+
+    fn annotation(module_id: Uuid, body: &str) -> CreatePageAnnotationRequest {
+        CreatePageAnnotationRequest {
+            module_id,
+            body: body.into(),
+            tags: Vec::new(),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_annotation_reaches_the_reader_at_the_module_it_names() {
+        let (state, _storage, page_id, module_id, other_module_id) = seeded().await;
+
+        create_page_annotation(
+            &state,
+            page_id,
+            annotation(module_id, "the second claim needs a source"),
+            "user",
+        )
+        .await
+        .unwrap();
+        create_page_annotation(
+            &state,
+            page_id,
+            annotation(other_module_id, "needs a second pass"),
+            "user",
+        )
+        .await
+        .expect_err("a module on another page is not an anchor");
+
+        let response = page_response(&state, page_id).await.unwrap();
+        let module = response
+            .modules
+            .iter()
+            .find(|module| module.id == module_id)
+            .expect("the module is on the page");
+        assert_eq!(
+            module
+                .annotations
+                .iter()
+                .map(|a| a.body.as_str())
+                .collect::<Vec<_>>(),
+            vec!["the second claim needs a source"],
+            "the module carries the note addressed to it, and only that one"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_empty_body_is_refused_before_anything_lands() {
+        let (state, storage, page_id, module_id, _) = seeded().await;
+
+        let error = create_page_annotation(&state, page_id, annotation(module_id, "   "), "user")
+            .await
+            .expect_err("an empty note names no reference");
+        assert!(error.to_string().contains("non-empty"), "{error}");
+        assert!(
+            storage
+                .list_page_annotations(page_id)
+                .await
+                .unwrap()
+                .is_empty(),
+            "validation runs before the store is touched"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_module_on_another_page_is_not_an_anchor() {
+        let (state, storage, page_id, _module_id, other_module_id) = seeded().await;
+
+        let error = create_page_annotation(
+            &state,
+            page_id,
+            annotation(other_module_id, "hangs nowhere either party can see"),
+            "user",
+        )
+        .await
+        .expect_err("the anchor must be on the named page");
+        assert!(
+            error.to_string().contains(&other_module_id.to_string()),
+            "{error}"
+        );
+        assert!(
+            storage
+                .list_page_annotations(page_id)
+                .await
+                .unwrap()
+                .is_empty(),
+            "the rejected note never landed"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn restating_a_note_leaves_the_displaced_words_in_the_trail() {
+        let (state, storage, page_id, module_id, _) = seeded().await;
+        let created = create_page_annotation(
+            &state,
+            page_id,
+            CreatePageAnnotationRequest {
+                module_id,
+                body: "first reading".into(),
+                tags: vec!["draft".into()],
+            },
+            "user",
+        )
+        .await
+        .unwrap();
+
+        update_page_annotation(
+            &state,
+            created.id,
+            UpdatePageAnnotationRequest {
+                body: "second reading".into(),
+                tags: vec!["settled".into()],
+            },
+            "assistant",
+        )
+        .await
+        .unwrap();
+
+        let stored = storage
+            .get_page_annotation(created.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            stored.body, "second reading",
+            "the row holds current truth only"
+        );
+
+        let events = storage.list_audit_events().await.unwrap();
+        let recorded = events
+            .iter()
+            .find(|event| event.event_kind == "page_annotation_updated")
+            .expect("the restatement is in the page's trail");
+        assert_eq!(
+            recorded.metadata["prior_body"], "first reading",
+            "the displaced words survive where the row does not"
+        );
+        assert_eq!(recorded.metadata["prior_tags"][0], "draft");
+        assert_eq!(recorded.metadata["new_body"], "second reading");
+        assert_eq!(
+            recorded.metadata["author"], "assistant",
+            "the trail names who made this change, not only who first wrote it"
+        );
+        assert_eq!(recorded.metadata["annotation_author"], "user");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn deleting_a_note_retains_what_it_said() {
+        let (state, storage, page_id, module_id, _) = seeded().await;
+        let created = create_page_annotation(
+            &state,
+            page_id,
+            annotation(module_id, "withdrawn on reflection"),
+            "user",
+        )
+        .await
+        .unwrap();
+
+        delete_page_annotation(&state, created.id, "user")
+            .await
+            .unwrap();
+
+        assert!(
+            storage
+                .get_page_annotation(created.id)
+                .await
+                .unwrap()
+                .is_none(),
+            "the note is gone from the page"
+        );
+        let events = storage.list_audit_events().await.unwrap();
+        let recorded = events
+            .iter()
+            .find(|event| event.event_kind == "page_annotation_deleted")
+            .expect("the removal is in the page's trail");
+        assert_eq!(
+            recorded.metadata["prior_body"], "withdrawn on reflection",
+            "recovery is re-writing the note, informed by the trail"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_live_signal_names_the_annotated_module_and_carries_no_words() {
+        let (state, _storage, page_id, module_id, _) = seeded().await;
+        let mut events = state.broadcast.subscribe();
+
+        create_page_annotation(
+            &state,
+            page_id,
+            annotation(module_id, "secret words that must not ride the wire"),
+            "user",
+        )
+        .await
+        .unwrap();
+
+        let event = events.recv().await.expect("the annotation broadcasts");
+        match &event {
+            ServerEvent::PageUpdated {
+                page_id: signalled_page,
+                module_id: signalled_module,
+            } => {
+                assert_eq!(*signalled_page, page_id);
+                assert_eq!(
+                    *signalled_module,
+                    Some(module_id),
+                    "the signal names where to look"
+                );
+            }
+            other => panic!("expected a page_updated signal, got {other:?}"),
+        }
+        let serialised = serde_json::to_string(&event).unwrap();
+        assert!(
+            !serialised.contains("secret words"),
+            "the event is a signal: content rides the refetch, never the event"
+        );
+    }
 }

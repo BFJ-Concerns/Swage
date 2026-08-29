@@ -9,6 +9,8 @@
 export type SettingsTab =
   | "providers"
   | "agents"
+  | "commands"
+  | "skills"
   | "generation"
   | "automation"
   | "plugins"
@@ -91,7 +93,7 @@ export function parseRoute(pathname: string): Route {
     };
   }
   const settingsMatch = pathname.match(
-    /^\/settings(?:\/(providers|agents|generation|automation|plugins|channels|devices|voice|recovery|display|account))?$/,
+    /^\/settings(?:\/(providers|agents|commands|skills|generation|automation|plugins|channels|devices|voice|recovery|display|account))?$/,
   );
   if (settingsMatch) {
     return {

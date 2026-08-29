@@ -907,6 +907,7 @@ impl swage_storage::WorkflowStore for MockStorage {
         _: Uuid,
         _: Option<&str>,
         _: Option<serde_json::Value>,
+        _: Option<Uuid>,
     ) -> Result<swage_storage::WorkflowScriptRecord, StorageError> {
         unimplemented!()
     }
@@ -2630,6 +2631,39 @@ impl swage_storage::PageStore for MockStorage {
         unimplemented!()
     }
     async fn update_page_module_source(&self, _: Uuid, _: &str) -> Result<(), StorageError> {
+        unimplemented!()
+    }
+}
+
+#[async_trait]
+impl swage_storage::PageAnnotationStore for MockStorage {
+    async fn create_page_annotation(
+        &self,
+        _: swage_storage::NewPageAnnotation,
+    ) -> Result<swage_storage::PageAnnotation, StorageError> {
+        unimplemented!()
+    }
+    async fn get_page_annotation(
+        &self,
+        _: Uuid,
+    ) -> Result<Option<swage_storage::PageAnnotation>, StorageError> {
+        unimplemented!()
+    }
+    async fn list_page_annotations(
+        &self,
+        _: Uuid,
+    ) -> Result<Vec<swage_storage::PageAnnotation>, StorageError> {
+        unimplemented!()
+    }
+    async fn update_page_annotation(
+        &self,
+        _: Uuid,
+        _: &str,
+        _: &[String],
+    ) -> Result<(), StorageError> {
+        unimplemented!()
+    }
+    async fn delete_page_annotation(&self, _: Uuid) -> Result<(), StorageError> {
         unimplemented!()
     }
 }
