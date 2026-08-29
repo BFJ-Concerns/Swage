@@ -11,6 +11,8 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::support::{WsStream, ws_collect_until};
+
 use async_trait::async_trait;
 use axum::Router;
 use axum::body::{Body, to_bytes};
@@ -255,9 +257,6 @@ type WsSink = futures::stream::SplitSink<
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
     tungstenite::Message,
 >;
-type WsStream = futures::stream::SplitStream<
-    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
->;
 
 async fn connect_ws(addr: SocketAddr, conversation_id: &str) -> (WsSink, WsStream) {
     let url = format!("ws://{addr}/api/conversations/{conversation_id}/ws");
@@ -288,30 +287,6 @@ async fn ws_recv(stream: &mut WsStream) -> Value {
             _ => continue,
         }
     }
-}
-
-/// Collect WebSocket events through the named terminal event.
-async fn ws_collect_until(
-    stream: &mut WsStream,
-    terminal_event: &str,
-    timeout: Duration,
-) -> Vec<Value> {
-    let mut events = Vec::new();
-    tokio::time::timeout(timeout, async {
-        loop {
-            let event = ws_recv_lenient(stream)
-                .await
-                .unwrap_or_else(|| panic!("websocket closed before {terminal_event}: {events:?}"));
-            let reached_terminal = event["type"] == terminal_event;
-            events.push(event);
-            if reached_terminal {
-                break;
-            }
-        }
-    })
-    .await
-    .unwrap_or_else(|_| panic!("timed out waiting for {terminal_event}: {events:?}"));
-    events
 }
 
 /// Like ws_recv but returns None on close instead of panicking.
