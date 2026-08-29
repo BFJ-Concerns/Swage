@@ -259,6 +259,54 @@ async fn terminal_run_rejects_operator_events_without_adding_to_the_queue() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn inline_run_keeps_anonymous_identity_in_its_public_projection() {
+    let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+    let space = storage.get_or_create_default().await.unwrap();
+    let state = AppState::new(
+        Arc::clone(&storage) as Arc<dyn Storage>,
+        Arc::clone(&storage) as Arc<dyn SpaceStore>,
+        Arc::new(StubProvider),
+        swage_config::ResolvedConfig::default(),
+        swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, build_router(state)).await.unwrap();
+    });
+    let base = format!("http://{address}");
+    let client = reqwest::Client::new();
+
+    let started: Value = client
+        .post(format!("{base}/api/spaces/{}/workflow-runs", space.id))
+        .json(&json!({"source": "return { done: true };", "args": null, "budget": null}))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let run_id = started["id"].as_str().unwrap();
+    assert!(started["script_id"].is_null());
+    assert!(started["script_name"].is_null());
+    assert!(started["script_version"].is_null());
+
+    let mut mutated_local_copy = started.clone();
+    mutated_local_copy["script_name"] = json!("forged");
+    let detail = wait_for_run(&client, &base, run_id).await;
+    assert!(detail["run"]["script_id"].is_null());
+    assert!(detail["run"]["script_name"].is_null());
+    assert!(detail["run"]["script_version"].is_null());
+    assert_eq!(detail["run"]["source"], "return { done: true };");
+    assert_ne!(detail["run"], mutated_local_copy);
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn cancelled_run_rejects_operator_events_without_adding_to_the_queue() {
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
     let space = storage.get_or_create_default().await.unwrap();
