@@ -54,3 +54,72 @@ fn set_executable_if_script(path: &Path) -> std::io::Result<()> {
 fn set_executable_if_script(_path: &Path) -> std::io::Result<()> {
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn regeneration_restores_fresh_and_damaged_shipped_skill_roots() {
+        let data_root = tempfile::tempdir().expect("temporary data root");
+        regenerate(data_root.path())
+            .await
+            .expect("first regeneration");
+        let projected = skill_dir(data_root.path(), "commission").join("scripts/create-annexe.sh");
+        let expected = include_str!("../../../shipped/skills/commission/scripts/create-annexe.sh");
+        assert_eq!(
+            std::fs::read(&projected).expect("projected script"),
+            expected.as_bytes()
+        );
+
+        std::fs::write(&projected, "mutated").expect("mutate projection");
+        let stray = root(data_root.path()).join("stray.txt");
+        std::fs::write(&stray, "stray").expect("write stray");
+        regenerate(data_root.path())
+            .await
+            .expect("second regeneration");
+
+        assert_eq!(
+            std::fs::read(&projected).expect("restored script"),
+            expected.as_bytes()
+        );
+        assert!(
+            !stray.exists(),
+            "whole-directory replacement removes strays"
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            assert_eq!(
+                std::fs::metadata(&projected)
+                    .expect("restored projected script metadata")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o755,
+                "restoring a damaged projection must also restore executable script mode"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn regeneration_recreates_a_deleted_projection() {
+        let data_root = tempfile::tempdir().expect("temporary data root");
+        regenerate(data_root.path())
+            .await
+            .expect("first regeneration");
+        tokio::fs::remove_dir_all(root(data_root.path()))
+            .await
+            .expect("delete projection");
+        regenerate(data_root.path())
+            .await
+            .expect("regenerate after deletion");
+        assert_eq!(
+            std::fs::read(skill_dir(data_root.path(), "workflow-authoring").join("SKILL.md"))
+                .expect("recreated skill"),
+            include_str!("../../../shipped/skills/workflow-authoring/SKILL.md").as_bytes()
+        );
+    }
+}
