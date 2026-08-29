@@ -845,6 +845,7 @@ impl LlmProvider for OpenAiProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{empty_completion_request, local_provider_config};
     use swage_core::{ChatMessage, Role, ToolCall};
 
     // --- Message conversion ---
@@ -923,8 +924,7 @@ mod tests {
 
     #[test]
     fn every_completion_effort_maps_to_openai_reasoning_effort() {
-        let provider =
-            OpenAiProvider::from_config(ProviderConfig::new("key", "model", "http://localhost"));
+        let provider = OpenAiProvider::from_config(local_provider_config());
         for (effort, expected) in [
             (swage_core::Effort::Low, "low"),
             (swage_core::Effort::Medium, "medium"),
@@ -948,18 +948,8 @@ mod tests {
 
     #[test]
     fn completion_without_effort_omits_openai_reasoning_effort() {
-        let provider =
-            OpenAiProvider::from_config(ProviderConfig::new("key", "model", "http://localhost"));
-        let request = CompletionRequest {
-            effort: None,
-            messages: vec![],
-            model: None,
-            max_tokens: None,
-            temperature: None,
-            stop_sequences: None,
-            metadata: None,
-            tool_definitions: vec![],
-        };
+        let provider = OpenAiProvider::from_config(local_provider_config());
+        let request = empty_completion_request();
         let body = serde_json::to_value(provider.build_request(&request, false)).unwrap();
         assert!(!body.as_object().unwrap().contains_key("reasoning_effort"));
     }
@@ -1009,18 +999,8 @@ mod tests {
 
     #[test]
     fn build_request_sets_stream_flag() {
-        let provider =
-            OpenAiProvider::from_config(ProviderConfig::new("key", "model", "http://localhost"));
-        let request = CompletionRequest {
-            effort: None,
-            messages: vec![],
-            model: None,
-            max_tokens: None,
-            temperature: None,
-            stop_sequences: None,
-            metadata: None,
-            tool_definitions: vec![],
-        };
+        let provider = OpenAiProvider::from_config(local_provider_config());
+        let request = empty_completion_request();
         let non_streaming = provider.build_request(&request, false);
         assert!(non_streaming.stream.is_none());
         assert!(non_streaming.stream_options.is_none());
@@ -1037,18 +1017,8 @@ mod tests {
 
     #[test]
     fn build_request_serialises_stream_usage_options_only_for_streaming() {
-        let provider =
-            OpenAiProvider::from_config(ProviderConfig::new("key", "model", "http://localhost"));
-        let request = CompletionRequest {
-            effort: None,
-            messages: vec![],
-            model: None,
-            max_tokens: None,
-            temperature: None,
-            stop_sequences: None,
-            metadata: None,
-            tool_definitions: vec![],
-        };
+        let provider = OpenAiProvider::from_config(local_provider_config());
+        let request = empty_completion_request();
 
         let non_streaming = serde_json::to_value(provider.build_request(&request, false)).unwrap();
         assert!(non_streaming.get("stream").is_none());
