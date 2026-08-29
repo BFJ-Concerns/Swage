@@ -11,15 +11,16 @@ use crate::model::{
     Material, Message, NewAgentDefinition, NewAgentMemoryRecord, NewAgentMessage,
     NewApprovalRequest, NewAttachment, NewAuditEvent, NewBackgroundJob, NewChannelInboundMessage,
     NewChannelLink, NewCurationAssertion, NewDeliveryRecord, NewDeviceRegistration,
-    NewKnowledgeCitation, NewMaterial, NewMessage, NewOrientationCard, NewPage, NewPageAnnotation, NewPageModule,
-    NewSchedule, NewScheduleRun, NewSecretRecord, NewSession, NewSourceObservation, NewSpace,
-    NewTaskDefinition, NewThread, NewToolCall, NewTurn, NewWorkflowJournalIntent, NewWorkflowRun,
-    NewWorkflowRunEvent, NewWorkflowScript, NewWorkspaceAttachment, OrientationCard,
-    OrientationCardLifecycle, Page, PageAnnotation, PageModule, PendingChannelOrigin, Schedule, ScheduleRun,
-    ScheduleRunUpdate, SecretRecord, Session, SessionVariable, SourceObservation, Space, SpaceSlug,
-    TaskDefinition, Thread, ThreadBranch, ThreadState, ToolCallRecord, Turn, TurnState,
-    UpdateSchedule, WorkflowJournalRecord, WorkflowRunEventRecord, WorkflowRunRecord,
-    WorkflowScriptRecord, WorkflowScriptVersion, WorkspaceAttachment,
+    NewKnowledgeCitation, NewMaterial, NewMessage, NewOrientationCard, NewPage, NewPageAnnotation,
+    NewPageModule, NewSchedule, NewScheduleRun, NewSecretRecord, NewSession, NewSourceObservation,
+    NewSpace, NewTaskDefinition, NewThread, NewToolCall, NewTurn, NewWorkflowJournalIntent,
+    NewWorkflowRun, NewWorkflowRunEvent, NewWorkflowScript, NewWorkspaceAttachment,
+    OrientationCard, OrientationCardLifecycle, Page, PageAnnotation, PageModule,
+    PendingChannelOrigin, Schedule, ScheduleRun, ScheduleRunUpdate, SecretRecord, Session,
+    SessionVariable, SourceObservation, Space, SpaceSlug, TaskDefinition, Thread, ThreadBranch,
+    ThreadState, ToolCallRecord, Turn, TurnState, UpdateSchedule, WorkflowJournalRecord,
+    WorkflowRunEventRecord, WorkflowRunRecord, WorkflowScriptRecord, WorkflowScriptVersion,
+    WorkspaceAttachment,
 };
 
 // ---------------------------------------------------------------------------
@@ -1184,8 +1185,7 @@ pub trait PageAnnotationStore: Send + Sync {
         &self,
         annotation: NewPageAnnotation,
     ) -> Result<PageAnnotation, StorageError>;
-    async fn get_page_annotation(&self, id: Uuid)
-    -> Result<Option<PageAnnotation>, StorageError>;
+    async fn get_page_annotation(&self, id: Uuid) -> Result<Option<PageAnnotation>, StorageError>;
     /// Every annotation on a page — module notes and page-level notes alike —
     /// oldest first.
     async fn list_page_annotations(
