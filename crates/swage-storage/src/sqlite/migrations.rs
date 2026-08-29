@@ -282,7 +282,7 @@ const CREATE_WORKFLOW_RUN_EVENTS: &str = "
         run_id            TEXT NOT NULL REFERENCES workflow_runs(id) ON DELETE CASCADE,
         seq               INTEGER NOT NULL,
         completed_order   INTEGER,
-        kind              TEXT NOT NULL CHECK (kind IN ('agent_call', 'worker_placement', 'effect', 'log', 'phase', 'workflow_call', 'timer', 'event', 'await_event', 'gate', 'budget', 'wind_down')),
+        kind              TEXT NOT NULL CHECK (kind IN ('agent_call', 'worker_placement', 'effect', 'log', 'phase', 'workflow_call', 'timer', 'event', 'await_event', 'gate', 'budget', 'terminal_budget', 'wind_down')),
         status            TEXT NOT NULL CHECK (status IN ('started', 'completed', 'failed')),
         args_hash         TEXT NOT NULL,
         request_json      TEXT NOT NULL,
