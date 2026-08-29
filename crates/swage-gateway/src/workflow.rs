@@ -71,6 +71,15 @@ fn runtime_worker_placement(placement: &WorkflowRunWorkerPlacement) -> ResolvedW
     }
 }
 
+fn runtime_placement_from_directory(placement: ResolvedWorkerDirectory) -> ResolvedWorkerPlacement {
+    ResolvedWorkerPlacement {
+        path: placement.path.to_string_lossy().into_owned(),
+        can_write: placement.can_write,
+        authority_path: placement.authority_path.to_string_lossy().into_owned(),
+        authority_context_id: placement.authority_context_id,
+    }
+}
+
 fn worker_placement_directory(placement: &ResolvedWorkerPlacement) -> ResolvedWorkerDirectory {
     ResolvedWorkerDirectory {
         path: placement.path.clone().into(),
@@ -1420,6 +1429,7 @@ async fn run_ephemeral_agent_call(
         output,
         input_tokens: turn.input_tokens.unwrap_or(0).max(0) as u64,
         output_tokens: turn.output_tokens.unwrap_or(0).max(0) as u64,
+        working_directory: resolved_working_directory.map(|placement| placement.path),
         session_id: Some(session_id),
         thread_id: Some(thread_id),
         turn_id: Some(turn.id),
@@ -1742,7 +1752,25 @@ async fn resolve_agent_placement_command(
                 )
                 .await
             }
-            None if request.session.is_some() => Ok(None),
+            None if request.session.is_some() => {
+                let session_ref = request.session.as_ref().expect("checked above");
+                let session = state
+                    .storage
+                    .get_session(session_ref.session_id)
+                    .await
+                    .map_err(|error| error.to_string())?
+                    .ok_or_else(|| {
+                        format!(
+                            "AgentCallError: continued session {} no longer exists",
+                            session_ref.session_id
+                        )
+                    })?;
+                reauthorise_session_worker_placement(state, &session)
+                    .await
+                    .map_err(|error| error.to_string())?
+                    .map(runtime_placement_from_directory)
+                    .map_or_else(|| Ok(None), |placement| Ok(Some(placement)))
+            }
             None => match inherited_worker_placement {
                 Some(placement) => {
                     reauthorise_recorded_worker_placement(state, space_id, placement.clone())
@@ -3319,12 +3347,7 @@ async fn complete_worker_directory_resolution(
     .await
     {
         Ok(directory) => {
-            let placement = ResolvedWorkerPlacement {
-                path: directory.path.to_string_lossy().into_owned(),
-                can_write: directory.can_write,
-                authority_path: directory.authority_path.to_string_lossy().into_owned(),
-                authority_context_id: directory.authority_context_id,
-            };
+            let placement = runtime_placement_from_directory(directory);
             state
                 .complete_workflow_journal_entry(
                     entry_id,
@@ -7851,6 +7874,8 @@ mod tests {
     async fn a_continued_call_lands_on_the_same_worker_session_with_history() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
         let space = storage.get_or_create_default().await.expect("space");
+        let worker_directory = tempfile::tempdir().expect("worker directory");
+        grant_workspace(&storage, space.id, worker_directory.path()).await;
         let swage_home = crate::test_support::SwageHomeGuard::new();
         for (agent, allow) in [("lead", "shell"), ("worker", "shell")] {
             let agent_dir = swage_home.path().join("spaces/default/agents").join(agent);
@@ -7939,10 +7964,9 @@ mod tests {
         ));
 
         let (first_reply, first_receive) = oneshot::channel();
-        tx.send(HostCommand::Agent {
-            resolved_working_directory: None,
+        tx.send(HostCommand::DispatchAgent {
             request: AgentCallRequest {
-                cwd: None,
+                cwd: Some(worker_directory.path().to_string_lossy().into_owned()),
                 isolation: None,
                 effort: None,
                 timeout_ms: None,
@@ -7967,6 +7991,11 @@ mod tests {
             .await
             .expect("first reply")
             .expect("first result");
+        assert_eq!(
+            first.working_directory.as_deref(),
+            Some(worker_directory.path().to_string_lossy().as_ref()),
+            "the first call reports its resolved worker directory"
+        );
         let token = AgentSessionRef {
             session_id: first.session_id.expect("session id"),
             thread_id: first.thread_id.expect("thread id"),
@@ -8001,8 +8030,7 @@ mod tests {
         .expect("revoke lead shell grant");
 
         let (second_reply, second_receive) = oneshot::channel();
-        tx.send(HostCommand::Agent {
-            resolved_working_directory: None,
+        tx.send(HostCommand::DispatchAgent {
             request: AgentCallRequest {
                 cwd: None,
                 isolation: None,
@@ -8029,6 +8057,11 @@ mod tests {
             .await
             .expect("second reply")
             .expect("second result");
+        assert_eq!(
+            second.working_directory.as_deref(),
+            first.working_directory.as_deref(),
+            "a continuation reports the immutable directory of its existing worker"
+        );
 
         let second_entry_id = storage
             .list_workflow_journal(run.id)
@@ -8081,13 +8114,15 @@ mod tests {
                 .expect_err("continued placement must be immutable"),
             "WorkerPlacementError: a continued worker keeps its original placement; cwd and isolation cannot be supplied with session".into()
         );
-        assert!(
+        assert_eq!(
             storage
                 .list_workflow_journal(run.id)
                 .await
                 .expect("journal")
                 .iter()
-                .all(|entry| entry.kind != "worker_placement"),
+                .filter(|entry| entry.kind == "worker_placement")
+                .count(),
+            1,
             "a rejected continuation must not provision or journal an unused worktree"
         );
 
@@ -8095,6 +8130,20 @@ mod tests {
         assert_eq!(second.session_id, Some(token.session_id));
         assert_eq!(second.thread_id, Some(token.thread_id));
         assert_eq!(second.output, Value::String("the work is done".into()));
+        let continued_result = storage
+            .list_workflow_journal(run.id)
+            .await
+            .expect("journal")
+            .into_iter()
+            .filter(|entry| entry.kind == "agent_call" && entry.status == "completed")
+            .max_by_key(|entry| entry.seq)
+            .and_then(|entry| entry.result)
+            .expect("continued agent call result");
+        assert_eq!(
+            continued_result["working_directory"],
+            worker_directory.path().to_string_lossy().as_ref(),
+            "the continued call journals its known worker directory"
+        );
         let turns = storage
             .list_turns_by_thread(token.thread_id)
             .await
@@ -9339,12 +9388,10 @@ mod tests {
         let cwd = serde_json::to_string(&repo.to_string_lossy()).unwrap();
         let source = format!(
             r#"
-            const calls = [
-                agent("write first-marker", {{ cwd: {cwd}, isolation: "worktree", maxAttempts: 1 }}),
-                agent("write second-marker", {{ cwd: {cwd}, isolation: "worktree", maxAttempts: 1 }})
-            ];
-            await Promise.all(calls);
-            return await workerPlacements();
+            const first = agentStart("write first-marker", {{ cwd: {cwd}, isolation: "worktree", maxAttempts: 1 }});
+            const second = agentStart("write second-marker", {{ cwd: {cwd}, isolation: "worktree", maxAttempts: 1 }});
+            await Promise.all([first.result, second.result]);
+            return {{ first: first.workingDirectory, second: second.workingDirectory }};
         "#
         );
         let Json(started) = start_inline_run(
@@ -9372,6 +9419,32 @@ mod tests {
             .map(std::path::PathBuf::from)
             .collect::<Vec<_>>();
         assert_eq!(paths.len(), 2);
+        let agent_call_results = journal
+            .iter()
+            .filter(|entry| entry.kind == "agent_call")
+            .map(|entry| {
+                assert_eq!(
+                    entry.request["cwd"],
+                    repo.to_string_lossy().as_ref(),
+                    "the journal retains the caller's requested directory"
+                );
+                entry
+                    .result
+                    .as_ref()
+                    .and_then(|result| result["working_directory"].as_str())
+                    .map(std::path::PathBuf::from)
+                    .expect("completed worker call records its host-resolved directory")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(agent_call_results.len(), 2);
+        assert!(
+            agent_call_results.iter().all(|path| paths.contains(path)),
+            "each call result must report one of this run's provisioned paths"
+        );
+        assert_ne!(
+            agent_call_results[0], agent_call_results[1],
+            "parallel isolated siblings expose independently verifiable directories"
+        );
         let writes = placement_tool.writes.lock().expect("placement writes");
         assert_eq!(writes.len(), 2);
         assert!(
@@ -11703,6 +11776,7 @@ mod tests {
                     output: Value::String("restated".into()),
                     input_tokens: 1,
                     output_tokens: 1,
+                    working_directory: None,
                     session_id: Some(session.id),
                     thread_id: Some(thread.id),
                     turn_id: Some(Uuid::new_v4()),
@@ -12656,6 +12730,7 @@ mod tests {
                     output: Value::String("completed work".into()),
                     input_tokens: 1,
                     output_tokens: 1,
+                    working_directory: None,
                     session_id: None,
                     thread_id: None,
                     turn_id: None,
@@ -12899,6 +12974,7 @@ mod tests {
                     output: Value::String("completed work".into()),
                     input_tokens: 1,
                     output_tokens: 1,
+                    working_directory: None,
                     session_id: None,
                     thread_id: None,
                     turn_id: None,
