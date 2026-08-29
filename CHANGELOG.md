@@ -42,6 +42,7 @@ All notable changes to Swage are documented in this file.
 
 ### Changed
 
+- The `workspace.path` key is removed; workspace attachments and managed scratch roots define tool scope, and local execution is no longer listed as an attached device.
 - Presence APIs and protocol types now consistently identify attached devices; the former machine-named routes and fields are removed in this private alpha.
 - Context compaction now uses provider-native prompt token counts when available, while retaining conservative local screening and estimate fallback when counting is unavailable.
 - Async turn submissions now reject unrecognised request fields instead of silently ignoring them.
