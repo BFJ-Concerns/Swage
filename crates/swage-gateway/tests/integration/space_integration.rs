@@ -33,7 +33,7 @@ use tower::ServiceExt;
 
 use swage_gateway::server::build_router;
 use swage_gateway::state::AppState;
-use swage_storage::SqliteStorage;
+use swage_storage::{AuditStore, SqliteStorage};
 
 use crate::support::ProcessEnvGuard;
 
@@ -231,6 +231,99 @@ async fn sessions_are_isolated_between_spaces() {
         .expect("spaces should be an array");
     // Default + Alpha + Bravo = 3 spaces.
     assert_eq!(spaces.len(), 3, "should have default + 2 created spaces");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn workspace_attachment_mutations_record_whole_state_audit_events() {
+    let (router, storage) = make_test_router();
+    let (status, space) = http_json(
+        &router,
+        "POST",
+        "/api/spaces",
+        Some(json!({ "name": "Audit" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let space_id = space["id"].as_str().expect("space id");
+    let workspace_root = tempfile::tempdir().expect("workspace root");
+
+    let (status, attached) = http_json(
+        &router,
+        "POST",
+        &format!("/api/spaces/{space_id}/workspaces"),
+        Some(json!({
+            "path": workspace_root.path().to_string_lossy(),
+            "set_as_default": false,
+            "permissions": ["read"],
+            "is_trusted": false,
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let workspace_id = attached["id"].as_str().expect("workspace id");
+
+    let (status, trusted) = http_json(
+        &router,
+        "PUT",
+        &format!("/api/spaces/{space_id}/workspaces/{workspace_id}/trust"),
+        Some(json!({ "is_trusted": true })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(trusted["is_trusted"], true);
+
+    let (status, _) = http_json(
+        &router,
+        "DELETE",
+        &format!("/api/spaces/{space_id}/workspaces/{workspace_id}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let mut events = storage
+        .list_audit_events()
+        .await
+        .expect("audit events")
+        .into_iter()
+        .filter(|event| {
+            event.entity_kind == "workspace_attachment" && event.entity_id == workspace_id
+        })
+        .collect::<Vec<_>>();
+    events.sort_by(|left, right| {
+        left.metadata["action"]
+            .as_str()
+            .cmp(&right.metadata["action"].as_str())
+    });
+    assert_eq!(
+        events.len(),
+        3,
+        "attach, trust, and detach each record an audit event"
+    );
+    assert!(
+        events
+            .iter()
+            .all(|event| event.event_kind == "configuration_change"
+                && event.metadata["source"] == "operator_http")
+    );
+    let attached_event = events
+        .iter()
+        .find(|event| event.metadata["action"] == "attach_workspace")
+        .expect("attach audit event");
+    assert!(attached_event.metadata["prior_state"].is_null());
+    assert_eq!(attached_event.metadata["new_state"]["is_trusted"], false);
+    let trust_event = events
+        .iter()
+        .find(|event| event.metadata["action"] == "set_workspace_trust")
+        .expect("trust audit event");
+    assert_eq!(trust_event.metadata["prior_state"]["is_trusted"], false);
+    assert_eq!(trust_event.metadata["new_state"]["is_trusted"], true);
+    let detached_event = events
+        .iter()
+        .find(|event| event.metadata["action"] == "detach_workspace")
+        .expect("detach audit event");
+    assert_eq!(detached_event.metadata["prior_state"]["is_trusted"], true);
+    assert!(detached_event.metadata["new_state"].is_null());
 }
 
 #[tokio::test(flavor = "multi_thread")]
