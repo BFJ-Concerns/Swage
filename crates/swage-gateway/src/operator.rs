@@ -45,17 +45,17 @@ pub async fn operator_overview(state: &AppState) -> Result<OperatorOverviewRespo
                 device_id: device.device_id,
                 label: device
                     .label
-                    .or_else(|| device_presence.and_then(|presence| presence.label.clone())),
+                    .or_else(|| device_presence.and_then(|record| record.label.clone())),
                 kind: device.kind,
                 base_url: device.base_url,
                 workspace_root: device.workspace_root,
                 capabilities: device.capabilities,
                 registered_at: device.registered_at,
                 state: device_presence
-                    .map(|presence| presence.state.clone())
+                    .map(|record| record.state.clone())
                     .unwrap_or_else(|| "connected".to_string()),
-                last_seen_at: device_presence.map(|presence| presence.last_seen_at),
-                disconnected_at: device_presence.and_then(|presence| presence.disconnected_at),
+                last_seen_at: device_presence.map(|record| record.last_seen_at),
+                disconnected_at: device_presence.and_then(|record| record.disconnected_at),
             }
         })
         .collect();
