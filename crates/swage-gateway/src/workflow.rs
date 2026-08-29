@@ -524,21 +524,32 @@ struct TokenBudgetState {
     replayed_working_credit: u64,
 }
 
-fn terminal_budget_reading(accounting: &TokenBudgetState, budget: &WorkflowBudget) -> Value {
-    let closing_remaining = budget.reserved_closing_tokens.map(|reserve| {
-        accounting
-            .closing_limit
-            .map(|limit| limit.saturating_sub(accounting.spent))
+fn closing_partition_remaining(
+    budget: &WorkflowBudget,
+    closing_limit: Option<u64>,
+    spent: u64,
+) -> Option<u64> {
+    budget.reserved_closing_tokens.map(|reserve| {
+        closing_limit
+            .map(|limit| limit.saturating_sub(spent))
             .unwrap_or_else(|| {
                 reserve.min(
                     budget
                         .max_total_tokens
-                        .map(|limit| limit.saturating_sub(accounting.spent))
+                        .map(|limit| limit.saturating_sub(spent))
                         .unwrap_or(0),
                 )
             })
-    });
-    serde_json::json!({ "closing_remaining": closing_remaining })
+    })
+}
+
+fn terminal_budget_reading(accounting: &TokenBudgetState, budget: &WorkflowBudget) -> Value {
+    let spent = accounting.spent;
+    serde_json::json!({
+        "spent": spent,
+        "remaining": budget.max_total_tokens.map(|limit| limit.saturating_sub(spent)),
+        "closing_remaining": closing_partition_remaining(budget, accounting.closing_limit, spent),
+    })
 }
 
 async fn record_terminal_budget(
@@ -546,7 +557,7 @@ async fn record_terminal_budget(
     run_id: Uuid,
     budget: &WorkflowBudget,
     accounting: &Mutex<TokenBudgetState>,
-) -> Result<Value, String> {
+) -> Result<(), String> {
     let request = serde_json::json!({ "budget": "terminal" });
     let args_hash = journal_args_hash(&request);
     let journal = state
@@ -561,7 +572,8 @@ async fn record_terminal_budget(
         return match entry.status.as_str() {
             "completed" => entry
                 .result
-                .clone()
+                .as_ref()
+                .map(|_| ())
                 .ok_or_else(|| "completed terminal budget entry has no result".into()),
             "failed" => Err(entry
                 .error_message
@@ -572,7 +584,7 @@ async fn record_terminal_budget(
                 state
                     .complete_workflow_journal_entry(entry.id, reading.clone())
                     .await
-                    .map(|_| reading)
+                    .map(|_| ())
                     .map_err(|error| error.to_string())
             }
             other => Err(format!("unknown terminal budget entry status: {other}")),
@@ -599,9 +611,9 @@ async fn record_terminal_budget(
         .await
         .map_err(|error| error.to_string())?;
     state
-        .complete_workflow_journal_entry(intent.id, reading.clone())
+        .complete_workflow_journal_entry(intent.id, reading)
         .await
-        .map(|_| reading)
+        .map(|_| ())
         .map_err(|error| error.to_string())
 }
 
@@ -3051,21 +3063,13 @@ async fn run_host_commands_inner(
                                 .max_total_tokens
                                 .map(|limit| limit.saturating_sub(spent))
                         };
-                        let closing_remaining = budget.reserved_closing_tokens.map(|reserve| {
-                            if reading_winding_down {
-                                proposed_closing_limit
-                                    .or(accounting.closing_limit)
-                                    .map(|limit| limit.saturating_sub(spent))
-                                    .unwrap_or(0)
-                            } else {
-                                reserve.min(
-                                    budget
-                                        .max_total_tokens
-                                        .map(|limit| limit.saturating_sub(spent))
-                                        .unwrap_or(0),
-                                )
-                            }
-                        });
+                        let closing_remaining = closing_partition_remaining(
+                            &budget,
+                            reading_winding_down
+                                .then(|| proposed_closing_limit.or(accounting.closing_limit))
+                                .flatten(),
+                            spent,
+                        );
                         let reading = serde_json::json!({
                             "spent": spent,
                             "remaining": remaining,
@@ -4705,7 +4709,7 @@ async fn launch_existing_run(
             }
             _ => None,
         };
-        let (mut run_state, mut output, mut error) = match engine_result {
+        let (run_state, output, error) = match engine_result {
             Ok(Ok(json)) => match serde_json::from_str(&json) {
                 Ok(value) => ("completed", Some(value), None),
                 Err(problem) => ("failed", None, Some(problem.to_string())),
@@ -4730,9 +4734,7 @@ async fn launch_existing_run(
         )
         .await
         {
-            run_state = "failed";
-            output = None;
-            error = Some(format!("terminal budget journal failed: {problem}"));
+            tracing::warn!(%run_id, %problem, "could not record terminal budget audit entry");
         }
         if run_state == "cancelled" {
             settle_cancelled_workflow_journal(storage.as_ref(), run_id).await;
@@ -7579,16 +7581,22 @@ mod tests {
                 _ => {}
             }
         }
-        assert_eq!(observed.len(), 2);
-        assert_eq!(observed[0].id, observed[1].id);
+        let log_events = observed
+            .into_iter()
+            .filter(|entry| entry.kind == WorkflowJournalEntryKind::Log)
+            .collect::<Vec<_>>();
+        assert_eq!(log_events.len(), 2);
+        assert_eq!(log_events[0].id, log_events[1].id);
         let Json(detail) = get_run(State(state.clone()), Path(started.id))
             .await
             .expect("detail");
-        assert_eq!(observed[1].status, detail.journal[0].status);
-        assert_eq!(
-            observed[1].completed_order,
-            detail.journal[0].completed_order
-        );
+        let log = detail
+            .journal
+            .iter()
+            .find(|entry| entry.kind == WorkflowJournalEntryKind::Log)
+            .expect("logged journal entry");
+        assert_eq!(log_events[1].status, log.status);
+        assert_eq!(log_events[1].completed_order, log.completed_order);
 
         let failed = state
             .create_workflow_journal_intent(NewWorkflowJournalIntent {
@@ -8246,11 +8254,14 @@ mod tests {
             .list_workflow_journal(run.id)
             .await
             .expect("journal");
-        assert_eq!(journal.len(), 1);
-        assert_eq!(journal[0].status, "completed");
-        assert!(journal[0].request.get("agent").is_none());
+        let agent_call = journal
+            .iter()
+            .find(|entry| entry.kind == "agent_call")
+            .expect("bare agent call");
+        assert_eq!(agent_call.status, "completed");
+        assert!(agent_call.request.get("agent").is_none());
         assert_eq!(
-            journal_wire(journal[0].clone())
+            journal_wire(agent_call.clone())
                 .expect("journal wire projection")
                 .agent_call
                 .expect("agent-call detail")
@@ -8258,12 +8269,12 @@ mod tests {
             None,
             "a bare call must not project an invented agent definition identity"
         );
-        assert_eq!(journal[0].request["prompt"], "bounded work");
+        assert_eq!(agent_call.request["prompt"], "bounded work");
         assert_eq!(
-            journal[0].result.as_ref().unwrap()["output"],
+            agent_call.result.as_ref().unwrap()["output"],
             "bounded work completed"
         );
-        let session_id = journal[0].result.as_ref().unwrap()["session_id"]
+        let session_id = agent_call.result.as_ref().unwrap()["session_id"]
             .as_str()
             .and_then(|id| Uuid::parse_str(id).ok())
             .expect("journalled worker session id");
@@ -9619,12 +9630,15 @@ mod tests {
             .await
             .expect("journal read-back");
         assert_eq!(failed_run.state, "failed");
-        assert_eq!(journal.len(), 1);
-        assert_eq!(journal[0].status, "failed");
-        assert_eq!(journal[0].request["effort"], "high");
-        assert_eq!(journal[0].request["timeout_ms"], 10000);
+        let agent_call = journal
+            .iter()
+            .find(|entry| entry.kind == "agent_call")
+            .expect("timed-out agent call");
+        assert_eq!(agent_call.status, "failed");
+        assert_eq!(agent_call.request["effort"], "high");
+        assert_eq!(agent_call.request["timeout_ms"], 10000);
         assert!(
-            journal[0]
+            agent_call
                 .error_message
                 .as_deref()
                 .is_some_and(|error| error.starts_with("AgentCallTimeoutError:"))
@@ -9734,10 +9748,13 @@ mod tests {
             .await
             .expect("journal read-back");
         assert_eq!(cancelled_run.state, "cancelled");
-        assert_eq!(journal.len(), 1);
-        assert_eq!(journal[0].status, "failed");
+        let agent_call = journal
+            .iter()
+            .find(|entry| entry.kind == "agent_call")
+            .expect("cancelled agent call");
+        assert_eq!(agent_call.status, "failed");
         assert_eq!(
-            journal[0].error_message.as_deref(),
+            agent_call.error_message.as_deref(),
             Some("WorkflowCancelledError: run cancelled")
         );
         assert_eq!(provider.requests.lock().expect("requests").len(), 1);
@@ -10513,9 +10530,11 @@ mod tests {
             .list_workflow_journal(started.id)
             .await
             .expect("journal");
-        assert_eq!(journal.len(), 1);
-        assert_eq!(journal[0].kind, "await_event");
-        assert_eq!(journal[0].status, "completed");
+        let await_event = journal
+            .iter()
+            .find(|entry| entry.kind == "await_event")
+            .expect("await-event journal entry");
+        assert_eq!(await_event.status, "completed");
 
         storage
             .update_workflow_run_state(started.id, "interrupted", None, None, None)
@@ -10767,7 +10786,8 @@ mod tests {
                 .list_workflow_journal(started.id)
                 .await
                 .expect("invalid-kind journal")
-                .is_empty()
+                .iter()
+                .all(|entry| entry.kind == "terminal_budget")
         );
         assert!(
             storage
@@ -13122,8 +13142,9 @@ mod tests {
             .list_workflow_journal(run.id)
             .await
             .expect("journal");
-        assert_eq!(journal.len(), 2);
+        assert_eq!(journal.len(), 3);
         assert_eq!(journal[0].id, refused.id);
+        assert_eq!(journal[1].kind, "agent_call");
         assert_eq!(journal[1].status, "completed");
     }
 
@@ -13302,6 +13323,14 @@ mod tests {
             .await
             .expect("journal");
         assert!(!journal.iter().any(|entry| entry.kind == "wind_down"));
+        let terminal = journal
+            .iter()
+            .find(|entry| entry.kind == "terminal_budget")
+            .expect("terminal budget entry");
+        let reading = terminal.result.as_ref().expect("terminal budget reading");
+        assert_eq!(reading["spent"], 6);
+        assert_eq!(reading["remaining"], 0);
+        assert!(reading["closing_remaining"].is_null());
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -14053,6 +14082,8 @@ mod tests {
             .expect("terminal budget entry");
         assert_eq!(terminal.status, "completed");
         assert_eq!(terminal.result.as_ref().unwrap()["closing_remaining"], 0);
+        assert_eq!(terminal.result.as_ref().unwrap()["spent"], 6);
+        assert_eq!(terminal.result.as_ref().unwrap()["remaining"], 0);
         let terminal_id = terminal.id;
 
         // The stored entry deliberately disagrees with the accounting that
@@ -14094,6 +14125,63 @@ mod tests {
             1
         );
         assert_eq!(provider.requests.lock().expect("requests").len(), 3);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn terminal_budget_audit_failure_preserves_the_engine_outcome() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        storage
+            .with_conn(|connection| {
+                connection.execute_batch(
+                    "CREATE TEMP TRIGGER reject_terminal_budget_completion
+                     BEFORE UPDATE OF status ON workflow_journal
+                     WHEN OLD.kind = 'terminal_budget' AND OLD.status = 'started'
+                          AND NEW.status = 'completed'
+                     BEGIN SELECT RAISE(FAIL, 'injected terminal audit failure'); END;",
+                )
+            })
+            .await
+            .expect("install terminal audit failure trigger");
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(space.id),
+            Json(StartInlineWorkflowRunRequest {
+                source: "return { settled: true };".into(),
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start run");
+        wait_for_terminal(&state, started.id).await;
+
+        let run = storage
+            .get_workflow_run(started.id)
+            .await
+            .expect("run")
+            .expect("present");
+        assert_eq!(run.state, "completed");
+        assert_eq!(
+            run.final_output,
+            Some(serde_json::json!({ "settled": true }))
+        );
+        let terminal = storage
+            .list_workflow_journal(started.id)
+            .await
+            .expect("journal")
+            .into_iter()
+            .find(|entry| entry.kind == "terminal_budget")
+            .expect("terminal budget intent");
+        assert_eq!(terminal.status, "started");
     }
 
     #[tokio::test(flavor = "multi_thread")]
