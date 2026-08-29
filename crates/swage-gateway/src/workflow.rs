@@ -190,12 +190,17 @@ fn carried_workflows(
                     .rsplit_once('/')
                     .and_then(|(_, file)| file.strip_suffix(".js"))
                     .ok_or_else(|| format!("invalid shipped workflow path: {}", file.path))?;
-                workflows.push(EffectiveWorkflow::from_carried(
+                match EffectiveWorkflow::from_carried(
                     space_id,
                     skill,
                     name.into(),
                     file.contents.into(),
-                )?);
+                ) {
+                    Ok(workflow) => workflows.push(workflow),
+                    Err(error) => {
+                        tracing::warn!(%error, "excluding carried workflow with invalid metadata")
+                    }
+                }
             }
             continue;
         }
@@ -241,12 +246,12 @@ fn carried_workflows(
                     skill.name
                 )
             })?;
-            workflows.push(EffectiveWorkflow::from_carried(
-                space_id,
-                skill,
-                name.into(),
-                source,
-            )?);
+            match EffectiveWorkflow::from_carried(space_id, skill, name.into(), source) {
+                Ok(workflow) => workflows.push(workflow),
+                Err(error) => {
+                    tracing::warn!(%error, "excluding carried workflow with invalid metadata")
+                }
+            }
         }
     }
     Ok(workflows)
@@ -270,6 +275,7 @@ async fn authored_workflow(
         .await
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "workflow script has no version".to_string())?;
+    let argument_schema = swage_workflow::script_meta(&head.source)?.argument_schema;
     Ok(EffectiveWorkflow {
         id: record.id,
         space_id: record.space_id,
@@ -284,7 +290,7 @@ async fn authored_workflow(
         built_in: false,
         immutable: false,
         carrying_skill: None,
-        argument_schema: swage_workflow::script_meta(&head.source)?.argument_schema,
+        argument_schema,
     })
 }
 
@@ -5453,7 +5459,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn invalid_carried_workflow_metadata_returns_an_error_without_panicking() {
+    async fn invalid_carried_workflow_metadata_does_not_hide_valid_workflows() {
         let root = tempfile::tempdir().expect("skill root");
         let skill_dir = root.path().join("skills/invalid-meta");
         std::fs::create_dir_all(skill_dir.join("workflows")).expect("workflow directory");
@@ -5467,17 +5473,26 @@ mod tests {
             r#"export const meta = { argumentSchema: { type: "object" } }; return {};"#,
         )
         .expect("carried workflow");
+        std::fs::write(
+            skill_dir.join("workflows/valid.js"),
+            "return { valid: true };",
+        )
+        .expect("carried workflow");
 
         let (state, storage) = workflow_test_state();
         let space = storage.get_or_create_default().await.expect("space");
         let _skill_root = crate::skill::SpaceSkillRootGuard::at(space.id, root.path());
 
-        let error = list_scripts(State(state), Path(space.id))
+        let Json(list) = list_scripts(State(state), Path(space.id))
             .await
-            .expect_err("invalid carried metadata must be reported");
+            .expect("valid carried workflows remain listable");
         assert!(
-            error.0.to_string().contains("invalid metadata"),
-            "metadata error must be returned: {error:?}"
+            list.scripts.iter().any(|script| script.name == "valid"),
+            "the valid carried workflow must remain listed: {list:?}"
+        );
+        assert!(
+            !list.scripts.iter().any(|script| script.name == "invalid"),
+            "the malformed carried workflow must be excluded: {list:?}"
         );
     }
 
