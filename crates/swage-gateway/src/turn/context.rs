@@ -522,7 +522,7 @@ mod shipped_skill_tests {
         )
         .expect("available requested skill");
         assert_eq!(resolved[0].name, "dispatch-proof");
-        assert_eq!(resolved[0].instructions, "Use the dispatch proof skill.\n");
+        assert_eq!(resolved[0].instructions, "Use the dispatch proof skill.");
 
         let error = resolve_requested_skills_for_agent(
             "default",
