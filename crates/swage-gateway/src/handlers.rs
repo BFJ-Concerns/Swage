@@ -4797,6 +4797,9 @@ mod tests {
         let turn_id = Uuid::new_v4();
         let report = swage_protocol::client::context::AssemblyReport {
             total_tokens: 1024,
+            tool_scope: Some(serde_json::json!({
+                "effective_root": "/var/lib/swage/scratch/spaces/example/sessions/example",
+            })),
             ..Default::default()
         };
         let report_json = serde_json::to_string(&report).unwrap();
@@ -4819,5 +4822,9 @@ mod tests {
         let body = body_json(resp).await;
         assert_eq!(body["turn_id"].as_str().unwrap(), turn_id.to_string());
         assert_eq!(body["report"]["total_tokens"].as_i64().unwrap(), 1024);
+        assert_eq!(
+            body["report"]["tool_scope"]["effective_root"],
+            "/var/lib/swage/scratch/spaces/example/sessions/example"
+        );
     }
 }
