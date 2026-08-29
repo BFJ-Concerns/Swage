@@ -1,9 +1,6 @@
 <script lang="ts">
-  import ApprovalCard from "./ApprovalCard.svelte";
-  import ConnectionIndicator from "./ConnectionIndicator.svelte";
+  import ConversationChannel from "./ConversationChannel.svelte";
   import ConversationList from "./ConversationList.svelte";
-  import MessageDisplay from "./MessageDisplay.svelte";
-  import MessageInput from "./MessageInput.svelte";
   import OperatorDashboard from "./OperatorDashboard.svelte";
   import PagesSurface from "./PagesSurface.svelte";
   import SettingsPage from "./SettingsPage.svelte";
@@ -114,7 +111,7 @@
   <header class="topbar">
     <SpaceSelector {spaceStore} {onSpaceChange} />
     <nav aria-label="Surface">
-      <button aria-pressed={!settingsMode && activeSurface === "conversation"} class:active={!settingsMode && activeSurface === "conversation"} onclick={() => onSelectSurface("conversation")}>Conversation</button>
+      <button aria-pressed={!settingsMode && activeSurface === "conversation"} class:active={!settingsMode && activeSurface === "conversation"} onclick={() => onSelectSurface("conversation")}>Conversations</button>
       <button aria-pressed={!settingsMode && activeSurface === "pages"} class:active={!settingsMode && activeSurface === "pages"} onclick={() => onSelectSurface("pages")}>Pages</button>
       <button aria-pressed={!settingsMode && activeSurface === "operator"} class:active={!settingsMode && activeSurface === "operator"} onclick={() => onSelectSurface("operator")}>Operator</button>
       <button aria-pressed={settingsMode} class:active={settingsMode} onclick={() => onNavigate?.("/settings/providers")}>Settings</button>
@@ -151,23 +148,23 @@
 {:else if activeSurface === "operator"}
   <main class="operator"><OperatorDashboard /></main>
 {:else if activeSurface === "pages"}
+  <!--
+    The work surface carries the control channel: the same channel markup and
+    the same store instances as the conversation surface, so moving between
+    pages keeps the conversation running rather than leaving it behind.
+  -->
   <main class="pages-surface">
-    {#if pagesStore && currentSpace}
-      <PagesSurface store={pagesStore} spaceId={currentSpace.id} />
-    {/if}
+    <div class="work">
+      {#if pagesStore && currentSpace}
+        <PagesSurface store={pagesStore} spaceId={currentSpace.id} />
+      {/if}
+    </div>
+    <ConversationChannel {conversationStore} {connectionStore} {streamingStore} {onRetry} {displayPreferences} {modelOptions} {modelCatalogueReady} {defaultModelId} {agentDefinitions} bind:selectedAgentId {onNavigate} {onNewConversation} />
   </main>
 {:else}
   <main class="conversation">
     <aside><ConversationList store={conversationStore} {onNewConversation} /></aside>
-    <section aria-label="Conversation">
-      {#if activeConversation}<ConnectionIndicator store={connectionStore} {onRetry} />{/if}
-      <MessageDisplay store={conversationStore} {streamingStore} {displayPreferences} />
-      {#if streamingStore.pendingApproval}
-        <ApprovalCard approval={streamingStore.pendingApproval} />
-      {:else}
-        <MessageInput store={streamingStore} {modelOptions} {modelCatalogueReady} selectedModelId={activeConversation?.selected_model_id ?? defaultModelId} sessionId={activeConversation?.id ?? null} {agentDefinitions} canSelectAgent={!activeConversation} bind:selectedAgentId {onNavigate} />
-      {/if}
-    </section>
+    <ConversationChannel {conversationStore} {connectionStore} {streamingStore} {onRetry} {displayPreferences} {modelOptions} {modelCatalogueReady} {defaultModelId} {agentDefinitions} bind:selectedAgentId {onNavigate} {onNewConversation} />
   </main>
 {/if}
 
@@ -180,5 +177,9 @@
   button.active { font-weight: bold; }
   .conversation { display: grid; grid-template-columns: minmax(16rem, 25%) 1fr; height: calc(100vh - 4rem); }
   .conversation aside { overflow: auto; border-right: 1px solid var(--ink); }
-  .conversation section, .operator, .pages-surface { min-width: 0; overflow: auto; }
+  /* The work surface and its docked channel share the conversation surface's
+     two-column rule, mirrored: the work takes the wide column. */
+  .pages-surface { display: grid; grid-template-columns: 1fr minmax(20rem, 33%); height: calc(100vh - 4rem); }
+  .pages-surface .work { min-width: 0; overflow: auto; border-right: 1px solid var(--ink); }
+  .operator { min-width: 0; overflow: auto; }
 </style>
