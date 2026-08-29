@@ -6594,6 +6594,26 @@ mod tests {
         }
     }
 
+    fn pending_working_state(
+        storage: Arc<SqliteStorage>,
+        pending_calls: usize,
+    ) -> (AppState, Arc<Notify>) {
+        let pending_call_started = Arc::new(Notify::new());
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::new(PendingWorkingProvider {
+                calls: AtomicUsize::new(0),
+                pending_calls,
+                pending_call_started: Arc::clone(&pending_call_started),
+            }),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        (state, pending_call_started)
+    }
+
     /// Streams scripted outputs in order and records each request's message
     /// texts, so a test can assert what history a turn actually carried.
     struct ScriptedRecordingProvider {
@@ -7499,19 +7519,7 @@ mod tests {
             })
             .await
             .expect("run");
-        let pending_call_started = Arc::new(Notify::new());
-        let state = AppState::new(
-            Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
-            Arc::new(PendingWorkingProvider {
-                calls: AtomicUsize::new(0),
-                pending_calls: 2,
-                pending_call_started: Arc::clone(&pending_call_started),
-            }),
-            swage_config::ResolvedConfig::default(),
-            crate::tool::ToolDispatcher::allow_all(vec![]),
-            None,
-        );
+        let (state, pending_call_started) = pending_working_state(Arc::clone(&storage), 2);
         let (tx, rx) = mpsc::unbounded_channel();
         let task = tokio::spawn(run_host_commands(
             state,
@@ -11723,19 +11731,7 @@ mod tests {
             })
             .await
             .expect("run");
-        let pending_call_started = Arc::new(Notify::new());
-        let state = AppState::new(
-            Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
-            Arc::new(PendingWorkingProvider {
-                calls: AtomicUsize::new(0),
-                pending_calls: 2,
-                pending_call_started: Arc::clone(&pending_call_started),
-            }),
-            swage_config::ResolvedConfig::default(),
-            crate::tool::ToolDispatcher::allow_all(vec![]),
-            None,
-        );
+        let (state, pending_call_started) = pending_working_state(Arc::clone(&storage), 2);
         let (tx, rx) = mpsc::unbounded_channel();
         let task = tokio::spawn(run_host_commands(
             state,
@@ -11933,19 +11929,7 @@ mod tests {
             .list_workflow_journal(run.id)
             .await
             .expect("journal");
-        let pending_call_started = Arc::new(Notify::new());
-        let state = AppState::new(
-            Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
-            Arc::new(PendingWorkingProvider {
-                calls: AtomicUsize::new(0),
-                pending_calls: 2,
-                pending_call_started: Arc::clone(&pending_call_started),
-            }),
-            swage_config::ResolvedConfig::default(),
-            crate::tool::ToolDispatcher::allow_all(vec![]),
-            None,
-        );
+        let (state, pending_call_started) = pending_working_state(Arc::clone(&storage), 2);
         let (tx, rx) = mpsc::unbounded_channel();
         let task = tokio::spawn(run_host_commands(
             state,

@@ -58,46 +58,6 @@ impl LlmProvider for UnusedProvider {
     }
 }
 
-struct ToolCallingProvider {
-    rounds: std::sync::Mutex<Vec<Vec<StreamChunk>>>,
-    requests: Arc<std::sync::Mutex<Vec<CompletionRequest>>>,
-}
-
-impl ToolCallingProvider {
-    fn new(rounds: Vec<Vec<StreamChunk>>) -> (Self, Arc<std::sync::Mutex<Vec<CompletionRequest>>>) {
-        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
-        (
-            Self {
-                rounds: std::sync::Mutex::new(rounds),
-                requests: Arc::clone(&requests),
-            },
-            requests,
-        )
-    }
-}
-#[async_trait]
-impl LlmProvider for ToolCallingProvider {
-    fn model_id(&self) -> &str {
-        "tool-caller"
-    }
-    async fn complete(&self, _: CompletionRequest) -> Result<CompletionResponse, ProviderError> {
-        unreachable!()
-    }
-    async fn complete_with_tools(
-        &self,
-        _: ToolCompletionRequest,
-    ) -> Result<ToolCompletionResponse, ProviderError> {
-        unreachable!()
-    }
-    fn stream(
-        &self,
-        request: CompletionRequest,
-    ) -> Pin<Box<dyn futures::Stream<Item = StreamChunk> + Send>> {
-        self.requests.lock().unwrap().push(request);
-        Box::pin(futures::stream::iter(self.rounds.lock().unwrap().remove(0)))
-    }
-}
-
 fn dispatcher() -> ToolDispatcher {
     let mut registry = ToolRegistry::default();
     registry
@@ -359,44 +319,47 @@ async fn real_tool_audits_whole_state_and_updated_values_recompose() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn live_listener_turns_set_and_update_the_values_used_by_composition() {
-    let (provider, captured_requests) = ToolCallingProvider::new(vec![
+    let (provider, captured_requests) = crate::support::CapturingProvider::new(
+        "tool-caller",
         vec![
-            StreamChunk::ToolUse {
-                call_id: "set-1".into(),
-                name: "session_values".into(),
-                arguments: json!({"action":"set","name":"task","value":"inspect storage"}),
-            },
-            StreamChunk::Done {
-                finish_reason: None,
-            },
+            vec![
+                StreamChunk::ToolUse {
+                    call_id: "set-1".into(),
+                    name: "session_values".into(),
+                    arguments: json!({"action":"set","name":"task","value":"inspect storage"}),
+                },
+                StreamChunk::Done {
+                    finish_reason: None,
+                },
+            ],
+            vec![
+                StreamChunk::Delta {
+                    content: "saved".into(),
+                },
+                StreamChunk::Done {
+                    finish_reason: None,
+                },
+            ],
+            vec![
+                StreamChunk::ToolUse {
+                    call_id: "set-2".into(),
+                    name: "session_values".into(),
+                    arguments: json!({"action":"set","name":"task","value":"verify audit"}),
+                },
+                StreamChunk::Done {
+                    finish_reason: None,
+                },
+            ],
+            vec![
+                StreamChunk::Delta {
+                    content: "updated".into(),
+                },
+                StreamChunk::Done {
+                    finish_reason: None,
+                },
+            ],
         ],
-        vec![
-            StreamChunk::Delta {
-                content: "saved".into(),
-            },
-            StreamChunk::Done {
-                finish_reason: None,
-            },
-        ],
-        vec![
-            StreamChunk::ToolUse {
-                call_id: "set-2".into(),
-                name: "session_values".into(),
-                arguments: json!({"action":"set","name":"task","value":"verify audit"}),
-            },
-            StreamChunk::Done {
-                finish_reason: None,
-            },
-        ],
-        vec![
-            StreamChunk::Delta {
-                content: "updated".into(),
-            },
-            StreamChunk::Done {
-                finish_reason: None,
-            },
-        ],
-    ]);
+    );
     let swage_home = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(swage_home.path().join("assemblies")).unwrap();
     std::fs::write(
@@ -532,24 +495,27 @@ async fn live_listener_turns_set_and_update_the_values_used_by_composition() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn live_http_delegations_apply_call_scoped_context_composition() {
-    let (provider, captured_requests) = ToolCallingProvider::new(vec![
+    let (provider, captured_requests) = crate::support::CapturingProvider::new(
+        "tool-caller",
         vec![
-            StreamChunk::Delta {
-                content: "first child response".into(),
-            },
-            StreamChunk::Done {
-                finish_reason: None,
-            },
+            vec![
+                StreamChunk::Delta {
+                    content: "first child response".into(),
+                },
+                StreamChunk::Done {
+                    finish_reason: None,
+                },
+            ],
+            vec![
+                StreamChunk::Delta {
+                    content: "second child response".into(),
+                },
+                StreamChunk::Done {
+                    finish_reason: None,
+                },
+            ],
         ],
-        vec![
-            StreamChunk::Delta {
-                content: "second child response".into(),
-            },
-            StreamChunk::Done {
-                finish_reason: None,
-            },
-        ],
-    ]);
+    );
     let swage_home = tempfile::tempdir().unwrap();
     let element_path = swage_home
         .path()

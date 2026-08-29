@@ -1,11 +1,20 @@
+use std::collections::VecDeque;
 use std::ffi::{OsStr, OsString};
-use std::sync::{Mutex, MutexGuard};
+use std::pin::Pin;
+use std::sync::{Arc, Mutex, MutexGuard};
 
-use axum::http::StatusCode;
+use async_trait::async_trait;
+use axum::{Router, http::StatusCode};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use futures::StreamExt;
 use serde_json::Value;
+use swage_core::{
+    CompletionRequest, CompletionResponse, ProviderError, StreamChunk, ToolCompletionRequest,
+    ToolCompletionResponse,
+};
+use swage_provider::LlmProvider;
 use swage_storage::MANAGED_SECRET_KEY_ENV;
+use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite;
 
 pub type WsStream = futures::stream::SplitStream<
@@ -13,6 +22,100 @@ pub type WsStream = futures::stream::SplitStream<
 >;
 
 static PROCESS_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+/// A streaming provider that records every request and serves scripted rounds.
+pub struct CapturingProvider {
+    model_id: &'static str,
+    rounds: Mutex<VecDeque<Vec<StreamChunk>>>,
+    repeated_round: Option<Vec<StreamChunk>>,
+    requests: Arc<Mutex<Vec<CompletionRequest>>>,
+}
+
+impl CapturingProvider {
+    pub fn new(
+        model_id: &'static str,
+        rounds: Vec<Vec<StreamChunk>>,
+    ) -> (Self, Arc<Mutex<Vec<CompletionRequest>>>) {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        (
+            Self {
+                model_id,
+                rounds: Mutex::new(rounds.into()),
+                repeated_round: None,
+                requests: Arc::clone(&requests),
+            },
+            requests,
+        )
+    }
+
+    pub fn repeating(
+        model_id: &'static str,
+        round: Vec<StreamChunk>,
+    ) -> (Self, Arc<Mutex<Vec<CompletionRequest>>>) {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        (
+            Self {
+                model_id,
+                rounds: Mutex::new(VecDeque::new()),
+                repeated_round: Some(round),
+                requests: Arc::clone(&requests),
+            },
+            requests,
+        )
+    }
+}
+
+#[async_trait]
+impl LlmProvider for CapturingProvider {
+    fn model_id(&self) -> &str {
+        self.model_id
+    }
+
+    async fn complete(
+        &self,
+        _request: CompletionRequest,
+    ) -> Result<CompletionResponse, ProviderError> {
+        unreachable!("capturing provider is configured for streaming tests")
+    }
+
+    async fn complete_with_tools(
+        &self,
+        _request: ToolCompletionRequest,
+    ) -> Result<ToolCompletionResponse, ProviderError> {
+        unreachable!("capturing provider is configured for streaming tests")
+    }
+
+    fn stream(
+        &self,
+        request: CompletionRequest,
+    ) -> Pin<Box<dyn futures::Stream<Item = StreamChunk> + Send>> {
+        self.requests.lock().unwrap().push(request);
+        let round = self
+            .rounds
+            .lock()
+            .unwrap()
+            .pop_front()
+            .or_else(|| self.repeated_round.clone())
+            .expect("missing configured provider round");
+        Box::pin(futures::stream::iter(round))
+    }
+}
+
+/// Serve a gateway router on an ephemeral loopback address.
+pub async fn start_live_server(router: Router) -> std::net::SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test gateway listener");
+    let address = listener
+        .local_addr()
+        .expect("test gateway listener address");
+    tokio::spawn(async move {
+        axum::serve(listener, router)
+            .await
+            .expect("serve test gateway");
+    });
+    address
+}
 
 pub async fn live_http_json(
     address: std::net::SocketAddr,
