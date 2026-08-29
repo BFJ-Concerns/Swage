@@ -5510,6 +5510,13 @@ mod tests {
         assert_eq!(run.carrying_skill.as_deref(), Some("assembly"));
         assert_eq!(run.source.as_deref(), Some(embedded));
         assert_eq!(run.source_hash, source_hash(embedded));
+        let journal = storage
+            .list_workflow_journal(started.id)
+            .await
+            .expect("workflow journal");
+        assert!(journal.iter().any(|entry| {
+            entry.kind == "phase" && entry.request == serde_json::json!({ "message": "restate" })
+        }));
     }
 
     #[tokio::test(flavor = "multi_thread")]
