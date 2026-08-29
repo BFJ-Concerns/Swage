@@ -15,8 +15,9 @@ use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use serde_json::Value;
-use tokio::net::TcpListener;
 use tower::ServiceExt;
+
+use crate::support::start_live_server;
 
 use swage_config::ResolvedConfig;
 use swage_core::{
@@ -90,12 +91,7 @@ async fn start_test_server_with_config(config: ResolvedConfig) -> (Router, Socke
     );
     let router = build_router(state);
 
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let serve_router = router.clone();
-    tokio::spawn(async move {
-        axum::serve(listener, serve_router).await.unwrap();
-    });
+    let (addr, _server) = start_live_server(router.clone()).await;
 
     (router, addr)
 }

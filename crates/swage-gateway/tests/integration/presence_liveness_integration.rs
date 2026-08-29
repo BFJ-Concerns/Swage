@@ -9,9 +9,10 @@ use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use futures::Stream;
-use tokio::net::TcpListener;
 use tokio::time::Duration;
 use tower::ServiceExt;
+
+use crate::support::start_live_server;
 use uuid::Uuid;
 
 use swage_client::http::GatewayClient;
@@ -67,12 +68,7 @@ async fn start_test_server() -> (Router, SocketAddr) {
     );
     let router = build_router(state);
 
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let serve_router = router.clone();
-    tokio::spawn(async move {
-        axum::serve(listener, serve_router).await.unwrap();
-    });
+    let (addr, _server) = start_live_server(router.clone()).await;
 
     (router, addr)
 }

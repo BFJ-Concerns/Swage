@@ -3090,30 +3090,7 @@ mod tests {
             store::{ThreadStore, ToolCallStore, TurnStore},
         };
 
-        struct NamedTool(&'static str);
-
-        #[async_trait::async_trait]
-        impl crate::tool::Tool for NamedTool {
-            fn name(&self) -> &str {
-                self.0
-            }
-
-            fn description(&self) -> &str {
-                "Test tool"
-            }
-
-            fn parameters(&self) -> serde_json::Value {
-                serde_json::json!({ "type": "object" })
-            }
-
-            async fn execute(
-                &self,
-                _arguments: serde_json::Value,
-                _ctx: &dyn swage_tool::context::ToolContext,
-            ) -> Result<serde_json::Value, swage_core::ToolError> {
-                Ok(serde_json::json!({ "ok": true }))
-            }
-        }
+        use crate::test_support::NamedTool;
 
         let (provider, captured_requests) = CapturingMultiRoundProvider::new(vec![
             vec![
@@ -3166,8 +3143,8 @@ mod tests {
             Arc::new(provider) as Arc<dyn LlmProvider>,
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![
-                Arc::new(NamedTool("shared")) as Arc<dyn crate::tool::Tool>,
-                Arc::new(NamedTool("target_only")) as Arc<dyn crate::tool::Tool>,
+                Arc::new(NamedTool::new("shared")) as Arc<dyn crate::tool::Tool>,
+                Arc::new(NamedTool::new("target_only")) as Arc<dyn crate::tool::Tool>,
             ]),
             None,
         );

@@ -6334,7 +6334,7 @@ mod tests {
             Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![
-                Arc::new(WorkflowNamedTool("shell")) as Arc<dyn crate::tool::Tool>
+                Arc::new(NamedTool::new("shell")) as Arc<dyn crate::tool::Tool>
             ]),
             None,
         );
@@ -6575,10 +6575,10 @@ mod tests {
             Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all([
-                Arc::new(WorkflowNamedTool("knowledge_record")) as Arc<dyn crate::tool::Tool>,
-                Arc::new(WorkflowNamedTool("web_search")) as Arc<dyn crate::tool::Tool>,
-                Arc::new(WorkflowNamedTool("shell")) as Arc<dyn crate::tool::Tool>,
-                Arc::new(WorkflowNamedTool("config_apply")) as Arc<dyn crate::tool::Tool>,
+                Arc::new(NamedTool::new("knowledge_record")) as Arc<dyn crate::tool::Tool>,
+                Arc::new(NamedTool::new("web_search")) as Arc<dyn crate::tool::Tool>,
+                Arc::new(NamedTool::new("shell")) as Arc<dyn crate::tool::Tool>,
+                Arc::new(NamedTool::new("config_apply")) as Arc<dyn crate::tool::Tool>,
             ]),
             None,
         );
@@ -6713,7 +6713,7 @@ mod tests {
         ];
         let mut tools = placeholder_tool_names
             .into_iter()
-            .map(|name| Arc::new(WorkflowNamedTool(name)) as Arc<dyn crate::tool::Tool>)
+            .map(|name| Arc::new(NamedTool::new(name)) as Arc<dyn crate::tool::Tool>)
             .collect::<Vec<_>>();
         tools.extend([
             Arc::new(crate::tool::knowledge::KnowledgeRecordTool) as Arc<dyn crate::tool::Tool>,
@@ -7194,6 +7194,95 @@ mod tests {
         }
     }
 
+    struct WorkingBudgetScaffold {
+        storage: Arc<SqliteStorage>,
+        space_id: Uuid,
+        run_id: Uuid,
+        state: AppState,
+        pending_call_started: Arc<Notify>,
+    }
+
+    impl WorkingBudgetScaffold {
+        async fn new(pending_calls: usize) -> Self {
+            let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+            let space = storage.get_or_create_default().await.expect("space");
+            let run = storage
+                .create_workflow_run(NewWorkflowRun {
+                    space_id: space.id,
+                    parent_run_id: None,
+                    parent_seq: None,
+                    script_version_id: None,
+                    inline_workflow_id: None,
+                    inline_workflow_name: None,
+                    inline_workflow_version: None,
+                    carrying_skill: None,
+                    source: Some("return null".into()),
+                    source_hash: source_hash("return null"),
+                    args: Value::Null,
+                    budget: serde_json::json!({}),
+                    engine_version: "test".into(),
+                    dispatch_bound_agent_ids: vec![],
+                    dispatch_bound_task_definition_ids: vec![],
+                    workflow_call_tools: None,
+                    inherited_worker_placement: None,
+                })
+                .await
+                .expect("run");
+            let pending_call_started = Arc::new(Notify::new());
+            let state = AppState::new(
+                Arc::clone(&storage) as Arc<dyn Storage>,
+                Arc::clone(&storage) as Arc<dyn SpaceStore>,
+                Arc::new(PendingWorkingProvider {
+                    calls: AtomicUsize::new(0),
+                    pending_calls,
+                    pending_call_started: Arc::clone(&pending_call_started),
+                }),
+                swage_config::ResolvedConfig::default(),
+                crate::tool::ToolDispatcher::allow_all(vec![]),
+                None,
+            );
+            Self {
+                storage,
+                space_id: space.id,
+                run_id: run.id,
+                state,
+                pending_call_started,
+            }
+        }
+
+        fn spawn(
+            self,
+            budget: WorkflowBudget,
+            replay: Vec<WorkflowJournalRecord>,
+            agent_calls: u32,
+            spent_tokens: u64,
+        ) -> (
+            mpsc::UnboundedSender<HostCommand>,
+            Arc<Notify>,
+            tokio::task::JoinHandle<()>,
+        ) {
+            let (tx, rx) = mpsc::unbounded_channel();
+            let task = tokio::spawn(run_host_commands(
+                self.state,
+                self.run_id,
+                self.space_id,
+                vec![],
+                vec![],
+                None,
+                None,
+                budget,
+                replay,
+                Arc::new(AtomicU32::new(agent_calls)),
+                Arc::new(AtomicU64::new(spent_tokens)),
+                Arc::new(Mutex::new(std::collections::HashMap::new())),
+                CancellationToken::new(),
+                PARK_TIMER_THRESHOLD_MS,
+                rx,
+            ));
+            (tx, self.pending_call_started, task)
+        }
+    }
+
     /// Streams scripted outputs in order and records each request's message
     /// texts, so a test can assert what history a turn actually carried.
     struct ScriptedRecordingProvider {
@@ -7568,30 +7657,7 @@ mod tests {
         }
     }
 
-    struct WorkflowNamedTool(&'static str);
-
-    #[async_trait::async_trait]
-    impl crate::tool::Tool for WorkflowNamedTool {
-        fn name(&self) -> &str {
-            self.0
-        }
-
-        fn description(&self) -> &str {
-            "Test workflow tool"
-        }
-
-        fn parameters(&self) -> serde_json::Value {
-            serde_json::json!({ "type": "object" })
-        }
-
-        async fn execute(
-            &self,
-            _arguments: serde_json::Value,
-            _ctx: &dyn swage_tool::context::ToolContext,
-        ) -> Result<serde_json::Value, swage_core::ToolError> {
-            Ok(serde_json::json!({ "unexpected": "execution" }))
-        }
-    }
+    use crate::test_support::NamedTool;
 
     #[async_trait::async_trait]
     impl DeliveryCapability for CancellingDeliveryCapability {
@@ -8104,52 +8170,8 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn configured_working_budget_admits_both_parallel_calls() {
-        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
-        let run = storage
-            .create_workflow_run(NewWorkflowRun {
-                space_id: space.id,
-                parent_run_id: None,
-                parent_seq: None,
-                script_version_id: None,
-                inline_workflow_id: None,
-                inline_workflow_name: None,
-                inline_workflow_version: None,
-                carrying_skill: None,
-                source: Some("return null".into()),
-                source_hash: source_hash("return null"),
-                args: Value::Null,
-                budget: serde_json::json!({}),
-                engine_version: "test".into(),
-                dispatch_bound_agent_ids: vec![],
-                dispatch_bound_task_definition_ids: vec![],
-                workflow_call_tools: None,
-                inherited_worker_placement: None,
-            })
-            .await
-            .expect("run");
-        let pending_call_started = Arc::new(Notify::new());
-        let state = AppState::new(
-            Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
-            Arc::new(PendingWorkingProvider {
-                calls: AtomicUsize::new(0),
-                pending_calls: 2,
-                pending_call_started: Arc::clone(&pending_call_started),
-            }),
-            swage_config::ResolvedConfig::default(),
-            crate::tool::ToolDispatcher::allow_all(vec![]),
-            None,
-        );
-        let (tx, rx) = mpsc::unbounded_channel();
-        let task = tokio::spawn(run_host_commands(
-            state,
-            run.id,
-            space.id,
-            vec![],
-            vec![],
-            None,
-            None,
+        let scaffold = WorkingBudgetScaffold::new(2).await;
+        let (tx, pending_call_started, task) = scaffold.spawn(
             WorkflowBudget {
                 max_agent_calls: Some(2),
                 max_total_tokens: Some(1_000),
@@ -8157,13 +8179,9 @@ mod tests {
                 max_concurrent_agent_calls: Some(2),
             },
             vec![],
-            Arc::new(AtomicU32::new(0)),
-            Arc::new(AtomicU64::new(0)),
-            Arc::new(Mutex::new(std::collections::HashMap::new())),
-            CancellationToken::new(),
-            PARK_TIMER_THRESHOLD_MS,
-            rx,
-        ));
+            0,
+            0,
+        );
         let request = |prompt: &str| AgentCallRequest {
             cwd: None,
             isolation: None,
@@ -8423,7 +8441,7 @@ mod tests {
             Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![
-                Arc::new(WorkflowNamedTool("shell")) as Arc<dyn crate::tool::Tool>
+                Arc::new(NamedTool::new("shell")) as Arc<dyn crate::tool::Tool>
             ]),
             None,
         );
@@ -8719,7 +8737,7 @@ mod tests {
             Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![
-                Arc::new(WorkflowNamedTool("shell")) as Arc<dyn crate::tool::Tool>
+                Arc::new(NamedTool::new("shell")) as Arc<dyn crate::tool::Tool>
             ]),
             None,
         );
@@ -9082,7 +9100,7 @@ mod tests {
             Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
             config,
             crate::tool::ToolDispatcher::allow_all(vec![
-                Arc::new(WorkflowNamedTool("shell")) as Arc<dyn crate::tool::Tool>
+                Arc::new(NamedTool::new("shell")) as Arc<dyn crate::tool::Tool>
             ]),
             None,
         );
@@ -9219,7 +9237,7 @@ mod tests {
             config,
             crate::tool::ToolDispatcher::allow_all(vec![
                 Arc::new(crate::tool::workflow_run::WorkflowRunTool) as Arc<dyn crate::tool::Tool>,
-                Arc::new(WorkflowNamedTool("shell")) as Arc<dyn crate::tool::Tool>,
+                Arc::new(NamedTool::new("shell")) as Arc<dyn crate::tool::Tool>,
             ]),
             None,
         );
@@ -9324,7 +9342,7 @@ mod tests {
             Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
             config,
             crate::tool::ToolDispatcher::allow_all(vec![
-                Arc::new(WorkflowNamedTool("shell")) as Arc<dyn crate::tool::Tool>
+                Arc::new(NamedTool::new("shell")) as Arc<dyn crate::tool::Tool>
             ]),
             None,
         );
@@ -12574,52 +12592,8 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn in_flight_working_reservations_do_not_consume_the_closing_partition() {
-        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
-        let run = storage
-            .create_workflow_run(NewWorkflowRun {
-                space_id: space.id,
-                parent_run_id: None,
-                parent_seq: None,
-                script_version_id: None,
-                inline_workflow_id: None,
-                inline_workflow_name: None,
-                inline_workflow_version: None,
-                carrying_skill: None,
-                source: Some("return null".into()),
-                source_hash: source_hash("return null"),
-                args: Value::Null,
-                budget: serde_json::json!({}),
-                engine_version: "test".into(),
-                dispatch_bound_agent_ids: vec![],
-                dispatch_bound_task_definition_ids: vec![],
-                workflow_call_tools: None,
-                inherited_worker_placement: None,
-            })
-            .await
-            .expect("run");
-        let pending_call_started = Arc::new(Notify::new());
-        let state = AppState::new(
-            Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
-            Arc::new(PendingWorkingProvider {
-                calls: AtomicUsize::new(0),
-                pending_calls: 2,
-                pending_call_started: Arc::clone(&pending_call_started),
-            }),
-            swage_config::ResolvedConfig::default(),
-            crate::tool::ToolDispatcher::allow_all(vec![]),
-            None,
-        );
-        let (tx, rx) = mpsc::unbounded_channel();
-        let task = tokio::spawn(run_host_commands(
-            state,
-            run.id,
-            space.id,
-            vec![],
-            vec![],
-            None,
-            None,
+        let scaffold = WorkingBudgetScaffold::new(2).await;
+        let (tx, pending_call_started, task) = scaffold.spawn(
             WorkflowBudget {
                 max_agent_calls: Some(3),
                 max_total_tokens: Some(6),
@@ -12627,13 +12601,9 @@ mod tests {
                 max_concurrent_agent_calls: Some(4),
             },
             vec![],
-            Arc::new(AtomicU32::new(0)),
-            Arc::new(AtomicU64::new(2)),
-            Arc::new(Mutex::new(std::collections::HashMap::new())),
-            CancellationToken::new(),
-            PARK_TIMER_THRESHOLD_MS,
-            rx,
-        ));
+            0,
+            2,
+        );
         let request = |prompt: &str| AgentCallRequest {
             cwd: None,
             isolation: None,
@@ -12718,30 +12688,9 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn replayed_in_flight_working_reservations_leave_the_closing_partition_available() {
-        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
-        let run = storage
-            .create_workflow_run(NewWorkflowRun {
-                space_id: space.id,
-                parent_run_id: None,
-                parent_seq: None,
-                script_version_id: None,
-                inline_workflow_id: None,
-                inline_workflow_name: None,
-                inline_workflow_version: None,
-                carrying_skill: None,
-                source: Some("return null".into()),
-                source_hash: source_hash("return null"),
-                args: Value::Null,
-                budget: serde_json::json!({}),
-                engine_version: "test".into(),
-                dispatch_bound_agent_ids: vec![],
-                dispatch_bound_task_definition_ids: vec![],
-                workflow_call_tools: None,
-                inherited_worker_placement: None,
-            })
-            .await
-            .expect("run");
+        let scaffold = WorkingBudgetScaffold::new(2).await;
+        let storage = Arc::clone(&scaffold.storage);
+        let run_id = scaffold.run_id;
         let request = |prompt: &str| AgentCallRequest {
             cwd: None,
             isolation: None,
@@ -12765,7 +12714,7 @@ mod tests {
             let request_json = serde_json::to_value(request(prompt)).expect("working request");
             storage
                 .create_workflow_journal_intent(NewWorkflowJournalIntent {
-                    run_id: run.id,
+                    run_id,
                     seq,
                     kind: "agent_call".into(),
                     args_hash: journal_args_hash(&request_json),
@@ -12782,7 +12731,7 @@ mod tests {
             serde_json::to_value(&transition_request).expect("transition request");
         let transition = storage
             .create_workflow_journal_intent(NewWorkflowJournalIntent {
-                run_id: run.id,
+                run_id,
                 seq: 2,
                 kind: "wind_down".into(),
                 args_hash: journal_args_hash(&transition_json),
@@ -12807,31 +12756,10 @@ mod tests {
             .await
             .expect("wind-down transition");
         let replay = storage
-            .list_workflow_journal(run.id)
+            .list_workflow_journal(run_id)
             .await
             .expect("journal");
-        let pending_call_started = Arc::new(Notify::new());
-        let state = AppState::new(
-            Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
-            Arc::new(PendingWorkingProvider {
-                calls: AtomicUsize::new(0),
-                pending_calls: 2,
-                pending_call_started: Arc::clone(&pending_call_started),
-            }),
-            swage_config::ResolvedConfig::default(),
-            crate::tool::ToolDispatcher::allow_all(vec![]),
-            None,
-        );
-        let (tx, rx) = mpsc::unbounded_channel();
-        let task = tokio::spawn(run_host_commands(
-            state,
-            run.id,
-            space.id,
-            vec![],
-            vec![],
-            None,
-            None,
+        let (tx, pending_call_started, task) = scaffold.spawn(
             WorkflowBudget {
                 max_agent_calls: Some(3),
                 max_total_tokens: Some(6),
@@ -12839,13 +12767,9 @@ mod tests {
                 max_concurrent_agent_calls: Some(4),
             },
             replay,
-            Arc::new(AtomicU32::new(2)),
-            Arc::new(AtomicU64::new(0)),
-            Arc::new(Mutex::new(std::collections::HashMap::new())),
-            CancellationToken::new(),
-            PARK_TIMER_THRESHOLD_MS,
-            rx,
-        ));
+            2,
+            0,
+        );
         let first_cancellation = CancellationToken::new();
         let (first_reply, first_receive) = oneshot::channel();
         tx.send(HostCommand::Agent {
