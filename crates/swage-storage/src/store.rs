@@ -12,15 +12,15 @@ use crate::model::{
     NewApprovalRequest, NewAttachment, NewAuditEvent, NewBackgroundJob, NewChannelInboundMessage,
     NewChannelLink, NewCurationAssertion, NewDeliveryRecord, NewDeviceRegistration,
     NewKnowledgeCitation, NewMaterial, NewMessage, NewOrientationCard, NewPage, NewPageAnnotation,
-    NewPageModule, NewSchedule, NewScheduleRun, NewSecretRecord, NewSession, NewSourceObservation,
-    NewSpace, NewTaskDefinition, NewThread, NewToolCall, NewTurn, NewWorkflowJournalIntent,
-    NewWorkflowRun, NewWorkflowRunEvent, NewWorkflowScript, NewWorkspaceAttachment,
-    OrientationCard, OrientationCardLifecycle, Page, PageAnnotation, PageModule,
-    PendingChannelOrigin, Schedule, ScheduleRun, ScheduleRunUpdate, SecretRecord, Session,
-    SessionVariable, SourceObservation, Space, SpaceSlug, TaskDefinition, Thread, ThreadBranch,
-    ThreadState, ToolCallRecord, Turn, TurnState, UpdateSchedule, WorkflowJournalRecord,
-    WorkflowRunEventRecord, WorkflowRunRecord, WorkflowScriptRecord, WorkflowScriptVersion,
-    WorkspaceAttachment,
+    NewPageModule, NewPageTemplate, NewPageTemplateModule, NewSchedule, NewScheduleRun,
+    NewSecretRecord, NewSession, NewSourceObservation, NewSpace, NewTaskDefinition, NewThread,
+    NewToolCall, NewTurn, NewWorkflowJournalIntent, NewWorkflowRun, NewWorkflowRunEvent,
+    NewWorkflowScript, NewWorkspaceAttachment, OrientationCard, OrientationCardLifecycle, Page,
+    PageAnnotation, PageModule, PageTemplate, PageTemplateModule, PendingChannelOrigin, Schedule,
+    ScheduleRun, ScheduleRunUpdate, SecretRecord, Session, SessionVariable, SourceObservation,
+    Space, SpaceSlug, TaskDefinition, Thread, ThreadBranch, ThreadState, ToolCallRecord, Turn,
+    TurnState, UpdateSchedule, WorkflowJournalRecord, WorkflowRunEventRecord, WorkflowRunRecord,
+    WorkflowScriptRecord, WorkflowScriptVersion, WorkspaceAttachment,
 };
 
 // ---------------------------------------------------------------------------
@@ -1171,6 +1171,34 @@ pub trait PageStore: Send + Sync {
     /// Replace a module instance's source, advancing the owning page's
     /// updated_at in the same write.
     async fn update_page_module_source(&self, id: Uuid, source: &str) -> Result<(), StorageError>;
+    async fn create_page_template(
+        &self,
+        template: NewPageTemplate,
+    ) -> Result<PageTemplate, StorageError>;
+    async fn get_page_template(&self, id: Uuid) -> Result<Option<PageTemplate>, StorageError>;
+    /// A space's templates, oldest first.
+    async fn list_page_templates_by_space(
+        &self,
+        space_id: Uuid,
+    ) -> Result<Vec<PageTemplate>, StorageError>;
+    async fn create_page_template_module(
+        &self,
+        module: NewPageTemplateModule,
+    ) -> Result<PageTemplateModule, StorageError>;
+    /// A template's module rows in position order.
+    async fn list_page_template_modules(
+        &self,
+        template_id: Uuid,
+    ) -> Result<Vec<PageTemplateModule>, StorageError>;
+    /// Create a page seeded from a template's modules, recording the fork's
+    /// origin on the page. The page row and its seeded modules land in one
+    /// write, so a half-seeded page cannot be observed. The copied rows are
+    /// the page's own from birth — later edits on either side do not cross.
+    async fn create_page_from_template(
+        &self,
+        page: NewPage,
+        template_id: Uuid,
+    ) -> Result<Page, StorageError>;
 }
 
 /// Annotations on a page's modules: the notes a user and an agent both hang
@@ -1989,6 +2017,40 @@ mod tests {
             unimplemented!()
         }
         async fn update_page_module_source(&self, _: Uuid, _: &str) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+        async fn create_page_template(
+            &self,
+            _: NewPageTemplate,
+        ) -> Result<PageTemplate, StorageError> {
+            unimplemented!()
+        }
+        async fn get_page_template(&self, _: Uuid) -> Result<Option<PageTemplate>, StorageError> {
+            unimplemented!()
+        }
+        async fn list_page_templates_by_space(
+            &self,
+            _: Uuid,
+        ) -> Result<Vec<PageTemplate>, StorageError> {
+            unimplemented!()
+        }
+        async fn create_page_template_module(
+            &self,
+            _: NewPageTemplateModule,
+        ) -> Result<PageTemplateModule, StorageError> {
+            unimplemented!()
+        }
+        async fn list_page_template_modules(
+            &self,
+            _: Uuid,
+        ) -> Result<Vec<PageTemplateModule>, StorageError> {
+            unimplemented!()
+        }
+        async fn create_page_from_template(
+            &self,
+            _: NewPage,
+            _: Uuid,
+        ) -> Result<Page, StorageError> {
             unimplemented!()
         }
     }

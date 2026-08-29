@@ -13,12 +13,15 @@ use uuid::Uuid;
 
 use swage_core::GatewayError;
 use swage_protocol::client::page::{
-    CreatePageAnnotationRequest, CreatePageRequest, PageAnnotationView, PageListResponse,
-    PageModuleView, PageResponse, PageSummary, UpdatePageAnnotationRequest, WritePageModuleRequest,
+    CreatePageAnnotationRequest, CreatePageRequest, CreatePageTemplateRequest,
+    PageAnnotationView, PageListResponse, PageModuleView, PageResponse, PageSummary,
+    PageTemplateListResponse, PageTemplateModuleView, PageTemplateResponse, PageTemplateSummary,
+    UpdatePageAnnotationRequest, WritePageModuleRequest,
 };
 use swage_protocol::client::websocket::ServerEvent;
 use swage_storage::{
-    NewAuditEvent, NewPage, NewPageAnnotation, NewPageModule, PageAnnotation, PageModule,
+    NewAuditEvent, NewPage, NewPageAnnotation, NewPageModule, NewPageTemplate,
+    NewPageTemplateModule, PageAnnotation, PageModule,
 };
 
 use crate::error::ApiError;
@@ -45,13 +48,41 @@ pub async fn create_page(
         .get(space_id)
         .await?
         .ok_or(GatewayError::SpaceNotFound { id: space_id })?;
-    let page = state
-        .storage
-        .create_page(NewPage {
-            space_id,
-            title: title.to_string(),
-        })
-        .await?;
+
+    // A template seeds the page; everything is validated before anything
+    // lands, so a rejected fork leaves no page behind.
+    let template = match request.template_id {
+        Some(template_id) => Some(resolve_template(state, space_id, template_id).await?),
+        None => None,
+    };
+
+    let page = match &template {
+        Some(template) => {
+            state
+                .storage
+                .create_page_from_template(
+                    NewPage {
+                        space_id,
+                        title: title.to_string(),
+                    },
+                    template.id,
+                )
+                .await?
+        }
+        None => {
+            state
+                .storage
+                .create_page(NewPage {
+                    space_id,
+                    title: title.to_string(),
+                })
+                .await?
+        }
+    };
+
+    let template_metadata = template
+        .as_ref()
+        .map(|template| json!({ "template_id": template.id, "template_name": template.name }));
     state
         .storage
         .create_audit_event(NewAuditEvent {
@@ -60,8 +91,17 @@ pub async fn create_page(
             entity_kind: "page".into(),
             entity_id: page.id.to_string(),
             event_kind: "page_created".into(),
-            summary: format!("page created: {title}"),
-            metadata: json!({ "space_id": page.space_id, "title": title }),
+            summary: match &template {
+                Some(template) => {
+                    format!("page created from template '{}': {title}", template.name)
+                }
+                None => format!("page created: {title}"),
+            },
+            metadata: json!({
+                "space_id": page.space_id,
+                "title": title,
+                "forked_from": template_metadata,
+            }),
         })
         .await?;
     // Creation is a page-level change: open surfaces refetch their list.
@@ -69,13 +109,139 @@ pub async fn create_page(
         page_id: page.id,
         module_id: None,
     });
+    let modules = state.storage.list_page_modules(page.id).await?;
     Ok(PageResponse {
         id: page.id,
         space_id: page.space_id,
         title: page.title,
         created_at: page.created_at,
         updated_at: page.updated_at,
-        modules: Vec::new(),
+        modules: modules
+            .into_iter()
+            .map(|module| module_view(module, Vec::new()))
+            .collect(),
+        forked_from_template_id: page.forked_from_template_id,
+        forked_at: page.forked_at,
+    })
+}
+
+/// A template usable from this space: it must exist and belong here.
+/// Templates are space-local — there is no sharing across spaces.
+async fn resolve_template(
+    state: &AppState,
+    space_id: Uuid,
+    template_id: Uuid,
+) -> Result<swage_storage::PageTemplate, GatewayError> {
+    state
+        .storage
+        .get_page_template(template_id)
+        .await?
+        .filter(|template| template.space_id == space_id)
+        .ok_or_else(|| {
+            GatewayError::ValidationError(format!("no template {template_id} in space {space_id}"))
+        })
+}
+
+/// Create a space's reusable page shape. A template is inert: it seeds
+/// pages at their creation and is never projected into pages already
+/// forked from it.
+pub async fn create_page_template(
+    state: &AppState,
+    space_id: Uuid,
+    request: CreatePageTemplateRequest,
+) -> Result<PageTemplateResponse, GatewayError> {
+    let name = request.name.trim();
+    if name.is_empty() {
+        return Err(GatewayError::ValidationError(
+            "a template needs a non-empty name".into(),
+        ));
+    }
+    state
+        .space_store
+        .get(space_id)
+        .await?
+        .ok_or(GatewayError::SpaceNotFound { id: space_id })?;
+    // Validate every module kind before the first write: a template that
+    // seeds an unrenderable module is a page the user cannot see.
+    for module in &request.modules {
+        let kind = module.kind.as_deref().unwrap_or("document");
+        if !MODULE_KINDS.contains(&kind) {
+            return Err(GatewayError::ValidationError(format!(
+                "unknown module kind '{kind}' — known kinds: {}",
+                MODULE_KINDS.join(", ")
+            )));
+        }
+    }
+
+    let template = state
+        .storage
+        .create_page_template(NewPageTemplate {
+            space_id,
+            name: name.to_string(),
+        })
+        .await?;
+    for (position, module) in request.modules.iter().enumerate() {
+        state
+            .storage
+            .create_page_template_module(NewPageTemplateModule {
+                template_id: template.id,
+                kind: module.kind.clone().unwrap_or_else(|| "document".into()),
+                position: position as i32,
+                source: module.source.clone(),
+            })
+            .await?;
+    }
+
+    state
+        .storage
+        .create_audit_event(NewAuditEvent {
+            id: Uuid::new_v4().to_string(),
+            session_id: None,
+            entity_kind: "page_template".into(),
+            entity_id: template.id.to_string(),
+            event_kind: "page_template_created".into(),
+            summary: format!("page template created: {name}"),
+            metadata: json!({
+                "space_id": template.space_id,
+                "name": name,
+                "module_count": request.modules.len(),
+            }),
+        })
+        .await?;
+
+    template_response(state, template.id).await
+}
+
+pub async fn template_response(
+    state: &AppState,
+    template_id: Uuid,
+) -> Result<PageTemplateResponse, GatewayError> {
+    let template = state
+        .storage
+        .get_page_template(template_id)
+        .await?
+        .ok_or_else(|| {
+            GatewayError::ValidationError(format!("no template with id {template_id}"))
+        })?;
+    let modules = state
+        .storage
+        .list_page_template_modules(template.id)
+        .await?;
+    Ok(PageTemplateResponse {
+        id: template.id,
+        space_id: template.space_id,
+        name: template.name,
+        created_at: template.created_at,
+        updated_at: template.updated_at,
+        modules: modules
+            .into_iter()
+            .map(|module| PageTemplateModuleView {
+                id: module.id,
+                kind: module.kind,
+                position: module.position,
+                source: module.source,
+            })
+            .collect(),
     })
 }
 
@@ -428,6 +594,8 @@ pub async fn page_response(state: &AppState, page_id: Uuid) -> Result<PageRespon
                 module_view(module, hung_here)
             })
             .collect(),
+        forked_from_template_id: page.forked_from_template_id,
+        forked_at: page.forked_at,
     })
 }
 
@@ -572,6 +740,7 @@ mod tests {
             space.id,
             CreatePageRequest {
                 title: "Planning".into(),
+                template_id: None,
             },
         )
         .await
@@ -593,6 +762,7 @@ mod tests {
             space.id,
             CreatePageRequest {
                 title: "Elsewhere".into(),
+                template_id: None,
             },
         )
         .await
@@ -828,4 +998,40 @@ mod tests {
             "the event is a signal: content rides the refetch, never the event"
         );
     }
+}
+
+pub async fn list_page_templates_handler(
+    State(state): State<AppState>,
+    Path(space_id): Path<Uuid>,
+) -> Result<Json<PageTemplateListResponse>, ApiError> {
+    let templates = state
+        .storage
+        .list_page_templates_by_space(space_id)
+        .await
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    Ok(Json(PageTemplateListResponse {
+        templates: templates
+            .into_iter()
+            .map(|template| PageTemplateSummary {
+                id: template.id,
+                name: template.name,
+                updated_at: template.updated_at,
+            })
+            .collect(),
+    }))
+}
+
+pub async fn create_page_template_handler(
+    State(state): State<AppState>,
+    Path(space_id): Path<Uuid>,
+    Json(request): Json<CreatePageTemplateRequest>,
+) -> Result<Json<PageTemplateResponse>, ApiError> {
+    Ok(Json(create_page_template(&state, space_id, request).await?))
+}
+
+pub async fn get_page_template_handler(
+    State(state): State<AppState>,
+    Path(template_id): Path<Uuid>,
+) -> Result<Json<PageTemplateResponse>, ApiError> {
+    Ok(Json(template_response(&state, template_id).await?))
 }

@@ -12,6 +12,7 @@
 import { fromStore, writable } from "svelte/store";
 import type { PageResponse } from "../protocol/PageResponse";
 import type { PageSummary } from "../protocol/PageSummary";
+import type { PageTemplateSummary } from "../protocol/PageTemplateSummary";
 import type { ServerEvent } from "../types";
 import * as pagesApi from "../api/pages";
 import { createWorkSurfaceChannel } from "../api/work-surface";
@@ -20,10 +21,12 @@ import type { WorkSurfaceChannel } from "../api/work-surface";
 export interface PagesStore {
   readonly pages: PageSummary[];
   readonly activePage: PageResponse | null;
+  readonly templates: PageTemplateSummary[];
   loadPages(spaceId: string): Promise<void>;
   openPage(pageId: string): Promise<void>;
   closePage(): void;
-  createPage(spaceId: string, title: string): Promise<void>;
+  createPage(spaceId: string, title: string, templateId?: string): Promise<void>;
+  templateName(templateId: string): string | null;
   writeModule(
     pageId: string,
     moduleId: string | null,
@@ -50,8 +53,10 @@ export interface PagesStoreOptions {
 export function createPagesStore(options?: PagesStoreOptions): PagesStore {
   const pagesStore = writable<PageSummary[]>([]);
   const activePageStore = writable<PageResponse | null>(null);
+  const templatesStore = writable<PageTemplateSummary[]>([]);
   const pagesState = fromStore(pagesStore);
   const activePageState = fromStore(activePageStore);
+  const templatesState = fromStore(templatesStore);
 
   let currentSpaceId: string | null = null;
 
@@ -90,6 +95,9 @@ export function createPagesStore(options?: PagesStoreOptions): PagesStore {
     get activePage() {
       return activePageState.current;
     },
+    get templates() {
+      return templatesState.current;
+    },
 
     async loadPages(spaceId: string): Promise<void> {
       if (currentSpaceId !== null && currentSpaceId !== spaceId) {
@@ -100,6 +108,9 @@ export function createPagesStore(options?: PagesStoreOptions): PagesStore {
       currentSpaceId = spaceId;
       const response = await pagesApi.listPages(spaceId);
       pagesStore.set(response.pages);
+      // Templates are space-local: the picker only ever offers this space's.
+      const templates = await pagesApi.listPageTemplates(spaceId);
+      templatesStore.set(templates.templates);
     },
 
     async openPage(pageId: string): Promise<void> {
@@ -110,11 +121,25 @@ export function createPagesStore(options?: PagesStoreOptions): PagesStore {
       activePageStore.set(null);
     },
 
-    async createPage(spaceId: string, title: string): Promise<void> {
-      const page = await pagesApi.createPage(spaceId, title);
+    async createPage(
+      spaceId: string,
+      title: string,
+      templateId?: string,
+    ): Promise<void> {
+      const page = await pagesApi.createPage(spaceId, title, templateId);
       const response = await pagesApi.listPages(spaceId);
       pagesStore.set(response.pages);
       activePageStore.set(page);
+    },
+
+    templateName(templateId: string): string | null {
+      // The recorded origin is an id; the space's loaded templates give it a
+      // name. A template that no longer exists resolves to nothing, and the
+      // caller shows the bare id rather than losing the lineage.
+      const template = templatesState.current.find(
+        (candidate) => candidate.id === templateId,
+      );
+      return template ? template.name : null;
     },
 
     async writeModule(
