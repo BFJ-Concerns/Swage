@@ -68,10 +68,10 @@
     streamingStore.handleServerEvent(event),
   );
 
-  // Pages listen on the same relay: page_updated is the live-refresh signal
-  // for the work surfaces, whichever surface is in view.
+  // The pages store opens its own work-surface channel: page signals are not
+  // turn events, and an open page must stay live even with no conversation
+  // selected.
   const pagesStore = createPagesStore();
-  connectionStore.onServerEvent((event) => pagesStore.handleServerEvent(event));
 
   // ---------------------------------------------------------------------------
   // Router-aware conversation actions
@@ -324,9 +324,10 @@
   function handleSelectSurface(next: Surface): void {
     activeSurface = next;
 
-    // The pages surface keeps the conversation socket: page_updated rides
-    // it, and the conversation is the control channel beside the work
-    // surface rather than a place to navigate away to.
+    // The pages surface keeps the conversation socket: the conversation is
+    // the control channel beside the work surface rather than a place to
+    // navigate away to. Page liveness does not depend on it — the pages
+    // store listens on its own channel.
     if (next === "operator") {
       connectionStore.disconnect();
       return;
