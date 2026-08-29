@@ -980,7 +980,7 @@ mod tests {
         let storage = stub_storage();
         let provider = Arc::new(ErrorProvider);
 
-        let (result, _) = compact_with_model(
+        let (result, record) = compact_with_model(
             messages,
             &CompactionThreshold::MessageCount(3),
             provider.as_ref(),
@@ -992,6 +992,10 @@ mod tests {
         )
         .await
         .expect("compact should succeed via truncation fallback");
+
+        let record = record.expect("truncation should emit an audit record");
+        assert_eq!(record.actual_strategy, "truncation");
+        assert_eq!(record.messages_removed, 2);
 
         assert!(
             !exceeds_threshold_with_model(
