@@ -6,6 +6,7 @@ All notable changes to Swage are documented in this file.
 
 ### Added
 
+- Workspace attachment, trust, and detach controls are now reachable from the selected space's Settings workspaces section.
 - Shipped development workflows are now syntax-checked at the gate, and the assembly build-and-verify workflow is runnable.
 - Agents can now list the workflows available to their session before starting one.
 - Asynchronous turn callers can select a configured model for one request, with the effective selection retained in that turn's audit snapshot.
