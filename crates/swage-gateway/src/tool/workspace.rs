@@ -359,9 +359,12 @@ fn normalise_path(path: &Path) -> PathBuf {
 }
 
 fn context_roots(ctx: &dyn ToolContext) -> Result<Vec<PathBuf>, String> {
-    let mut roots = vec![canonical_existing_root(ctx.working_directory())?];
+    let mut roots = vec![canonical_existing_root(
+        ctx.working_directory(),
+        "Workspace root",
+    )?];
     for path in ctx.allowed_paths() {
-        let root = canonical_existing_root(path)?;
+        let root = canonical_existing_root(path, "Workspace root")?;
         if !roots.contains(&root) {
             roots.push(root);
         }
@@ -369,13 +372,13 @@ fn context_roots(ctx: &dyn ToolContext) -> Result<Vec<PathBuf>, String> {
     Ok(roots)
 }
 
-fn canonical_existing_root(path: &Path) -> Result<PathBuf, String> {
+fn canonical_existing_root(path: &Path, root_name: &str) -> Result<PathBuf, String> {
     let root = path
         .canonicalize()
-        .map_err(|error| format!("Workspace root is unavailable: {}: {error}", path.display()))?;
+        .map_err(|error| format!("{root_name} is unavailable: {}: {error}", path.display()))?;
     if !root.is_dir() {
         return Err(format!(
-            "Workspace root is not a directory: {}",
+            "{root_name} is not a directory: {}",
             path.display()
         ));
     }
@@ -630,5 +633,24 @@ mod tests {
         cfg.workspace.path = ".".to_string();
         let root = resolve_workspace_root(&cfg);
         assert!(root.is_absolute());
+    }
+
+    #[test]
+    fn canonical_root_checker_keeps_each_callers_wording() {
+        let dir = tmp_workspace();
+        let file = dir.path().join("not-a-directory");
+        std::fs::write(&file, b"").unwrap();
+
+        assert_eq!(
+            canonical_existing_root(&file, "Attachment root").unwrap_err(),
+            format!("Attachment root is not a directory: {}", file.display())
+        );
+
+        let missing = dir.path().join("missing");
+        assert!(
+            canonical_existing_root(&missing, "Tool root")
+                .unwrap_err()
+                .starts_with(&format!("Tool root is unavailable: {}:", missing.display()))
+        );
     }
 }
