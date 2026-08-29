@@ -26,7 +26,12 @@ Creation paths (all converge on the internal `start_run`):
 - `GatewayWorkflowLauncher::start_by_name` — programmatic, from agent
   dispatch. Carries `dispatch_bound_agent_ids`.
 
-Hard limit: 4 concurrent active runs.
+The `start_run` path checks an active-run cap of 4 and rejects new
+runs when the cap is reached. Child runs created via
+`complete_workflow_call_entry` and resumed runs bypass this check, and
+concurrent `start_run` calls race the async mutex without
+serialisation, so the cap is a soft admission gate on `start_run`
+callers rather than a hard gateway-wide limit.
 
 `start_run` validates the budget, creates a `NewWorkflowRun` record
 (with `source_hash` as SHA-256 of source, `engine_version:
@@ -64,7 +69,7 @@ absent.
 
 ### Defaults header
 
-A script may export `const defaults = { ... };` before its body. These
+A script may open with `export const defaults = { ... };` before its body. These
 are merged into every `agent()` / `agentStart()` call — call-site values
 override, but `undefined` at the call site falls back to the default.
 
@@ -73,7 +78,7 @@ override, but `undefined` at the call site falls back to the default.
 | Function | Returns | Notes |
 |---|---|---|
 | `agent(prompt, options?)` | `Promise<Value>` | Synchronous (awaited) agent call. Requires `options.agent`. |
-| `agentStart(prompt, options?)` | Handle | Fire-and-forget dispatch. Handle has `.done`, `.session`, `.result`, `.label`. |
+| `agentStart(prompt, options?)` | Handle | Fire-and-forget dispatch. Handle has `.done`, `.session`, `.result`, `.label`, and `.workingDirectory` after completion; the latter is the host-resolved child directory, including a provisioned isolated worktree. |
 | `wait({ watches?, timerMs? })` | `Promise<WakeResult>` | Races handle completions against a journalled timer. Returns `{wake: "completion", handle, value/error}` or `{wake: "timer"}`. |
 | `workflow(name, args?)` | `Promise<Value>` | Child workflow call. Only present when `capabilities.composition` is true. |
 | `deliver(payload, options?)` | `Promise<EffectReceipt>` | Delivery effect. Only present when `capabilities.delivery` is true. |
@@ -155,15 +160,16 @@ rank, preserving the original interleaving for deterministic scripts.
 | `event` | `postEvent()` / `deliverEvents()` | Event posts and delivery stamps. |
 | `gate` | `gate()` | Wake-gate evaluations, spawned like agent calls. |
 | `budget` | `budgetSnapshot()` | Recorded reading replayed, not re-read, to preserve branch determinism. |
-| `wind_down` | Agent admission | Written when working allowance is exhausted. The triggering agent call is refused. |
+| `wind_down` | Agent admission or `budgetSnapshot()` | Written when working allowance is exhausted. When triggered by an agent call, that call is refused; when triggered by `budgetSnapshot()`, the snapshot succeeds. |
 
 ### Effect recovery
 
 When a `deliver` entry is found in status `started` during replay, the
 recovery strategy depends on `EffectKind`:
 
-- `IdempotencyKey` — resend directly (the idempotency key makes
-  re-delivery safe).
+- `IdempotencyKey` — resend directly without probing. Re-delivery is
+  only safe when the receiver implements duplicate suppression keyed on
+  the idempotency key; the strategy assumes this, it does not provide it.
 - `CheckBeforeRedo` — probe first; if evidence of prior delivery exists,
   use it; otherwise resend.
 
@@ -189,16 +195,20 @@ The budget is carved from `max_total_tokens`:
 
 ### Wind-down trigger
 
-Wind-down latches when a new agent call (or `budgetSnapshot()`) finds the
-working partition's remaining capacity falls below one per-call
-reservation estimate. The trigger:
+Wind-down latches when a new agent call or a `budgetSnapshot()` finds
+the working partition's remaining capacity has dropped below one
+per-call reservation estimate. The trigger:
 
 1. Computes `working_limit = limit - reserve`.
 2. Computes `committed = spent + working_reserved + closing_reserved`.
 3. If `working_limit - committed < reservation`:
    - Writes a `wind_down` journal entry with a budget reading.
    - Latches `closing_limit = spent + reserve`.
-   - Returns `BudgetWindDownError` to the script.
+
+When an agent call triggers this transition, that call is refused with
+`BudgetWindDownError`. When `budgetSnapshot()` triggers the transition,
+the snapshot succeeds and returns a reading with `winding_down: true` —
+it is the next agent call that is refused, not the snapshot itself.
 
 Once `winding_down` is true, new agent calls are admitted against
 `closing_limit`. If `closing_limit - (spent + closing_reserved) <
@@ -234,10 +244,17 @@ the live `accounting.spent` counter.
 | `closing_limit` | Once wind-down latches: `spent_at_transition + reserved_closing_tokens`. `None` before wind-down. |
 | `replayed_working_credit` | Accumulated spend from replayed working calls that settle before the wind-down latch. |
 
-Per-call reservation estimate: `(limit / calls).max(1)` where `calls`
-is `max_agent_calls` when set **and non-zero**, otherwise
+Per-call reservation estimate: `token_reservation_per_call(limit, budget)`
+computes `(limit / calls).max(1)` where `calls` is `max_agent_calls`
+when set **and non-zero**, otherwise
 `max(max_concurrent_agent_calls.unwrap_or(4), 1)`. The final `.max(1)`
 clamp ensures every admitted call reserves at least one token.
+
+Working-partition calls pass `limit = max_total_tokens - reserved_closing_tokens`
+(the working partition's share). After wind-down, closing-partition calls
+pass `limit = max_total_tokens` (the full ceiling), so their per-call
+estimate is larger — shrinking the estimate a second time would admit
+work that the closing partition cannot fund.
 
 ## Durable run parking
 
@@ -427,7 +444,7 @@ The handover is stored via `update_workflow_run_state` in the
 
 | Mechanism | Scope | Default |
 |---|---|---|
-| Active-run limit | Gateway-wide | 4 concurrent runs |
+| Active-run cap | `start_run` callers | 4 (soft — bypassed by child runs and resumptions) |
 | Agent-call semaphore | Per-run | `max_concurrent_agent_calls` (default 4) |
 | `in_flight` counter | Per-run | Guards parking — no park while > 0 |
 | `agent_calls` counter | Per-run lifetime | Checked against `max_agent_calls` budget |

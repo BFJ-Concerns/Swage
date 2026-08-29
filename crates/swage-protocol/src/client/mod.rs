@@ -89,6 +89,7 @@ pub struct ClientSurface {
     create_workflow_script_request: workflow::CreateWorkflowScriptRequest,
     update_workflow_script_request: workflow::UpdateWorkflowScriptRequest,
     workflow_script_list: workflow::WorkflowScriptListResponse,
+    workflow_argument_contract: workflow::WorkflowArgumentContract,
     start_workflow_run_request: workflow::StartWorkflowRunRequest,
     start_inline_workflow_run_request: workflow::StartInlineWorkflowRunRequest,
     post_workflow_run_event_request: workflow::PostWorkflowRunEventRequest,
