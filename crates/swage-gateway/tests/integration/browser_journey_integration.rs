@@ -39,7 +39,7 @@ use tokio::process::Child;
 use tokio_tungstenite::tungstenite;
 use tower::ServiceExt;
 
-use crate::support::ProcessEnvGuard;
+use crate::support::{ProcessEnvGuard, start_live_server};
 use tokio_util::sync::CancellationToken;
 
 static BROWSER_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -781,16 +781,7 @@ async fn start_browser_tool_server(
         None,
     );
     let router = build_router(state);
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind test gateway");
-    let addr = listener.local_addr().expect("gateway address");
-    let serve_router = router.clone();
-    tokio::spawn(async move {
-        axum::serve(listener, serve_router)
-            .await
-            .expect("serve test gateway");
-    });
+    let (addr, _server) = start_live_server(router.clone()).await;
     (router, addr)
 }
 
