@@ -3912,6 +3912,99 @@ async fn session_config_uses_root_retained_at_state_construction() {
     assert_eq!(loaded.communication.message_ttl_secs, 111);
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn active_skill_loading_keeps_agent_skills_out_of_reserved_workflow_contexts() {
+    let root = SwageHomeGuard::new();
+    let normal_skill = root
+        .path()
+        .join("spaces/default/agents/gateway/skills/normal-agent-skill/SKILL.md");
+    let reserved_skill = root
+        .path()
+        .join("spaces/default/agents")
+        .join(swage_config::RESERVED_WORKFLOW_AGENT_ID)
+        .join("skills/reserved-agent-skill/SKILL.md");
+    for (path, instructions) in [
+        (&normal_skill, "Normal agent skill instructions."),
+        (&reserved_skill, "Reserved worker instructions must not load."),
+    ] {
+        std::fs::create_dir_all(path.parent().expect("skill directory"))
+            .expect("create skill directory");
+        std::fs::write(
+            path,
+            format!("---\ndescription: Test skill\n---\n{instructions}\n"),
+        )
+        .expect("write skill fixture");
+    }
+
+    let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
+    let space = storage
+        .get_or_create_default()
+        .await
+        .expect("create default space");
+    let session = storage
+        .create_session(NewSession {
+            space_id: space.id,
+            agent_id: "gateway".to_string(),
+            metadata: None,
+            active_workspace_attachment_id: None,
+        })
+        .await
+        .expect("create normal-agent session");
+    let session_id = session.id;
+    let state = AppState::new_with_config_root(
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
+        Arc::new(MockProvider::new(vec![])) as Arc<dyn LlmProvider>,
+        swage_config::ResolvedConfig::default(),
+        crate::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+        root.path().to_path_buf(),
+    );
+    let (available, warnings) = crate::skill::SkillManager::discover_available(
+        root.path(),
+        &root.path().join("spaces/default"),
+        Some(&root.path().join("spaces/default/agents/gateway")),
+    );
+    assert!(warnings.is_empty(), "fixture skills must parse: {warnings:?}");
+    assert!(
+        available.iter().any(|skill| skill.name == "normal-agent-skill"),
+        "normal fixture skill must be discoverable: {available:?}"
+    );
+    let normal = load_active_skills_for_agent(
+        &state,
+        session_id,
+        "default",
+        "gateway",
+        Some(root.path()),
+        true,
+        &[],
+    )
+    .await;
+    assert_eq!(
+        normal
+            .iter()
+            .map(|skill| skill.name.as_str())
+            .collect::<Vec<_>>(),
+        ["normal-agent-skill"],
+        "a normal agent must asynchronously load and activate its agent-level skill"
+    );
+
+    let reserved = load_active_skills_for_agent(
+        &state,
+        session_id,
+        "default",
+        swage_config::RESERVED_WORKFLOW_AGENT_ID,
+        Some(root.path()),
+        false,
+        &[],
+    )
+    .await;
+    assert!(
+        reserved.is_empty(),
+        "the reserved workflow agent must not discover either agent-directory skill: {reserved:?}"
+    );
+}
+
 pub(crate) async fn make_state_with_storage(
     provider_chunks: Vec<StreamChunk>,
     storage: Arc<MockStorage>,

@@ -382,7 +382,7 @@ async fn live_listener_turns_set_and_update_the_values_used_by_composition() {
             StreamChunk::ToolUse {
                 call_id: "set-2".into(),
                 name: "session_values".into(),
-                arguments: json!({"action":"set","name":"task","value":"verify audit"}),
+                arguments: json!({"action":"set","name":"task","value":"verify audit with durable evidence"}),
             },
             StreamChunk::Done {
                 finish_reason: None,
@@ -486,7 +486,7 @@ async fn live_listener_turns_set_and_update_the_values_used_by_composition() {
         let expected = if prompt.starts_with("save") {
             "Task: inspect storage; owner: ⟦unset:owner⟧"
         } else {
-            "Task: verify audit; owner: ⟦unset:owner⟧"
+            "Task: verify audit with durable evidence; owner: ⟦unset:owner⟧"
         };
         assert_eq!(render(variables)[0].text_content(), expected);
     }
@@ -506,7 +506,7 @@ async fn live_listener_turns_set_and_update_the_values_used_by_composition() {
     );
     assert_eq!(
         events[0].metadata["new_state"],
-        json!({"task":"verify audit"})
+        json!({"task":"verify audit with durable evidence"})
     );
 
     let requests = captured_requests.lock().unwrap();
@@ -539,6 +539,12 @@ async fn live_listener_turns_set_and_update_the_values_used_by_composition() {
         second_turn_context.contains("Current work: inspect storage"),
         "the real session_values update should re-render the named element: {second_turn_context}"
     );
+    for context in [&first_context, &second_turn_context] {
+        assert!(
+            context.contains("## Working norms"),
+            "the named JavaScript assembly must deliver working-norm text to the provider: {context}"
+        );
+    }
     assert_eq!(
         context_reports.len(),
         2,
@@ -552,12 +558,23 @@ async fn live_listener_turns_set_and_update_the_values_used_by_composition() {
                 .expect("assembled elements")
                 .iter()
                 .any(|element| element["name"] == "working_norms"),
-            "the named JavaScript route must receive rendered working norms: {report}"
+            "the named JavaScript route must account for its working-norms element: {report}"
         );
     }
+    let first_total = context_reports[0]["total_tokens"]
+        .as_u64()
+        .expect("first report token total");
+    let second_total = context_reports[1]["total_tokens"]
+        .as_u64()
+        .expect("second report token total");
     assert_ne!(
-        context_reports[0]["total_tokens"], context_reports[1]["total_tokens"],
-        "a re-rendered briefing must be token-counted again for the next foreground turn"
+        first_total, second_total,
+        "changing the stored briefing value must change the assembled token total"
+    );
+    assert_eq!(
+        (first_total, second_total),
+        (178, 173),
+        "the two stored briefing values must retain their exact independently recounted totals"
     );
     let audit = storage
         .list_audit_events_by_session(session_id)
@@ -568,7 +585,113 @@ async fn live_listener_turns_set_and_update_the_values_used_by_composition() {
             event.entity_id == swage_gateway::experimentation::LOCATION_WORKING_NORMS
                 && event.event_kind == "variant_selected"
         }),
-        "the JavaScript assembly route must record its working-norms decision: {audit:?}"
+        "the named JavaScript turn must retain the working-norms selection audit event: {audit:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn live_listener_default_assembly_delivers_working_norms_to_the_provider() {
+    let (provider, captured_requests) = ToolCallingProvider::new(vec![vec![
+        StreamChunk::Delta {
+            content: "default assembly reply".into(),
+        },
+        StreamChunk::Done {
+            finish_reason: None,
+        },
+    ]]);
+    let swage_home = tempfile::tempdir().unwrap();
+    let mut environment = crate::support::ProcessEnvGuard::new();
+    environment.set_swage_home(swage_home.path());
+    let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+    let mut config = swage_config::ResolvedConfig::default();
+    config.instructions = "Default-route prompt".into();
+    let state = AppState::new(
+        storage.clone() as Arc<dyn Storage>,
+        storage.clone(),
+        Arc::new(provider),
+        config,
+        ToolDispatcher::allow_all(vec![]),
+        None,
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, build_router(state)).await.unwrap();
+    });
+    let conversation: serde_json::Value = reqwest::Client::new()
+        .post(format!("http://{address}/api/conversations"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let session_id: Uuid = conversation["id"].as_str().unwrap().parse().unwrap();
+    let (socket, _) = tokio_tungstenite::connect_async(format!(
+        "ws://{address}/api/conversations/{session_id}/ws"
+    ))
+    .await
+    .unwrap();
+    let (mut sink, mut stream) = socket.split();
+    sink.send(tungstenite::Message::Text(
+        json!({"type":"subscribe","channels":["context"]})
+            .to_string()
+            .into(),
+    ))
+    .await
+    .unwrap();
+    sink.send(tungstenite::Message::Text(
+        json!({"type":"send_message","content":"use default assembly"})
+            .to_string()
+            .into(),
+    ))
+    .await
+    .unwrap();
+    let report = tokio::time::timeout(Duration::from_secs(10), async {
+        let mut report = None;
+        while let Some(message) = stream.next().await {
+            let message = message.unwrap();
+            if let tungstenite::Message::Text(text) = message {
+                let event: serde_json::Value = serde_json::from_str(&text).unwrap();
+                if event["type"] == "context_assembled" {
+                    report = Some(event["report"].clone());
+                }
+                if event["type"] == "turn_complete" {
+                    return report.expect("default turn emitted a context report before completion");
+                }
+            }
+        }
+        panic!("context stream closed before default assembly report")
+    })
+    .await
+    .expect("default assembly report before timeout");
+    assert_eq!(report["assembly_name"], "default");
+    assert!(
+        report["elements"]
+            .as_array()
+            .expect("default assembly elements")
+            .iter()
+            .any(|element| element["name"] == "working_norms"),
+        "the default assembly must account for its working-norms element: {report}"
+    );
+    let requests = captured_requests.lock().unwrap();
+    assert_eq!(requests.len(), 1, "one foreground provider request");
+    assert!(
+        requests[0]
+            .messages
+            .iter()
+            .any(|message| message.text_content().contains("## Working norms")),
+        "the default assembly must deliver working-norm text to the provider: {:?}",
+        requests[0].messages
+    );
+    drop(requests);
+    let audit = storage.list_audit_events_by_session(session_id).await.unwrap();
+    assert!(
+        audit.iter().any(|event| {
+            event.entity_id == swage_gateway::experimentation::LOCATION_WORKING_NORMS
+                && event.event_kind == "variant_selected"
+        }),
+        "the default assembly turn must retain the working-norms selection audit event: {audit:?}"
     );
 }
 
