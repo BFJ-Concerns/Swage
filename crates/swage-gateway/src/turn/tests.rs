@@ -7424,6 +7424,7 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
                 "target_agent": "agent-b",
                 "task": "Summarise this request",
                 "task_definition": "strict-review",
+                "skills": ["delegated-specialist"],
                 "elements": ["delegated-brief"],
                 "variables": {"owner": "delegating parent"},
                 "assembly": "delegated-focus",
@@ -7699,6 +7700,18 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
         "delegated assembly report should contain its element decisions"
     );
     assert_eq!(child_snapshot["assembly_name"], "delegated-focus");
+    let skills = child_snapshot["elements"]
+        .as_array()
+        .expect("delegated assembly report should list elements")
+        .iter()
+        .find(|element| element["name"] == "skills")
+        .expect("delegated child report should record its requested skills");
+    assert!(
+        skills["source"]
+            .as_str()
+            .is_some_and(|source| source.contains("delegated-specialist")),
+        "delegated child report should name the requested skill: {skills}"
+    );
     assert!(
         child_snapshot["elements"]
             .as_array()
@@ -12181,6 +12194,7 @@ async fn delegated_assembly_applies_call_scoped_composition_over_live_state() {
                 "dispatch owner".into(),
             )])),
             assembly: Some("briefing".into()),
+            skills: None,
         },
     );
 
