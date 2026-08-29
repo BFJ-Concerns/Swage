@@ -447,6 +447,7 @@ fn journal_wire(
         "await_event" => WorkflowJournalEntryKind::AwaitEvent,
         "gate" => WorkflowJournalEntryKind::Gate,
         "budget" => WorkflowJournalEntryKind::Budget,
+        "terminal_budget" => WorkflowJournalEntryKind::TerminalBudget,
         "wind_down" => WorkflowJournalEntryKind::WindDown,
         other => return Err(format!("unknown workflow entry kind: {other}")),
     };
@@ -521,6 +522,87 @@ struct TokenBudgetState {
     // the transition's recorded reading, so carry it forward until the
     // closing limit is reconstructed (or add it directly if already latched).
     replayed_working_credit: u64,
+}
+
+fn terminal_budget_reading(accounting: &TokenBudgetState, budget: &WorkflowBudget) -> Value {
+    let closing_remaining = budget.reserved_closing_tokens.map(|reserve| {
+        accounting
+            .closing_limit
+            .map(|limit| limit.saturating_sub(accounting.spent))
+            .unwrap_or_else(|| {
+                reserve.min(
+                    budget
+                        .max_total_tokens
+                        .map(|limit| limit.saturating_sub(accounting.spent))
+                        .unwrap_or(0),
+                )
+            })
+    });
+    serde_json::json!({ "closing_remaining": closing_remaining })
+}
+
+async fn record_terminal_budget(
+    state: &AppState,
+    run_id: Uuid,
+    budget: &WorkflowBudget,
+    accounting: &Mutex<TokenBudgetState>,
+) -> Result<Value, String> {
+    let request = serde_json::json!({ "budget": "terminal" });
+    let args_hash = journal_args_hash(&request);
+    let journal = state
+        .storage
+        .list_workflow_journal(run_id)
+        .await
+        .map_err(|error| error.to_string())?;
+    if let Some(entry) = journal.iter().find(|entry| entry.kind == "terminal_budget") {
+        if entry.args_hash != args_hash {
+            return Err("NondeterministicReplayError".into());
+        }
+        return match entry.status.as_str() {
+            "completed" => entry
+                .result
+                .clone()
+                .ok_or_else(|| "completed terminal budget entry has no result".into()),
+            "failed" => Err(entry
+                .error_message
+                .clone()
+                .unwrap_or_else(|| "recorded terminal budget failure".into())),
+            "started" => {
+                let reading = terminal_budget_reading(&*accounting.lock().await, budget);
+                state
+                    .complete_workflow_journal_entry(entry.id, reading.clone())
+                    .await
+                    .map(|_| reading)
+                    .map_err(|error| error.to_string())
+            }
+            other => Err(format!("unknown terminal budget entry status: {other}")),
+        };
+    }
+
+    let seq = journal
+        .iter()
+        .map(|entry| entry.seq)
+        .max()
+        .map_or(0, |seq| seq.saturating_add(1));
+    let reading = terminal_budget_reading(&*accounting.lock().await, budget);
+    let intent = state
+        .create_workflow_journal_intent(NewWorkflowJournalIntent {
+            run_id,
+            seq,
+            kind: "terminal_budget".into(),
+            args_hash,
+            request,
+            effect_kind: None,
+            idempotency_key: None,
+            target_kind: None,
+        })
+        .await
+        .map_err(|error| error.to_string())?;
+    state
+        .complete_workflow_journal_entry(intent.id, reading.clone())
+        .await
+        .map(|_| reading)
+        .map_err(|error| error.to_string())
 }
 
 fn completed_agent_tokens_before(replay: &[WorkflowJournalRecord], transition_seq: u64) -> u64 {
@@ -1441,6 +1523,7 @@ async fn settle_cancelled_workflow_journal(storage: &dyn Storage, run_id: Uuid) 
     }
 }
 
+#[cfg(test)]
 fn run_host_commands(
     state: AppState,
     run_id: Uuid,
@@ -1458,6 +1541,51 @@ fn run_host_commands(
     park_threshold_ms: u64,
     commands: mpsc::UnboundedReceiver<HostCommand>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+    let token_budget = Arc::new(Mutex::new(TokenBudgetState {
+        spent: spent_tokens.load(Ordering::SeqCst),
+        working_reserved: 0,
+        closing_reserved: 0,
+        closing_limit: None,
+        replayed_working_credit: 0,
+    }));
+    run_host_commands_with_budget(
+        state,
+        run_id,
+        space_id,
+        dispatch_bound_agent_ids,
+        dispatch_bound_task_definition_ids,
+        inherited_worker_placement,
+        delivery_grant,
+        budget,
+        replay,
+        agent_calls,
+        spent_tokens,
+        token_budget,
+        failed_agent_calls,
+        park,
+        park_threshold_ms,
+        commands,
+    )
+}
+
+fn run_host_commands_with_budget(
+    state: AppState,
+    run_id: Uuid,
+    space_id: Uuid,
+    dispatch_bound_agent_ids: Vec<String>,
+    dispatch_bound_task_definition_ids: Vec<String>,
+    inherited_worker_placement: Option<ResolvedWorkerPlacement>,
+    delivery_grant: Option<Value>,
+    budget: WorkflowBudget,
+    replay: Vec<WorkflowJournalRecord>,
+    agent_calls: Arc<AtomicU32>,
+    spent_tokens: Arc<AtomicU64>,
+    token_budget: Arc<Mutex<TokenBudgetState>>,
+    failed_agent_calls: Arc<Mutex<std::collections::HashMap<String, FailedAgentCallRef>>>,
+    park: CancellationToken,
+    park_threshold_ms: u64,
+    commands: mpsc::UnboundedReceiver<HostCommand>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
     Box::pin(run_host_commands_inner(
         state,
         run_id,
@@ -1470,6 +1598,7 @@ fn run_host_commands(
         replay,
         agent_calls,
         spent_tokens,
+        token_budget,
         failed_agent_calls,
         park,
         park_threshold_ms,
@@ -1754,6 +1883,7 @@ async fn run_host_commands_inner(
     replay: Vec<WorkflowJournalRecord>,
     agent_calls: Arc<AtomicU32>,
     spent_tokens: Arc<AtomicU64>,
+    token_budget: Arc<Mutex<TokenBudgetState>>,
     failed_agent_calls: Arc<Mutex<std::collections::HashMap<String, FailedAgentCallRef>>>,
     park: CancellationToken,
     park_threshold_ms: u64,
@@ -1777,13 +1907,6 @@ async fn run_host_commands_inner(
     // Wind-down is replay position, not run end-state. A transition later in
     // the journal must not classify earlier started calls as closing work.
     let mut winding_down = false;
-    let token_budget = Arc::new(Mutex::new(TokenBudgetState {
-        spent: spent_tokens.load(Ordering::SeqCst),
-        working_reserved: 0,
-        closing_reserved: 0,
-        closing_limit: None,
-        replayed_working_credit: 0,
-    }));
     let effect_seq = Arc::new(AtomicU64::new(
         replay
             .iter()
@@ -4484,8 +4607,15 @@ async fn launch_existing_run(
         .sum();
     let agent_calls = Arc::new(AtomicU32::new(initial_agent_calls));
     let spent_tokens = Arc::new(AtomicU64::new(initial_spent_tokens));
+    let token_budget = Arc::new(Mutex::new(TokenBudgetState {
+        spent: initial_spent_tokens,
+        working_reserved: 0,
+        closing_reserved: 0,
+        closing_limit: None,
+        replayed_working_credit: 0,
+    }));
     let failed_agent_calls = Arc::new(Mutex::new(std::collections::HashMap::new()));
-    let host_task = tokio::spawn(run_host_commands(
+    let host_task = tokio::spawn(run_host_commands_with_budget(
         state.clone(),
         record.id,
         space_id,
@@ -4500,6 +4630,7 @@ async fn launch_existing_run(
         replay,
         Arc::clone(&agent_calls),
         Arc::clone(&spent_tokens),
+        Arc::clone(&token_budget),
         Arc::clone(&failed_agent_calls),
         park.clone(),
         PARK_TIMER_THRESHOLD_MS,
@@ -4538,6 +4669,9 @@ async fn launch_existing_run(
     let storage = Arc::clone(&state.storage);
     let active = Arc::clone(&state.active_workflow_runs);
     let worktree_host = Arc::clone(&state.worktree_host);
+    let terminal_budget_state = Arc::clone(&token_budget);
+    let terminal_budget = run_budget;
+    let terminal_budget_state_owner = state.clone();
     let run_id = record.id;
     let broadcast = state.broadcast.clone();
     tokio::spawn(async move {
@@ -4571,7 +4705,7 @@ async fn launch_existing_run(
             }
             _ => None,
         };
-        let (run_state, output, error) = match engine_result {
+        let (mut run_state, mut output, mut error) = match engine_result {
             Ok(Ok(json)) => match serde_json::from_str(&json) {
                 Ok(value) => ("completed", Some(value), None),
                 Err(problem) => ("failed", None, Some(problem.to_string())),
@@ -4588,6 +4722,18 @@ async fn launch_existing_run(
             Ok(Err(problem)) => ("failed", None, Some(problem.to_string())),
             Err(problem) => ("failed", None, Some(problem.to_string())),
         };
+        if let Err(problem) = record_terminal_budget(
+            &terminal_budget_state_owner,
+            run_id,
+            &terminal_budget,
+            &terminal_budget_state,
+        )
+        .await
+        {
+            run_state = "failed";
+            output = None;
+            error = Some(format!("terminal budget journal failed: {problem}"));
+        }
         if run_state == "cancelled" {
             settle_cancelled_workflow_journal(storage.as_ref(), run_id).await;
         }
@@ -13852,6 +13998,101 @@ mod tests {
             .expect("present");
         assert_eq!(replayed.state, "completed");
         assert_eq!(replayed.final_output.as_ref(), Some(output));
+        assert_eq!(provider.requests.lock().expect("requests").len(), 3);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn terminal_budget_is_read_back_and_replayed_without_recomputation() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let provider = Arc::new(ScriptedRecordingProvider {
+            outputs: std::sync::Mutex::new(std::collections::VecDeque::from(
+                ["working one", "working two", "closing report"].map(scripted_text_output),
+            )),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let source = r#"
+            await agent("working one", {agent: "default"});
+            await agent("working two", {agent: "default"});
+            try { await agent("cross working boundary", {agent: "default"}); } catch (_) {}
+            return await agent("closing report", {agent: "default"});
+        "#;
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(space.id),
+            Json(StartInlineWorkflowRunRequest {
+                source: source.into(),
+                args: Value::Null,
+                budget: Some(WorkflowBudget {
+                    max_agent_calls: Some(4),
+                    max_total_tokens: Some(6),
+                    reserved_closing_tokens: Some(2),
+                    max_concurrent_agent_calls: Some(1),
+                }),
+            }),
+        )
+        .await
+        .expect("start inline run");
+        wait_for_terminal(&state, started.id).await;
+
+        let journal = storage
+            .list_workflow_journal(started.id)
+            .await
+            .expect("independent journal read-back");
+        let terminal = journal
+            .iter()
+            .find(|entry| entry.kind == "terminal_budget")
+            .expect("terminal budget entry");
+        assert_eq!(terminal.status, "completed");
+        assert_eq!(terminal.result.as_ref().unwrap()["closing_remaining"], 0);
+        let terminal_id = terminal.id;
+
+        // The stored entry deliberately disagrees with the accounting that
+        // produced it. Replay must surface the durable audit reading rather
+        // than derive a replacement from its end-state counters.
+        storage
+            .with_conn(move |connection| {
+                connection.execute_batch(&format!(
+                    "UPDATE workflow_journal SET result_json = '{{\"closing_remaining\":99}}' WHERE id = '{terminal_id}';"
+                ))?;
+                Ok(())
+            })
+            .await
+            .expect("replace stored terminal reading");
+        storage
+            .update_workflow_run_state(started.id, "interrupted", None, None, None)
+            .await
+            .expect("simulate restart");
+        let _ = resume_run(State(state.clone()), Path(started.id))
+            .await
+            .expect("resume");
+        wait_for_terminal(&state, started.id).await;
+
+        let Json(detail) = get_run(State(state), Path(started.id))
+            .await
+            .expect("get run");
+        let replayed = detail
+            .journal
+            .iter()
+            .find(|entry| entry.kind == WorkflowJournalEntryKind::TerminalBudget)
+            .expect("projected terminal budget entry");
+        assert_eq!(replayed.result.as_ref().unwrap()["closing_remaining"], 99);
+        assert_eq!(
+            detail
+                .journal
+                .iter()
+                .filter(|entry| entry.kind == WorkflowJournalEntryKind::TerminalBudget)
+                .count(),
+            1
+        );
         assert_eq!(provider.requests.lock().expect("requests").len(), 3);
     }
 
