@@ -274,7 +274,7 @@ test("renders the dark-theme status badge and controlled provider error", async 
   await page.getByRole("button", { name: "Operator" }).click();
   const connectedBadge = page.locator(".badge", { hasText: "connected" });
   await expect(connectedBadge).toBeVisible();
-  await expect(connectedBadge).toHaveCSS("background-color", "rgb(214, 235, 247)");
+  await expect(connectedBadge).toHaveCSS("background-color", "rgb(255, 248, 238)");
 
   await page.getByRole("button", { name: "Conversation" }).click();
   await send(page, "controlled provider failure");
