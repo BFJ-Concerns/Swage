@@ -13,7 +13,6 @@ const KNOWN_SECTIONS: &[&str] = &[
     "server",
     "providers",
     "models",
-    "workspace",
     "sandbox",
     "logging",
     "tools",
@@ -39,7 +38,6 @@ fn known_fields_for(section: &str) -> &'static [&'static str] {
         "server" => &["host", "port"],
         "providers" => &["default", "entries"],
         "models" => &["default", "default_model_id", "entries"],
-        "workspace" => &["path"],
         "sandbox" => &["enabled", "allow_degraded_execution"],
         "logging" => &["level"],
         // Scalar tool settings plus flattened permission fields (allow, deny,
@@ -140,7 +138,6 @@ fn check_field_type(
         ("models", "default") => ("string", matches!(value, Value::String(_))),
         ("models", "default_model_id") => ("string", matches!(value, Value::String(_))),
         ("models", "entries") => ("table", matches!(value, Value::Table(_))),
-        ("workspace", "path") => ("string", matches!(value, Value::String(_))),
         ("sandbox", "enabled" | "allow_degraded_execution") => {
             ("boolean", matches!(value, Value::Boolean(_)))
         }
@@ -1191,6 +1188,21 @@ max_tokens = 1024
                 if section == "server" && name == "protocol")
         });
         assert!(found, "should report unknown field 'protocol' in [server]");
+    }
+
+    #[test]
+    fn workspace_path_is_rejected_as_an_unknown_section() {
+        let problems =
+            validate_toml_string("[workspace]\npath = \"/tmp/project\"", &path("config.toml"));
+        assert!(
+            problems.iter().any(|problem| {
+                matches!(
+                    &problem.kind,
+                    ConfigProblemKind::UnknownSection { name } if name == "workspace"
+                )
+            }),
+            "removed [workspace] configuration must be rejected: {problems:?}"
+        );
     }
 
     #[test]
