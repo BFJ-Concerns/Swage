@@ -211,6 +211,58 @@ async fn provider_response_snapshot_failure_records_reconstruction_gap() {
     }));
 }
 
+#[tokio::test]
+async fn compaction_snapshot_failure_records_reconstruction_gap_through_turn_loop() {
+    let storage = Arc::new(MockStorage::new());
+    storage.fail_snapshot_writes();
+    let (state, session_id) =
+        make_state_with_storage(provider_witness_chunks(), Arc::clone(&storage)).await;
+    let thread_id = storage
+        .list_by_session(session_id)
+        .await
+        .expect("list test thread")
+        .into_iter()
+        .next()
+        .expect("default thread")
+        .id;
+
+    for index in 0..101 {
+        storage
+            .append_message(AppendMessage {
+                thread_id,
+                turn_id: None,
+                role: if index % 2 == 0 {
+                    swage_core::Role::User
+                } else {
+                    swage_core::Role::Assistant
+                },
+                content: format!("history message {index}"),
+                agent_id: "gateway".to_string(),
+            })
+            .await
+            .expect("seed history for compaction");
+    }
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    process_turn(
+        &state,
+        session_id,
+        None,
+        "continue".into(),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .expect("a recorded reconstruction gap should allow the turn to complete");
+
+    let db = storage.db.lock().await;
+    assert!(db.audit_events.iter().any(|event| {
+        event.event_kind == "turn_record_degraded"
+            && event.metadata["record"] == "compaction_snapshot"
+    }));
+}
+
 // -----------------------------------------------------------------------
 // Sandbox guard
 // -----------------------------------------------------------------------
@@ -300,7 +352,13 @@ impl LlmProvider for MockProvider {
         &self,
         _request: CompletionRequest,
     ) -> Result<CompletionResponse, ProviderError> {
-        unimplemented!("not used in streaming tests")
+        Ok(CompletionResponse {
+            content: "Compacted history".to_string(),
+            input_tokens: 1,
+            output_tokens: 1,
+            finish_reason: FinishReason::Stop,
+            cost: None,
+        })
     }
 
     async fn complete_with_tools(
