@@ -37,6 +37,8 @@ mod output_schema_validation_integration;
 mod presence_liveness_integration;
 #[path = "integration/ptc_integration.rs"]
 mod ptc_integration;
+#[path = "integration/review_sweep_engine_integration.rs"]
+mod review_sweep_engine_integration;
 #[path = "integration/run_supervision_integration.rs"]
 mod run_supervision_integration;
 #[path = "integration/sandbox_entrypoint_integration.rs"]
