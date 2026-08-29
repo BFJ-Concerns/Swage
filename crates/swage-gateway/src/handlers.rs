@@ -1195,15 +1195,8 @@ pub async fn list_skills(
     // Skill discovery is best-effort beneath the root retained by this gateway.
     let root = state.config_root.clone();
 
-    let space_dir = root.join("spaces").join(&space.slug);
-    let agent_dir = params
-        .agent_id
-        .as_deref()
-        .filter(|agent_id| *agent_id != swage_config::RESERVED_WORKFLOW_AGENT_ID)
-        .map(|agent_id| space_dir.join("agents").join(agent_id));
-    let agent_dir = agent_dir.as_deref().filter(|path| path.is_dir());
-    let (skills, _warnings) =
-        crate::skill::SkillManager::discover_available(&root, &space_dir, agent_dir);
+    let skills =
+        crate::skill::discover_available_for_scope(&root, &space.slug, params.agent_id.as_deref());
 
     let skill_items: Vec<SkillItem> = skills
         .into_iter()

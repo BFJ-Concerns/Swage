@@ -206,22 +206,34 @@ pub(crate) async fn discover_available_for_space(
         .await
         .map_err(|error| format!("failed to load space {space_id}: {error}"))?
         .ok_or_else(|| format!("space {space_id} was not found"))?;
-    let space_dir = root.join("spaces").join(space.slug);
-    let agent_dir = match agent_id {
-        Some(agent) => {
-            if !agent_scope_is_visible(state, space_id, agent)
-                .await
-                .map_err(|error| error.to_string())?
-            {
-                return Err(format!(
-                    "no agent definition named '{agent}' is visible to space {space_id}"
-                ));
-            }
-            Some(space_dir.join("agents").join(agent))
-        }
-        None => None,
-    };
-    Ok(SkillManager::discover_available(root, &space_dir, agent_dir.as_deref()).0)
+    if let Some(agent) = agent_id
+        && !agent_scope_is_visible(state, space_id, agent)
+            .await
+            .map_err(|error| error.to_string())?
+    {
+        return Err(format!(
+            "no agent definition named '{agent}' is visible to space {space_id}"
+        ));
+    }
+    Ok(discover_available_for_scope(root, &space.slug, agent_id))
+}
+
+/// Discover the effective skills for a configured space and optional agent.
+///
+/// The filesystem layout and reserved workflow-agent rule are shared by
+/// context assembly, the HTTP catalogue, and storage-backed discovery.
+pub(crate) fn discover_available_for_scope(
+    root: &Path,
+    space_slug: &str,
+    agent_id: Option<&str>,
+) -> Vec<SkillDefinition> {
+    let hierarchy = crate::turn::configuration_hierarchy(root, space_slug, agent_id);
+    let space_dir = &hierarchy[1].1;
+    let agent_dir = hierarchy
+        .iter()
+        .find(|(level, _)| *level == HierarchyLevel::Agent)
+        .and_then(|(_, path)| path.is_dir().then_some(path.as_path()));
+    SkillManager::discover_available(root, space_dir, agent_dir).0
 }
 
 pub(crate) async fn discover_available_for_space_from_config(
