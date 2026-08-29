@@ -1630,6 +1630,19 @@ async fn process_turn_with_composition_and_focus(
                     .await
                 {
                     tracing::warn!(%error, "failed to persist compaction record");
+                    if let Err(audit_error) = record_durability::record_reconstruction_gap(
+                        state.storage.as_ref(),
+                        Some(session_id),
+                        snapshot_turn_id,
+                        "compaction_snapshot",
+                        &error,
+                    )
+                    .await
+                    {
+                        record_integrity_lost.get_or_insert(format!(
+                            "compaction snapshot lost and the loss could not be recorded: {audit_error}"
+                        ));
+                    }
                 }
             }
             AgentEvent::Token { content } => {
