@@ -779,20 +779,8 @@ impl LlmProvider for ResponsesProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{empty_completion_request, local_provider_config};
     use swage_core::{ChatMessage, Role, ToolCall};
-
-    fn completion_request() -> CompletionRequest {
-        CompletionRequest {
-            effort: None,
-            messages: vec![],
-            model: None,
-            max_tokens: None,
-            temperature: None,
-            stop_sequences: None,
-            metadata: None,
-            tool_definitions: vec![],
-        }
-    }
 
     // --- Message conversion ---
 
@@ -869,10 +857,9 @@ mod tests {
 
     #[test]
     fn build_request_pins_the_native_envelope_constants() {
-        let provider =
-            ResponsesProvider::from_config(ProviderConfig::new("key", "model", "http://localhost"));
-        let body =
-            serde_json::to_value(provider.build_request(&completion_request(), false)).unwrap();
+        let provider = ResponsesProvider::from_config(local_provider_config());
+        let body = serde_json::to_value(provider.build_request(&empty_completion_request(), false))
+            .unwrap();
         assert_eq!(body["parallel_tool_calls"], false);
         assert_eq!(body["store"], false);
         assert_eq!(body["text"]["verbosity"], "low");
@@ -881,8 +868,7 @@ mod tests {
 
     #[test]
     fn every_completion_effort_maps_to_responses_reasoning_effort() {
-        let provider =
-            ResponsesProvider::from_config(ProviderConfig::new("key", "model", "http://localhost"));
+        let provider = ResponsesProvider::from_config(local_provider_config());
         for (effort, expected) in [
             (swage_core::Effort::Low, "low"),
             (swage_core::Effort::Medium, "medium"),
@@ -891,7 +877,7 @@ mod tests {
         ] {
             let request = CompletionRequest {
                 effort: Some(effort),
-                ..completion_request()
+                ..empty_completion_request()
             };
             let body = serde_json::to_value(provider.build_request(&request, false)).unwrap();
             assert_eq!(body["reasoning"]["effort"], expected);
@@ -901,20 +887,18 @@ mod tests {
 
     #[test]
     fn build_request_omits_reasoning_when_no_effort_is_configured() {
-        let provider =
-            ResponsesProvider::from_config(ProviderConfig::new("key", "model", "http://localhost"));
-        let body =
-            serde_json::to_value(provider.build_request(&completion_request(), false)).unwrap();
+        let provider = ResponsesProvider::from_config(local_provider_config());
+        let body = serde_json::to_value(provider.build_request(&empty_completion_request(), false))
+            .unwrap();
         assert!(body.get("reasoning").is_none());
     }
 
     #[test]
     fn build_request_maps_max_tokens_to_max_output_tokens() {
-        let provider =
-            ResponsesProvider::from_config(ProviderConfig::new("key", "model", "http://localhost"));
+        let provider = ResponsesProvider::from_config(local_provider_config());
         let request = CompletionRequest {
             max_tokens: Some(2048),
-            ..completion_request()
+            ..empty_completion_request()
         };
         let body = serde_json::to_value(provider.build_request(&request, false)).unwrap();
         assert_eq!(body["max_output_tokens"], 2048);
@@ -923,8 +907,7 @@ mod tests {
 
     #[test]
     fn build_request_flattens_tools_and_sets_auto_choice() {
-        let provider =
-            ResponsesProvider::from_config(ProviderConfig::new("key", "model", "http://localhost"));
+        let provider = ResponsesProvider::from_config(local_provider_config());
         let request = CompletionRequest {
             tool_definitions: vec![serde_json::json!({
                 "name": "ping",
@@ -935,7 +918,7 @@ mod tests {
                     "required": ["value"]
                 }
             })],
-            ..completion_request()
+            ..empty_completion_request()
         };
         let body = serde_json::to_value(provider.build_request(&request, false)).unwrap();
         // Flattened: name at the tool's top level, no nested `function` object.
@@ -947,13 +930,14 @@ mod tests {
 
     #[test]
     fn build_request_sets_stream_flag_only_when_streaming() {
-        let provider =
-            ResponsesProvider::from_config(ProviderConfig::new("key", "model", "http://localhost"));
+        let provider = ResponsesProvider::from_config(local_provider_config());
         let non_streaming =
-            serde_json::to_value(provider.build_request(&completion_request(), false)).unwrap();
+            serde_json::to_value(provider.build_request(&empty_completion_request(), false))
+                .unwrap();
         assert!(non_streaming.get("stream").is_none());
         let streaming =
-            serde_json::to_value(provider.build_request(&completion_request(), true)).unwrap();
+            serde_json::to_value(provider.build_request(&empty_completion_request(), true))
+                .unwrap();
         assert_eq!(streaming["stream"], true);
     }
 
@@ -966,7 +950,7 @@ mod tests {
         ));
         let request = CompletionRequest {
             model: Some("custom-model".into()),
-            ..completion_request()
+            ..empty_completion_request()
         };
         let body = provider.build_request(&request, false);
         assert_eq!(body.model, "custom-model");
@@ -974,9 +958,8 @@ mod tests {
 
     #[test]
     fn provider_request_snapshot_names_the_responses_protocol_and_register() {
-        let provider =
-            ResponsesProvider::from_config(ProviderConfig::new("key", "model", "http://localhost"));
-        let snapshot = provider.provider_request_snapshot(&completion_request(), true);
+        let provider = ResponsesProvider::from_config(local_provider_config());
+        let snapshot = provider.provider_request_snapshot(&empty_completion_request(), true);
         assert_eq!(snapshot["provider"], "openai");
         assert_eq!(snapshot["protocol"], "responses");
         assert_eq!(snapshot["stream"], true);

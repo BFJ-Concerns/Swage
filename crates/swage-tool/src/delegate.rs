@@ -52,6 +52,11 @@ impl Tool for DelegateTool {
                     "type": "string",
                     "description": "Optional named task definition to apply to the child."
                 },
+                "skills": {
+                    "type": "array",
+                    "description": "Named skills to activate for this delegated child.",
+                    "items": { "type": "string" }
+                },
                 "context": {
                     "type": "array",
                     "description": "Optional context messages to transfer to the delegate.",
@@ -124,6 +129,27 @@ impl Tool for DelegateTool {
             .get("task_definition")
             .and_then(Value::as_str)
             .map(str::to_string);
+        let skills = params
+            .get("skills")
+            .map(|value| {
+                value
+                    .as_array()
+                    .ok_or_else(|| ToolError::InvalidParameters {
+                        name: DELEGATE_TOOL_NAME.to_string(),
+                        message: "skills must be an array of strings".to_string(),
+                    })?
+                    .iter()
+                    .map(|skill| {
+                        skill.as_str().map(str::to_string).ok_or_else(|| {
+                            ToolError::InvalidParameters {
+                                name: DELEGATE_TOOL_NAME.to_string(),
+                                message: "skills must be an array of strings".to_string(),
+                            }
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .transpose()?;
         let cwd = params
             .get("cwd")
             .and_then(Value::as_str)
@@ -157,6 +183,7 @@ impl Tool for DelegateTool {
                 context,
                 cwd,
                 isolation,
+                skills,
                 composition: Box::new(composition),
                 completion_mode,
             }),
@@ -234,6 +261,7 @@ mod tests {
                 json!({
                     "target_agent": "reviewer",
                     "task": "Review independently",
+                    "skills": ["code-review"],
                     "cwd": "/repo",
                     "isolation": "worktree"
                 }),
@@ -247,6 +275,7 @@ mod tests {
                     request.isolation,
                     Some(swage_protocol::client::workflow::WorkerIsolation::Worktree)
                 );
+                assert_eq!(request.skills, Some(vec!["code-review".into()]));
             }
             other => panic!("expected RequiresDelegation, got: {other:?}"),
         }
@@ -261,6 +290,7 @@ mod tests {
                 json!({
                     "target_agent": "reviewer",
                     "task": "Review independently",
+                    "skills": ["code-review"],
                     "elements": ["current-work"],
                     "variables": {"owner": "delegate-owner"},
                     "assembly": "focused"
@@ -284,6 +314,7 @@ mod tests {
                     Some(&"delegate-owner".to_string())
                 );
                 assert_eq!(request.composition.assembly.as_deref(), Some("focused"));
+                assert_eq!(request.skills, Some(vec!["code-review".into()]));
             }
             other => panic!("expected RequiresDelegation, got: {other:?}"),
         }
