@@ -5487,6 +5487,159 @@ async fn approved_sandbox_fallback_build_failure_clears_active_turn() {
 }
 
 #[tokio::test]
+async fn approved_sandbox_degradation_resumes_to_tool_approval_and_completion() {
+    let rounds = vec![
+        vec![
+            StreamChunk::ToolUse {
+                call_id: "fallback-echo".into(),
+                name: "echo".into(),
+                arguments: serde_json::json!({ "text": "continued without isolation" }),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ],
+        vec![
+            StreamChunk::Delta {
+                content: "The fallback turn completed.".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ],
+    ];
+    let (state, session_id) = make_state_with_approval_gated_echo(rounds).await;
+    state.fail_next_dispatcher_builds(1);
+
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let task_state = state.clone();
+    let task = tokio::spawn(async move {
+        process_turn(
+            &task_state,
+            session_id,
+            None,
+            "Use echo after accepting degraded execution".into(),
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
+        )
+        .await
+    });
+
+    let mut saw_degradation_approval = false;
+    let mut saw_tool_approval = false;
+    let mut saw_tool_start = false;
+    let mut saw_tool_end = false;
+    let mut saw_token = false;
+    let mut saw_complete = false;
+    while !saw_complete {
+        let event = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+            .await
+            .expect("turn should continue emitting events after each approval")
+            .expect("turn event channel should stay open until completion");
+        match event {
+            ServerEvent::ApprovalRequired {
+                approval_id,
+                kind,
+                tool_name,
+                ..
+            } if kind == "hook" => {
+                assert!(
+                    !saw_degradation_approval,
+                    "the sandbox fallback should require one degradation approval"
+                );
+                assert_eq!(tool_name, None, "the fallback approval is not a tool call");
+                saw_degradation_approval = true;
+                state
+                    .approval_channels
+                    .lock()
+                    .unwrap()
+                    .remove(&approval_id)
+                    .expect("degradation approval channel should be registered")
+                    .send(swage_agent::ApprovalDecision {
+                        decision: swage_agent::approval::ApprovalDecisionValue::Approved,
+                        scope: swage_agent::approval::ApprovalDecisionScope::Once,
+                        reason: None,
+                    })
+                    .expect("degradation approval should resume the turn");
+            }
+            ServerEvent::ApprovalRequired {
+                approval_id,
+                kind,
+                tool_name,
+                ..
+            } if kind == "tool" => {
+                assert!(
+                    saw_degradation_approval,
+                    "ordinary tool approval must follow the accepted degradation approval"
+                );
+                assert_eq!(tool_name.as_deref(), Some("echo"));
+                saw_tool_approval = true;
+                state
+                    .approval_channels
+                    .lock()
+                    .unwrap()
+                    .remove(&approval_id)
+                    .expect("tool approval channel should be registered")
+                    .send(swage_agent::ApprovalDecision {
+                        decision: swage_agent::approval::ApprovalDecisionValue::Approved,
+                        scope: swage_agent::approval::ApprovalDecisionScope::Once,
+                        reason: None,
+                    })
+                    .expect("tool approval should resume execution");
+            }
+            ServerEvent::ToolStart { tool, .. } if tool == "echo" => saw_tool_start = true,
+            ServerEvent::ToolEnd { tool, status, .. } if tool == "echo" && status == "success" => {
+                saw_tool_end = true
+            }
+            ServerEvent::Token { content } if content.contains("fallback turn completed") => {
+                saw_token = true
+            }
+            ServerEvent::TurnComplete { .. } => saw_complete = true,
+            ServerEvent::Error { message, .. } => panic!("fallback turn must not fail: {message}"),
+            _ => {}
+        }
+    }
+
+    task.await
+        .expect("turn task should finish")
+        .expect("accepted degradation should continue the turn");
+    assert!(
+        saw_tool_approval,
+        "ordinary tool approval should be rendered"
+    );
+    assert!(saw_tool_start, "approved tool should execute");
+    assert!(saw_tool_end, "tool execution should finish successfully");
+    assert!(saw_token, "the final assistant output should stream");
+
+    let thread = state
+        .storage
+        .list_by_session(session_id)
+        .await
+        .unwrap()
+        .remove(0);
+    let turn = state
+        .storage
+        .list_turns_by_thread(thread.id)
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!(turn.state, TurnState::Completed);
+    assert_eq!(
+        turn.assistant_response.as_deref(),
+        Some("The fallback turn completed."),
+        "the assistant result should persist after the approved fallback"
+    );
+    let calls = state
+        .storage
+        .list_tool_calls_by_turn(turn.id)
+        .await
+        .unwrap();
+    assert_eq!(calls.len(), 1, "the approved echo call should persist");
+    assert_eq!(calls[0].status.as_deref(), Some("success"));
+}
+
+#[tokio::test]
 async fn attended_sandbox_failure_records_interactive_attendance() {
     let mut config = swage_config::ResolvedConfig::default();
     config.sandbox.enabled = false;
