@@ -10,7 +10,7 @@ use std::{
 
 use swage_agent::{
     AgentBuilder, AgentConfig, CompactionThreshold, TurnRequest,
-    compaction::{compact, exceeds_threshold},
+    compaction::{compact_with_model, exceeds_threshold_with_model},
     context::TurnExecutionContext,
 };
 use swage_core::{
@@ -165,18 +165,26 @@ async fn non_text_and_tool_payloads_use_native_counting_while_exact_limit_and_er
         ],
     };
     assert!(
-        exceeds_threshold(std::slice::from_ref(&non_text), &threshold, &provider).await,
+        exceeds_threshold_with_model(std::slice::from_ref(&non_text), &threshold, &provider, None,)
+            .await,
         "non-text payload bypasses the byte screen and uses native count"
     );
     assert!(
-        !exceeds_threshold(std::slice::from_ref(&tool_replay), &threshold, &provider).await,
+        !exceeds_threshold_with_model(
+            std::slice::from_ref(&tool_replay),
+            &threshold,
+            &provider,
+            None,
+        )
+        .await,
         "native count at the exact limit must not compact"
     );
     assert!(
-        !exceeds_threshold(
+        !exceeds_threshold_with_model(
             &[ChatMessage::new(Role::User, "tiny")],
             &threshold,
-            &provider
+            &provider,
+            None,
         )
         .await,
         "a provider count failure keeps the non-exceeding estimate"
@@ -186,13 +194,15 @@ async fn non_text_and_tool_payloads_use_native_counting_while_exact_limit_and_er
         calls: AtomicUsize::new(0),
         counts: vec![Ok(Some(100)), Ok(Some(1))],
     };
-    let (_messages, record) = compact(
+    let (_messages, record) = compact_with_model(
         vec![non_text, tool_replay],
         &threshold,
         &provider,
         &storage,
         Uuid::new_v4(),
         None,
+        None,
+        false,
     )
     .await
     .unwrap();
