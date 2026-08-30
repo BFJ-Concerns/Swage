@@ -8,5 +8,6 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+serde_json = { workspace = true }
 sha2 = { workspace = true }
 swage-workflow = { path = "../crates/swage-workflow" }
