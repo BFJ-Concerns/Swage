@@ -6,17 +6,14 @@ use swage_core::GatewayError;
 use swage_storage::Storage;
 
 use crate::config_change::{ConfigChange, record_config_change};
+use crate::service::is_lowercase_identifier;
 use crate::state::AppState;
 
 pub const VARIABLE_NAME_RULE: &str =
     "variable names are lowercase ASCII letters, digits, and hyphens";
 
 pub fn validate_variable_name(name: &str) -> Result<(), GatewayError> {
-    if name.is_empty()
-        || !name.chars().all(|character| {
-            character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-'
-        })
-    {
+    if !is_lowercase_identifier(name) {
         return Err(GatewayError::ValidationError(VARIABLE_NAME_RULE.into()));
     }
     Ok(())

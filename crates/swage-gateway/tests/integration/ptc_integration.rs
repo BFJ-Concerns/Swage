@@ -18,7 +18,6 @@ use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use futures::{SinkExt, StreamExt};
 use serde_json::{Value, json};
-use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite;
 use tower::ServiceExt;
 
@@ -31,6 +30,8 @@ use swage_provider::LlmProvider;
 use swage_storage::SqliteStorage;
 use swage_storage::model::NewWorkspaceAttachment;
 use swage_storage::store::{SpaceStore, WorkspaceAttachmentStore};
+
+use crate::support::start_live_server;
 
 // ---------------------------------------------------------------------------
 // Mock providers
@@ -161,12 +162,7 @@ async fn start_ptc_test_server(
     );
     let router = build_router(state);
 
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let serve_router = router.clone();
-    tokio::spawn(async move {
-        axum::serve(listener, serve_router).await.unwrap();
-    });
+    let (addr, _server) = start_live_server(router.clone()).await;
 
     (router, addr, storage, workspace)
 }

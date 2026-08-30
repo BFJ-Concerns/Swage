@@ -342,6 +342,7 @@ fn check_gate() -> Result<()> {
     fmt_check()?;
     check()?;
     check_frontend_design_tokens()?;
+    check_shipped_workflows_parse()?;
     clippy()
 }
 
@@ -690,6 +691,31 @@ fn check_tracked_local_state() -> Result<()> {
         "Checking for tracked local state",
         command("scripts/check-tracked-local-state.sh", []),
     )
+}
+
+/// Product workflows are compile-time embedded, but their source is still a
+/// separate deliverable. Parse the complete shipped catalogue before it can be
+/// advertised by the gateway.
+fn check_shipped_workflows_parse() -> Result<()> {
+    let root = Path::new("shipped/skills");
+    let mut files = Vec::new();
+    collect_files(root, &mut files)?;
+    files.sort();
+
+    for path in files.into_iter().filter(|path| {
+        path.parent().and_then(Path::file_name) == Some(std::ffi::OsStr::new("workflows"))
+            && path.extension() == Some(std::ffi::OsStr::new("js"))
+    }) {
+        let source = fs::read_to_string(&path)?;
+        swage_workflow::parse_workflow(&source).map_err(|error| {
+            format!(
+                "shipped workflow {} does not parse: {error}",
+                path.display()
+            )
+        })?;
+        println!("==> Parsed shipped workflow {}", path.display());
+    }
+    Ok(())
 }
 
 /// swage-protocol's projection test *rewrites* the committed JSON Schema and
