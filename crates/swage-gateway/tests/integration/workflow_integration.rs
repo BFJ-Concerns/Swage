@@ -210,11 +210,7 @@ async fn terminal_run_rejects_operator_events_without_adding_to_the_queue() {
         swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
         None,
     );
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let server = tokio::spawn(async move {
-        axum::serve(listener, build_router(state)).await.unwrap();
-    });
+    let (address, server) = start_live_server(build_router(state)).await;
     let base = format!("http://{address}");
     let client = reqwest::Client::new();
 
@@ -265,11 +261,7 @@ async fn inline_run_keeps_anonymous_identity_in_its_public_projection() {
         swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
         None,
     );
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let server = tokio::spawn(async move {
-        axum::serve(listener, build_router(state)).await.unwrap();
-    });
+    let (address, server) = start_live_server(build_router(state)).await;
     let base = format!("http://{address}");
     let client = reqwest::Client::new();
 
@@ -310,11 +302,7 @@ async fn cancelled_run_rejects_operator_events_without_adding_to_the_queue() {
         swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
         None,
     );
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let server = tokio::spawn(async move {
-        axum::serve(listener, build_router(state)).await.unwrap();
-    });
+    let (address, server) = start_live_server(build_router(state)).await;
     let base = format!("http://{address}");
     let client = reqwest::Client::new();
 
