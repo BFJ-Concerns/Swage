@@ -27,6 +27,23 @@ describe("status register hues", () => {
     expect(result.ok).toBe(true);
   });
 
+  it("keeps shared primary-button ink AA-safe on the accent fill", () => {
+    const primaryFillRows = result.rows.filter(
+      (r) => r.register === "--primary-fill-ink on --accent",
+    );
+    expect(primaryFillRows).toHaveLength(2);
+    for (const row of primaryFillRows) {
+      expect(row.contrast).toBeGreaterThanOrEqual(4.5);
+    }
+  });
+
+  it("routes shared primary-button foreground paint through the AA-safe role", () => {
+    const risoCss = readFileSync(RISO_CSS_PATH, "utf8");
+    expect(risoCss).toMatch(
+      /\.riso-btn\.primary\s*\{[^}]*color:\s*var\(--primary-fill-ink\)\s*;/s,
+    );
+  });
+
   it("keeps the dark error red clear of the action orange (the collision fix)", () => {
     const darkErrorVsAccent = result.rows.find(
       (r) => r.scheme === "dark" && r.errorVsAccent != null,
