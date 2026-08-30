@@ -151,6 +151,54 @@ impl Drop for GatewayProbe {
     }
 }
 
+#[cfg(unix)]
+#[test]
+fn gateway_start_regenerates_fresh_and_damaged_shipped_skill_projection() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let probe = GatewayProbe::new();
+    let projected = probe
+        .root
+        .path()
+        .join("generated/shipped-skills/commission/scripts/create-annexe.sh");
+    let projection_root = probe.root.path().join("generated/shipped-skills");
+    let expected = include_str!("../../../../shipped/skills/commission/scripts/create-annexe.sh");
+
+    probe.start();
+    assert_eq!(
+        fs::read(&projected).expect("gateway startup projected shipped skill"),
+        expected.as_bytes(),
+        "the gateway startup consumer must project bundled skill bytes into a fresh root"
+    );
+    probe.stop();
+
+    fs::write(&projected, "damaged projection").expect("damage projected skill");
+    fs::set_permissions(&projected, fs::Permissions::from_mode(0o600))
+        .expect("remove projected script execute mode");
+    let stray = projection_root.join("stray.txt");
+    fs::write(&stray, "stray").expect("write stray projection file");
+
+    probe.start();
+    assert_eq!(
+        fs::read(&projected).expect("gateway startup restored shipped skill"),
+        expected.as_bytes(),
+        "a later gateway startup must replace damaged projected bytes"
+    );
+    assert!(
+        !stray.exists(),
+        "a later gateway startup must replace the complete shipped-skill projection"
+    );
+    assert_eq!(
+        fs::metadata(&projected)
+            .expect("gateway startup restored projected script metadata")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o755,
+        "a later gateway startup must restore executable projected scripts"
+    );
+}
+
 #[test]
 fn restart_recovers_xdg_metadata_without_swage_home() {
     assert_restart_recovers_without_swage_home(GatewayProbe::without_explicit_root());
