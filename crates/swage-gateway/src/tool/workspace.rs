@@ -585,4 +585,44 @@ mod tests {
 
         assert_eq!(result.unwrap_err(), "max_output_bytes must be positive");
     }
+
+    #[test]
+    fn canonical_root_checker_preserves_workspace_root_wording_at_both_call_sites() {
+        let dir = tmp_workspace();
+        let tool_root = dir.path().join("not-a-directory");
+        std::fs::write(&tool_root, b"").unwrap();
+        let tool_context = swage_tool::context::MockToolContext {
+            agent_id: "test-agent".into(),
+            session_id: "test-session".into(),
+            working_directory: tool_root.clone(),
+            allowed_paths: vec![],
+            user_info: None,
+            call_id: None,
+            turn_id: None,
+        };
+
+        assert_eq!(
+            resolve_context_path(&tool_context, "readme.md").unwrap_err(),
+            format!("Workspace root is not a directory: {}", tool_root.display())
+        );
+
+        let attachment_root = dir.path().join("missing");
+        let attachment_context = swage_tool::context::MockToolContext {
+            agent_id: "test-agent".into(),
+            session_id: "test-session".into(),
+            working_directory: dir.path().to_path_buf(),
+            allowed_paths: vec![attachment_root.clone()],
+            user_info: None,
+            call_id: None,
+            turn_id: None,
+        };
+        assert!(
+            resolve_context_path(&attachment_context, attachment_root.to_str().unwrap())
+                .unwrap_err()
+                .starts_with(&format!(
+                    "Workspace root is unavailable: {}:",
+                    attachment_root.display()
+                ))
+        );
+    }
 }
