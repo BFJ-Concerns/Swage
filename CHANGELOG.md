@@ -62,6 +62,7 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- Accepted sandbox-degradation approvals now resume attended turns so ordinary tool approval, execution, and assistant output can continue.
 - Schema-constrained workflow agent calls now return `null` after exhausting validation attempts, while ordinary agent and turn failures still throw.
 - Unattended turns now refuse a relative managed scratch root with an error naming how to configure a deliberate root, and record their resolved tool root in turn diagnostics.
 - Terminal Chat Completions stream events now preserve reported token usage when it arrives alongside the finish reason.
