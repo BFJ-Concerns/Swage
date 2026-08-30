@@ -126,6 +126,98 @@ impl LlmProvider for CompactionStreamingProvider {
     }
 }
 
+struct NativeCountCompactionProvider {
+    count_calls: AtomicUsize,
+    count_requests: Mutex<Vec<CompletionRequest>>,
+    stream_requests: Mutex<Vec<CompletionRequest>>,
+}
+
+impl NativeCountCompactionProvider {
+    fn new() -> Self {
+        Self {
+            count_calls: AtomicUsize::new(0),
+            count_requests: Mutex::new(Vec::new()),
+            stream_requests: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn count_requests(&self) -> Vec<CompletionRequest> {
+        self.count_requests
+            .lock()
+            .expect("count request lock should not be poisoned")
+            .clone()
+    }
+
+    fn stream_requests(&self) -> Vec<CompletionRequest> {
+        self.stream_requests
+            .lock()
+            .expect("stream request lock should not be poisoned")
+            .clone()
+    }
+}
+
+#[async_trait]
+impl LlmProvider for NativeCountCompactionProvider {
+    fn model_id(&self) -> &str {
+        "native-count-mock"
+    }
+
+    async fn count_tokens(
+        &self,
+        request: &CompletionRequest,
+    ) -> Result<Option<u64>, ProviderError> {
+        self.count_requests
+            .lock()
+            .expect("count request lock should not be poisoned")
+            .push(request.clone());
+        if self.count_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            Ok(Some(100))
+        } else {
+            Err(ProviderError::InvalidResponse(
+                "transient native count failure".to_string(),
+            ))
+        }
+    }
+
+    async fn complete(
+        &self,
+        _request: CompletionRequest,
+    ) -> Result<CompletionResponse, ProviderError> {
+        Ok(CompletionResponse {
+            content: "brief".to_string(),
+            input_tokens: 1,
+            output_tokens: 1,
+            finish_reason: FinishReason::Stop,
+            cost: None,
+        })
+    }
+
+    async fn complete_with_tools(
+        &self,
+        _request: ToolCompletionRequest,
+    ) -> Result<ToolCompletionResponse, ProviderError> {
+        unreachable!("compaction test should not call complete_with_tools")
+    }
+
+    fn stream(
+        &self,
+        request: CompletionRequest,
+    ) -> Pin<Box<dyn Stream<Item = StreamChunk> + Send>> {
+        self.stream_requests
+            .lock()
+            .expect("stream request lock should not be poisoned")
+            .push(request);
+        Box::pin(stream::iter(vec![
+            StreamChunk::Delta {
+                content: "done".to_string(),
+            },
+            StreamChunk::Done {
+                finish_reason: Some(FinishReason::Stop),
+            },
+        ]))
+    }
+}
+
 #[async_trait]
 impl LlmProvider for StreamingProvider {
     fn model_id(&self) -> &str {
@@ -644,6 +736,47 @@ async fn streaming_turn_compacts_context_before_provider_stream() {
         provider.last_stream_message_count() <= 3,
         "provider should receive compacted context"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn native_count_breach_keeps_its_model_and_compacts_after_a_retry_failure() {
+    let (storage, space, session, thread) = setup_conversation("agent-a").await;
+    let provider = Arc::new(NativeCountCompactionProvider::new());
+    let mut config = resolved_config("agent-a");
+    config.compaction_threshold = swage_agent::CompactionThreshold::TokenCount(20);
+    config.model_id = Some("selected-model".to_string());
+    let agent = AgentBuilder::new()
+        .config(config)
+        .provider(provider.clone())
+        .storage(storage)
+        .build()
+        .expect("agent");
+
+    let mut request = test_request(space.id, session.id, thread.id, "latest", None);
+    request.assembled_context = vec![
+        ChatMessage::new(Role::User, "first history message"),
+        ChatMessage::new(Role::Assistant, "second history message"),
+        ChatMessage::new(Role::User, "third history message"),
+        ChatMessage::new(Role::Assistant, "fourth history message"),
+    ];
+
+    let (event_tx, _event_rx) = mpsc::unbounded_channel();
+    agent
+        .process_turn_streaming(request, event_tx)
+        .await
+        .expect("a native-count breach must not be discarded after a retry failure");
+
+    let count_requests = provider.count_requests();
+    assert_eq!(count_requests.len(), 2);
+    assert_eq!(count_requests[0].model.as_deref(), Some("selected-model"));
+    assert_eq!(count_requests[1].model.as_deref(), Some("selected-model"));
+    assert_eq!(count_requests[0].messages.len(), 4);
+    assert_eq!(count_requests[1].messages.len(), 3);
+
+    let stream_requests = provider.stream_requests();
+    assert_eq!(stream_requests.len(), 1);
+    assert_eq!(stream_requests[0].model.as_deref(), Some("selected-model"));
+    assert_eq!(stream_requests[0].messages.len(), 3);
 }
 
 #[tokio::test(flavor = "multi_thread")]

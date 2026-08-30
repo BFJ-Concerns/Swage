@@ -104,7 +104,7 @@ pub struct AppState {
     pub hook_registry: Option<Arc<HookRegistry>>,
     /// Session routing map for external channels.
     pub channel_routes: Arc<AsyncMutex<HashMap<ChannelOrigin, Uuid>>>,
-    /// Runtime presence for recent clients and registered machines.
+    /// Runtime presence for recent clients and registered devices.
     pub presence: Arc<AsyncMutex<PresenceRuntime>>,
     /// Registered local and attached devices.
     pub devices: Arc<AsyncMutex<DeviceRuntime>>,
@@ -180,26 +180,23 @@ impl AppState {
             .map(|run| run.id)
             .collect::<HashSet<_>>();
 
-        // Storage has a global interrupted-run lister, but parked runs are
-        // currently listed by space. Keep the latter scan until storage owns
-        // an all-parked query too.
-        for space in self
+        let space_ids = self
             .space_store
             .list_all()
             .await
             .map_err(|error| error.to_string())?
-        {
-            for run in self
-                .storage
-                .list_workflow_runs(space.id)
+            .into_iter()
+            .map(|space| space.id)
+            .collect::<HashSet<_>>();
+        owners.extend(
+            self.storage
+                .list_parked_workflow_runs()
                 .await
                 .map_err(|error| error.to_string())?
-            {
-                if run.state == "parked" {
-                    owners.insert(run.id);
-                }
-            }
-        }
+                .into_iter()
+                .filter(|run| space_ids.contains(&run.space_id))
+                .map(|run| run.id),
+        );
         Ok(owners)
     }
 

@@ -7,8 +7,11 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static METADATA_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// Metadata written by the gateway on startup, read by the CLI for discovery.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -106,7 +109,31 @@ impl RuntimeMetadata {
         }
         let json = serde_json::to_string_pretty(self)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        std::fs::write(path, json)
+        let file_name = path.file_name().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "metadata path has no file name",
+            )
+        })?;
+        let temporary = path.with_file_name(format!(
+            ".{}-{}-{}.tmp",
+            file_name.to_string_lossy(),
+            std::process::id(),
+            METADATA_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed),
+        ));
+        let write_result = (|| -> io::Result<()> {
+            let mut file = std::fs::OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&temporary)?;
+            file.write_all(json.as_bytes())?;
+            file.sync_all()?;
+            std::fs::rename(&temporary, path)
+        })();
+        if write_result.is_err() {
+            let _ = std::fs::remove_file(&temporary);
+        }
+        write_result
     }
 
     pub fn load_from(path: &Path) -> io::Result<Self> {
@@ -137,6 +164,7 @@ fn effective_swage_root_path() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Barrier};
     use tempfile::TempDir;
     // Shared crate-wide lock — prevents races with http.rs tests that also
     // manipulate XDG_RUNTIME_DIR during parallel test execution.
@@ -292,6 +320,41 @@ mod tests {
         assert_eq!(loaded.pid, meta.pid);
         assert_eq!(loaded.address, meta.address);
         assert_eq!(loaded.started_at, meta.started_at);
+    }
+
+    #[test]
+    fn save_to_never_exposes_partial_metadata_to_contending_readers() {
+        const READERS: usize = 4;
+        const READS_PER_READER: usize = 300;
+
+        let tmp = TempDir::new().unwrap();
+        let path = Arc::new(tmp.path().join("metadata.json"));
+        RuntimeMetadata::new(1, "http://127.0.0.1:3000".to_string())
+            .save_to(path.as_ref())
+            .unwrap();
+
+        let start = Arc::new(Barrier::new(READERS + 1));
+        std::thread::scope(|scope| {
+            for _ in 0..READERS {
+                let path = Arc::clone(&path);
+                let start = Arc::clone(&start);
+                scope.spawn(move || {
+                    start.wait();
+                    for _ in 0..READS_PER_READER {
+                        let metadata = RuntimeMetadata::load_from(path.as_ref())
+                            .expect("readers must see either complete metadata version");
+                        assert!(metadata.address.starts_with("http://127.0.0.1:"));
+                    }
+                });
+            }
+
+            start.wait();
+            for port in 3001..=3300 {
+                RuntimeMetadata::new(1, format!("http://127.0.0.1:{port}"))
+                    .save_to(path.as_ref())
+                    .unwrap();
+            }
+        });
     }
 
     #[test]

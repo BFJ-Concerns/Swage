@@ -808,29 +808,11 @@ fn provider_error(error: swage_codex::ClientError) -> AgentError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use async_trait::async_trait;
-    use swage_core::ToolError;
     use swage_storage::NewTurn;
     use swage_tool::permission::RequireApprovalEntry;
-    use swage_tool::{context::ToolContext, tool::Tool};
+    use swage_tool::tool::Tool;
 
-    struct NamedTool(&'static str);
-
-    #[async_trait]
-    impl Tool for NamedTool {
-        fn name(&self) -> &str {
-            self.0
-        }
-        fn description(&self) -> &str {
-            "test tool"
-        }
-        fn parameters(&self) -> Value {
-            json!({"type":"object"})
-        }
-        async fn execute(&self, params: Value, _ctx: &dyn ToolContext) -> Result<Value, ToolError> {
-            Ok(params)
-        }
-    }
+    use crate::test_support::NamedTool;
 
     fn permissions(allow: &[&str], approval: &[&str]) -> PermissionConfig {
         PermissionConfig {
@@ -1046,11 +1028,11 @@ mod tests {
     #[tokio::test]
     async fn scripted_tool_call_offers_dispatcher_definitions_and_returns_result() {
         let dispatcher =
-            ToolDispatcher::allow_all([Arc::new(NamedTool("file_read")) as Arc<dyn Tool>]);
+            ToolDispatcher::allow_all([Arc::new(NamedTool::echoing("file_read")) as Arc<dyn Tool>]);
         let expected_tools = json!([{
             "type":"function",
             "name":"file_read",
-            "description":"test tool",
+            "description":"Test tool",
             "inputSchema":{"type":"object"}
         }]);
         let success_notifications = successful_turn_notifications();
@@ -1221,8 +1203,8 @@ mod tests {
     #[test]
     fn dynamic_tools_exclude_approval_gated_capabilities() {
         let dispatcher = ToolDispatcher::allow_all([
-            Arc::new(NamedTool("file_read")) as Arc<dyn Tool>,
-            Arc::new(NamedTool("authenticated_post")) as Arc<dyn Tool>,
+            Arc::new(NamedTool::new("file_read")) as Arc<dyn Tool>,
+            Arc::new(NamedTool::new("authenticated_post")) as Arc<dyn Tool>,
         ]);
         let permissions = permissions(&["file_read"], &["authenticated_post"]);
         let names = dynamic_tools(&dispatcher, &permissions)

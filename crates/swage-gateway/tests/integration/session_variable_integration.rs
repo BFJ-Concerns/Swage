@@ -8,9 +8,10 @@ use std::time::Duration;
 use async_trait::async_trait;
 use futures::{SinkExt, StreamExt};
 use serde_json::json;
-use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite;
 use uuid::Uuid;
+
+use crate::support::start_live_server;
 
 use swage_config::HierarchyLevel;
 use swage_context::briefing::BriefingElement;
@@ -56,46 +57,6 @@ impl LlmProvider for UnusedProvider {
         _: CompletionRequest,
     ) -> Pin<Box<dyn futures::Stream<Item = StreamChunk> + Send>> {
         unreachable!()
-    }
-}
-
-struct ToolCallingProvider {
-    rounds: std::sync::Mutex<Vec<Vec<StreamChunk>>>,
-    requests: Arc<std::sync::Mutex<Vec<CompletionRequest>>>,
-}
-
-impl ToolCallingProvider {
-    fn new(rounds: Vec<Vec<StreamChunk>>) -> (Self, Arc<std::sync::Mutex<Vec<CompletionRequest>>>) {
-        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
-        (
-            Self {
-                rounds: std::sync::Mutex::new(rounds),
-                requests: Arc::clone(&requests),
-            },
-            requests,
-        )
-    }
-}
-#[async_trait]
-impl LlmProvider for ToolCallingProvider {
-    fn model_id(&self) -> &str {
-        "tool-caller"
-    }
-    async fn complete(&self, _: CompletionRequest) -> Result<CompletionResponse, ProviderError> {
-        unreachable!()
-    }
-    async fn complete_with_tools(
-        &self,
-        _: ToolCompletionRequest,
-    ) -> Result<ToolCompletionResponse, ProviderError> {
-        unreachable!()
-    }
-    fn stream(
-        &self,
-        request: CompletionRequest,
-    ) -> Pin<Box<dyn futures::Stream<Item = StreamChunk> + Send>> {
-        self.requests.lock().unwrap().push(request);
-        Box::pin(futures::stream::iter(self.rounds.lock().unwrap().remove(0)))
     }
 }
 
@@ -360,44 +321,47 @@ async fn real_tool_audits_whole_state_and_updated_values_recompose() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn live_listener_turns_set_and_update_the_values_used_by_composition() {
-    let (provider, captured_requests) = ToolCallingProvider::new(vec![
+    let (provider, captured_requests) = crate::support::CapturingProvider::new(
+        "tool-caller",
         vec![
-            StreamChunk::ToolUse {
-                call_id: "set-1".into(),
-                name: "session_values".into(),
-                arguments: json!({"action":"set","name":"task","value":"inspect storage"}),
-            },
-            StreamChunk::Done {
-                finish_reason: None,
-            },
+            vec![
+                StreamChunk::ToolUse {
+                    call_id: "set-1".into(),
+                    name: "session_values".into(),
+                    arguments: json!({"action":"set","name":"task","value":"inspect storage"}),
+                },
+                StreamChunk::Done {
+                    finish_reason: None,
+                },
+            ],
+            vec![
+                StreamChunk::Delta {
+                    content: "saved".into(),
+                },
+                StreamChunk::Done {
+                    finish_reason: None,
+                },
+            ],
+            vec![
+                StreamChunk::ToolUse {
+                    call_id: "set-2".into(),
+                    name: "session_values".into(),
+                    arguments: json!({"action":"set","name":"task","value":"verify audit with durable evidence"}),
+                },
+                StreamChunk::Done {
+                    finish_reason: None,
+                },
+            ],
+            vec![
+                StreamChunk::Delta {
+                    content: "updated".into(),
+                },
+                StreamChunk::Done {
+                    finish_reason: None,
+                },
+            ],
         ],
-        vec![
-            StreamChunk::Delta {
-                content: "saved".into(),
-            },
-            StreamChunk::Done {
-                finish_reason: None,
-            },
-        ],
-        vec![
-            StreamChunk::ToolUse {
-                call_id: "set-2".into(),
-                name: "session_values".into(),
-                arguments: json!({"action":"set","name":"task","value":"verify audit with durable evidence"}),
-            },
-            StreamChunk::Done {
-                finish_reason: None,
-            },
-        ],
-        vec![
-            StreamChunk::Delta {
-                content: "updated".into(),
-            },
-            StreamChunk::Done {
-                finish_reason: None,
-            },
-        ],
-    ]);
+    );
     let swage_home = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(swage_home.path().join("assemblies")).unwrap();
     std::fs::write(
@@ -424,11 +388,7 @@ async fn live_listener_turns_set_and_update_the_values_used_by_composition() {
         ToolDispatcher::allow_all(vec![Arc::new(SessionVariableTool) as Arc<dyn Tool>]),
         None,
     );
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        axum::serve(listener, build_router(state)).await.unwrap();
-    });
+    let (address, _server) = start_live_server(build_router(state)).await;
     let conversation: serde_json::Value = reqwest::Client::new()
         .post(format!("http://{address}/api/conversations"))
         .send()
@@ -606,14 +566,17 @@ async fn live_listener_turns_set_and_update_the_values_used_by_composition() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn live_listener_default_assembly_delivers_working_norms_to_the_provider() {
-    let (provider, captured_requests) = ToolCallingProvider::new(vec![vec![
-        StreamChunk::Delta {
-            content: "default assembly reply".into(),
-        },
-        StreamChunk::Done {
-            finish_reason: None,
-        },
-    ]]);
+    let (provider, captured_requests) = crate::support::CapturingProvider::new(
+        "tool-caller",
+        vec![vec![
+            StreamChunk::Delta {
+                content: "default assembly reply".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ]],
+    );
     let swage_home = tempfile::tempdir().unwrap();
     let mut environment = crate::support::ProcessEnvGuard::new();
     environment.set_swage_home(swage_home.path());
@@ -630,11 +593,7 @@ async fn live_listener_default_assembly_delivers_working_norms_to_the_provider()
         ToolDispatcher::allow_all(vec![]),
         None,
     );
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        axum::serve(listener, build_router(state)).await.unwrap();
-    });
+    let (address, _server) = start_live_server(build_router(state)).await;
     let conversation: serde_json::Value = reqwest::Client::new()
         .post(format!("http://{address}/api/conversations"))
         .send()
@@ -718,24 +677,27 @@ async fn live_listener_default_assembly_delivers_working_norms_to_the_provider()
 
 #[tokio::test(flavor = "multi_thread")]
 async fn live_http_delegations_apply_call_scoped_context_composition() {
-    let (provider, captured_requests) = ToolCallingProvider::new(vec![
+    let (provider, captured_requests) = crate::support::CapturingProvider::new(
+        "tool-caller",
         vec![
-            StreamChunk::Delta {
-                content: "first child response".into(),
-            },
-            StreamChunk::Done {
-                finish_reason: None,
-            },
+            vec![
+                StreamChunk::Delta {
+                    content: "first child response".into(),
+                },
+                StreamChunk::Done {
+                    finish_reason: None,
+                },
+            ],
+            vec![
+                StreamChunk::Delta {
+                    content: "second child response".into(),
+                },
+                StreamChunk::Done {
+                    finish_reason: None,
+                },
+            ],
         ],
-        vec![
-            StreamChunk::Delta {
-                content: "second child response".into(),
-            },
-            StreamChunk::Done {
-                finish_reason: None,
-            },
-        ],
-    ]);
+    );
     let swage_home = tempfile::tempdir().unwrap();
     let element_path = swage_home
         .path()
@@ -767,11 +729,7 @@ async fn live_http_delegations_apply_call_scoped_context_composition() {
         ToolDispatcher::allow_all(vec![]),
         None,
     );
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        axum::serve(listener, build_router(state)).await.unwrap();
-    });
+    let (address, _server) = start_live_server(build_router(state)).await;
     let client = reqwest::Client::new();
 
     let dispatch = |task: &'static str| {
