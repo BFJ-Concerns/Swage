@@ -12,8 +12,9 @@ use super::{
     dispatch_bound_task_definition_ids_for_turn, effective_tool_permissions_record,
     execute_context_assembly, load_active_skills_for_agent, load_memory_for_assembly,
     load_session_config, load_space_memory, load_trusted_workspace_policy, mpsc,
-    operator_guidance_rules, resolve_authorised_worker_directory, resolve_swage_root,
-    select_context_assembly, shutdown_sandbox_guard,
+    operator_guidance_rules, resolve_authorised_worker_directory,
+    resolve_requested_skills_for_agent, resolve_swage_root, select_context_assembly,
+    shutdown_sandbox_guard,
 };
 use crate::turn::workspace::ResolvedWorkerDirectory;
 use sha2::{Digest, Sha256};
@@ -109,8 +110,10 @@ impl DelegationContextAssembler for GatewayDelegatedContextAssembler {
             Some(&self.swage_root),
             false,
             &self.config.declared_skills,
+            self.composition.skills.as_deref().unwrap_or_default(),
         )
-        .await;
+        .await
+        .map_err(AgentError::InvalidConfig)?;
         let context_choices = select_context_assembly(
             &self.state,
             &self.config,
@@ -335,6 +338,7 @@ impl DelegationHandler for GatewayDelegationHandler {
         context: Option<serde_json::Value>,
         cwd: Option<String>,
         isolation: Option<swage_protocol::client::workflow::WorkerIsolation>,
+        skills: Option<Vec<String>>,
         composition: DispatchContextComposition,
         delegate_call_id: &str,
         sender_agent_id: &str,
@@ -402,6 +406,13 @@ impl DelegationHandler for GatewayDelegationHandler {
             }
             None => target_resolved,
         };
+        resolve_requested_skills_for_agent(
+            &space.slug,
+            target_agent_id,
+            Some(resolve_swage_root(&self.state)),
+            skills.as_deref().unwrap_or_default(),
+        )
+        .map_err(AgentError::InvalidConfig)?;
 
         let mut bound_agent_ids = dispatch_bound_agent_ids_for_turn(&self.state, sender_turn_id)
             .await
@@ -585,6 +596,7 @@ impl DelegationHandler for GatewayDelegationHandler {
         })?;
         payload["task"] = serde_json::json!(task);
         payload["task_definition"] = serde_json::json!(task_definition);
+        payload["skills"] = serde_json::json!(skills);
         payload["placement"] = serde_json::json!({
             "cwd": placement.as_ref().map(|placement| &placement.path),
             "requested_cwd": cwd,
