@@ -8,7 +8,6 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use axum::Router;
-use tokio::net::TcpListener;
 
 use swage_core::{
     CompletionRequest, CompletionResponse, ProviderError, StreamChunk, ToolCompletionRequest,
@@ -20,6 +19,8 @@ use swage_provider::{
     VoiceCapabilities, VoiceProvider,
 };
 use swage_storage::SqliteStorage;
+
+use crate::support::start_live_server;
 
 struct MockProvider {
     chunks: std::sync::Mutex<Vec<StreamChunk>>,
@@ -118,12 +119,7 @@ async fn start_test_server(
     }
     let router: Router = build_router(state);
 
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        axum::serve(listener, router).await.unwrap();
-    });
-    addr
+    start_live_server(router).await.0
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -11,8 +11,8 @@
   --paper, --error, --accent) out of riso.css for both themes and checks two
   things the eye cannot be trusted to judge:
 
-    1. WCAG 2.1 contrast — every register's text/glyph clears AA (4.5:1) on the
-       backing it actually renders on, in the scheme it renders in.
+    1. WCAG 2.1 contrast — every register's text/glyph and the shared primary
+       button ink clear AA (4.5:1) on the backing they actually render on.
     2. CIEDE2000 (ΔE00) role separation — every spot hue stays measurably clear
        of the two warm roles the palette reserves (--accent owns action,
        --error owns trouble), and confirmation feedback (--success) stays
@@ -248,8 +248,17 @@ export function measure(cssPath) {
   for (const [scheme, theme] of Object.entries(themes)) {
     const paper = hexToRgb(resolveHex("--paper", theme, root));
     const accent = hexToRgb(resolveHex("--accent", theme, root));
+    const primaryFillInk = hexToRgb(resolveHex("--primary-fill-ink", theme, root));
     const error = hexToRgb(resolveHex("--error", theme, root));
     const success = hexToRgb(resolveHex("--success", theme, root));
+
+    const primaryFillContrast = contrastRatio(primaryFillInk, accent);
+    if (primaryFillContrast < AA_SMALL_TEXT) {
+      failures.push(
+        `[${scheme}] --primary-fill-ink: contrast ${primaryFillContrast.toFixed(2)} < ${AA_SMALL_TEXT} (text on --accent)`,
+      );
+    }
+    rows.push({ scheme, register: "--primary-fill-ink on --accent", contrast: primaryFillContrast });
 
     // Resolve each register's representative hue for this scheme.
     const hues = {};
@@ -346,6 +355,8 @@ function formatReport(result) {
     }
     const ea = result.rows.find((x) => x.scheme === scheme && x.errorVsAccent != null);
     lines.push(`  --error vs --accent: ΔE00 ${ea.errorVsAccent.toFixed(1)}`);
+    const primary = result.rows.find((x) => x.scheme === scheme && x.register === "--primary-fill-ink on --accent");
+    lines.push(`  --primary-fill-ink on --accent: ${primary.contrast.toFixed(2)}:1`);
     for (const r of result.rows.filter((x) => x.scheme === scheme && x.successVsRegister != null)) {
       lines.push(`  ${r.register}: ΔE00 ${r.successVsRegister.toFixed(1)}`);
     }

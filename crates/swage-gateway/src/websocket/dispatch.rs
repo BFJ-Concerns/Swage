@@ -9,11 +9,6 @@ use crate::{state::AppState, subscription::SubscriptionState, turn};
 
 use super::{ClientEvent, ServerEvent, error_codes};
 
-#[cfg(test)]
-pub(crate) static TEST_SKILL_ROOTS: std::sync::LazyLock<
-    std::sync::Mutex<std::collections::HashMap<Uuid, std::path::PathBuf>>,
-> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
-
 /// Discover skills available to a session.
 ///
 /// Resolves the Swage root, looks up the session's space slug and agent id,
@@ -53,7 +48,7 @@ pub(crate) async fn discover_available_for_session(
 
 #[cfg(test)]
 fn skill_root_for_session(session_id: Uuid) -> Option<std::path::PathBuf> {
-    TEST_SKILL_ROOTS
+    crate::skill::TEST_SKILL_ROOTS
         .lock()
         .unwrap_or_else(|error| error.into_inner())
         .get(&session_id)
@@ -63,48 +58,6 @@ fn skill_root_for_session(session_id: Uuid) -> Option<std::path::PathBuf> {
 #[cfg(not(test))]
 fn skill_root_for_session(_session_id: Uuid) -> Option<std::path::PathBuf> {
     None
-}
-
-#[cfg(test)]
-pub(crate) struct SessionSkillRootGuard {
-    session_id: Uuid,
-    _root: Option<tempfile::TempDir>,
-}
-
-#[cfg(test)]
-impl SessionSkillRootGuard {
-    pub(crate) fn at(session_id: Uuid, root: &std::path::Path) -> Self {
-        TEST_SKILL_ROOTS
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .insert(session_id, root.to_path_buf());
-        Self {
-            session_id,
-            _root: None,
-        }
-    }
-
-    pub(crate) fn empty(session_id: Uuid) -> Self {
-        let root = tempfile::TempDir::new().expect("temp skill root");
-        TEST_SKILL_ROOTS
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .insert(session_id, root.path().to_path_buf());
-        Self {
-            session_id,
-            _root: Some(root),
-        }
-    }
-}
-
-#[cfg(test)]
-impl Drop for SessionSkillRootGuard {
-    fn drop(&mut self) {
-        TEST_SKILL_ROOTS
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .remove(&self.session_id);
-    }
 }
 
 /// Parse and dispatch a raw text frame from the client.
