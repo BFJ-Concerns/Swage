@@ -253,6 +253,7 @@ mod tests {
                 "action":"upsert",
                 "id":"review",
                 "instructions":"First contract.",
+                "model_id":"gpt-5.6",
                 "tool_permissions":{
                     "allow":["file_read"],
                     "deny":[],
@@ -298,7 +299,7 @@ mod tests {
             edited.metadata["new_state"]["instructions"],
             "Edited contract."
         );
-        assert_eq!(edited.metadata["prior_state"]["model_id"], Value::Null);
+        assert_eq!(edited.metadata["prior_state"]["model_id"], "gpt-5.6");
         assert_eq!(
             edited.metadata["prior_state"]["tool_permissions"],
             json!({
