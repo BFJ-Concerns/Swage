@@ -4324,8 +4324,10 @@ async fn active_skill_loading_keeps_agent_skills_out_of_reserved_workflow_contex
         Some(root.path()),
         true,
         &[],
+        &[],
     )
-    .await;
+    .await
+    .expect("load normal agent skills");
     assert_eq!(
         normal
             .iter()
@@ -4343,8 +4345,10 @@ async fn active_skill_loading_keeps_agent_skills_out_of_reserved_workflow_contex
         Some(root.path()),
         false,
         &[],
+        &[],
     )
-    .await;
+    .await
+    .expect("load reserved workflow agent skills");
     assert!(
         reserved.is_empty(),
         "the reserved workflow agent must not discover either agent-directory skill: {reserved:?}"
