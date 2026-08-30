@@ -177,7 +177,7 @@ async fn saved_workflow_runs_through_the_gateway_engine_and_persists_its_final_o
         const placements = await workerPlacements();
         return {{ placements }};"#
     );
-    let script: Value = client.post(format!("{base}/api/spaces/{}/workflow-scripts", space.id)).json(&json!({"name":"final output","description":"engine output","source":source,"delivery_grant":null})).send().await.unwrap().error_for_status().unwrap().json().await.unwrap();
+    let script: Value = client.post(format!("{base}/api/spaces/{}/workflow-scripts", space.id)).json(&json!({"name":"final-output","description":"engine output","source":source,"delivery_grant":null})).send().await.unwrap().error_for_status().unwrap().json().await.unwrap();
     let started: Value = client
         .post(format!(
             "{base}/api/workflow-scripts/{}/runs",

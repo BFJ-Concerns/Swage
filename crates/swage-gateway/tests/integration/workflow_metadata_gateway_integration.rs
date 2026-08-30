@@ -39,7 +39,7 @@ impl LlmProvider for StubProvider {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn workflow_metadata_headers_override_and_persist_through_live_gateway_requests() {
+async fn workflow_metadata_and_explicit_updates_persist_through_live_gateway_requests() {
     let root = scratch_tempdir();
     let mut environment = ProcessEnvGuard::new();
     environment.set_swage_home(root.path());
@@ -60,15 +60,15 @@ async fn workflow_metadata_headers_override_and_persist_through_live_gateway_req
     });
     let base = format!("http://{address}");
     let client = reqwest::Client::new();
-    let created: Value = client.post(format!("{base}/api/spaces/{}/workflow-scripts", space.id)).json(&json!({"name":"request name","description":"request description","source":"export const meta = { enabled: false, empty: null, retries: 3, name: \"header name\", description: \"header description\" }; return \"created\";","delivery_grant":null})).send().await.unwrap().error_for_status().unwrap().json().await.unwrap();
-    assert_eq!(created["name"], "header name");
+    let created: Value = client.post(format!("{base}/api/spaces/{}/workflow-scripts", space.id)).json(&json!({"name":"request-name","description":"request description","source":"export const meta = { enabled: false, empty: null, retries: 3, name: \"header-name\", description: \"header description\" }; return \"created\";","delivery_grant":null})).send().await.unwrap().error_for_status().unwrap().json().await.unwrap();
+    assert_eq!(created["name"], "header-name");
     assert_eq!(created["description"], "header description");
-    let updated: Value = client.put(format!("{base}/api/workflow-scripts/{}", created["id"].as_str().unwrap())).json(&json!({"description":"ignored request description","source":"export const meta = { enabled: false, empty: null, retries: 4, name: \"updated header name\", description: \"updated header description\" }; return \"updated\";","delivery_grant":null})).send().await.unwrap().error_for_status().unwrap().json().await.unwrap();
+    let updated: Value = client.put(format!("{base}/api/workflow-scripts/{}", created["id"].as_str().unwrap())).json(&json!({"description":"ignored request description","source":"export const meta = { enabled: false, empty: null, retries: 4, name: \"updated-header-name\", description: \"updated header description\" }; return \"updated\";","delivery_grant":null})).send().await.unwrap().error_for_status().unwrap().json().await.unwrap();
     assert_eq!(
-        updated["name"], "header name",
+        updated["name"], "header-name",
         "source updates retain the saved name"
     );
-    assert_eq!(updated["description"], "updated header description");
+    assert_eq!(updated["description"], "ignored request description");
     assert_eq!(updated["head_version"], 2);
     let reloaded: Value = client
         .get(format!(
