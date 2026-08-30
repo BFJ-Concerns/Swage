@@ -11,13 +11,14 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::support::{WsStream, start_live_server, ws_collect_until};
+
 use async_trait::async_trait;
 use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use futures::{SinkExt, StreamExt};
 use serde_json::{Value, json};
-use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite;
 use tower::ServiceExt;
 
@@ -223,12 +224,7 @@ async fn start_test_server_with_dispatcher(
     );
     let router = build_router(state);
 
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let serve_router = router.clone();
-    tokio::spawn(async move {
-        axum::serve(listener, serve_router).await.unwrap();
-    });
+    let (addr, _server) = start_live_server(router.clone()).await;
 
     (router, addr, storage)
 }
@@ -254,9 +250,6 @@ async fn http(router: &Router, method: &str, uri: &str) -> (StatusCode, Value) {
 type WsSink = futures::stream::SplitSink<
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
     tungstenite::Message,
->;
-type WsStream = futures::stream::SplitStream<
-    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
 >;
 
 async fn connect_ws(addr: SocketAddr, conversation_id: &str) -> (WsSink, WsStream) {
@@ -285,44 +278,6 @@ async fn ws_recv(stream: &mut WsStream) -> Value {
             Some(Ok(tungstenite::Message::Close(_))) => panic!("WebSocket closed unexpectedly"),
             Some(Err(e)) => panic!("WebSocket error: {e}"),
             None => panic!("WebSocket stream ended unexpectedly"),
-            _ => continue,
-        }
-    }
-}
-
-/// Collect WebSocket events through the named terminal event.
-async fn ws_collect_until(
-    stream: &mut WsStream,
-    terminal_event: &str,
-    timeout: Duration,
-) -> Vec<Value> {
-    let mut events = Vec::new();
-    tokio::time::timeout(timeout, async {
-        loop {
-            let event = ws_recv_lenient(stream)
-                .await
-                .unwrap_or_else(|| panic!("websocket closed before {terminal_event}: {events:?}"));
-            let reached_terminal = event["type"] == terminal_event;
-            events.push(event);
-            if reached_terminal {
-                break;
-            }
-        }
-    })
-    .await
-    .unwrap_or_else(|_| panic!("timed out waiting for {terminal_event}: {events:?}"));
-    events
-}
-
-/// Like ws_recv but returns None on close instead of panicking.
-async fn ws_recv_lenient(stream: &mut WsStream) -> Option<Value> {
-    loop {
-        match stream.next().await {
-            Some(Ok(tungstenite::Message::Text(text))) => {
-                return Some(serde_json::from_str(&text).unwrap_or(Value::Null));
-            }
-            Some(Ok(tungstenite::Message::Close(_))) => return None,
-            None => return None,
             _ => continue,
         }
     }

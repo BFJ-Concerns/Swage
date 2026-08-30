@@ -40,6 +40,10 @@ fn typescript_bindings_are_regenerated() {
     client::page::WritePageModuleRequest::export_all(&cfg).expect("export write page module");
     client::page::PageResponse::export_all(&cfg).expect("export page");
     client::page::PageListResponse::export_all(&cfg).expect("export pages");
+    client::page::CreatePageAnnotationRequest::export_all(&cfg)
+        .expect("export create page annotation");
+    client::page::UpdatePageAnnotationRequest::export_all(&cfg)
+        .expect("export update page annotation");
     client::space::CreateWorkspaceAttachmentRequest::export_all(&cfg)
         .expect("export attach workspace");
     client::space::WorkspaceAttachmentListResponse::export_all(&cfg).expect("export workspaces");
@@ -98,6 +102,8 @@ fn typescript_bindings_are_regenerated() {
         .expect("export workflow update");
     client::workflow::WorkflowScriptListResponse::export_all(&cfg)
         .expect("export workflow scripts");
+    client::workflow::WorkflowArgumentContract::export_all(&cfg)
+        .expect("export workflow argument contract");
     client::workflow::StartWorkflowRunRequest::export_all(&cfg)
         .expect("export workflow run request");
     client::workflow::StartInlineWorkflowRunRequest::export_all(&cfg)
@@ -118,7 +124,7 @@ fn typescript_bindings_are_regenerated() {
     client::workflow::WorkerIsolation::export_all(&cfg).expect("export worker isolation");
     client::skill::SkillListResponse::export_all(&cfg).expect("export skill catalogue");
     hosting::PresenceSnapshotResponse::export_all(&cfg).expect("export hosting presence");
-    hosting::MachineHeartbeatRequest::export_all(&cfg).expect("export hosting heartbeat");
+    hosting::DeviceHeartbeatRequest::export_all(&cfg).expect("export hosting heartbeat");
     hosting::ApprovalListResponse::export_all(&cfg).expect("export hosting approvals");
     hosting::ApprovalDecisionRequest::export_all(&cfg).expect("export hosting approval decision");
     hosting::OperatorOverviewResponse::export_all(&cfg).expect("export operator overview");
