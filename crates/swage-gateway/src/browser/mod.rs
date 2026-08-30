@@ -754,7 +754,7 @@ async fn spawn_browser(
     let active_port_file = profile.join("DevToolsActivePort");
     let _ = tokio::fs::remove_file(&active_port_file).await;
 
-    let command = chromium_command(&binary, &profile, no_sandbox);
+    let command = chromium_command(&binary, &profile, 0, no_sandbox);
     let child =
         ChildProcessManager::spawn(command).map_err(|error| ToolError::ExecutionFailed {
             name: "browser".to_string(),
@@ -802,9 +802,10 @@ async fn spawn_browser(
     })
 }
 
-fn chromium_command(
+pub fn chromium_command(
     binary: &std::path::Path,
     profile: &std::path::Path,
+    remote_debugging_port: u16,
     no_sandbox: bool,
 ) -> tokio::process::Command {
     let mut command = tokio::process::Command::new(binary);
@@ -817,7 +818,7 @@ fn chromium_command(
         .arg("--no-first-run")
         .arg("--no-default-browser-check")
         .arg("--remote-debugging-address=127.0.0.1")
-        .arg("--remote-debugging-port=0")
+        .arg(format!("--remote-debugging-port={remote_debugging_port}"))
         .arg("about:blank")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -1238,6 +1239,7 @@ mod tests {
         let command = chromium_command(
             std::path::Path::new("/usr/bin/chromium"),
             std::path::Path::new("/test/profile"),
+            0,
             false,
         );
         let arguments = command

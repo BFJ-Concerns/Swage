@@ -200,14 +200,7 @@ pub(crate) fn available_skills_for_agent(
     let Some(root) = swage_root else {
         return vec![];
     };
-    let hierarchy = configuration_hierarchy(root, space_slug, agent_id);
-    let space_dir = &hierarchy[1].1;
-    let agent_dir_opt = hierarchy
-        .iter()
-        .find(|(level, _)| *level == HierarchyLevel::Agent)
-        .and_then(|(_, path)| path.is_dir().then_some(path.as_path()));
-    let (available, _warnings) = SkillManager::discover_available(root, space_dir, agent_dir_opt);
-    available
+    crate::skill::discover_available_for_scope(root, space_slug, Some(agent_id))
         .into_iter()
         .map(|skill| AvailableSkill {
             name: skill.name,
@@ -216,7 +209,7 @@ pub(crate) fn available_skills_for_agent(
         .collect()
 }
 
-/// Construct the shared global → space → agent config hierarchy.
+/// Construct the shared global → space → optional-agent config hierarchy.
 ///
 /// The workflow-ephemeral agent is a dispatch-only identity, not an
 /// operator-configurable agent. Its hierarchy stops at the space level so no
@@ -224,14 +217,14 @@ pub(crate) fn available_skills_for_agent(
 pub(crate) fn configuration_hierarchy(
     root: &Path,
     space_slug: &str,
-    agent_id: &str,
+    agent_id: Option<&str>,
 ) -> Vec<(HierarchyLevel, PathBuf)> {
     let space = root.join("spaces").join(space_slug);
     let mut hierarchy = vec![
         (HierarchyLevel::Global, root.to_path_buf()),
         (HierarchyLevel::Space, space),
     ];
-    if agent_id != RESERVED_WORKFLOW_AGENT_ID {
+    if let Some(agent_id) = agent_id.filter(|id| *id != RESERVED_WORKFLOW_AGENT_ID) {
         hierarchy.push((
             HierarchyLevel::Agent,
             root.join("spaces")
@@ -341,13 +334,7 @@ pub(crate) async fn load_active_skills_for_agent(
     let Some(root) = swage_root else {
         return vec![];
     };
-    let hierarchy = configuration_hierarchy(root, space_slug, agent_id);
-    let space_dir = &hierarchy[1].1;
-    let agent_dir_opt = hierarchy
-        .iter()
-        .find(|(level, _)| *level == HierarchyLevel::Agent)
-        .and_then(|(_, path)| path.is_dir().then_some(path.as_path()));
-    let (available, _warnings) = SkillManager::discover_available(root, space_dir, agent_dir_opt);
+    let available = crate::skill::discover_available_for_scope(root, space_slug, Some(agent_id));
 
     // Agent-level skills are automatic for the current agent context. Store
     // them idempotently so the normal activation ordering and filtering path is
@@ -475,8 +462,8 @@ mod shipped_skill_tests {
         }
 
         let reserved_hierarchy =
-            configuration_hierarchy(root.path(), "dispatch", RESERVED_WORKFLOW_AGENT_ID);
-        let ordinary_hierarchy = configuration_hierarchy(root.path(), "dispatch", "reviewer");
+            configuration_hierarchy(root.path(), "dispatch", Some(RESERVED_WORKFLOW_AGENT_ID));
+        let ordinary_hierarchy = configuration_hierarchy(root.path(), "dispatch", Some("reviewer"));
         assert!(
             reserved_hierarchy
                 .iter()
