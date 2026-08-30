@@ -23,9 +23,6 @@ use swage_tool::dispatch::ToolDispatcher;
 
 use crate::secret::SecretManager;
 use crate::state::AppState;
-use crate::tool::workspace::resolve_workspace_root;
-
-pub const LOCAL_DEVICE_ID: &str = "local";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -94,37 +91,6 @@ struct TransportBackedDeviceState {
     workspace_roots: Vec<PathBuf>,
 }
 
-pub fn make_local_device(
-    config: &swage_config::ResolvedConfig,
-    dispatcher: &ToolDispatcher,
-) -> RegisteredDevice {
-    let workspace_root = resolve_workspace_root(config);
-    RegisteredDevice {
-        device_id: LOCAL_DEVICE_ID.to_string(),
-        label: Some("Local machine".to_string()),
-        kind: DeviceKind::Local,
-        base_url: None,
-        shared_token_secret_ref: None,
-        workspace_root: workspace_root.clone(),
-        workspace_roots: vec![workspace_root],
-        capabilities: dispatcher
-            .registry()
-            .list()
-            .into_iter()
-            .map(ToOwned::to_owned)
-            .collect(),
-        registered_at: Utc::now(),
-    }
-}
-
-pub async fn register_local_device(state: &AppState) {
-    let local_device = make_local_device(&state.config, state.tool_dispatcher.as_ref());
-    let mut runtime = state.devices.lock().await;
-    runtime
-        .devices
-        .insert(local_device.device_id.clone(), local_device);
-}
-
 pub async fn register_remote_device(
     state: &AppState,
     request: RegisterDeviceRequest,
@@ -169,10 +135,10 @@ pub async fn register_remote_device(
         .insert(device.device_id.clone(), device.clone());
     drop(runtime);
 
-    crate::presence::upsert_machine_heartbeat(
+    crate::presence::upsert_device_heartbeat(
         state,
-        crate::presence::MachineHeartbeatRequest {
-            machine_id: device.device_id.clone(),
+        crate::presence::DeviceHeartbeatRequest {
+            device_id: device.device_id.clone(),
             label: device.label.clone(),
             stale_after_secs: 30,
         },
@@ -270,17 +236,7 @@ fn select_device(
         }
     }
 
-    if let Some(local) = devices.get(LOCAL_DEVICE_ID) {
-        return Some(local.clone());
-    }
-
-    let mut attached_devices = devices
-        .values()
-        .filter(|device| device.kind != DeviceKind::Local)
-        .cloned()
-        .collect::<Vec<_>>();
-    attached_devices.sort_by(|left, right| left.device_id.cmp(&right.device_id));
-    attached_devices.into_iter().next()
+    None
 }
 
 pub async fn execute_on_remote_device(
@@ -656,8 +612,8 @@ mod tests {
     fn select_device_prefers_metadata_backend_kind() {
         let devices = HashMap::from([
             (
-                LOCAL_DEVICE_ID.to_string(),
-                registered_device(LOCAL_DEVICE_ID, DeviceKind::Local),
+                "local".to_string(),
+                registered_device("local", DeviceKind::Local),
             ),
             (
                 "docker-a".to_string(),
@@ -682,8 +638,8 @@ mod tests {
     fn select_device_prefers_explicit_device_id_over_backend_kind() {
         let devices = HashMap::from([
             (
-                LOCAL_DEVICE_ID.to_string(),
-                registered_device(LOCAL_DEVICE_ID, DeviceKind::Local),
+                "local".to_string(),
+                registered_device("local", DeviceKind::Local),
             ),
             (
                 "docker-a".to_string(),
@@ -705,6 +661,26 @@ mod tests {
         .expect("device should resolve");
 
         assert_eq!(selected.device_id, "docker-a");
+    }
+
+    #[test]
+    fn select_device_leaves_local_turns_unrouted_when_only_remote_devices_exist() {
+        let devices = HashMap::from([(
+            "ssh-a".to_string(),
+            registered_device("ssh-a", DeviceKind::Ssh),
+        )]);
+
+        assert!(select_device(&devices, None).is_none());
+        assert!(
+            select_device(
+                &devices,
+                Some(&serde_json::json!({"execution_backend": "local"})),
+            )
+            .is_none()
+        );
+        assert!(
+            select_device(&devices, Some(&serde_json::json!({"device_id": "local"})),).is_none()
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

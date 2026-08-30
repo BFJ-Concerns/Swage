@@ -17,6 +17,8 @@ pub struct DispatchContextComposition {
     pub variables: Option<BTreeMap<String, String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assembly: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skills: Option<Vec<String>>,
 }
 
 impl DispatchContextComposition {

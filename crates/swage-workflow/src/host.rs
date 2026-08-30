@@ -14,6 +14,13 @@ pub enum WorkflowHostError {
         host_reference: String,
         message: String,
     },
+    /// A schema-constrained worker exhausted its validation attempts. This is
+    /// distinct from an ordinary failed turn because workflow `agent()` calls
+    /// expose it as `null`, matching the established workflow contract.
+    SchemaExhausted {
+        host_reference: Option<String>,
+        message: String,
+    },
 }
 
 impl std::fmt::Display for WorkflowHostError {
@@ -21,6 +28,7 @@ impl std::fmt::Display for WorkflowHostError {
         match self {
             Self::Message(message) => f.write_str(message),
             Self::AgentCall { message, .. } => f.write_str(message),
+            Self::SchemaExhausted { message, .. } => f.write_str(message),
         }
     }
 }
@@ -58,6 +66,11 @@ pub struct AgentCallRequest {
     /// never acquire a tool its dispatching context or agent lacks.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<String>>,
+    /// Optional call-scoped skill selection. Requested skills are resolved
+    /// before the child starts and extend its context without affecting tool
+    /// authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skills: Option<Vec<String>>,
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<Effort>,
@@ -93,6 +106,10 @@ pub struct AgentCallResult {
     pub output: Value,
     pub input_tokens: u64,
     pub output_tokens: u64,
+    /// Host-resolved directory in which this worker ran. This is reported
+    /// separately from the caller's journalled `cwd` request.
+    #[serde(default)]
+    pub working_directory: Option<String>,
     #[serde(default)]
     pub session_id: Option<Uuid>,
     #[serde(default)]
@@ -324,6 +341,7 @@ mod task_request_tests {
             agent: None,
             task: task.map(str::to_owned),
             tools: None,
+            skills: None,
             model: None,
             effort: None,
             timeout_ms: None,
@@ -354,6 +372,12 @@ mod task_request_tests {
                 .expect("request object")
                 .contains_key("tools")
         );
+        assert!(
+            !value
+                .as_object()
+                .expect("request object")
+                .contains_key("skills")
+        );
     }
 
     #[test]
@@ -373,6 +397,17 @@ mod task_request_tests {
         assert_eq!(
             value["tools"],
             serde_json::json!(["web_search", "url_fetch"])
+        );
+    }
+
+    #[test]
+    fn call_scoped_skills_are_serialised_verbatim() {
+        let mut request = request(None);
+        request.skills = Some(vec!["code-review".into(), "testing".into()]);
+        let value = serde_json::to_value(request).expect("serialise request");
+        assert_eq!(
+            value["skills"],
+            serde_json::json!(["code-review", "testing"])
         );
     }
 
@@ -403,6 +438,7 @@ mod tests {
             agent: Some("worker".into()),
             task: None,
             tools: None,
+            skills: None,
             model: None,
             effort: None,
             timeout_ms: None,
