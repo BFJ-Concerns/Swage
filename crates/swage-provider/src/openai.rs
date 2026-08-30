@@ -529,7 +529,15 @@ impl OpenAiProvider {
         };
 
         // Usage information may arrive in a chunk with empty choices (e.g. the
-        // final chunk from OpenAI when stream_options.include_usage is set).
+        // final chunk from OpenAI when stream_options.include_usage is set), or
+        // alongside the terminal choice.
+        let usage = chunk.usage.as_ref().map(|usage| {
+            StreamChunk::Usage(swage_core::TokenUsage {
+                input_tokens: usage.prompt_tokens,
+                output_tokens: usage.completion_tokens,
+            })
+        });
+
         if let Some(choice) = chunk.choices.first() {
             // Accumulate streaming tool calls.
             if let Some(ref tool_calls) = choice.delta.tool_calls {
@@ -552,6 +560,9 @@ impl OpenAiProvider {
                         arguments: tool_call.arguments,
                     })
                     .collect::<Vec<_>>();
+                if let Some(usage) = usage {
+                    chunks.push(usage);
+                }
                 chunks.push(StreamChunk::Done {
                     finish_reason: Some(finish),
                 });
@@ -579,11 +590,8 @@ impl OpenAiProvider {
 
         // Usage information (sent in some streaming responses, often with
         // empty choices array).
-        if let Some(usage) = chunk.usage {
-            return vec![StreamChunk::Usage(swage_core::TokenUsage {
-                input_tokens: usage.prompt_tokens,
-                output_tokens: usage.completion_tokens,
-            })];
+        if let Some(usage) = usage {
+            return vec![usage];
         }
 
         Vec::new()
@@ -837,6 +845,7 @@ impl LlmProvider for OpenAiProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{empty_completion_request, local_provider_config};
     use swage_core::{ChatMessage, Role, ToolCall};
 
     // --- Message conversion ---
@@ -915,8 +924,7 @@ mod tests {
 
     #[test]
     fn every_completion_effort_maps_to_openai_reasoning_effort() {
-        let provider =
-            OpenAiProvider::from_config(ProviderConfig::new("key", "model", "http://localhost"));
+        let provider = OpenAiProvider::from_config(local_provider_config());
         for (effort, expected) in [
             (swage_core::Effort::Low, "low"),
             (swage_core::Effort::Medium, "medium"),
@@ -940,18 +948,8 @@ mod tests {
 
     #[test]
     fn completion_without_effort_omits_openai_reasoning_effort() {
-        let provider =
-            OpenAiProvider::from_config(ProviderConfig::new("key", "model", "http://localhost"));
-        let request = CompletionRequest {
-            effort: None,
-            messages: vec![],
-            model: None,
-            max_tokens: None,
-            temperature: None,
-            stop_sequences: None,
-            metadata: None,
-            tool_definitions: vec![],
-        };
+        let provider = OpenAiProvider::from_config(local_provider_config());
+        let request = empty_completion_request();
         let body = serde_json::to_value(provider.build_request(&request, false)).unwrap();
         assert!(!body.as_object().unwrap().contains_key("reasoning_effort"));
     }
@@ -1001,18 +999,8 @@ mod tests {
 
     #[test]
     fn build_request_sets_stream_flag() {
-        let provider =
-            OpenAiProvider::from_config(ProviderConfig::new("key", "model", "http://localhost"));
-        let request = CompletionRequest {
-            effort: None,
-            messages: vec![],
-            model: None,
-            max_tokens: None,
-            temperature: None,
-            stop_sequences: None,
-            metadata: None,
-            tool_definitions: vec![],
-        };
+        let provider = OpenAiProvider::from_config(local_provider_config());
+        let request = empty_completion_request();
         let non_streaming = provider.build_request(&request, false);
         assert!(non_streaming.stream.is_none());
         assert!(non_streaming.stream_options.is_none());
@@ -1029,18 +1017,8 @@ mod tests {
 
     #[test]
     fn build_request_serialises_stream_usage_options_only_for_streaming() {
-        let provider =
-            OpenAiProvider::from_config(ProviderConfig::new("key", "model", "http://localhost"));
-        let request = CompletionRequest {
-            effort: None,
-            messages: vec![],
-            model: None,
-            max_tokens: None,
-            temperature: None,
-            stop_sequences: None,
-            metadata: None,
-            tool_definitions: vec![],
-        };
+        let provider = OpenAiProvider::from_config(local_provider_config());
+        let request = empty_completion_request();
 
         let non_streaming = serde_json::to_value(provider.build_request(&request, false)).unwrap();
         assert!(non_streaming.get("stream").is_none());
@@ -1621,6 +1599,26 @@ mod tests {
         assert!(matches!(
             chunk,
             Some(StreamChunk::Usage(usage)) if usage.input_tokens == 10 && usage.output_tokens == 5
+        ));
+    }
+
+    #[test]
+    fn parse_stream_event_with_finish_reason_and_usage_emits_usage_before_done() {
+        let event = SseEvent {
+            event_type: None,
+            data: r#"{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5}}"#.into(),
+        };
+        let mut acc = ToolCallAccumulator::new();
+        let chunks = OpenAiProvider::parse_stream_event_chunks(&event, &mut acc);
+
+        assert!(matches!(
+            chunks.as_slice(),
+            [
+                StreamChunk::Usage(usage),
+                StreamChunk::Done {
+                    finish_reason: Some(FinishReason::Stop)
+                }
+            ] if usage.input_tokens == 10 && usage.output_tokens == 5
         ));
     }
 

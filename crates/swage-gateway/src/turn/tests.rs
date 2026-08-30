@@ -80,6 +80,247 @@ fn provider_response_witness_is_appended_without_content_fields() {
     assert!(response["witness"].get("thinking").is_none());
 }
 
+#[tokio::test]
+async fn ordinary_and_delegated_snapshot_paths_record_provider_events_identically() {
+    let storage = Arc::new(MockStorage::new());
+    let (state, session_id) = make_state_with_storage(vec![], Arc::clone(&storage)).await;
+    let ordinary_turn_id = Uuid::new_v4();
+    let delegated_turn_id = Uuid::new_v4();
+    let mut ordinary_report = serde_json::json!({"assembly": "same input"});
+    let delegated_report = serde_json::json!({"assembly": "same input"});
+
+    let witness = swage_core::ProviderResponseWitness {
+        http_status: 200,
+        request_id: Some("request-3".into()),
+        terminal_event: Some("message_stop".into()),
+        stop_reason: Some("end_turn".into()),
+        usage: swage_core::TokenUsage {
+            input_tokens: 11,
+            output_tokens: 7,
+        },
+        content_blocks: vec![swage_core::ProviderContentBlockWitness {
+            block_type: "text".into(),
+            count: 1,
+            bytes: 7,
+        }],
+    };
+    let expected_provider_visible = serde_json::json!({
+        "requests": [{
+            "round": 3,
+            "request": {"messages": ["same request"]},
+        }],
+        "responses": [{
+            "round": 3,
+            "witness": witness,
+        }],
+        "reasoning": [{
+            "round": 3,
+            "content": "same reasoning",
+            "details": {"source": "provider"},
+        }],
+    });
+
+    for event in [
+        AgentEvent::ProviderRequestPrepared {
+            turn_id: ordinary_turn_id,
+            round: 3,
+            request: serde_json::json!({"messages": ["same request"]}),
+        },
+        AgentEvent::ProviderResponseCaptured {
+            turn_id: ordinary_turn_id,
+            round: 3,
+            witness: witness.clone(),
+        },
+        AgentEvent::ProviderReasoningCaptured {
+            turn_id: ordinary_turn_id,
+            round: 3,
+            content: "same reasoning".into(),
+            details: Some(serde_json::json!({"source": "provider"})),
+        },
+    ] {
+        apply_provider_snapshot_event(
+            &state,
+            &mut ordinary_report,
+            event,
+            ProviderSnapshotCapturePath::Ordinary,
+        )
+        .await;
+    }
+
+    storage
+        .store_snapshot(delegated_turn_id, &delegated_report.to_string())
+        .await
+        .expect("seed delegated snapshot");
+    for event in [
+        AgentEvent::ProviderRequestPrepared {
+            turn_id: delegated_turn_id,
+            round: 3,
+            request: serde_json::json!({"messages": ["same request"]}),
+        },
+        AgentEvent::ProviderResponseCaptured {
+            turn_id: delegated_turn_id,
+            round: 3,
+            witness,
+        },
+        AgentEvent::ProviderReasoningCaptured {
+            turn_id: delegated_turn_id,
+            round: 3,
+            content: "same reasoning".into(),
+            details: Some(serde_json::json!({"source": "provider"})),
+        },
+    ] {
+        delegation_snapshot_recorder_for_state(state.clone())
+            .record_event(session_id, event)
+            .await
+            .expect("record delegated provider event");
+    }
+    let delegated_report: serde_json::Value = serde_json::from_str(
+        &storage
+            .get_snapshot(delegated_turn_id)
+            .await
+            .expect("read delegated snapshot")
+            .expect("delegated snapshot"),
+    )
+    .expect("delegated snapshot JSON");
+
+    assert_eq!(
+        ordinary_report["provider_visible"],
+        expected_provider_visible
+    );
+    assert_eq!(
+        delegated_report["provider_visible"],
+        expected_provider_visible
+    );
+}
+
+#[test]
+fn ordinary_and_delegated_snapshot_paths_fail_closed_with_their_audit_wording() {
+    use std::sync::{Arc as StdArc, Mutex as StdMutex};
+    use tracing_subscriber::{Registry, layer::SubscriberExt};
+
+    #[derive(Default)]
+    struct MessageRecorder(StdArc<StdMutex<Vec<String>>>);
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for MessageRecorder {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            struct MessageVisitor<'a>(&'a mut Option<String>);
+
+            impl tracing::field::Visit for MessageVisitor<'_> {
+                fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                    if field.name() == "message" {
+                        *self.0 = Some(value.to_owned());
+                    }
+                }
+
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    if field.name() == "message" {
+                        *self.0 = Some(format!("{value:?}"));
+                    }
+                }
+            }
+
+            let mut message = None;
+            event.record(&mut MessageVisitor(&mut message));
+            if let Some(message) = message {
+                self.0.lock().unwrap().push(message);
+            }
+        }
+    }
+
+    let messages = MessageRecorder::default();
+    let captured_messages = StdArc::clone(&messages.0);
+    let subscriber = Registry::default().with(messages);
+
+    tracing::subscriber::with_default(subscriber, || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build test runtime")
+            .block_on(async {
+                let storage = Arc::new(MockStorage::new());
+                let (state, session_id) =
+                    make_state_with_storage(vec![], Arc::clone(&storage)).await;
+                let ordinary_turn_id = Uuid::new_v4();
+                let delegated_turn_id = Uuid::new_v4();
+                let mut ordinary_report = serde_json::json!({"assembly": "same input"});
+                let delegated_report = serde_json::json!({"assembly": "same input"});
+                let expected_provider_visible = serde_json::json!({
+                    "capture_errors": [{
+                        "round": 4,
+                        "kind": "secret_redaction_unavailable",
+                    }],
+                });
+
+                storage
+                    .store_snapshot(delegated_turn_id, &delegated_report.to_string())
+                    .await
+                    .expect("seed delegated snapshot");
+                storage.fail_secret_reads();
+                tracing::callsite::rebuild_interest_cache();
+
+                apply_provider_snapshot_event(
+                    &state,
+                    &mut ordinary_report,
+                    AgentEvent::ProviderRequestPrepared {
+                        turn_id: ordinary_turn_id,
+                        round: 4,
+                        request: serde_json::json!({"messages": ["secret request"]}),
+                    },
+                    ProviderSnapshotCapturePath::Ordinary,
+                )
+                .await;
+                delegation_snapshot_recorder_for_state(state.clone())
+                    .record_event(
+                        session_id,
+                        AgentEvent::ProviderRequestPrepared {
+                            turn_id: delegated_turn_id,
+                            round: 4,
+                            request: serde_json::json!({"messages": ["secret request"]}),
+                        },
+                    )
+                    .await
+                    .expect("record delegated redaction failure");
+                let delegated_report: serde_json::Value = serde_json::from_str(
+                    &storage
+                        .get_snapshot(delegated_turn_id)
+                        .await
+                        .expect("read delegated snapshot")
+                        .expect("delegated snapshot"),
+                )
+                .expect("delegated snapshot JSON");
+
+                assert_eq!(
+                    ordinary_report["provider_visible"],
+                    expected_provider_visible
+                );
+                assert_eq!(
+                    delegated_report["provider_visible"],
+                    expected_provider_visible
+                );
+                assert!(ordinary_report["provider_visible"]["requests"].is_null());
+                assert!(delegated_report["provider_visible"]["requests"].is_null());
+            });
+    });
+
+    let messages = captured_messages.lock().expect("recorded messages");
+    assert!(messages.iter().any(|message| {
+        message
+            == "provider-visible request capture omitted because secret redaction was unavailable"
+    }));
+    assert!(messages.iter().any(|message| {
+        message
+            == "delegated provider-visible request capture omitted because secret redaction was unavailable"
+    }));
+}
+
 #[test]
 fn delegate_worktree_identity_is_stable_per_tool_call() {
     let sender_turn_id = Uuid::new_v4();
@@ -907,6 +1148,7 @@ impl swage_storage::WorkflowStore for MockStorage {
         _: Uuid,
         _: Option<&str>,
         _: Option<serde_json::Value>,
+        _: Option<Uuid>,
     ) -> Result<swage_storage::WorkflowScriptRecord, StorageError> {
         unimplemented!()
     }
@@ -990,6 +1232,11 @@ impl swage_storage::WorkflowStore for MockStorage {
     async fn list_due_parked_workflow_runs(
         &self,
         _: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<swage_storage::WorkflowRunRecord>, StorageError> {
+        unimplemented!()
+    }
+    async fn list_parked_workflow_runs(
+        &self,
     ) -> Result<Vec<swage_storage::WorkflowRunRecord>, StorageError> {
         unimplemented!()
     }
@@ -1573,17 +1820,17 @@ impl WorkspaceAttachmentStore for MockStorage {
 impl DeviceStore for MockStorage {
     async fn upsert_device(
         &self,
-        host: NewDeviceRegistration,
+        device: NewDeviceRegistration,
     ) -> Result<DeviceRegistration, StorageError> {
         let registration = DeviceRegistration {
-            device_id: host.device_id,
-            label: host.label,
-            kind: host.kind,
-            base_url: host.base_url,
-            shared_token: host.shared_token,
-            workspace_root: host.workspace_root,
-            workspace_roots: host.workspace_roots,
-            capabilities: host.capabilities,
+            device_id: device.device_id,
+            label: device.label,
+            kind: device.kind,
+            base_url: device.base_url,
+            shared_token: device.shared_token,
+            workspace_root: device.workspace_root,
+            workspace_roots: device.workspace_roots,
+            capabilities: device.capabilities,
             registered_at: chrono::Utc::now(),
         };
         self.db
@@ -2630,6 +2877,39 @@ impl swage_storage::PageStore for MockStorage {
         unimplemented!()
     }
     async fn update_page_module_source(&self, _: Uuid, _: &str) -> Result<(), StorageError> {
+        unimplemented!()
+    }
+}
+
+#[async_trait]
+impl swage_storage::PageAnnotationStore for MockStorage {
+    async fn create_page_annotation(
+        &self,
+        _: swage_storage::NewPageAnnotation,
+    ) -> Result<swage_storage::PageAnnotation, StorageError> {
+        unimplemented!()
+    }
+    async fn get_page_annotation(
+        &self,
+        _: Uuid,
+    ) -> Result<Option<swage_storage::PageAnnotation>, StorageError> {
+        unimplemented!()
+    }
+    async fn list_page_annotations(
+        &self,
+        _: Uuid,
+    ) -> Result<Vec<swage_storage::PageAnnotation>, StorageError> {
+        unimplemented!()
+    }
+    async fn update_page_annotation(
+        &self,
+        _: Uuid,
+        _: &str,
+        _: &[String],
+    ) -> Result<(), StorageError> {
+        unimplemented!()
+    }
+    async fn delete_page_annotation(&self, _: Uuid) -> Result<(), StorageError> {
         unimplemented!()
     }
 }
@@ -5208,6 +5488,114 @@ async fn unattended_sandbox_failure_records_unattended_attendance() {
 }
 
 #[tokio::test]
+async fn unattended_turn_rejects_a_relative_managed_scratch_root() {
+    let storage = Arc::new(MockStorage::new());
+    let (state, session_id) = make_state_with_storage_and_root(
+        vec![],
+        Arc::clone(&storage),
+        Some(std::path::PathBuf::from(".")),
+    )
+    .await;
+
+    let error = process_turn_with_composition(
+        &state,
+        session_id,
+        None,
+        "message".to_string(),
+        mpsc::unbounded_channel().0,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+        None,
+        None,
+        None,
+        None,
+        TurnAttendance::Unattended,
+        DispatchContextComposition::default(),
+        None,
+    )
+    .await
+    .expect_err("an unattended relative scratch root must not inherit the launch directory");
+
+    assert!(
+        error
+            .to_string()
+            .contains("attach a workspace or configure an absolute managed scratch root"),
+        "the refusal must explain how to establish a deliberate root: {error}"
+    );
+    let thread = storage
+        .list_by_session(session_id)
+        .await
+        .expect("thread")
+        .remove(0);
+    let turns = storage
+        .list_turns_by_thread(thread.id)
+        .await
+        .expect("turns");
+    assert_eq!(turns[0].state, TurnState::Failed);
+    assert!(
+        !state.active_turns.lock().await.contains_key(&session_id),
+        "the rejected turn must release its active-turn guard"
+    );
+}
+
+#[tokio::test]
+async fn unattended_turn_accepts_an_active_workspace_when_scratch_root_is_relative() {
+    let storage = Arc::new(MockStorage::new());
+    let (state, session_id) = make_state_with_storage_and_root(
+        vec![
+            StreamChunk::Delta {
+                content: "configured root".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ],
+        Arc::clone(&storage),
+        Some(std::path::PathBuf::from(".")),
+    )
+    .await;
+    let workspace = tempfile::tempdir().expect("workspace root");
+    let session = storage
+        .get_session(session_id)
+        .await
+        .expect("session lookup")
+        .expect("session");
+    let attachment = storage
+        .create_workspace_attachment(NewWorkspaceAttachment {
+            space_id: session.space_id,
+            label: "configured workspace".into(),
+            path: workspace.path().to_string_lossy().into_owned(),
+            permissions: vec!["read".into(), "write".into()],
+            is_trusted: true,
+        })
+        .await
+        .expect("workspace attachment");
+    storage
+        .set_session_active_workspace(session_id, Some(attachment.id))
+        .await
+        .expect("select workspace attachment");
+
+    process_turn_with_composition(
+        &state,
+        session_id,
+        None,
+        "message".to_string(),
+        mpsc::unbounded_channel().0,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+        None,
+        None,
+        None,
+        None,
+        TurnAttendance::Unattended,
+        DispatchContextComposition::default(),
+        None,
+    )
+    .await
+    .expect("an active workspace is a deliberate unattended tool root");
+}
+
+#[tokio::test]
 async fn degradation_audit_and_terminal_state_failure_clears_active_turn() {
     let storage = Arc::new(MockStorage::new());
     storage.fail_audit_writes();
@@ -7290,6 +7678,7 @@ async fn assert_delegation_fails_before_child_creation(
             None,
             None,
             None,
+            None,
             DispatchContextComposition::default(),
             request_id,
             "gateway",
@@ -7424,6 +7813,7 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
                 "target_agent": "agent-b",
                 "task": "Summarise this request",
                 "task_definition": "strict-review",
+                "skills": ["delegated-specialist"],
                 "elements": ["delegated-brief"],
                 "variables": {"owner": "delegating parent"},
                 "assembly": "delegated-focus",
@@ -7541,14 +7931,26 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
         "---\ndescription: Definition-declared behaviour\n---\nUse the definition-declared skill.\n",
     )
     .expect("write declared skill");
-    let target_agent_dir = swage_home.path().join("spaces/default/agents/agent-b");
-    std::fs::create_dir_all(target_agent_dir.join("skills/delegated-specialist"))
-        .expect("create delegated agent directory");
+    let requested_skill_dir = swage_home
+        .path()
+        .join("spaces/default/skills/delegated-specialist");
+    std::fs::create_dir_all(&requested_skill_dir)
+        .expect("create requested delegated skill directory");
     std::fs::write(
-            target_agent_dir.join("skills/delegated-specialist/SKILL.md"),
+            requested_skill_dir.join("SKILL.md"),
             "---\ndescription: Delegated specialist behaviour\n---\nUse the delegated specialist skill.\n",
         )
-        .expect("write delegated agent skill");
+        .expect("write requested delegated skill");
+    let agent_skill_dir = swage_home
+        .path()
+        .join("spaces/default/agents/agent-b/skills/agent-owned-specialist");
+    std::fs::create_dir_all(&agent_skill_dir)
+        .expect("create delegated agent-level skill directory");
+    std::fs::write(
+        agent_skill_dir.join("SKILL.md"),
+        "---\ndescription: Agent-owned specialist behaviour\n---\nUse the agent-owned specialist skill.\n",
+    )
+    .expect("write delegated agent-level skill");
     let _guard = SwageHomeGuard::set_to(swage_home.path());
     storage
         .activate_skill(session_id, "foreground-only")
@@ -7699,6 +8101,18 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
         "delegated assembly report should contain its element decisions"
     );
     assert_eq!(child_snapshot["assembly_name"], "delegated-focus");
+    let skills = child_snapshot["elements"]
+        .as_array()
+        .expect("delegated assembly report should list elements")
+        .iter()
+        .find(|element| element["name"] == "skills")
+        .expect("delegated child report should record its requested skills");
+    assert!(
+        skills["source"]
+            .as_str()
+            .is_some_and(|source| source.contains("delegated-specialist")),
+        "delegated child report should name the requested skill: {skills}"
+    );
     assert!(
         child_snapshot["elements"]
             .as_array()
@@ -7904,8 +8318,9 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
     );
     assert!(
         child_request_text.contains("## Skills available in this session")
-            && child_request_text.contains("delegated-specialist — Delegated specialist behaviour"),
-        "delegated provider request should include the target skill catalogue: {child_request_text}"
+            && child_request_text
+                .contains("agent-owned-specialist — Agent-owned specialist behaviour"),
+        "delegated provider request should catalogue the target agent's own skill: {child_request_text}"
     );
     assert!(
         child_request_text.contains("Inherited Background Context"),
@@ -7920,8 +8335,8 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
         "delegated provider request should fence the task separately: {child_request_text}"
     );
     assert!(
-        child_request_text.contains("Use the delegated specialist skill."),
-        "delegated provider request should include target agent-level skill instructions: {child_request_text}"
+        child_request_text.contains("Use the agent-owned specialist skill."),
+        "delegated provider request should activate the target agent's own skill instructions: {child_request_text}"
     );
     assert!(
         child_request_text.contains("Use the definition-declared skill."),
@@ -7970,8 +8385,8 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
         .collect::<Vec<_>>()
         .join("\n\n");
     assert!(
-        !resumed_parent_request_text.contains("Use the delegated specialist skill."),
-        "target agent skill instructions must not bleed into the resumed parent request"
+        !resumed_parent_request_text.contains("Use the agent-owned specialist skill."),
+        "the target agent's own skill instructions must not bleed into the resumed parent request"
     );
     let next_parent_request_text = captured_requests[4]
         .messages
@@ -8569,6 +8984,7 @@ async fn delegated_read_only_location_approval_allows_read_and_refuses_write() {
             None,
             Some(attachment.to_string_lossy().into_owned()),
             None,
+            None,
             DispatchContextComposition::default(),
             "read-only-placement-delegate",
             "gateway",
@@ -8720,6 +9136,7 @@ async fn workflow_call_tool_bound_survives_delegation_and_child_continuation() {
         .handle_delegation(
             "agent-b",
             "complete the delegated work",
+            None,
             None,
             None,
             None,
@@ -8901,6 +9318,7 @@ async fn task_scoped_delegate_keeps_its_permission_bound_when_delegating_again()
             None,
             None,
             None,
+            None,
             DispatchContextComposition::default(),
             "outer-task-delegate",
             "gateway",
@@ -9079,6 +9497,7 @@ async fn placed_delegate_keeps_exact_read_only_authority_when_delegating_again()
             None,
             Some(placed_workspace.to_string_lossy().into_owned()),
             None,
+            None,
             DispatchContextComposition::default(),
             "outer-placed-delegate",
             "gateway",
@@ -9243,6 +9662,7 @@ async fn delegate_worktree_provisions_isolated_cwd_and_records_resolved_placemen
             None,
             Some(repo.to_string_lossy().into_owned()),
             Some(swage_protocol::client::workflow::WorkerIsolation::Worktree),
+            None,
             DispatchContextComposition::default(),
             "wait-worktree-delegate-call",
             "gateway",
@@ -9253,7 +9673,15 @@ async fn delegate_worktree_provisions_isolated_cwd_and_records_resolved_placemen
         )
         .await
         .expect("wait-mode worktree delegation should complete");
-    assert!(matches!(wait_outcome, DelegationOutcome::Completed(_)));
+    let wait_result = match wait_outcome {
+        DelegationOutcome::Completed(result) => result,
+        DelegationOutcome::Detached(_) => panic!("wait-mode delegation must complete"),
+    };
+    assert_eq!(
+        wait_result["working_directory"],
+        wait_worktree.to_string_lossy().as_ref(),
+        "the waiting dispatcher receives the real provisioned directory"
+    );
     assert!(
         storage.list_approvals().await.unwrap().is_empty(),
         "the waiting delegated turn must use its enforced grant without parking"
@@ -9279,6 +9707,7 @@ async fn delegate_worktree_provisions_isolated_cwd_and_records_resolved_placemen
             None,
             Some(repo.to_string_lossy().into_owned()),
             Some(swage_protocol::client::workflow::WorkerIsolation::Worktree),
+            None,
             DispatchContextComposition::default(),
             "worktree-delegate-call",
             "gateway",
@@ -9342,12 +9771,17 @@ async fn delegate_worktree_provisions_isolated_cwd_and_records_resolved_placemen
         storage.list_approvals().await.unwrap().is_empty(),
         "the detached delegated turn must use its enforced grant without parking"
     );
-    assert!(
-        result_messages.iter().any(|message| {
+    let result = result_messages
+        .iter()
+        .find(|message| {
             message.kind == swage_core::MessageKind::Result
                 && message.payload.get("error").is_none()
-        }),
-        "the detached delegate should record a successful terminal result"
+        })
+        .expect("the detached delegate should record a successful terminal result");
+    assert_eq!(
+        result.payload["working_directory"],
+        worktree.to_string_lossy().as_ref(),
+        "the durable completion reports the real provisioned directory"
     );
     for _ in 0..20 {
         if state.worktree_host.list_owner(owner_id).await.is_empty() && !worktree.exists() {
@@ -9447,6 +9881,7 @@ async fn detached_delegate_can_be_cancelled_through_active_registry() {
             None,
             Some(delegated_cwd.path().to_string_lossy().into_owned()),
             Some(swage_protocol::client::workflow::WorkerIsolation::Worktree),
+            None,
             DispatchContextComposition::default(),
             "detached-placement-delegate",
             "gateway",
@@ -9483,6 +9918,7 @@ async fn detached_delegate_can_be_cancelled_through_active_registry() {
             None,
             None,
             Some(denied_cwd.path().to_string_lossy().into_owned()),
+            None,
             None,
             DispatchContextComposition::default(),
             "denied-placement-delegate",
@@ -12181,6 +12617,7 @@ async fn delegated_assembly_applies_call_scoped_composition_over_live_state() {
                 "dispatch owner".into(),
             )])),
             assembly: Some("briefing".into()),
+            skills: None,
         },
     );
 
@@ -12702,6 +13139,24 @@ async fn context_assembled_precedes_first_token() {
                 !report.elements.is_empty(),
                 "report should contain elements key"
             );
+            let session = state
+                .storage
+                .get_session(session_id)
+                .await
+                .expect("session lookup")
+                .expect("session");
+            assert_eq!(
+                report
+                    .tool_scope
+                    .as_ref()
+                    .and_then(|scope| scope.get("effective_root")),
+                Some(&serde_json::json!(managed_scratch_workspace(
+                    &state.config_root,
+                    session.space_id,
+                    session_id
+                ))),
+                "live turn diagnostics must report the root passed to tools"
+            );
         }
         other => panic!("expected ContextAssembled, got: {other:?}"),
     }
@@ -12758,6 +13213,21 @@ async fn assembly_report_persisted_as_context_snapshot() {
     assert!(
         parsed.get("elements").is_some(),
         "snapshot should contain elements key"
+    );
+    let session = state
+        .storage
+        .get_session(session_id)
+        .await
+        .expect("session lookup")
+        .expect("session");
+    assert_eq!(
+        parsed["tool_scope"]["effective_root"],
+        serde_json::json!(managed_scratch_workspace(
+            &state.config_root,
+            session.space_id,
+            session_id
+        )),
+        "turn diagnostics must record the root passed to tools"
     );
     let provider_request = &parsed["provider_visible"]["requests"][0];
     assert_eq!(provider_request["round"], serde_json::json!(1));

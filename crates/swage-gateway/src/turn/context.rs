@@ -200,14 +200,7 @@ pub(crate) fn available_skills_for_agent(
     let Some(root) = swage_root else {
         return vec![];
     };
-    let hierarchy = configuration_hierarchy(root, space_slug, agent_id);
-    let space_dir = &hierarchy[1].1;
-    let agent_dir_opt = hierarchy
-        .iter()
-        .find(|(level, _)| *level == HierarchyLevel::Agent)
-        .and_then(|(_, path)| path.is_dir().then_some(path.as_path()));
-    let (available, _warnings) = SkillManager::discover_available(root, space_dir, agent_dir_opt);
-    available
+    crate::skill::discover_available_for_scope(root, space_slug, Some(agent_id))
         .into_iter()
         .map(|skill| AvailableSkill {
             name: skill.name,
@@ -216,7 +209,57 @@ pub(crate) fn available_skills_for_agent(
         .collect()
 }
 
-/// Construct the shared global → space → agent config hierarchy.
+fn active_skill_from_definition(
+    skill: &swage_config::skill::SkillDefinition,
+    activation_order: u32,
+) -> ActiveSkill {
+    ActiveSkill {
+        name: skill.name.clone(),
+        instructions: skill.instructions.clone(),
+        source_directory: skill
+            .source_path
+            .parent()
+            .expect("skill source has a parent directory")
+            .to_path_buf(),
+        level: skill.level.clone(),
+        is_agent_level: skill.level == HierarchyLevel::Agent,
+        activation_order,
+    }
+}
+
+/// Resolve explicitly requested dispatch skills through the same hierarchy as
+/// the interactive skill catalogue. Unlike declarative configuration, an
+/// unavailable dispatch request is an admission failure.
+pub(crate) fn resolve_requested_skills_for_agent(
+    space_slug: &str,
+    agent_id: &str,
+    swage_root: Option<&Path>,
+    requested_skills: &[String],
+) -> Result<Vec<ActiveSkill>, String> {
+    if requested_skills.is_empty() {
+        return Ok(vec![]);
+    }
+    let Some(root) = swage_root else {
+        return Err(format!(
+            "requested skill {:?} is unavailable: no Swage root",
+            requested_skills[0]
+        ));
+    };
+    let available = crate::skill::discover_available_for_scope(root, space_slug, Some(agent_id));
+    requested_skills
+        .iter()
+        .enumerate()
+        .map(|(index, name)| {
+            available
+                .iter()
+                .find(|skill| skill.name == *name)
+                .map(|skill| active_skill_from_definition(skill, index as u32))
+                .ok_or_else(|| format!("requested skill {name:?} is unavailable for this dispatch"))
+        })
+        .collect()
+}
+
+/// Construct the shared global → space → optional-agent config hierarchy.
 ///
 /// The workflow-ephemeral agent is a dispatch-only identity, not an
 /// operator-configurable agent. Its hierarchy stops at the space level so no
@@ -224,14 +267,14 @@ pub(crate) fn available_skills_for_agent(
 pub(crate) fn configuration_hierarchy(
     root: &Path,
     space_slug: &str,
-    agent_id: &str,
+    agent_id: Option<&str>,
 ) -> Vec<(HierarchyLevel, PathBuf)> {
     let space = root.join("spaces").join(space_slug);
     let mut hierarchy = vec![
         (HierarchyLevel::Global, root.to_path_buf()),
         (HierarchyLevel::Space, space),
     ];
-    if agent_id != RESERVED_WORKFLOW_AGENT_ID {
+    if let Some(agent_id) = agent_id.filter(|id| *id != RESERVED_WORKFLOW_AGENT_ID) {
         hierarchy.push((
             HierarchyLevel::Agent,
             root.join("spaces")
@@ -337,17 +380,17 @@ pub(crate) async fn load_active_skills_for_agent(
     swage_root: Option<&Path>,
     include_user_activated: bool,
     declared_skills: &[String],
-) -> Vec<ActiveSkill> {
+    requested_skills: &[String],
+) -> Result<Vec<ActiveSkill>, String> {
     let Some(root) = swage_root else {
-        return vec![];
+        return resolve_requested_skills_for_agent(
+            space_slug,
+            agent_id,
+            swage_root,
+            requested_skills,
+        );
     };
-    let hierarchy = configuration_hierarchy(root, space_slug, agent_id);
-    let space_dir = &hierarchy[1].1;
-    let agent_dir_opt = hierarchy
-        .iter()
-        .find(|(level, _)| *level == HierarchyLevel::Agent)
-        .and_then(|(_, path)| path.is_dir().then_some(path.as_path()));
-    let (available, _warnings) = SkillManager::discover_available(root, space_dir, agent_dir_opt);
+    let available = crate::skill::discover_available_for_scope(root, space_slug, Some(agent_id));
 
     // Agent-level skills are automatic for the current agent context. Store
     // them idempotently so the normal activation ordering and filtering path is
@@ -402,21 +445,21 @@ pub(crate) async fn load_active_skills_for_agent(
             );
             continue;
         };
-        active.push(ActiveSkill {
-            name: skill.name.clone(),
-            instructions: skill.instructions.clone(),
-            source_directory: skill
-                .source_path
-                .parent()
-                .expect("skill source has a parent directory")
-                .to_path_buf(),
-            level: skill.level.clone(),
-            is_agent_level: skill.level == HierarchyLevel::Agent,
-            activation_order: active.len() as u32,
-        });
+        active.push(active_skill_from_definition(skill, active.len() as u32));
     }
 
-    active
+    for requested in
+        resolve_requested_skills_for_agent(space_slug, agent_id, Some(root), requested_skills)?
+    {
+        if !active.iter().any(|skill| skill.name == requested.name) {
+            active.push(ActiveSkill {
+                activation_order: active.len() as u32,
+                ..requested
+            });
+        }
+    }
+
+    Ok(active)
 }
 
 #[cfg(test)]
@@ -441,6 +484,39 @@ mod shipped_skill_tests {
                 "workflow-authoring"
             ]
         );
+    }
+
+    #[test]
+    fn requested_dispatch_skills_use_the_interactive_discovery_hierarchy() {
+        let root = tempfile::tempdir().expect("temporary root");
+        let skill_dir = root.path().join("spaces/default/skills/dispatch-proof");
+        std::fs::create_dir_all(&skill_dir).expect("create skill directory");
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\ndescription: Dispatch proof\n---\nUse the dispatch proof skill.\n",
+        )
+        .expect("write skill");
+
+        let resolved = resolve_requested_skills_for_agent(
+            "default",
+            "worker",
+            Some(root.path()),
+            &["dispatch-proof".into()],
+        )
+        .expect("available requested skill");
+        assert_eq!(resolved[0].name, "dispatch-proof");
+        assert_eq!(resolved[0].instructions, "Use the dispatch proof skill.");
+
+        let error = resolve_requested_skills_for_agent(
+            "default",
+            "worker",
+            Some(root.path()),
+            &["absent-skill".into()],
+        )
+        .expect_err("missing requested skill must reject dispatch");
+        assert!(error.contains("absent-skill"));
+        assert!(error.contains("this dispatch"));
+        assert!(!error.contains("worker"));
     }
 
     #[test]
@@ -475,8 +551,8 @@ mod shipped_skill_tests {
         }
 
         let reserved_hierarchy =
-            configuration_hierarchy(root.path(), "dispatch", RESERVED_WORKFLOW_AGENT_ID);
-        let ordinary_hierarchy = configuration_hierarchy(root.path(), "dispatch", "reviewer");
+            configuration_hierarchy(root.path(), "dispatch", Some(RESERVED_WORKFLOW_AGENT_ID));
+        let ordinary_hierarchy = configuration_hierarchy(root.path(), "dispatch", Some("reviewer"));
         assert!(
             reserved_hierarchy
                 .iter()
