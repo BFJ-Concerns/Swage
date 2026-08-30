@@ -5073,6 +5073,7 @@ name = "xtask"
 version = "0.2.0"
 dependencies = [
  "sha2 0.11.0",
+ "swage-workflow",
 ]
 
 [[package]]

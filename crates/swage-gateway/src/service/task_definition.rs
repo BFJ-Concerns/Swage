@@ -5,6 +5,7 @@ use swage_storage::{NewTaskDefinition, Storage, TaskDefinition};
 
 use crate::{
     config_change::{ConfigChange, record_config_change},
+    service::is_lowercase_identifier,
     state::AppState,
 };
 
@@ -14,12 +15,7 @@ pub struct TaskDefinitionChange {
 }
 
 pub fn validate_task_definition(definition: &NewTaskDefinition) -> Result<(), GatewayError> {
-    if definition.id.is_empty()
-        || !definition
-            .id
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
-    {
+    if !is_lowercase_identifier(&definition.id) {
         return Err(GatewayError::ValidationError(
             "task ids are non-empty lowercase ASCII letters, digits, and hyphens".into(),
         ));

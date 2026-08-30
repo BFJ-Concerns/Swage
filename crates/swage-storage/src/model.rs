@@ -1130,6 +1130,37 @@ pub struct NewPageModule {
     pub source: String,
 }
 
+/// A note hung on one of a page's modules — the shared reference a user and
+/// an agent both point at instead of describing a location to each other.
+///
+/// Anchoring is at module grain and only there: `module_id` names the module
+/// the note is about. Nothing here addresses the page as a whole, and nothing
+/// addresses a position inside a module's content.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PageAnnotation {
+    pub id: Uuid,
+    pub page_id: Uuid,
+    pub module_id: Uuid,
+    /// The note's text, in whatever words its author used.
+    pub body: String,
+    /// Free-form labels the author attached, for sorting and filtering.
+    pub tags: Vec<String>,
+    /// Who left the note: an agent id, or "user" for the web surface.
+    pub author: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Input for leaving an annotation. `id` and timestamps are storage-assigned.
+#[derive(Debug, Clone)]
+pub struct NewPageAnnotation {
+    pub page_id: Uuid,
+    pub module_id: Uuid,
+    pub body: String,
+    pub tags: Vec<String>,
+    pub author: String,
+}
+
 /// A message within a thread.
 ///
 /// Messages are scoped to a thread and may optionally reference the turn that
@@ -1929,8 +1960,29 @@ pub struct WorkflowScriptRecord {
     pub name: String,
     pub description: String,
     pub delivery_grant: Option<serde_json::Value>,
+    /// The conversation that authored this script, when a model authored it
+    /// rather than an operator. Its presence is the durable mark that the
+    /// script's authority is the authoring session's and no more.
+    pub authoring_session_id: Option<Uuid>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+impl WorkflowScriptRecord {
+    /// The delivery grant a run resolved from this script may actually use.
+    ///
+    /// Delivery is how a run's effects leave the machine, so a script a model
+    /// wrote never carries one: were it otherwise, a model could author a
+    /// script naming any delivery target and then start it, minting itself
+    /// authority its own session never held. The stored column stays readable
+    /// so an operator can see what was asked for; every run-start path reads
+    /// the grant through here.
+    pub fn effective_delivery_grant(&self) -> Option<serde_json::Value> {
+        if self.authoring_session_id.is_some() {
+            return None;
+        }
+        self.delivery_grant.clone()
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1940,6 +1992,9 @@ pub struct NewWorkflowScript {
     pub description: String,
     pub source: String,
     pub delivery_grant: Option<serde_json::Value>,
+    /// Set when a model authored the script; see
+    /// [`WorkflowScriptRecord::effective_delivery_grant`].
+    pub authoring_session_id: Option<Uuid>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

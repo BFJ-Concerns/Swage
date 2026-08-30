@@ -12,7 +12,6 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use axum::Router;
-use tokio::net::TcpListener;
 
 use swage_config::ResolvedConfig;
 use swage_core::{
@@ -22,6 +21,8 @@ use swage_core::{
 use swage_gateway::{server::build_router, state::AppState};
 use swage_provider::LlmProvider;
 use swage_storage::SqliteStorage;
+
+use crate::support::start_live_server;
 
 // ---------------------------------------------------------------------------
 // Mock provider — minimal for non-streaming tests
@@ -81,12 +82,7 @@ async fn start_test_gateway() -> (Router, SocketAddr) {
     );
     let router = build_router(state);
 
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let serve_router = router.clone();
-    tokio::spawn(async move {
-        axum::serve(listener, serve_router).await.unwrap();
-    });
+    let (addr, _server) = start_live_server(router.clone()).await;
 
     (router, addr)
 }
