@@ -32,8 +32,8 @@ pub struct ClientPresenceResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
-pub struct MachinePresenceResponse {
-    pub machine_id: String,
+pub struct DevicePresenceResponse {
+    pub device_id: String,
     pub label: Option<String>,
     pub state: String,
     pub registered_at: DateTime<Utc>,
@@ -47,14 +47,14 @@ pub struct MachinePresenceResponse {
 pub struct PresenceSnapshotResponse {
     pub gateway: PresenceGatewayResponse,
     pub clients: Vec<ClientPresenceResponse>,
-    pub machines: Vec<MachinePresenceResponse>,
+    pub devices: Vec<DevicePresenceResponse>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
-pub struct MachineHeartbeatRequest {
-    pub machine_id: String,
+pub struct DeviceHeartbeatRequest {
+    pub device_id: String,
     pub label: Option<String>,
-    #[serde(default = "default_machine_stale_after_secs")]
+    #[serde(default = "default_device_stale_after_secs")]
     #[ts(type = "number")]
     pub stale_after_secs: u64,
 }
@@ -293,7 +293,7 @@ pub struct AgentDefinitionMutationResponse {
     pub summary: String,
 }
 
-fn default_machine_stale_after_secs() -> u64 {
+fn default_device_stale_after_secs() -> u64 {
     30
 }
 
@@ -310,7 +310,7 @@ pub struct KnowledgeMirrorRegenerateResponse {
 #[allow(dead_code)]
 pub struct HostingSurface {
     presence: PresenceSnapshotResponse,
-    heartbeat: MachineHeartbeatRequest,
+    heartbeat: DeviceHeartbeatRequest,
     approvals: ApprovalListResponse,
     approval_decision: ApprovalDecisionRequest,
     operator_overview: OperatorOverviewResponse,
