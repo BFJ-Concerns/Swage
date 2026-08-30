@@ -1,7 +1,7 @@
 // The provider is controlled; Chromium, the rendered Svelte app, HTTP/WebSocket
 // transport, gateway turn loop, storage, cancellation and approvals are live.
 import { createServer } from "node:net";
-import { access, mkdir, mkdtemp, rm } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { spawn, type ChildProcess } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -94,6 +94,36 @@ async function send(page: Page, prompt: string): Promise<void> {
   await page.getByRole("button", { name: "Send" }).click();
   await expect(page.getByLabel("Your message").getByText(prompt, { exact: true })).toBeVisible();
 }
+
+async function providerRequests(): Promise<Array<{ prompt: string | null; effort: string | null }>> {
+  const root = process.env.SWAGE_E2E_INVOCATION_DIR;
+  if (!root) throw new Error("The E2E invocation directory was not provided");
+  try {
+    return (await readFile(join(root, "provider-requests.jsonl"), "utf8"))
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as { prompt: string | null; effort: string | null });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  }
+}
+
+async function sendNewConversation(page: Page, prompt: string, effort?: "high"): Promise<void> {
+  await expect(page.getByRole("textbox", { name: "Message" })).toBeVisible();
+  if (effort) await page.getByRole("combobox", { name: "Effort" }).selectOption(effort);
+  await page.getByRole("textbox", { name: "Message" }).fill(prompt);
+  await page.getByRole("button", { name: "Send" }).click();
+  await expect(page.getByLabel("Your message").getByText(prompt, { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Send" })).toBeVisible();
+}
+
+const effortJourneyPrompts = [
+  "first high effort conversation",
+  "second high effort conversation",
+  "default effort after switch",
+] as const;
 
 test("resolves light-theme tokens before runtime theme application", async ({ page }) => {
   await page.addInitScript(() => {
@@ -218,4 +248,48 @@ test("approves a pending tool call through the rendered UI", async ({ page }) =>
     "Approval completed through the gateway.",
   );
   await expect(page.getByRole("button", { name: "Send" })).toBeVisible();
+});
+
+test("clears effort after switching conversations before the following new-conversation send", async ({ page }) => {
+  await page.goto("/");
+  await openComposer(page);
+  await sendNewConversation(page, effortJourneyPrompts[0], "high");
+  await page.getByRole("button", { name: "+ New conversation" }).click();
+  await sendNewConversation(page, effortJourneyPrompts[1], "high");
+
+  // Newly created conversations are prepended, so the prior one is index one
+  // even when earlier suite journeys already populated the shared gateway.
+  await page.locator(".conversation-select-btn").nth(1).click();
+  await expect(page.getByRole("textbox", { name: "Message" })).toBeVisible();
+  await page.getByRole("button", { name: "+ New conversation" }).click();
+  await expect(page.getByRole("combobox", { name: "Effort" })).toHaveValue("");
+  await sendNewConversation(page, effortJourneyPrompts[2]);
+
+  const effortRequests = async () => (await providerRequests()).filter(
+    (request) => typeof request.prompt === "string"
+      && effortJourneyPrompts.includes(request.prompt as typeof effortJourneyPrompts[number]),
+  );
+  await expect.poll(effortRequests).toEqual([
+    expect.objectContaining({ prompt: effortJourneyPrompts[0], effort: "high" }),
+    expect.objectContaining({ prompt: effortJourneyPrompts[1], effort: "high" }),
+    expect.objectContaining({ prompt: effortJourneyPrompts[2], effort: null }),
+  ]);
+});
+
+test("renders the dark-theme status badge and controlled provider error", async ({ page }) => {
+  await page.goto("/");
+  await openComposer(page);
+  await page.getByRole("button", { name: "Dark theme" }).click();
+  await expect(page.locator("body")).toHaveClass(/theme-cyanotype/);
+
+  await page.getByRole("button", { name: "Operator" }).click();
+  const connectedBadge = page.locator(".badge", { hasText: "connected" });
+  await expect(connectedBadge).toBeVisible();
+  await expect(connectedBadge).toHaveCSS("background-color", "rgb(255, 248, 238)");
+
+  await page.getByRole("button", { name: "Conversation" }).click();
+  await send(page, "controlled provider failure");
+  const error = page.getByRole("alert");
+  await expect(error).toContainText("Controlled provider failure");
+  await expect(error).toHaveCSS("border-left-color", "rgb(248, 93, 120)");
 });

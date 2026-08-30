@@ -231,7 +231,7 @@ fn parse_skill_frontmatter(raw: &str) -> Result<SkillFrontmatterParts, String> {
 /// Specificity rank for override resolution and output sorting.
 ///
 /// Lower return value = more specific = wins when names collide and sorts first.
-fn level_specificity(level: &HierarchyLevel) -> i32 {
+pub fn level_specificity(level: &HierarchyLevel) -> i32 {
     match level {
         HierarchyLevel::Agent => 0,
         HierarchyLevel::Space => 1,
