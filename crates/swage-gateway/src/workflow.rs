@@ -1451,6 +1451,22 @@ async fn run_ephemeral_agent_call(
             if let Some(tools) = effective_call_tools.as_ref() {
                 metadata[crate::turn::WORKFLOW_CALL_TOOLS_METADATA_KEY] = serde_json::json!(tools);
             }
+            if let Some(skills) = request.skills.as_ref() {
+                let space = state
+                    .space_store
+                    .get(space_id)
+                    .await
+                    .map_err(|error| error.to_string())?
+                    .ok_or_else(|| format!("AgentCallError: space {space_id} no longer exists"))?;
+                crate::turn::resolve_requested_skills_for_agent(
+                    &space.slug,
+                    &agent_id,
+                    Some(crate::turn::resolve_swage_root(state)),
+                    skills,
+                )
+                .map_err(|error| format!("AgentCallError: {error}"))?;
+                metadata["workflow_call_skills"] = serde_json::json!(skills);
+            }
             let session = state
                 .storage
                 .create_session(NewSession {
@@ -1491,6 +1507,7 @@ async fn run_ephemeral_agent_call(
         elements: request.elements.clone(),
         variables: request.variables.clone(),
         assembly: request.assembly.clone(),
+        skills: request.skills.clone(),
     };
     let processing = crate::turn::process_turn_with_composition(
         state,
@@ -6392,6 +6409,7 @@ mod tests {
                 agent: Some("gateway".into()),
                 task: None,
                 tools: None,
+                skills: None,
                 model: None,
                 schema: None,
                 max_attempts: 1,
@@ -6425,6 +6443,118 @@ mod tests {
         assert_eq!(
             calls[0].result.as_deref(),
             Some("{\"output\":\"workflow\"}")
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn workflow_agent_call_records_requested_skills_in_its_child_report() {
+        let swage_home = tempfile::TempDir::new().expect("temp swage home");
+        let skill_dir = swage_home
+            .path()
+            .join("spaces/default/skills/workflow-specialist");
+        std::fs::create_dir_all(&skill_dir).expect("create workflow skill directory");
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\ndescription: Workflow specialist\n---\nUse the workflow specialist skill.\n",
+        )
+        .expect("write workflow skill");
+        let _guard = crate::test_support::SwageHomeGuard::set_to(swage_home.path());
+
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::new(crate::turn::tests::MockProvider::new(vec![
+                swage_core::StreamChunk::Delta {
+                    content: "specialist result".into(),
+                },
+                swage_core::StreamChunk::Done {
+                    finish_reason: None,
+                },
+            ])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let request = |skills| AgentCallRequest {
+            cwd: None,
+            isolation: None,
+            effort: None,
+            timeout_ms: None,
+            prompt: "Use the requested skill".into(),
+            agent: Some("workflow-worker".into()),
+            task: None,
+            tools: None,
+            skills,
+            model: None,
+            schema: None,
+            max_attempts: 1,
+            label: None,
+            session: None,
+            elements: None,
+            variables: None,
+            assembly: None,
+        };
+
+        let result = run_ephemeral_agent_call(
+            &state,
+            Uuid::new_v4(),
+            space.id,
+            &[],
+            &[],
+            Uuid::new_v4(),
+            request(Some(vec!["workflow-specialist".into()])),
+            None,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("workflow agent call");
+
+        let snapshot = storage
+            .get_snapshot(result.turn_id.expect("workflow child turn"))
+            .await
+            .expect("read child report")
+            .expect("workflow child report should be persisted");
+        let snapshot: Value = serde_json::from_str(&snapshot).expect("child report JSON");
+        let skills = snapshot["elements"]
+            .as_array()
+            .expect("child report elements")
+            .iter()
+            .find(|element| element["name"] == "skills")
+            .expect("workflow child report should record requested skills");
+        assert!(
+            skills["source"]
+                .as_str()
+                .is_some_and(|source| source.contains("workflow-specialist")),
+            "workflow child report should name the requested skill: {skills}"
+        );
+
+        let error = run_ephemeral_agent_call(
+            &state,
+            Uuid::new_v4(),
+            space.id,
+            &[],
+            &[],
+            Uuid::new_v4(),
+            request(Some(vec!["missing-workflow-skill".into()])),
+            None,
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("unavailable workflow skill must refuse the dispatch");
+        assert!(
+            error.to_string().contains("missing-workflow-skill"),
+            "error was: {error}"
+        );
+        assert_eq!(
+            storage
+                .list_sessions_by_agent_id("workflow-worker")
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "failed skill admission must not create a child session"
         );
     }
 
@@ -6470,6 +6600,7 @@ mod tests {
                 agent: Some("researcher".into()),
                 task: None,
                 tools: None,
+                skills: None,
                 model: None,
                 schema: None,
                 max_attempts: 1,
@@ -6539,6 +6670,7 @@ mod tests {
                 agent: Some("researcher".into()),
                 task: None,
                 tools: Some(vec!["web_search".into()]),
+                skills: None,
                 model: None,
                 schema: None,
                 max_attempts: 1,
@@ -6789,6 +6921,7 @@ mod tests {
             agent: Some("default".into()),
             task: None,
             tools: None,
+            skills: None,
             model: None,
             effort: None,
             timeout_ms: None,
@@ -8058,6 +8191,7 @@ mod tests {
             agent: Some("default".into()),
             task: None,
             tools: None,
+            skills: None,
             model: None,
             schema: None,
             max_attempts: 1,
@@ -8168,6 +8302,7 @@ mod tests {
             agent: Some("default".into()),
             task: None,
             tools: None,
+            skills: None,
             model: None,
             schema: None,
             max_attempts: 1,
@@ -8345,6 +8480,7 @@ mod tests {
                 agent: Some("worker".into()),
                 task: None,
                 tools: None,
+                skills: None,
                 model: None,
                 schema: None,
                 max_attempts: 1,
@@ -8411,6 +8547,7 @@ mod tests {
                 agent: Some("worker".into()),
                 task: None,
                 tools: None,
+                skills: None,
                 model: None,
                 schema: None,
                 max_attempts: 1,
@@ -8465,6 +8602,7 @@ mod tests {
                 agent: Some("worker".into()),
                 task: None,
                 tools: None,
+                skills: None,
                 model: None,
                 schema: None,
                 max_attempts: 1,
@@ -9213,6 +9351,7 @@ mod tests {
             agent: None,
             task: Some("review".into()),
             tools: None,
+            skills: None,
             model: None,
             effort: None,
             timeout_ms: None,
@@ -10480,6 +10619,7 @@ mod tests {
                 agent: Some("worker".into()),
                 task: None,
                 tools: None,
+                skills: None,
                 model: None,
                 schema: None,
                 max_attempts: 1,
@@ -10529,6 +10669,7 @@ mod tests {
                 agent: None,
                 task: Some("review".into()),
                 tools: None,
+                skills: None,
                 model: None,
                 effort: None,
                 timeout_ms: None,
@@ -12209,6 +12350,7 @@ mod tests {
             agent: Some("worker".into()),
             task: None,
             tools: None,
+            skills: None,
             model: None,
             schema: None,
             max_attempts: 3,
@@ -12257,6 +12399,7 @@ mod tests {
             agent: Some("worker".into()),
             task: None,
             tools: None,
+            skills: None,
             model: None,
             schema: None,
             session: Some(AgentSessionRef {
@@ -12390,6 +12533,7 @@ mod tests {
             agent: Some("default".into()),
             task: None,
             tools: None,
+            skills: None,
             model: None,
             schema: None,
             max_attempts: 1,
@@ -12469,6 +12613,7 @@ mod tests {
             agent: Some("default".into()),
             task: None,
             tools: None,
+            skills: None,
             model: None,
             schema: None,
             max_attempts: 1,
@@ -12555,6 +12700,7 @@ mod tests {
             agent: Some("default".into()),
             task: None,
             tools: None,
+            skills: None,
             model: None,
             schema: None,
             max_attempts: 1,
@@ -12722,6 +12868,7 @@ mod tests {
             agent: Some("default".into()),
             task: None,
             tools: None,
+            skills: None,
             model: None,
             schema: None,
             max_attempts: 1,
@@ -12859,6 +13006,7 @@ mod tests {
             agent: Some("default".into()),
             task: None,
             tools: None,
+            skills: None,
             model: None,
             schema: None,
             max_attempts: 1,
@@ -12988,6 +13136,7 @@ mod tests {
             agent: Some("default".into()),
             task: None,
             tools: None,
+            skills: None,
             model: None,
             schema: None,
             max_attempts: 1,
@@ -13068,6 +13217,7 @@ mod tests {
             agent: Some("default".into()),
             task: None,
             tools: None,
+            skills: None,
             model: None,
             schema: None,
             max_attempts: 1,
@@ -13312,6 +13462,7 @@ mod tests {
             agent: Some("default".into()),
             task: None,
             tools: None,
+            skills: None,
             model: None,
             schema: None,
             max_attempts: 1,
@@ -13543,6 +13694,7 @@ mod tests {
             agent: Some("default".into()),
             task: None,
             tools: None,
+            skills: None,
             model: None,
             schema: None,
             max_attempts: 1,
@@ -14280,6 +14432,7 @@ mod tests {
             agent: Some("default".into()),
             task: None,
             tools: None,
+            skills: None,
             model: None,
             schema: None,
             max_attempts: 1,
@@ -14388,6 +14541,7 @@ mod tests {
             agent: Some("default".into()),
             task: None,
             tools: None,
+            skills: None,
             model: None,
             schema: None,
             max_attempts: 1,

@@ -1524,6 +1524,7 @@ impl Agent {
                     context,
                     cwd,
                     isolation,
+                    skills,
                     composition,
                     completion_mode,
                 } = *request;
@@ -1588,6 +1589,7 @@ impl Agent {
                         transferred_context,
                         cwd,
                         isolation,
+                        skills,
                         *composition,
                         &call.call_id,
                         &self.config.agent_id,

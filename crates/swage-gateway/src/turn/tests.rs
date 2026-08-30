@@ -7736,6 +7736,7 @@ async fn assert_delegation_fails_before_child_creation(
             None,
             None,
             None,
+            None,
             DispatchContextComposition::default(),
             request_id,
             "gateway",
@@ -7870,6 +7871,7 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
                 "target_agent": "agent-b",
                 "task": "Summarise this request",
                 "task_definition": "strict-review",
+                "skills": ["delegated-specialist"],
                 "elements": ["delegated-brief"],
                 "variables": {"owner": "delegating parent"},
                 "assembly": "delegated-focus",
@@ -7987,14 +7989,26 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
         "---\ndescription: Definition-declared behaviour\n---\nUse the definition-declared skill.\n",
     )
     .expect("write declared skill");
-    let target_agent_dir = swage_home.path().join("spaces/default/agents/agent-b");
-    std::fs::create_dir_all(target_agent_dir.join("skills/delegated-specialist"))
-        .expect("create delegated agent directory");
+    let requested_skill_dir = swage_home
+        .path()
+        .join("spaces/default/skills/delegated-specialist");
+    std::fs::create_dir_all(&requested_skill_dir)
+        .expect("create requested delegated skill directory");
     std::fs::write(
-            target_agent_dir.join("skills/delegated-specialist/SKILL.md"),
+            requested_skill_dir.join("SKILL.md"),
             "---\ndescription: Delegated specialist behaviour\n---\nUse the delegated specialist skill.\n",
         )
-        .expect("write delegated agent skill");
+        .expect("write requested delegated skill");
+    let agent_skill_dir = swage_home
+        .path()
+        .join("spaces/default/agents/agent-b/skills/agent-owned-specialist");
+    std::fs::create_dir_all(&agent_skill_dir)
+        .expect("create delegated agent-level skill directory");
+    std::fs::write(
+        agent_skill_dir.join("SKILL.md"),
+        "---\ndescription: Agent-owned specialist behaviour\n---\nUse the agent-owned specialist skill.\n",
+    )
+    .expect("write delegated agent-level skill");
     let _guard = SwageHomeGuard::set_to(swage_home.path());
     storage
         .activate_skill(session_id, "foreground-only")
@@ -8145,6 +8159,18 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
         "delegated assembly report should contain its element decisions"
     );
     assert_eq!(child_snapshot["assembly_name"], "delegated-focus");
+    let skills = child_snapshot["elements"]
+        .as_array()
+        .expect("delegated assembly report should list elements")
+        .iter()
+        .find(|element| element["name"] == "skills")
+        .expect("delegated child report should record its requested skills");
+    assert!(
+        skills["source"]
+            .as_str()
+            .is_some_and(|source| source.contains("delegated-specialist")),
+        "delegated child report should name the requested skill: {skills}"
+    );
     assert!(
         child_snapshot["elements"]
             .as_array()
@@ -8350,8 +8376,9 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
     );
     assert!(
         child_request_text.contains("## Skills available in this session")
-            && child_request_text.contains("delegated-specialist — Delegated specialist behaviour"),
-        "delegated provider request should include the target skill catalogue: {child_request_text}"
+            && child_request_text
+                .contains("agent-owned-specialist — Agent-owned specialist behaviour"),
+        "delegated provider request should catalogue the target agent's own skill: {child_request_text}"
     );
     assert!(
         child_request_text.contains("Inherited Background Context"),
@@ -8366,8 +8393,8 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
         "delegated provider request should fence the task separately: {child_request_text}"
     );
     assert!(
-        child_request_text.contains("Use the delegated specialist skill."),
-        "delegated provider request should include target agent-level skill instructions: {child_request_text}"
+        child_request_text.contains("Use the agent-owned specialist skill."),
+        "delegated provider request should activate the target agent's own skill instructions: {child_request_text}"
     );
     assert!(
         child_request_text.contains("Use the definition-declared skill."),
@@ -8416,8 +8443,8 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
         .collect::<Vec<_>>()
         .join("\n\n");
     assert!(
-        !resumed_parent_request_text.contains("Use the delegated specialist skill."),
-        "target agent skill instructions must not bleed into the resumed parent request"
+        !resumed_parent_request_text.contains("Use the agent-owned specialist skill."),
+        "the target agent's own skill instructions must not bleed into the resumed parent request"
     );
     let next_parent_request_text = captured_requests[4]
         .messages
@@ -9015,6 +9042,7 @@ async fn delegated_read_only_location_approval_allows_read_and_refuses_write() {
             None,
             Some(attachment.to_string_lossy().into_owned()),
             None,
+            None,
             DispatchContextComposition::default(),
             "read-only-placement-delegate",
             "gateway",
@@ -9166,6 +9194,7 @@ async fn workflow_call_tool_bound_survives_delegation_and_child_continuation() {
         .handle_delegation(
             "agent-b",
             "complete the delegated work",
+            None,
             None,
             None,
             None,
@@ -9347,6 +9376,7 @@ async fn task_scoped_delegate_keeps_its_permission_bound_when_delegating_again()
             None,
             None,
             None,
+            None,
             DispatchContextComposition::default(),
             "outer-task-delegate",
             "gateway",
@@ -9525,6 +9555,7 @@ async fn placed_delegate_keeps_exact_read_only_authority_when_delegating_again()
             None,
             Some(placed_workspace.to_string_lossy().into_owned()),
             None,
+            None,
             DispatchContextComposition::default(),
             "outer-placed-delegate",
             "gateway",
@@ -9689,6 +9720,7 @@ async fn delegate_worktree_provisions_isolated_cwd_and_records_resolved_placemen
             None,
             Some(repo.to_string_lossy().into_owned()),
             Some(swage_protocol::client::workflow::WorkerIsolation::Worktree),
+            None,
             DispatchContextComposition::default(),
             "wait-worktree-delegate-call",
             "gateway",
@@ -9733,6 +9765,7 @@ async fn delegate_worktree_provisions_isolated_cwd_and_records_resolved_placemen
             None,
             Some(repo.to_string_lossy().into_owned()),
             Some(swage_protocol::client::workflow::WorkerIsolation::Worktree),
+            None,
             DispatchContextComposition::default(),
             "worktree-delegate-call",
             "gateway",
@@ -9906,6 +9939,7 @@ async fn detached_delegate_can_be_cancelled_through_active_registry() {
             None,
             Some(delegated_cwd.path().to_string_lossy().into_owned()),
             Some(swage_protocol::client::workflow::WorkerIsolation::Worktree),
+            None,
             DispatchContextComposition::default(),
             "detached-placement-delegate",
             "gateway",
@@ -9942,6 +9976,7 @@ async fn detached_delegate_can_be_cancelled_through_active_registry() {
             None,
             None,
             Some(denied_cwd.path().to_string_lossy().into_owned()),
+            None,
             None,
             DispatchContextComposition::default(),
             "denied-placement-delegate",
@@ -12640,6 +12675,7 @@ async fn delegated_assembly_applies_call_scoped_composition_over_live_state() {
                 "dispatch owner".into(),
             )])),
             assembly: Some("briefing".into()),
+            skills: None,
         },
     );
 
