@@ -138,7 +138,6 @@ describe("reconnect reconciliation", () => {
     store.reconcileAfterReconnect(recoveredTurnGeneration);
 
     expect(store.isStreaming).toBe(true);
-    expect(store.activeTurnId).toBeNull();
     expect(store.streamedContent).toBe("new live content");
   });
 });

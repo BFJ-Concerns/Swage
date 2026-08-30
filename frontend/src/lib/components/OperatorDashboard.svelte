@@ -420,7 +420,7 @@
               <span class="timestamp">
                 {device.last_seen_at
                   ? new Date(device.last_seen_at).toLocaleString()
-                  : "local host"}
+                  : "local device"}
               </span>
             </div>
           {/each}

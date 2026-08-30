@@ -57,10 +57,9 @@ impl LlmProvider for MockProvider {
     }
 }
 
-fn test_state(db_path: &Path, workspace_root: &Path) -> (AppState, Arc<SqliteStorage>) {
+fn test_state(db_path: &Path) -> (AppState, Arc<SqliteStorage>) {
     let storage = Arc::new(SqliteStorage::open(db_path).unwrap());
-    let mut config = swage_config::ResolvedConfig::default();
-    config.workspace.path = workspace_root.to_string_lossy().into_owned();
+    let config = swage_config::ResolvedConfig::default();
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn SpaceStore>,
@@ -122,10 +121,8 @@ async fn create_conversation(router: &Router) -> Uuid {
 async fn materials_can_be_created_read_archived_restored_and_promoted() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("materials.db");
-    let workspace_root = dir.path().join("workspace");
-    std::fs::create_dir_all(&workspace_root).unwrap();
 
-    let (state, storage) = test_state(&db_path, &workspace_root);
+    let (state, storage) = test_state(&db_path);
     let router = build_router(state.clone());
     let session_id = create_conversation(&router).await;
     let session = storage.get_session(session_id).await.unwrap().unwrap();
@@ -231,10 +228,8 @@ async fn materials_can_be_created_read_archived_restored_and_promoted() {
 async fn material_paths_cannot_escape_the_managed_workspace_root() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("materials-permissions.db");
-    let workspace_root = dir.path().join("workspace");
-    std::fs::create_dir_all(&workspace_root).unwrap();
 
-    let (state, _storage) = test_state(&db_path, &workspace_root);
+    let (state, _storage) = test_state(&db_path);
     let router = build_router(state);
     let session_id = create_conversation(&router).await;
 
@@ -279,10 +274,8 @@ async fn material_paths_cannot_escape_the_managed_workspace_root() {
 async fn attachment_ingested_and_manual_materials_share_one_surface() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("materials-attachment.db");
-    let workspace_root = dir.path().join("workspace");
-    std::fs::create_dir_all(&workspace_root).unwrap();
 
-    let (state, storage) = test_state(&db_path, &workspace_root);
+    let (state, storage) = test_state(&db_path);
     let router = build_router(state.clone());
     let session_id = create_conversation(&router).await;
     let session = storage.get_session(session_id).await.unwrap().unwrap();
