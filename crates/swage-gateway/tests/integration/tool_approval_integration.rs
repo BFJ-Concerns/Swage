@@ -28,7 +28,6 @@ use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use futures::{SinkExt, StreamExt};
 use serde_json::{Value, json};
-use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite;
 use tower::ServiceExt;
 
@@ -44,7 +43,9 @@ use swage_storage::{
     store::{ApprovalStore, SessionStore, SpaceStore, ThreadStore, ToolCallStore, TurnStore},
 };
 
-use crate::support::{ProcessEnvGuard, live_http_json};
+use crate::support::{
+    ProcessEnvGuard, WsStream, live_http_json, start_live_server, ws_recv_lenient,
+};
 
 const WEBSOCKET_EVENT_DEADLINE: Duration = Duration::from_secs(120);
 
@@ -182,12 +183,7 @@ async fn start_test_server_with_tools(
     );
     let router = build_router(state);
 
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let serve_router = router.clone();
-    tokio::spawn(async move {
-        axum::serve(listener, serve_router).await.unwrap();
-    });
+    let (addr, _server) = start_live_server(router.clone()).await;
 
     (router, addr, storage)
 }
@@ -214,9 +210,6 @@ type WsSink = futures::stream::SplitSink<
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
     tungstenite::Message,
 >;
-type WsStream = futures::stream::SplitStream<
-    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
->;
 
 async fn connect_ws(addr: SocketAddr, conversation_id: &str) -> (WsSink, WsStream) {
     let url = format!("ws://{addr}/api/conversations/{conversation_id}/ws");
@@ -230,19 +223,6 @@ async fn ws_send(sink: &mut WsSink, payload: Value) {
     sink.send(tungstenite::Message::Text(payload.to_string().into()))
         .await
         .expect("ws send should succeed");
-}
-
-async fn ws_recv_lenient(stream: &mut WsStream) -> Option<Value> {
-    loop {
-        match stream.next().await {
-            Some(Ok(tungstenite::Message::Text(text))) => {
-                return Some(serde_json::from_str(&text).unwrap_or(Value::Null));
-            }
-            Some(Ok(tungstenite::Message::Close(_))) => return None,
-            None => return None,
-            _ => continue,
-        }
-    }
 }
 
 async fn ws_collect_events(stream: &mut WsStream, timeout: Duration) -> Vec<Value> {

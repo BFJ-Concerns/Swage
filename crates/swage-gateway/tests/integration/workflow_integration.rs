@@ -11,9 +11,8 @@ use swage_core::{
 use swage_gateway::{server::build_router, state::AppState};
 use swage_provider::LlmProvider;
 use swage_storage::{SpaceStore, SqliteStorage, Storage, WorkflowStore};
-use tokio::net::TcpListener;
 
-use crate::support::ProcessEnvGuard;
+use crate::support::{ProcessEnvGuard, start_live_server};
 
 struct StubProvider;
 
@@ -90,11 +89,7 @@ async fn carried_workflow_runs_over_http_and_authored_source_shadows_it() {
         swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
         None,
     );
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let server = tokio::spawn(async move {
-        axum::serve(listener, build_router(state)).await.unwrap();
-    });
+    let (address, server) = start_live_server(build_router(state)).await;
     let base = format!("http://{address}");
     let client = reqwest::Client::new();
 

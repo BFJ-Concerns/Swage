@@ -45,13 +45,13 @@ fn row_to_module(row: &rusqlite::Row<'_>) -> rusqlite::Result<PageModule> {
     })
 }
 
-fn parse_uuid(s: &str) -> rusqlite::Result<Uuid> {
+pub(crate) fn parse_uuid(s: &str) -> rusqlite::Result<Uuid> {
     s.parse::<Uuid>().map_err(|e| {
         rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
     })
 }
 
-fn parse_dt(s: &str) -> rusqlite::Result<DateTime<Utc>> {
+pub(crate) fn parse_dt(s: &str) -> rusqlite::Result<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(s)
         .map(|d| d.with_timezone(&Utc))
         .map_err(|e| {

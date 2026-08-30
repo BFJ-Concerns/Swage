@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 
 import appLayout from "../components/AppLayout.svelte?raw";
 import connectionIndicator from "../components/ConnectionIndicator.svelte?raw";
+import conversationChannel from "../components/ConversationChannel.svelte?raw";
 import conversationList from "../components/ConversationList.svelte?raw";
 import messageDisplay from "../components/MessageDisplay.svelte?raw";
 import messageInput from "../components/MessageInput.svelte?raw";
@@ -28,6 +29,7 @@ import providerModelManagement from "../components/settings/ProviderModelManagem
 const RETINTED_COMPONENTS = {
   AppLayout: appLayout,
   ConnectionIndicator: connectionIndicator,
+  ConversationChannel: conversationChannel,
   ConversationList: conversationList,
   MessageDisplay: messageDisplay,
   MessageInput: messageInput,
