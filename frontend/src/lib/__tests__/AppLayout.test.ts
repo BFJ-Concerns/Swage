@@ -169,6 +169,7 @@ interface MountOptions {
   onSelectSurface?: (surface: "conversation" | "operator" | "pages") => void;
   routePath?: string;
   agentDefinitions?: import("../protocol/EffectiveAgentDefinitionResponse").EffectiveAgentDefinitionResponse[];
+  modelOptions?: string[];
   streamingStore?: StreamingStore;
   conversationStore?: ConversationStore;
   onNewConversation?: () => void;
@@ -189,6 +190,7 @@ function mountLayout(options: MountOptions = {}): MountedComponent {
       onNavigate: options.onNavigate,
       route: options.routePath ? parseRoute(options.routePath) : undefined,
       agentDefinitions: options.agentDefinitions ?? [],
+      modelOptions: options.modelOptions,
       onNewConversation: options.onNewConversation,
       pagesStore: options.pagesStore,
     },
@@ -386,6 +388,60 @@ describe("AppLayout shell navigation", () => {
     (document.querySelector("button.send") as HTMLButtonElement).click();
 
     expect(startTurn).toHaveBeenCalledWith("Hello", null, "researcher", null);
+  });
+
+  it("clears effort after the active conversation changes before the next new conversation", () => {
+    const startTurn = vi.fn();
+    const firstConversation = {
+      id: "first-conversation", space_id: "default", selected_model_id: null,
+      created_at: "", last_activity: "", messages: [],
+    };
+    const secondConversation = { ...firstConversation, id: "second-conversation" };
+    const conversationStore = {
+      ...mockConversationStore(),
+      get activeConversation() { return null; },
+    };
+    const layout = createClassComponent({
+      component: AppLayout,
+      target: document.body,
+      props: {
+        conversationStore,
+        connectionStore: mockConnectionStore(),
+        streamingStore: { ...mockStreamingStore(), startTurn },
+        spaceStore: mockSpaceStore(),
+        onRetry: () => {},
+        activeSurface: "conversation",
+        onSelectSurface: () => {},
+        modelOptions: ["e2e-model"],
+        agentDefinitions: [{
+          id: "researcher", display_name: "Researcher", description: "", instructions: "",
+          model_id: null, tool_permissions: null, skills: [], output_schema: null,
+          output_max_retries: null, is_builtin: false, source_scope: "global",
+        }],
+      },
+    });
+    const effort = document.querySelector('[aria-label="Effort"]') as HTMLSelectElement;
+    effort.value = "high";
+    effort.dispatchEvent(new Event("change", { bubbles: true }));
+    flushSync();
+
+    layout.$set({ conversationStore: { ...conversationStore, get activeConversation() { return firstConversation; } } });
+    flushSync();
+    layout.$set({ conversationStore: { ...conversationStore, get activeConversation() { return secondConversation; } } });
+    flushSync();
+    layout.$set({ conversationStore });
+    flushSync();
+
+    const message = document.querySelector('textarea[aria-label="Message"]') as HTMLTextAreaElement;
+    message.value = "Use the new conversation default";
+    message.dispatchEvent(new Event("input", { bubbles: true }));
+    flushSync();
+    (document.querySelector("button.send") as HTMLButtonElement).click();
+
+    expect(startTurn).toHaveBeenCalledWith(
+      "Use the new conversation default", "e2e-model", null, null,
+    );
+    layout.$destroy();
   });
 
   it("renders the space switcher in the shell", () => {
