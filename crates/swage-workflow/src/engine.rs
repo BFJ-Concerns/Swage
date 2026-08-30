@@ -137,7 +137,7 @@ fn meta_value_range(object: &str, field: &str) -> Option<(usize, usize)> {
             let key_start = index;
             while bytes
                 .get(index)
-                .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+                .is_some_and(|byte| byte.is_ascii_alphanumeric() || matches!(*byte, b'_' | b'$'))
             {
                 index += 1;
             }
@@ -1613,6 +1613,16 @@ mod tests {
                 description: Some("bare keys".into()),
                 argument_schema: None,
             }
+        );
+
+        let dollar_key_form = script_meta(
+            r#"export const meta = { $name: "dollar", description: "valid JavaScript key" };"#,
+        )
+        .expect("JavaScript metadata with a dollar key");
+        assert_eq!(dollar_key_form.name.as_deref(), None);
+        assert_eq!(
+            dollar_key_form.description.as_deref(),
+            Some("valid JavaScript key")
         );
     }
 

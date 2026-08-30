@@ -8,6 +8,7 @@ use std::{
     time::Duration,
 };
 
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 const APP_PACKAGE: &str = "swage-gateway";
@@ -223,12 +224,30 @@ fn build_dev(options: &BuildDevOptions) -> Result<()> {
         "Building swage debug binary",
         command("cargo", ["build", "-p", APP_PACKAGE, "--bin", BINARY_NAME]),
     )?;
+    let binary = cargo_target_directory()?.join("debug").join(BINARY_NAME);
     ensure_file(
-        "target/debug/swage",
-        "debug binary was not produced: target/debug/swage",
+        binary.as_path(),
+        &format!("debug binary was not produced: {}", binary.display()),
     )?;
-    println!("==> Built target/debug/{BINARY_NAME}");
+    println!("==> Built {}", binary.display());
     Ok(())
+}
+
+/// Resolve Cargo's target directory through Cargo itself, including config and
+/// the standard `CARGO_TARGET_DIR` override.
+fn cargo_target_directory() -> Result<PathBuf> {
+    let output = Command::new("cargo")
+        .args(["metadata", "--no-deps", "--format-version=1"])
+        .output()?;
+    if !output.status.success() {
+        return Err(format!("cargo metadata failed with {}", output.status).into());
+    }
+    let metadata: Value = serde_json::from_slice(&output.stdout)?;
+    let directory = metadata
+        .get("target_directory")
+        .and_then(Value::as_str)
+        .ok_or("cargo metadata omitted target_directory")?;
+    Ok(PathBuf::from(directory))
 }
 
 fn dev(options: &DevOptions) -> Result<()> {
@@ -526,13 +545,9 @@ fn check_frontend_design_tokens() -> Result<()> {
 }
 
 fn component_style_lines(contents: &str) -> impl Iterator<Item = (usize, &str, usize)> {
-    #[derive(Default)]
     enum StyleRegion {
-        #[default]
         Outside,
-        OpeningTag {
-            quote: Option<char>,
-        },
+        OpeningTag { quote: Option<char> },
         Contents,
     }
 
@@ -1225,8 +1240,8 @@ fn format_bytes(bytes: u64) -> String {
     }
 }
 
-fn ensure_file(path: &str, message: &str) -> Result<()> {
-    if Path::new(path).is_file() {
+fn ensure_file(path: impl AsRef<Path>, message: &str) -> Result<()> {
+    if path.as_ref().is_file() {
         Ok(())
     } else {
         Err(message.into())
