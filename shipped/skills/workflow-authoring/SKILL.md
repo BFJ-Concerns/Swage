@@ -86,8 +86,9 @@ return { reply };
   (names the worker in the run record), `session` (a continuation token
   from an earlier handle, to keep one worker's session going), `tools`
   (a call-scoped allow-list that can only narrow the worker's effective
-  grants), `timeoutMs` (fail this one call at a hard deadline; unset
-  means the worker runs to completion), `cwd`
+  grants), `skills` (named skills to activate for this worker), `timeoutMs`
+  (fail this one call at a hard deadline; unset means the worker runs to
+  completion), `cwd`
   (the directory the worker's tools operate in), `isolation:
   "worktree"` (give the worker its own provisioned worktree of the
   `cwd` repository, so parallel siblings never share a mutable tree),

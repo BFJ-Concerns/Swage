@@ -891,7 +891,7 @@ impl WorkflowEngine {
                         const buildAgentRequest = (options) => {
                             const merged = mergeDefaults(options);
                             const knownOptions = new Set([
-                                "agent", "task", "tools", "model", "effort", "timeoutMs",
+                                "agent", "task", "tools", "skills", "model", "effort", "timeoutMs",
                                 "cwd", "isolation", "schema", "maxAttempts", "label",
                                 "session", "elements", "variables", "assembly",
                             ]);
@@ -918,6 +918,9 @@ impl WorkflowEngine {
                                 ...(merged.tools === undefined || merged.tools === null
                                     ? {}
                                     : { tools: merged.tools.map(String) }),
+                                ...(merged.skills === undefined || merged.skills === null
+                                    ? {}
+                                    : { skills: merged.skills.map(String) }),
                                 model: merged.model ?? null,
                                 ...(merged.effort === undefined || merged.effort === null
                                     ? {}
@@ -1763,6 +1766,7 @@ mod tests {
                     timeoutMs: 75, cwd: "/repo", isolation: "worktree",
                     schema: { type: "object" }, maxAttempts: 2, label: "inspect",
                     session: { session_id: "00000000-0000-0000-0000-00000000000a", thread_id: "00000000-0000-0000-0000-00000000000b" },
+                    skills: ["code-review", "testing"],
                     elements: ["current-work"], variables: { owner: "operator" }, assembly: "focused",
                 }); return null;"#,
                 "null",
@@ -1788,6 +1792,10 @@ mod tests {
         );
         assert_eq!(request.variables.as_ref().unwrap()["owner"], "operator");
         assert_eq!(request.assembly.as_deref(), Some("focused"));
+        assert_eq!(
+            request.skills.as_deref(),
+            Some(["code-review".to_string(), "testing".to_string()].as_slice())
+        );
     }
 
     #[tokio::test]
