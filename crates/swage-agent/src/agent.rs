@@ -250,20 +250,23 @@ impl Agent {
             approval_scope.approve_remaining_gates();
         }
 
-        let assembled_context = if crate::compaction::exceeds_threshold(
+        let assembled_context = if crate::compaction::exceeds_threshold_with_model(
             &request.assembled_context,
             &self.config.compaction_threshold,
             self.provider.as_ref(),
+            self.config.model_id.as_deref(),
         )
         .await
         {
-            match crate::compaction::compact(
+            match crate::compaction::compact_with_model(
                 request.assembled_context,
                 &self.config.compaction_threshold,
                 self.provider.as_ref(),
                 self.storage.as_ref(),
                 thread_id,
                 compaction_focus.as_deref(),
+                self.config.model_id.as_deref(),
+                true,
             )
             .await
             {

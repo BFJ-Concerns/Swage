@@ -1,3 +1,4 @@
+import { appendFile } from "node:fs/promises";
 import { createServer } from "node:http";
 
 const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -36,6 +37,20 @@ async function handle(request, response) {
   let raw = "";
   for await (const chunk of request) raw += chunk;
   const body = JSON.parse(raw);
+  if (process.env.SWAGE_E2E_PROVIDER_REQUESTS) {
+    await appendFile(
+      process.env.SWAGE_E2E_PROVIDER_REQUESTS,
+      `${JSON.stringify({
+        prompt: body.messages.at(-1)?.content ?? null,
+        effort: body.output_config?.effort ?? null,
+      })}\n`,
+    );
+  }
+  if (JSON.stringify(body.messages).includes("controlled provider failure")) {
+    response.writeHead(503, { "content-type": "application/json" });
+    response.end(JSON.stringify({ error: { message: "Controlled provider failure" } }));
+    return;
+  }
   response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", "x-request-id": "e2e-provider" });
 
   const serialised = JSON.stringify(body.messages);
