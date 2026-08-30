@@ -9,9 +9,10 @@ use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use futures::Stream;
-use tokio::net::TcpListener;
 use tokio::time::Duration;
 use tower::ServiceExt;
+
+use crate::support::start_live_server;
 use uuid::Uuid;
 
 use swage_client::http::GatewayClient;
@@ -67,12 +68,7 @@ async fn start_test_server() -> (Router, SocketAddr) {
     );
     let router = build_router(state);
 
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let serve_router = router.clone();
-    tokio::spawn(async move {
-        axum::serve(listener, serve_router).await.unwrap();
-    });
+    let (addr, _server) = start_live_server(router.clone()).await;
 
     (router, addr)
 }
@@ -160,15 +156,15 @@ async fn presence_snapshot_tracks_client_disconnect_and_reconnect() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn presence_snapshot_marks_machine_stale_after_missed_heartbeat() {
+async fn presence_snapshot_marks_device_stale_after_missed_heartbeat() {
     let (_router, addr) = start_test_server().await;
     let http = reqwest::Client::new();
     let client = GatewayClient::new(&format!("http://{addr}"));
 
     let response = http
-        .post(format!("http://{addr}/api/presence/machines/heartbeat"))
+        .post(format!("http://{addr}/api/presence/devices/heartbeat"))
         .json(&serde_json::json!({
-            "machine_id": "device-a",
+            "device_id": "device-a",
             "label": "Device A",
             "stale_after_secs": 1
         }))
@@ -177,21 +173,42 @@ async fn presence_snapshot_marks_machine_stale_after_missed_heartbeat() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::ACCEPTED);
 
+    let obsolete_heartbeat = http
+        .post(format!("http://{addr}/api/presence/machines/heartbeat"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(obsolete_heartbeat.status(), StatusCode::NOT_FOUND);
+
     let connected = client.presence().await.unwrap();
-    let machine = connected
-        .machines
+    let device = connected
+        .devices
         .iter()
-        .find(|machine| machine.machine_id == "device-a")
-        .expect("machine presence record");
-    assert_eq!(machine.state, "connected");
+        .find(|device| device.device_id == "device-a")
+        .expect("device presence record");
+    assert_eq!(device.state, "connected");
 
     tokio::time::sleep(Duration::from_secs(2)).await;
 
     let stale = client.presence().await.unwrap();
-    let machine = stale
-        .machines
+    let device = stale
+        .devices
         .iter()
-        .find(|machine| machine.machine_id == "device-a")
-        .expect("stale machine presence record");
-    assert_eq!(machine.state, "stale");
+        .find(|device| device.device_id == "device-a")
+        .expect("stale device presence record");
+    assert_eq!(device.state, "stale");
+
+    let disconnected = http
+        .delete(format!("http://{addr}/api/presence/devices/device-a"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(disconnected.status(), StatusCode::NO_CONTENT);
+
+    let obsolete_disconnect = http
+        .delete(format!("http://{addr}/api/presence/machines/device-a"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(obsolete_disconnect.status(), StatusCode::NOT_FOUND);
 }

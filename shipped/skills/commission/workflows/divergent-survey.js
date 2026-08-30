@@ -315,7 +315,7 @@ applies, treat "couldn't determine" as a valid answer rather than guessing, and 
 what you observe from what you infer. Be specific to THIS outcome; avoid generic
 architecture advice.
 
-Reply with a single JSON value conforming to the schema. Reason first if you need to, then give the JSON inside a single ```json fenced code block — the FIRST fenced block in your reply is the one that is read, so use exactly one and put nothing schema-shaped in any other fence. A reply that is the bare JSON value alone, with no prose at all, also works. Never restate the schema or show
+Reply with a single JSON value conforming to the schema. Reason first if you need to, then give the JSON inside a single \`\`\`json fenced code block — the FIRST fenced block in your reply is the one that is read, so use exactly one and put nothing schema-shaped in any other fence. A reply that is the bare JSON value alone, with no prose at all, also works. Never restate the schema or show
 a sample answer; the only JSON value in your reply is your actual answer.`;
 
 const critiqueFindingsBlock = (findings) =>
@@ -348,7 +348,7 @@ If something is wrong with what you were GIVEN rather than the approach — the 
 is itself contradictory or wrong, or a research finding looks fabricated — say so in
 \`out_of_scope_concerns\`; use an empty string when you have nothing, and never pad it.
 
-Reply with a single JSON value conforming to the schema. Reason first if you need to, then give the JSON inside a single ```json fenced code block — the FIRST fenced block in your reply is the one that is read, so use exactly one and put nothing schema-shaped in any other fence. A reply that is the bare JSON value alone, with no prose at all, also works. Never restate the schema or show
+Reply with a single JSON value conforming to the schema. Reason first if you need to, then give the JSON inside a single \`\`\`json fenced code block — the FIRST fenced block in your reply is the one that is read, so use exactly one and put nothing schema-shaped in any other fence. A reply that is the bare JSON value alone, with no prose at all, also works. Never restate the schema or show
 a sample answer; the only JSON value in your reply is your actual answer.`;
 
 // Fan-in guard: the synthesis prompt is the SUM of every approach/critique pair plus
@@ -409,7 +409,7 @@ approach.
 
 ${JSON.stringify(pair, null, 2)}
 
-Reply with a single JSON value conforming to the schema. Reason first if you need to, then give the JSON inside a single ```json fenced code block — the FIRST fenced block in your reply is the one that is read, so use exactly one and put nothing schema-shaped in any other fence. A reply that is the bare JSON value alone, with no prose at all, also works. Never restate the schema or show
+Reply with a single JSON value conforming to the schema. Reason first if you need to, then give the JSON inside a single \`\`\`json fenced code block — the FIRST fenced block in your reply is the one that is read, so use exactly one and put nothing schema-shaped in any other fence. A reply that is the bare JSON value alone, with no prose at all, also works. Never restate the schema or show
 a sample answer; the only JSON value in your reply is your actual answer.`;
 
 const synthesisPrompt = (pairs) =>
@@ -436,7 +436,7 @@ ${JSON.stringify(research, null, 2)}
 Alternatives and their critiques:
 ${JSON.stringify(pairs, null, 2)}
 
-Reply with a single JSON value conforming to the schema. Reason first if you need to, then give the JSON inside a single ```json fenced code block — the FIRST fenced block in your reply is the one that is read, so use exactly one and put nothing schema-shaped in any other fence. A reply that is the bare JSON value alone, with no prose at all, also works. Never restate the schema or show
+Reply with a single JSON value conforming to the schema. Reason first if you need to, then give the JSON inside a single \`\`\`json fenced code block — the FIRST fenced block in your reply is the one that is read, so use exactly one and put nothing schema-shaped in any other fence. A reply that is the bare JSON value alone, with no prose at all, also works. Never restate the schema or show
 a sample answer; the only JSON value in your reply is your actual answer.`;
 
 // Stage 0: survey the theory before any approach exists. A researcher that

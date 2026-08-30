@@ -31,7 +31,7 @@
       "$ref": "#/$defs/EffectiveAgentDefinitionListResponse"
     },
     "heartbeat": {
-      "$ref": "#/$defs/MachineHeartbeatRequest"
+      "$ref": "#/$defs/DeviceHeartbeatRequest"
     },
     "knowledge_mirror": {
       "$ref": "#/$defs/KnowledgeMirrorRegenerateResponse"
@@ -574,6 +574,29 @@
         }
       ]
     },
+    "DeviceHeartbeatRequest": {
+      "type": "object",
+      "properties": {
+        "device_id": {
+          "type": "string"
+        },
+        "label": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "stale_after_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 30,
+          "minimum": 0
+        }
+      },
+      "required": [
+        "device_id"
+      ]
+    },
     "DeviceListResponse": {
       "type": "object",
       "properties": {
@@ -586,6 +609,50 @@
       },
       "required": [
         "devices"
+      ]
+    },
+    "DevicePresenceResponse": {
+      "type": "object",
+      "properties": {
+        "device_id": {
+          "type": "string"
+        },
+        "disconnected_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "label": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "last_seen_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "registered_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "stale_after_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "state": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "device_id",
+        "state",
+        "registered_at",
+        "last_seen_at",
+        "stale_after_secs"
       ]
     },
     "DeviceResponse": {
@@ -762,73 +829,6 @@
       "required": [
         "mirror_root",
         "files_written"
-      ]
-    },
-    "MachineHeartbeatRequest": {
-      "type": "object",
-      "properties": {
-        "label": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "machine_id": {
-          "type": "string"
-        },
-        "stale_after_secs": {
-          "type": "integer",
-          "format": "uint64",
-          "default": 30,
-          "minimum": 0
-        }
-      },
-      "required": [
-        "machine_id"
-      ]
-    },
-    "MachinePresenceResponse": {
-      "type": "object",
-      "properties": {
-        "disconnected_at": {
-          "type": [
-            "string",
-            "null"
-          ],
-          "format": "date-time"
-        },
-        "label": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "last_seen_at": {
-          "type": "string",
-          "format": "date-time"
-        },
-        "machine_id": {
-          "type": "string"
-        },
-        "registered_at": {
-          "type": "string",
-          "format": "date-time"
-        },
-        "stale_after_secs": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        },
-        "state": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "machine_id",
-        "state",
-        "registered_at",
-        "last_seen_at",
-        "stale_after_secs"
       ]
     },
     "OperatorDeviceSummary": {
@@ -1089,20 +1089,20 @@
             "$ref": "#/$defs/ClientPresenceResponse"
           }
         },
-        "gateway": {
-          "$ref": "#/$defs/PresenceGatewayResponse"
-        },
-        "machines": {
+        "devices": {
           "type": "array",
           "items": {
-            "$ref": "#/$defs/MachinePresenceResponse"
+            "$ref": "#/$defs/DevicePresenceResponse"
           }
+        },
+        "gateway": {
+          "$ref": "#/$defs/PresenceGatewayResponse"
         }
       },
       "required": [
         "gateway",
         "clients",
-        "machines"
+        "devices"
       ]
     },
     "Schedule": {

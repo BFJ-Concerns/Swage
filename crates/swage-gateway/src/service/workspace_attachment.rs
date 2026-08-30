@@ -8,6 +8,9 @@ use swage_storage::{
     store::{SpaceStore, Storage},
 };
 
+use crate::config_change::{ConfigChange, record_config_change};
+use crate::state::AppState;
+
 pub use swage_protocol::client::space::{
     CreateWorkspaceAttachmentRequest, UpdateWorkspaceTrustRequest, WorkspaceAttachmentListResponse,
     WorkspaceAttachmentResponse,
@@ -25,13 +28,17 @@ fn default_workspace_permissions() -> Vec<String> {
 pub struct WorkspaceAttachmentService {
     pub(crate) storage: Arc<dyn Storage>,
     pub(crate) space_store: Arc<dyn SpaceStore>,
+    audit_state: AppState,
 }
 
 impl WorkspaceAttachmentService {
-    pub fn new(storage: Arc<dyn Storage>, space_store: Arc<dyn SpaceStore>) -> Self {
+    /// Creates the handler-facing mutation surface. Configuration mutations
+    /// made through it are recorded with their complete attachment snapshots.
+    pub fn from_state(state: AppState) -> Self {
         Self {
-            storage,
-            space_store,
+            storage: Arc::clone(&state.storage),
+            space_store: Arc::clone(&state.space_store),
+            audit_state: state,
         }
     }
 
@@ -120,6 +127,14 @@ impl WorkspaceAttachmentService {
             .get_workspace_attachment(workspace.id)
             .await?
             .ok_or_else(|| GatewayError::ValidationError("created workspace disappeared".into()))?;
+        self.record_change(
+            "attach_workspace",
+            workspace.id,
+            format!("attached workspace '{}'", workspace.label),
+            None,
+            Some(workspace_snapshot(&workspace)?),
+        )
+        .await?;
         Ok(workspace_to_response(workspace))
     }
 
@@ -129,12 +144,25 @@ impl WorkspaceAttachmentService {
         workspace_id: Uuid,
         req: UpdateWorkspaceTrustRequest,
     ) -> Result<WorkspaceAttachmentResponse, GatewayError> {
+        let prior = self.workspace_snapshot(workspace_id).await?;
         self.ensure_workspace_belongs_to_space(space_id, workspace_id)
             .await?;
         let workspace = self
             .storage
             .set_workspace_trust(workspace_id, req.is_trusted)
             .await?;
+        self.record_change(
+            "set_workspace_trust",
+            workspace_id,
+            format!(
+                "{} trust for workspace '{}'",
+                if req.is_trusted { "enabled" } else { "revoked" },
+                workspace.label
+            ),
+            Some(prior),
+            Some(workspace_snapshot(&workspace)?),
+        )
+        .await?;
         Ok(workspace_to_response(workspace))
     }
 
@@ -143,12 +171,61 @@ impl WorkspaceAttachmentService {
         space_id: Uuid,
         workspace_id: Uuid,
     ) -> Result<(), GatewayError> {
+        let prior = self.workspace_snapshot(workspace_id).await?;
         self.ensure_workspace_belongs_to_space(space_id, workspace_id)
             .await?;
         self.storage
             .delete_workspace_attachment(workspace_id)
             .await?;
+        self.record_change(
+            "detach_workspace",
+            workspace_id,
+            "detached workspace".to_string(),
+            Some(prior),
+            None,
+        )
+        .await?;
         Ok(())
+    }
+
+    async fn workspace_snapshot(
+        &self,
+        workspace_id: Uuid,
+    ) -> Result<serde_json::Value, GatewayError> {
+        let workspace = self
+            .storage
+            .get_workspace_attachment(workspace_id)
+            .await?
+            .ok_or_else(|| {
+                GatewayError::ValidationError(format!(
+                    "workspace attachment {workspace_id} not found"
+                ))
+            })?;
+        workspace_snapshot(&workspace)
+    }
+
+    async fn record_change(
+        &self,
+        action: &str,
+        workspace_id: Uuid,
+        summary: String,
+        prior_state: Option<serde_json::Value>,
+        new_state: Option<serde_json::Value>,
+    ) -> Result<(), GatewayError> {
+        record_config_change(
+            &self.audit_state,
+            ConfigChange {
+                entity_kind: "workspace_attachment",
+                entity_id: &workspace_id.to_string(),
+                action,
+                source: "operator_http",
+                session_id: None,
+                summary: &summary,
+                prior_state,
+                new_state,
+            },
+        )
+        .await
     }
 
     async fn ensure_space_exists(&self, space_id: Uuid) -> Result<(), GatewayError> {
@@ -217,6 +294,10 @@ impl WorkspaceAttachmentService {
             .set_workspace_missing_state(workspace.id, is_missing)
             .await?)
     }
+}
+
+fn workspace_snapshot(workspace: &WorkspaceAttachment) -> Result<serde_json::Value, GatewayError> {
+    serde_json::to_value(workspace).map_err(|error| GatewayError::ConfigError(error.to_string()))
 }
 
 fn workspace_to_response(workspace: WorkspaceAttachment) -> WorkspaceAttachmentResponse {
