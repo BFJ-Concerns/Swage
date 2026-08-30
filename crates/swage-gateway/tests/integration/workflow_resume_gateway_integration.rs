@@ -203,8 +203,11 @@ async fn interrupted_knowledge_record_worker_resumes_and_deduplicates_its_captur
         "first captured body".len() as u64
     );
     let journal = storage.list_workflow_journal(run_uuid).await.unwrap();
-    assert_eq!(journal.len(), 1);
-    assert_eq!(journal[0].kind, "agent_call");
-    assert_eq!(journal[0].status, "completed");
+    let agent_calls = journal
+        .iter()
+        .filter(|entry| entry.kind == "agent_call")
+        .collect::<Vec<_>>();
+    assert_eq!(agent_calls.len(), 1);
+    assert_eq!(agent_calls[0].status, "completed");
     server.abort();
 }

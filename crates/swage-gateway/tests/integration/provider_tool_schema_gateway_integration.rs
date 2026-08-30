@@ -45,6 +45,6 @@ fn gateway_rung_provider_payload_carries_anyof_and_allof_guidance() {
     let guidance = parameters["description"].as_str().unwrap();
     assert!(guidance.contains("anyOf (at least one of: requires `url`; or requires `query`)"));
     assert!(guidance.contains(
-        "allOf (all of: requires `source`; or an additional locally validated alternative)"
+        "allOf (all of: requires `source`; and an additional locally validated alternative)"
     ));
 }
