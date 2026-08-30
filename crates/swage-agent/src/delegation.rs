@@ -620,6 +620,7 @@ pub trait DelegationHandler: Send + Sync {
         context: Option<serde_json::Value>,
         cwd: Option<String>,
         isolation: Option<swage_protocol::client::workflow::WorkerIsolation>,
+        skills: Option<Vec<String>>,
         composition: DispatchContextComposition,
         delegate_call_id: &str,
         sender_agent_id: &str,

@@ -10,7 +10,6 @@ use axum::{Json, Router, routing::post};
 use reqwest::StatusCode;
 use rusqlite::Connection;
 use serde_json::{Value, json};
-use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 
 use swage_core::{
@@ -26,6 +25,8 @@ use swage_storage::{
         ChannelLinkStore, ChannelQueueStore, DeliveryStore, SessionStore, SpaceStore, ThreadStore,
     },
 };
+
+use crate::support::start_live_server;
 
 struct MockProvider {
     rounds: Mutex<VecDeque<Vec<StreamChunk>>>,
@@ -84,12 +85,7 @@ async fn start_test_server(provider: impl LlmProvider + 'static) -> SocketAddr {
     );
     let router: Router = build_router(state);
 
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        axum::serve(listener, router).await.unwrap();
-    });
-    addr
+    start_live_server(router).await.0
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -213,12 +209,7 @@ async fn start_file_backed_test_server(
         None,
     );
     let router: Router = build_router(state);
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        axum::serve(listener, router).await.unwrap();
-    });
-    addr
+    start_live_server(router).await.0
 }
 
 async fn start_webhook_server() -> (String, mpsc::UnboundedReceiver<Value>) {
@@ -234,11 +225,7 @@ async fn start_webhook_server() -> (String, mpsc::UnboundedReceiver<Value>) {
         }),
     );
 
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    });
+    let (addr, _server) = start_live_server(app).await;
     (format!("http://{addr}/"), rx)
 }
 

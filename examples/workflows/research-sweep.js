@@ -66,8 +66,12 @@ const plan = await agent(
     },
   },
 );
-// A schema-failed or turn-failed call throws from agent() itself, so plan is
-// a validated object here; empty is the one bad shape the schema permits.
+// Schema exhaustion returns null; other turn failures still throw. Stop with
+// a clear run error before treating an absent plan as a validated object.
+if (plan === null) {
+  throw new Error("research-sweep could not validate its source plan");
+}
+// Empty is the one bad shape the schema permits.
 if (plan.sources.length === 0) {
   throw new Error("research-sweep could not scope any sources");
 }
@@ -222,9 +226,11 @@ const findings = await agent(
 
 // The terminal report names what failed, was omitted, or was withheld -
 // the commission's requirement that a sweep never pretends completeness.
-// agent() throws on failure, so reaching here means synthesis validated;
-// the report still names what failed upstream and what the synthesist
-// could not support.
+// Schema exhaustion returns null, so refuse to present an unvalidated
+// synthesis as findings; other agent-call failures still throw.
+if (findings === null) {
+  throw new Error("research-sweep could not validate its findings");
+}
 return {
   topic,
   purpose,

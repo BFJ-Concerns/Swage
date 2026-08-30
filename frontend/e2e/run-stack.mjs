@@ -83,7 +83,11 @@ process.on("exit", () => {
 });
 
 start(process.execPath, [join(frontendDir, "e2e/mock-provider.mjs")], {
-  env: { ...process.env, SWAGE_E2E_PROVIDER_PORT: String(providerPort) },
+  env: {
+    ...process.env,
+    SWAGE_E2E_PROVIDER_PORT: String(providerPort),
+    SWAGE_E2E_PROVIDER_REQUESTS: join(invocationDir, "provider-requests.jsonl"),
+  },
 });
 start(join(repoDir, "target/debug/swage"), [
   "--server-mode", "gateway", "start", "--host", "127.0.0.1", "--port", String(gatewayPort),
