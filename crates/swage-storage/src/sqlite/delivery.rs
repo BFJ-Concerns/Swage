@@ -202,7 +202,7 @@ mod tests {
         let thread = ThreadStore::create(
             &storage,
             NewThread {
-                session_id: Some(session.id),
+                session_id: session.id,
                 agent_id: "gateway".into(),
             },
         )
