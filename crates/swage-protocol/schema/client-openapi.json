@@ -5196,6 +5196,32 @@
         ],
         "type": "object"
       },
+      "WorkflowHoldMetrics": {
+        "description": "Derived counters over a run's decision holds. Nothing here is stored:\nthe hold rows and their rejection rows already hold the history, so the\ncounters cannot drift from it.",
+        "properties": {
+          "answers_rejected": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "holds_answered": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "holds_open": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "holds_open",
+          "holds_answered",
+          "answers_rejected"
+        ],
+        "type": "object"
+      },
       "WorkflowJournalEntry": {
         "properties": {
           "agent_call": {
@@ -5444,6 +5470,10 @@
       },
       "WorkflowRunDetailResponse": {
         "properties": {
+          "hold_metrics": {
+            "$ref": "#/components/schemas/WorkflowHoldMetrics",
+            "description": "Derived counts over those holds: what the run is still waiting on,\nwhat has been decided, and how often a decider offered something the\nhold does not accept."
+          },
           "holds": {
             "description": "The run's decision holds, oldest first, each carrying its accepted\nverdict and every answer refused along the way.",
             "items": {
@@ -5469,7 +5499,8 @@
           "run",
           "journal",
           "wake_metrics",
-          "holds"
+          "holds",
+          "hold_metrics"
         ],
         "type": "object"
       },
