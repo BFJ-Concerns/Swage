@@ -109,6 +109,145 @@ mod tests {
         assert!(detail.contains("ZeroDivisionError: division by zero"));
     }
 }
+
+#[cfg(test)]
+mod approval_tests {
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    };
+
+    use swage_storage::model::{ApprovalKind, NewSession, NewThread, NewTurn};
+    use swage_storage::store::{SessionStore, SpaceStore, ThreadStore, TurnStore};
+    use swage_storage::{SqliteStorage, Storage, TurnState};
+
+    use super::*;
+
+    async fn approval_fixture(
+        registrar: ApprovalChannelRegistrar,
+    ) -> (Agent, TurnExecutionContext) {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("in-memory storage"));
+        let space = storage
+            .get_or_create_default()
+            .await
+            .expect("default space");
+        let session = storage
+            .create_session(NewSession {
+                space_id: space.id,
+                agent_id: "agent".into(),
+                metadata: None,
+                active_workspace_attachment_id: None,
+            })
+            .await
+            .expect("session");
+        let thread = ThreadStore::create(
+            storage.as_ref(),
+            NewThread {
+                session_id: session.id,
+                agent_id: "agent".into(),
+            },
+        )
+        .await
+        .expect("thread");
+        let turn = storage
+            .create_turn(NewTurn {
+                thread_id: thread.id,
+                agent_id: "agent".into(),
+                state: TurnState::Pending,
+                user_input: Some("test approval".into()),
+                parent_turn_id: None,
+            })
+            .await
+            .expect("turn");
+        let agent = Agent {
+            config: AgentConfig::new("agent").with_workspace("/work", vec!["/work".into()]),
+            provider: Arc::new(swage_provider::UnsupportedLlmProvider::new("not called")),
+            storage: Arc::clone(&storage) as Arc<dyn Storage>,
+            tool_dispatcher: None,
+            hook_registry: None,
+            leak_detector: None,
+            approval_registrar: Some(registrar),
+            delegation_handler: None,
+            context_transfer_config: swage_config::ContextTransferConfig::default(),
+        };
+        let execution = TurnExecutionContext {
+            session_id: session.id,
+            thread_id: thread.id,
+            turn_id: turn.id,
+            space_id: Some(space.id),
+        };
+        (agent, execution)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn immediate_rejection_after_approval_notification_keeps_its_sender() {
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let event_rx = Arc::new(Mutex::new(event_rx));
+        let registrar_event_rx = Arc::clone(&event_rx);
+        let notification_preceded_registration = Arc::new(AtomicBool::new(false));
+        let registrar_observation = Arc::clone(&notification_preceded_registration);
+        let registered_approval_id = Arc::new(Mutex::new(None));
+        let registrar_approval_id = Arc::clone(&registered_approval_id);
+        let registrar: ApprovalChannelRegistrar = Arc::new(move |approval_id, sender| {
+            if registrar_event_rx
+                .lock()
+                .expect("approval events")
+                .try_recv()
+                .is_ok()
+            {
+                registrar_observation.store(true, Ordering::SeqCst);
+            }
+            *registrar_approval_id.lock().expect("registered approval id") = Some(approval_id);
+            sender
+                .send(crate::approval::ApprovalDecision {
+                    decision: crate::approval::ApprovalDecisionValue::Rejected,
+                    scope: crate::approval::ApprovalDecisionScope::Once,
+                    reason: Some("immediate rejection".into()),
+                })
+                .expect("registered sender accepts an immediate rejection");
+        });
+        let (agent, execution) = approval_fixture(registrar).await;
+        let outcome = agent
+            .handle_approval_gate(
+                &execution,
+                ApprovalKind::Tool,
+                Some("shell".into()),
+                None,
+                None,
+                "Allow shell?".into(),
+                None,
+                std::time::Duration::from_secs(5),
+                swage_core::ApprovalTimeoutPolicy::Reject,
+                &event_tx,
+                &tokio_util::sync::CancellationToken::new(),
+                &mut TurnApprovalScope::default(),
+            )
+            .await
+            .expect("approval gate");
+
+        assert!(
+            !notification_preceded_registration.load(Ordering::SeqCst),
+            "ApprovalRequired became observable before its decision sender was registered"
+        );
+        let approval_id = match event_rx
+            .lock()
+            .expect("approval events")
+            .try_recv()
+            .expect("approval event after registration")
+        {
+            AgentEvent::ApprovalRequired { approval_id, .. } => approval_id,
+            event => panic!("expected approval event, got {event:?}"),
+        };
+        assert_eq!(
+            *registered_approval_id.lock().expect("registered approval id"),
+            Some(approval_id)
+        );
+        assert!(matches!(
+            outcome,
+            crate::approval::ApprovalGateOutcome::Rejected { .. }
+        ));
+    }
+}
 // Agent struct
 // ---------------------------------------------------------------------------
 
@@ -1744,22 +1883,8 @@ impl Agent {
             .update_turn_state(execution.turn_id, TurnState::AwaitingApproval)
             .await?;
 
-        // 3. Emit ApprovalRequired event for downstream consumers (gateway → WebSocket).
-        let _ = event_tx.send(AgentEvent::ApprovalRequired {
-            approval_id: approval.id,
-            turn_id: execution.turn_id,
-            agent_id: self.config.agent_id.clone(),
-            kind: kind.to_string(),
-            tool_name: tool_name.clone(),
-            tool_arguments: tool_arguments.clone(),
-            hook_name: hook_name.clone(),
-            prompt: prompt.clone(),
-            context: context.clone(),
-            timeout_at: timeout_at.to_rfc3339(),
-            timeout_policy: timeout_policy.clone(),
-        });
-
-        // 4. Register the oneshot channel for the decision.
+        // 3. Register the oneshot channel before exposing the approval. A client may
+        // reject immediately after receiving ApprovalRequired.
         let Some(ref registrar) = self.approval_registrar else {
             // No approval channel infrastructure — treat as rejection.
             let _ = self
@@ -1781,6 +1906,21 @@ impl Agent {
 
         let (tx, rx) = tokio::sync::oneshot::channel::<crate::approval::ApprovalDecision>();
         registrar(approval.id, tx);
+
+        // 4. Emit ApprovalRequired only once a decision can be received.
+        let _ = event_tx.send(AgentEvent::ApprovalRequired {
+            approval_id: approval.id,
+            turn_id: execution.turn_id,
+            agent_id: self.config.agent_id.clone(),
+            kind: kind.to_string(),
+            tool_name: tool_name.clone(),
+            tool_arguments: tool_arguments.clone(),
+            hook_name: hook_name.clone(),
+            prompt: prompt.clone(),
+            context: context.clone(),
+            timeout_at: timeout_at.to_rfc3339(),
+            timeout_policy: timeout_policy.clone(),
+        });
 
         // 5. Race the oneshot receiver against the timeout and cancellation.
         // Three outcomes: human decision arrives, timeout fires, or the turn
