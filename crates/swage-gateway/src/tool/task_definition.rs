@@ -1,5 +1,8 @@
 //! Granted authoring surface for durable task definitions.
-use crate::{state::AppState, tool::Tool, tool_executor::GatewayToolContext};
+use crate::{state::AppState, tool::Tool};
+
+#[cfg(test)]
+use crate::tool_executor::GatewayToolContext;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use swage_core::{GatewayError, ToolError};

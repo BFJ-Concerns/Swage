@@ -4330,7 +4330,7 @@ fn validate_workflow_arguments(schema: Option<&Value>, args: &Value) -> Result<(
     let Some(schema) = schema else {
         return Ok(());
     };
-    let validator = jsonschema::validator_for(schema).map_err(|error| {
+    let validator = swage_core::json_schema_validator(schema).map_err(|error| {
         ApiError::validation(format!("workflow argument schema is invalid: {error}"))
     })?;
     validator.validate(args).map_err(|error| {

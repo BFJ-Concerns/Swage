@@ -131,7 +131,7 @@ impl AgentConfig {
         // Compile the output schema eagerly to catch malformed schemas at
         // construction time rather than at the first validation attempt.
         if let Some(schema) = &self.output_schema {
-            jsonschema::validator_for(schema).map_err(|e| {
+            swage_core::json_schema_validator(schema).map_err(|e| {
                 crate::AgentError::InvalidConfig(format!("output schema compilation failed: {e}"))
             })?;
         }
