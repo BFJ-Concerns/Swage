@@ -2194,9 +2194,17 @@ async fn process_turn_with_composition_and_focus(
                     structured_output: structured_output.clone(),
                 });
             }
-            AgentEvent::Error { message } => {
+            AgentEvent::Error {
+                message,
+                provider_failure,
+            } => {
                 let _ = ws_tx.send(ServerEvent::Error {
-                    code: "agent_error".to_string(),
+                    code: if provider_failure {
+                        "provider_error"
+                    } else {
+                        "agent_error"
+                    }
+                    .to_string(),
                     message,
                 });
             }

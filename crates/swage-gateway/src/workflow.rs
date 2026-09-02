@@ -1255,16 +1255,34 @@ struct WorkflowTurnAttempt {
     events: Vec<ServerEvent>,
 }
 
-fn fallback_is_eligible(error: &GatewayError, emitted_output: bool, dispatched_tool: bool) -> bool {
+enum FallbackFailure {
+    Provider,
+    UnknownModel,
+}
+
+fn fallback_failure(error: &GatewayError) -> Option<FallbackFailure> {
+    match error {
+        GatewayError::Provider(_) => Some(FallbackFailure::Provider),
+        GatewayError::ValidationError(message) if message.starts_with("unknown model ") => {
+            Some(FallbackFailure::UnknownModel)
+        }
+        _ => None,
+    }
+}
+
+fn fallback_is_eligible(
+    failure: FallbackFailure,
+    emitted_output: bool,
+    dispatched_tool: bool,
+) -> bool {
     if emitted_output || dispatched_tool {
         return false;
     }
 
-    match error {
-        GatewayError::Provider(_) => true,
-        GatewayError::ValidationError(message) => message.starts_with("unknown model "),
-        _ => false,
-    }
+    matches!(
+        failure,
+        FallbackFailure::Provider | FallbackFailure::UnknownModel
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1614,9 +1632,15 @@ async fn run_ephemeral_agent_call(
                 ServerEvent::ToolStart { .. } | ServerEvent::ToolEnd { .. }
             )
         });
+    let provider_failure = primary.events.iter().find_map(|event| match event {
+        ServerEvent::Error { code, message } if code == "provider_error" => Some(message),
+        _ => None,
+    });
     let primary_error = match primary.outcome {
         Err(error) => {
-            if fallback_is_eligible(&error, emitted_output, dispatched_tool) {
+            if fallback_failure(&error).is_some_and(|failure| {
+                fallback_is_eligible(failure, emitted_output, dispatched_tool)
+            }) {
                 Some(error.to_string())
             } else {
                 return Err(error.to_string().into());
@@ -1644,7 +1668,13 @@ async fn run_ephemeral_agent_call(
                     });
                 }
             }
-            if let Some(turn) =
+            if let Some(message) = provider_failure
+                && fallback_is_eligible(FallbackFailure::Provider, emitted_output, dispatched_tool)
+            {
+                Some(format!(
+                    "AgentCallError: provider failed before output: {message}"
+                ))
+            } else if let Some(turn) =
                 turn.filter(|turn| turn.state != swage_storage::TurnState::Completed)
             {
                 return Err(format!(
@@ -1652,8 +1682,9 @@ async fn run_ephemeral_agent_call(
                     turn.id
                 )
                 .into());
+            } else {
+                None
             }
-            None
         }
     };
     let mut served_model = request.model.clone();
