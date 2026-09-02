@@ -2107,6 +2107,16 @@ async fn run_host_commands_inner(
                 cancellation,
                 reply,
             } => {
+                // A fresh invalid schema is an author error, not a worker
+                // failure: reject it before placement provisioning or an
+                // agent journal intent. Existing journal entries predate this
+                // check and must replay exactly as recorded.
+                if replay.get(seq.load(Ordering::SeqCst) as usize).is_none()
+                    && let Err(error) = validate_agent_call(&request)
+                {
+                    let _ = reply.send(Err(WorkflowHostError::Message(error)));
+                    continue;
+                }
                 let resolved_working_directory = match resolve_agent_placement_command(
                     &state,
                     run_id,
@@ -2684,32 +2694,38 @@ async fn run_host_commands_inner(
                             .await
                         }
                         None => {
-                            match state
-                                .create_workflow_journal_intent(NewWorkflowJournalIntent {
-                                    run_id,
-                                    seq: current_seq,
-                                    kind: "workflow_call".into(),
-                                    args_hash: hash,
-                                    request: request_json,
-                                    effect_kind: None,
-                                    idempotency_key: None,
-                                    target_kind: None,
-                                })
-                                .await
+                            if let Err(error) =
+                                validate_workflow_call(&state, run_id, space_id, &request).await
                             {
-                                Ok(intent) => {
-                                    complete_workflow_call_entry(
-                                        &state,
+                                Err(error)
+                            } else {
+                                match state
+                                    .create_workflow_journal_intent(NewWorkflowJournalIntent {
                                         run_id,
-                                        space_id,
-                                        intent.id,
-                                        current_seq,
-                                        request,
-                                        cancellation,
-                                    )
+                                        seq: current_seq,
+                                        kind: "workflow_call".into(),
+                                        args_hash: hash,
+                                        request: request_json,
+                                        effect_kind: None,
+                                        idempotency_key: None,
+                                        target_kind: None,
+                                    })
                                     .await
+                                {
+                                    Ok(intent) => {
+                                        complete_workflow_call_entry(
+                                            &state,
+                                            run_id,
+                                            space_id,
+                                            intent.id,
+                                            current_seq,
+                                            request,
+                                            cancellation,
+                                        )
+                                        .await
+                                    }
+                                    Err(error) => Err(error.to_string()),
                                 }
-                                Err(error) => Err(error.to_string()),
                             }
                         }
                     };
@@ -4344,6 +4360,43 @@ fn validate_workflow_arguments(schema: Option<&Value>, args: &Value) -> Result<(
             "workflow arguments violate the declared schema at {field}: {error}"
         ))
     })
+}
+
+fn validate_agent_call(request: &AgentCallRequest) -> Result<(), String> {
+    let Some(schema) = request.schema.as_ref() else {
+        return Ok(());
+    };
+    jsonschema::validator_for(schema)
+        .map(|_| ())
+        .map_err(|error| format!("InvalidAgentSchemaError: agent schema is invalid: {error}"))
+}
+
+async fn validate_workflow_call(
+    state: &AppState,
+    parent_run_id: Uuid,
+    space_id: Uuid,
+    request: &WorkflowCallRequest,
+) -> Result<(), String> {
+    let parent = state
+        .storage
+        .get_workflow_run(parent_run_id)
+        .await
+        .map_err(|error| error.to_string())?;
+    let agent_id = parent
+        .as_ref()
+        .and_then(|run| run.dispatch_bound_agent_ids.last())
+        .map(String::as_str);
+    let skills = discover_skills_for_space(state, space_id, agent_id).await?;
+    let script = resolve_workflow_by_name(state, space_id, &request.name, &skills)
+        .await?
+        .ok_or_else(|| {
+            format!(
+                "WorkflowReferenceError: workflow script {:?} was not found",
+                request.name
+            )
+        })?;
+    validate_workflow_arguments(script.argument_schema.as_ref(), &request.args)
+        .map_err(|error| format!("WorkflowArgumentsError: {}", error.message()))
 }
 
 fn run_state(state: &str) -> Result<WorkflowRunState, ApiError> {
@@ -15793,6 +15846,102 @@ mod tests {
             .expect("child run recorded");
         assert_eq!(child.state, "completed");
         assert_eq!(child.parent_run_id, Some(started.id));
+
+        // A recorded call is replayed as recorded rather than revalidated as
+        // a fresh call. This is the compatibility path for journals written
+        // before pre-spawn validation existed.
+        storage
+            .update_workflow_run_state(started.id, "interrupted", None, None, None)
+            .await
+            .expect("simulate restart");
+        let _ = resume_run(State(state.clone()), Path(started.id))
+            .await
+            .expect("resume");
+        wait_for_terminal(&state, started.id).await;
+        let replayed = storage
+            .list_workflow_journal(started.id)
+            .await
+            .expect("replay journal");
+        assert_eq!(
+            replayed
+                .iter()
+                .filter(|entry| entry.kind == "workflow_call")
+                .count(),
+            1,
+            "replay reuses the journalled child call instead of creating another"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fresh_author_errors_fail_before_agent_or_workflow_intents() {
+        for (source, forbidden_kind, expected_error) in [
+            (
+                r#"await agent("bad schema", { schema: { type: 7 } });"#,
+                "agent_call",
+                "InvalidAgentSchemaError",
+            ),
+            (
+                r#"await workflow("missing workflow", {});"#,
+                "workflow_call",
+                "WorkflowReferenceError",
+            ),
+        ] {
+            let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+            let space = storage.get_or_create_default().await.expect("space");
+            let _skill_root = crate::skill::TestSkillRootGuard::empty(space.id);
+            let state = AppState::new(
+                Arc::clone(&storage) as Arc<dyn Storage>,
+                Arc::clone(&storage) as Arc<dyn SpaceStore>,
+                Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+                swage_config::ResolvedConfig::default(),
+                crate::tool::ToolDispatcher::allow_all(vec![]),
+                None,
+            );
+            let (script, _) = storage
+                .create_workflow_script(NewWorkflowScript {
+                    space_id: space.id,
+                    name: format!("pre-spawn {forbidden_kind}"),
+                    description: String::new(),
+                    source: source.into(),
+                    delivery_grant: None,
+                    authoring_session_id: None,
+                })
+                .await
+                .expect("script");
+            let Json(started) = start_saved_run(
+                State(state.clone()),
+                Path(script.id),
+                Json(StartWorkflowRunRequest {
+                    args: Value::Null,
+                    budget: None,
+                }),
+            )
+            .await
+            .expect("start");
+            wait_for_terminal(&state, started.id).await;
+
+            let run = storage
+                .get_workflow_run(started.id)
+                .await
+                .expect("run")
+                .expect("present");
+            assert_eq!(run.state, "failed");
+            assert!(
+                run.error_message
+                    .as_deref()
+                    .is_some_and(|message| message.contains(expected_error)),
+                "expected {expected_error} in {:?}",
+                run.error_message
+            );
+            let journal = storage
+                .list_workflow_journal(started.id)
+                .await
+                .expect("journal");
+            assert!(
+                !journal.iter().any(|entry| entry.kind == forbidden_kind),
+                "{forbidden_kind} must not be journalled for a rejected call: {journal:#?}"
+            );
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]
