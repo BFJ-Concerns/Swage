@@ -101,7 +101,7 @@
       await conversationStore.loadConversations(conv.space_id);
     }
 
-    if (!streamingStore.isStreaming) connectionStore.connectTo(id);
+    connectionStore.connectTo(id);
     // router is declared below but will be initialised before this is called.
     router.navigate(`/conversations/${id}`);
   }
@@ -335,7 +335,7 @@
     // navigate away to. Page liveness does not depend on it — the pages
     // store listens on its own channel.
     if (next === "operator") {
-      if (!streamingStore.isStreaming) connectionStore.disconnect();
+      connectionStore.disconnect();
       return;
     }
 
@@ -344,7 +344,7 @@
     // Operator needs to establish the connection again.
     if (previous === "operator") {
       const id = conversationStore.activeConversation?.id;
-      if (id && !streamingStore.isStreaming) connectionStore.connectTo(id);
+      if (id) connectionStore.connectTo(id);
     }
   }
 
