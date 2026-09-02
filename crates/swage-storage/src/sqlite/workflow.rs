@@ -1034,6 +1034,137 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn a_hold_is_keyed_to_its_raise_and_stops_being_parkable_once_answered() {
+        let storage = SqliteStorage::in_memory().expect("storage");
+        let space = storage
+            .create(NewSpace {
+                name: "hold-store".into(),
+                slug: "hold-store".parse().expect("slug"),
+            })
+            .await
+            .expect("space");
+        let run = storage
+            .create_workflow_run(NewWorkflowRun {
+                space_id: space.id,
+                parent_run_id: None,
+                parent_seq: None,
+                script_version_id: None,
+                inline_workflow_id: None,
+                inline_workflow_name: None,
+                inline_workflow_version: None,
+                carrying_skill: None,
+                source: Some("return null".into()),
+                source_hash: Uuid::new_v4().to_string(),
+                args: serde_json::Value::Null,
+                budget: serde_json::json!({}),
+                engine_version: "test".into(),
+                dispatch_bound_agent_ids: vec![],
+                dispatch_bound_task_definition_ids: vec![],
+                workflow_call_tools: None,
+                inherited_worker_placement: None,
+            })
+            .await
+            .expect("run");
+        let entry = storage
+            .create_workflow_journal_intent(NewWorkflowJournalIntent {
+                run_id: run.id,
+                seq: 0,
+                kind: "hold".into(),
+                args_hash: "hash".into(),
+                request: serde_json::json!({"action": "raise"}),
+                effect_kind: None,
+                idempotency_key: None,
+                target_kind: None,
+            })
+            .await
+            .expect("raise intent");
+        let new_hold = || NewWorkflowRunHold {
+            run_id: run.id,
+            journal_entry_id: entry.id,
+            content: "Ship the release?".into(),
+            verdicts: vec!["ship".into(), "hold".into()],
+        };
+        let hold = storage
+            .create_workflow_run_hold(new_hold())
+            .await
+            .expect("open the hold");
+        let redone = storage
+            .create_workflow_run_hold(new_hold())
+            .await
+            .expect("redo the raise");
+        assert_eq!(
+            redone.id, hold.id,
+            "a redone raise reads its own decision back instead of opening a second one"
+        );
+
+        assert!(
+            storage
+                .park_workflow_run_if_hold_open(run.id, Utc::now() + chrono::Duration::hours(1), hold.id)
+                .await
+                .expect("park on the open hold"),
+            "a run waiting on an open hold parks"
+        );
+        storage
+            .update_workflow_run_state(run.id, "running", None, None, None)
+            .await
+            .expect("resume");
+        assert!(
+            storage
+                .answer_workflow_run_hold(
+                    hold.id,
+                    WorkflowRunHoldAnswer {
+                        verdict: "ship".into(),
+                        surface: "agent".into(),
+                        agent_id: Some("decider".into()),
+                        session_id: Some(Uuid::new_v4()),
+                        turn_id: Some(Uuid::new_v4()),
+                    },
+                )
+                .await
+                .expect("answer the hold"),
+            "the first answer wins"
+        );
+        assert!(
+            !storage
+                .park_workflow_run_if_hold_open(run.id, Utc::now() + chrono::Duration::hours(1), hold.id)
+                .await
+                .expect("park attempt after the answer"),
+            "an answer that wins the race is never slept past"
+        );
+        assert!(
+            !storage
+                .answer_workflow_run_hold(
+                    hold.id,
+                    WorkflowRunHoldAnswer {
+                        verdict: "hold".into(),
+                        surface: "agent".into(),
+                        agent_id: Some("latecomer".into()),
+                        session_id: None,
+                        turn_id: None,
+                    },
+                )
+                .await
+                .expect("second answer"),
+            "a hold takes one verdict, not the last one offered"
+        );
+        let answered = storage
+            .get_workflow_run_hold(hold.id)
+            .await
+            .expect("read")
+            .expect("hold");
+        assert_eq!(answered.verdict.as_deref(), Some("ship"));
+        assert_eq!(answered.state, "answered");
+        assert!(
+            storage
+                .list_open_workflow_run_holds(space.id)
+                .await
+                .expect("open holds")
+                .is_empty(),
+            "an answered hold leaves the decider's list"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn script_versions_append_and_runs_survive_reopen_shape() {
         let storage = SqliteStorage::in_memory().expect("storage");
         let space = storage
