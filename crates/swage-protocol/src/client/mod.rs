@@ -62,6 +62,7 @@ pub struct ClientSurface {
     conversation_thread: conversation::ConversationThreadDetail,
     turn_context: context::TurnContextResponse,
     submit_turn: turn::SubmitTurnRequest,
+    message_attachment: turn::MessageAttachment,
     submit_turn_response: turn::SubmitTurnResponse,
     turn_poll: turn::TurnPollResponse,
     send_message: turn::SendMessageRequest,

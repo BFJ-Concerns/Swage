@@ -427,6 +427,7 @@ impl ThreadStore for SqliteStorage {
                         row.get::<_, Option<String>>(5)?,
                         row.get::<_, Option<String>>(6)?,
                         row.get::<_, String>(7)?,
+                        row.get::<_, String>(8)?,
                     ))
                 },
             )?;
@@ -522,14 +523,24 @@ impl ThreadStore for SqliteStorage {
             }
 
             for row in messages {
-                let (turn_id, role, content, position, agent_id, tool_call_id, tool_name, created_at) = row;
+                let (
+                    turn_id,
+                    role,
+                    content,
+                    position,
+                    agent_id,
+                    tool_call_id,
+                    tool_name,
+                    created_at,
+                    attachments,
+                ) = row;
                 let child_turn_id = turn_id
                     .as_ref()
                     .and_then(|turn_id| turn_id_map.get(turn_id))
                     .cloned();
                 conn.execute(
-                    "INSERT INTO messages (id, thread_id, turn_id, role, content, position, agent_id, tool_call_id, tool_name, created_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                    "INSERT INTO messages (id, thread_id, turn_id, role, content, position, agent_id, tool_call_id, tool_name, created_at, attachments)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                     params![
                         Uuid::new_v4().to_string(),
                         child_thread_id.to_string(),
@@ -541,6 +552,7 @@ impl ThreadStore for SqliteStorage {
                         tool_call_id,
                         tool_name,
                         created_at,
+                        attachments,
                     ],
                 )?;
             }
@@ -940,6 +952,7 @@ mod tests {
         let first = storage
             .create_message(NewMessage {
                 thread_id: parent.id,
+                attachments: Vec::new(),
                 turn_id: None,
                 role: Role::User,
                 content: "hello".into(),
@@ -951,6 +964,7 @@ mod tests {
         storage
             .create_message(NewMessage {
                 thread_id: parent.id,
+                attachments: Vec::new(),
                 turn_id: None,
                 role: Role::Assistant,
                 content: "world".into(),
@@ -996,6 +1010,7 @@ mod tests {
         storage
             .create_message(NewMessage {
                 thread_id: parent.id,
+                attachments: Vec::new(),
                 turn_id: Some(parent_turn.id),
                 role: Role::User,
                 content: "use a tool".into(),
@@ -1007,6 +1022,7 @@ mod tests {
         let assistant_message = storage
             .create_message(NewMessage {
                 thread_id: parent.id,
+                attachments: Vec::new(),
                 turn_id: Some(parent_turn.id),
                 role: Role::Assistant,
                 content: "done".into(),
@@ -1100,6 +1116,7 @@ mod tests {
         let user_message = storage
             .create_message(NewMessage {
                 thread_id: parent.id,
+                attachments: Vec::new(),
                 turn_id: Some(parent_turn.id),
                 role: Role::User,
                 content: "use a tool".into(),
@@ -1111,6 +1128,7 @@ mod tests {
         storage
             .create_message(NewMessage {
                 thread_id: parent.id,
+                attachments: Vec::new(),
                 turn_id: Some(parent_turn.id),
                 role: Role::Assistant,
                 content: "done".into(),
@@ -1183,6 +1201,7 @@ mod tests {
         let msg_a = storage
             .create_message(NewMessage {
                 thread_id: parent_a.id,
+                attachments: Vec::new(),
                 turn_id: None,
                 role: Role::User,
                 content: "a".into(),
@@ -1194,6 +1213,7 @@ mod tests {
         let msg_b = storage
             .create_message(NewMessage {
                 thread_id: parent_b.id,
+                attachments: Vec::new(),
                 turn_id: None,
                 role: Role::User,
                 content: "b".into(),

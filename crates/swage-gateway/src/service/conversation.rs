@@ -314,6 +314,7 @@ impl ConversationService {
                     turn_id,
                     role: message.role.to_string(),
                     content: message.content,
+                    attachments: crate::turn::message_attachments(&message.attachments)?,
                     timestamp: message.created_at,
                     turn_state,
                     tool_calls,
@@ -598,6 +599,7 @@ impl ConversationService {
                         turn_id: message.turn_id,
                         role: message.role.to_string(),
                         content: message.content,
+                        attachments: crate::turn::message_attachments(&message.attachments)?,
                         timestamp: message.created_at,
                         turn_state: message
                             .turn_id

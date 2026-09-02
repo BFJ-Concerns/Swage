@@ -64,13 +64,47 @@ struct OpenAiStreamOptions {
 struct OpenAiMessage {
     role: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    content: Option<String>,
+    content: Option<OpenAiContent>,
     #[serde(skip_serializing_if = "Option::is_none")]
     name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_call_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_calls: Option<Vec<OpenAiToolCall>>,
+}
+
+/// A message's content on the Chat Completions wire: a bare string when the
+/// message is text only, an array of typed parts once it carries an image.
+/// The string form is kept for text so a text-only request's body is
+/// byte-identical to what it was before image parts existed.
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
+#[serde(untagged)]
+enum OpenAiContent {
+    Text(String),
+    Parts(Vec<OpenAiContentPart>),
+}
+
+impl OpenAiContent {
+    /// The text-only projection of the content — what a caller that reads
+    /// the message as a string sees.
+    fn as_text(&self) -> Option<&str> {
+        match self {
+            Self::Text(text) => Some(text.as_str()),
+            Self::Parts(_) => None,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum OpenAiContentPart {
+    Text { text: String },
+    ImageUrl { image_url: OpenAiImageUrl },
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
+struct OpenAiImageUrl {
+    url: String,
 }
 
 /// Wire representation of a tool call from the OpenAI response.
@@ -252,15 +286,7 @@ impl OpenAiProvider {
             Role::Tool => "tool",
         };
 
-        let content_text: String = message
-            .content()
-            .iter()
-            .filter_map(|part| match part {
-                ContentPart::Text { text } => Some(text.as_str()),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("");
+        let content = Self::convert_content(message.content());
 
         let tool_calls = message.tool_calls().map(|calls| {
             calls
@@ -278,15 +304,42 @@ impl OpenAiProvider {
 
         vec![OpenAiMessage {
             role: role.to_string(),
-            content: if content_text.is_empty() {
-                None
-            } else {
-                Some(content_text)
-            },
+            content,
             name: message.name().map(ToOwned::to_owned),
             tool_call_id: message.tool_call_id().map(ToOwned::to_owned),
             tool_calls,
         }]
+    }
+
+    /// Message content on the wire. Text-only content stays a single string;
+    /// an image part switches the message to the typed-parts array, every
+    /// part in its original order. Empty content is omitted.
+    fn convert_content(parts: &[ContentPart]) -> Option<OpenAiContent> {
+        let has_image = parts
+            .iter()
+            .any(|part| matches!(part, ContentPart::ImageUrl { .. }));
+        if has_image {
+            return Some(OpenAiContent::Parts(
+                parts
+                    .iter()
+                    .map(|part| match part {
+                        ContentPart::Text { text } => OpenAiContentPart::Text { text: text.clone() },
+                        ContentPart::ImageUrl { url } => OpenAiContentPart::ImageUrl {
+                            image_url: OpenAiImageUrl { url: url.clone() },
+                        },
+                    })
+                    .collect(),
+            ));
+        }
+        let text: String = parts
+            .iter()
+            .filter_map(|part| match part {
+                ContentPart::Text { text } => Some(text.as_str()),
+                ContentPart::ImageUrl { .. } => None,
+            })
+            .collect::<Vec<_>>()
+            .join("");
+        (!text.is_empty()).then_some(OpenAiContent::Text(text))
     }
 
     fn convert_tool_replay_message(
@@ -328,11 +381,7 @@ impl OpenAiProvider {
 
                 Some(vec![OpenAiMessage {
                     role: "assistant".to_string(),
-                    content: if text_content.is_empty() {
-                        None
-                    } else {
-                        Some(text_content)
-                    },
+                    content: (!text_content.is_empty()).then_some(OpenAiContent::Text(text_content)),
                     name: message.name().map(ToOwned::to_owned),
                     tool_call_id: None,
                     tool_calls: if tool_calls.is_empty() {
@@ -350,7 +399,7 @@ impl OpenAiProvider {
                             call_id, content, ..
                         } => Some(OpenAiMessage {
                             role: "tool".to_string(),
-                            content: Some(content.clone()),
+                            content: Some(OpenAiContent::Text(content.clone())),
                             name: None,
                             tool_call_id: Some(call_id.clone()),
                             tool_calls: None,
@@ -856,7 +905,10 @@ mod tests {
         let converted = OpenAiProvider::convert_messages(&messages);
         assert_eq!(converted.len(), 1);
         assert_eq!(converted[0].role, "system");
-        assert_eq!(converted[0].content.as_deref(), Some("You are helpful"));
+        assert_eq!(
+            converted[0].content.as_ref().and_then(OpenAiContent::as_text),
+            Some("You are helpful")
+        );
     }
 
     #[test]
@@ -869,6 +921,67 @@ mod tests {
         assert_eq!(converted.len(), 2);
         assert_eq!(converted[0].role, "user");
         assert_eq!(converted[1].role, "assistant");
+    }
+
+    #[test]
+    fn text_only_content_stays_a_string_on_the_wire() {
+        let messages = vec![ChatMessage::new(Role::User, "Hello")];
+        let converted = OpenAiProvider::convert_messages(&messages);
+        let wire = serde_json::to_value(&converted[0]).expect("serialise message");
+        assert_eq!(wire["content"], "Hello");
+    }
+
+    #[test]
+    fn an_image_part_switches_content_to_typed_parts_in_order() {
+        let messages = vec![ChatMessage::new_parts(
+            Role::User,
+            vec![
+                ContentPart::Text {
+                    text: "What is in this picture?".into(),
+                },
+                ContentPart::ImageUrl {
+                    url: "https://example.test/cat.png".into(),
+                },
+            ],
+        )];
+        let converted = OpenAiProvider::convert_messages(&messages);
+        let wire = serde_json::to_value(&converted[0]).expect("serialise message");
+        assert_eq!(
+            wire["content"],
+            serde_json::json!([
+                {"type": "text", "text": "What is in this picture?"},
+                {"type": "image_url", "image_url": {"url": "https://example.test/cat.png"}}
+            ])
+        );
+    }
+
+    #[test]
+    fn a_request_carrying_an_image_puts_it_on_the_wire_body() {
+        let provider = OpenAiProvider::from_config(ProviderConfig::new(
+            "https://api.openai.com/v1",
+            "key",
+            "gpt-4o",
+        ));
+        let request = CompletionRequest {
+            messages: vec![ChatMessage::new_parts(
+                Role::User,
+                vec![
+                    ContentPart::Text {
+                        text: "Describe it".into(),
+                    },
+                    ContentPart::ImageUrl {
+                        url: "data:image/png;base64,AAAA".into(),
+                    },
+                ],
+            )],
+            ..CompletionRequest::default()
+        };
+        let body = serde_json::to_value(provider.build_request(&request, false))
+            .expect("serialise request body");
+        assert_eq!(
+            body["messages"][0]["content"][1]["image_url"]["url"],
+            "data:image/png;base64,AAAA"
+        );
     }
 
     #[test]
@@ -1235,7 +1348,10 @@ mod tests {
 
         assert_eq!(converted[1].role, "tool");
         assert_eq!(converted[1].tool_call_id.as_deref(), Some("call_1"));
-        assert_eq!(converted[1].content.as_deref(), Some("/workspace"));
+        assert_eq!(
+            converted[1].content.as_ref().and_then(OpenAiContent::as_text),
+            Some("/workspace")
+        );
     }
 
     // --- Tool request building ---

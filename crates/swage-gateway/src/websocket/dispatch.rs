@@ -98,6 +98,7 @@ pub(super) async fn dispatch_client_message(
 
         ClientEvent::SendMessage {
             content,
+            attachments,
             thread_id,
             selected_model_id,
         } => {
@@ -193,7 +194,7 @@ pub(super) async fn dispatch_client_message(
                                 &state,
                                 session_id,
                                 thread_id,
-                                turn_content,
+                                turn::TurnInput::with_attachments(turn_content, attachments),
                                 tx.clone(),
                                 sub,
                                 None,
@@ -213,7 +214,7 @@ pub(super) async fn dispatch_client_message(
                                 &state,
                                 session_id,
                                 thread_id,
-                                content,
+                                turn::TurnInput::with_attachments(content, attachments),
                                 tx.clone(),
                                 sub,
                                 None,
@@ -235,7 +236,7 @@ pub(super) async fn dispatch_client_message(
                             &state,
                             session_id,
                             thread_id,
-                            content,
+                            turn::TurnInput::with_attachments(content, attachments),
                             tx.clone(),
                             sub,
                             None,

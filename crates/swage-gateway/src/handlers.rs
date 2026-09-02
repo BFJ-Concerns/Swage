@@ -1353,6 +1353,8 @@ pub async fn submit_turn(
         crate::turn::resolve_requested_turn_model(&state.active_config(), model)
             .map_err(ApiError::from)?;
     }
+    crate::turn::check_attachment_support(&state.workflow_capabilities, &req.attachments)
+        .map_err(ApiError::from)?;
 
     if state
         .active_turns
@@ -1416,7 +1418,7 @@ pub async fn submit_turn(
 
     // Spawn background turn processing — the REST client polls for result.
     let bg_state = state.clone();
-    let message = req.message;
+    let input = crate::turn::TurnInput::with_attachments(req.message, req.attachments);
     let output_schema = req.output_schema;
     let compaction_focus = req.compaction_focus;
     let model = req.model;
@@ -1438,7 +1440,7 @@ pub async fn submit_turn(
             &bg_state,
             session_id,
             Some(thread_id),
-            message,
+            input,
             ws_tx,
             subscription,
             output_schema,
@@ -2599,6 +2601,7 @@ mod tests {
             storage
                 .append_message(AppendMessage {
                     thread_id: thread.id,
+                    attachments: Vec::new(),
                     turn_id: None,
                     role: if index % 2 == 0 {
                         Role::User
@@ -3609,6 +3612,82 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn post_turns_refuses_an_image_attachment_the_provider_cannot_consume() {
+        let storage = Arc::new(MockStorage::new());
+        let mut config = swage_config::ResolvedConfig::default();
+        config.providers.entries.insert(
+            "codex".into(),
+            swage_config::ProviderEndpointConfig {
+                protocol: swage_config::Protocol::Codex,
+                ..Default::default()
+            },
+        );
+        config.models.default = "codex".into();
+        config.models.entries.insert(
+            "codex".into(),
+            swage_config::ModelEndpointConfig {
+                provider_id: "codex".into(),
+                model_id: "fake-codex".into(),
+                ..Default::default()
+            },
+        );
+        let (router, storage) = make_router_with_provider_and_config(
+            Arc::new(MockProvider::new(vec![])) as Arc<dyn LlmProvider>,
+            storage,
+            config,
+        );
+
+        let create = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/conversations")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("create conversation response");
+        let conversation_id = body_json(create).await["id"]
+            .as_str()
+            .expect("conversation id")
+            .to_string();
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/turns")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::json!({
+                            "conversation_id": conversation_id,
+                            "message": "what is this?",
+                            "attachments": [{"kind": "image_url", "url": "https://example.test/cat.png"}]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .expect("refused response");
+
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = body_json(response).await;
+        assert_eq!(body["code"], "validation_error");
+        assert!(
+            body["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("image")),
+            "{body}"
+        );
+        assert!(
+            storage.db.lock().await.turns.is_empty(),
+            "a refused attachment must not create a pending turn"
+        );
+    }
+
     // -----------------------------------------------------------------------
     // GET /api/conversations
     // -----------------------------------------------------------------------
@@ -4328,6 +4407,7 @@ mod tests {
         let first = storage
             .create_message(swage_storage::model::NewMessage {
                 thread_id: parent_thread_id,
+                attachments: Vec::new(),
                 turn_id: None,
                 role: swage_core::Role::User,
                 content: "hello".into(),
@@ -4339,6 +4419,7 @@ mod tests {
         storage
             .create_message(swage_storage::model::NewMessage {
                 thread_id: parent_thread_id,
+                attachments: Vec::new(),
                 turn_id: None,
                 role: swage_core::Role::Assistant,
                 content: "draft".into(),
@@ -4378,6 +4459,7 @@ mod tests {
         storage
             .create_message(swage_storage::model::NewMessage {
                 thread_id: parent_thread_id,
+                attachments: Vec::new(),
                 turn_id: None,
                 role: swage_core::Role::User,
                 content: "parent continues".into(),

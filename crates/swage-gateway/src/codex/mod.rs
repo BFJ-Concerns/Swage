@@ -444,6 +444,7 @@ async fn run_turn_inner(
         .storage
         .append_message(AppendMessage {
             thread_id: request.thread_id,
+            attachments: Vec::new(),
             turn_id: Some(request.turn_id),
             role: Role::Assistant,
             content: response_text.clone(),

@@ -12,10 +12,11 @@ use futures::{StreamExt, stream};
 use tokio::sync::{Mutex, Notify, mpsc};
 
 use swage_core::{
-    ChatMessage, CompletionRequest, CompletionResponse, DelegateCompletionMode, MessageStatus,
-    ProviderError, SandboxError, StreamChunk, ToolCompletionRequest, ToolCompletionResponse,
-    ToolError, ToolReplayPart,
+    ChatMessage, CompletionRequest, CompletionResponse, ContentPart, DelegateCompletionMode,
+    MessageStatus, ProviderError, SandboxError, StreamChunk, ToolCompletionRequest,
+    ToolCompletionResponse, ToolError, ToolReplayPart,
 };
+use swage_protocol::client::turn::MessageAttachment;
 use swage_core::{FinishReason, StorageError};
 use swage_hook::{Hook, HookOutcome, HookRegistration, HookRegistry};
 use swage_provider::LlmProvider;
@@ -471,6 +472,7 @@ async fn compaction_snapshot_failure_records_reconstruction_gap_through_turn_loo
         storage
             .append_message(AppendMessage {
                 thread_id,
+                attachments: Vec::new(),
                 turn_id: None,
                 role: if index % 2 == 0 {
                     swage_core::Role::User
@@ -2865,6 +2867,7 @@ impl ThreadStore for MockStorage {
             db.messages.push(swage_storage::Message {
                 id: message_id,
                 thread_id: branch.child_thread_id,
+                attachments: Vec::new(),
                 turn_id: message.turn_id,
                 role: message.role,
                 content: message.content,
@@ -3207,6 +3210,7 @@ impl MessageStore for MockStorage {
         let m = Message {
             id: Uuid::new_v4(),
             thread_id: message.thread_id,
+            attachments: Vec::new(),
             turn_id: message.turn_id,
             role: message.role,
             content: message.content,
@@ -3238,6 +3242,7 @@ impl MessageStore for MockStorage {
         let created = Message {
             id: Uuid::new_v4(),
             thread_id: message.thread_id,
+            attachments: Vec::new(),
             turn_id: message.turn_id,
             role: message.role,
             content: message.content,
@@ -7353,6 +7358,7 @@ async fn branch_turn_rebuilds_tool_replay_from_copied_history() {
     storage
         .create_message(NewMessage {
             thread_id: parent_thread.id,
+            attachments: Vec::new(),
             turn_id: Some(parent_turn.id),
             role: Role::User,
             content: "Use echo".to_string(),
@@ -7364,6 +7370,7 @@ async fn branch_turn_rebuilds_tool_replay_from_copied_history() {
     let assistant_message = storage
         .create_message(NewMessage {
             thread_id: parent_thread.id,
+            attachments: Vec::new(),
             turn_id: Some(parent_turn.id),
             role: Role::Assistant,
             content: "Echo complete".to_string(),
@@ -7543,6 +7550,7 @@ async fn later_turn_rebuilds_failed_tool_replay_as_error() {
     storage
         .create_message(NewMessage {
             thread_id: thread.id,
+            attachments: Vec::new(),
             turn_id: Some(failed_turn.id),
             role: Role::User,
             content: "Run the command".to_string(),
@@ -7554,6 +7562,7 @@ async fn later_turn_rebuilds_failed_tool_replay_as_error() {
     storage
         .create_message(NewMessage {
             thread_id: thread.id,
+            attachments: Vec::new(),
             turn_id: Some(failed_turn.id),
             role: Role::Assistant,
             content: "Trying the command".to_string(),
@@ -14882,6 +14891,213 @@ fn delegation_result_renders_failure_and_unknown_shapes() {
     assert!(unknown.contains("verdict"));
 }
 
+fn vision_capable_config() -> swage_config::ResolvedConfig {
+    // The default provider protocol (OpenAI) advertises vision, which is
+    // what the intake gate reads.
+    let mut config = swage_config::ResolvedConfig::default();
+    config.providers.entries.insert(
+        "openai".into(),
+        swage_config::ProviderEndpointConfig {
+            protocol: swage_config::Protocol::OpenAi,
+            ..Default::default()
+        },
+    );
+    config.models.default = "gpt".into();
+    config.models.entries.insert(
+        "gpt".into(),
+        swage_config::ModelEndpointConfig {
+            provider_id: "openai".into(),
+            model_id: "gpt-4o".into(),
+            ..Default::default()
+        },
+    );
+    config
+}
+
+fn text_only_config() -> swage_config::ResolvedConfig {
+    let mut config = swage_config::ResolvedConfig::default();
+    config.providers.entries.insert(
+        "codex".into(),
+        swage_config::ProviderEndpointConfig {
+            protocol: swage_config::Protocol::Codex,
+            ..Default::default()
+        },
+    );
+    config.models.default = "codex".into();
+    config.models.entries.insert(
+        "codex".into(),
+        swage_config::ModelEndpointConfig {
+            provider_id: "codex".into(),
+            model_id: "fake-codex".into(),
+            ..Default::default()
+        },
+    );
+    config
+}
+
+/// The image intake journey at the gateway seam: an image part submitted
+/// beside the text is recorded with the user message in the wire's own
+/// shape, rebuilt into history as a content part, and reaches the provider
+/// request as `ContentPart::ImageUrl` in submission order.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_image_attachment_is_recorded_and_reaches_the_provider_as_a_content_part() {
+    let storage = Arc::new(MockStorage::new());
+    let (provider, captured_requests) = CapturingMultiRoundProvider::new(vec![vec![
+        StreamChunk::Delta {
+            content: "a cat".into(),
+        },
+        StreamChunk::Done {
+            finish_reason: None,
+        },
+    ]]);
+    let space = storage.get_or_create_default().await.expect("space");
+    let session = storage
+        .create_session(NewSession {
+            space_id: space.id,
+            agent_id: "gateway".to_string(),
+            metadata: None,
+            active_workspace_attachment_id: None,
+        })
+        .await
+        .expect("session");
+    ThreadStore::create(
+        &*storage,
+        NewThread {
+            session_id: session.id,
+            agent_id: "gateway".to_string(),
+        },
+    )
+    .await
+    .expect("thread");
+    let state = AppState::new(
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
+        Arc::new(provider) as Arc<dyn LlmProvider>,
+        vision_capable_config(),
+        crate::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+    );
+    assert!(state.workflow_capabilities.vision);
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    process_turn(
+        &state,
+        session.id,
+        None,
+        TurnInput::with_attachments(
+            "What is in this picture?",
+            vec![MessageAttachment::ImageUrl {
+                url: "https://example.test/cat.png".into(),
+            }],
+        ),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .expect("turn with an image completes");
+
+    // Recorded beside the text, in the wire's own shape.
+    let stored = storage.db.lock().await.messages.clone();
+    let user = stored
+        .iter()
+        .find(|message| message.role == Role::User)
+        .expect("stored user message");
+    assert_eq!(user.content, "What is in this picture?");
+    assert_eq!(
+        user.attachments,
+        vec![serde_json::json!({"kind": "image_url", "url": "https://example.test/cat.png"})]
+    );
+
+    // On the provider request as content parts, text first.
+    let requests = captured_requests.lock().expect("captured requests");
+    let user_message = requests[0]
+        .messages
+        .iter()
+        .find(|message| {
+            message.role() == Role::User
+                && message.text_content().contains("What is in this picture?")
+        })
+        .expect("user message reached the provider");
+    assert_eq!(
+        user_message.content(),
+        &[
+            ContentPart::Text {
+                text: "What is in this picture?".into()
+            },
+            ContentPart::ImageUrl {
+                url: "https://example.test/cat.png".into()
+            },
+        ]
+    );
+}
+
+/// A provider that cannot consume images refuses the submission before any
+/// record is written: a part the model never sees must not ride along.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_image_attachment_is_refused_before_persistence_when_the_provider_lacks_vision() {
+    let storage = Arc::new(MockStorage::new());
+    let (state, session_id) =
+        make_state_with_config_and_storage(vec![], text_only_config(), Arc::clone(&storage)).await;
+    assert!(!state.workflow_capabilities.vision);
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let error = process_turn(
+        &state,
+        session_id,
+        None,
+        TurnInput::with_attachments(
+            "What is in this picture?",
+            vec![MessageAttachment::ImageUrl {
+                url: "https://example.test/cat.png".into(),
+            }],
+        ),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .expect_err("an unsupported attachment must fail the turn");
+    assert!(
+        matches!(&error, GatewayError::ValidationError(message) if message.contains("image")),
+        "{error}"
+    );
+
+    let db = storage.db.lock().await;
+    assert!(db.messages.is_empty(), "nothing is persisted for a refused turn");
+    assert!(db.turns.is_empty(), "no turn record is created for a refused turn");
+}
+
+/// A stored attachment outside the wire contract is corruption, refused
+/// when history is rebuilt rather than dropped.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stored_attachment_outside_the_contract_fails_the_history_rebuild() {
+    let storage = MockStorage::new();
+    let thread_id = Uuid::new_v4();
+    storage
+        .append_message(AppendMessage {
+            thread_id,
+            attachments: vec![serde_json::json!({"kind": "hologram", "url": "x"})],
+            turn_id: None,
+            role: Role::User,
+            content: "look".into(),
+            agent_id: "gateway".into(),
+        })
+        .await
+        .unwrap();
+
+    let error = super::history::rebuild_thread_history_messages(&storage, thread_id)
+        .await
+        .expect_err("an out-of-contract attachment must not be silently dropped");
+    assert!(
+        matches!(
+            &error,
+            GatewayError::Storage(StorageError::Corruption { message }) if message.contains("hologram")
+        ),
+        "{error}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn delivered_delegation_results_survive_the_history_rebuild() {
     let storage = MockStorage::new();
@@ -14894,6 +15110,7 @@ async fn delivered_delegation_results_survive_the_history_rebuild() {
     storage
         .append_message(AppendMessage {
             thread_id,
+            attachments: Vec::new(),
             turn_id: None,
             role: Role::User,
             content: "Delegated agent researcher completed:\nGathered 3 sources.".into(),
@@ -14904,6 +15121,7 @@ async fn delivered_delegation_results_survive_the_history_rebuild() {
     storage
         .append_message(AppendMessage {
             thread_id,
+            attachments: Vec::new(),
             turn_id: None,
             role: Role::Tool,
             content: "orphaned tool row".into(),
