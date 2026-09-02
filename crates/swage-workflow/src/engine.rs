@@ -49,6 +49,18 @@ fn named_host_error(error: &str, fallback: &str) -> (String, String) {
         .unwrap_or_else(|| (fallback.to_string(), error.to_string()))
 }
 
+fn is_pre_spawn_author_error(error: &str) -> bool {
+    [
+        "InvalidAgentOptionError",
+        "InvalidAgentPromptError",
+        "InvalidAgentSchemaError",
+        "WorkflowReferenceError",
+        "WorkflowArgumentsError",
+    ]
+    .iter()
+    .any(|prefix| error.starts_with(prefix))
+}
+
 /// Hard limits applied by the host to each fresh JavaScript runtime.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct EngineLimits {
@@ -505,7 +517,7 @@ impl WorkflowEngine {
                                     Ok(request) => request,
                                     Err(error) => return serde_json::json!({
                                         "ok": false,
-                                    "error": {"name": "InvalidAgentOptionError", "message": error.to_string()}
+                                        "error": {"name": "InvalidAgentOptionError", "message": error.to_string(), "pre_spawn": true}
                                     }).to_string(),
                                 };
                                 let mut request = request;
@@ -552,7 +564,7 @@ impl WorkflowEngine {
                                         let (name, message) = named_host_error(&error, "AgentCallError");
                                         serde_json::json!({
                                             "ok": false,
-                                            "error": {"name": name, "message": message, "host_reference": host_reference}
+                                            "error": {"name": name, "message": message, "host_reference": host_reference, "pre_spawn": is_pre_spawn_author_error(&error)}
                                         }).to_string()
                                     }
                                 }
@@ -598,7 +610,7 @@ impl WorkflowEngine {
                                         Ok(args) => args,
                                         Err(error) => return serde_json::json!({
                                             "ok": false,
-                                            "error": {"name": "WorkflowCompositionError", "message": error.to_string()}
+                                            "error": {"name": "WorkflowArgumentsError", "message": error.to_string(), "pre_spawn": true}
                                         }).to_string(),
                                     };
                                     match host
@@ -610,7 +622,7 @@ impl WorkflowEngine {
                                             let (name, message) = named_host_error(&error, "WorkflowCompositionError");
                                             serde_json::json!({
                                                 "ok": false,
-                                                "error": {"name": name, "message": message}
+                                                "error": {"name": name, "message": message, "pre_spawn": is_pre_spawn_author_error(&error)}
                                             }).to_string()
                                         }
                                     }
@@ -858,6 +870,9 @@ impl WorkflowEngine {
                             if (!response.ok) {
                                 const error = new Error(response.error.message);
                                 error.name = response.error.name;
+                                if (response.error.pre_spawn === true) {
+                                    Object.defineProperty(error, "__swagePreSpawnAuthorError", { value: true });
+                                }
                                 throw error;
                             }
                             return response.value;
@@ -869,6 +884,9 @@ impl WorkflowEngine {
                             if (!response.ok) {
                                 const error = new Error(response.error.message);
                                 error.name = response.error.name;
+                                if (response.error.pre_spawn === true) {
+                                    Object.defineProperty(error, "__swagePreSpawnAuthorError", { value: true });
+                                }
                                 if (typeof response.error.host_reference === "string") {
                                     Object.defineProperty(error, "__swageAgentCallReference", {
                                         value: response.error.host_reference,
@@ -1106,7 +1124,7 @@ impl WorkflowEngine {
                             })));
                         globalThis.deliverEvents = async (upToSeq) =>
                             unwrapHostResponse(await __deliverEvents(upToSeq));
-                        const isPreSpawnAuthorError = (error) => new Set([
+                        const isPreSpawnAuthorError = (error) => error.__swagePreSpawnAuthorError === true || new Set([
                             "UnknownAgentOptionError",
                             "AgentRequiredError",
                             "InvalidAgentOptionError",
