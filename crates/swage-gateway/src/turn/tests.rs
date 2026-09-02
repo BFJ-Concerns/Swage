@@ -1166,6 +1166,8 @@ pub(crate) struct MockStorage {
     pause_structured_output_writes: AtomicBool,
     structured_output_write_started: Notify,
     structured_output_write_release: Notify,
+    require_result_working_directory: AtomicBool,
+    result_created_without_working_directory: AtomicBool,
 }
 
 #[async_trait]
@@ -1449,6 +1451,8 @@ impl MockStorage {
             pause_structured_output_writes: AtomicBool::new(false),
             structured_output_write_started: Notify::new(),
             structured_output_write_release: Notify::new(),
+            require_result_working_directory: AtomicBool::new(false),
+            result_created_without_working_directory: AtomicBool::new(false),
         }
     }
 
@@ -1512,6 +1516,16 @@ impl MockStorage {
 
     fn release_structured_output_write(&self) {
         self.structured_output_write_release.notify_one();
+    }
+
+    fn require_result_working_directory(&self) {
+        self.require_result_working_directory
+            .store(true, Ordering::SeqCst);
+    }
+
+    fn result_was_created_without_working_directory(&self) -> bool {
+        self.result_created_without_working_directory
+            .load(Ordering::SeqCst)
     }
 
     pub(crate) fn last_snapshot_list_limit(&self) -> usize {
@@ -4122,6 +4136,14 @@ impl swage_storage::store::AgentMessageStore for MockStorage {
         msg: NewAgentMessage,
     ) -> Result<AgentMessage, StorageError> {
         msg.validate()?;
+
+        if self.require_result_working_directory.load(Ordering::SeqCst)
+            && msg.kind == swage_core::MessageKind::Result
+            && msg.payload.get("working_directory").is_none()
+        {
+            self.result_created_without_working_directory
+                .store(true, Ordering::SeqCst);
+        }
 
         let now = chrono::Utc::now();
         let record = AgentMessage {
@@ -10030,7 +10052,7 @@ async fn delegate_worktree_provisions_isolated_cwd_and_records_resolved_placemen
     std::fs::create_dir(&repo).expect("repository directory");
     init_test_git_repository(&repo);
 
-    let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
+    let storage = Arc::new(MockStorage::new());
     let space = storage
         .get_or_create_default()
         .await
@@ -10179,6 +10201,7 @@ async fn delegate_worktree_provisions_isolated_cwd_and_records_resolved_placemen
         "successful wait-mode delegation must remove its worktree"
     );
 
+    storage.require_result_working_directory();
     let outcome = GatewayDelegationHandler::new(state.clone())
         .handle_delegation(
             "agent-b",
@@ -10243,6 +10266,15 @@ async fn delegate_worktree_provisions_isolated_cwd_and_records_resolved_placemen
                 .iter()
                 .any(|message| message.kind == swage_core::MessageKind::Result)
         {
+            let result = result_messages
+                .iter()
+                .find(|message| message.kind == swage_core::MessageKind::Result)
+                .expect("the first observable detached result");
+            assert_eq!(
+                result.payload["working_directory"],
+                worktree.to_string_lossy().as_ref(),
+                "a parent waking on the first durable result must receive its placement"
+            );
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -10258,6 +10290,10 @@ async fn delegate_worktree_provisions_isolated_cwd_and_records_resolved_placemen
                 && message.payload.get("error").is_none()
         })
         .expect("the detached delegate should record a successful terminal result");
+    assert!(
+        !storage.result_was_created_without_working_directory(),
+        "a detached Result must carry placement in its initial durable payload"
+    );
     assert_eq!(
         result.payload["working_directory"],
         worktree.to_string_lossy().as_ref(),
