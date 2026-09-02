@@ -302,8 +302,13 @@ pub enum WorkflowJournalEntryStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
 #[serde(tag = "availability", rename_all = "snake_case")]
 pub enum WorkflowCallUsage {
-    Known { input_tokens: u64, output_tokens: u64 },
-    Unavailable { reason: WorkflowUsageUnavailableReason },
+    Known {
+        input_tokens: u64,
+        output_tokens: u64,
+    },
+    Unavailable {
+        reason: WorkflowUsageUnavailableReason,
+    },
 }
 
 impl WorkflowCallUsage {
@@ -377,8 +382,12 @@ pub enum WorkflowProviderRoundOutcome {
     Outstanding,
     /// A response arrived, asking for this many tool calls (zero when the
     /// model answered instead of calling tools).
-    Responded { tool_calls: u32 },
-    Failed { message: String },
+    Responded {
+        tool_calls: u32,
+    },
+    Failed {
+        message: String,
+    },
 }
 
 /// What a worker was asked to do, recorded when it was dispatched.

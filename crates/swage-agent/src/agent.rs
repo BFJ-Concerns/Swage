@@ -322,6 +322,10 @@ impl Agent {
         let mut accumulated = String::new();
         let mut total_input_tokens: u32 = 0;
         let mut total_output_tokens: u32 = 0;
+        // Whether any provider round reported usage at all. A provider that
+        // reports none leaves the turn's token columns unset rather than at
+        // zero, so a reader can tell "spent nothing" from "cannot say".
+        let mut usage_reported = false;
         let mut total_tool_calls: u32 = 0;
         let mut tool_position: i32 = 0;
         let mut round = 0usize;
@@ -356,6 +360,7 @@ impl Agent {
                     &accumulated,
                     &mut total_input_tokens,
                     &mut total_output_tokens,
+                    &mut usage_reported,
                     true,
                     round,
                 )
@@ -692,6 +697,7 @@ impl Agent {
                         &accumulated,
                         &mut total_input_tokens,
                         &mut total_output_tokens,
+                        &mut usage_reported,
                         false,
                         round + attempt as usize,
                     )
@@ -732,13 +738,15 @@ impl Agent {
 
         // 11. Update turn: response text, token counts, state → Completed.
         self.storage.update_response(turn.id, &safe_content).await?;
-        self.storage
-            .update_tokens(
-                turn.id,
-                total_input_tokens.into(),
-                total_output_tokens.into(),
-            )
-            .await?;
+        if usage_reported {
+            self.storage
+                .update_tokens(
+                    turn.id,
+                    total_input_tokens.into(),
+                    total_output_tokens.into(),
+                )
+                .await?;
+        }
         self.storage
             .update_turn_state(turn.id, TurnState::Completed)
             .await?;
@@ -778,6 +786,7 @@ impl Agent {
         accumulated_prefix: &str,
         total_input_tokens: &mut u32,
         total_output_tokens: &mut u32,
+        usage_reported: &mut bool,
         collect_tool_calls: bool,
         round: usize,
     ) -> Result<StreamRoundOutcome, AgentError> {
@@ -825,6 +834,7 @@ impl Agent {
                             reasoning.push(ToolReplayReasoning { content, details });
                         }
                         Some(StreamChunk::Usage(usage)) => {
+                            *usage_reported = true;
                             *total_input_tokens += usage.input_tokens;
                             *total_output_tokens += usage.output_tokens;
                         }
