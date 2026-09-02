@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::{path::Path, sync::Arc, time::Instant};
 
 use serde_json::{Value, json};
+use swage_agent::event::SchemaValidationError;
 use swage_agent::{AgentConfig, AgentError, AgentEvent, OutboundMessage};
 use swage_codex::{AppServerClient, ClientError, ContentItem, DynamicToolSpec, ToolCallResponse};
 use swage_core::{ChatMessage, Role, StorageError};
@@ -280,154 +281,171 @@ async fn run_turn_inner(
         };
 
     let sandbox_policy = sandbox_policy(&request.permissions, &request.agent_config.allowed_paths);
-    let provider_request = json!({
-        "threadId": codex_thread_id,
-        "input": [{"type":"text", "text":request.user_message}],
-        "sandboxPolicy": sandbox_policy,
-        "approvalPolicy": "on-request",
-        "cwd": request.agent_config.working_directory,
-        "outputSchema": request.agent_config.output_schema,
-    });
-    let _ = request.event_tx.send(AgentEvent::ProviderRequestPrepared {
-        turn_id: request.turn_id,
-        round: 1,
-        request: json!({"method":"turn/start","params":provider_request.clone()}),
-    });
-    let turn_response = client
-        .request("turn/start", provider_request)
-        .await
-        .map_err(provider_error)?;
-    let codex_turn_id = turn_response
-        .pointer("/turn/id")
-        .or_else(|| turn_response.get("turnId"))
-        .and_then(Value::as_str)
-        .map(ToString::to_string);
-
+    let validator = request
+        .agent_config
+        .output_schema
+        .as_ref()
+        .map(jsonschema::validator_for)
+        .transpose()
+        .map_err(|error| AgentError::InvalidConfig(format!("invalid output schema: {error}")))?;
+    let mut structured_output = None;
     let mut response_text = String::new();
     let mut input_tokens = 0u32;
     let mut output_tokens = 0u32;
     let mut tool_count = 0u32;
-    let mut active_items = HashMap::<String, Value>::new();
-    let mut tool_tasks = JoinSet::new();
-    loop {
-        tokio::select! {
-            // Drain buffered requests and notifications before reporting
-            // transport closure: the server may deliver a turn's terminal
-            // notification and close in the same instant, and that outcome
-            // must win over the close.
-            biased;
-            () = request.cancellation.cancelled() => {
-                if let Some(turn_id) = codex_turn_id.as_deref() {
-                    let _ = client.request("turn/interrupt", json!({"threadId":codex_thread_id,"turnId":turn_id})).await;
+    for attempt in 0..=request.agent_config.max_output_retries {
+        response_text.clear();
+        let provider_request = json!({
+            "threadId": codex_thread_id,
+            "input": [{"type":"text", "text":request.user_message}],
+            "sandboxPolicy": sandbox_policy,
+            "approvalPolicy": "on-request",
+            "cwd": request.agent_config.working_directory,
+            "outputSchema": request.agent_config.output_schema,
+        });
+        let _ = request.event_tx.send(AgentEvent::ProviderRequestPrepared {
+            turn_id: request.turn_id,
+            round: attempt as usize + 1,
+            request: json!({"method":"turn/start","params":provider_request.clone()}),
+        });
+        let turn_response = client
+            .request("turn/start", provider_request)
+            .await
+            .map_err(provider_error)?;
+        let codex_turn_id = turn_response
+            .pointer("/turn/id")
+            .or_else(|| turn_response.get("turnId"))
+            .and_then(Value::as_str)
+            .map(ToString::to_string);
+        let mut active_items = HashMap::<String, Value>::new();
+        let mut tool_tasks = JoinSet::new();
+        loop {
+            tokio::select! {
+                // Drain buffered requests and notifications before reporting
+                // transport closure: the server may deliver a turn's terminal
+                // notification and close in the same instant, and that outcome
+                // must win over the close.
+                biased;
+                () = request.cancellation.cancelled() => {
+                    if let Some(turn_id) = codex_turn_id.as_deref() {
+                        let _ = client.request("turn/interrupt", json!({"threadId":codex_thread_id,"turnId":turn_id})).await;
+                    }
+                    state.storage.update_turn_state(request.turn_id, TurnState::Interrupted).await?;
+                    state.storage.update_state(request.thread_id, ThreadState::Idle).await?;
+                    return Err(AgentError::Cancelled);
                 }
-                state.storage.update_turn_state(request.turn_id, TurnState::Interrupted).await?;
-                state.storage.update_state(request.thread_id, ThreadState::Idle).await?;
-                return Err(AgentError::Cancelled);
-            }
-            incoming = server_requests.recv() => {
-                let incoming = incoming.map_err(|_| AgentError::ProviderFailed(swage_core::ProviderError::InvalidResponse(
-                    "Codex App Server transport closed mid-turn".to_string(),
-                )))?;
-                if incoming.method == "item/tool/call" {
-                    tool_count += 1;
-                    let tool_state = state.clone();
-                    let tool_client = client.clone();
-                    let tool_request = request.clone();
-                    let position = tool_count;
-                    tool_tasks.spawn(async move {
-                        handle_tool_call(&tool_state, &tool_client, &tool_request, incoming, position).await;
-                    });
-                } else {
-                    handle_approval(&state, &client, &request, incoming, &active_items).await;
+                incoming = server_requests.recv() => {
+                    let incoming = incoming.map_err(|_| AgentError::ProviderFailed(swage_core::ProviderError::InvalidResponse(
+                        "Codex App Server transport closed mid-turn".to_string(),
+                    )))?;
+                    if incoming.method == "item/tool/call" {
+                        tool_count += 1;
+                        let tool_state = state.clone();
+                        let tool_client = client.clone();
+                        let tool_request = request.clone();
+                        let position = tool_count;
+                        tool_tasks.spawn(async move {
+                            handle_tool_call(&tool_state, &tool_client, &tool_request, incoming, position).await;
+                        });
+                    } else {
+                        handle_approval(&state, &client, &request, incoming, &active_items).await;
+                    }
                 }
-            }
-            incoming = notifications.recv() => {
-                let incoming = incoming.map_err(|_| AgentError::ProviderFailed(swage_core::ProviderError::InvalidResponse(
-                    "Codex App Server transport closed mid-turn".to_string(),
-                )))?;
-                match incoming.method.as_str() {
-                    "item/started" | "item/updated" => {
-                        let item = incoming.params.get("item").cloned().unwrap_or_else(|| incoming.params.clone());
-                        if let Some(id) = item.get("id").and_then(Value::as_str) {
-                            active_items.insert(id.to_string(), item);
+                incoming = notifications.recv() => {
+                    let incoming = incoming.map_err(|_| AgentError::ProviderFailed(swage_core::ProviderError::InvalidResponse(
+                        "Codex App Server transport closed mid-turn".to_string(),
+                    )))?;
+                    match incoming.method.as_str() {
+                        "item/started" | "item/updated" => {
+                            let item = incoming.params.get("item").cloned().unwrap_or_else(|| incoming.params.clone());
+                            if let Some(id) = item.get("id").and_then(Value::as_str) {
+                                active_items.insert(id.to_string(), item);
+                            }
                         }
-                    }
-                    "item/agentMessage/delta" => {
-                        if let Some(delta) = incoming.params.get("delta").and_then(Value::as_str) {
-                            response_text.push_str(delta);
-                            let _ = request.event_tx.send(AgentEvent::Token { content: delta.to_string() });
+                        "item/agentMessage/delta" => {
+                            if let Some(delta) = incoming.params.get("delta").and_then(Value::as_str) {
+                                response_text.push_str(delta);
+                                let _ = request.event_tx.send(AgentEvent::Token { content: delta.to_string() });
+                            }
                         }
-                    }
-                    "item/reasoning/summaryTextDelta" | "item/reasoning/textDelta" => {
-                        if let Some(delta) = incoming.params.get("delta").and_then(Value::as_str) {
-                            let _ = request.event_tx.send(AgentEvent::ProviderReasoningCaptured {
-                                turn_id: request.turn_id,
-                                round: 0,
-                                content: delta.to_string(),
-                                details: None,
-                            });
+                        "item/reasoning/summaryTextDelta" | "item/reasoning/textDelta" => {
+                            if let Some(delta) = incoming.params.get("delta").and_then(Value::as_str) {
+                                let _ = request.event_tx.send(AgentEvent::ProviderReasoningCaptured {
+                                    turn_id: request.turn_id,
+                                    round: 0,
+                                    content: delta.to_string(),
+                                    details: None,
+                                });
+                            }
                         }
-                    }
-                    "item/completed" => {
-                        let item = incoming.params.get("item").cloned().unwrap_or_else(|| incoming.params.clone());
-                        if item.get("type").and_then(Value::as_str) == Some("agentMessage")
-                            && response_text.is_empty()
-                            && let Some(text) = item.get("text").and_then(Value::as_str)
-                        {
-                            response_text = text.to_string();
-                            let _ = request.event_tx.send(AgentEvent::Token { content: text.to_string() });
+                        "item/completed" => {
+                            let item = incoming.params.get("item").cloned().unwrap_or_else(|| incoming.params.clone());
+                            if item.get("type").and_then(Value::as_str) == Some("agentMessage")
+                                && response_text.is_empty()
+                                && let Some(text) = item.get("text").and_then(Value::as_str)
+                            {
+                                response_text = text.to_string();
+                                let _ = request.event_tx.send(AgentEvent::Token { content: text.to_string() });
+                            }
+                            let _ = record_audit(&state.storage, request.session_id, request.turn_id, "codex_item", item.get("type").and_then(Value::as_str).unwrap_or("item"), json!({
+                                "codex_thread_id":codex_thread_id,
+                                "codex_turn_id":codex_turn_id,
+                                "item":item,
+                            })).await;
                         }
-                        let _ = record_audit(&state.storage, request.session_id, request.turn_id, "codex_item", item.get("type").and_then(Value::as_str).unwrap_or("item"), json!({
-                            "codex_thread_id":codex_thread_id,
-                            "codex_turn_id":codex_turn_id,
-                            "item":item,
-                        })).await;
-                    }
-                    "thread/tokenUsage/updated" => {
-                        let last = incoming.params.pointer("/tokenUsage/last").or_else(|| incoming.params.get("last"));
-                        input_tokens = last.and_then(|v| v.get("inputTokens")).and_then(Value::as_u64).and_then(|v| u32::try_from(v).ok()).unwrap_or(input_tokens);
-                        output_tokens = last.and_then(|v| v.get("outputTokens")).and_then(Value::as_u64).and_then(|v| u32::try_from(v).ok()).unwrap_or(output_tokens);
-                    }
-                    "turn/completed" => {
-                        let status = incoming.params.pointer("/turn/status").and_then(Value::as_str).unwrap_or("failed");
-                        if status != "completed" {
-                            let message = incoming.params.pointer("/turn/error/message").and_then(Value::as_str).unwrap_or("Codex turn failed");
-                            return Err(AgentError::ProviderFailed(swage_core::ProviderError::InvalidResponse(message.to_string())));
+                        "thread/tokenUsage/updated" => {
+                            let last = incoming.params.pointer("/tokenUsage/last").or_else(|| incoming.params.get("last"));
+                            input_tokens = last.and_then(|v| v.get("inputTokens")).and_then(Value::as_u64).and_then(|v| u32::try_from(v).ok()).unwrap_or(input_tokens);
+                            output_tokens = last.and_then(|v| v.get("outputTokens")).and_then(Value::as_u64).and_then(|v| u32::try_from(v).ok()).unwrap_or(output_tokens);
                         }
-                        break;
+                        "turn/completed" => {
+                            let status = incoming.params.pointer("/turn/status").and_then(Value::as_str).unwrap_or("failed");
+                            if status != "completed" {
+                                let message = incoming.params.pointer("/turn/error/message").and_then(Value::as_str).unwrap_or("Codex turn failed");
+                                return Err(AgentError::ProviderFailed(swage_core::ProviderError::InvalidResponse(message.to_string())));
+                            }
+                            break;
+                        }
+                        _ => tracing::debug!(method = %incoming.method, "ignoring unsupported Codex notification"),
                     }
-                    _ => tracing::debug!(method = %incoming.method, "ignoring unsupported Codex notification"),
                 }
-            }
-            () = client.closed() => {
-                return Err(AgentError::ProviderFailed(swage_core::ProviderError::InvalidResponse(
-                    "Codex App Server transport closed mid-turn".to_string(),
-                )));
+                () = client.closed() => {
+                    return Err(AgentError::ProviderFailed(swage_core::ProviderError::InvalidResponse(
+                        "Codex App Server transport closed mid-turn".to_string(),
+                    )));
+                }
             }
         }
-    }
 
-    while let Some(result) = tool_tasks.join_next().await {
-        if let Err(error) = result {
-            tracing::warn!(%error, "Codex dynamic-tool dispatch task panicked");
-        }
-    }
-
-    let structured_output = match request.agent_config.output_schema.as_ref() {
-        Some(schema) => {
-            let value: Value = serde_json::from_str(&response_text).map_err(|error| {
-                AgentError::InvalidConfig(format!("Codex structured output was not JSON: {error}"))
-            })?;
-            let validator = jsonschema::validator_for(schema).map_err(|error| {
-                AgentError::InvalidConfig(format!("invalid output schema: {error}"))
-            })?;
-            if validator.validate(&value).is_err() {
-                return Err(AgentError::OutputSchemaFailed { attempts: 1 });
+        while let Some(result) = tool_tasks.join_next().await {
+            if let Err(error) = result {
+                tracing::warn!(%error, "Codex dynamic-tool dispatch task panicked");
             }
-            Some(value)
         }
-        None => None,
-    };
+
+        let Some(validator) = validator.as_ref() else {
+            break;
+        };
+        if let Ok(value) = serde_json::from_str::<Value>(&response_text)
+            && validator.validate(&value).is_ok()
+        {
+            structured_output = Some(value);
+            break;
+        }
+        if attempt == request.agent_config.max_output_retries {
+            structured_output = Some(Value::Null);
+            break;
+        }
+        let _ = request.event_tx.send(AgentEvent::OutputSchemaRetry {
+            turn_id: request.turn_id,
+            attempt: attempt + 1,
+            max_retries: request.agent_config.max_output_retries,
+            errors: vec![SchemaValidationError {
+                path: String::new(),
+                message: "Codex output did not match the required JSON schema".into(),
+            }],
+        });
+    }
     state
         .storage
         .update_response(request.turn_id, &response_text)
@@ -855,6 +873,28 @@ mod tests {
         Arc<crate::turn::tests::MockStorage>,
         Vec<AgentEvent>,
     ) {
+        run_scripted_turn_with_config(
+            scenario,
+            dispatcher,
+            permissions,
+            fail_audit_writes,
+            AgentConfig::new("gateway").with_workspace("/work", vec!["/work".into()]),
+        )
+        .await
+    }
+
+    async fn run_scripted_turn_with_config(
+        scenario: Value,
+        dispatcher: ToolDispatcher,
+        permissions: PermissionConfig,
+        fail_audit_writes: bool,
+        agent_config: AgentConfig,
+    ) -> (
+        Result<OutboundMessage, AgentError>,
+        Vec<Value>,
+        Arc<crate::turn::tests::MockStorage>,
+        Vec<AgentEvent>,
+    ) {
         let storage = Arc::new(crate::turn::tests::MockStorage::new());
         let (mut state, session_id) =
             crate::turn::tests::make_state_with_storage(Vec::new(), Arc::clone(&storage)).await;
@@ -906,7 +946,7 @@ mod tests {
             model: "fake-codex".to_string(),
             user_message: "scripted turn".to_string(),
             assembled_context: Vec::new(),
-            agent_config: AgentConfig::new("gateway").with_workspace("/work", vec!["/work".into()]),
+            agent_config,
             permissions,
             dispatcher: Arc::new(dispatcher),
             event_tx,
@@ -968,6 +1008,61 @@ mod tests {
                 .response,
             "done"
         );
+    }
+
+    #[tokio::test]
+    async fn scripted_schema_exhaustion_retries_to_the_configured_bound_and_returns_null() {
+        let invalid_turn = |turn_id: &str| {
+            vec![
+                json!({"jsonrpc":"2.0","id":"$request_id","result":{"turn":{"id":turn_id}}}),
+                json!({"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"delta":"not json"}}),
+                json!({"jsonrpc":"2.0","method":"turn/completed","params":{"turn":{"id":turn_id,"status":"completed"}}}),
+            ]
+        };
+        let scenario = json!({"keepOpen":true,"steps":[
+            {
+                "receive":{"method":"thread/start"},
+                "send":[{"jsonrpc":"2.0","id":"$request_id","result":{"thread":{"id":"fake-thread"}}}]
+            },
+            {"receive":{"method":"turn/start"},"send":invalid_turn("first")},
+            {"receive":{"method":"turn/start"},"send":invalid_turn("second")}
+        ]});
+        let config = AgentConfig::new("gateway")
+            .with_workspace("/work", vec!["/work".into()])
+            .with_output_schema(json!({"type":"object","required":["result"]}), 1);
+        let dispatcher = ToolDispatcher::allow_all(Vec::<Arc<dyn Tool>>::new());
+
+        let (result, _, _, events) = run_scripted_turn_with_config(
+            scenario,
+            dispatcher,
+            permissions(&[], &[]),
+            false,
+            config,
+        )
+        .await;
+
+        let output = result.expect("schema exhaustion must settle as a completed null result");
+        assert_eq!(output.structured_output, Some(Value::Null));
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    AgentEvent::ProviderRequestPrepared { request, .. }
+                        if request["method"] == "turn/start"
+                ))
+                .count(),
+            2,
+            "the initial request plus one configured retry must reach Codex"
+        );
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AgentEvent::OutputSchemaRetry {
+                attempt: 1,
+                max_retries: 1,
+                ..
+            }
+        )));
     }
 
     #[tokio::test]
