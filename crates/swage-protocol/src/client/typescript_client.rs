@@ -118,7 +118,11 @@ fn render_function(out: &mut String, route: &Route) {
             if parameter.required {
                 let _ = writeln!(out, "  query.set(\"{}\", {name});", parameter.name);
             } else {
-                let _ = writeln!(out, "  if ({name} !== undefined) query.set(\"{}\", {name});", parameter.name);
+                let _ = writeln!(
+                    out,
+                    "  if ({name} !== undefined) query.set(\"{}\", {name});",
+                    parameter.name
+                );
             }
         }
         let _ = writeln!(

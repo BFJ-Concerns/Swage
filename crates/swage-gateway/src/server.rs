@@ -8,8 +8,8 @@ use axum::{
     routing::{get, post, put},
 };
 use tower_http::trace::TraceLayer;
-use uuid::Uuid;
 use tracing::Instrument;
+use uuid::Uuid;
 
 use crate::{assets, handlers, knowledge_mirror, page, state::AppState, websocket, workflow};
 
