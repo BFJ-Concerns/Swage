@@ -13,14 +13,9 @@ import type { UpdatePageAnnotationRequest } from "../protocol/UpdatePageAnnotati
 import type { PageTemplateListResponse } from "../protocol/PageTemplateListResponse";
 import type { PageTemplateResponse } from "../protocol/PageTemplateResponse";
 import type { CreatePageTemplateRequest } from "../protocol/CreatePageTemplateRequest";
+import * as generated from "../protocol/client";
 
-let baseUrl = "";
-
-export function setBaseUrl(url: string): void {
-  baseUrl = url;
-}
-
-async function request(
+async function templateRequest(
   path: string,
   method: string,
   body?: unknown,
@@ -30,7 +25,7 @@ async function request(
     init.headers = { "Content-Type": "application/json" };
     init.body = JSON.stringify(body);
   }
-  const response = await fetch(`${baseUrl}${path}`, init);
+  const response = await fetch(path, init);
   if (!response.ok) {
     const text = await response.text();
     throw new Error(`${method} ${path} failed (${response.status}): ${text}`);
@@ -38,14 +33,16 @@ async function request(
   return response;
 }
 
+export function setBaseUrl(url: string): void {
+  generated.setClientBaseUrl(url);
+}
+
 export async function listPages(spaceId: string): Promise<PageListResponse> {
-  const response = await request(`/api/spaces/${spaceId}/pages`, "GET");
-  return (await response.json()) as PageListResponse;
+  return generated.listPages(spaceId);
 }
 
 export async function getPage(pageId: string): Promise<PageResponse> {
-  const response = await request(`/api/pages/${pageId}`, "GET");
-  return (await response.json()) as PageResponse;
+  return generated.getPage(pageId);
 }
 
 // A template seeds the new page's modules and is recorded as its origin;
@@ -55,17 +52,13 @@ export async function createPage(
   title: string,
   templateId?: string,
 ): Promise<PageResponse> {
-  const response = await request(`/api/spaces/${spaceId}/pages`, "POST", {
-    title,
-    template_id: templateId,
-  });
-  return (await response.json()) as PageResponse;
+  return generated.createPage(spaceId, { title, template_id: templateId });
 }
 
 export async function listPageTemplates(
   spaceId: string,
 ): Promise<PageTemplateListResponse> {
-  const response = await request(
+  const response = await templateRequest(
     `/api/spaces/${spaceId}/page-templates`,
     "GET",
   );
@@ -76,7 +69,7 @@ export async function createPageTemplate(
   spaceId: string,
   body: CreatePageTemplateRequest,
 ): Promise<PageTemplateResponse> {
-  const response = await request(
+  const response = await templateRequest(
     `/api/spaces/${spaceId}/page-templates`,
     "POST",
     body,
@@ -88,36 +81,25 @@ export async function writePageModule(
   pageId: string,
   body: WritePageModuleRequest,
 ): Promise<PageModuleView> {
-  const response = await request(`/api/pages/${pageId}/modules`, "POST", body);
-  return (await response.json()) as PageModuleView;
+  return generated.writePageModule(pageId, body);
 }
 
 export async function createPageAnnotation(
   pageId: string,
   body: CreatePageAnnotationRequest,
 ): Promise<PageAnnotationView> {
-  const response = await request(
-    `/api/pages/${pageId}/annotations`,
-    "POST",
-    body,
-  );
-  return (await response.json()) as PageAnnotationView;
+  return generated.createPageAnnotation(pageId, body);
 }
 
 export async function updatePageAnnotation(
   annotationId: string,
   body: UpdatePageAnnotationRequest,
 ): Promise<PageAnnotationView> {
-  const response = await request(
-    `/api/page-annotations/${annotationId}`,
-    "POST",
-    body,
-  );
-  return (await response.json()) as PageAnnotationView;
+  return generated.updatePageAnnotation(annotationId, body);
 }
 
 export async function deletePageAnnotation(
   annotationId: string,
 ): Promise<void> {
-  await request(`/api/page-annotations/${annotationId}`, "DELETE");
+  await generated.deletePageAnnotation(annotationId);
 }

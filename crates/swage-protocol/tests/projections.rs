@@ -48,6 +48,8 @@ fn typescript_bindings_are_regenerated() {
     client::page::CreatePageTemplateRequest::export_all(&cfg).expect("export create page template");
     client::page::PageTemplateResponse::export_all(&cfg).expect("export page template");
     client::page::PageTemplateListResponse::export_all(&cfg).expect("export page templates");
+    client::page::DeletePageAnnotationResponse::export_all(&cfg)
+        .expect("export delete page annotation");
     client::space::CreateWorkspaceAttachmentRequest::export_all(&cfg)
         .expect("export attach workspace");
     client::space::WorkspaceAttachmentListResponse::export_all(&cfg).expect("export workspaces");
