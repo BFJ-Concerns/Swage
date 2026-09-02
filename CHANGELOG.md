@@ -64,6 +64,7 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- Live replies now remain with their conversation while the user changes conversations or opens Operator.
 - Rejected tool approvals now render as failed calls in the conversation transcript.
 - Gateway runtime discovery no longer reads a partially written metadata file during startup.
 - Compaction audit records now count every source message replaced by a successful summary.

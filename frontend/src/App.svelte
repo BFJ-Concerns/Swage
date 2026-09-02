@@ -64,9 +64,22 @@
 
   // Route all server events from the WebSocket through the streaming store.
   // The connection store is a pure relay — interpretation belongs to streaming.
-  connectionStore.onServerEvent((event) =>
-    streamingStore.handleServerEvent(event),
-  );
+  connectionStore.onServerEvent((event) => {
+    const streamingConversationId = streamingStore.activeConversationId;
+    streamingStore.handleServerEvent(event);
+
+    // A live turn keeps its own socket while the user navigates. Once it
+    // settles, bind the channel to the selected conversation for its next turn.
+    const selectedConversationId = conversationStore.activeConversation?.id;
+    if (
+      streamingConversationId &&
+      !streamingStore.isStreaming &&
+      selectedConversationId &&
+      selectedConversationId !== streamingConversationId
+    ) {
+      connectionStore.connectTo(selectedConversationId);
+    }
+  });
 
   // The pages store opens its own work-surface channel: page signals are not
   // turn events, and an open page must stay live even with no conversation
@@ -88,8 +101,26 @@
     if (activeSurface === "operator") activeSurface = "conversation";
   }
 
+  function connectToConversationIfNeeded(id: string): void {
+    if (
+      !streamingStore.isStreaming ||
+      (streamingStore.activeConversationId === id &&
+        connectionStore.status !== "connected")
+    ) {
+      connectionStore.connectTo(id);
+    }
+  }
+
   async function selectAndNavigateOrThrow(id: string): Promise<void> {
     keepSurfaceForConversation();
+    const selectedConversationId = conversationStore.activeConversation?.id;
+    if (
+      !streamingStore.isStreaming &&
+      selectedConversationId === streamingStore.activeConversationId &&
+      id !== selectedConversationId
+    ) {
+      streamingStore.clearConversationOwnership?.();
+    }
     await conversationStore.selectConversation(id);
 
     // A deep-linked conversation may belong to a space other than the one
@@ -101,7 +132,7 @@
       await conversationStore.loadConversations(conv.space_id);
     }
 
-    connectionStore.connectTo(id);
+    connectToConversationIfNeeded(id);
     // router is declared below but will be initialised before this is called.
     router.navigate(`/conversations/${id}`);
   }
@@ -338,7 +369,7 @@
     // navigate away to. Page liveness does not depend on it — the pages
     // store listens on its own channel.
     if (next === "operator") {
-      connectionStore.disconnect();
+      if (!streamingStore.isStreaming) connectionStore.disconnect();
       return;
     }
 
@@ -347,7 +378,7 @@
     // Operator needs to establish the connection again.
     if (previous === "operator") {
       const id = conversationStore.activeConversation?.id;
-      if (id) connectionStore.connectTo(id);
+      if (id) connectToConversationIfNeeded(id);
     }
   }
 

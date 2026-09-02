@@ -1067,6 +1067,92 @@ describe("App", () => {
     expect(document.querySelector(".message-display")?.textContent).toContain("Streamed reply.");
   });
 
+  it("keeps a live stream on its conversation when another conversation is selected", async () => {
+    const defaultSpace = makeSpace();
+
+    vi.mocked(spacesApi.listSpaces).mockResolvedValueOnce([defaultSpace]);
+    vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([
+      makeConversationSummary({ id: "conv-a", message_preview: "Conversation A" }),
+      makeConversationSummary({ id: "conv-b", message_preview: "Conversation B" }),
+    ]);
+    vi.mocked(conversationsApi.getConversation)
+      .mockResolvedValueOnce(makeConversationDetail({ id: "conv-a" }))
+      .mockResolvedValueOnce(makeConversationDetail({ id: "conv-b" }));
+
+    setPath("/conversations/conv-a");
+    component = mount(App, { target: document.body });
+    await settleUi();
+    websocketHarness.fireStatus("connected");
+
+    const textarea = document.querySelector<HTMLTextAreaElement>("textarea");
+    flushSync(() => {
+      textarea!.value = "Keep this reply with A";
+      textarea!.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    flushSync(() => document.querySelector<HTMLButtonElement>(".action.send")!.click());
+    websocketHarness.fireEvent({ type: "token", content: "Reply for A" });
+    await settleUi();
+
+    websocketHarness.client.connect.mockClear();
+    websocketHarness.client.disconnect.mockClear();
+    const conversationButtons = document.querySelectorAll<HTMLButtonElement>(
+      ".conversation-select-btn",
+    );
+    flushSync(() => conversationButtons[1]!.click());
+    await settleUi();
+
+    expect(websocketHarness.client.connect).not.toHaveBeenCalled();
+    expect(websocketHarness.client.disconnect).not.toHaveBeenCalled();
+    expect(document.querySelector(".message-display")?.textContent).not.toContain("Reply for A");
+    expect(document.querySelector(".action.stop")).toBeNull();
+    expect(document.querySelector(".action.send")).not.toBeNull();
+
+    websocketHarness.fireEvent({ type: "turn_complete", turn_id: "turn-a" });
+    await settleUi();
+
+    expect(websocketHarness.client.connect).toHaveBeenCalledOnce();
+    expect(websocketHarness.client.connect).toHaveBeenCalledWith("conv-b");
+  });
+
+  it("keeps the live conversation subscription while Operator opens", async () => {
+    const defaultSpace = makeSpace();
+
+    vi.mocked(spacesApi.listSpaces).mockResolvedValueOnce([defaultSpace]);
+    vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([
+      makeConversationSummary({ id: "conv-a" }),
+    ]);
+    vi.mocked(conversationsApi.getConversation).mockResolvedValueOnce(
+      makeConversationDetail({ id: "conv-a" }),
+    );
+
+    setPath("/conversations/conv-a");
+    component = mount(App, { target: document.body });
+    await settleUi();
+    websocketHarness.fireStatus("connected");
+
+    const textarea = document.querySelector<HTMLTextAreaElement>("textarea");
+    flushSync(() => {
+      textarea!.value = "Keep the subscription";
+      textarea!.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    flushSync(() => document.querySelector<HTMLButtonElement>(".action.send")!.click());
+    websocketHarness.fireEvent({ type: "token", content: "Still live" });
+    await settleUi();
+
+    websocketHarness.client.connect.mockClear();
+    websocketHarness.client.disconnect.mockClear();
+    vi.mocked(operatorApi.fetchOperatorOverview).mockClear();
+    const operator = Array.from(
+      document.querySelectorAll<HTMLButtonElement>('nav[aria-label="Surface"] button'),
+    ).find((button) => button.textContent?.trim() === "Operator");
+    flushSync(() => operator!.click());
+    await waitForText("Live control surface for the running gateway");
+
+    expect(operatorApi.fetchOperatorOverview).toHaveBeenCalledOnce();
+    expect(websocketHarness.client.disconnect).not.toHaveBeenCalled();
+    expect(websocketHarness.client.connect).not.toHaveBeenCalled();
+  });
+
   it("keeps a newer stream live when reconnect refresh completes late", async () => {
     const defaultSpace = makeSpace();
     let resolveReconnectRefresh!: (conversation: ConversationDetail) => void;

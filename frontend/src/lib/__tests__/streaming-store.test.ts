@@ -247,6 +247,30 @@ describe("turn_complete", () => {
     expect(store.isStreaming).toBe(false);
   });
 
+  it("keeps a settled turn associated with the conversation that started it", () => {
+    let activeConversation = { id: "conv-a", messages: [] };
+    const appendAssistantMessage = vi.fn();
+    const store = createStreamingStore({
+      conversationStore: {
+        get activeConversation() {
+          return activeConversation;
+        },
+        appendOptimisticUserMessage: vi.fn(),
+        appendAssistantMessage,
+      },
+    });
+
+    store.startTurn("Question for A");
+    store.handleServerEvent({ type: "token", content: "Answer for A" });
+    activeConversation = { id: "conv-b", messages: [] };
+    store.handleServerEvent({ type: "turn_complete", turn_id: "turn-a" });
+
+    expect(store.activeConversationId).toBe("conv-a");
+    expect(store.streamBelongsTo?.("conv-a")).toBe(true);
+    expect(store.streamBelongsTo?.("conv-b")).toBe(false);
+    expect(appendAssistantMessage).not.toHaveBeenCalled();
+  });
+
   it("resets streamedContent to empty", () => {
     const store = createStreamingStore();
     store.startTurn("question");
