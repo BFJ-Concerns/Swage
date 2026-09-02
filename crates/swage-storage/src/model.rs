@@ -1224,6 +1224,11 @@ pub struct Message {
     pub turn_id: Option<Uuid>,
     pub role: Role,
     pub content: String,
+    /// Content parts submitted beside the text, one generic JSON value per
+    /// part exactly as the client wire carried it. Storage keeps them
+    /// opaque; the gateway parses them against the wire contract when it
+    /// projects the message and rejects a value outside it.
+    pub attachments: Vec<serde_json::Value>,
     /// Monotonically increasing position within the thread.
     pub position: i32,
     /// The agent that produced or received this message.
@@ -1972,6 +1977,8 @@ pub struct NewMessage {
     pub turn_id: Option<Uuid>,
     pub role: Role,
     pub content: String,
+    /// Content parts beside the text; empty for a text-only message.
+    pub attachments: Vec<serde_json::Value>,
     /// Monotonically increasing position within the thread.
     pub position: i32,
     /// The agent that produced or received this message.
@@ -1988,6 +1995,8 @@ pub struct AppendMessage {
     pub turn_id: Option<Uuid>,
     pub role: Role,
     pub content: String,
+    /// Content parts beside the text; empty for a text-only message.
+    pub attachments: Vec<serde_json::Value>,
     /// The agent that produced or received this message.
     pub agent_id: String,
 }
@@ -2007,8 +2016,29 @@ pub struct WorkflowScriptRecord {
     pub name: String,
     pub description: String,
     pub delivery_grant: Option<serde_json::Value>,
+    /// The conversation that authored this script, when a model authored it
+    /// rather than an operator. Its presence is the durable mark that the
+    /// script's authority is the authoring session's and no more.
+    pub authoring_session_id: Option<Uuid>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+impl WorkflowScriptRecord {
+    /// The delivery grant a run resolved from this script may actually use.
+    ///
+    /// Delivery is how a run's effects leave the machine, so a script a model
+    /// wrote never carries one: were it otherwise, a model could author a
+    /// script naming any delivery target and then start it, minting itself
+    /// authority its own session never held. The stored column stays readable
+    /// so an operator can see what was asked for; every run-start path reads
+    /// the grant through here.
+    pub fn effective_delivery_grant(&self) -> Option<serde_json::Value> {
+        if self.authoring_session_id.is_some() {
+            return None;
+        }
+        self.delivery_grant.clone()
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -2018,6 +2048,9 @@ pub struct NewWorkflowScript {
     pub description: String,
     pub source: String,
     pub delivery_grant: Option<serde_json::Value>,
+    /// Set when a model authored the script; see
+    /// [`WorkflowScriptRecord::effective_delivery_grant`].
+    pub authoring_session_id: Option<Uuid>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -2631,6 +2664,7 @@ mod tests {
         let msg = Message {
             id,
             thread_id,
+            attachments: Vec::new(),
             turn_id: Some(Uuid::new_v4()),
             role: Role::User,
             content: "hello".to_string(),
@@ -2662,6 +2696,7 @@ mod tests {
         let msg = Message {
             id,
             thread_id,
+            attachments: Vec::new(),
             turn_id: None,
             role: Role::Assistant,
             content: "sure".to_string(),
@@ -2684,6 +2719,7 @@ mod tests {
         let thread_id = Uuid::new_v4();
         let nm = NewMessage {
             thread_id,
+            attachments: Vec::new(),
             turn_id: None,
             role: Role::User,
             content: "test".to_string(),
@@ -2698,6 +2734,7 @@ mod tests {
     fn new_message_is_debug_clone() {
         let original = NewMessage {
             thread_id: Uuid::new_v4(),
+            attachments: Vec::new(),
             turn_id: Some(Uuid::new_v4()),
             role: Role::User,
             content: "hi".to_string(),

@@ -197,9 +197,11 @@ gateway; point it at a non-default port with
 
 ## Going deeper
 
-Three pages in [`docs/`](docs/) cover the parts of the system a newcomer
-meets first:
+The [`docs/`](docs/) pages cover the parts of the system a newcomer meets
+first:
 
+- [First session](docs/first-session.md) — opening a space, attaching a
+  repository as a workspace, and trusting it so its guidance reaches agents.
 - [Workflow engine](docs/workflow-engine.md) — how a workflow script runs,
   how a run survives a restart, and how its token budget is spent.
 - [Agents and permissions](docs/agents-and-permissions.md) — agent

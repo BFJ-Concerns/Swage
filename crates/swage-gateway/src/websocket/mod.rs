@@ -14,8 +14,6 @@ pub use work_surface::work_surface_ws_handler;
 use crate::state::AppState;
 #[cfg(test)]
 use axum::http::StatusCode;
-#[cfg(test)]
-pub(crate) use dispatch::SessionSkillRootGuard;
 pub(crate) use dispatch::discover_available_for_session;
 use dispatch::dispatch_client_message;
 #[cfg(test)]

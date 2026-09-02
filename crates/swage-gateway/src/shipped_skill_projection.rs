@@ -60,7 +60,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn regeneration_restores_bytes_and_removes_strays() {
+    async fn regeneration_restores_fresh_and_damaged_shipped_skill_roots() {
         let data_root = tempfile::tempdir().expect("temporary data root");
         regenerate(data_root.path())
             .await
@@ -80,13 +80,28 @@ mod tests {
             .expect("second regeneration");
 
         assert_eq!(
-            std::fs::read(projected).expect("restored script"),
+            std::fs::read(&projected).expect("restored script"),
             expected.as_bytes()
         );
         assert!(
             !stray.exists(),
             "whole-directory replacement removes strays"
         );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            assert_eq!(
+                std::fs::metadata(&projected)
+                    .expect("restored projected script metadata")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o755,
+                "restoring a damaged projection must also restore executable script mode"
+            );
+        }
     }
 
     #[tokio::test]

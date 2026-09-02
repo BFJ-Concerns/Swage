@@ -3,4 +3,4 @@ import type { AssemblyError } from "./AssemblyError";
 import type { CompactionRecord } from "./CompactionRecord";
 import type { ElementReport } from "./ElementReport";
 
-export type AssemblyReport = { assembly_name: string, elements: Array<ElementReport>, total_tokens: number, budget: number | null, budget_remaining: number | null, compaction_applied: Array<CompactionRecord>, warnings: Array<string>, errors: Array<AssemblyError>, effective_tool_permissions?: Record<string, unknown>, provider_visible?: Record<string, unknown>, duration: { secs: number; nanos: number }, };
+export type AssemblyReport = { assembly_name: string, elements: Array<ElementReport>, total_tokens: number, budget: number | null, budget_remaining: number | null, compaction_applied: Array<CompactionRecord>, warnings: Array<string>, errors: Array<AssemblyError>, effective_tool_permissions?: Record<string, unknown>, tool_scope?: Record<string, unknown>, provider_visible?: Record<string, unknown>, duration: { secs: number; nanos: number }, };

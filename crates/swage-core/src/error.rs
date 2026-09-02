@@ -359,6 +359,8 @@ pub struct DelegationRequest {
     pub cwd: Option<String>,
     /// Optional runtime-managed child isolation.
     pub isolation: Option<swage_protocol::client::workflow::WorkerIsolation>,
+    /// Named skills selected for this child dispatch.
+    pub skills: Option<Vec<String>>,
     /// Call-scoped inputs used to compose the child's context.
     pub composition: Box<crate::DispatchContextComposition>,
     /// Whether the parent turn should wait for the child result.

@@ -12,8 +12,8 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
 use swage_core::{
-    CompletionRequest, CompletionResponse, ProviderError, StreamChunk, ToolCompletionRequest,
-    ToolCompletionResponse,
+    CompletionRequest, CompletionResponse, EffortCapability, ProviderError, StreamChunk,
+    ToolCompletionRequest, ToolCompletionResponse,
 };
 
 use crate::provider::LlmProvider;
@@ -236,6 +236,10 @@ impl LlmProvider for CircuitBreakerProvider {
         stream: bool,
     ) -> serde_json::Value {
         self.inner.provider_request_snapshot(request, stream)
+    }
+
+    fn effort_capability(&self, model: &str) -> Option<EffortCapability> {
+        self.inner.effort_capability(model)
     }
 
     async fn count_tokens(
@@ -943,6 +947,13 @@ mod tests {
             serde_json::json!({"provider": "probe", "stream": stream})
         }
 
+        fn effort_capability(&self, _: &str) -> Option<EffortCapability> {
+            Some(EffortCapability::Levels {
+                levels: vec![swage_core::Effort::Low],
+                can_disable: false,
+            })
+        }
+
         async fn count_tokens(&self, _: &CompletionRequest) -> Result<Option<u64>, ProviderError> {
             Ok(Some(42))
         }
@@ -986,6 +997,13 @@ mod tests {
         let provider =
             CircuitBreakerProvider::new(Box::new(CountingProbe), CircuitBreakerConfig::default());
         assert_eq!(provider.count_tokens(&count_req()).await.unwrap(), Some(42));
+    }
+
+    #[test]
+    fn effort_capability_delegates_to_the_wrapped_provider() {
+        let provider =
+            CircuitBreakerProvider::new(Box::new(CountingProbe), CircuitBreakerConfig::default());
+        assert!(provider.effort_capability("any").is_some());
     }
 
     #[test]

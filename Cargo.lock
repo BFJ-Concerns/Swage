@@ -3627,6 +3627,7 @@ dependencies = [
  "mime_guess",
  "rand 0.10.2",
  "reqwest",
+ "rusqlite",
  "rust-embed",
  "serde",
  "serde_json",
@@ -5072,7 +5073,9 @@ checksum = "1ffae5123b2d3fc086436f8834ae3ab053a283cfac8fe0a0b8eaae044768a4c4"
 name = "xtask"
 version = "0.2.0"
 dependencies = [
+ "serde_json",
  "sha2 0.11.0",
+ "swage-workflow",
 ]
 
 [[package]]

@@ -148,6 +148,25 @@ describe("sendMessage", () => {
     const events = mock.sentEvents().map((s) => JSON.parse(s));
     expect(events).toContainEqual({ type: "send_message", content: "Hello, world" });
   });
+
+  it("carries attachments beside the text only when some are given", () => {
+    const mock = createMockWsClient();
+    const store = createConnectionStore({ wsClientFactory: () => mock });
+
+    store.connectTo("conv-abc");
+    store.sendMessage("What is this?", null, [
+      { kind: "image_url", url: "https://example.test/cat.png" },
+    ]);
+    store.sendMessage("And this?", null, []);
+
+    const events = mock.sentEvents().map((s) => JSON.parse(s));
+    expect(events).toContainEqual({
+      type: "send_message",
+      content: "What is this?",
+      attachments: [{ kind: "image_url", url: "https://example.test/cat.png" }],
+    });
+    expect(events).toContainEqual({ type: "send_message", content: "And this?" });
+  });
 });
 
 describe("cancelTurn", () => {

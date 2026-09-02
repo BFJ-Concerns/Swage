@@ -250,20 +250,23 @@ impl Agent {
             approval_scope.approve_remaining_gates();
         }
 
-        let assembled_context = if crate::compaction::exceeds_threshold(
+        let assembled_context = if crate::compaction::exceeds_threshold_with_model(
             &request.assembled_context,
             &self.config.compaction_threshold,
             self.provider.as_ref(),
+            self.config.model_id.as_deref(),
         )
         .await
         {
-            match crate::compaction::compact(
+            match crate::compaction::compact_with_model(
                 request.assembled_context,
                 &self.config.compaction_threshold,
                 self.provider.as_ref(),
                 self.storage.as_ref(),
                 thread_id,
                 compaction_focus.as_deref(),
+                self.config.model_id.as_deref(),
+                true,
             )
             .await
             {
@@ -303,7 +306,7 @@ impl Agent {
         let mut llm_request = CompletionRequest {
             messages: assembled_context,
             model: self.config.model_id.clone(),
-            effort: request.effort,
+            effort: request.effort.clone(),
             max_tokens: self.config.max_tokens,
             temperature: self.config.temperature,
             stop_sequences: self.config.stop_sequences.clone(),
@@ -622,6 +625,7 @@ impl Agent {
                         .storage
                         .append_message(swage_storage::model::AppendMessage {
                             thread_id,
+                            attachments: Vec::new(),
                             turn_id: Some(turn.id),
                             role: Role::Assistant,
                             content: accumulated.clone(),
@@ -718,6 +722,7 @@ impl Agent {
         self.storage
             .append_message(swage_storage::model::AppendMessage {
                 thread_id,
+                attachments: Vec::new(),
                 turn_id: Some(turn.id),
                 role: Role::Assistant,
                 content: safe_content.clone(),
@@ -1521,6 +1526,7 @@ impl Agent {
                     context,
                     cwd,
                     isolation,
+                    skills,
                     composition,
                     completion_mode,
                 } = *request;
@@ -1585,6 +1591,7 @@ impl Agent {
                         transferred_context,
                         cwd,
                         isolation,
+                        skills,
                         *composition,
                         &call.call_id,
                         &self.config.agent_id,
@@ -1977,6 +1984,7 @@ impl Agent {
             .storage
             .append_message(swage_storage::model::AppendMessage {
                 thread_id,
+                attachments: Vec::new(),
                 turn_id: Some(turn_id),
                 role: Role::Assistant,
                 content: safe_content.clone(),

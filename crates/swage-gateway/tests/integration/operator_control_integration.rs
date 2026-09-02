@@ -301,19 +301,15 @@ async fn effective_agent_definition_endpoint_selects_the_requested_space() {
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let definitions = body["definitions"].as_array().unwrap();
-    assert_eq!(definitions.len(), 5, "effective winners: {body}");
+    assert_eq!(definitions.len(), 3, "effective winners: {body}");
     assert_eq!(definitions[0]["id"], "gateway");
     assert_eq!(definitions[0]["source_scope"], "built_in");
-    assert_eq!(definitions[1]["id"], "organiser");
-    assert_eq!(definitions[1]["source_scope"], "built_in");
-    assert_eq!(definitions[2]["id"], "researcher");
-    assert_eq!(definitions[2]["instructions"], "authored winner");
-    assert_eq!(definitions[2]["source_scope"], "global");
-    assert_eq!(definitions[3]["id"], "shared");
-    assert_eq!(definitions[3]["instructions"], "space winner");
-    assert_eq!(definitions[3]["source_scope"], "space");
-    assert_eq!(definitions[4]["id"], "synthesist");
-    assert_eq!(definitions[4]["source_scope"], "built_in");
+    assert_eq!(definitions[1]["id"], "researcher");
+    assert_eq!(definitions[1]["instructions"], "authored winner");
+    assert_eq!(definitions[1]["source_scope"], "global");
+    assert_eq!(definitions[2]["id"], "shared");
+    assert_eq!(definitions[2]["instructions"], "space winner");
+    assert_eq!(definitions[2]["source_scope"], "space");
     assert!(
         definitions
             .iter()
@@ -410,7 +406,7 @@ async fn operator_overview_lists_sessions_jobs_approvals_channels_and_devices() 
     )
     .await
     .unwrap();
-    swage_gateway::presence::disconnect_machine(&state, "docker-a").await;
+    swage_gateway::presence::disconnect_device(&state, "docker-a").await;
 
     state.channel_routes.lock().await.insert(
         ChannelOrigin {

@@ -12,12 +12,13 @@ use futures::{StreamExt, stream};
 use tokio::sync::{Mutex, Notify, mpsc};
 
 use swage_core::{
-    ChatMessage, CompletionRequest, CompletionResponse, DelegateCompletionMode, MessageStatus,
-    ProviderError, SandboxError, StreamChunk, ToolCompletionRequest, ToolCompletionResponse,
-    ToolError, ToolReplayPart,
+    ChatMessage, CompletionRequest, CompletionResponse, ContentPart, DelegateCompletionMode,
+    MessageStatus, ProviderError, SandboxError, StreamChunk, ToolCompletionRequest,
+    ToolCompletionResponse, ToolError, ToolReplayPart,
 };
 use swage_core::{FinishReason, StorageError};
 use swage_hook::{Hook, HookOutcome, HookRegistration, HookRegistry};
+use swage_protocol::client::turn::MessageAttachment;
 use swage_provider::LlmProvider;
 use swage_storage::{
     model::{
@@ -78,6 +79,247 @@ fn provider_response_witness_is_appended_without_content_fields() {
     assert_eq!(response["witness"]["content_blocks"][0]["bytes"], 42);
     assert!(response["witness"].get("content").is_none());
     assert!(response["witness"].get("thinking").is_none());
+}
+
+#[tokio::test]
+async fn ordinary_and_delegated_snapshot_paths_record_provider_events_identically() {
+    let storage = Arc::new(MockStorage::new());
+    let (state, session_id) = make_state_with_storage(vec![], Arc::clone(&storage)).await;
+    let ordinary_turn_id = Uuid::new_v4();
+    let delegated_turn_id = Uuid::new_v4();
+    let mut ordinary_report = serde_json::json!({"assembly": "same input"});
+    let delegated_report = serde_json::json!({"assembly": "same input"});
+
+    let witness = swage_core::ProviderResponseWitness {
+        http_status: 200,
+        request_id: Some("request-3".into()),
+        terminal_event: Some("message_stop".into()),
+        stop_reason: Some("end_turn".into()),
+        usage: swage_core::TokenUsage {
+            input_tokens: 11,
+            output_tokens: 7,
+        },
+        content_blocks: vec![swage_core::ProviderContentBlockWitness {
+            block_type: "text".into(),
+            count: 1,
+            bytes: 7,
+        }],
+    };
+    let expected_provider_visible = serde_json::json!({
+        "requests": [{
+            "round": 3,
+            "request": {"messages": ["same request"]},
+        }],
+        "responses": [{
+            "round": 3,
+            "witness": witness,
+        }],
+        "reasoning": [{
+            "round": 3,
+            "content": "same reasoning",
+            "details": {"source": "provider"},
+        }],
+    });
+
+    for event in [
+        AgentEvent::ProviderRequestPrepared {
+            turn_id: ordinary_turn_id,
+            round: 3,
+            request: serde_json::json!({"messages": ["same request"]}),
+        },
+        AgentEvent::ProviderResponseCaptured {
+            turn_id: ordinary_turn_id,
+            round: 3,
+            witness: witness.clone(),
+        },
+        AgentEvent::ProviderReasoningCaptured {
+            turn_id: ordinary_turn_id,
+            round: 3,
+            content: "same reasoning".into(),
+            details: Some(serde_json::json!({"source": "provider"})),
+        },
+    ] {
+        apply_provider_snapshot_event(
+            &state,
+            &mut ordinary_report,
+            event,
+            ProviderSnapshotCapturePath::Ordinary,
+        )
+        .await;
+    }
+
+    storage
+        .store_snapshot(delegated_turn_id, &delegated_report.to_string())
+        .await
+        .expect("seed delegated snapshot");
+    for event in [
+        AgentEvent::ProviderRequestPrepared {
+            turn_id: delegated_turn_id,
+            round: 3,
+            request: serde_json::json!({"messages": ["same request"]}),
+        },
+        AgentEvent::ProviderResponseCaptured {
+            turn_id: delegated_turn_id,
+            round: 3,
+            witness,
+        },
+        AgentEvent::ProviderReasoningCaptured {
+            turn_id: delegated_turn_id,
+            round: 3,
+            content: "same reasoning".into(),
+            details: Some(serde_json::json!({"source": "provider"})),
+        },
+    ] {
+        delegation_snapshot_recorder_for_state(state.clone())
+            .record_event(session_id, event)
+            .await
+            .expect("record delegated provider event");
+    }
+    let delegated_report: serde_json::Value = serde_json::from_str(
+        &storage
+            .get_snapshot(delegated_turn_id)
+            .await
+            .expect("read delegated snapshot")
+            .expect("delegated snapshot"),
+    )
+    .expect("delegated snapshot JSON");
+
+    assert_eq!(
+        ordinary_report["provider_visible"],
+        expected_provider_visible
+    );
+    assert_eq!(
+        delegated_report["provider_visible"],
+        expected_provider_visible
+    );
+}
+
+#[test]
+fn ordinary_and_delegated_snapshot_paths_fail_closed_with_their_audit_wording() {
+    use std::sync::{Arc as StdArc, Mutex as StdMutex};
+    use tracing_subscriber::{Registry, layer::SubscriberExt};
+
+    #[derive(Default)]
+    struct MessageRecorder(StdArc<StdMutex<Vec<String>>>);
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for MessageRecorder {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            struct MessageVisitor<'a>(&'a mut Option<String>);
+
+            impl tracing::field::Visit for MessageVisitor<'_> {
+                fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                    if field.name() == "message" {
+                        *self.0 = Some(value.to_owned());
+                    }
+                }
+
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    if field.name() == "message" {
+                        *self.0 = Some(format!("{value:?}"));
+                    }
+                }
+            }
+
+            let mut message = None;
+            event.record(&mut MessageVisitor(&mut message));
+            if let Some(message) = message {
+                self.0.lock().unwrap().push(message);
+            }
+        }
+    }
+
+    let messages = MessageRecorder::default();
+    let captured_messages = StdArc::clone(&messages.0);
+    let subscriber = Registry::default().with(messages);
+
+    tracing::subscriber::with_default(subscriber, || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build test runtime")
+            .block_on(async {
+                let storage = Arc::new(MockStorage::new());
+                let (state, session_id) =
+                    make_state_with_storage(vec![], Arc::clone(&storage)).await;
+                let ordinary_turn_id = Uuid::new_v4();
+                let delegated_turn_id = Uuid::new_v4();
+                let mut ordinary_report = serde_json::json!({"assembly": "same input"});
+                let delegated_report = serde_json::json!({"assembly": "same input"});
+                let expected_provider_visible = serde_json::json!({
+                    "capture_errors": [{
+                        "round": 4,
+                        "kind": "secret_redaction_unavailable",
+                    }],
+                });
+
+                storage
+                    .store_snapshot(delegated_turn_id, &delegated_report.to_string())
+                    .await
+                    .expect("seed delegated snapshot");
+                storage.fail_secret_reads();
+                tracing::callsite::rebuild_interest_cache();
+
+                apply_provider_snapshot_event(
+                    &state,
+                    &mut ordinary_report,
+                    AgentEvent::ProviderRequestPrepared {
+                        turn_id: ordinary_turn_id,
+                        round: 4,
+                        request: serde_json::json!({"messages": ["secret request"]}),
+                    },
+                    ProviderSnapshotCapturePath::Ordinary,
+                )
+                .await;
+                delegation_snapshot_recorder_for_state(state.clone())
+                    .record_event(
+                        session_id,
+                        AgentEvent::ProviderRequestPrepared {
+                            turn_id: delegated_turn_id,
+                            round: 4,
+                            request: serde_json::json!({"messages": ["secret request"]}),
+                        },
+                    )
+                    .await
+                    .expect("record delegated redaction failure");
+                let delegated_report: serde_json::Value = serde_json::from_str(
+                    &storage
+                        .get_snapshot(delegated_turn_id)
+                        .await
+                        .expect("read delegated snapshot")
+                        .expect("delegated snapshot"),
+                )
+                .expect("delegated snapshot JSON");
+
+                assert_eq!(
+                    ordinary_report["provider_visible"],
+                    expected_provider_visible
+                );
+                assert_eq!(
+                    delegated_report["provider_visible"],
+                    expected_provider_visible
+                );
+                assert!(ordinary_report["provider_visible"]["requests"].is_null());
+                assert!(delegated_report["provider_visible"]["requests"].is_null());
+            });
+    });
+
+    let messages = captured_messages.lock().expect("recorded messages");
+    assert!(messages.iter().any(|message| {
+        message
+            == "provider-visible request capture omitted because secret redaction was unavailable"
+    }));
+    assert!(messages.iter().any(|message| {
+        message
+            == "delegated provider-visible request capture omitted because secret redaction was unavailable"
+    }));
 }
 
 #[test]
@@ -162,7 +404,7 @@ async fn provider_response_event_persists_witness_through_gateway_turn() {
         &state,
         session_id,
         None,
-        "Hello".into(),
+        TurnInput::from("Hello"),
         tx,
         Arc::new(Mutex::new(SubscriptionState::new(true))),
         None,
@@ -196,7 +438,7 @@ async fn provider_response_snapshot_failure_records_reconstruction_gap() {
         &state,
         session_id,
         None,
-        "Hello".into(),
+        TurnInput::from("Hello"),
         tx,
         Arc::new(Mutex::new(SubscriptionState::new(true))),
         None,
@@ -208,6 +450,59 @@ async fn provider_response_snapshot_failure_records_reconstruction_gap() {
     assert!(db.audit_events.iter().any(|event| {
         event.event_kind == "turn_record_degraded"
             && event.metadata["record"] == "provider_response_witness"
+    }));
+}
+
+#[tokio::test]
+async fn compaction_snapshot_failure_records_reconstruction_gap_through_turn_loop() {
+    let storage = Arc::new(MockStorage::new());
+    storage.fail_snapshot_writes();
+    let (state, session_id) =
+        make_state_with_storage(provider_witness_chunks(), Arc::clone(&storage)).await;
+    let thread_id = storage
+        .list_by_session(session_id)
+        .await
+        .expect("list test thread")
+        .into_iter()
+        .next()
+        .expect("default thread")
+        .id;
+
+    for index in 0..101 {
+        storage
+            .append_message(AppendMessage {
+                thread_id,
+                attachments: Vec::new(),
+                turn_id: None,
+                role: if index % 2 == 0 {
+                    swage_core::Role::User
+                } else {
+                    swage_core::Role::Assistant
+                },
+                content: format!("history message {index}"),
+                agent_id: "gateway".to_string(),
+            })
+            .await
+            .expect("seed history for compaction");
+    }
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    process_turn(
+        &state,
+        session_id,
+        None,
+        TurnInput::from("continue"),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .expect("a recorded reconstruction gap should allow the turn to complete");
+
+    let db = storage.db.lock().await;
+    assert!(db.audit_events.iter().any(|event| {
+        event.event_kind == "turn_record_degraded"
+            && event.metadata["record"] == "compaction_snapshot"
     }));
 }
 
@@ -300,7 +595,13 @@ impl LlmProvider for MockProvider {
         &self,
         _request: CompletionRequest,
     ) -> Result<CompletionResponse, ProviderError> {
-        unimplemented!("not used in streaming tests")
+        Ok(CompletionResponse {
+            content: "Compacted history".to_string(),
+            input_tokens: 1,
+            output_tokens: 1,
+            finish_reason: FinishReason::Stop,
+            cost: None,
+        })
     }
 
     async fn complete_with_tools(
@@ -851,6 +1152,7 @@ pub(crate) struct MockStorage {
     fail_turn_state_writes: AtomicBool,
     fail_turn_state_write_at: AtomicUsize,
     turn_state_write_calls: AtomicUsize,
+    idle_thread_state_write_calls: AtomicUsize,
     fail_inbound_audit_writes: AtomicBool,
     fail_append_message_at: AtomicUsize,
     append_message_calls: AtomicUsize,
@@ -907,6 +1209,7 @@ impl swage_storage::WorkflowStore for MockStorage {
         _: Uuid,
         _: Option<&str>,
         _: Option<serde_json::Value>,
+        _: Option<Uuid>,
     ) -> Result<swage_storage::WorkflowScriptRecord, StorageError> {
         unimplemented!()
     }
@@ -990,6 +1293,11 @@ impl swage_storage::WorkflowStore for MockStorage {
     async fn list_due_parked_workflow_runs(
         &self,
         _: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<swage_storage::WorkflowRunRecord>, StorageError> {
+        unimplemented!()
+    }
+    async fn list_parked_workflow_runs(
+        &self,
     ) -> Result<Vec<swage_storage::WorkflowRunRecord>, StorageError> {
         unimplemented!()
     }
@@ -1124,6 +1432,7 @@ impl MockStorage {
             fail_turn_state_writes: AtomicBool::new(false),
             fail_turn_state_write_at: AtomicUsize::new(0),
             turn_state_write_calls: AtomicUsize::new(0),
+            idle_thread_state_write_calls: AtomicUsize::new(0),
             fail_inbound_audit_writes: AtomicBool::new(false),
             fail_append_message_at: AtomicUsize::new(0),
             append_message_calls: AtomicUsize::new(0),
@@ -1151,6 +1460,10 @@ impl MockStorage {
 
     pub(crate) fn turn_state_write_calls(&self) -> usize {
         self.turn_state_write_calls.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn idle_thread_state_write_calls(&self) -> usize {
+        self.idle_thread_state_write_calls.load(Ordering::SeqCst)
     }
 
     fn fail_inbound_audit_writes(&self) {
@@ -1573,17 +1886,17 @@ impl WorkspaceAttachmentStore for MockStorage {
 impl DeviceStore for MockStorage {
     async fn upsert_device(
         &self,
-        host: NewDeviceRegistration,
+        device: NewDeviceRegistration,
     ) -> Result<DeviceRegistration, StorageError> {
         let registration = DeviceRegistration {
-            device_id: host.device_id,
-            label: host.label,
-            kind: host.kind,
-            base_url: host.base_url,
-            shared_token: host.shared_token,
-            workspace_root: host.workspace_root,
-            workspace_roots: host.workspace_roots,
-            capabilities: host.capabilities,
+            device_id: device.device_id,
+            label: device.label,
+            kind: device.kind,
+            base_url: device.base_url,
+            shared_token: device.shared_token,
+            workspace_root: device.workspace_root,
+            workspace_roots: device.workspace_roots,
+            capabilities: device.capabilities,
             registered_at: chrono::Utc::now(),
         };
         self.db
@@ -2429,6 +2742,10 @@ impl ThreadStore for MockStorage {
     }
 
     async fn update_state(&self, id: Uuid, state: ThreadState) -> Result<(), StorageError> {
+        if state == ThreadState::Idle {
+            self.idle_thread_state_write_calls
+                .fetch_add(1, Ordering::SeqCst);
+        }
         let mut db = self.db.lock().await;
         match db.threads.get_mut(&id) {
             None => Err(StorageError::NotFound {
@@ -2550,6 +2867,7 @@ impl ThreadStore for MockStorage {
             db.messages.push(swage_storage::Message {
                 id: message_id,
                 thread_id: branch.child_thread_id,
+                attachments: Vec::new(),
                 turn_id: message.turn_id,
                 role: message.role,
                 content: message.content,
@@ -2929,6 +3247,7 @@ impl MessageStore for MockStorage {
         let m = Message {
             id: Uuid::new_v4(),
             thread_id: message.thread_id,
+            attachments: message.attachments,
             turn_id: message.turn_id,
             role: message.role,
             content: message.content,
@@ -2960,6 +3279,7 @@ impl MessageStore for MockStorage {
         let created = Message {
             id: Uuid::new_v4(),
             thread_id: message.thread_id,
+            attachments: message.attachments,
             turn_id: message.turn_id,
             role: message.role,
             content: message.content,
@@ -3982,6 +4302,232 @@ async fn session_config_uses_root_retained_at_state_construction() {
     assert_eq!(loaded.communication.message_ttl_secs, 111);
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn active_skill_loading_keeps_agent_skills_out_of_reserved_workflow_contexts() {
+    let root = SwageHomeGuard::new();
+    let normal_skill = root
+        .path()
+        .join("spaces/default/agents/gateway/skills/normal-agent-skill/SKILL.md");
+    let reserved_skill = root
+        .path()
+        .join("spaces/default/agents")
+        .join(swage_config::RESERVED_WORKFLOW_AGENT_ID)
+        .join("skills/reserved-agent-skill/SKILL.md");
+    for (path, instructions) in [
+        (&normal_skill, "Normal agent skill instructions."),
+        (
+            &reserved_skill,
+            "Reserved worker instructions must not load.",
+        ),
+    ] {
+        std::fs::create_dir_all(path.parent().expect("skill directory"))
+            .expect("create skill directory");
+        std::fs::write(
+            path,
+            format!("---\ndescription: Test skill\n---\n{instructions}\n"),
+        )
+        .expect("write skill fixture");
+    }
+
+    let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
+    let space = storage
+        .get_or_create_default()
+        .await
+        .expect("create default space");
+    let session = storage
+        .create_session(NewSession {
+            space_id: space.id,
+            agent_id: "gateway".to_string(),
+            metadata: None,
+            active_workspace_attachment_id: None,
+        })
+        .await
+        .expect("create normal-agent session");
+    let session_id = session.id;
+    let state = AppState::new_with_config_root(
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
+        Arc::new(MockProvider::new(vec![])) as Arc<dyn LlmProvider>,
+        swage_config::ResolvedConfig::default(),
+        crate::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+        root.path().to_path_buf(),
+    );
+    let (available, warnings) = crate::skill::SkillManager::discover_available(
+        root.path(),
+        &root.path().join("spaces/default"),
+        Some(&root.path().join("spaces/default/agents/gateway")),
+    );
+    assert!(
+        warnings.is_empty(),
+        "fixture skills must parse: {warnings:?}"
+    );
+    assert!(
+        available
+            .iter()
+            .any(|skill| skill.name == "normal-agent-skill"),
+        "normal fixture skill must be discoverable: {available:?}"
+    );
+    let normal = load_active_skills_for_agent(
+        &state,
+        session_id,
+        "default",
+        "gateway",
+        Some(root.path()),
+        true,
+        &[],
+        &[],
+    )
+    .await
+    .expect("load normal agent skills");
+    assert_eq!(
+        normal
+            .iter()
+            .map(|skill| skill.name.as_str())
+            .collect::<Vec<_>>(),
+        ["normal-agent-skill"],
+        "a normal agent must asynchronously load and activate its agent-level skill"
+    );
+
+    let reserved = load_active_skills_for_agent(
+        &state,
+        session_id,
+        "default",
+        swage_config::RESERVED_WORKFLOW_AGENT_ID,
+        Some(root.path()),
+        false,
+        &[],
+        &[],
+    )
+    .await
+    .expect("load reserved workflow agent skills");
+    assert!(
+        reserved.is_empty(),
+        "the reserved workflow agent must not discover either agent-directory skill: {reserved:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn process_turn_loads_agent_skills_and_excludes_reserved_workflow_skills() {
+    let root = SwageHomeGuard::new();
+    let normal_skill = root
+        .path()
+        .join("spaces/default/agents/gateway/skills/normal-agent-skill/SKILL.md");
+    let reserved_skill = root
+        .path()
+        .join("spaces/default/agents")
+        .join(swage_config::RESERVED_WORKFLOW_AGENT_ID)
+        .join("skills/reserved-agent-skill/SKILL.md");
+    for (path, instructions) in [
+        (&normal_skill, "Normal agent skill instructions."),
+        (
+            &reserved_skill,
+            "Reserved worker instructions must not reach a provider.",
+        ),
+    ] {
+        std::fs::create_dir_all(path.parent().expect("skill directory"))
+            .expect("create skill directory");
+        std::fs::write(
+            path,
+            format!("---\ndescription: Test skill\n---\n{instructions}\n"),
+        )
+        .expect("write skill fixture");
+    }
+
+    let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
+    let space = storage
+        .get_or_create_default()
+        .await
+        .expect("create default space");
+    let mut session_ids = Vec::new();
+    for agent_id in ["gateway", swage_config::RESERVED_WORKFLOW_AGENT_ID] {
+        let session = storage
+            .create_session(NewSession {
+                space_id: space.id,
+                agent_id: agent_id.to_string(),
+                metadata: None,
+                active_workspace_attachment_id: None,
+            })
+            .await
+            .expect("create skill fixture session");
+        ThreadStore::create(
+            storage.as_ref(),
+            NewThread {
+                session_id: session.id,
+                agent_id: agent_id.to_string(),
+            },
+        )
+        .await
+        .expect("create skill fixture thread");
+        session_ids.push(session.id);
+    }
+    let (provider, captured_requests) = CapturingMultiRoundProvider::new(vec![
+        vec![
+            StreamChunk::Delta {
+                content: "normal reply".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ],
+        vec![
+            StreamChunk::Delta {
+                content: "reserved reply".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ],
+    ]);
+    let state = AppState::new_with_config_root(
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
+        Arc::new(provider) as Arc<dyn LlmProvider>,
+        swage_config::ResolvedConfig::default(),
+        crate::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+        root.path().to_path_buf(),
+    );
+    for session_id in session_ids {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        process_turn(
+            &state,
+            session_id,
+            None,
+            TurnInput::from("exercise agent skill loading"),
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
+        )
+        .await
+        .expect("turn should complete");
+    }
+
+    let requests = captured_requests.lock().expect("captured requests");
+    assert_eq!(
+        requests.len(),
+        2,
+        "one provider request per foreground turn"
+    );
+    let request_text = |request: &CompletionRequest| {
+        request
+            .messages
+            .iter()
+            .map(ChatMessage::text_content)
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    assert!(
+        request_text(&requests[0]).contains("Normal agent skill instructions."),
+        "process_turn must load the normal agent-level skill before calling the provider"
+    );
+    assert!(
+        !request_text(&requests[1])
+            .contains("Reserved worker instructions must not reach a provider."),
+        "process_turn must exclude reserved workflow-agent directory skills from the provider context"
+    );
+}
+
 pub(crate) async fn make_state_with_storage(
     provider_chunks: Vec<StreamChunk>,
     storage: Arc<MockStorage>,
@@ -4177,7 +4723,7 @@ async fn fresh_codex_turn_completes_without_degraded_execution_opt_in_or_audit()
         &state,
         session_id,
         None,
-        "Hello Codex".into(),
+        TurnInput::from("Hello Codex"),
         tx,
         Arc::new(Mutex::new(SubscriptionState::new(true))),
         None,
@@ -5219,6 +5765,159 @@ async fn approved_sandbox_fallback_build_failure_clears_active_turn() {
 }
 
 #[tokio::test]
+async fn approved_sandbox_degradation_resumes_to_tool_approval_and_completion() {
+    let rounds = vec![
+        vec![
+            StreamChunk::ToolUse {
+                call_id: "fallback-echo".into(),
+                name: "echo".into(),
+                arguments: serde_json::json!({ "text": "continued without isolation" }),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ],
+        vec![
+            StreamChunk::Delta {
+                content: "The fallback turn completed.".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ],
+    ];
+    let (state, session_id) = make_state_with_approval_gated_echo(rounds).await;
+    state.fail_next_dispatcher_builds(1);
+
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let task_state = state.clone();
+    let task = tokio::spawn(async move {
+        process_turn(
+            &task_state,
+            session_id,
+            None,
+            TurnInput::from("Use echo after accepting degraded execution"),
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
+        )
+        .await
+    });
+
+    let mut saw_degradation_approval = false;
+    let mut saw_tool_approval = false;
+    let mut saw_tool_start = false;
+    let mut saw_tool_end = false;
+    let mut saw_token = false;
+    let mut saw_complete = false;
+    while !saw_complete {
+        let event = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+            .await
+            .expect("turn should continue emitting events after each approval")
+            .expect("turn event channel should stay open until completion");
+        match event {
+            ServerEvent::ApprovalRequired {
+                approval_id,
+                kind,
+                tool_name,
+                ..
+            } if kind == "hook" => {
+                assert!(
+                    !saw_degradation_approval,
+                    "the sandbox fallback should require one degradation approval"
+                );
+                assert_eq!(tool_name, None, "the fallback approval is not a tool call");
+                saw_degradation_approval = true;
+                state
+                    .approval_channels
+                    .lock()
+                    .unwrap()
+                    .remove(&approval_id)
+                    .expect("degradation approval channel should be registered")
+                    .send(swage_agent::ApprovalDecision {
+                        decision: swage_agent::approval::ApprovalDecisionValue::Approved,
+                        scope: swage_agent::approval::ApprovalDecisionScope::Once,
+                        reason: None,
+                    })
+                    .expect("degradation approval should resume the turn");
+            }
+            ServerEvent::ApprovalRequired {
+                approval_id,
+                kind,
+                tool_name,
+                ..
+            } if kind == "tool" => {
+                assert!(
+                    saw_degradation_approval,
+                    "ordinary tool approval must follow the accepted degradation approval"
+                );
+                assert_eq!(tool_name.as_deref(), Some("echo"));
+                saw_tool_approval = true;
+                state
+                    .approval_channels
+                    .lock()
+                    .unwrap()
+                    .remove(&approval_id)
+                    .expect("tool approval channel should be registered")
+                    .send(swage_agent::ApprovalDecision {
+                        decision: swage_agent::approval::ApprovalDecisionValue::Approved,
+                        scope: swage_agent::approval::ApprovalDecisionScope::Once,
+                        reason: None,
+                    })
+                    .expect("tool approval should resume execution");
+            }
+            ServerEvent::ToolStart { tool, .. } if tool == "echo" => saw_tool_start = true,
+            ServerEvent::ToolEnd { tool, status, .. } if tool == "echo" && status == "success" => {
+                saw_tool_end = true
+            }
+            ServerEvent::Token { content } if content.contains("fallback turn completed") => {
+                saw_token = true
+            }
+            ServerEvent::TurnComplete { .. } => saw_complete = true,
+            ServerEvent::Error { message, .. } => panic!("fallback turn must not fail: {message}"),
+            _ => {}
+        }
+    }
+
+    task.await
+        .expect("turn task should finish")
+        .expect("accepted degradation should continue the turn");
+    assert!(
+        saw_tool_approval,
+        "ordinary tool approval should be rendered"
+    );
+    assert!(saw_tool_start, "approved tool should execute");
+    assert!(saw_tool_end, "tool execution should finish successfully");
+    assert!(saw_token, "the final assistant output should stream");
+
+    let thread = state
+        .storage
+        .list_by_session(session_id)
+        .await
+        .unwrap()
+        .remove(0);
+    let turn = state
+        .storage
+        .list_turns_by_thread(thread.id)
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!(turn.state, TurnState::Completed);
+    assert_eq!(
+        turn.assistant_response.as_deref(),
+        Some("The fallback turn completed."),
+        "the assistant result should persist after the approved fallback"
+    );
+    let calls = state
+        .storage
+        .list_tool_calls_by_turn(turn.id)
+        .await
+        .unwrap();
+    assert_eq!(calls.len(), 1, "the approved echo call should persist");
+    assert_eq!(calls[0].status.as_deref(), Some("success"));
+}
+
+#[tokio::test]
 async fn attended_sandbox_failure_records_interactive_attendance() {
     let mut config = swage_config::ResolvedConfig::default();
     config.sandbox.enabled = false;
@@ -5275,6 +5974,114 @@ async fn unattended_sandbox_failure_records_unattended_attendance() {
         event.event_kind == "execution_isolation_degraded"
             && event.metadata["execution_context"] == "unattended turn"
     }));
+}
+
+#[tokio::test]
+async fn unattended_turn_rejects_a_relative_managed_scratch_root() {
+    let storage = Arc::new(MockStorage::new());
+    let (state, session_id) = make_state_with_storage_and_root(
+        vec![],
+        Arc::clone(&storage),
+        Some(std::path::PathBuf::from(".")),
+    )
+    .await;
+
+    let error = process_turn_with_composition(
+        &state,
+        session_id,
+        None,
+        "message".to_string(),
+        mpsc::unbounded_channel().0,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+        None,
+        None,
+        None,
+        None,
+        TurnAttendance::Unattended,
+        DispatchContextComposition::default(),
+        None,
+    )
+    .await
+    .expect_err("an unattended relative scratch root must not inherit the launch directory");
+
+    assert!(
+        error
+            .to_string()
+            .contains("attach a workspace or configure an absolute managed scratch root"),
+        "the refusal must explain how to establish a deliberate root: {error}"
+    );
+    let thread = storage
+        .list_by_session(session_id)
+        .await
+        .expect("thread")
+        .remove(0);
+    let turns = storage
+        .list_turns_by_thread(thread.id)
+        .await
+        .expect("turns");
+    assert_eq!(turns[0].state, TurnState::Failed);
+    assert!(
+        !state.active_turns.lock().await.contains_key(&session_id),
+        "the rejected turn must release its active-turn guard"
+    );
+}
+
+#[tokio::test]
+async fn unattended_turn_accepts_an_active_workspace_when_scratch_root_is_relative() {
+    let storage = Arc::new(MockStorage::new());
+    let (state, session_id) = make_state_with_storage_and_root(
+        vec![
+            StreamChunk::Delta {
+                content: "configured root".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ],
+        Arc::clone(&storage),
+        Some(std::path::PathBuf::from(".")),
+    )
+    .await;
+    let workspace = tempfile::tempdir().expect("workspace root");
+    let session = storage
+        .get_session(session_id)
+        .await
+        .expect("session lookup")
+        .expect("session");
+    let attachment = storage
+        .create_workspace_attachment(NewWorkspaceAttachment {
+            space_id: session.space_id,
+            label: "configured workspace".into(),
+            path: workspace.path().to_string_lossy().into_owned(),
+            permissions: vec!["read".into(), "write".into()],
+            is_trusted: true,
+        })
+        .await
+        .expect("workspace attachment");
+    storage
+        .set_session_active_workspace(session_id, Some(attachment.id))
+        .await
+        .expect("select workspace attachment");
+
+    process_turn_with_composition(
+        &state,
+        session_id,
+        None,
+        "message".to_string(),
+        mpsc::unbounded_channel().0,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+        None,
+        None,
+        None,
+        None,
+        TurnAttendance::Unattended,
+        DispatchContextComposition::default(),
+        None,
+    )
+    .await
+    .expect("an active workspace is a deliberate unattended tool root");
 }
 
 #[tokio::test]
@@ -6156,6 +6963,7 @@ async fn second_tool_round_request_replays_reasoning_when_model_capability_opts_
             default_effort: None,
             capabilities: swage_config::ModelCapabilitiesConfig {
                 reasoning_replay: true,
+                effort: None,
             },
         },
     )]
@@ -6588,6 +7396,7 @@ async fn branch_turn_rebuilds_tool_replay_from_copied_history() {
     storage
         .create_message(NewMessage {
             thread_id: parent_thread.id,
+            attachments: Vec::new(),
             turn_id: Some(parent_turn.id),
             role: Role::User,
             content: "Use echo".to_string(),
@@ -6599,6 +7408,7 @@ async fn branch_turn_rebuilds_tool_replay_from_copied_history() {
     let assistant_message = storage
         .create_message(NewMessage {
             thread_id: parent_thread.id,
+            attachments: Vec::new(),
             turn_id: Some(parent_turn.id),
             role: Role::Assistant,
             content: "Echo complete".to_string(),
@@ -6778,6 +7588,7 @@ async fn later_turn_rebuilds_failed_tool_replay_as_error() {
     storage
         .create_message(NewMessage {
             thread_id: thread.id,
+            attachments: Vec::new(),
             turn_id: Some(failed_turn.id),
             role: Role::User,
             content: "Run the command".to_string(),
@@ -6789,6 +7600,7 @@ async fn later_turn_rebuilds_failed_tool_replay_as_error() {
     storage
         .create_message(NewMessage {
             thread_id: thread.id,
+            attachments: Vec::new(),
             turn_id: Some(failed_turn.id),
             role: Role::Assistant,
             content: "Trying the command".to_string(),
@@ -7120,7 +7932,7 @@ async fn attended_turn_prompts_and_records_rejected_granted_tool_call() {
             &task_state,
             session_id,
             None,
-            "Use echo".into(),
+            TurnInput::from("Use echo"),
             tx,
             Arc::new(Mutex::new(SubscriptionState::new(true))),
             None,
@@ -7360,6 +8172,7 @@ async fn assert_delegation_fails_before_child_creation(
             None,
             None,
             None,
+            None,
             DispatchContextComposition::default(),
             request_id,
             "gateway",
@@ -7494,6 +8307,7 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
                 "target_agent": "agent-b",
                 "task": "Summarise this request",
                 "task_definition": "strict-review",
+                "skills": ["delegated-specialist"],
                 "elements": ["delegated-brief"],
                 "variables": {"owner": "delegating parent"},
                 "assembly": "delegated-focus",
@@ -7611,14 +8425,26 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
         "---\ndescription: Definition-declared behaviour\n---\nUse the definition-declared skill.\n",
     )
     .expect("write declared skill");
-    let target_agent_dir = swage_home.path().join("spaces/default/agents/agent-b");
-    std::fs::create_dir_all(target_agent_dir.join("skills/delegated-specialist"))
-        .expect("create delegated agent directory");
+    let requested_skill_dir = swage_home
+        .path()
+        .join("spaces/default/skills/delegated-specialist");
+    std::fs::create_dir_all(&requested_skill_dir)
+        .expect("create requested delegated skill directory");
     std::fs::write(
-            target_agent_dir.join("skills/delegated-specialist/SKILL.md"),
+            requested_skill_dir.join("SKILL.md"),
             "---\ndescription: Delegated specialist behaviour\n---\nUse the delegated specialist skill.\n",
         )
-        .expect("write delegated agent skill");
+        .expect("write requested delegated skill");
+    let agent_skill_dir = swage_home
+        .path()
+        .join("spaces/default/agents/agent-b/skills/agent-owned-specialist");
+    std::fs::create_dir_all(&agent_skill_dir)
+        .expect("create delegated agent-level skill directory");
+    std::fs::write(
+        agent_skill_dir.join("SKILL.md"),
+        "---\ndescription: Agent-owned specialist behaviour\n---\nUse the agent-owned specialist skill.\n",
+    )
+    .expect("write delegated agent-level skill");
     let _guard = SwageHomeGuard::set_to(swage_home.path());
     storage
         .activate_skill(session_id, "foreground-only")
@@ -7769,6 +8595,18 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
         "delegated assembly report should contain its element decisions"
     );
     assert_eq!(child_snapshot["assembly_name"], "delegated-focus");
+    let skills = child_snapshot["elements"]
+        .as_array()
+        .expect("delegated assembly report should list elements")
+        .iter()
+        .find(|element| element["name"] == "skills")
+        .expect("delegated child report should record its requested skills");
+    assert!(
+        skills["source"]
+            .as_str()
+            .is_some_and(|source| source.contains("delegated-specialist")),
+        "delegated child report should name the requested skill: {skills}"
+    );
     assert!(
         child_snapshot["elements"]
             .as_array()
@@ -7974,8 +8812,9 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
     );
     assert!(
         child_request_text.contains("## Skills available in this session")
-            && child_request_text.contains("delegated-specialist — Delegated specialist behaviour"),
-        "delegated provider request should include the target skill catalogue: {child_request_text}"
+            && child_request_text
+                .contains("agent-owned-specialist — Agent-owned specialist behaviour"),
+        "delegated provider request should catalogue the target agent's own skill: {child_request_text}"
     );
     assert!(
         child_request_text.contains("Inherited Background Context"),
@@ -7990,8 +8829,8 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
         "delegated provider request should fence the task separately: {child_request_text}"
     );
     assert!(
-        child_request_text.contains("Use the delegated specialist skill."),
-        "delegated provider request should include target agent-level skill instructions: {child_request_text}"
+        child_request_text.contains("Use the agent-owned specialist skill."),
+        "delegated provider request should activate the target agent's own skill instructions: {child_request_text}"
     );
     assert!(
         child_request_text.contains("Use the definition-declared skill."),
@@ -8040,8 +8879,8 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
         .collect::<Vec<_>>()
         .join("\n\n");
     assert!(
-        !resumed_parent_request_text.contains("Use the delegated specialist skill."),
-        "target agent skill instructions must not bleed into the resumed parent request"
+        !resumed_parent_request_text.contains("Use the agent-owned specialist skill."),
+        "the target agent's own skill instructions must not bleed into the resumed parent request"
     );
     let next_parent_request_text = captured_requests[4]
         .messages
@@ -8215,7 +9054,7 @@ async fn delegated_child_snapshot_records_exact_non_empty_effective_tool_grant()
         &state,
         session.id,
         None,
-        "Delegate this".into(),
+        TurnInput::from("Delegate this"),
         tx,
         Arc::new(Mutex::new(SubscriptionState::new(true))),
         None,
@@ -8639,6 +9478,7 @@ async fn delegated_read_only_location_approval_allows_read_and_refuses_write() {
             None,
             Some(attachment.to_string_lossy().into_owned()),
             None,
+            None,
             DispatchContextComposition::default(),
             "read-only-placement-delegate",
             "gateway",
@@ -8794,6 +9634,7 @@ async fn workflow_call_tool_bound_survives_delegation_and_child_continuation() {
             None,
             None,
             None,
+            None,
             DispatchContextComposition::default(),
             "workflow-bounded-delegate",
             "agent-a",
@@ -8827,7 +9668,7 @@ async fn workflow_call_tool_bound_survives_delegation_and_child_continuation() {
         &state,
         child_session.id,
         None,
-        "continue the delegated work".into(),
+        TurnInput::from("continue the delegated work"),
         tx,
         Arc::new(Mutex::new(SubscriptionState::new(true))),
         None,
@@ -8968,6 +9809,7 @@ async fn task_scoped_delegate_keeps_its_permission_bound_when_delegating_again()
             "agent-b",
             "Delegate once more",
             Some("delegation-only"),
+            None,
             None,
             None,
             None,
@@ -9149,6 +9991,7 @@ async fn placed_delegate_keeps_exact_read_only_authority_when_delegating_again()
             None,
             Some(placed_workspace.to_string_lossy().into_owned()),
             None,
+            None,
             DispatchContextComposition::default(),
             "outer-placed-delegate",
             "gateway",
@@ -9313,6 +10156,7 @@ async fn delegate_worktree_provisions_isolated_cwd_and_records_resolved_placemen
             None,
             Some(repo.to_string_lossy().into_owned()),
             Some(swage_protocol::client::workflow::WorkerIsolation::Worktree),
+            None,
             DispatchContextComposition::default(),
             "wait-worktree-delegate-call",
             "gateway",
@@ -9323,7 +10167,15 @@ async fn delegate_worktree_provisions_isolated_cwd_and_records_resolved_placemen
         )
         .await
         .expect("wait-mode worktree delegation should complete");
-    assert!(matches!(wait_outcome, DelegationOutcome::Completed(_)));
+    let wait_result = match wait_outcome {
+        DelegationOutcome::Completed(result) => result,
+        DelegationOutcome::Detached(_) => panic!("wait-mode delegation must complete"),
+    };
+    assert_eq!(
+        wait_result["working_directory"],
+        wait_worktree.to_string_lossy().as_ref(),
+        "the waiting dispatcher receives the real provisioned directory"
+    );
     assert!(
         storage.list_approvals().await.unwrap().is_empty(),
         "the waiting delegated turn must use its enforced grant without parking"
@@ -9349,6 +10201,7 @@ async fn delegate_worktree_provisions_isolated_cwd_and_records_resolved_placemen
             None,
             Some(repo.to_string_lossy().into_owned()),
             Some(swage_protocol::client::workflow::WorkerIsolation::Worktree),
+            None,
             DispatchContextComposition::default(),
             "worktree-delegate-call",
             "gateway",
@@ -9412,12 +10265,17 @@ async fn delegate_worktree_provisions_isolated_cwd_and_records_resolved_placemen
         storage.list_approvals().await.unwrap().is_empty(),
         "the detached delegated turn must use its enforced grant without parking"
     );
-    assert!(
-        result_messages.iter().any(|message| {
+    let result = result_messages
+        .iter()
+        .find(|message| {
             message.kind == swage_core::MessageKind::Result
                 && message.payload.get("error").is_none()
-        }),
-        "the detached delegate should record a successful terminal result"
+        })
+        .expect("the detached delegate should record a successful terminal result");
+    assert_eq!(
+        result.payload["working_directory"],
+        worktree.to_string_lossy().as_ref(),
+        "the durable completion reports the real provisioned directory"
     );
     for _ in 0..20 {
         if state.worktree_host.list_owner(owner_id).await.is_empty() && !worktree.exists() {
@@ -9517,6 +10375,7 @@ async fn detached_delegate_can_be_cancelled_through_active_registry() {
             None,
             Some(delegated_cwd.path().to_string_lossy().into_owned()),
             Some(swage_protocol::client::workflow::WorkerIsolation::Worktree),
+            None,
             DispatchContextComposition::default(),
             "detached-placement-delegate",
             "gateway",
@@ -9553,6 +10412,7 @@ async fn detached_delegate_can_be_cancelled_through_active_registry() {
             None,
             None,
             Some(denied_cwd.path().to_string_lossy().into_owned()),
+            None,
             None,
             DispatchContextComposition::default(),
             "denied-placement-delegate",
@@ -9849,7 +10709,7 @@ async fn capture_provider_effort_for_selected_model(
         &state,
         session_id,
         None,
-        "hi".into(),
+        TurnInput::from("hi"),
         tx,
         Arc::new(Mutex::new(SubscriptionState::new(true))),
         None,
@@ -9863,6 +10723,7 @@ async fn capture_provider_effort_for_selected_model(
         .take()
         .expect("provider should receive the turn request")
         .effort
+        .map(|resolved| resolved.requested)
 }
 
 #[tokio::test]
@@ -9980,6 +10841,141 @@ async fn process_turn_uses_aliased_model_default_effort_without_session_metadata
     );
 }
 
+/// The effort exemplar's turn seam: the intent resolves once against the
+/// effective model's declared capability, the provider receives the resolved
+/// control, and the turn's audit snapshot records the outcome — a clamp
+/// included.
+#[tokio::test]
+async fn process_turn_resolves_effort_against_the_declared_capability_and_records_it() {
+    let chunks = vec![
+        StreamChunk::Delta {
+            content: "Hello".into(),
+        },
+        StreamChunk::Done {
+            finish_reason: None,
+        },
+    ];
+    let (provider, captured_request) = CapturingProvider::new(chunks);
+    let (storage, session_id) =
+        make_storage_with_session_metadata(Some(serde_json::json!({"effort": "max"}))).await;
+    let mut config = swage_config::ResolvedConfig::default();
+    config.models.default = "local".into();
+    config.models.entries.insert(
+        "local".into(),
+        swage_config::ModelEndpointConfig {
+            provider_id: "local".into(),
+            model_id: "local-reasoner".into(),
+            capabilities: swage_config::ModelCapabilitiesConfig {
+                reasoning_replay: false,
+                effort: Some(swage_core::EffortCapability::Levels {
+                    levels: vec![swage_core::Effort::Low, swage_core::Effort::High],
+                    can_disable: false,
+                }),
+            },
+            ..Default::default()
+        },
+    );
+    let state = AppState::new(
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
+        Arc::new(provider) as Arc<dyn LlmProvider>,
+        config,
+        crate::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+    );
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    process_turn(
+        &state,
+        session_id,
+        None,
+        TurnInput::from("hi"),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .expect("turn ok");
+
+    let resolved = captured_request
+        .lock()
+        .unwrap()
+        .take()
+        .expect("provider request")
+        .effort
+        .expect("effort reached the provider");
+    assert_eq!(resolved.requested, swage_core::Effort::Max);
+    assert_eq!(
+        resolved.control,
+        swage_core::EffortControl::Level {
+            level: swage_core::Effort::High
+        }
+    );
+    assert_eq!(resolved.clamped_to, Some(swage_core::Effort::High));
+
+    let snapshot = storage
+        .db
+        .lock()
+        .await
+        .snapshots
+        .values()
+        .next()
+        .map(|(report, _)| report.clone())
+        .expect("context snapshot recorded");
+    let report: serde_json::Value = serde_json::from_str(&snapshot).unwrap();
+    assert_eq!(report["provider_visible"]["effort"]["requested"], "max");
+    assert_eq!(report["provider_visible"]["effort"]["clamped_to"], "high");
+    assert_eq!(
+        report["provider_visible"]["effort"]["note"],
+        "max unsupported; clamped to high"
+    );
+}
+
+/// With no catalogue declaration, the provider adapter's own account of the
+/// documented control resolves the intent.
+#[test]
+fn effort_capability_falls_back_from_the_catalogue_to_the_adapter() {
+    let mut config = swage_config::ResolvedConfig::default();
+    config.models.default = "claude".into();
+    config.models.entries.insert(
+        "claude".into(),
+        swage_config::ModelEndpointConfig {
+            provider_id: "anthropic".into(),
+            model_id: "claude-opus-5".into(),
+            ..Default::default()
+        },
+    );
+    let anthropic = swage_provider::anthropic::AnthropicProvider::new("key", "claude-opus-5");
+    let capability = super::effort_capability_for_model(&config, "claude", &anthropic);
+    assert!(matches!(
+        capability,
+        swage_core::EffortCapability::Levels {
+            can_disable: true,
+            ..
+        }
+    ));
+
+    let declared = swage_core::EffortCapability::None;
+    config
+        .models
+        .entries
+        .get_mut("claude")
+        .unwrap()
+        .capabilities
+        .effort = Some(declared.clone());
+    assert_eq!(
+        super::effort_capability_for_model(&config, "claude", &anthropic),
+        declared,
+        "the catalogue's own declaration wins over the adapter's"
+    );
+
+    let mock = MockProvider::new(vec![]);
+    assert_eq!(
+        super::effort_capability_for_model(&config, "unknown", &mock),
+        swage_core::EffortCapability::None
+    );
+}
+
 #[tokio::test]
 async fn process_turn_passes_tool_context_to_tools() {
     let captured = Arc::new(std::sync::Mutex::new(None));
@@ -10024,7 +11020,7 @@ async fn process_turn_passes_tool_context_to_tools() {
         &state,
         session_id,
         None,
-        "capture".into(),
+        TurnInput::from("capture"),
         tx,
         Arc::new(Mutex::new(SubscriptionState::new(true))),
         None,
@@ -10100,7 +11096,7 @@ async fn process_turn_resolves_config_per_space_and_completes_turn() {
         &state,
         session_id,
         None,
-        "hi".into(),
+        TurnInput::from("hi"),
         tx,
         Arc::new(Mutex::new(SubscriptionState::new(true))),
         None,
@@ -10190,7 +11186,7 @@ async fn process_turn_uses_hot_swapped_runtime_config_for_next_turn() {
         &state,
         session_id,
         None,
-        "hi".into(),
+        TurnInput::from("hi"),
         tx,
         Arc::new(Mutex::new(SubscriptionState::new(true))),
         None,
@@ -10232,7 +11228,7 @@ async fn invalid_call_scoped_assembly_is_rejected_before_provider_dispatch() {
         &state,
         session_id,
         None,
-        "hi".into(),
+        TurnInput::from("hi"),
         tx,
         Arc::new(Mutex::new(SubscriptionState::new(true))),
         None,
@@ -10284,7 +11280,7 @@ async fn unknown_forced_context_assembly_rejects_call_scoped_override() {
         &state,
         session_id,
         None,
-        "hi".into(),
+        TurnInput::from("hi"),
         tx,
         Arc::new(Mutex::new(SubscriptionState::new(true))),
         None,
@@ -10389,7 +11385,7 @@ async fn forced_default_context_assembly_runs_and_records_forced_reason() {
         &state,
         session_id,
         None,
-        "hi".into(),
+        TurnInput::from("hi"),
         tx,
         Arc::new(Mutex::new(SubscriptionState::new(true))),
         None,
@@ -10548,7 +11544,7 @@ async fn process_turn_uses_hot_swapped_runtime_tool_policy_for_next_turn() {
         &state,
         session_id,
         None,
-        "hello".into(),
+        TurnInput::from("hello"),
         tx,
         Arc::new(Mutex::new(SubscriptionState::new(true))),
         None,
@@ -10596,7 +11592,7 @@ async fn process_turn_stream_request_includes_registered_tool_definitions() {
         &state,
         session_id,
         None,
-        "hello".into(),
+        TurnInput::from("hello"),
         tx,
         Arc::new(Mutex::new(SubscriptionState::new(true))),
         None,
@@ -10908,7 +11904,7 @@ async fn process_turn_stream_request_inherits_global_permissions_without_workspa
         &state,
         session_id,
         None,
-        "hello".into(),
+        TurnInput::from("hello"),
         tx,
         Arc::new(Mutex::new(SubscriptionState::new(true))),
         None,
@@ -12251,6 +13247,7 @@ async fn delegated_assembly_applies_call_scoped_composition_over_live_state() {
                 "dispatch owner".into(),
             )])),
             assembly: Some("briefing".into()),
+            skills: None,
         },
     );
 
@@ -12772,6 +13769,24 @@ async fn context_assembled_precedes_first_token() {
                 !report.elements.is_empty(),
                 "report should contain elements key"
             );
+            let session = state
+                .storage
+                .get_session(session_id)
+                .await
+                .expect("session lookup")
+                .expect("session");
+            assert_eq!(
+                report
+                    .tool_scope
+                    .as_ref()
+                    .and_then(|scope| scope.get("effective_root")),
+                Some(&serde_json::json!(managed_scratch_workspace(
+                    &state.config_root,
+                    session.space_id,
+                    session_id
+                ))),
+                "live turn diagnostics must report the root passed to tools"
+            );
         }
         other => panic!("expected ContextAssembled, got: {other:?}"),
     }
@@ -12828,6 +13843,21 @@ async fn assembly_report_persisted_as_context_snapshot() {
     assert!(
         parsed.get("elements").is_some(),
         "snapshot should contain elements key"
+    );
+    let session = state
+        .storage
+        .get_session(session_id)
+        .await
+        .expect("session lookup")
+        .expect("session");
+    assert_eq!(
+        parsed["tool_scope"]["effective_root"],
+        serde_json::json!(managed_scratch_workspace(
+            &state.config_root,
+            session.space_id,
+            session_id
+        )),
+        "turn diagnostics must record the root passed to tools"
     );
     let provider_request = &parsed["provider_visible"]["requests"][0];
     assert_eq!(provider_request["round"], serde_json::json!(1));
@@ -14035,6 +15065,219 @@ fn delegation_result_renders_failure_and_unknown_shapes() {
     assert!(unknown.contains("verdict"));
 }
 
+fn vision_capable_config() -> swage_config::ResolvedConfig {
+    // The default provider protocol (OpenAI) advertises vision, which is
+    // what the intake gate reads.
+    let mut config = swage_config::ResolvedConfig::default();
+    config.providers.entries.insert(
+        "openai".into(),
+        swage_config::ProviderEndpointConfig {
+            protocol: swage_config::Protocol::OpenAi,
+            ..Default::default()
+        },
+    );
+    config.models.default = "gpt".into();
+    config.models.entries.insert(
+        "gpt".into(),
+        swage_config::ModelEndpointConfig {
+            provider_id: "openai".into(),
+            model_id: "gpt-4o".into(),
+            ..Default::default()
+        },
+    );
+    config
+}
+
+fn text_only_config() -> swage_config::ResolvedConfig {
+    let mut config = swage_config::ResolvedConfig::default();
+    config.providers.entries.insert(
+        "codex".into(),
+        swage_config::ProviderEndpointConfig {
+            protocol: swage_config::Protocol::Codex,
+            ..Default::default()
+        },
+    );
+    config.models.default = "codex".into();
+    config.models.entries.insert(
+        "codex".into(),
+        swage_config::ModelEndpointConfig {
+            provider_id: "codex".into(),
+            model_id: "fake-codex".into(),
+            ..Default::default()
+        },
+    );
+    config
+}
+
+/// The image intake journey at the gateway seam: an image part submitted
+/// beside the text is recorded with the user message in the wire's own
+/// shape, rebuilt into history as a content part, and reaches the provider
+/// request as `ContentPart::ImageUrl` in submission order.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_image_attachment_is_recorded_and_reaches_the_provider_as_a_content_part() {
+    let storage = Arc::new(MockStorage::new());
+    let (provider, captured_requests) = CapturingMultiRoundProvider::new(vec![vec![
+        StreamChunk::Delta {
+            content: "a cat".into(),
+        },
+        StreamChunk::Done {
+            finish_reason: None,
+        },
+    ]]);
+    let space = storage.get_or_create_default().await.expect("space");
+    let session = storage
+        .create_session(NewSession {
+            space_id: space.id,
+            agent_id: "gateway".to_string(),
+            metadata: None,
+            active_workspace_attachment_id: None,
+        })
+        .await
+        .expect("session");
+    ThreadStore::create(
+        &*storage,
+        NewThread {
+            session_id: session.id,
+            agent_id: "gateway".to_string(),
+        },
+    )
+    .await
+    .expect("thread");
+    let state = AppState::new(
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
+        Arc::new(provider) as Arc<dyn LlmProvider>,
+        vision_capable_config(),
+        crate::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+    );
+    assert!(state.workflow_capabilities.vision);
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    process_turn(
+        &state,
+        session.id,
+        None,
+        TurnInput::with_attachments(
+            "What is in this picture?",
+            vec![MessageAttachment::ImageUrl {
+                url: "https://example.test/cat.png".into(),
+            }],
+        ),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .expect("turn with an image completes");
+
+    // Recorded beside the text, in the wire's own shape.
+    let stored = storage.db.lock().await.messages.clone();
+    let user = stored
+        .iter()
+        .find(|message| message.role == Role::User)
+        .expect("stored user message");
+    assert_eq!(user.content, "What is in this picture?");
+    assert_eq!(
+        user.attachments,
+        vec![serde_json::json!({"kind": "image_url", "url": "https://example.test/cat.png"})]
+    );
+
+    // On the provider request as content parts, text first.
+    let requests = captured_requests.lock().expect("captured requests");
+    let user_message = requests[0]
+        .messages
+        .iter()
+        .find(|message| {
+            message.role() == Role::User
+                && message.text_content().contains("What is in this picture?")
+        })
+        .expect("user message reached the provider");
+    assert_eq!(
+        user_message.content(),
+        &[
+            ContentPart::Text {
+                text: "What is in this picture?".into()
+            },
+            ContentPart::ImageUrl {
+                url: "https://example.test/cat.png".into()
+            },
+        ]
+    );
+}
+
+/// A provider that cannot consume images refuses the submission before any
+/// record is written: a part the model never sees must not ride along.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_image_attachment_is_refused_before_persistence_when_the_provider_lacks_vision() {
+    let storage = Arc::new(MockStorage::new());
+    let (state, session_id) =
+        make_state_with_config_and_storage(vec![], text_only_config(), Arc::clone(&storage)).await;
+    assert!(!state.workflow_capabilities.vision);
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let error = process_turn(
+        &state,
+        session_id,
+        None,
+        TurnInput::with_attachments(
+            "What is in this picture?",
+            vec![MessageAttachment::ImageUrl {
+                url: "https://example.test/cat.png".into(),
+            }],
+        ),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .expect_err("an unsupported attachment must fail the turn");
+    assert!(
+        matches!(&error, GatewayError::ValidationError(message) if message.contains("image")),
+        "{error}"
+    );
+
+    let db = storage.db.lock().await;
+    assert!(
+        db.messages.is_empty(),
+        "nothing is persisted for a refused turn"
+    );
+    assert!(
+        db.turns.is_empty(),
+        "no turn record is created for a refused turn"
+    );
+}
+
+/// A stored attachment outside the wire contract is corruption, refused
+/// when history is rebuilt rather than dropped.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stored_attachment_outside_the_contract_fails_the_history_rebuild() {
+    let storage = MockStorage::new();
+    let thread_id = Uuid::new_v4();
+    storage
+        .append_message(AppendMessage {
+            thread_id,
+            attachments: vec![serde_json::json!({"kind": "hologram", "url": "x"})],
+            turn_id: None,
+            role: Role::User,
+            content: "look".into(),
+            agent_id: "gateway".into(),
+        })
+        .await
+        .unwrap();
+
+    let error = super::history::rebuild_thread_history_messages(&storage, thread_id)
+        .await
+        .expect_err("an out-of-contract attachment must not be silently dropped");
+    assert!(
+        matches!(
+            &error,
+            GatewayError::Storage(StorageError::Corruption { message }) if message.contains("hologram")
+        ),
+        "{error}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn delivered_delegation_results_survive_the_history_rebuild() {
     let storage = MockStorage::new();
@@ -14047,6 +15290,7 @@ async fn delivered_delegation_results_survive_the_history_rebuild() {
     storage
         .append_message(AppendMessage {
             thread_id,
+            attachments: Vec::new(),
             turn_id: None,
             role: Role::User,
             content: "Delegated agent researcher completed:\nGathered 3 sources.".into(),
@@ -14057,6 +15301,7 @@ async fn delivered_delegation_results_survive_the_history_rebuild() {
     storage
         .append_message(AppendMessage {
             thread_id,
+            attachments: Vec::new(),
             turn_id: None,
             role: Role::Tool,
             content: "orphaned tool row".into(),
