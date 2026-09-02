@@ -4478,11 +4478,11 @@ pub async fn update_script(
     Path(id): Path<Uuid>,
     Json(request): Json<UpdateWorkflowScriptRequest>,
 ) -> Result<Json<WorkflowScript>, ApiError> {
-    if resolve_workflow_by_id(&state, id, None)
+    let workflow = resolve_workflow_by_id(&state, id, None)
         .await
         .map_err(internal)?
-        .is_some_and(|workflow| workflow.immutable)
-    {
+        .ok_or_else(|| ApiError::not_found("workflow script", id))?;
+    if workflow.immutable {
         return Err(ApiError::conflict(
             "carried and built-in workflow scripts are immutable; create a same-named workflow in the space to customise it".into(),
         ));
@@ -5855,6 +5855,29 @@ mod tests {
         assert_eq!(run.carrying_skill.as_deref(), Some("research"));
         assert_eq!(run.source.as_deref(), Some(embedded));
         assert_eq!(run.source_hash, source_hash(embedded));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn updating_an_absent_workflow_script_returns_not_found() {
+        let (state, _) = workflow_test_state();
+        let missing = Uuid::new_v4();
+
+        let error = update_script(
+            State(state),
+            Path(missing),
+            Json(UpdateWorkflowScriptRequest {
+                description: Some("still absent".into()),
+                ..Default::default()
+            }),
+        )
+        .await
+        .expect_err("an absent workflow script must remain absent");
+
+        assert_eq!(error.status(), axum::http::StatusCode::NOT_FOUND);
+        assert_eq!(
+            error.code(),
+            swage_protocol::client::error::ErrorCode::NotFound
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
