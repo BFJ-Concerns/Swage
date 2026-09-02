@@ -444,10 +444,7 @@ pub async fn update_page_annotation(
         .get_page_annotation(annotation_id)
         .await?
         .ok_or_else(|| {
-            GatewayError::Storage(StorageError::NotFound {
-                entity: "page annotation".into(),
-                id: annotation_id.to_string(),
-            })
+            GatewayError::ValidationError(format!("no annotation with id {annotation_id}"))
         })?;
     let body = request.body.trim();
     if body.is_empty() {
@@ -1080,6 +1077,64 @@ mod tests {
                 .count(),
             1,
             "the losing delete must not append a second audit event"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_failed_deletion_audit_rolls_back_the_annotation_removal() {
+        let (state, storage, page_id, module_id, _) = seeded().await;
+        let annotation = create_page_annotation(
+            &state,
+            page_id,
+            annotation(module_id, "the row must survive a failed audit"),
+            "user",
+        )
+        .await
+        .unwrap();
+        let duplicate_id = "deletion-audit-id";
+        storage
+            .create_audit_event(NewAuditEvent {
+                id: duplicate_id.into(),
+                session_id: None,
+                entity_kind: "test".into(),
+                entity_id: annotation.id.to_string(),
+                event_kind: "seed".into(),
+                summary: "occupy the deletion audit id".into(),
+                metadata: json!({}),
+            })
+            .await
+            .unwrap();
+        let existing = storage
+            .get_page_annotation(annotation.id)
+            .await
+            .unwrap()
+            .unwrap();
+        let audit = annotation_change_event(
+            "Planning",
+            page_id,
+            &existing,
+            "page_annotation_deleted",
+            None,
+            None,
+            "user",
+        );
+        let audit = NewAuditEvent {
+            id: duplicate_id.into(),
+            ..audit
+        };
+
+        assert!(
+            storage
+                .delete_page_annotation_with_audit(existing, audit,)
+                .await
+                .is_err()
+        );
+        assert!(
+            storage
+                .get_page_annotation(annotation.id)
+                .await
+                .unwrap()
+                .is_some()
         );
     }
 
