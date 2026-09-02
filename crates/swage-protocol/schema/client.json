@@ -5409,6 +5409,16 @@
           "format": "uint64",
           "minimum": 0
         },
+        "liveness": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkflowWorkerLiveness"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "output_tokens": {
           "type": [
             "integer",
@@ -6236,6 +6246,26 @@
         "gate_suppressions",
         "events_posted",
         "events_pending"
+      ]
+    },
+    "WorkflowWorkerLiveness": {
+      "description": "Earliest liveness evidence for one workflow worker.",
+      "type": "object",
+      "properties": {
+        "first_evidence_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "started_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "started_at"
       ]
     },
     "WorkspaceAttachmentListResponse": {

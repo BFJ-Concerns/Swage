@@ -5101,6 +5101,16 @@
               "null"
             ]
           },
+          "liveness": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WorkflowWorkerLiveness"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "output_tokens": {
             "format": "uint64",
             "minimum": 0,
@@ -5928,6 +5938,26 @@
           "gate_suppressions",
           "events_posted",
           "events_pending"
+        ],
+        "type": "object"
+      },
+      "WorkflowWorkerLiveness": {
+        "description": "Earliest liveness evidence for one workflow worker.",
+        "properties": {
+          "first_evidence_at": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "started_at": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "started_at"
         ],
         "type": "object"
       },
