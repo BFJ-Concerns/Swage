@@ -1,7 +1,9 @@
 #![allow(clippy::unwrap_used)]
 
 use std::{
+    net::TcpListener as StdTcpListener,
     pin::Pin,
+    process::Command,
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -16,13 +18,132 @@ use swage_core::{
 };
 use swage_gateway::{server::build_router, state::AppState, tool::knowledge::KnowledgeRecordTool};
 use swage_provider::LlmProvider;
-use swage_storage::{ObservationStore, SpaceStore, SqliteStorage, Storage, WorkflowStore};
+use swage_storage::{
+    NewWorkflowRun, ObservationStore, SpaceStore, SqliteStorage, Storage, WorkflowStore,
+};
 use tokio::net::TcpListener;
 
 use crate::support::scratch_tempdir;
 
 struct InterruptedKnowledgeProvider {
     rounds: AtomicUsize,
+}
+
+fn crashed_workflow_run(
+    space_id: uuid::Uuid,
+    source: Option<&str>,
+    source_hash: &str,
+) -> NewWorkflowRun {
+    NewWorkflowRun {
+        space_id,
+        parent_run_id: None,
+        parent_seq: None,
+        script_version_id: None,
+        inline_workflow_id: None,
+        inline_workflow_name: None,
+        inline_workflow_version: None,
+        carrying_skill: None,
+        source: source.map(str::to_owned),
+        source_hash: source_hash.into(),
+        args: Value::Null,
+        budget: json!({}),
+        engine_version: "test".into(),
+        dispatch_bound_agent_ids: vec![],
+        dispatch_bound_task_definition_ids: vec![],
+        workflow_call_tools: None,
+        inherited_worker_placement: None,
+    }
+}
+
+/// Journey: a gateway dies with running workflows -> the next gateway boot
+/// marks and lists them -> its first wake-loop pass replays the resumable run.
+///
+/// Proves: startup.rs invokes crash recovery before starting the wake loop,
+/// and the loop consumes the interrupted-run listing. One deliberately
+/// unreplayable run remains interrupted, making the boot listing observable
+/// after the valid run has replayed.
+#[tokio::test(flavor = "multi_thread")]
+async fn gateway_boot_recovers_and_wakes_runs_left_running_by_a_crash() {
+    let root = scratch_tempdir();
+    let runtime = scratch_tempdir();
+    let storage = Arc::new(SqliteStorage::open(&root.path().join("swage.db")).unwrap());
+    let space = storage.get_or_create_default().await.unwrap();
+    let replayable = storage
+        .create_workflow_run(crashed_workflow_run(
+            space.id,
+            Some("return null;"),
+            "boot-recovery-replayable",
+        ))
+        .await
+        .unwrap();
+    let listed_after_recovery = storage
+        .create_workflow_run(crashed_workflow_run(
+            space.id,
+            None,
+            "boot-recovery-unreplayable",
+        ))
+        .await
+        .unwrap();
+
+    let listener = StdTcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port().to_string();
+    drop(listener);
+    let start = Command::new(env!("CARGO_BIN_EXE_swage"))
+        .env("SWAGE_HOME", root.path())
+        .env("XDG_RUNTIME_DIR", runtime.path())
+        .args(["gateway", "start", "--port", &port])
+        .output()
+        .unwrap();
+    assert!(
+        start.status.success(),
+        "gateway startup failed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&start.stdout),
+        String::from_utf8_lossy(&start.stderr),
+    );
+
+    let recovery_result = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let replayed = storage
+                .get_workflow_run(replayable.id)
+                .await
+                .unwrap()
+                .unwrap();
+            let unreplayable = storage
+                .get_workflow_run(listed_after_recovery.id)
+                .await
+                .unwrap()
+                .unwrap();
+            if replayed.state == "completed" && unreplayable.state == "interrupted" {
+                let resumable = storage.list_interrupted_workflow_runs().await.unwrap();
+                break (replayed, resumable);
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await;
+
+    let stop = Command::new(env!("CARGO_BIN_EXE_swage"))
+        .env("SWAGE_HOME", root.path())
+        .env("XDG_RUNTIME_DIR", runtime.path())
+        .args(["gateway", "stop", "--force"])
+        .output()
+        .unwrap();
+    assert!(
+        stop.status.success(),
+        "gateway shutdown failed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&stop.stdout),
+        String::from_utf8_lossy(&stop.stderr),
+    );
+
+    let (replayed, resumable) = recovery_result
+        .expect("gateway boot should mark and list abandoned runs before replaying the valid one");
+    assert_eq!(replayed.state, "completed");
+    assert!(
+        resumable
+            .iter()
+            .any(|run| run.id == listed_after_recovery.id),
+        "the boot wake loop's interrupted-run listing should retain the recovered run"
+    );
 }
 
 #[async_trait::async_trait]
@@ -91,8 +212,14 @@ impl LlmProvider for InterruptedKnowledgeProvider {
     }
 }
 
+/// Journey: gateway crash leaves a workflow running -> boot recovery marks and
+/// lists it -> the live gateway resumes its journalled work over HTTP.
+///
+/// Proves: the startup recovery transition produces the exact interrupted-run
+/// work list the boot wake loop consumes. A regression in either marking or
+/// listing leaves the HTTP resume path unreachable.
 #[tokio::test(flavor = "multi_thread")]
-async fn interrupted_knowledge_record_worker_resumes_and_deduplicates_its_capture_over_http() {
+async fn boot_recovery_marks_lists_and_resumes_an_interrupted_knowledge_worker_over_http() {
     let root = scratch_tempdir();
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
     let space = storage.get_or_create_default().await.unwrap();
@@ -152,10 +279,28 @@ async fn interrupted_knowledge_record_worker_resumes_and_deduplicates_its_captur
     .await
     .expect("the first attempt should record knowledge before settling its agent call");
 
-    storage
-        .update_workflow_run_state(run_uuid, "interrupted", None, None, None)
-        .await
-        .unwrap();
+    // This is the same durable recovery operation startup.rs runs before it
+    // spawns the workflow wake loop. The original request remains in-flight,
+    // exactly as it would after the gateway process dies.
+    assert_eq!(
+        storage.interrupt_running_workflow_runs().await.unwrap(),
+        1,
+        "boot recovery should mark the abandoned running workflow"
+    );
+    let resumable_runs = storage.list_interrupted_workflow_runs().await.unwrap();
+    assert!(
+        resumable_runs.iter().any(|run| run.id == run_uuid),
+        "the boot wake loop's interrupted-run listing should include the recovered workflow"
+    );
+    let recovered = storage.get_workflow_run(run_uuid).await.unwrap().unwrap();
+    assert_eq!(recovered.state, "interrupted");
+    assert!(
+        recovered.completed_at.is_none(),
+        "startup recovery must leave the replayable run non-terminal"
+    );
+
+    // Exercise the same replay operation that the wake loop applies to each
+    // item from that listing, through the gateway's public resume endpoint.
     let resumed: Value = client
         .post(format!("{base}/api/workflow-runs/{run_id}/resume"))
         .send()
