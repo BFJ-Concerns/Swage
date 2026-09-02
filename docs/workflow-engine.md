@@ -73,6 +73,14 @@ The optional `tools` array narrows a fresh worker call to the named tools. It
 is intersected with the worker's effective grants and therefore cannot grant
 new authority; continuations retain the allow-list chosen at worker creation.
 
+### Model fallback
+
+`agent()` and `agentStart()` accept `fallbackModel`, a catalogue model id. It
+is used only when the requested model is unavailable or the provider refuses
+or fails it before output; schema exhaustion and failures after output still return the
+established `null` result or throw. The completed call record's `served_model`
+names the model that actually served the call.
+
 ### Composition
 
 `workflow(name, args)` calls a child workflow. It is only available when the
