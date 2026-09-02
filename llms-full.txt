@@ -984,7 +984,9 @@ override, but `undefined` at the call site falls back to the default.
 host uses it only when the requested model is unavailable or the provider
 refuses or fails it before any output; schema exhaustion and failures after output do
 not fall back. A completed `agent_call` result records `served_model`, the
-catalogue model that actually served the call.
+catalogue model that actually served the call. Continuation calls ignore
+`fallbackModel` and never make a fallback attempt; they use the worker's
+persisted model selection, including a fallback selected at creation.
 
 ### Composition bounds
 

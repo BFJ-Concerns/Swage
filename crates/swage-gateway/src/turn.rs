@@ -879,6 +879,7 @@ pub(crate) async fn process_turn_with_existing_turn_and_focus_and_model(
         compaction_focus,
         requested_model,
         None,
+        false,
     )
     .await
 }
@@ -919,6 +920,7 @@ pub(crate) async fn process_turn_with_composition(
         None,
         None,
         None,
+        false,
     )
     .await
 }
@@ -944,6 +946,7 @@ pub(crate) async fn process_turn_with_composition_and_model(
     agent_call_scope: Option<Uuid>,
     requested_model: Option<String>,
     provider_failure_observer: Option<ProviderFailureObserver>,
+    reuse_persisted_input: bool,
 ) -> Result<(), GatewayError> {
     process_turn_with_composition_and_focus(
         state,
@@ -963,6 +966,7 @@ pub(crate) async fn process_turn_with_composition_and_model(
         None,
         requested_model,
         provider_failure_observer,
+        reuse_persisted_input,
     )
     .await
 }
@@ -991,6 +995,7 @@ async fn process_turn_with_composition_and_focus(
     compaction_focus: Option<String>,
     requested_model: Option<String>,
     provider_failure_observer: Option<ProviderFailureObserver>,
+    reuse_persisted_input: bool,
 ) -> Result<(), GatewayError> {
     let TurnInput {
         text: content,
@@ -1263,24 +1268,26 @@ async fn process_turn_with_composition_and_focus(
         .await?;
     }
 
-    record_failed_turn_and_release_on_error(
-        state,
-        session_id,
-        prepared_turn_id,
-        state
-            .storage
-            .append_message(AppendMessage {
-                thread_id,
-                attachments: attachment_records(&attachments),
-                turn_id: Some(prepared_turn_id),
-                role: Role::User,
-                content: before_inbound.canonical_content.clone(),
-                agent_id: session.agent_id.clone(),
-            })
-            .await
-            .map_err(GatewayError::from),
-    )
-    .await?;
+    if !reuse_persisted_input {
+        record_failed_turn_and_release_on_error(
+            state,
+            session_id,
+            prepared_turn_id,
+            state
+                .storage
+                .append_message(AppendMessage {
+                    thread_id,
+                    attachments: attachment_records(&attachments),
+                    turn_id: Some(prepared_turn_id),
+                    role: Role::User,
+                    content: before_inbound.canonical_content.clone(),
+                    agent_id: session.agent_id.clone(),
+                })
+                .await
+                .map_err(GatewayError::from),
+        )
+        .await?;
+    }
 
     // Step 7: Deliver completed detached delegations. A detached child's
     // Result waits in this agent's mailbox until its parent next turns;
