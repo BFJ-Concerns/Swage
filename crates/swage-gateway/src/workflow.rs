@@ -11185,8 +11185,8 @@ mod tests {
         }
     }
 
-    async fn event_gate_fixture(
-        provider: Arc<ScriptedGateProvider>,
+    async fn event_gate_fixture<P: swage_provider::LlmProvider + 'static>(
+        provider: Arc<P>,
     ) -> (
         Arc<SqliteStorage>,
         AppState,
@@ -12779,6 +12779,216 @@ mod tests {
             receive.try_recv(),
             Err(oneshot::error::TryRecvError::Empty)
         ));
+        drop(tx);
+        task.await.expect("host loop");
+    }
+
+    /// A provider that holds its gate evaluation open, so the run has a
+    /// genuinely in-flight call while the test sends its next command.
+    struct BlockingGateProvider {
+        entered: Arc<Notify>,
+        release: Arc<Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl swage_provider::LlmProvider for BlockingGateProvider {
+        fn model_id(&self) -> &str {
+            "blocking-gate-model"
+        }
+
+        async fn complete(
+            &self,
+            _request: swage_core::CompletionRequest,
+        ) -> Result<swage_core::CompletionResponse, swage_core::ProviderError> {
+            self.entered.notify_one();
+            self.release.notified().await;
+            Ok(swage_core::CompletionResponse {
+                content: r#"{"wake":true,"reasoning":"released"}"#.into(),
+                input_tokens: 1,
+                output_tokens: 1,
+                finish_reason: swage_core::FinishReason::Stop,
+                cost: None,
+            })
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _request: swage_core::ToolCompletionRequest,
+        ) -> Result<swage_core::ToolCompletionResponse, swage_core::ProviderError> {
+            unimplemented!("gate evaluations use complete")
+        }
+
+        fn stream(
+            &self,
+            _request: swage_core::CompletionRequest,
+        ) -> std::pin::Pin<Box<dyn futures::Stream<Item = swage_core::StreamChunk> + Send>>
+        {
+            unimplemented!("gate evaluations use complete")
+        }
+    }
+
+    fn decision_hold(content: &str) -> HoldRequest {
+        HoldRequest {
+            content: content.into(),
+            verdicts: vec!["ship".into(), "hold".into()],
+        }
+    }
+
+    async fn wait_for_open_hold(storage: &Arc<SqliteStorage>, run_id: Uuid) -> Uuid {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let holds = storage
+                    .list_workflow_run_holds(run_id)
+                    .await
+                    .expect("list holds");
+                if let Some(hold) = holds.first() {
+                    return hold.id;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the hold is opened")
+    }
+
+    async fn answer_open_hold(state: &AppState, hold_id: Uuid) {
+        answer_run_hold(
+            state,
+            AnswerWorkflowRunHoldRequest {
+                hold_id,
+                verdict: "ship".into(),
+            },
+            RunEventSource {
+                surface: "operator",
+                agent_id: None,
+                session_id: None,
+                turn_id: None,
+            },
+        )
+        .await
+        .expect("answer the open hold");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_hold_raised_beside_an_armed_timer_refuses_the_park_and_keeps_its_engine() {
+        let provider = Arc::new(ScriptedGateProvider {
+            replies: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            calls: AtomicUsize::new(0),
+        });
+        let (storage, state, run) = event_gate_fixture(provider).await;
+        let (tx, task) = spawn_event_loop(state.clone(), run.id, run.space_id, vec![]);
+
+        // Short of the park threshold, so this timer arms in process and is
+        // still armed when the hold asks to park.
+        let (timer_reply, _timer_receive) = oneshot::channel();
+        tx.send(HostCommand::Timer {
+            ms: 30_000,
+            timer_id: 0,
+            cancellation: CancellationToken::new(),
+            reply: timer_reply,
+        })
+        .expect("arm a sibling timer");
+
+        let (reply, receive) = oneshot::channel();
+        tx.send(HostCommand::Hold {
+            request: decision_hold("ship it, or hold it?"),
+            cancellation: CancellationToken::new(),
+            reply,
+        })
+        .expect("raise the hold");
+
+        let hold_id = wait_for_open_hold(&storage, run.id).await;
+        let waiting = storage
+            .get_workflow_run(run.id)
+            .await
+            .expect("read run")
+            .expect("run");
+        assert_eq!(
+            waiting.state, "running",
+            "an armed sibling timer refuses the durable park: parking would kill it unfired"
+        );
+        assert!(waiting.wake_at.is_none());
+
+        // The engine stayed up, so the in-process watcher takes the answer.
+        answer_open_hold(&state, hold_id).await;
+        let answer = tokio::time::timeout(std::time::Duration::from_secs(5), receive)
+            .await
+            .expect("the refusing engine still watches its hold")
+            .expect("hold reply")
+            .expect("verdict");
+        assert_eq!(answer["verdict"], "ship");
+
+        drop(tx);
+        task.await.expect("host loop");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_hold_raised_beside_an_in_flight_call_refuses_the_park_and_keeps_its_engine() {
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let provider = Arc::new(BlockingGateProvider {
+            entered: Arc::clone(&entered),
+            release: Arc::clone(&release),
+        });
+        let (storage, state, run) = event_gate_fixture(provider).await;
+        let (tx, task) = spawn_event_loop(state.clone(), run.id, run.space_id, vec![]);
+
+        send_post_event(
+            &tx,
+            "worker.completion",
+            serde_json::json!({"worker": "w1"}),
+        )
+        .await
+        .expect("post the event the gate reads");
+        let (gate_reply, gate_receive) = oneshot::channel();
+        tx.send(HostCommand::Gate {
+            request: GateRequest {
+                criteria: "wake when the worker has settled".into(),
+                model: None,
+            },
+            cancellation: CancellationToken::new(),
+            reply: gate_reply,
+        })
+        .expect("start a gate evaluation");
+        // The evaluation is now inside the provider: the call is in flight.
+        entered.notified().await;
+
+        let (reply, receive) = oneshot::channel();
+        tx.send(HostCommand::Hold {
+            request: decision_hold("ship it, or hold it?"),
+            cancellation: CancellationToken::new(),
+            reply,
+        })
+        .expect("raise the hold");
+
+        let hold_id = wait_for_open_hold(&storage, run.id).await;
+        let waiting = storage
+            .get_workflow_run(run.id)
+            .await
+            .expect("read run")
+            .expect("run");
+        assert_eq!(
+            waiting.state, "running",
+            "an in-flight call refuses the durable park: wake replay would run it twice"
+        );
+        assert!(waiting.wake_at.is_none());
+
+        answer_open_hold(&state, hold_id).await;
+        let answer = tokio::time::timeout(std::time::Duration::from_secs(5), receive)
+            .await
+            .expect("the refusing engine still watches its hold")
+            .expect("hold reply")
+            .expect("verdict");
+        assert_eq!(answer["verdict"], "ship");
+
+        release.notify_one();
+        assert_eq!(
+            gate_receive
+                .await
+                .expect("gate reply")
+                .expect("gate result")["wake"],
+            true
+        );
         drop(tx);
         task.await.expect("host loop");
     }
