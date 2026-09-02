@@ -114,6 +114,17 @@
 
   async function selectAndNavigateOrThrow(id: string): Promise<void> {
     keepSurfaceForConversation();
+    const selectedConversationId = conversationStore.activeConversation?.id;
+    if (
+      !streamingStore.isStreaming &&
+      selectedConversationId === streamingStore.activeConversationId &&
+      id !== selectedConversationId
+    ) {
+      // Settled turn state remains attached until its owner has been shown.
+      // Leaving that rendered owner releases it before another conversation
+      // becomes the active surface.
+      streamingStore.clearConversationOwnership();
+    }
     await conversationStore.selectConversation(id);
 
     // A deep-linked conversation may belong to a space other than the one
@@ -170,8 +181,14 @@
   }
 
   function clearActiveConversation(): void {
+    const selectedConversationId = conversationStore.activeConversation?.id;
     conversationStore.clearActiveConversation();
-    streamingStore.clearConversationOwnership();
+    if (
+      !streamingStore.isStreaming &&
+      selectedConversationId === streamingStore.activeConversationId
+    ) {
+      streamingStore.clearConversationOwnership();
+    }
   }
 
   // Proxy that implements ConversationStore but overrides the two navigation-

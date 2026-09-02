@@ -310,7 +310,6 @@ export function createStreamingStore(
           streamedContentStore.set("");
           turnErrorStore.set(null);
           isStreamingStore.set(false);
-          activeConversationId = null;
           turnStartedAtStore.set(null);
           // Tool calls are now captured in the message history — clear live state.
           activeToolCallsStore.set([]);
@@ -323,7 +322,6 @@ export function createStreamingStore(
           settlePartialResponse("failed");
           turnErrorStore.set({ code: event.code, message: event.message });
           isStreamingStore.set(false);
-          activeConversationId = null;
           turnStartedAtStore.set(null);
           // activeToolCalls are preserved so the UI can show what was
           // in-flight when the error occurred.
@@ -346,7 +344,6 @@ export function createStreamingStore(
               : `Structured output validation failed after ${event.attempts} attempts.`,
           });
           isStreamingStore.set(false);
-          activeConversationId = null;
           turnStartedAtStore.set(null);
           providerRetryStore.set(null);
           break;
@@ -357,7 +354,6 @@ export function createStreamingStore(
           // to read what was generated before they stopped it).
           settlePartialResponse("interrupted");
           isStreamingStore.set(false);
-          activeConversationId = null;
           turnStartedAtStore.set(null);
           // activeToolCalls preserved — same rationale as the error case.
           providerRetryStore.set(null);
@@ -370,7 +366,6 @@ export function createStreamingStore(
           settlePartialResponse("failed");
           turnErrorStore.set({ code: "gateway_shutdown", message: event.reason });
           isStreamingStore.set(false);
-          activeConversationId = null;
           turnStartedAtStore.set(null);
           providerRetryStore.set(null);
           break;
