@@ -6,7 +6,7 @@ All notable changes to Swage are documented in this file.
 
 ### Added
 
-- A workflow run that ends by any path now leaves a terminal account: how it ended, and a partition of every worker it dispatched into done, failed, cut short, and unsettled, each with the directory its work was left in. A run that never returned also surfaces its completed workers' output as partial results with the reason it produced none, on the run detail and through the new `workflow_run_account` tool a lead agent can read.
+- A workflow run that ends by any path now leaves a terminal account: how it ended, and a partition of every worker it dispatched into done, failed, cut short, and unsettled, each with the directory its work was left in. A run that never returned also surfaces its completed workers' output as partial results with the reason it produced none, on the run detail, on the run's own view at `/workflow-runs/{id}`, and through the new `workflow_run_account` tool a lead agent can read.
 - Users and agents can leave durable notes on a page's modules, appearing on an open page as they are written and readable by the agent alongside the module they hang on.
 - Work surfaces receive server-wide page signals over their own listen-only WebSocket, so an open page stays current whether or not a conversation is selected.
 - Workflow runs now journal their terminal budget balance.
