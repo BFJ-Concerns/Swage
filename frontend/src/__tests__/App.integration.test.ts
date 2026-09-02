@@ -1126,6 +1126,7 @@ describe("App", () => {
     await settleUi();
 
     const bClient = websocketHarness.clientFor("conv-b")!;
+    expect(bClient).toBeDefined();
     expect(bClient.connect).toHaveBeenCalledWith("conv-b");
     expect(aClient.disconnect).not.toHaveBeenCalled();
     expect(document.querySelector(".message-display")?.textContent).not.toContain("Reply for A");
