@@ -1846,7 +1846,9 @@ fn partial_reason(ending: &WorkflowRunEnding) -> String {
 
 /// Write the run's terminal account, having assembled it. Serialisation
 /// cannot fail: every field is a JSON-safe scalar, string, or list of the
-/// same, and the workers' outputs came out of the journal as JSON.
+/// same, and the workers' outputs came out of the journal as JSON. The write
+/// itself is first-write-wins in storage, so a run keeps the one account it
+/// ended with however many times a recovery pass revisits it.
 async fn record_terminal_account(
     storage: &dyn Storage,
     run_id: Uuid,
@@ -5454,14 +5456,17 @@ pub async fn cancel_run(
         if let Err(problem) = record_terminal_budget_from_journal(&state, id, &budget).await {
             tracing::warn!(%id, %problem, "could not record terminal budget audit entry");
         }
+        // The account lands before the state moves: a reader that sees the
+        // run cancelled sees the account of how, never a run briefly ended
+        // with nothing to say for itself.
+        if let Some(account) = account {
+            record_terminal_account(state.storage.as_ref(), id, account).await;
+        }
         state
             .storage
             .update_workflow_run_state(id, "cancelled", None, None, None)
             .await
             .map_err(internal)?;
-        if let Some(account) = account {
-            record_terminal_account(state.storage.as_ref(), id, account).await;
-        }
         let cancelled = state
             .storage
             .get_workflow_run(id)
@@ -16293,6 +16298,18 @@ mod tests {
         .expect("worker turn becomes interrupted");
     }
 
+    /// The account exactly as it is recorded, so a test can tell "unchanged"
+    /// from "written again with the same shape at a later instant".
+    async fn recorded_terminal_account(storage: &SqliteStorage, run_id: Uuid) -> Value {
+        storage
+            .get_workflow_run(run_id)
+            .await
+            .expect("run")
+            .expect("present")
+            .terminal_account
+            .expect("recorded terminal account")
+    }
+
     async fn terminal_account_of(
         storage: &SqliteStorage,
         run_id: Uuid,
@@ -16671,6 +16688,18 @@ mod tests {
                 .state,
             "interrupted"
         );
+        // The run stays owed on every later wake pass, and each pass fails to
+        // relaunch it again — but a run ends once, so the account it ended
+        // with is the account it keeps rather than one re-settled at each
+        // tick's instant.
+        let first = recorded_terminal_account(&storage, run.id).await;
+        assert_eq!(resume_owed_workflow_runs(&state).await, 0);
+        assert_eq!(resume_owed_workflow_runs(&state).await, 0);
+        assert_eq!(
+            recorded_terminal_account(&storage, run.id).await,
+            first,
+            "a later recovery pass re-settled the account it had already written"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -16678,27 +16707,39 @@ mod tests {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
         let space = storage.get_or_create_default().await.expect("space");
         let (state, _provider) = scripted_state(&storage, vec![]);
-        let Json(started) = start_inline_run(
-            State(state.clone()),
-            Path(space.id),
-            Json(StartInlineWorkflowRunRequest {
-                source: "return 1;".into(),
+        // A run that has recorded no account of its own, so the blob under
+        // test is the only one the projection can read.
+        let run = storage
+            .create_workflow_run(NewWorkflowRun {
+                space_id: space.id,
+                parent_run_id: None,
+                parent_seq: None,
+                script_version_id: None,
+                inline_workflow_id: None,
+                inline_workflow_name: None,
+                inline_workflow_version: None,
+                carrying_skill: None,
+                source: None,
+                source_hash: source_hash(""),
                 args: Value::Null,
-                budget: None,
-            }),
-        )
-        .await
-        .expect("start inline run");
-        wait_for_terminal(&state, started.id).await;
+                budget: Value::Null,
+                engine_version: "test".into(),
+                dispatch_bound_agent_ids: vec![],
+                dispatch_bound_task_definition_ids: vec![],
+                workflow_call_tools: None,
+                inherited_worker_placement: None,
+            })
+            .await
+            .expect("run");
         storage
             .set_workflow_run_terminal_account(
-                started.id,
+                run.id,
                 serde_json::json!({"ending": {"ending": "evaporated"}}),
             )
             .await
             .expect("write an out-of-contract account");
 
-        let error = get_run(State(state.clone()), Path(started.id))
+        let error = get_run(State(state.clone()), Path(run.id))
             .await
             .expect_err("an out-of-contract account is refused, never projected");
         assert!(

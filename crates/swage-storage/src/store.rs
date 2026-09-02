@@ -1055,6 +1055,11 @@ pub trait WorkflowStore: Send + Sync {
     /// Write the run's terminal account. Separate from the state update so
     /// the boot recovery path can account for a run it cannot resume without
     /// moving the run's state.
+    ///
+    /// First write wins: a run ends once, so an account already recorded is
+    /// left exactly as it was. A recovery pass that revisits the same
+    /// unresumable run therefore reads back the ending it first recorded
+    /// rather than a fresh one settled at a later instant.
     async fn set_workflow_run_terminal_account(
         &self,
         id: Uuid,
