@@ -4931,19 +4931,145 @@
               "null"
             ]
           },
-          "input_tokens": {
-            "format": "uint64",
-            "minimum": 0,
+          "dispatch": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WorkflowAgentCallDispatch"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "What the call was dispatched with. Absent only for calls journalled\nbefore the dispatch record existed."
+          },
+          "provider_rounds": {
+            "description": "The provider rounds this call's turn ran, oldest first. `None` where\nthe projection does not carry them — the live entry event, which is\nsent as the entry settles — so an absent round record is never read\nas a call that made no provider request. The run detail always\ncarries them.",
+            "items": {
+              "$ref": "#/components/schemas/WorkflowProviderRound"
+            },
             "type": [
-              "integer",
+              "array",
               "null"
             ]
           },
-          "output_tokens": {
-            "format": "uint64",
-            "minimum": 0,
+          "session_id": {
+            "format": "uuid",
             "type": [
-              "integer",
+              "string",
+              "null"
+            ]
+          },
+          "termination": {
+            "$ref": "#/components/schemas/WorkflowWorkerTermination"
+          },
+          "thread_id": {
+            "format": "uuid",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "turn_id": {
+            "format": "uuid",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "usage": {
+            "$ref": "#/components/schemas/WorkflowCallUsage"
+          }
+        },
+        "required": [
+          "usage",
+          "termination"
+        ],
+        "type": "object"
+      },
+      "WorkflowAgentCallDispatch": {
+        "description": "What a worker was asked to do, recorded when it was dispatched.\n\nWritten before any provider work begins, so a worker that dies mid-run\nstill leaves evidence of the call it was serving.",
+        "properties": {
+          "agent_definition_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "grants": {
+            "description": "The call-scoped tool grants after intersection with the dispatching\ncontext's own authority. `None` means the call narrowed nothing.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "placement": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WorkflowWorkerPlacementRecord"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Where the worker runs, once the placement was provisioned."
+          },
+          "prompt": {
+            "type": "string"
+          },
+          "requested_effort": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Effort"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The effort the call named, before the turn resolved it."
+          },
+          "requested_model": {
+            "description": "The model the call named, before the turn resolved it.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "resolved": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WorkflowAgentCallResolution"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Stamped once the turn resolved the options it actually ran with."
+          }
+        },
+        "required": [
+          "prompt"
+        ],
+        "type": "object"
+      },
+      "WorkflowAgentCallResolution": {
+        "description": "The options a dispatched worker's turn resolved for itself.",
+        "properties": {
+          "effort": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Effort"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "model": {
+            "type": [
+              "string",
               "null"
             ]
           },
@@ -5039,6 +5165,61 @@
           }
         },
         "type": "object"
+      },
+      "WorkflowCallUsage": {
+        "description": "What a worker call cost, or why that is not known.\n\nA call whose provider reported no usage is not a call that spent nothing:\nthe two are different facts and the record keeps them apart. Absence is\nalways the `unavailable` variant carrying its reason, never zero counts.",
+        "oneOf": [
+          {
+            "properties": {
+              "availability": {
+                "const": "known",
+                "type": "string"
+              },
+              "input_tokens": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "output_tokens": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "availability",
+              "input_tokens",
+              "output_tokens"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "availability": {
+                "const": "unavailable",
+                "type": "string"
+              },
+              "reason": {
+                "$ref": "#/components/schemas/WorkflowUsageUnavailableReason"
+              }
+            },
+            "required": [
+              "availability",
+              "reason"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WorkflowCutShortCause": {
+        "description": "The run-end circumstance that cut a worker short.",
+        "oneOf": [
+          {
+            "const": "run_cancelled",
+            "description": "The run was cancelled while the worker was in flight.",
+            "type": "string"
+          }
+        ]
       },
       "WorkflowDecisionEventPayload": {
         "properties": {
@@ -5324,12 +5505,103 @@
         ]
       },
       "WorkflowJournalEntryStatus": {
-        "enum": [
-          "started",
-          "completed",
-          "failed"
+        "oneOf": [
+          {
+            "enum": [
+              "started",
+              "completed",
+              "failed"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "cut_short",
+            "description": "The run's own end stopped this entry's work. Distinct from `failed`,\nwhich is the work's own failure.",
+            "type": "string"
+          }
+        ]
+      },
+      "WorkflowProviderRound": {
+        "description": "One provider request round inside a worker call.\n\nA round with no `completed_at` is still outstanding: the request went to\nthe provider and no response has come back. A settled round names what\ncame back, so a tool loop (rounds settling with tool calls), a hung\nrequest (an outstanding round), and a slow response (a settled round with\na long span) are told apart from the record alone.",
+        "properties": {
+          "completed_at": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "outcome": {
+            "$ref": "#/components/schemas/WorkflowProviderRoundOutcome"
+          },
+          "round": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "started_at": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "round",
+          "started_at",
+          "outcome"
         ],
-        "type": "string"
+        "type": "object"
+      },
+      "WorkflowProviderRoundOutcome": {
+        "oneOf": [
+          {
+            "description": "The request is outstanding — no response has arrived.",
+            "properties": {
+              "outcome": {
+                "const": "outstanding",
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A response arrived, asking for this many tool calls (zero when the\nmodel answered instead of calling tools).",
+            "properties": {
+              "outcome": {
+                "const": "responded",
+                "type": "string"
+              },
+              "tool_calls": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "outcome",
+              "tool_calls"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "message": {
+                "type": "string"
+              },
+              "outcome": {
+                "const": "failed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome",
+              "message"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "WorkflowRun": {
         "properties": {
@@ -5731,6 +6003,21 @@
         ],
         "type": "object"
       },
+      "WorkflowUsageUnavailableReason": {
+        "description": "Why a call's usage is not known.",
+        "oneOf": [
+          {
+            "const": "provider_reported_no_usage",
+            "description": "The turn completed but the provider reported no token counts.",
+            "type": "string"
+          },
+          {
+            "const": "call_did_not_settle",
+            "description": "The call never settled, so no usage was ever collected.",
+            "type": "string"
+          }
+        ]
+      },
       "WorkflowWakeMetrics": {
         "description": "Derived counters over a run's wake machinery. `events_pending` counts\nundelivered queue entries now; the rest count journalled history.",
         "properties": {
@@ -5768,6 +6055,87 @@
           "events_pending"
         ],
         "type": "object"
+      },
+      "WorkflowWorkerPlacementRecord": {
+        "description": "Where a dispatched worker was placed.",
+        "properties": {
+          "can_write": {
+            "type": "boolean"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "can_write"
+        ],
+        "type": "object"
+      },
+      "WorkflowWorkerTermination": {
+        "description": "Why a worker stopped.\n\n`cut_short` is the run's own end reaching into a worker that was still\nworking. It is not a failure of the worker, and the terminal run account\npartitions on the same cause — this is where that cause is named.",
+        "oneOf": [
+          {
+            "description": "The worker is still working; nothing has terminated it.",
+            "properties": {
+              "termination": {
+                "const": "outstanding",
+                "type": "string"
+              }
+            },
+            "required": [
+              "termination"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The worker ran to its own end, successfully or not.",
+            "properties": {
+              "termination": {
+                "const": "settled",
+                "type": "string"
+              }
+            },
+            "required": [
+              "termination"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The worker's own work failed.",
+            "properties": {
+              "message": {
+                "type": "string"
+              },
+              "termination": {
+                "const": "failed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "termination",
+              "message"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The run ended while this worker was still working.",
+            "properties": {
+              "cause": {
+                "$ref": "#/components/schemas/WorkflowCutShortCause"
+              },
+              "termination": {
+                "const": "cut_short",
+                "type": "string"
+              }
+            },
+            "required": [
+              "termination",
+              "cause"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "WorkspaceAttachmentListResponse": {
         "properties": {
