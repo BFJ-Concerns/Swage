@@ -160,6 +160,17 @@ fn run_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkflowRunRecord> {
                     Box::new(error),
                 )
             })?,
+        terminal_account: row
+            .get::<_, Option<String>>(25)?
+            .map(|value| serde_json::from_str(&value))
+            .transpose()
+            .map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    25,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })?,
         created_at: time(row.get(18)?)?,
         completed_at: completed_at.map(time).transpose()?,
     })
@@ -171,7 +182,7 @@ const RUN_COLUMNS: &str = "id, space_id, parent_run_id, parent_seq, script_versi
     COALESCE((SELECT script_id FROM workflow_script_versions WHERE id = workflow_runs.script_version_id), inline_workflow_id), \
     COALESCE((SELECT name FROM workflow_scripts WHERE id = (SELECT script_id FROM workflow_script_versions WHERE id = workflow_runs.script_version_id)), inline_workflow_name), \
     COALESCE((SELECT version FROM workflow_script_versions WHERE id = workflow_runs.script_version_id), inline_workflow_version), \
-    carrying_skill, source, source_hash, args_json, budget_json, state, final_output_json, handover_json, error_message, engine_version, created_at, completed_at, dispatch_bound_agent_ids_json, dispatch_bound_task_definition_ids_json, wake_at, inherited_worker_placement_json, workflow_call_tools_json";
+    carrying_skill, source, source_hash, args_json, budget_json, state, final_output_json, handover_json, error_message, engine_version, created_at, completed_at, dispatch_bound_agent_ids_json, dispatch_bound_task_definition_ids_json, wake_at, inherited_worker_placement_json, workflow_call_tools_json, terminal_account_json";
 const JOURNAL_COLUMNS: &str = "id, run_id, seq, completed_order, kind, status, args_hash, request_json, result_json, error_message, effect_kind, idempotency_key, target_kind, started_at, completed_at";
 const RUN_EVENT_COLUMNS: &str = "id, run_id, journal_entry_id, seq, kind, payload_json, source_surface, source_agent_id, source_session_id, source_turn_id, posted_at, delivered_wake_seq, delivered_at";
 
@@ -540,6 +551,22 @@ impl WorkflowStore for SqliteStorage {
         let error = error_message.map(str::to_string);
         let now = Utc::now().to_rfc3339();
         self.with_conn(move |conn| { conn.execute("UPDATE workflow_runs SET state=?2, final_output_json=?3, handover_json=?4, error_message=?5, wake_at=NULL, completed_at=CASE WHEN ?2='running' THEN NULL ELSE ?6 END WHERE id=?1", params![id.to_string(),state,output,handover,error,now])?; Ok(()) }).await
+    }
+    async fn set_workflow_run_terminal_account(
+        &self,
+        id: Uuid,
+        account: serde_json::Value,
+    ) -> Result<(), StorageError> {
+        let account = serde_json::to_string(&account)
+            .map_err(|error| StorageError::QueryFailed(error.to_string()))?;
+        self.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE workflow_runs SET terminal_account_json=?2 WHERE id=?1",
+                params![id.to_string(), account],
+            )?;
+            Ok(())
+        })
+        .await
     }
     async fn interrupt_running_workflow_runs(&self) -> Result<u64, StorageError> {
         self.with_conn(|conn| { let count=conn.execute("UPDATE workflow_runs SET state='interrupted', completed_at=NULL WHERE state='running'", [])?; Ok(count as u64) }).await

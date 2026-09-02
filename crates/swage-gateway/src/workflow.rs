@@ -15,9 +15,12 @@ use swage_protocol::client::workflow::{
     StartInlineWorkflowRunRequest, StartWorkflowRunRequest, UpdateWorkflowScriptRequest,
     WorkflowArgumentContract, WorkflowBudget, WorkflowHandoverEvent, WorkflowHandoverEventDelivery,
     WorkflowHandoverFailedCall, WorkflowHandoverFailedCallRef, WorkflowRun,
-    WorkflowRunDetailResponse, WorkflowRunEvent, WorkflowRunEventSource, WorkflowRunHandover,
-    WorkflowRunListResponse, WorkflowRunState, WorkflowScript, WorkflowScriptListResponse,
+    WorkflowPartialResult, WorkflowPartialResults, WorkflowRunDetailResponse, WorkflowRunEnding,
+    WorkflowRunEvent, WorkflowRunEventSource, WorkflowRunHandover, WorkflowRunListResponse,
+    WorkflowRunState, WorkflowRunTerminalAccount, WorkflowScript, WorkflowScriptListResponse,
+    WorkflowWorkerAccount, WorkflowWorkerPartition, WorkflowWorkerTermination,
 };
+use swage_protocol::client::error::ErrorCode;
 use swage_storage::WorkflowJournalRecord;
 use swage_storage::{
     NewAuditEvent, NewSession, NewThread, NewWorkflowJournalIntent, NewWorkflowRun,
@@ -1603,31 +1606,223 @@ async fn run_ephemeral_agent_call(
 /// join the resolved configuration model.
 const PARK_TIMER_THRESHOLD_MS: u64 = 60_000;
 
-async fn settle_cancelled_workflow_journal(storage: &dyn Storage, run_id: Uuid) {
-    match storage.list_workflow_journal(run_id).await {
-        Ok(entries) => {
-            for entry in entries
-                .into_iter()
-                .filter(|entry| entry.status == "started")
+/// The settling error written over a worker the run's ending caught in
+/// flight. Cancellation keeps its own long-standing wording; the other
+/// endings name themselves, so a reader of the journal alone can still tell
+/// what stopped the worker.
+fn run_end_settlement_error(ending: &WorkflowRunEnding) -> &'static str {
+    match ending {
+        WorkflowRunEnding::Cancelled => "WorkflowCancelledError: run cancelled",
+        WorkflowRunEnding::Threw { .. } => "WorkflowRunEndedError: the run failed",
+        WorkflowRunEnding::WoundDown { .. } => "WorkflowRunEndedError: the run wound down",
+        WorkflowRunEnding::Returned => "WorkflowRunEndedError: the run returned",
+        WorkflowRunEnding::InterruptedWithoutResume { .. } => {
+            "WorkflowRunEndedError: the run was interrupted"
+        }
+    }
+}
+
+/// How the run ended, from the state it settled into.
+///
+/// A failed run may have ended under its closing boundary rather than on its
+/// own terms; `refine_ending` separates the two from the journal, so the
+/// coarse reading here never has to guess.
+fn ending_of_terminal_state(run_state: &str, error: Option<&str>) -> WorkflowRunEnding {
+    match run_state {
+        "completed" => WorkflowRunEnding::Returned,
+        "cancelled" => WorkflowRunEnding::Cancelled,
+        _ => WorkflowRunEnding::Threw {
+            error: error
+                .unwrap_or("the run failed without a recorded error")
+                .to_string(),
+        },
+    }
+}
+
+/// A failed run that latched wind-down ended under its closing boundary. The
+/// latch is the journal's own completed `wind_down` entry — never a substring
+/// of the error text, which is the script's wording, not the host's.
+fn refine_ending(ending: WorkflowRunEnding, journal: &[WorkflowJournalRecord]) -> WorkflowRunEnding {
+    match ending {
+        WorkflowRunEnding::Threw { error }
+            if journal
+                .iter()
+                .any(|entry| entry.kind == "wind_down" && entry.status == "completed") =>
+        {
+            WorkflowRunEnding::WoundDown { error }
+        }
+        ending => ending,
+    }
+}
+
+fn worker_placement_of(entry: &WorkflowJournalRecord) -> Option<String> {
+    entry
+        .result
+        .as_ref()
+        .and_then(|result| result.get("working_directory"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+fn worker_account(
+    entry: &WorkflowJournalRecord,
+    termination: Option<WorkflowWorkerTermination>,
+) -> WorkflowWorkerAccount {
+    WorkflowWorkerAccount {
+        journal_entry_id: entry.id,
+        seq: entry.seq,
+        label: entry
+            .request
+            .get("label")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        agent_definition_id: entry
+            .request
+            .get("agent")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        placement: worker_placement_of(entry),
+        termination,
+    }
+}
+
+/// Settle the workers this run's ending caught in flight, then account for
+/// every worker it dispatched.
+///
+/// Settlement and accounting are one step because they read the same journal
+/// at the same instant: an entry still `started` when the run ends is exactly
+/// the worker the ending cut short, and once settled that fact is no longer
+/// legible from its status alone. An ending nobody was alive to settle — a
+/// gateway death — settles nothing, and its workers are accounted `unsettled`
+/// rather than dressed as cut short by a process that arrived afterwards.
+async fn account_for_run_end(
+    storage: &dyn Storage,
+    run_id: Uuid,
+    ending: WorkflowRunEnding,
+) -> Option<WorkflowRunTerminalAccount> {
+    let journal = match storage.list_workflow_journal(run_id).await {
+        Ok(journal) => journal,
+        Err(error) => {
+            tracing::warn!(
+                %run_id,
+                %error,
+                "could not read the journal to account for the run's end"
+            );
+            return None;
+        }
+    };
+    let ending = refine_ending(ending, &journal);
+    let settles = !matches!(ending, WorkflowRunEnding::InterruptedWithoutResume { .. });
+    let settlement = run_end_settlement_error(&ending);
+    let mut cut_short = std::collections::HashSet::new();
+    if settles {
+        for entry in journal.iter().filter(|entry| entry.status == "started") {
+            match storage
+                .fail_workflow_journal_entry(entry.id, settlement)
+                .await
             {
-                if let Err(error) = storage
-                    .fail_workflow_journal_entry(entry.id, "WorkflowCancelledError: run cancelled")
-                    .await
-                {
-                    tracing::warn!(
-                        %run_id,
-                        journal_entry_id = %entry.id,
-                        %error,
-                        "could not settle cancelled workflow journal entry"
-                    );
+                Ok(_) => {
+                    cut_short.insert(entry.id);
                 }
+                Err(error) => tracing::warn!(
+                    %run_id,
+                    journal_entry_id = %entry.id,
+                    %error,
+                    "could not settle a worker the run's end cut short"
+                ),
             }
         }
-        Err(error) => tracing::warn!(
-            %run_id,
-            %error,
-            "could not list workflow journal while settling cancellation"
-        ),
+    }
+    let mut workers = WorkflowWorkerPartition::default();
+    let mut recovered = Vec::new();
+    for entry in journal.iter().filter(|entry| entry.kind == "agent_call") {
+        if cut_short.contains(&entry.id) {
+            workers.cut_short.push(worker_account(
+                entry,
+                Some(WorkflowWorkerTermination::CutShort {
+                    detail: Some(settlement.to_string()),
+                }),
+            ));
+            continue;
+        }
+        match entry.status.as_str() {
+            "completed" => {
+                workers.done.push(worker_account(entry, None));
+                if let Some(output) = entry.result.as_ref().and_then(|result| result.get("output"))
+                {
+                    recovered.push(WorkflowPartialResult {
+                        journal_entry_id: entry.id,
+                        seq: entry.seq,
+                        label: entry
+                            .request
+                            .get("label")
+                            .and_then(Value::as_str)
+                            .map(str::to_string),
+                        output: output.clone(),
+                        placement: worker_placement_of(entry),
+                    });
+                }
+            }
+            "failed" => workers.failed.push(worker_account(
+                entry,
+                Some(WorkflowWorkerTermination::Failed {
+                    error: entry
+                        .error_message
+                        .clone()
+                        .unwrap_or_else(|| "the worker failed without a recorded error".into()),
+                }),
+            )),
+            _ => workers.unsettled.push(worker_account(
+                entry,
+                Some(WorkflowWorkerTermination::Unsettled),
+            )),
+        }
+    }
+    // A run that returned has a result of its own; its completed workers are
+    // accounted for, not offered as a stand-in for one.
+    let partial_results = (!matches!(ending, WorkflowRunEnding::Returned)).then(|| {
+        WorkflowPartialResults {
+            reason: partial_reason(&ending),
+            results: recovered,
+        }
+    });
+    Some(WorkflowRunTerminalAccount {
+        ending,
+        workers,
+        partial_results,
+        settled_at: chrono::Utc::now(),
+    })
+}
+
+/// Why the run's completed work is partial rather than a result.
+fn partial_reason(ending: &WorkflowRunEnding) -> String {
+    match ending {
+        WorkflowRunEnding::Returned => "the run returned".into(),
+        WorkflowRunEnding::Threw { error } => format!("the run failed before returning: {error}"),
+        WorkflowRunEnding::Cancelled => "the run was cancelled before returning".into(),
+        WorkflowRunEnding::WoundDown { error } => {
+            format!("the run wound down before returning: {error}")
+        }
+        WorkflowRunEnding::InterruptedWithoutResume { reason } => {
+            format!("the gateway ended with the run in flight and it could not be resumed: {reason}")
+        }
+    }
+}
+
+/// Write the run's terminal account, having assembled it. Serialisation
+/// cannot fail: every field is a JSON-safe scalar, string, or list of the
+/// same, and the workers' outputs came out of the journal as JSON.
+async fn record_terminal_account(
+    storage: &dyn Storage,
+    run_id: Uuid,
+    account: WorkflowRunTerminalAccount,
+) {
+    let account = serde_json::to_value(&account).expect("terminal account serialises to JSON");
+    if let Err(error) = storage
+        .set_workflow_run_terminal_account(run_id, account)
+        .await
+    {
+        tracing::warn!(%run_id, %error, "could not record the run's terminal account");
     }
 }
 
@@ -4386,6 +4581,16 @@ fn run_wire(record: WorkflowRunRecord) -> Result<WorkflowRun, ApiError> {
                     record.id
                 ))
             })?,
+        terminal_account: record
+            .terminal_account
+            .map(serde_json::from_value::<WorkflowRunTerminalAccount>)
+            .transpose()
+            .map_err(|error| {
+                internal(format!(
+                    "workflow run {} terminal account does not match the recorded contract: {error}",
+                    record.id
+                ))
+            })?,
         error_message: record.error_message,
         created_at: record.created_at,
         completed_at: record.completed_at,
@@ -4897,9 +5102,6 @@ async fn launch_existing_run(
         {
             tracing::warn!(%run_id, %problem, "could not record terminal budget audit entry");
         }
-        if run_state == "cancelled" {
-            settle_cancelled_workflow_journal(storage.as_ref(), run_id).await;
-        }
         let handover = if run_state == "failed" && output.is_none() {
             match terminal_failed_call_reference {
                 Some(host_reference) => {
@@ -4934,6 +5136,14 @@ async fn launch_existing_run(
         let state_update = storage
             .update_workflow_run_state(run_id, run_state, output, handover, error.as_deref())
             .await;
+        // Every ending accounts for itself, and the account is assembled
+        // before any worktree is reclaimed: it names each worker's placement,
+        // and a returned run's cleanup would otherwise remove the directories
+        // it names between the read and the write.
+        let ending = ending_of_terminal_state(run_state, error.as_deref());
+        if let Some(account) = account_for_run_end(storage.as_ref(), run_id, ending).await {
+            record_terminal_account(storage.as_ref(), run_id, account).await;
+        }
         if state_update.is_ok() && run_state == "completed" {
             worktree_host.cleanup_owner(run_id).await;
         }
@@ -5202,7 +5412,8 @@ pub async fn cancel_run(
     // A parked run has no engine to signal: cancel it in the record so the
     // waker never relaunches it.
     if run.state == "parked" {
-        settle_cancelled_workflow_journal(state.storage.as_ref(), id).await;
+        let account =
+            account_for_run_end(state.storage.as_ref(), id, WorkflowRunEnding::Cancelled).await;
         let budget = budget_wire(&run.budget);
         if let Err(problem) = record_terminal_budget_from_journal(&state, id, &budget).await {
             tracing::warn!(%id, %problem, "could not record terminal budget audit entry");
@@ -5212,6 +5423,9 @@ pub async fn cancel_run(
             .update_workflow_run_state(id, "cancelled", None, None, None)
             .await
             .map_err(internal)?;
+        if let Some(account) = account {
+            record_terminal_account(state.storage.as_ref(), id, account).await;
+        }
         let cancelled = state
             .storage
             .get_workflow_run(id)
@@ -5335,6 +5549,22 @@ pub(crate) async fn resume_owed_workflow_runs(state: &AppState) -> usize {
             }
             Err(error) => {
                 tracing::warn!(%run_id, error = %error, "failed to resume workflow run");
+                // A run this pass cannot relaunch has ended by gateway death:
+                // nothing will run its script again, so it accounts for
+                // itself here rather than reading as silence. A lost race is
+                // not an ending — another owner holds the run and will
+                // account for it. Resume policy is untouched either way: the
+                // run's own state is left exactly as it was found.
+                if error.code() != ErrorCode::Conflict {
+                    let ending = WorkflowRunEnding::InterruptedWithoutResume {
+                        reason: error.message().to_string(),
+                    };
+                    if let Some(account) =
+                        account_for_run_end(state.storage.as_ref(), run_id, ending).await
+                    {
+                        record_terminal_account(state.storage.as_ref(), run_id, account).await;
+                    }
+                }
             }
         }
     }

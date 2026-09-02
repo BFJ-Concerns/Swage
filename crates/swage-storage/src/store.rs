@@ -1052,6 +1052,14 @@ pub trait WorkflowStore: Send + Sync {
         handover: Option<serde_json::Value>,
         error_message: Option<&str>,
     ) -> Result<(), StorageError>;
+    /// Write the run's terminal account. Separate from the state update so
+    /// the boot recovery path can account for a run it cannot resume without
+    /// moving the run's state.
+    async fn set_workflow_run_terminal_account(
+        &self,
+        id: Uuid,
+        account: serde_json::Value,
+    ) -> Result<(), StorageError>;
     async fn interrupt_running_workflow_runs(&self) -> Result<u64, StorageError>;
     /// Atomically move a run from one expected state to another. `false`
     /// means the run was no longer in `from` — the caller lost the race
@@ -2453,6 +2461,13 @@ mod tests {
             _: Option<serde_json::Value>,
             _: Option<serde_json::Value>,
             _: Option<&str>,
+        ) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+        async fn set_workflow_run_terminal_account(
+            &self,
+            _: Uuid,
+            _: serde_json::Value,
         ) -> Result<(), StorageError> {
             unimplemented!()
         }

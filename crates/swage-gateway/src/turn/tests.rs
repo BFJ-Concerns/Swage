@@ -1261,6 +1261,13 @@ impl swage_storage::WorkflowStore for MockStorage {
     ) -> Result<(), StorageError> {
         unimplemented!()
     }
+    async fn set_workflow_run_terminal_account(
+        &self,
+        _: Uuid,
+        _: serde_json::Value,
+    ) -> Result<(), StorageError> {
+        unimplemented!()
+    }
     async fn interrupt_running_workflow_runs(&self) -> Result<u64, StorageError> {
         unimplemented!()
     }
