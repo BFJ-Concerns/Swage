@@ -26,7 +26,6 @@ use swage_tool::context::ToolContext;
 use crate::service::{WorkflowScriptDraft, WorkflowScriptEdit};
 use crate::state::AppState;
 use crate::tool::Tool;
-use crate::tool_executor::GatewayToolContext;
 
 pub const WORKFLOW_SAVE_TOOL: &str = "workflow_save";
 

@@ -11,7 +11,6 @@ use swage_tool::context::ToolContext;
 
 use crate::tool::Tool;
 use crate::tool::workspace::truncated_output_value;
-use crate::tool_executor::GatewayToolContext;
 
 pub struct ToolResultReadTool {
     pub max_output_bytes: usize,

@@ -7,7 +7,6 @@ use swage_protocol::client::workflow::PostWorkflowRunEventRequest;
 use swage_tool::context::ToolContext;
 
 use crate::tool::Tool;
-use crate::tool_executor::GatewayToolContext;
 use crate::workflow::{RunEventSource, post_external_run_event};
 
 pub struct RunEventPostTool;
