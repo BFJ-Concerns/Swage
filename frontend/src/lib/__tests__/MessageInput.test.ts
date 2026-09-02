@@ -4,28 +4,22 @@ import { flushSync, mount, unmount } from "svelte";
 import { createClassComponent } from "svelte/legacy";
 
 import MessageInput from "../components/MessageInput.svelte";
-import type { StreamingStore } from "../stores/streaming";
+import {
+  createStreamingStore,
+  withConversationAutoCreate,
+  type StreamingStore,
+} from "../stores/streaming";
 
 type MountedComponent = ReturnType<typeof mount>;
 
 function makeStreamingStore(
   isStreaming = false,
-  activeConversationId?: string | null,
 ): StreamingStore {
   return {
     get isStreaming() {
       return isStreaming;
     },
-    get activeConversationId() {
-      return activeConversationId;
-    },
-    streamBelongsTo(conversationId) {
-      return (
-        conversationId === null ||
-        activeConversationId === undefined ||
-        activeConversationId === conversationId
-      );
-    },
+    streamBelongsTo: () => true,
     clearConversationOwnership: vi.fn(),
     get activeTurnGeneration() {
       return 0;
@@ -323,7 +317,21 @@ describe("MessageInput", () => {
   });
 
   it("does not show another conversation's stream controls", () => {
-    const store = makeStreamingStore(true, "conversation-one");
+    const activeConversation = { id: "conversation-one", messages: [] };
+    const store = createStreamingStore({
+      conversationStore: {
+        get activeConversation() {
+          return activeConversation;
+        },
+        appendOptimisticUserMessage: vi.fn(),
+        appendAssistantMessage: vi.fn(),
+      },
+      connectionStore: {
+        sendMessage: vi.fn(),
+        cancelTurn: vi.fn(),
+      },
+    });
+    store.startTurn("Keep this turn in conversation one");
     component = mount(MessageInput, {
       target: document.body,
       props: { store, sessionId: "conversation-two" },
@@ -334,7 +342,27 @@ describe("MessageInput", () => {
   });
 
   it("locks the space-home composer during conversation creation", () => {
-    const store = makeStreamingStore(true, "conversation-one");
+    const activeConversation = { id: "conversation-one", messages: [] };
+    const base = createStreamingStore({
+      conversationStore: {
+        get activeConversation() {
+          return activeConversation;
+        },
+        appendOptimisticUserMessage: vi.fn(),
+        appendAssistantMessage: vi.fn(),
+      },
+      connectionStore: {
+        sendMessage: vi.fn(),
+        cancelTurn: vi.fn(),
+      },
+    });
+    base.startTurn("Existing turn");
+    const store = withConversationAutoCreate(base, {
+      hasActiveConversation: () => false,
+      createConversation: vi.fn(() => new Promise(() => {})),
+    });
+    store.startTurn("Create from the space home");
+
     component = mount(MessageInput, {
       target: document.body,
       props: { store, sessionId: null },
