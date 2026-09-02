@@ -7514,12 +7514,12 @@ mod tests {
             _: swage_core::CompletionRequest,
         ) -> std::pin::Pin<Box<dyn futures::Stream<Item = swage_core::StreamChunk> + Send>>
         {
-            let parked = self
-                .parked
-                .lock()
-                .expect("parked sender")
-                .take()
-                .expect("one workflow provider call");
+            let parked = self.parked.lock().expect("parked sender").take();
+            let Some(parked) = parked else {
+                return Box::pin(futures::stream::iter(scripted_text_output(
+                    "second evidence",
+                )));
+            };
             let release = self
                 .release
                 .lock()
@@ -8920,13 +8920,32 @@ mod tests {
             crate::tool::ToolDispatcher::allow_all(vec![]),
             None,
         );
+        let router = crate::server::build_router(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test gateway");
+        let address = listener.local_addr().expect("test gateway address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router)
+                .await
+                .expect("serve test gateway");
+        });
+        let client = reqwest::Client::new();
+        let run_url = |run_id| format!("http://{address}/api/workflow-runs/{run_id}");
         let Json(started) = start_inline_run(
             State(state.clone()),
             Path(space.id),
             Json(StartInlineWorkflowRunRequest {
-                source: "return await agent('wait for the provider');".into(),
+                source:
+                    "return await Promise.all([agent('parked worker'), agent('streaming worker')]);"
+                        .into(),
                 args: Value::Null,
-                budget: None,
+                budget: Some(WorkflowBudget {
+                    max_agent_calls: None,
+                    max_total_tokens: None,
+                    reserved_closing_tokens: None,
+                    max_concurrent_agent_calls: Some(2),
+                }),
             }),
         )
         .await
@@ -8936,19 +8955,51 @@ mod tests {
             .expect("worker reaches the parked provider boundary")
             .expect("provider park signal");
 
-        let Json(blocked) = get_run(State(state.clone()), Path(started.id))
-            .await
-            .expect("real get_run handler while worker is blocked");
+        let blocked = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let detail = client
+                    .get(run_url(started.id))
+                    .send()
+                    .await
+                    .expect("request live run detail")
+                    .error_for_status()
+                    .expect("live run detail succeeds")
+                    .json::<swage_protocol::client::workflow::WorkflowRunDetailResponse>()
+                    .await
+                    .expect("live run detail deserialises");
+                let liveness = detail
+                    .journal
+                    .iter()
+                    .filter_map(|entry| {
+                        entry.agent_call.as_ref().and_then(|call| {
+                            call.liveness
+                                .as_ref()
+                                .map(|liveness| (entry.request["prompt"].as_str(), liveness))
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                if liveness.len() == 2
+                    && liveness.iter().any(|(prompt, liveness)| {
+                        *prompt == Some("parked worker") && liveness.first_evidence_at.is_none()
+                    })
+                    && liveness.iter().any(|(prompt, liveness)| {
+                        *prompt == Some("streaming worker") && liveness.first_evidence_at.is_some()
+                    })
+                {
+                    break detail;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("live API exposes distinct liveness for both running workers");
         let blocked_liveness = blocked
             .journal
             .iter()
-            .find_map(|entry| {
-                entry
-                    .agent_call
-                    .as_ref()
-                    .and_then(|call| call.liveness.as_ref())
-            })
-            .expect("running agent call projects liveness through get_run");
+            .find(|entry| entry.request["prompt"] == "parked worker")
+            .and_then(|entry| entry.agent_call.as_ref())
+            .and_then(|call| call.liveness.as_ref())
+            .expect("parked worker projects liveness through the live API");
         assert!(
             blocked_liveness.started_at <= chrono::Utc::now(),
             "dispatch must stamp the worker before its provider emits evidence"
@@ -8961,19 +9012,37 @@ mod tests {
         release.send(()).expect("release first provider delta");
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
             loop {
-                let Json(detail) = get_run(State(state.clone()), Path(started.id))
+                let detail = client
+                    .get(run_url(started.id))
+                    .send()
                     .await
-                    .expect("real get_run handler after provider evidence");
+                    .expect("request live run detail after provider evidence")
+                    .error_for_status()
+                    .expect("live run detail after provider evidence succeeds")
+                    .json::<swage_protocol::client::workflow::WorkflowRunDetailResponse>()
+                    .await
+                    .expect("live run detail after provider evidence deserialises");
                 if detail
                     .journal
                     .iter()
-                    .find_map(|entry| {
+                    .filter_map(|entry| {
                         entry
                             .agent_call
                             .as_ref()
                             .and_then(|call| call.liveness.as_ref())
                     })
-                    .is_some_and(|liveness| liveness.first_evidence_at.is_some())
+                    .count()
+                    == 2
+                    && detail
+                        .journal
+                        .iter()
+                        .filter_map(|entry| {
+                            entry
+                                .agent_call
+                                .as_ref()
+                                .and_then(|call| call.liveness.as_ref())
+                        })
+                        .all(|liveness| liveness.first_evidence_at.is_some())
                 {
                     break;
                 }
@@ -8984,21 +9053,41 @@ mod tests {
         .expect("first provider delta becomes visible through get_run");
 
         wait_for_terminal(&state, started.id).await;
-        let Json(settled) = get_run(State(state), Path(started.id))
+        let settled = client
+            .get(run_url(started.id))
+            .send()
             .await
-            .expect("real get_run handler after settlement");
+            .expect("request settled live run detail")
+            .error_for_status()
+            .expect("settled live run detail succeeds")
+            .json::<swage_protocol::client::workflow::WorkflowRunDetailResponse>()
+            .await
+            .expect("settled live run detail deserialises");
         let settled_liveness = settled
             .journal
             .iter()
-            .find_map(|entry| {
+            .filter_map(|entry| {
                 entry
                     .agent_call
                     .as_ref()
                     .and_then(|call| call.liveness.as_ref())
             })
-            .expect("settled agent call persists liveness");
+            .collect::<Vec<_>>();
+        assert_eq!(
+            settled_liveness.len(),
+            2,
+            "both agent calls persist liveness"
+        );
+        assert!(
+            settled_liveness
+                .iter()
+                .all(|liveness| liveness.first_evidence_at.is_some()),
+            "both settled workers retain their first evidence stamps"
+        );
+        let settled_liveness = settled_liveness[0];
         assert!(settled_liveness.first_evidence_at.is_some());
         assert!(settled_liveness.first_evidence_at >= Some(settled_liveness.started_at));
+        server.abort();
     }
 
     #[tokio::test(flavor = "multi_thread")]
