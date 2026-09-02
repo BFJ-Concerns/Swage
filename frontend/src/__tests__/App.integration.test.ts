@@ -1093,6 +1093,64 @@ describe("App", () => {
     });
   });
 
+  it("reconnects a dropped stream when its owning conversation is selected again", async () => {
+    const defaultSpace = makeSpace();
+
+    vi.mocked(spacesApi.listSpaces).mockResolvedValueOnce([defaultSpace]);
+    vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([
+      makeConversationSummary({ id: "conv-stream" }),
+      makeConversationSummary({ id: "conv-other" }),
+    ]);
+    vi.mocked(conversationsApi.getConversation)
+      .mockResolvedValueOnce(makeConversationDetail({ id: "conv-stream", messages: [] }))
+      .mockResolvedValueOnce(makeConversationDetail({ id: "conv-other", messages: [] }))
+      .mockResolvedValueOnce(makeConversationDetail({ id: "conv-stream", messages: [] }))
+      .mockResolvedValueOnce(makeConversationDetail({ id: "conv-stream", messages: [] }));
+
+    setPath("/conversations/conv-stream");
+    component = mount(App, { target: document.body });
+    await settleUi();
+    websocketHarness.fireStatus("connected");
+
+    const textarea = document.querySelector<HTMLTextAreaElement>("textarea");
+    expect(textarea).not.toBeNull();
+    flushSync(() => {
+      textarea!.value = "Keep this stream attached";
+      textarea!.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    flushSync(() =>
+      document.querySelector<HTMLButtonElement>(".action.send")!.click(),
+    );
+    expect(websocketHarness.client.send).toHaveBeenCalledWith({
+      type: "send_message",
+      content: "Keep this stream attached",
+    });
+    websocketHarness.fireEvent({ type: "token", content: "Still rendering" });
+    await settleUi();
+
+    websocketHarness.client.connect.mockClear();
+    const conversationButtons = document.querySelectorAll<HTMLButtonElement>(
+      ".conversation-select-btn",
+    );
+    flushSync(() => conversationButtons[1]!.click());
+    await settleUi();
+    expect(websocketHarness.client.connect).not.toHaveBeenCalled();
+
+    websocketHarness.fireStatus("reconnecting");
+    flushSync(() => conversationButtons[0]!.click());
+    await settleUi();
+
+    expect(websocketHarness.client.connect).toHaveBeenCalledOnce();
+    expect(websocketHarness.client.connect).toHaveBeenCalledWith("conv-stream");
+    websocketHarness.fireStatus("connected");
+    await settleUi();
+    expect(document.querySelector(".connection-indicator")).toBeNull();
+    expect(document.querySelector(".message-display")?.textContent).toContain(
+      "Still rendering",
+    );
+    expect(document.querySelector(".action.stop")).not.toBeNull();
+  });
+
   it("keeps a newer stream live when reconnect refresh completes late", async () => {
     const defaultSpace = makeSpace();
     let resolveReconnectRefresh!: (conversation: ConversationDetail) => void;
