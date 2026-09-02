@@ -37,6 +37,127 @@ files). The overlay:
 4. Sets `declared_skills` and, when present, `output_schema` and
    `output_max_retries`.
 
+## Effort
+
+Reasoning effort is a single provider-neutral vocabulary of seven levels,
+ordered lowest to highest:
+
+| Level | Wire spelling |
+|---|---|
+| Off | `off` |
+| Minimal | `minimal` |
+| Low | `low` |
+| Medium | `medium` |
+| High | `high` |
+| Xhigh | `xhigh` |
+| Max | `max` |
+
+### Where effort is set
+
+Effort resolves through a three-step fallback:
+
+1. **Per-turn override** — an explicit `effort_override` passed by the
+   caller (workflow dispatches, delegated turns).
+2. **Session metadata** — set at session creation via the `effort` field
+   of `CreateConversationRequest`. Stored in the session's metadata JSON
+   and read back on each turn.
+3. **Model default** — `default_effort` on the model's catalogue entry
+   (`ModelEndpointConfig` in config, `ModelSettings` on the wire). When
+   set, every turn using that model inherits the default unless
+   overridden above.
+
+When none of these supplies a value, the turn sends no effort control.
+
+The web UI's Settings → Providers panel exposes a **Default effort**
+dropdown on each model entry, with all seven levels plus "No effort".
+This sets `default_effort` on the model's config entry.
+
+Config example:
+
+```toml
+[models.entries.sonnet]
+provider_id = "anthropic"
+model_id = "claude-sonnet-5"
+default_effort = "high"
+```
+
+### Resolution
+
+Each model declares an `EffortCapability` — either through the catalogue
+entry's `capabilities.effort` field (config or wire), or through the
+provider adapter's built-in declaration for models it serves. Three
+capability shapes:
+
+| Shape | Fields | Behaviour |
+|---|---|---|
+| `Levels` | `levels: [Effort]`, `can_disable: bool` | The control takes named levels from a fixed set. `can_disable` governs whether `off` sends the model's own disable or clamps to the lowest supported level. |
+| `Budget` | `min_tokens: u32`, `max_tokens: u32`, `can_disable: bool` | The control takes a numeric thinking budget. The six non-off levels spread monotonically across the declared range. |
+| `None` | — | No effort control; every intent is omitted from the request. |
+
+`resolve_effort` (`swage-core/src/effort.rs`) is the single resolution
+point. Rules:
+
+- A level the model supports natively passes through.
+- An unsupported level clamps to the nearest supported level below the
+  request, or to the lowest supported level when nothing lower exists.
+- `off` sends the model's disable when `can_disable` is true; otherwise
+  clamps to the lowest level with a note.
+- A budget model receives a monotone budget across its range (higher
+  intent never resolves to a smaller budget).
+- A model declaring `None` has the control omitted entirely.
+
+A capability that cannot be honoured (empty levels, inverted budget
+range) is refused at config validation (`EffortCapability::validate`),
+not at resolution time.
+
+### Adapter declarations
+
+The built-in adapters declare:
+
+| Adapter | Capability |
+|---|---|
+| Anthropic | Levels: `low`, `medium`, `high`, `max`; `can_disable: true` |
+| Chat Completions (OpenAI) | Levels: `minimal`, `low`, `medium`, `high`, `xhigh`; `can_disable: true` (reasoning models only; non-reasoning models return `None`) |
+| Responses (OpenAI) | Same as Chat Completions |
+
+A catalogue entry's `capabilities.effort` overrides the adapter's
+declaration for that model.
+
+### Audit trail
+
+The turn's assembly report records the resolution under
+`provider_visible.effort` as a `ResolvedEffort`:
+
+```json
+{
+  "requested": "max",
+  "control": { "kind": "level", "level": "xhigh" },
+  "clamped_to": "xhigh",
+  "note": "max unsupported; clamped to xhigh"
+}
+```
+
+When the request was honoured as-is, `clamped_to` and `note` are absent.
+This data is stored in the assembly report JSON and available through
+`GET /api/turns/{id}/context`; the web UI's context inspector panel
+does not yet render it.
+
+## Effective agent registry
+
+A fresh installation's effective agent registry holds one entry: the
+shipped default (`"gateway"`, display name "Swage default"). No other
+agent definitions ship with the gateway. The start-conversation picker
+lists this default plus any operator-authored definitions visible to
+the space (via `GET /api/spaces/{spaceId}/agent-definitions`).
+`CreateConversationRequest`'s `agent_id` field selects one of these:
+`"gateway"` or an operator-authored definition visible to the target
+space; the gateway rejects anything else with a validation error.
+
+A shipped workflow's roles (the research sweep's researcher, organiser,
+and synthesist) are bare dispatches inside the workflow script, not
+standalone agent definitions — they do not appear in the registry or the
+picker.
+
 ## Operator guidance (`AGENTS.md`)
 
 Operator-authored guidance is a second instruction source, parallel to the
@@ -433,6 +554,13 @@ The inspector panel displays:
 `ContextAssembled` WebSocket event use the same typed report; the frontend
 imports the generated `AssemblyReport.ts` projection.
 
+The report's `provider_visible` object also records the resolved effort
+for the turn (see [Agents and permissions — Effort](agents-and-permissions.md#effort)):
+what was requested, what the adapter sent, and any clamp or substitution.
+This data is stored in the report JSON but is not yet rendered by the
+web UI's inspector panel; it is available through the
+`GET /api/turns/{id}/context` endpoint.
+
 `swage-tui` has a terminal-UI equivalent (`ui/inspector.rs:64`), toggled by
 keybinding. It shows per-element fill bars and a budget percentage.
 
@@ -451,6 +579,189 @@ The `RouterOptions.conversationStore` interface (`router.ts:47`) is a
 four-member contract — `activeConversationId`, `checkConversationExists`,
 `clearActiveConversation`, `selectConversation` — decoupled from Svelte store
 internals.
+
+## Image attachments
+
+A message may carry content parts beside its text, submitted as the
+`attachments` array on `SubmitTurnRequest` (REST) or the `SendMessage`
+WebSocket event. Each attachment is a tagged `MessageAttachment`
+(`swage-protocol::client::turn`); the only kind at this tree is `image_url`,
+carrying a URL (https or `data:` inline).
+
+### Intake check
+
+`check_attachment_support` (`turn.rs:154`) runs before anything is persisted.
+For each attachment:
+
+- An `image_url` with an empty URL is rejected as a `ValidationError`.
+- An `image_url` when the configured provider's `WorkflowCapabilities.vision`
+  is `false` is rejected as a `ValidationError`.
+
+### Which protocols claim vision
+
+`WorkflowCapabilities::for_protocol` (`capabilities.rs:30`) sets `vision`
+per protocol:
+
+| Protocol | `vision` | Reason |
+|---|---|---|
+| `OpenAi` | `true` | The Chat Completions adapter maps `ContentPart::ImageUrl` |
+| `OpenRouter` | `true` | Same adapter (OpenAI-shaped envelope) |
+| `OpenAiResponses` | `false` | Adapter converts text parts only |
+| `Anthropic` | `false` | Adapter converts text parts only |
+| `Google` | `false` | Adapter converts text parts only |
+| `Codex` | `false` | App Server integration; assembled text only |
+
+Vision is claimed only where the adapter's message conversion maps
+`ContentPart::ImageUrl` to the wire body. The capability is resolved once at
+startup from the default provider's protocol and stored in
+`AppState.workflow_capabilities`.
+
+### Wire shape
+
+When image parts are present, the OpenAI adapter (`openai.rs`) emits a JSON
+array of typed content parts (`[{"type":"text","text":"…"},
+{"type":"image_url","image_url":{"url":"…"}}]`). Text-only messages keep
+the plain string form, preserving wire compatibility.
+
+Stored messages carry attachments as opaque JSON in the `attachments`
+column of the `messages` table (`TEXT NOT NULL DEFAULT '[]'`). The
+`MessageView` returned by the API includes the `attachments` array.
+
+## Provider credentials
+
+A provider entry in `config.toml` has two credential fields
+(`ProviderEndpointConfig` in `swage-config/src/model.rs`):
+
+| Field | Resolution | Audit/redaction |
+|---|---|---|
+| `api_key_secret_ref` | Resolved through the `SecretManager` by reference (`secret://{backend}/{id}`) with an audit event per access and the value registered for redaction | Yes |
+| `api_key_env` | Direct `std::env::var` read at startup; legacy path, warned at startup (`startup.rs:449`) | No |
+
+`resolve_provider_config` (`startup.rs:420`) checks `api_key_secret_ref`
+first; if absent, falls back to `api_key_env`. The resolved secret must have
+`material_kind` `"provider_key"`.
+
+### Secret manager and backends
+
+The `SecretManager` (`secret.rs`) resolves secrets by their `secret://`
+reference, with an audit event per access and the resolved value registered
+for redaction. A secret's `backend_kind` names where its value lives;
+resolution reads the backend on every call, so material that changes
+underneath is current at the next access.
+
+| Backend | `backend_kind` | Value source |
+|---|---|---|
+| Managed | `managed` | Encrypted at rest in the gateway's SQLite store |
+| Environment | `env` | `external_reference` names an environment variable |
+| File | `file` | `external_reference` names a file path; `metadata.json_pointer` (RFC 6901) optionally selects one field of a JSON document |
+
+### File backend
+
+The file is re-read on every resolution. When `json_pointer` is absent, the
+whole file (trimmed) is the value. When present, the file is parsed as JSON
+and the pointer selects the field — a string value is used directly; any
+other JSON type is serialised. The file's modification time is recorded as
+the observation stamp.
+
+### Registering a file-backed secret
+
+Create the secret with `POST /api/secrets` (`server.rs:251`):
+
+```json
+{
+  "name": "my-service-token",
+  "material_kind": "provider_key",
+  "owner_kind": "operator",
+  "backend_kind": "file",
+  "scope_kind": "provider",
+  "scope_id": "my-provider",
+  "external_reference": "/path/to/token-file.json",
+  "metadata": { "json_pointer": "/tokens/access_token" }
+}
+```
+
+The request fields (`CreateSecretRequest` in `secret.rs:43`):
+
+| Field | Required | Purpose |
+|---|---|---|
+| `name` | Yes | Human-readable label |
+| `material_kind` | Yes | What the secret is — `"provider_key"` for provider credentials |
+| `owner_kind` | Yes | Who owns it — `"operator"`, `"harness"`, etc. |
+| `backend_kind` | Yes | `"file"`, `"env"`, or `"managed"` |
+| `scope_kind` | Yes | Scope category — `"provider"`, `"global"`, etc. |
+| `scope_id` | No | Scope within the category |
+| `external_reference` | No | File path (for `file`) or env var name (for `env`) |
+| `metadata` | No | Backend-specific; `{"json_pointer": "..."}` for `file` |
+| `value` | No | The secret material (for `managed` backend) |
+
+The response includes a `reference` field (`secret://file/{id}`). Point the
+provider entry's `api_key_secret_ref` at this reference:
+
+```toml
+[providers.entries.my-provider]
+protocol = "openai"
+api_key_secret_ref = "secret://file/<returned-id>"
+```
+
+### Codex auth store registration
+
+At startup (`startup.rs:208`) the gateway registers the Codex CLI's
+`auth.json` under the file backend as two records:
+
+| Name | Material kind | JSON pointer |
+|---|---|---|
+| `codex.access_token` | `oauth_access_token` | `/tokens/access_token` |
+| `codex.refresh_token` | `oauth_refresh_token` | `/tokens/refresh_token` |
+
+Registration is idempotent: an existing active record for either token is
+re-pointed at the current path. Registration precedes sign-in, so the file
+need not exist yet. Both tokens resolve, audit, and redact through the
+governed system.
+
+## Wire error contract
+
+Every failed HTTP response on the client surface carries
+`{"code":"<snake_case>","message":"…"}` — the `ApiErrorBody` type
+(`swage-protocol::client::error`).
+
+### ErrorCode enum
+
+`ErrorCode` (`error.rs:21`) names one HTTP status each:
+
+| Code | Status | Meaning |
+|---|---|---|
+| `malformed_body` | 400 | Body was not valid JSON or could not be read |
+| `forbidden` | 403 | Caller may not perform this operation |
+| `not_found` | 404 | Addressed entity does not exist |
+| `conflict` | 409 | Collides with existing state |
+| `turn_in_progress` | 409 | Conversation already has a turn in flight |
+| `already_connected` | 409 | Conversation already has a live connection |
+| `unsupported_media_type` | 415 | Missing `Content-Type: application/json` |
+| `validation_error` | 422 | Body parsed but failed validation |
+| `sign_in_unsupported` | 422 | Provider offers no sign-in flow of the requested kind |
+| `internal_error` | 500 | Unexpected gateway failure |
+| `provider_error` | 502 | Upstream model provider failed |
+| `sign_in_failed` | 502 | Provider refused or could not complete sign-in |
+| `provider_runtime_unavailable` | 503 | Provider runtime could not be started or reached |
+
+The HTTP status is a projection of the code (`ErrorCode::status`), never an
+independent fact. Codes serialise as `snake_case` strings via serde.
+
+### Coverage
+
+`GatewayError` maps exhaustively to an `ErrorCode` — a new variant must
+choose one. The gateway's own `Json` extractor answers body-parsing
+rejections (malformed JSON, unsupported media type, `deny_unknown_fields`
+violations naming the rejected field) in the same `ApiErrorBody` shape.
+Handlers construct refusals through `ApiError` rather than hand-built bodies.
+
+### Client consumers
+
+- **Rust client** — `ClientError::Gateway` variant parses the body into a
+  typed error.
+- **Frontend** — `ApiError` class (`frontend/src/lib/api/error.ts`) reads
+  the `code` field. The generated TypeScript client's request helper raises
+  `ApiError` on non-ok responses.
 
 ## Wire-contract architecture
 
@@ -473,19 +784,40 @@ surface. A `schemars::schema_for!` call walks only the type graph reachable from
 that anchor, so a new top-level type must be added to the anchor unless an
 existing field already reaches it.
 
+### Route manifest
+
+`routes.rs` (`swage-protocol::client::routes`) carries a growing manifest of
+client-surface HTTP routes: method, path template, path parameters, request
+body schema name, and response body schema name. The manifest does not yet
+cover the full client surface — the space CRUD routes are the first entries;
+routes not yet in the manifest are registered directly on the router and are
+not covered by the OpenAPI or generated-client projections. Failures are not
+listed per route — every route answers a failure with `ApiErrorBody`,
+projected once as the shared error response.
+
+Adding a manifested route is one entry in the `routes()` function; the
+OpenAPI document, the generated TypeScript client, and the router-coverage
+test all read this table. The router test (`server.rs:418`) proves every
+manifest route is registered on the axum router — a manifest entry with no
+matching handler fails the test.
+
 ### Projections
 
 | Projection | Output | Mechanism |
 |---|---|---|
-| TypeScript (ts-rs) | `frontend/src/lib/protocol/` | `projections.rs` test manually calls `export_all` for each top-level export, then trims trailing whitespace |
+| TypeScript types (ts-rs) | `frontend/src/lib/protocol/` | `projections.rs` test manually calls `export_all` for each top-level export, then trims trailing whitespace |
 | JSON Schema (schemars) | `crates/swage-protocol/schema/{client,hosting,device,channel}.json` | `projections.rs` tests per surface, via the anchor type |
+| OpenAPI 3.1 (from route manifest) | `crates/swage-protocol/schema/client-openapi.json` | `projections.rs` test renders `openapi::document()`, which walks the manifest and reuses the client surface's JSON Schema as its `components/schemas` |
+| TypeScript client (from route manifest) | `frontend/src/lib/protocol/client.ts` | `projections.rs` test renders `typescript_client::generate()` — one typed function per manifest route over a shared `request` helper that raises `ApiError` on non-ok responses |
 
 Running `cargo test -p swage-protocol` regenerates all projections in place.
 New top-level wire types must be added to the appropriate anchor for JSON
 Schema and to the explicit `export_all` list for TypeScript unless already
-reachable from an existing entry. Drift shows as uncommitted changes, caught by
-the verify gate's projection-freshness check; an unregistered type creates no
-drift for that check to detect.
+reachable from an existing entry. New routes must be added to the `routes()`
+manifest for the OpenAPI and client projections. Drift shows as uncommitted
+changes, caught by the verify gate's projection-freshness check; an
+unregistered type or unmanifested route creates no drift for that check to
+detect.
 
 ## Verification gate
 
@@ -1007,6 +1339,41 @@ evaluations. It is incremented in the host-command loop (deterministic
 boundary) and decremented in the spawned task on completion. The park
 guard reads this counter — the journal can lag a dispatch, so it must not
 be the guard.
+
+## Carried workflows
+
+A workflow script may be carried by a skill rather than authored as a
+space row. The `WorkflowScript` wire type carries a `carrying_skill`
+field (`Option<String>`) naming the skill that provides the workflow
+when it is not a standalone authored row. A carried workflow is
+immutable in place; an operator can shadow it by authoring a same-named
+workflow in the space.
+
+Each shipped skill carries its own workflows. When a skill is active on
+a session, its carried workflows become available, and any available
+workflow starts by name through `workflow_run`. The research skill
+(`shipped/skills/research/`) carries `research-sweep`.
+
+### Running a research sweep
+
+Activate the research skill on a session (via `activate_skill`), then
+dispatch its carried workflow with `workflow_run`:
+
+```json
+{ "name": "research-sweep", "args": { "topic": "…", "purpose": "…", "maxSources": 8 } }
+```
+
+- `topic` — what to research, as the user phrased it.
+- `purpose` — what the findings must serve; the synthesis is judged
+  against this.
+- `maxSources` — optional ceiling on sources gathered (default 8).
+
+The sweep runs unattended: sources are gathered as immutable
+observations, an organising pass signposts what landed using
+`knowledge_curate_orientation` (which can author, supersede, and retire
+orientation cards), and a synthesis pass delivers cited findings. The
+sweep's roles — scout, gatherers, organiser, synthesist — are bare
+dispatches inside the script, not standalone agent definitions.
 
 ## Storage
 
