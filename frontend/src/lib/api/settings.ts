@@ -9,6 +9,7 @@ import type {
 import type { ProviderSignInState } from "../protocol/ProviderSignInState";
 import type { SignInMethod } from "../protocol/SignInMethod";
 import type { StartProviderSignInResponse } from "../protocol/StartProviderSignInResponse";
+import { ApiError } from "./error";
 
 async function request(path: string, method = "GET", body?: unknown): Promise<Response> {
   const init: RequestInit = { method };
@@ -18,20 +19,7 @@ async function request(path: string, method = "GET", body?: unknown): Promise<Re
   }
   const response = await fetch(path, init);
   if (!response.ok) {
-    let detail = "";
-    try {
-      const contentType = response.headers.get("Content-Type") ?? "";
-      if (contentType.includes("application/json")) {
-        const body = (await response.json()) as { message?: unknown };
-        if (typeof body.message === "string") detail = `: ${body.message}`;
-      } else {
-        const body = await response.text();
-        if (body.trim()) detail = `: ${body.trim()}`;
-      }
-    } catch {
-      detail = "";
-    }
-    throw new Error(`HTTP ${response.status} from ${method} ${path}${detail}`);
+    throw await ApiError.fromResponse(response, method, path);
   }
   return response;
 }

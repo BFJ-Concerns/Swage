@@ -2,6 +2,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { discoverModels } from "../api/settings";
+import { ApiError } from "../api/error";
 
 function mockResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -43,16 +44,37 @@ describe("settings api", () => {
     });
   });
 
-  it("includes server response text in request failures", async () => {
+  it("reads a contract error body into a typed ApiError", async () => {
     vi.mocked(fetch).mockResolvedValueOnce(
-      new Response("unknown variant `OpenAi`", {
-        status: 422,
-        headers: { "Content-Type": "text/plain" },
+      mockResponse(
+        { code: "validation_error", message: "validation error: unknown variant `OpenAi`" },
+        422,
+      ),
+    );
+
+    const failure = await discoverModels("llama").catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(ApiError);
+    const apiError = failure as ApiError;
+    expect(apiError.status).toBe(422);
+    expect(apiError.code).toBe("validation_error");
+    expect(apiError.is("validation_error")).toBe(true);
+    expect(apiError.message).toBe("validation error: unknown variant `OpenAi`");
+  });
+
+  it("keeps a response outside the contract as a diagnostic error", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response("<html>bad gateway</html>", {
+        status: 502,
+        headers: { "Content-Type": "text/html" },
       }),
     );
 
-    await expect(discoverModels("llama")).rejects.toThrow(
-      "HTTP 422 from GET /api/settings/providers/llama/models: unknown variant `OpenAi`",
+    const failure = await discoverModels("llama").catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(ApiError);
+    const apiError = failure as ApiError;
+    expect(apiError.code).toBeNull();
+    expect(apiError.message).toBe(
+      "HTTP 502 from GET /api/settings/providers/llama/models: <html>bad gateway</html>",
     );
   });
 });
