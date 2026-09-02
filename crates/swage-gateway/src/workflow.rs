@@ -7511,9 +7511,20 @@ mod tests {
 
         fn stream(
             &self,
-            _: swage_core::CompletionRequest,
+            request: swage_core::CompletionRequest,
         ) -> std::pin::Pin<Box<dyn futures::Stream<Item = swage_core::StreamChunk> + Send>>
         {
+            let prompt = request
+                .messages
+                .iter()
+                .map(swage_core::ChatMessage::text_content)
+                .collect::<Vec<_>>()
+                .join("\n");
+            if !prompt.contains("parked worker") {
+                return Box::pin(futures::stream::iter(scripted_text_output(
+                    "second evidence",
+                )));
+            }
             let parked = self.parked.lock().expect("parked sender").take();
             let Some(parked) = parked else {
                 return Box::pin(futures::stream::iter(scripted_text_output(
