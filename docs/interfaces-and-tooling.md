@@ -97,6 +97,12 @@ frontend's TypeScript is generated from it via ts-rs, and the canonical
 published artefact is the JSON Schema generated via schemars and committed
 under `crates/swage-protocol/schema/`.
 
+The report's `provider_visible` object also records the resolved effort for
+the turn — what was requested, what the adapter sent, and any clamp or
+substitution — so an operator can see how effort was resolved for any past
+turn. See [Agents and permissions — Effort](agents-and-permissions.md#effort)
+for the full resolution rules.
+
 The assembly report used by the context inspector is part of the client
 surface. Both the stored-context response and the `context_assembled`
 WebSocket event use that protocol type, and the frontend imports its generated

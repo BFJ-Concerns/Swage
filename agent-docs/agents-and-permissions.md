@@ -1,5 +1,5 @@
 ---
-description: Agent definitions, operator guidance (AGENTS.md), tool permissions, approval mechanics, dispatch-bound grant intersection, and space-targeted session creation
+description: Agent definitions, operator guidance (AGENTS.md), tool permissions, approval mechanics, dispatch-bound grant intersection, effort resolution, and space-targeted session creation
 ---
 
 # Agents and permissions
@@ -35,6 +35,118 @@ files). The overlay:
    ignored (the config's own grants stand).
 4. Sets `declared_skills` and, when present, `output_schema` and
    `output_max_retries`.
+
+## Effort
+
+Reasoning effort is a single provider-neutral vocabulary of seven levels,
+ordered lowest to highest:
+
+| Level | Wire spelling |
+|---|---|
+| Off | `off` |
+| Minimal | `minimal` |
+| Low | `low` |
+| Medium | `medium` |
+| High | `high` |
+| Xhigh | `xhigh` |
+| Max | `max` |
+
+### Where effort is set
+
+Effort resolves through a three-step fallback:
+
+1. **Per-turn override** — an explicit `effort_override` passed by the
+   caller (workflow dispatches, delegated turns).
+2. **Session metadata** — set at session creation via the `effort` field
+   of `CreateConversationRequest`. Stored in the session's metadata JSON
+   and read back on each turn.
+3. **Model default** — `default_effort` on the model's catalogue entry
+   (`ModelEndpointConfig` in config, `ModelSettings` on the wire). When
+   set, every turn using that model inherits the default unless
+   overridden above.
+
+When none of these supplies a value, the turn sends no effort control.
+
+Config example:
+
+```toml
+[models.entries.sonnet]
+provider_id = "anthropic"
+model_id = "claude-sonnet-5"
+default_effort = "high"
+```
+
+### Resolution
+
+Each model declares an `EffortCapability` — either through the catalogue
+entry's `capabilities.effort` field (config or wire), or through the
+provider adapter's built-in declaration for models it serves. Three
+capability shapes:
+
+| Shape | Fields | Behaviour |
+|---|---|---|
+| `Levels` | `levels: [Effort]`, `can_disable: bool` | The control takes named levels from a fixed set. `can_disable` governs whether `off` sends the model's own disable or clamps to the lowest supported level. |
+| `Budget` | `min_tokens: u32`, `max_tokens: u32`, `can_disable: bool` | The control takes a numeric thinking budget. The six non-off levels spread monotonically across the declared range. |
+| `None` | — | No effort control; every intent is omitted from the request. |
+
+`resolve_effort` (`swage-core/src/effort.rs`) is the single resolution
+point. Rules:
+
+- A level the model supports natively passes through.
+- An unsupported level clamps to the nearest supported level below the
+  request, or to the lowest supported level when nothing lower exists.
+- `off` sends the model's disable when `can_disable` is true; otherwise
+  clamps to the lowest level with a note.
+- A budget model receives a monotone budget across its range (higher
+  intent never resolves to a smaller budget).
+- A model declaring `None` has the control omitted entirely.
+
+A capability that cannot be honoured (empty levels, inverted budget
+range) is refused at config validation (`EffortCapability::validate`),
+not at resolution time.
+
+### Adapter declarations
+
+The built-in adapters declare:
+
+| Adapter | Capability |
+|---|---|
+| Anthropic | Levels: `low`, `medium`, `high`, `max`; `can_disable: true` |
+| Chat Completions (OpenAI) | Levels: `minimal`, `low`, `medium`, `high`, `xhigh`; `can_disable: true` (reasoning models only; non-reasoning models return `None`) |
+| Responses (OpenAI) | Same as Chat Completions |
+
+A catalogue entry's `capabilities.effort` overrides the adapter's
+declaration for that model.
+
+### Audit trail
+
+The turn's assembly report records the resolution under
+`provider_visible.effort` as a `ResolvedEffort`:
+
+```json
+{
+  "requested": "max",
+  "control": { "kind": "level", "level": "xhigh" },
+  "clamped_to": "xhigh",
+  "note": "max unsupported; clamped to xhigh"
+}
+```
+
+When the request was honoured as-is, `clamped_to` and `note` are absent.
+The context inspector shows this alongside the effective model snapshot.
+
+## Effective agent registry
+
+A fresh installation's effective agent registry holds one entry: the
+shipped default (`"gateway"`, display name "Swage default"). No other
+agent definitions ship with the gateway. The start-conversation picker
+— and `CreateConversationRequest`'s `agent_id` field — list this default
+plus any operator-authored definitions (global or space-scoped).
+
+A shipped workflow's roles (the research sweep's researcher, organiser,
+and synthesist) are bare dispatches inside the workflow script, not
+standalone agent definitions — they do not appear in the registry or the
+picker.
 
 ## Operator guidance (`AGENTS.md`)
 

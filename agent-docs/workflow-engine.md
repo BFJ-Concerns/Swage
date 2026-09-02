@@ -1,5 +1,5 @@
 ---
-description: Run lifecycle, journal/replay, budget partitions, parking, wake gate, worker sessions, cancellation, and failure handover
+description: Run lifecycle, journal/replay, budget partitions, parking, wake gate, worker sessions, cancellation, failure handover, and carried workflows
 ---
 
 # Workflow engine
@@ -454,6 +454,21 @@ evaluations. It is incremented in the host-command loop (deterministic
 boundary) and decremented in the spawned task on completion. The park
 guard reads this counter — the journal can lag a dispatch, so it must not
 be the guard.
+
+## Carried workflows
+
+A workflow script may be carried by a skill rather than authored as a
+space row. The `WorkflowScript` wire type carries a `carrying_skill`
+field (`Option<String>`) naming the skill that provides the workflow
+when it is not a standalone authored row. A carried workflow is
+immutable in place; an operator can shadow it by authoring a same-named
+workflow in the space.
+
+The shipped research skill (`shipped/skills/research/`) carries the
+`research-sweep` workflow. No other workflows ship with the gateway.
+A carried workflow's roles (the research sweep's researcher, organiser,
+and synthesist) are bare dispatches inside the script, not standalone
+agent definitions — they do not appear in the agent registry.
 
 ## Storage
 
