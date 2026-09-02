@@ -4,6 +4,10 @@ All notable changes to Swage are documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- Resumed workflow workers no longer replay tool calls to providers without a tool name.
+
 ### Added
 
 - Users and agents can leave durable notes on a page's modules, appearing on an open page as they are written and readable by the agent alongside the module they hang on.
