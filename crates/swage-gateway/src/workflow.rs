@@ -437,8 +437,7 @@ fn journal_wire(
 ) -> Result<swage_protocol::client::workflow::WorkflowJournalEntry, String> {
     use swage_protocol::client::workflow::{
         WorkflowAgentCallDetail, WorkflowEffectDetail, WorkflowJournalEntry,
-        WorkflowJournalEntryKind, WorkflowJournalEntryStatus, WorkflowWorkerLiveness,
-        WorkflowWorktreeCompletion,
+        WorkflowJournalEntryKind, WorkflowJournalEntryStatus, WorkflowWorktreeCompletion,
     };
     let kind = match entry.kind.as_str() {
         "agent_call" => WorkflowJournalEntryKind::AgentCall,
@@ -502,22 +501,6 @@ fn journal_wire(
                     tip_commit: worktree.tip_commit,
                     changed: worktree.changed,
                     removed: worktree.removed,
-                }),
-            liveness: result
-                .and_then(|value| value.get("liveness"))
-                .and_then(|value| {
-                    serde_json::from_value::<swage_workflow::WorkerLiveness>(value.clone()).ok()
-                })
-                .and_then(|liveness| {
-                    Some(WorkflowWorkerLiveness {
-                        started_at: liveness.started_at.parse().ok()?,
-                        first_evidence_at: liveness
-                            .first_evidence_at
-                            .as_deref()
-                            .map(str::parse)
-                            .transpose()
-                            .ok()?,
-                    })
                 }),
         }
     });
@@ -1485,16 +1468,9 @@ async fn run_ephemeral_agent_call(
     };
     let (events, mut events_rx) = mpsc::unbounded_channel::<ServerEvent>();
     let observed_events = Arc::new(Mutex::new(Vec::new()));
-    let event_liveness = Arc::clone(&state.active_workflow_workers);
     let recorded_events = Arc::clone(&observed_events);
     let event_task = tokio::spawn(async move {
         while let Some(event) = events_rx.recv().await {
-            if matches!(event, ServerEvent::Token { .. })
-                && let Some(liveness) = event_liveness.lock().await.get_mut(&journal_entry_id)
-                && liveness.first_evidence_at.is_none()
-            {
-                liveness.first_evidence_at = Some(chrono::Utc::now().to_rfc3339());
-            }
             recorded_events.lock().await.push(event);
         }
     });
@@ -1642,7 +1618,6 @@ async fn run_ephemeral_agent_call(
         thread_id: Some(thread_id),
         turn_id: Some(turn.id),
         worktree: None,
-        liveness: None,
     })
 }
 
@@ -3683,13 +3658,6 @@ async fn complete_agent_entry(
     let worktree_seq = resolved_working_directory
         .as_ref()
         .and_then(|placement| placement.worktree_seq);
-    state.active_workflow_workers.lock().await.insert(
-        entry_id,
-        swage_workflow::WorkerLiveness {
-            started_at: chrono::Utc::now().to_rfc3339(),
-            first_evidence_at: None,
-        },
-    );
     match run_ephemeral_agent_call(
         state,
         run_id,
@@ -3704,7 +3672,6 @@ async fn complete_agent_entry(
     .await
     {
         Ok(mut result) => {
-            result.liveness = state.active_workflow_workers.lock().await.remove(&entry_id);
             if let Some(worktree_seq) = worktree_seq {
                 let completion = state
                     .worktree_host
@@ -3733,7 +3700,6 @@ async fn complete_agent_entry(
         // resumed path. Cancellation is settled for every in-flight entry at
         // the owning run boundary after the host loop drains.
         Err(error) => {
-            state.active_workflow_workers.lock().await.remove(&entry_id);
             if !error.to_string().starts_with("WorkflowCancelledError") {
                 let _ = state
                     .fail_workflow_journal_entry(entry_id, &error.to_string())
@@ -5247,26 +5213,10 @@ pub async fn get_run(
             .filter(|event| event.delivered_at.is_none())
             .count() as u32,
     };
-    let live_workers = state.active_workflow_workers.lock().await.clone();
-    let mut journal = entries
+    let journal = entries
         .into_iter()
         .map(|entry| journal_wire(entry).map_err(internal))
         .collect::<Result<Vec<_>, ApiError>>()?;
-    for entry in &mut journal {
-        if let Some(liveness) = live_workers.get(&entry.id)
-            && let Some(agent_call) = entry.agent_call.as_mut()
-        {
-            agent_call.liveness = Some(swage_protocol::client::workflow::WorkflowWorkerLiveness {
-                started_at: liveness.started_at.parse().map_err(internal)?,
-                first_evidence_at: liveness
-                    .first_evidence_at
-                    .as_deref()
-                    .map(str::parse)
-                    .transpose()
-                    .map_err(internal)?,
-            });
-        }
-    }
     Ok(Json(WorkflowRunDetailResponse {
         run: run_wire(run)?,
         journal,
@@ -7374,6 +7324,9 @@ mod tests {
                 .map(swage_core::ChatMessage::text_content)
                 .collect::<Vec<_>>()
                 .join("\n");
+            if text.contains("leave worktree unchanged") {
+                return Box::pin(futures::stream::iter(scripted_text_output("unchanged")));
+            }
             let file = if text.contains("first-marker") {
                 "first-marker"
             } else {
@@ -8815,21 +8768,6 @@ mod tests {
             agent_call.result.as_ref().unwrap()["output"],
             "bounded work completed"
         );
-        let liveness = &agent_call.result.as_ref().expect("agent result")["liveness"];
-        assert!(
-            liveness["started_at"]
-                .as_str()
-                .and_then(|value| value.parse::<chrono::DateTime<chrono::Utc>>().ok())
-                .is_some(),
-            "a real worker run must record when its execution began"
-        );
-        assert!(
-            liveness["first_evidence_at"]
-                .as_str()
-                .and_then(|value| value.parse::<chrono::DateTime<chrono::Utc>>().ok())
-                .is_some(),
-            "the provider's emitted output must establish first evidence"
-        );
         let session_id = agent_call.result.as_ref().unwrap()["session_id"]
             .as_str()
             .and_then(|id| Uuid::parse_str(id).ok())
@@ -9982,8 +9920,9 @@ mod tests {
             r#"
             const first = agentStart("write first-marker", {{ cwd: {cwd}, isolation: "worktree", maxAttempts: 1 }});
             const second = agentStart("write second-marker", {{ cwd: {cwd}, isolation: "worktree", maxAttempts: 1 }});
-            await Promise.all([first.result, second.result]);
-            return {{ first: first.workingDirectory, second: second.workingDirectory }};
+            const unchanged = agentStart("leave worktree unchanged", {{ cwd: {cwd}, isolation: "worktree", maxAttempts: 1 }});
+            await Promise.all([first.result, second.result, unchanged.result]);
+            return {{ first: first.workingDirectory, second: second.workingDirectory, unchanged: unchanged.workingDirectory }};
         "#
         );
         let Json(started) = start_inline_run(
@@ -9993,7 +9932,7 @@ mod tests {
                 source,
                 args: Value::Null,
                 budget: Some(WorkflowBudget {
-                    max_concurrent_agent_calls: Some(2),
+                    max_concurrent_agent_calls: Some(3),
                     ..WorkflowBudget::default()
                 }),
             }),
@@ -10010,7 +9949,7 @@ mod tests {
             .filter_map(|entry| entry.result.as_ref()?.get("path")?.as_str())
             .map(std::path::PathBuf::from)
             .collect::<Vec<_>>();
-        assert_eq!(paths.len(), 2);
+        assert_eq!(paths.len(), 3);
         let agent_call_results = journal
             .iter()
             .filter(|entry| entry.kind == "agent_call")
@@ -10028,7 +9967,7 @@ mod tests {
                     .expect("completed worker call records its host-resolved directory")
             })
             .collect::<Vec<_>>();
-        assert_eq!(agent_call_results.len(), 2);
+        assert_eq!(agent_call_results.len(), 3);
         assert!(
             agent_call_results.iter().all(|path| paths.contains(path)),
             "each call result must report one of this run's provisioned paths"
@@ -10055,27 +9994,43 @@ mod tests {
         );
         drop(writes);
         assert!(!repo.join("first-marker").exists() && !repo.join("second-marker").exists());
+        let path_for = |prompt: &str| {
+            journal
+                .iter()
+                .find(|entry| entry.kind == "agent_call" && entry.request["prompt"] == prompt)
+                .and_then(|entry| entry.result.as_ref())
+                .and_then(|result| result["working_directory"].as_str())
+                .map(std::path::PathBuf::from)
+                .expect("worker call records its host-resolved directory")
+        };
+        let first_path = path_for("write first-marker");
+        let second_path = path_for("write second-marker");
+        let unchanged_path = path_for("leave worktree unchanged");
         assert!(
-            paths[0].join("first-marker").exists() || paths[1].join("first-marker").exists(),
-            "the first marker remains inside a retained changed worktree"
+            first_path.join("first-marker").exists(),
+            "the first marker remains inside its changed worktree"
         );
         assert!(
-            paths[0].join("second-marker").exists() || paths[1].join("second-marker").exists(),
-            "the second marker remains inside a retained changed worktree"
+            second_path.join("second-marker").exists(),
+            "the second marker remains inside its changed worktree"
         );
         let completed_run_root = fixture
             .path()
             .join("worker-worktrees")
             .join(started.id.to_string());
         for _ in 0..20 {
-            if paths.iter().all(|path| path.exists()) {
+            if !unchanged_path.exists() {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         }
         assert!(
-            paths.iter().all(|path| path.exists()),
-            "changed worktrees remain available as completion evidence: {paths:?}"
+            !unchanged_path.exists(),
+            "the unchanged worktree must be removed after its async cleanup: {unchanged_path:?}"
+        );
+        assert!(
+            first_path.exists() && second_path.exists(),
+            "changed worktrees remain available as completion evidence: {first_path:?}, {second_path:?}"
         );
         assert!(
             completed_run_root.exists(),
@@ -10113,8 +10068,8 @@ mod tests {
             })
             .expect("failed run should retain its worktree path");
         assert!(
-            !retained_path.exists(),
-            "a terminal run reclaims its completed worker worktree"
+            retained_path.exists(),
+            "the failed run retains its changed worker worktree for inspection"
         );
 
         let cancelled_source = format!(
@@ -12452,7 +12407,6 @@ mod tests {
                     thread_id: Some(thread.id),
                     turn_id: Some(Uuid::new_v4()),
                     worktree: None,
-                    liveness: None,
                 })
                 .expect("first result"),
             )
@@ -13322,7 +13276,6 @@ mod tests {
                     thread_id: None,
                     turn_id: None,
                     worktree: None,
-                    liveness: None,
                 })
                 .expect("work result"),
             )
@@ -13569,7 +13522,6 @@ mod tests {
                     thread_id: None,
                     turn_id: None,
                     worktree: None,
-                    liveness: None,
                 })
                 .expect("work result"),
             )

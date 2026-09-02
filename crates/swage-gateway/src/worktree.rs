@@ -477,9 +477,9 @@ mod tests {
         assert!(!removed.changed && removed.removed);
         assert!(first.path.exists(), "changed worktree remains for merging");
         assert!(!second.path.exists(), "unchanged worktree is removed");
-        remove_worktree(&repo, &first.path).await.unwrap();
-        let _ =
-            tokio::fs::remove_dir(temp.path().join("worktrees").join(owner_id.to_string())).await;
+        resumed_host.shutdown().await;
+        host.cleanup_owner(owner_id).await;
+        assert!(!first.path.exists() && !second.path.exists());
         assert!(
             !temp
                 .path()

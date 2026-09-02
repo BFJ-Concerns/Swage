@@ -120,8 +120,6 @@ pub struct AgentCallResult {
     pub turn_id: Option<Uuid>,
     #[serde(default)]
     pub worktree: Option<WorktreeCompletion>,
-    #[serde(default)]
-    pub liveness: Option<WorkerLiveness>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -130,12 +128,6 @@ pub struct WorktreeCompletion {
     pub tip_commit: String,
     pub changed: bool,
     pub removed: bool,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct WorkerLiveness {
-    pub started_at: String,
-    pub first_evidence_at: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
