@@ -1302,7 +1302,7 @@ async fn skip_run(
             },
         )
         .await?;
-    let reason = message.as_deref().unwrap_or_else(|| match reason {
+    let reason = message.as_deref().unwrap_or(match reason {
         SkipReason::Gate => "schedule gate decided no work was needed",
         SkipReason::Overlap => "schedule run overlapped an in-flight run",
     });
