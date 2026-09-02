@@ -247,7 +247,7 @@ describe("turn_complete", () => {
     expect(store.isStreaming).toBe(false);
   });
 
-  it("clears conversation ownership when the turn settles", () => {
+  it("retains conversation ownership when the turn settles", () => {
     const activeConversation = { id: "conv-a", messages: [] };
     const store = createStreamingStore({
       conversationStore: {
@@ -266,7 +266,9 @@ describe("turn_complete", () => {
 
     store.handleServerEvent({ type: "turn_complete", turn_id: "t-1" });
 
-    expect(store.activeConversationId).toBeNull();
+    expect(store.activeConversationId).toBe("conv-a");
+    expect(store.streamBelongsTo("conv-a")).toBe(true);
+    expect(store.streamBelongsTo("conv-b")).toBe(false);
   });
 
   it("clears conversation ownership when the conversation is deselected", () => {
