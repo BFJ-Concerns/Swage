@@ -1433,8 +1433,8 @@ async fn close_open_held_workers(storage: &dyn Storage, run_id: Uuid) {
         .filter_map(worker_id_of)
         .filter(|worker_id| !closed.contains(worker_id))
         .collect::<Vec<_>>();
-    let mut next_seq = journal.iter().map(|entry| entry.seq).max().unwrap_or(0) + 1;
-    for worker_id in open {
+    let first_seq = journal.iter().map(|entry| entry.seq).max().unwrap_or(0) + 1;
+    for (next_seq, worker_id) in (first_seq..).zip(open) {
         let request = serde_json::json!({
             "action": "close", "worker_id": worker_id, "closed_by": "run_end",
         });
@@ -1450,7 +1450,6 @@ async fn close_open_held_workers(storage: &dyn Storage, run_id: Uuid) {
                 target_kind: None,
             })
             .await;
-        next_seq += 1;
         match intent {
             Ok(intent) => {
                 let result = serde_json::json!({ "worker_id": worker_id, "closed_by": "run_end" });
