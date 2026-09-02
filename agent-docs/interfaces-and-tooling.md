@@ -98,14 +98,27 @@ Stored messages carry attachments as opaque JSON in the `attachments`
 column of the `messages` table (`TEXT NOT NULL DEFAULT '[]'`). The
 `MessageView` returned by the API includes the `attachments` array.
 
-## Secret backends
+## Provider credentials
 
-Every credential the gateway uses resolves through the `SecretManager`
-(`secret.rs`), by reference, with an audit event per access and the resolved
-value registered for redaction. A secret's `backend_kind` names where its
-value lives; resolution reads the backend on every call, so material that
-changes underneath (a harness refreshing its own tokens) is current at the
-next access.
+A provider entry in `config.toml` has two credential fields
+(`ProviderEndpointConfig` in `swage-config/src/model.rs`):
+
+| Field | Resolution | Audit/redaction |
+|---|---|---|
+| `api_key_secret_ref` | Resolved through the `SecretManager` by reference (`secret://{backend}/{id}`) with an audit event per access and the value registered for redaction | Yes |
+| `api_key_env` | Direct `std::env::var` read at startup; legacy path, warned at startup (`startup.rs:449`) | No |
+
+`resolve_provider_config` (`startup.rs:420`) checks `api_key_secret_ref`
+first; if absent, falls back to `api_key_env`. The resolved secret must have
+`material_kind` `"provider_key"`.
+
+### Secret manager and backends
+
+The `SecretManager` (`secret.rs`) resolves secrets by their `secret://`
+reference, with an audit event per access and the resolved value registered
+for redaction. A secret's `backend_kind` names where its value lives;
+resolution reads the backend on every call, so material that changes
+underneath is current at the next access.
 
 | Backend | `backend_kind` | Value source |
 |---|---|---|
@@ -120,6 +133,46 @@ whole file (trimmed) is the value. When present, the file is parsed as JSON
 and the pointer selects the field — a string value is used directly; any
 other JSON type is serialised. The file's modification time is recorded as
 the observation stamp.
+
+### Registering a file-backed secret
+
+Create the secret with `POST /api/secrets` (`server.rs:251`):
+
+```json
+{
+  "name": "my-service-token",
+  "material_kind": "provider_key",
+  "owner_kind": "operator",
+  "backend_kind": "file",
+  "scope_kind": "provider",
+  "scope_id": "my-provider",
+  "external_reference": "/path/to/token-file.json",
+  "metadata": { "json_pointer": "/tokens/access_token" }
+}
+```
+
+The request fields (`CreateSecretRequest` in `secret.rs:43`):
+
+| Field | Required | Purpose |
+|---|---|---|
+| `name` | Yes | Human-readable label |
+| `material_kind` | Yes | What the secret is — `"provider_key"` for provider credentials |
+| `owner_kind` | Yes | Who owns it — `"operator"`, `"harness"`, etc. |
+| `backend_kind` | Yes | `"file"`, `"env"`, or `"managed"` |
+| `scope_kind` | Yes | Scope category — `"provider"`, `"global"`, etc. |
+| `scope_id` | No | Scope within the category |
+| `external_reference` | No | File path (for `file`) or env var name (for `env`) |
+| `metadata` | No | Backend-specific; `{"json_pointer": "..."}` for `file` |
+| `value` | No | The secret material (for `managed` backend) |
+
+The response includes a `reference` field (`secret://file/{id}`). Point the
+provider entry's `api_key_secret_ref` at this reference:
+
+```toml
+[providers.entries.my-provider]
+protocol = "openai"
+api_key_secret_ref = "secret://file/<returned-id>"
+```
 
 ### Codex auth store registration
 
