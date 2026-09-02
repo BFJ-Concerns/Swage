@@ -768,7 +768,8 @@ impl WorkflowStore for SqliteStorage {
                 "SELECT {RUN_HOLD_COLUMNS} FROM workflow_run_holds \
                  WHERE run_id = ?1 ORDER BY seq ASC"
             ))?;
-            stmt.query_map([run_id.to_string()], run_hold_row)?.collect()
+            stmt.query_map([run_id.to_string()], run_hold_row)?
+                .collect()
         })
         .await
     }
@@ -1099,7 +1100,11 @@ mod tests {
 
         assert!(
             storage
-                .park_workflow_run_if_hold_open(run.id, Utc::now() + chrono::Duration::hours(1), hold.id)
+                .park_workflow_run_if_hold_open(
+                    run.id,
+                    Utc::now() + chrono::Duration::hours(1),
+                    hold.id
+                )
                 .await
                 .expect("park on the open hold"),
             "a run waiting on an open hold parks"
@@ -1126,7 +1131,11 @@ mod tests {
         );
         assert!(
             !storage
-                .park_workflow_run_if_hold_open(run.id, Utc::now() + chrono::Duration::hours(1), hold.id)
+                .park_workflow_run_if_hold_open(
+                    run.id,
+                    Utc::now() + chrono::Duration::hours(1),
+                    hold.id
+                )
                 .await
                 .expect("park attempt after the answer"),
             "an answer that wins the race is never slept past"
