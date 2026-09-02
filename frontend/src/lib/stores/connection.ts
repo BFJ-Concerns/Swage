@@ -15,6 +15,8 @@ export interface ConnectionStore {
   readonly status: ConnectionStatus;
   readonly errorMessage: string | null;
   connectTo(conversationId: string): void;
+  /** Mark whether a conversation needs its client retained off-screen. */
+  setStreamActive?(conversationId: string, active: boolean): void;
   disconnect(): void;
   disconnectAll?(): void;
   sendMessage(
@@ -50,7 +52,19 @@ export function createConnectionStore(
   const serverEventHandlers: ((event: ServerEvent, conversationId: string) => void)[] = [];
   const clients = new Map<string, WebSocketClient>();
   const statuses = new Map<string, ConnectionStatus>();
+  const streamingConversations = new Set<string>();
   let selectedConversationId: string | null = null;
+
+  function releaseInactiveClients(): void {
+    for (const [conversationId, client] of clients) {
+      if (conversationId === selectedConversationId || streamingConversations.has(conversationId)) {
+        continue;
+      }
+      client.disconnect();
+      clients.delete(conversationId);
+      statuses.delete(conversationId);
+    }
+  }
 
   function clientFor(conversationId: string): WebSocketClient {
     const existing = clients.get(conversationId);
@@ -93,28 +107,40 @@ export function createConnectionStore(
       errorMessageStore.set(null);
       selectedConversationId = conversationId;
       const status = statuses.get(conversationId);
+      const existing = clients.get(conversationId);
       if (status === "connected" || status === "reconnecting") {
         statusStore.set(status);
+        releaseInactiveClients();
+        return;
+      }
+      if (existing && status !== "error" && status !== "disconnected") {
+        releaseInactiveClients();
         return;
       }
       clientFor(conversationId).connect(conversationId);
+      releaseInactiveClients();
+    },
+
+    setStreamActive(conversationId: string, active: boolean): void {
+      if (active) {
+        streamingConversations.add(conversationId);
+      } else {
+        streamingConversations.delete(conversationId);
+      }
+      releaseInactiveClients();
     },
 
     disconnect(): void {
-      if (!selectedConversationId) return;
-      clients.get(selectedConversationId)?.disconnect();
-      clients.delete(selectedConversationId);
-      statuses.delete(selectedConversationId);
+      for (const client of clients.values()) client.disconnect();
+      clients.clear();
+      statuses.clear();
+      streamingConversations.clear();
       selectedConversationId = null;
       statusStore.set("disconnected");
     },
 
     disconnectAll(): void {
-      for (const client of clients.values()) client.disconnect();
-      clients.clear();
-      statuses.clear();
-      selectedConversationId = null;
-      statusStore.set("disconnected");
+      this.disconnect();
     },
 
     sendMessage(

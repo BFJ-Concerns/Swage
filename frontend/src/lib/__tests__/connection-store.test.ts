@@ -147,6 +147,7 @@ describe("sendMessage", () => {
     });
 
     store.connectTo("conv-a");
+    store.setStreamActive?.("conv-a", true);
     store.connectTo("conv-b");
     store.sendMessage("conv-b", "Message for B");
 
@@ -158,6 +159,41 @@ describe("sendMessage", () => {
       content: "Message for B",
     });
     expect(first.sentEvents()).toEqual([]);
+  });
+
+  it("retains only selected or streaming clients", () => {
+    const a = createMockWsClient();
+    const b = createMockWsClient();
+    const c = createMockWsClient();
+    const d = createMockWsClient();
+    const e = createMockWsClient();
+    const clients = [a, b, c, d, e];
+    const store = createConnectionStore({
+      wsClientFactory: () => clients.shift()!,
+    });
+
+    store.connectTo("conv-a");
+    store.connectTo("conv-b");
+    store.connectTo("conv-c");
+
+    expect(a.disconnect).toHaveBeenCalledOnce();
+    expect(b.disconnect).toHaveBeenCalledOnce();
+    expect(c.disconnect).not.toHaveBeenCalled();
+
+    store.connectTo("conv-a");
+    store.setStreamActive?.("conv-a", true);
+    store.connectTo("conv-b");
+
+    expect(d.lastConnectedId()).toBe("conv-a");
+    expect(d.disconnect).not.toHaveBeenCalled();
+    expect(c.disconnect).toHaveBeenCalledOnce();
+
+    store.setStreamActive?.("conv-a", false);
+    expect(d.disconnect).toHaveBeenCalledOnce();
+    expect(e.lastConnectedId()).toBe("conv-b");
+
+    store.disconnect();
+    expect(e.disconnect).toHaveBeenCalledOnce();
   });
 
   it("sends a send_message ClientEvent via the WS client", () => {

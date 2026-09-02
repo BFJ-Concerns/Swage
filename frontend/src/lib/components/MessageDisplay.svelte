@@ -136,7 +136,7 @@
   $effect(() => {
     // These accesses establish reactive tracking once the stores use $state.
     void (store?.activeConversation?.messages?.length ?? 0);
-    void (streamingStore?.streamedContent?.length ?? 0);
+    void (streamingStore?.streamFor?.(store?.activeConversation?.id ?? null).streamedContent.length ?? 0);
 
     if (!userScrolledUp && scrollEl) {
       requestAnimationFrame(() => {
@@ -150,29 +150,19 @@
 
   const messages = $derived(store?.activeConversation?.messages ?? []);
   const hasConversation = $derived(store?.activeConversation != null);
-  const streamBelongsToActiveConversation = $derived(
-    streamingStore?.streamBelongsTo?.(store?.activeConversation?.id ?? null) ?? true,
+  const stream = $derived(
+    streamingStore?.streamFor?.(store?.activeConversation?.id ?? null),
   );
-  const isStreaming = $derived(
-    (streamingStore?.isStreaming ?? false) && streamBelongsToActiveConversation,
-  );
-  const streamedContent = $derived(
-    streamBelongsToActiveConversation ? streamingStore?.streamedContent ?? "" : "",
-  );
-  const turnError = $derived(
-    streamBelongsToActiveConversation ? streamingStore?.turnError ?? null : null,
-  );
-  const providerRetry = $derived(
-    streamBelongsToActiveConversation ? streamingStore?.providerRetry ?? null : null,
-  );
+  const isStreaming = $derived(stream?.isStreaming ?? streamingStore?.isStreaming ?? false);
+  const streamedContent = $derived(stream?.streamedContent ?? streamingStore?.streamedContent ?? "");
+  const turnError = $derived(stream?.turnError ?? streamingStore?.turnError ?? null);
+  const providerRetry = $derived(stream?.providerRetry ?? streamingStore?.providerRetry ?? null);
   const retryWaitSeconds = $derived(
     providerRetry ? Math.max(1, Math.ceil(providerRetry.wait_ms / 1000)) : 0,
   );
   const shouldRenderMarkdown = $derived(displayPreferences.conversation_rendering === "markdown");
   // Live tool calls for the current in-progress turn.
-  const activeToolCalls = $derived(
-    streamBelongsToActiveConversation ? streamingStore?.activeToolCalls ?? [] : [],
-  );
+  const activeToolCalls = $derived(stream?.activeToolCalls ?? streamingStore?.activeToolCalls ?? []);
 
   function shouldShowModel(role: "user" | "assistant"): boolean {
     return (

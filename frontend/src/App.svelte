@@ -94,14 +94,6 @@
 
   async function selectAndNavigateOrThrow(id: string): Promise<void> {
     keepSurfaceForConversation();
-    const selectedConversationId = conversationStore.activeConversation?.id;
-    if (
-      !streamingStore.isStreaming &&
-      selectedConversationId === streamingStore.activeConversationId &&
-      id !== selectedConversationId
-    ) {
-      streamingStore.clearConversationOwnership?.();
-    }
     await conversationStore.selectConversation(id);
 
     // A deep-linked conversation may belong to a space other than the one
@@ -349,10 +341,7 @@
     // the control channel beside the work surface rather than a place to
     // navigate away to. Page liveness does not depend on it — the pages
     // store listens on its own channel.
-    if (next === "operator") {
-      if (!streamingStore.isStreaming) connectionStore.disconnect();
-      return;
-    }
+    if (next === "operator") return;
 
     // Conversations and Pages share the same ambient channel. Moving between
     // them must retain its socket and in-memory history; only returning from
