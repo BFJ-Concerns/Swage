@@ -430,7 +430,11 @@ async fn forward_anthropic_stream(
             if matches!(chunk, StreamChunk::ToolUse { .. }) {
                 witness.record_tool_output();
             }
-            if matches!(chunk, StreamChunk::Error { .. }) {
+            if matches!(
+                &chunk,
+                StreamChunk::Error { message }
+                    if message == "Anthropic tool_use block is missing a name"
+            ) {
                 if tx.send(witness.witness_chunk()).is_err() {
                     return;
                 }
@@ -1527,6 +1531,27 @@ mod tests {
             2,
             "forwarding must stop at the malformed tool block"
         );
+    }
+
+    #[tokio::test]
+    async fn malformed_tool_use_frame_forwards_its_error_and_keeps_streaming() {
+        let chunks = fixture_chunks(vec![
+            event("content_block_start", "{not-json"),
+            event(
+                "content_block_delta",
+                r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"still forwarded"}}"#,
+            ),
+        ])
+        .await;
+
+        assert!(matches!(
+            &chunks[0],
+            StreamChunk::Error { message } if message.contains("failed to parse Anthropic tool-use frame")
+        ));
+        assert!(matches!(
+            &chunks[1],
+            StreamChunk::Delta { content } if content == "still forwarded"
+        ));
     }
 
     #[test]
