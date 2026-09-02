@@ -5,13 +5,17 @@
 //! shape with the status projected from the code. Three things produce
 //! failures and all three land here: a `GatewayError` a handler returns
 //! (`From` below, with the exhaustive code mapping in `error_code`), a
-//! request body the framework could not parse (the [`Json`] extractor's
-//! rejection), and a refusal a handler states directly (the constructors).
+//! request body or path segment the framework could not parse (the [`Json`]
+//! and [`Path`] extractors' rejections), and a refusal a handler states
+//! directly (the constructors).
 //! No handler builds an error body by hand.
 
 use axum::{
-    extract::{FromRequest, OptionalFromRequest, Request, rejection::JsonRejection},
-    http::StatusCode,
+    extract::{
+        FromRequest, FromRequestParts, OptionalFromRequest, Request,
+        rejection::{JsonRejection, PathRejection},
+    },
+    http::{StatusCode, request::Parts},
     response::{IntoResponse, Response},
 };
 use serde::{Serialize, de::DeserializeOwned};
@@ -211,6 +215,34 @@ impl<T: Serialize> IntoResponse for Json<T> {
     }
 }
 
+/// The client surface's path-parameter extractor: `axum::extract::Path` with
+/// its rejection answered as an [`ApiError`], so a path segment that is not
+/// the UUID the route declares fails in the contract's shape rather than as
+/// the framework's plain-text 400.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Path<T>(pub T);
+
+impl<T, S> FromRequestParts<S> for Path<T>
+where
+    T: serde::de::DeserializeOwned + Send,
+    S: Send + Sync,
+{
+    type Rejection = ApiError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        <axum::extract::Path<T> as FromRequestParts<S>>::from_request_parts(parts, state)
+            .await
+            .map(|axum::extract::Path(value)| Self(value))
+            .map_err(path_rejection_error)
+    }
+}
+
+/// A path the framework refused: the segment did not parse as the route's
+/// declared type. Validation, since the shape of the request is wrong.
+fn path_rejection_error(rejection: PathRejection) -> ApiError {
+    ApiError::new(ErrorCode::ValidationError, rejection.body_text())
+}
+
 /// A body the framework refused, in the contract's shape. The rejection's
 /// own text is kept as the message: for a validation failure it names the
 /// offending field, which is what a client needs.
@@ -344,10 +376,44 @@ mod tests {
     }
 
     fn probe_router() -> Router {
-        Router::new().route(
-            "/probe",
-            post(|Json(_): Json<Probe>| async { StatusCode::OK }),
-        )
+        Router::new()
+            .route(
+                "/probe",
+                post(|Json(_): Json<Probe>| async { StatusCode::OK }),
+            )
+            .route(
+                "/probe/{id}",
+                axum::routing::get(|Path(_): Path<Uuid>| async { StatusCode::OK }),
+            )
+    }
+
+    #[tokio::test]
+    async fn a_path_segment_outside_its_declared_type_answers_in_the_contract_shape() {
+        let response = probe_router()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/probe/not-a-uuid")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let (status, body) = read_error(response).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body.code, ErrorCode::ValidationError);
+
+        let ok = probe_router()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/probe/{}", Uuid::nil()))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ok.status(), StatusCode::OK);
     }
 
     async fn probe(content_type: &str, body: &'static str) -> Response {

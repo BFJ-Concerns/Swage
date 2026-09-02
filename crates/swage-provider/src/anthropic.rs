@@ -85,7 +85,8 @@ struct AnthropicThinkingConfig {
 /// The effort control Anthropic documents for the Messages API: named
 /// levels on `output_config.effort` from `low` to `max`, with adaptive
 /// thinking beside them, and `thinking.type = "disabled"` as a true off.
-/// One declaration serves every Claude model this adapter addresses.
+/// Declared for Claude models only — the adapter vouches for the models
+/// Anthropic documents, and answers `None` for anything else routed to it.
 pub(crate) fn anthropic_effort_capability() -> EffortCapability {
     EffortCapability::Levels {
         levels: vec![Effort::Low, Effort::Medium, Effort::High, Effort::Max],
@@ -1072,8 +1073,12 @@ impl LlmProvider for AnthropicProvider {
         &self.config.model
     }
 
-    fn effort_capability(&self, _model: &str) -> Option<EffortCapability> {
-        Some(anthropic_effort_capability())
+    fn effort_capability(&self, model: &str) -> Option<EffortCapability> {
+        model
+            .trim()
+            .to_ascii_lowercase()
+            .starts_with("claude")
+            .then(anthropic_effort_capability)
     }
 
     fn provider_request_snapshot(
@@ -1756,6 +1761,13 @@ mod tests {
         assert_eq!(body["thinking"]["type"], "disabled");
         assert!(body["thinking"].get("display").is_none());
         assert!(!body.as_object().unwrap().contains_key("output_config"));
+    }
+
+    #[test]
+    fn effort_capability_is_declared_for_claude_models_only() {
+        let provider = AnthropicProvider::new("key", "claude-opus-5");
+        assert!(provider.effort_capability("claude-opus-5").is_some());
+        assert!(provider.effort_capability("some-other-model").is_none());
     }
 
     /// The declaration is bound to the documented control: every level the

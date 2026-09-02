@@ -61,6 +61,18 @@ describe("settings api", () => {
     expect(apiError.message).toBe("validation error: unknown variant `OpenAi`");
   });
 
+  it("treats a code outside the contract as out of contract", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      mockResponse({ code: "teapot", message: "short and stout" }, 418),
+    );
+
+    const failure = await discoverModels("llama").catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(ApiError);
+    const apiError = failure as ApiError;
+    expect(apiError.code).toBeNull();
+    expect(apiError.status).toBe(418);
+  });
+
   it("keeps a response outside the contract as a diagnostic error", async () => {
     vi.mocked(fetch).mockResolvedValueOnce(
       new Response("<html>bad gateway</html>", {

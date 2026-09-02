@@ -42,13 +42,37 @@ export class ApiError extends Error {
   }
 }
 
+// The contract's code set, mirrored from the generated `ErrorCode` union so
+// a body carrying a code outside it is treated as out of contract, exactly
+// as the Rust client does. The `satisfies` clause fails the type-check the
+// moment the generated union gains or loses a member.
+const ERROR_CODES = [
+  "malformed_body",
+  "unsupported_media_type",
+  "validation_error",
+  "forbidden",
+  "not_found",
+  "conflict",
+  "turn_in_progress",
+  "already_connected",
+  "provider_error",
+  "sign_in_unsupported",
+  "sign_in_failed",
+  "provider_runtime_unavailable",
+  "internal_error",
+] as const satisfies readonly ErrorCode[];
+
+function isErrorCode(value: unknown): value is ErrorCode {
+  return typeof value === "string" && (ERROR_CODES as readonly string[]).includes(value);
+}
+
 function parseContract(text: string): ApiErrorBody | null {
   try {
     const value: unknown = JSON.parse(text);
     if (
       typeof value === "object" &&
       value !== null &&
-      typeof (value as { code?: unknown }).code === "string" &&
+      isErrorCode((value as { code?: unknown }).code) &&
       typeof (value as { message?: unknown }).message === "string"
     ) {
       return value as ApiErrorBody;

@@ -4,7 +4,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use axum::{
-    extract::{ConnectInfo, Extension, Path, Query, State},
+    extract::{ConnectInfo, Extension, Query, State},
     http::StatusCode,
     response::IntoResponse,
 };
@@ -41,7 +41,7 @@ use crate::{
         DevDmInboundRequest, DevThreadInboundRequest,
     },
     device::{DeviceListResponse, DeviceResponse, RegisterDeviceRequest},
-    error::{ApiError, Json},
+    error::{ApiError, Json, Path},
     material::{
         CreateMaterialRequest, MaterialListResponse, MaterialResponse, PromoteMaterialRequest,
     },
