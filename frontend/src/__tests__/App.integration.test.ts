@@ -1064,7 +1064,8 @@ describe("App", () => {
 
     expect(websocketHarness.client.disconnect).not.toHaveBeenCalled();
     expect(websocketHarness.client.connect).not.toHaveBeenCalled();
-    expect(document.querySelector(".action.stop")).not.toBeNull();
+    expect(document.querySelector(".action.stop")).toBeNull();
+    expect(document.querySelector(".action.send")).not.toBeNull();
     expect(document.querySelector(".message-display")?.textContent).not.toContain("Streamed reply.");
 
     websocketHarness.fireEvent({
