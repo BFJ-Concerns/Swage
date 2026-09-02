@@ -1,22 +1,23 @@
 #![allow(clippy::unwrap_used)]
 
 use std::{
-    pin::Pin,
     sync::{Arc, Mutex},
     time::Duration,
 };
 
-use serde_json::{Value, json};
-use swage_core::{
-    CompletionRequest, CompletionResponse, FinishReason, ProviderError, StreamChunk,
-    ToolCompletionRequest, ToolCompletionResponse,
+use axum::{
+    Router,
+    extract::{Json, State},
+    http::header,
+    routing::post,
 };
+use serde_json::{Value, json};
 use swage_gateway::{
     server::build_router,
     state::AppState,
     tool::{Tool, ToolDispatcher},
 };
-use swage_provider::LlmProvider;
+use swage_provider::{LlmProvider, openai::OpenAiProvider, provider::ProviderConfig};
 use swage_storage::{SpaceStore, SqliteStorage, Storage};
 
 use crate::support::{ProcessEnvGuard, scratch_tempdir, start_live_server};
@@ -47,49 +48,33 @@ impl Tool for UnionTool {
     }
 }
 
-struct RecordingProvider {
-    requests: Mutex<Vec<CompletionRequest>>,
-}
-
-#[async_trait::async_trait]
-impl LlmProvider for RecordingProvider {
-    fn model_id(&self) -> &str {
-        "union-schema-recording"
-    }
-    async fn complete(&self, _: CompletionRequest) -> Result<CompletionResponse, ProviderError> {
-        unreachable!("turn uses streaming")
-    }
-    async fn complete_with_tools(
-        &self,
-        _: ToolCompletionRequest,
-    ) -> Result<ToolCompletionResponse, ProviderError> {
-        unreachable!("turn uses streaming")
-    }
-    fn stream(
-        &self,
-        request: CompletionRequest,
-    ) -> Pin<Box<dyn futures::Stream<Item = StreamChunk> + Send>> {
-        self.requests.lock().unwrap().push(request);
-        Box::pin(futures::stream::iter([
-            StreamChunk::Delta {
-                content: "done".into(),
-            },
-            StreamChunk::Done {
-                finish_reason: Some(FinishReason::Stop),
-            },
-        ]))
-    }
+async fn record_openai_request(
+    State(requests): State<Arc<Mutex<Vec<Value>>>>,
+    Json(request): Json<Value>,
+) -> ([(header::HeaderName, &'static str); 1], &'static str) {
+    requests.lock().unwrap().push(request);
+    (
+        [(header::CONTENT_TYPE, "text/event-stream")],
+        "data: {\"choices\":[{\"delta\":{\"content\":\"done\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+    )
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn gateway_turn_dispatches_registered_union_tool_schema_to_provider() {
+async fn gateway_turn_projects_registered_union_tool_schema_on_openai_wire() {
     let root = scratch_tempdir();
     let mut environment = ProcessEnvGuard::new();
     environment.set_swage_home(root.path());
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-    let provider = Arc::new(RecordingProvider {
-        requests: Mutex::new(vec![]),
-    });
+    let upstream_requests = Arc::new(Mutex::new(vec![]));
+    let upstream_router = Router::new()
+        .route("/chat/completions", post(record_openai_request))
+        .with_state(Arc::clone(&upstream_requests));
+    let (upstream_address, upstream_server) = start_live_server(upstream_router).await;
+    let provider = Arc::new(OpenAiProvider::from_config(ProviderConfig::new(
+        "test-key",
+        "test-model",
+        format!("http://{upstream_address}"),
+    )));
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn SpaceStore>,
@@ -134,19 +119,27 @@ async fn gateway_turn_dispatches_registered_union_tool_schema_to_provider() {
     })
     .await
     .unwrap();
-    let requests = provider.requests.lock().unwrap();
-    let parameters = &requests[0]
-        .tool_definitions
+    let requests = upstream_requests.lock().unwrap();
+    assert_eq!(
+        requests.len(),
+        1,
+        "the adapter must dispatch one wire request"
+    );
+    let parameters = &requests[0]["tools"]
+        .as_array()
+        .unwrap()
         .iter()
-        .find(|tool| tool["name"] == "lookup")
-        .expect("registered lookup reaches provider")["parameters"];
-    assert_eq!(
-        parameters["anyOf"],
-        json!([{"required": ["url"]}, {"required": ["query"]}])
-    );
-    assert_eq!(
-        parameters["allOf"],
-        json!([{"required": ["source"]}, {"properties": {"source": {"type": "string"}}}])
-    );
+        .find(|tool| tool["function"]["name"] == "lookup")
+        .expect("registered lookup reaches the OpenAI wire format")["function"]["parameters"];
+    assert!(parameters.get("anyOf").is_none());
+    assert!(parameters.get("allOf").is_none());
+    let guidance = parameters["description"]
+        .as_str()
+        .expect("the projected schema retains local-validation guidance");
+    assert!(guidance.contains("anyOf (at least one of: requires `url`; or requires `query`)"));
+    assert!(guidance.contains(
+        "allOf (all of: requires `source`; and an additional locally validated alternative)"
+    ));
     server.abort();
+    upstream_server.abort();
 }

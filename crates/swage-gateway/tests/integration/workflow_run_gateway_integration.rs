@@ -319,6 +319,31 @@ async fn shipped_research_sweep_runs_valid_arguments_through_each_staged_role() 
             .iter()
             .any(|prompt| prompt.contains("Deliver research findings"))
     );
+    for stage_marker in [
+        "You are scoping a research sweep.",
+        "Gather one source",
+        "Organise them into the space's knowledge base.",
+        "Deliver research findings.",
+    ] {
+        let stage_prompts = prompts
+            .iter()
+            .filter(|prompt| prompt.contains(stage_marker))
+            .collect::<Vec<_>>();
+        assert!(
+            !stage_prompts.is_empty(),
+            "{stage_marker} must dispatch at least one staged worker"
+        );
+        for prompt in stage_prompts {
+            assert!(
+                prompt.contains("contract evidence"),
+                "{stage_marker} must receive the submitted topic: {prompt}"
+            );
+            assert!(
+                prompt.contains("prove the staged research contract"),
+                "{stage_marker} must receive the submitted purpose: {prompt}"
+            );
+        }
+    }
     drop(prompts);
 
     let journal = storage
