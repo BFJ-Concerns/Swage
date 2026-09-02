@@ -11,17 +11,17 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use swage_config::skill::SkillDefinition;
 use swage_core::{ChatMessage, CompletionRequest, Role, StorageError};
+use swage_protocol::client::error::ErrorCode;
 use swage_protocol::client::workflow::{
     CreateWorkflowScriptRequest, PostWorkflowRunEventRequest, PostWorkflowRunEventResponse,
     StartInlineWorkflowRunRequest, StartWorkflowRunRequest, UpdateWorkflowScriptRequest,
     WorkflowArgumentContract, WorkflowBudget, WorkflowHandoverEvent, WorkflowHandoverEventDelivery,
-    WorkflowHandoverFailedCall, WorkflowHandoverFailedCallRef, WorkflowRun,
-    WorkflowPartialResult, WorkflowPartialResults, WorkflowRunDetailResponse, WorkflowRunEnding,
+    WorkflowHandoverFailedCall, WorkflowHandoverFailedCallRef, WorkflowPartialResult,
+    WorkflowPartialResults, WorkflowRun, WorkflowRunDetailResponse, WorkflowRunEnding,
     WorkflowRunEvent, WorkflowRunEventSource, WorkflowRunHandover, WorkflowRunListResponse,
     WorkflowRunState, WorkflowRunTerminalAccount, WorkflowScript, WorkflowScriptListResponse,
     WorkflowWorkerAccount, WorkflowWorkerPartition, WorkflowWorkerTermination,
 };
-use swage_protocol::client::error::ErrorCode;
 use swage_storage::WorkflowJournalRecord;
 use swage_storage::{
     NewAuditEvent, NewSession, NewThread, NewWorkflowJournalIntent, NewWorkflowRun,
@@ -1648,12 +1648,13 @@ fn ending_of_terminal_state(run_state: &str, error: Option<&str>) -> WorkflowRun
 /// latch is the journal's own `wind_down` entry, whose presence is the host's
 /// record of the crossing — never a substring of the error text, which is the
 /// script's wording rather than the host's.
-fn refine_ending(ending: WorkflowRunEnding, journal: &[WorkflowJournalRecord]) -> WorkflowRunEnding {
+fn refine_ending(
+    ending: WorkflowRunEnding,
+    journal: &[WorkflowJournalRecord],
+) -> WorkflowRunEnding {
     match ending {
         WorkflowRunEnding::Threw { error }
-            if journal
-                .iter()
-                .any(|entry| entry.kind == "wind_down") =>
+            if journal.iter().any(|entry| entry.kind == "wind_down") =>
         {
             WorkflowRunEnding::WoundDown { error }
         }
@@ -1761,7 +1762,9 @@ async fn account_for_run_end(
     let mut workers = WorkflowWorkerPartition::default();
     let mut recovered = Vec::new();
     for entry in journal.iter().filter(|entry| entry.kind == "agent_call") {
-        if entry.status == "started" && !matches!(ending, WorkflowRunEnding::InterruptedWithoutResume { .. }) {
+        if entry.status == "started"
+            && !matches!(ending, WorkflowRunEnding::InterruptedWithoutResume { .. })
+        {
             workers.cut_short.push(worker_account(
                 entry,
                 &placements,
@@ -1774,7 +1777,10 @@ async fn account_for_run_end(
         match entry.status.as_str() {
             "completed" => {
                 workers.done.push(worker_account(entry, &placements, None));
-                if let Some(output) = entry.result.as_ref().and_then(|result| result.get("output"))
+                if let Some(output) = entry
+                    .result
+                    .as_ref()
+                    .and_then(|result| result.get("output"))
                 {
                     recovered.push(WorkflowPartialResult {
                         journal_entry_id: entry.id,
@@ -1808,12 +1814,11 @@ async fn account_for_run_end(
     }
     // A run that returned has a result of its own; its completed workers are
     // accounted for, not offered as a stand-in for one.
-    let partial_results = (!matches!(ending, WorkflowRunEnding::Returned)).then(|| {
-        WorkflowPartialResults {
+    let partial_results =
+        (!matches!(ending, WorkflowRunEnding::Returned)).then(|| WorkflowPartialResults {
             reason: partial_reason(&ending),
             results: recovered,
-        }
-    });
+        });
     Some(WorkflowRunTerminalAccount {
         ending,
         workers,
@@ -1832,7 +1837,9 @@ fn partial_reason(ending: &WorkflowRunEnding) -> String {
             format!("the run wound down before returning: {error}")
         }
         WorkflowRunEnding::InterruptedWithoutResume { reason } => {
-            format!("the gateway ended with the run in flight and it could not be resumed: {reason}")
+            format!(
+                "the gateway ended with the run in flight and it could not be resumed: {reason}"
+            )
         }
     }
 }
@@ -16408,7 +16415,10 @@ mod tests {
         );
         assert_eq!(partial.results.len(), 1);
         assert_eq!(partial.results[0].label.as_deref(), Some("survey"));
-        assert_eq!(partial.results[0].output, Value::String("survey reply".into()));
+        assert_eq!(
+            partial.results[0].output,
+            Value::String("survey reply".into())
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -16417,25 +16427,32 @@ mod tests {
         let space = storage.get_or_create_default().await.expect("space");
         let (state, _provider) = scripted_state(
             &storage,
-            vec![scripted_text_output_with_usage("working segment", 12_000, 164)],
+            vec![
+                scripted_text_output("first segment"),
+                scripted_text_output("second segment"),
+                scripted_text_output("third segment"),
+            ],
         );
         let Json(started) = start_inline_run(
             State(state.clone()),
             Path(space.id),
             Json(StartInlineWorkflowRunRequest {
                 source: r#"
-                    await agent("working segment", {agent: "default", label: "working"});
-                    const snapshot = await budgetSnapshot();
-                    if (snapshot.remaining > 5000) throw new Error("expected wind-down");
+                    const burst = [0, 1, 2, 3].map((i) =>
+                        agentStart(`work ${i}`, {agent: "default", label: `worker ${i}`})
+                    );
+                    await Promise.all(
+                        burst.map((handle) => handle.result.catch((error) => error.name))
+                    );
                     throw new Error("stopped inside the closing partition");
                 "#
                 .into(),
                 args: Value::Null,
                 budget: Some(WorkflowBudget {
-                    max_agent_calls: Some(6),
-                    max_total_tokens: Some(18_000),
-                    reserved_closing_tokens: Some(5_000),
-                    max_concurrent_agent_calls: Some(1),
+                    max_agent_calls: None,
+                    max_total_tokens: Some(14),
+                    reserved_closing_tokens: Some(8),
+                    max_concurrent_agent_calls: Some(3),
                 }),
             }),
         )
@@ -16447,8 +16464,11 @@ mod tests {
         let WorkflowRunEnding::WoundDown { error } = &account.ending else {
             panic!("unexpected ending: {:?}", account.ending);
         };
-        assert!(error.contains("stopped inside the closing partition"), "{error}");
-        assert_eq!(account.workers.done.len(), 1);
+        assert!(
+            error.contains("stopped inside the closing partition"),
+            "{error}"
+        );
+        assert_eq!(account.workers.done.len(), 3);
         assert!(
             account
                 .partial_results
@@ -16470,8 +16490,9 @@ mod tests {
             Json(StartInlineWorkflowRunRequest {
                 source: r#"
                     const first = agentStart("finish this", {agent: "default", label: "finishing", maxAttempts: 1});
+                    await first.result;
                     const second = agentStart("never answered", {agent: "default", label: "hanging", maxAttempts: 1});
-                    return await Promise.all([first.result, second.result]);
+                    return await second.result;
                 "#
                 .into(),
                 args: Value::Null,
@@ -16538,7 +16559,9 @@ mod tests {
             account.workers.cut_short[0].termination
         );
         assert!(account.workers.failed.is_empty());
-        let partial = account.partial_results.expect("cancelled run's recovered work");
+        let partial = account
+            .partial_results
+            .expect("cancelled run's recovered work");
         assert_eq!(partial.results.len(), 1);
         assert_eq!(
             partial.results[0].output,
@@ -16555,7 +16578,10 @@ mod tests {
             .terminal_account
             .expect("recorded account");
         assert_eq!(recorded["ending"]["ending"], "cancelled");
-        assert_eq!(recorded["workers"]["cut_short"][0]["termination"]["cause"], "cut_short");
+        assert_eq!(
+            recorded["workers"]["cut_short"][0]["termination"]["cause"],
+            "cut_short"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -16586,7 +16612,8 @@ mod tests {
             })
             .await
             .expect("run");
-        let request = serde_json::json!({"prompt": "in flight", "label": "in flight", "agent": "default"});
+        let request =
+            serde_json::json!({"prompt": "in flight", "label": "in flight", "agent": "default"});
         storage
             .create_workflow_journal_intent(NewWorkflowJournalIntent {
                 run_id: run.id,
@@ -16675,7 +16702,9 @@ mod tests {
             .await
             .expect_err("an out-of-contract account is refused, never projected");
         assert!(
-            error.to_string().contains("terminal account does not match the recorded contract"),
+            error
+                .to_string()
+                .contains("terminal account does not match the recorded contract"),
             "{error}"
         );
     }
