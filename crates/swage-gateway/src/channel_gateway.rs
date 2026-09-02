@@ -114,8 +114,9 @@ pub async fn read_delivery_log(state: &AppState, query: DeliveryLogQuery) -> Del
             .unwrap_or_default()
             .into_iter()
             .filter_map(|record| {
+                let session_id = record.session_id?;
                 parse_delivery_target(record.target).map(|target| RecordedDelivery {
-                    session_id: record.session_id,
+                    session_id,
                     run_id: record.run_id,
                     turn_id: record.turn_id,
                     target,

@@ -1238,7 +1238,7 @@ async fn fail_run(
             run_id,
             ScheduleRunUpdate {
                 state: Some(ScheduleRunState::Failed),
-                error_message: Some(message),
+                error_message: Some(message.clone()),
                 output_text: output,
                 ..Default::default()
             },
@@ -1297,7 +1297,7 @@ async fn skip_run(
                 state: Some(ScheduleRunState::Skipped),
                 skip_reason: Some(reason),
                 gate,
-                error_message: message,
+                error_message: message.clone(),
                 ..Default::default()
             },
         )
