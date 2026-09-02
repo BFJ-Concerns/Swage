@@ -150,29 +150,16 @@
 
   const messages = $derived(store?.activeConversation?.messages ?? []);
   const hasConversation = $derived(store?.activeConversation != null);
-  const streamBelongsToActiveConversation = $derived(
-    streamingStore?.streamBelongsTo(store?.activeConversation?.id ?? null) ?? false,
-  );
-  const isStreaming = $derived(
-    (streamingStore?.isStreaming ?? false) && streamBelongsToActiveConversation,
-  );
-  const streamedContent = $derived(
-    streamBelongsToActiveConversation ? streamingStore?.streamedContent ?? "" : "",
-  );
-  const turnError = $derived(
-    streamBelongsToActiveConversation ? streamingStore?.turnError ?? null : null,
-  );
-  const providerRetry = $derived(
-    streamBelongsToActiveConversation ? streamingStore?.providerRetry ?? null : null,
-  );
+  const isStreaming = $derived(streamingStore?.isStreaming ?? false);
+  const streamedContent = $derived(streamingStore?.streamedContent ?? "");
+  const turnError = $derived(streamingStore?.turnError ?? null);
+  const providerRetry = $derived(streamingStore?.providerRetry ?? null);
   const retryWaitSeconds = $derived(
     providerRetry ? Math.max(1, Math.ceil(providerRetry.wait_ms / 1000)) : 0,
   );
   const shouldRenderMarkdown = $derived(displayPreferences.conversation_rendering === "markdown");
   // Live tool calls for the current in-progress turn.
-  const activeToolCalls = $derived(
-    streamBelongsToActiveConversation ? streamingStore?.activeToolCalls ?? [] : [],
-  );
+  const activeToolCalls = $derived(streamingStore?.activeToolCalls ?? []);
 
   function shouldShowModel(role: "user" | "assistant"): boolean {
     return (

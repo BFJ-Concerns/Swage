@@ -115,8 +115,6 @@ function makeStreamingStore(
     get isStreaming() {
       return isStreaming;
     },
-    streamBelongsTo: () => true,
-    clearConversationOwnership: vi.fn(),
     get activeTurnGeneration() {
       return 0;
     },
@@ -248,34 +246,6 @@ describe("settled partial responses", () => {
     expect(document.body.textContent).toContain("Response interrupted");
     expect(document.body.textContent).toContain("Response failed");
     expect(document.body.textContent?.match(/Response interrupted/g)).toHaveLength(1);
-  });
-
-  it("keeps a failed turn's error and live tool calls on its conversation", () => {
-    const store = makeConversationStore([]);
-    const streamingStore = createStreamingStore({ conversationStore: store });
-    streamingStore.startTurn("Run the tool");
-    streamingStore.handleServerEvent({
-      type: "tool_start",
-      call_id: "live-call",
-      tool: "read_file",
-      arguments: { path: "/workspace/input.txt" },
-    });
-    streamingStore.handleServerEvent({ type: "token", content: "Partial response" });
-    streamingStore.handleServerEvent({
-      type: "error",
-      code: "provider_error",
-      message: "Provider exploded",
-    });
-
-    component = mount(MessageDisplay, {
-      target: document.body,
-      props: { store, streamingStore },
-    });
-
-    expect(streamingStore.activeConversationId).toBe("conv-1");
-    expect(streamingStore.activeToolCalls).toHaveLength(1);
-    expect(document.body.textContent).toContain("Provider exploded");
-    expect(document.querySelectorAll(".tool-call")).toHaveLength(1);
   });
 });
 

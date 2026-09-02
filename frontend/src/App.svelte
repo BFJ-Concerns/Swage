@@ -64,23 +64,9 @@
 
   // Route all server events from the WebSocket through the streaming store.
   // The connection store is a pure relay — interpretation belongs to streaming.
-  connectionStore.onServerEvent((event) => {
-    const streamingConversationId = streamingStore.activeConversationId;
-    streamingStore.handleServerEvent(event);
-
-    // A live turn keeps its own socket while the user navigates. Once it
-    // settles, reconnect the channel to the conversation they selected so the
-    // next outgoing message cannot be sent to the completed turn's socket.
-    const selectedConversationId = conversationStore.activeConversation?.id;
-    if (
-      streamingConversationId &&
-      !streamingStore.isStreaming &&
-      selectedConversationId &&
-      selectedConversationId !== streamingConversationId
-    ) {
-      connectionStore.connectTo(selectedConversationId);
-    }
-  });
+  connectionStore.onServerEvent((event) =>
+    streamingStore.handleServerEvent(event),
+  );
 
   // The pages store opens its own work-surface channel: page signals are not
   // turn events, and an open page must stay live even with no conversation
@@ -102,29 +88,8 @@
     if (activeSurface === "operator") activeSurface = "conversation";
   }
 
-  function connectToConversationIfNeeded(id: string): void {
-    if (
-      !streamingStore.isStreaming ||
-      (streamingStore.activeConversationId === id &&
-        connectionStore.status !== "connected")
-    ) {
-      connectionStore.connectTo(id);
-    }
-  }
-
   async function selectAndNavigateOrThrow(id: string): Promise<void> {
     keepSurfaceForConversation();
-    const selectedConversationId = conversationStore.activeConversation?.id;
-    if (
-      !streamingStore.isStreaming &&
-      selectedConversationId === streamingStore.activeConversationId &&
-      id !== selectedConversationId
-    ) {
-      // Settled turn state remains attached until its owner has been shown.
-      // Leaving that rendered owner releases it before another conversation
-      // becomes the active surface.
-      streamingStore.clearConversationOwnership();
-    }
     await conversationStore.selectConversation(id);
 
     // A deep-linked conversation may belong to a space other than the one
@@ -136,7 +101,7 @@
       await conversationStore.loadConversations(conv.space_id);
     }
 
-    connectToConversationIfNeeded(id);
+    if (!streamingStore.isStreaming) connectionStore.connectTo(id);
     // router is declared below but will be initialised before this is called.
     router.navigate(`/conversations/${id}`);
   }
@@ -180,17 +145,6 @@
     void createAndNavigate();
   }
 
-  function clearActiveConversation(): void {
-    const selectedConversationId = conversationStore.activeConversation?.id;
-    conversationStore.clearActiveConversation();
-    if (
-      !streamingStore.isStreaming &&
-      selectedConversationId === streamingStore.activeConversationId
-    ) {
-      streamingStore.clearConversationOwnership();
-    }
-  }
-
   // Proxy that implements ConversationStore but overrides the two navigation-
   // bearing actions. All other methods delegate straight to the base store.
   const routerAwareStore: ConversationStore = {
@@ -212,7 +166,7 @@
       await createAndNavigate(selectedModelId, agentId, effort);
     },
     deleteConversation: (id) => conversationStore.deleteConversation(id),
-    clearActiveConversation,
+    clearActiveConversation: () => conversationStore.clearActiveConversation(),
     appendOptimisticUserMessage: (msg) =>
       conversationStore.appendOptimisticUserMessage(msg),
     appendAssistantMessage: (msg) => conversationStore.appendAssistantMessage(msg),
@@ -251,7 +205,7 @@
       },
       clearActiveConversation: () => {
         connectionStore.disconnect();
-        clearActiveConversation();
+        conversationStore.clearActiveConversation();
       },
       selectConversation: selectAndNavigateOrThrow,
     },
@@ -390,7 +344,7 @@
     // Operator needs to establish the connection again.
     if (previous === "operator") {
       const id = conversationStore.activeConversation?.id;
-      if (id) connectToConversationIfNeeded(id);
+      if (id && !streamingStore.isStreaming) connectionStore.connectTo(id);
     }
   }
 
@@ -414,7 +368,7 @@
       connectionStore.disconnect();
       // Drop the active conversation too: left in place, the old space's
       // conversation would keep rendering and the composer would send into it.
-      clearActiveConversation();
+      conversationStore.clearActiveConversation();
       // Reset the URL so the router doesn't try to restore a stale conversation.
       router.navigate("/");
       // Load the new space's conversations.

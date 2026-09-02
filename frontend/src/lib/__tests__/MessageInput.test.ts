@@ -4,23 +4,15 @@ import { flushSync, mount, unmount } from "svelte";
 import { createClassComponent } from "svelte/legacy";
 
 import MessageInput from "../components/MessageInput.svelte";
-import {
-  createStreamingStore,
-  withConversationAutoCreate,
-  type StreamingStore,
-} from "../stores/streaming";
+import type { StreamingStore } from "../stores/streaming";
 
 type MountedComponent = ReturnType<typeof mount>;
 
-function makeStreamingStore(
-  isStreaming = false,
-): StreamingStore {
+function makeStreamingStore(isStreaming = false): StreamingStore {
   return {
     get isStreaming() {
       return isStreaming;
     },
-    streamBelongsTo: () => true,
-    clearConversationOwnership: vi.fn(),
     get activeTurnGeneration() {
       return 0;
     },
@@ -314,61 +306,5 @@ describe("MessageInput", () => {
     });
 
     expect(store.cancelTurn).toHaveBeenCalledOnce();
-  });
-
-  it("does not show another conversation's stream controls", () => {
-    const activeConversation = { id: "conversation-one", messages: [] };
-    const store = createStreamingStore({
-      conversationStore: {
-        get activeConversation() {
-          return activeConversation;
-        },
-        appendOptimisticUserMessage: vi.fn(),
-        appendAssistantMessage: vi.fn(),
-      },
-      connectionStore: {
-        sendMessage: vi.fn(),
-        cancelTurn: vi.fn(),
-      },
-    });
-    store.startTurn("Keep this turn in conversation one");
-    component = mount(MessageInput, {
-      target: document.body,
-      props: { store, sessionId: "conversation-two" },
-    });
-
-    expect(document.querySelector(".action.stop")).toBeNull();
-    expect(document.querySelector(".action.send")).not.toBeNull();
-  });
-
-  it("locks the space-home composer during conversation creation", () => {
-    const activeConversation = { id: "conversation-one", messages: [] };
-    const base = createStreamingStore({
-      conversationStore: {
-        get activeConversation() {
-          return activeConversation;
-        },
-        appendOptimisticUserMessage: vi.fn(),
-        appendAssistantMessage: vi.fn(),
-      },
-      connectionStore: {
-        sendMessage: vi.fn(),
-        cancelTurn: vi.fn(),
-      },
-    });
-    base.startTurn("Existing turn");
-    const store = withConversationAutoCreate(base, {
-      hasActiveConversation: () => false,
-      createConversation: vi.fn(() => new Promise<string | null>(() => {})),
-    });
-    store.startTurn("Create from the space home");
-
-    component = mount(MessageInput, {
-      target: document.body,
-      props: { store, sessionId: null },
-    });
-
-    expect(document.querySelector(".action.stop")).not.toBeNull();
-    expect(document.querySelector(".action.send")).toBeNull();
   });
 });
