@@ -63,6 +63,7 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- Workflow calls that name an unknown model now fail at that call instead of silently using the default model.
 - Rejected tool approvals now render as failed calls in the conversation transcript.
 - Gateway runtime discovery no longer reads a partially written metadata file during startup.
 - Compaction audit records now count every source message replaced by a successful summary.

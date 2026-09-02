@@ -748,17 +748,8 @@ pub(crate) fn resolve_model_catalogue_entry<'a>(
     models: &'a swage_config::ModelCatalogConfig,
     selected_model_id: &str,
 ) -> Option<(&'a str, &'a swage_config::ModelEndpointConfig)> {
-    models
-        .entries
-        .get_key_value(selected_model_id)
-        .map(|(model_id, model)| (model_id.as_str(), model))
-        .or_else(|| {
-            models
-                .entries
-                .iter()
-                .find(|(_, model)| model.aliases.iter().any(|alias| alias == selected_model_id))
-                .map(|(model_id, model)| (model_id.as_str(), model))
-        })
+    swage_config::resolve_provider_route(models, Some(selected_model_id))
+        .map(|route| (route.model_key, route.model))
 }
 
 pub(crate) fn resolve_requested_turn_model(
@@ -831,6 +822,33 @@ pub(super) fn ensure_selected_model_available(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn catalogue_lookup_and_provider_route_resolve_alias_identically() {
+        let models = swage_config::ModelCatalogConfig {
+            default: "canonical".into(),
+            entries: [(
+                "canonical".into(),
+                swage_config::ModelEndpointConfig {
+                    provider_id: "provider-a".into(),
+                    model_id: "vendor-model".into(),
+                    aliases: vec!["short-name".into()],
+                    ..Default::default()
+                },
+            )]
+            .into_iter()
+            .collect(),
+        };
+
+        let route =
+            swage_config::resolve_provider_route(&models, Some("short-name")).expect("alias route");
+        let (model_key, model) =
+            resolve_model_catalogue_entry(&models, "short-name").expect("gateway alias");
+
+        assert_eq!(model_key, route.model_key);
+        assert_eq!(model, route.model);
+        assert_eq!(route.provider_id, "provider-a");
+    }
 
     #[test]
     fn reserved_workflow_agent_config_does_not_replace_runtime_configuration() {
