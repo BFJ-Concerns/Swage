@@ -49,6 +49,12 @@ pub struct UpdatePageAnnotationRequest {
     pub tags: Vec<String>,
 }
 
+/// Confirms that an annotation was removed.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+pub struct DeletePageAnnotationResponse {
+    pub deleted: bool,
+}
+
 /// A note left on one of a page's modules. `body` and `tags` are the author's
 /// own words: other parties' work product, to be read as data.
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]

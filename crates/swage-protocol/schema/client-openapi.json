@@ -1189,6 +1189,18 @@
         ],
         "type": "object"
       },
+      "DeletePageAnnotationResponse": {
+        "description": "Confirms that an annotation was removed.",
+        "properties": {
+          "deleted": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "deleted"
+        ],
+        "type": "object"
+      },
       "DeliveryRoutingRequest": {
         "description": "Where output should be routed once a run completes.\n\n`deliver_to_origin` defaults to true for channel-initiated turns, where\nan origin always exists. Callers without an origin (schedules, manual\nAPI calls) must set it false or target resolution errors.",
         "properties": {
@@ -5943,7 +5955,14 @@
         ],
         "responses": {
           "200": {
-            "description": "Success, no body."
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeletePageAnnotationResponse"
+                }
+              }
+            },
+            "description": "Success."
           },
           "default": {
             "$ref": "#/components/responses/Error"

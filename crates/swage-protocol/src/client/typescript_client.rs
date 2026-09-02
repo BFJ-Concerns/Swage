@@ -169,6 +169,9 @@ mod tests {
         assert!(rendered.contains(
             "export async function deleteSpace(id: string): Promise<void> {\n  return request<void>(\"DELETE\", `/api/spaces/${encodeURIComponent(id)}`);\n}"
         ));
+        assert!(rendered.contains(
+            "export async function deletePageAnnotation(annotationId: string): Promise<DeletePageAnnotationResponse> {\n  return request<DeletePageAnnotationResponse>(\"DELETE\", `/api/page-annotations/${encodeURIComponent(annotationId)}`);\n}"
+        ));
     }
 
     #[test]

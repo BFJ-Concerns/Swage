@@ -20,8 +20,9 @@ use super::{
         CreateConversationRequest,
     },
     page::{
-        CreatePageAnnotationRequest, CreatePageRequest, PageAnnotationView, PageListResponse,
-        PageModuleView, PageResponse, UpdatePageAnnotationRequest, WritePageModuleRequest,
+        CreatePageAnnotationRequest, CreatePageRequest, DeletePageAnnotationResponse,
+        PageAnnotationView, PageListResponse, PageModuleView, PageResponse,
+        UpdatePageAnnotationRequest, WritePageModuleRequest,
     },
     provider_signin::{
         ProviderSignInState, StartProviderSignInRequest, StartProviderSignInResponse,
@@ -444,7 +445,7 @@ pub fn routes() -> Vec<Route> {
             request: None,
             response: Response {
                 status: 200,
-                body: None,
+                body: schema::<DeletePageAnnotationResponse>(),
             },
         },
         Route {
