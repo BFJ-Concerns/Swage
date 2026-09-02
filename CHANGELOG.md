@@ -6,7 +6,7 @@ All notable changes to Swage are documented in this file.
 
 ### Added
 
-- Every workflow agent call is now recorded with the prompt and resolved options it was dispatched under, the provider rounds its turn ran with start, end, and outcome, and a usage record that reads as unavailable with a reason where the provider reported none, so budget reconstruction never reads absence as zero spend; a worker the run's own end cut short is recorded as cut short rather than as its own failure.
+- Every workflow agent call is now recorded with the prompt and resolved options each attempt of it was dispatched under, the provider rounds every attempt ran with start, end, and outcome, and a usage record that reads as unavailable with a reason where the provider reported none, so budget reconstruction never reads absence as zero spend; a worker the run's own end cut short is recorded as cut short rather than as its own failure, and a call the run's end interrupted keeps that attempt's rounds beside those of the attempt replay dispatched after it.
 - Users and agents can leave durable notes on a page's modules, appearing on an open page as they are written and readable by the agent alongside the module they hang on.
 - Work surfaces receive server-wide page signals over their own listen-only WebSocket, so an open page stays current whether or not a conversation is selected.
 - Workflow runs now journal their terminal budget balance.
