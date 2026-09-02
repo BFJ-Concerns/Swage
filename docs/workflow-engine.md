@@ -340,10 +340,10 @@ standalone row in a space. In the workflow listing, a carried workflow's
 immutable in place; an operator can shadow one by authoring a same-named
 workflow in the space.
 
-Several shipped skills carry workflows (assembly, commission, maestro, and
-research, among others). The research skill carries `research-sweep`, the
-only shipped workflow intended for direct user invocation — the others serve
-internal skill orchestration.
+Each shipped skill carries its own workflows. When a skill is active on a
+session, its carried workflows become available, and any available workflow
+starts by name through `workflow_run`. The research skill carries
+`research-sweep`.
 
 ### Running a research sweep
 
