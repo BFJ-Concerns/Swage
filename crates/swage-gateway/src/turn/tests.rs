@@ -3210,7 +3210,7 @@ impl MessageStore for MockStorage {
         let m = Message {
             id: Uuid::new_v4(),
             thread_id: message.thread_id,
-            attachments: Vec::new(),
+            attachments: message.attachments,
             turn_id: message.turn_id,
             role: message.role,
             content: message.content,
@@ -3242,7 +3242,7 @@ impl MessageStore for MockStorage {
         let created = Message {
             id: Uuid::new_v4(),
             thread_id: message.thread_id,
-            attachments: Vec::new(),
+            attachments: message.attachments,
             turn_id: message.turn_id,
             role: message.role,
             content: message.content,
