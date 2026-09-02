@@ -3,7 +3,6 @@
 
 <!-- source: agent-docs/agents-and-permissions.md -->
 
-
 # Agents and permissions
 
 ## Agent definitions
@@ -344,8 +343,8 @@ Per-tool overrides via `RequireApprovalEntry::WithOptions { timeout, timeout_pol
 - `Interrupt` — mark the turn as Interrupted; no further tool calls or
   completions are issued.
 
-<!-- source: agent-docs/first-session.md -->
 
+<!-- source: agent-docs/first-session.md -->
 
 # First session
 
@@ -401,8 +400,8 @@ instructions).
 read grant and guidance are removed from future turns. **Detach** removes the attachment
 entirely.
 
-<!-- source: agent-docs/interfaces-and-tooling.md -->
 
+<!-- source: agent-docs/interfaces-and-tooling.md -->
 
 # Interfaces and tooling
 
@@ -496,9 +495,9 @@ array of typed content parts (`[{"type":"text","text":"…"},
 {"type":"image_url","image_url":{"url":"…"}}]`). Text-only messages keep
 the plain string form, preserving wire compatibility.
 
-Stored messages carry attachments as opaque JSON records in the
-`message_attachments` table. The `MessageView` returned by the API includes
-the `attachments` array.
+Stored messages carry attachments as opaque JSON in the `attachments`
+column of the `messages` table (`TEXT NOT NULL DEFAULT '[]'`). The
+`MessageView` returned by the API includes the `attachments` array.
 
 ## Secret backends
 
@@ -606,17 +605,20 @@ existing field already reaches it.
 
 ### Route manifest
 
-`routes.rs` (`swage-protocol::client::routes`) names every client-surface HTTP
-route once: method, path template, path parameters, request body schema name,
-and response body schema name. Failures are not listed per route — every route
-answers a failure with `ApiErrorBody`, projected once as the shared error
-response.
+`routes.rs` (`swage-protocol::client::routes`) carries a growing manifest of
+client-surface HTTP routes: method, path template, path parameters, request
+body schema name, and response body schema name. The manifest does not yet
+cover the full client surface — the space CRUD routes are the first entries;
+routes not yet in the manifest are registered directly on the router and are
+not covered by the OpenAPI or generated-client projections. Failures are not
+listed per route — every route answers a failure with `ApiErrorBody`,
+projected once as the shared error response.
 
-Adding a route is one entry in the `routes()` function; the OpenAPI document,
-the generated TypeScript client, and the router-coverage test all read this
-table. The router test (`server.rs:418`) proves every manifest route is
-registered on the axum router — a manifest entry with no matching handler
-fails the test.
+Adding a manifested route is one entry in the `routes()` function; the
+OpenAPI document, the generated TypeScript client, and the router-coverage
+test all read this table. The router test (`server.rs:418`) proves every
+manifest route is registered on the axum router — a manifest entry with no
+matching handler fails the test.
 
 ### Projections
 
@@ -701,8 +703,8 @@ Route changes propagate `notFound` state to the UI, so the "conversation not
 found" notice appears for `popstate`-triggered navigations and initial page
 loads alike.
 
-<!-- source: agent-docs/workflow-engine.md -->
 
+<!-- source: agent-docs/workflow-engine.md -->
 
 # Workflow engine
 
