@@ -912,6 +912,91 @@ impl std::fmt::Display for HierarchyLevel {
 mod tests {
     use super::*;
 
+    fn route_catalogues() -> (ModelCatalogConfig, ProviderCatalogConfig) {
+        let mut models = ModelCatalogConfig {
+            default: "house".into(),
+            entries: HashMap::new(),
+        };
+        models.entries.insert(
+            "house".into(),
+            ModelEndpointConfig {
+                provider_id: "proxy".into(),
+                model_id: "house-1".into(),
+                aliases: vec!["cheap".into()],
+                context_window: None,
+                generation_preset: None,
+                default_effort: None,
+                capabilities: ModelCapabilitiesConfig::default(),
+            },
+        );
+        models.entries.insert(
+            "metered".into(),
+            ModelEndpointConfig {
+                provider_id: "vendor".into(),
+                model_id: "vendor-1".into(),
+                aliases: Vec::new(),
+                context_window: None,
+                generation_preset: None,
+                default_effort: None,
+                capabilities: ModelCapabilitiesConfig::default(),
+            },
+        );
+
+        let mut providers = ProviderCatalogConfig {
+            default: "proxy".into(),
+            entries: HashMap::new(),
+        };
+        providers.entries.insert(
+            "proxy".into(),
+            ProviderEndpointConfig {
+                protocol: Protocol::Anthropic,
+                base_url: Some("http://proxy.invalid".into()),
+                worker_staleness_threshold_ms: Some(600_000),
+                ..Default::default()
+            },
+        );
+        providers.entries.insert(
+            "vendor".into(),
+            ProviderEndpointConfig {
+                protocol: Protocol::Anthropic,
+                base_url: Some("http://vendor.invalid".into()),
+                ..Default::default()
+            },
+        );
+        (models, providers)
+    }
+
+    #[test]
+    fn provider_route_resolves_by_id_alias_and_default() {
+        let (models, providers) = route_catalogues();
+
+        let by_id = resolve_provider_route(&models, &providers, Some("house")).expect("by id");
+        assert_eq!(by_id.provider_id, "proxy");
+        assert_eq!(by_id.model.model_id, "house-1");
+        assert_eq!(by_id.endpoint.worker_staleness_threshold_ms, Some(600_000));
+
+        let by_alias = resolve_provider_route(&models, &providers, Some("cheap")).expect("alias");
+        assert_eq!(by_alias.provider_id, "proxy");
+        assert_eq!(by_alias.model.model_id, "house-1");
+
+        let by_default = resolve_provider_route(&models, &providers, None).expect("default");
+        assert_eq!(by_default.provider_id, "proxy");
+    }
+
+    #[test]
+    fn provider_route_is_per_route_and_absent_for_an_unknown_model() {
+        let (models, providers) = route_catalogues();
+
+        let metered = resolve_provider_route(&models, &providers, Some("metered")).expect("route");
+        assert_eq!(metered.provider_id, "vendor");
+        assert_eq!(
+            metered.endpoint.worker_staleness_threshold_ms, None,
+            "a route that declares no threshold does not inherit another route's"
+        );
+
+        assert!(resolve_provider_route(&models, &providers, Some("absent")).is_none());
+    }
+
     #[test]
     fn server_config_defaults() {
         let cfg = ServerConfig::default();
