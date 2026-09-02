@@ -30,6 +30,9 @@
   let annotationBody = $state("");
 
   $effect(() => {
+    // A template belongs to one space: switching spaces must not carry a
+    // selection the new space's picker never offered into the next create.
+    newTemplateId = "";
     void store.loadPages(spaceId);
   });
 
