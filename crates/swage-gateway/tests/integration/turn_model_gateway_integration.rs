@@ -242,6 +242,7 @@ fn null_turn_model_is_omitted_by_the_shared_request_serialiser() {
         output_schema: None,
         compaction_focus: None,
         model: None,
+        attachments: Vec::new(),
     };
     assert!(
         serde_json::to_value(request)
