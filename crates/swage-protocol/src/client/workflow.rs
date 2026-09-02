@@ -68,8 +68,26 @@ pub struct WorkflowScriptListResponse {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
+pub struct WorkflowRouteBudget {
+    /// The token ceiling for calls resolved to this provider entry.
+    pub max_total_tokens: Option<u64>,
+    /// Tokens retained for closing calls on this provider entry after the
+    /// workflow has entered wind-down for that route.
+    pub reserved_closing_tokens: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
 pub struct WorkflowBudget {
     pub max_agent_calls: Option<u32>,
+    /// Per-provider-entry token ledgers. A model resolves to the provider
+    /// entry named by its catalogue configuration, and calls on one entry
+    /// never consume another entry's allowance.
+    #[serde(default)]
+    pub per_route: std::collections::BTreeMap<String, WorkflowRouteBudget>,
+    /// Legacy default used only when no per-route ledger is configured.
+    ///
+    /// Kept while callers move to `per_route`; each resolved provider still
+    /// receives an independent ledger from these values.
     pub max_total_tokens: Option<u64>,
     /// Tokens held back from ordinary work for calls made after the run has
     /// observed its wind-down boundary. This allowance is part of, not in

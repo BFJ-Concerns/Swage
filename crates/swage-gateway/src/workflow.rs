@@ -703,6 +703,25 @@ fn token_reservation_per_call(limit: u64, budget: &WorkflowBudget) -> u64 {
 }
 
 fn validate_budget(budget: &WorkflowBudget) -> Result<(), ApiError> {
+    for (route, route_budget) in &budget.per_route {
+        if route.trim().is_empty() {
+            return Err(ApiError::validation(
+                "per_route budget keys must name a provider entry".into(),
+            ));
+        }
+        if let Some(reserve) = route_budget.reserved_closing_tokens {
+            let ceiling = route_budget.max_total_tokens.ok_or_else(|| {
+                ApiError::validation(format!(
+                    "per_route.{route}.reserved_closing_tokens requires max_total_tokens"
+                ))
+            })?;
+            if reserve > ceiling {
+                return Err(ApiError::validation(format!(
+                    "per_route.{route}.reserved_closing_tokens cannot exceed max_total_tokens"
+                )));
+            }
+        }
+    }
     if let Some(reserve) = budget.reserved_closing_tokens {
         let ceiling = budget.max_total_tokens.ok_or_else(|| {
             ApiError::validation("reserved_closing_tokens requires max_total_tokens".into())
@@ -6841,6 +6860,7 @@ mod tests {
             None,
             WorkflowBudget {
                 max_agent_calls: None,
+                per_route: Default::default(),
                 max_total_tokens: None,
                 reserved_closing_tokens: None,
                 max_concurrent_agent_calls: None,
@@ -6994,6 +7014,7 @@ mod tests {
     fn budget_reserve_requires_a_total_token_ceiling() {
         let error = validate_budget(&WorkflowBudget {
             max_agent_calls: None,
+            per_route: Default::default(),
             max_total_tokens: None,
             reserved_closing_tokens: Some(1),
             max_concurrent_agent_calls: None,
@@ -7011,6 +7032,7 @@ mod tests {
     fn budget_reserve_cannot_exceed_total_token_ceiling() {
         let error = validate_budget(&WorkflowBudget {
             max_agent_calls: None,
+            per_route: Default::default(),
             max_total_tokens: Some(10),
             reserved_closing_tokens: Some(11),
             max_concurrent_agent_calls: None,
@@ -7886,6 +7908,7 @@ mod tests {
             None,
             WorkflowBudget {
                 max_agent_calls: None,
+                per_route: Default::default(),
                 max_total_tokens: None,
                 reserved_closing_tokens: None,
                 max_concurrent_agent_calls: None,
@@ -8111,6 +8134,7 @@ mod tests {
         let (tx, pending_call_started, task) = scaffold.spawn(
             WorkflowBudget {
                 max_agent_calls: Some(2),
+                per_route: Default::default(),
                 max_total_tokens: Some(1_000),
                 reserved_closing_tokens: Some(100),
                 max_concurrent_agent_calls: Some(2),
@@ -8218,6 +8242,7 @@ mod tests {
             None,
             WorkflowBudget {
                 max_agent_calls: None,
+                per_route: Default::default(),
                 max_total_tokens: Some(1_000_000),
                 reserved_closing_tokens: None,
                 max_concurrent_agent_calls: Some(2),
@@ -8393,6 +8418,7 @@ mod tests {
             None,
             WorkflowBudget {
                 max_agent_calls: None,
+                per_route: Default::default(),
                 max_total_tokens: None,
                 reserved_closing_tokens: None,
                 max_concurrent_agent_calls: None,
@@ -10285,6 +10311,7 @@ mod tests {
                 args: Value::Null,
                 budget: serde_json::to_value(WorkflowBudget {
                     max_agent_calls: Some(1),
+                    per_route: Default::default(),
                     max_total_tokens: Some(10),
                     reserved_closing_tokens: Some(4),
                     max_concurrent_agent_calls: Some(1),
@@ -10392,6 +10419,7 @@ mod tests {
                 args: Value::Null,
                 budget: serde_json::to_value(WorkflowBudget {
                     max_agent_calls: Some(3),
+                    per_route: Default::default(),
                     max_total_tokens: Some(10),
                     reserved_closing_tokens: Some(4),
                     max_concurrent_agent_calls: Some(1),
@@ -10535,6 +10563,7 @@ mod tests {
             None,
             WorkflowBudget {
                 max_agent_calls: None,
+                per_route: Default::default(),
                 max_total_tokens: None,
                 reserved_closing_tokens: None,
                 max_concurrent_agent_calls: None,
@@ -11485,6 +11514,7 @@ mod tests {
             None,
             WorkflowBudget {
                 max_agent_calls: None,
+                per_route: Default::default(),
                 max_total_tokens: None,
                 reserved_closing_tokens: None,
                 max_concurrent_agent_calls: None,
@@ -11768,6 +11798,7 @@ mod tests {
             None,
             WorkflowBudget {
                 max_agent_calls: None,
+                per_route: Default::default(),
                 max_total_tokens: None,
                 reserved_closing_tokens: None,
                 max_concurrent_agent_calls: None,
@@ -11864,6 +11895,7 @@ mod tests {
             None,
             WorkflowBudget {
                 max_agent_calls: None,
+                per_route: Default::default(),
                 max_total_tokens: None,
                 reserved_closing_tokens: None,
                 max_concurrent_agent_calls: None,
@@ -12452,6 +12484,7 @@ mod tests {
             None,
             WorkflowBudget {
                 max_agent_calls: None,
+                per_route: Default::default(),
                 max_total_tokens: Some(1_000_000),
                 reserved_closing_tokens: None,
                 max_concurrent_agent_calls: Some(2),
@@ -12536,6 +12569,7 @@ mod tests {
         let (tx, pending_call_started, task) = scaffold.spawn(
             WorkflowBudget {
                 max_agent_calls: Some(3),
+                per_route: Default::default(),
                 max_total_tokens: Some(6),
                 reserved_closing_tokens: Some(2),
                 max_concurrent_agent_calls: Some(4),
@@ -12702,6 +12736,7 @@ mod tests {
         let (tx, pending_call_started, task) = scaffold.spawn(
             WorkflowBudget {
                 max_agent_calls: Some(3),
+                per_route: Default::default(),
                 max_total_tokens: Some(6),
                 reserved_closing_tokens: Some(2),
                 max_concurrent_agent_calls: Some(4),
@@ -12857,6 +12892,7 @@ mod tests {
             None,
             WorkflowBudget {
                 max_agent_calls: None,
+                per_route: Default::default(),
                 max_total_tokens: Some(1_000_000),
                 reserved_closing_tokens: None,
                 max_concurrent_agent_calls: Some(2),
@@ -13027,6 +13063,7 @@ mod tests {
             None,
             WorkflowBudget {
                 max_agent_calls: Some(3),
+                per_route: Default::default(),
                 max_total_tokens: Some(6),
                 reserved_closing_tokens: Some(2),
                 max_concurrent_agent_calls: Some(1),
@@ -13260,6 +13297,7 @@ mod tests {
             None,
             WorkflowBudget {
                 max_agent_calls: Some(3),
+                per_route: Default::default(),
                 max_total_tokens: Some(6),
                 reserved_closing_tokens: Some(2),
                 max_concurrent_agent_calls: Some(1),
@@ -13514,6 +13552,7 @@ mod tests {
             None,
             WorkflowBudget {
                 max_agent_calls: Some(3),
+                per_route: Default::default(),
                 max_total_tokens: Some(6),
                 reserved_closing_tokens: Some(2),
                 max_concurrent_agent_calls: Some(1),
@@ -13599,6 +13638,7 @@ mod tests {
         let source = "try { await agent('must not execute', {agent:'default'}); } catch (_) {} return await agent('does execute', {agent:'default'});";
         let budget = WorkflowBudget {
             max_agent_calls: Some(1),
+            per_route: Default::default(),
             max_total_tokens: Some(1_000_000),
             reserved_closing_tokens: None,
             max_concurrent_agent_calls: Some(4),
@@ -13858,6 +13898,7 @@ mod tests {
                 args: Value::Null,
                 budget: Some(WorkflowBudget {
                     max_agent_calls: None,
+                    per_route: Default::default(),
                     max_total_tokens: Some(6),
                     reserved_closing_tokens: None,
                     max_concurrent_agent_calls: Some(4),
@@ -14185,6 +14226,7 @@ mod tests {
                 args: Value::Null,
                 budget: Some(WorkflowBudget {
                     max_agent_calls: None,
+                    per_route: Default::default(),
                     max_total_tokens: None,
                     reserved_closing_tokens: None,
                     max_concurrent_agent_calls: Some(2),
@@ -14661,6 +14703,7 @@ mod tests {
                 args: Value::Null,
                 budget: Some(WorkflowBudget {
                     max_agent_calls: Some(3),
+                    per_route: Default::default(),
                     max_total_tokens: Some(8),
                     reserved_closing_tokens: Some(4),
                     max_concurrent_agent_calls: Some(1),
@@ -14749,6 +14792,7 @@ mod tests {
                 args: Value::Null,
                 budget: Some(WorkflowBudget {
                     max_agent_calls: Some(4),
+                    per_route: Default::default(),
                     max_total_tokens: Some(6),
                     reserved_closing_tokens: Some(2),
                     max_concurrent_agent_calls: Some(1),
@@ -14918,6 +14962,7 @@ mod tests {
                 args: Value::Null,
                 budget: Some(WorkflowBudget {
                     max_agent_calls: Some(6),
+                    per_route: Default::default(),
                     max_total_tokens: Some(18_000),
                     reserved_closing_tokens: Some(5_000),
                     max_concurrent_agent_calls: Some(1),
@@ -14988,6 +15033,7 @@ mod tests {
                 args: Value::Null,
                 budget: Some(WorkflowBudget {
                     max_agent_calls: Some(5),
+                    per_route: Default::default(),
                     max_total_tokens: Some(10),
                     reserved_closing_tokens: Some(3),
                     max_concurrent_agent_calls: Some(1),
@@ -15060,6 +15106,7 @@ mod tests {
                 args: Value::Null,
                 budget: Some(WorkflowBudget {
                     max_agent_calls: Some(3),
+                    per_route: Default::default(),
                     max_total_tokens: Some(6),
                     reserved_closing_tokens: Some(2),
                     max_concurrent_agent_calls: Some(1),
@@ -15149,6 +15196,7 @@ mod tests {
             .expect("script");
         let budget = WorkflowBudget {
             max_agent_calls: None,
+            per_route: Default::default(),
             max_total_tokens: Some(14),
             reserved_closing_tokens: Some(8),
             max_concurrent_agent_calls: Some(3),
@@ -15284,6 +15332,7 @@ mod tests {
                 args: Value::Null,
                 budget: Some(WorkflowBudget {
                     max_agent_calls: Some(2),
+                    per_route: Default::default(),
                     max_total_tokens: Some(4),
                     reserved_closing_tokens: Some(2),
                     max_concurrent_agent_calls: Some(1),
@@ -15374,6 +15423,7 @@ mod tests {
                 args: Value::Null,
                 budget: Some(WorkflowBudget {
                     max_agent_calls: Some(2),
+                    per_route: Default::default(),
                     max_total_tokens: Some(4),
                     reserved_closing_tokens: Some(2),
                     max_concurrent_agent_calls: Some(1),
@@ -15498,6 +15548,7 @@ mod tests {
                 args: Value::Null,
                 budget: Some(WorkflowBudget {
                     max_agent_calls: Some(3),
+                    per_route: Default::default(),
                     max_total_tokens: Some(5),
                     reserved_closing_tokens: Some(2),
                     max_concurrent_agent_calls: Some(1),
@@ -15687,6 +15738,7 @@ mod tests {
                 args: Value::Null,
                 budget: Some(WorkflowBudget {
                     max_agent_calls: None,
+                    per_route: Default::default(),
                     max_total_tokens: Some(10),
                     reserved_closing_tokens: None,
                     max_concurrent_agent_calls: None,
