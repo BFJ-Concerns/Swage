@@ -5,10 +5,7 @@ use std::sync::{
     atomic::{AtomicU32, AtomicU64, Ordering},
 };
 
-use axum::{
-    Json,
-    extract::{Path, State},
-};
+use axum::extract::{Path, State};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use swage_config::skill::SkillDefinition;
@@ -38,7 +35,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::{
-    error::ApiError,
+    error::{ApiError, Json},
     state::AppState,
     subscription::SubscriptionState,
     turn::{
@@ -901,7 +898,7 @@ impl GatewayWorkflowLauncher {
             inherited_worker_placement,
         )
         .await
-        .map_err(|error| error.0.to_string())?;
+        .map_err(|error| error.message().to_owned())?;
         if !wait {
             return serde_json::to_value(run).map_err(|error| error.to_string());
         }
@@ -922,7 +919,7 @@ impl GatewayWorkflowLauncher {
         })
         .await
         .map_err(|_| "workflow wait timed out".to_string())??;
-        serde_json::to_value(run_wire(record).map_err(|error| error.0.to_string())?)
+        serde_json::to_value(run_wire(record).map_err(|error| error.message().to_owned())?)
             .map_err(|error| error.to_string())
     }
 }
@@ -4109,7 +4106,7 @@ async fn complete_workflow_call_entry(
                     .ok_or_else(|| "child workflow run disappeared".to_string())?;
                 launch_existing_run(state.clone(), running, source, grant)
                     .await
-                    .map_err(|error| error.0.to_string())?;
+                    .map_err(|error| error.message().to_owned())?;
                 child
             }
             _ => child,
@@ -4184,7 +4181,7 @@ async fn complete_workflow_call_entry(
                 script.delivery_grant.clone(),
             )
             .await
-            .map_err(|error| error.0.to_string())?;
+            .map_err(|error| error.message().to_owned())?;
             record
         }
     };
@@ -5336,7 +5333,7 @@ pub(crate) async fn resume_owed_workflow_runs(state: &AppState) -> usize {
                 tracing::info!(%run_id, from_state = %was, "resumed workflow run");
             }
             Err(error) => {
-                tracing::warn!(%run_id, error = %error.0, "failed to resume workflow run");
+                tracing::warn!(%run_id, error = %error, "failed to resume workflow run");
             }
         }
     }
@@ -5783,7 +5780,7 @@ mod tests {
         .await
         .expect_err("invalid arguments must be rejected");
         assert!(
-            error.0.to_string().contains("/task"),
+            error.message().contains("/task"),
             "validation must name the failing field: {error:?}"
         );
         assert!(
@@ -5827,7 +5824,7 @@ mod tests {
         .await
         .expect_err("shipped update must fail");
         assert!(
-            matches!(update_error.0, swage_core::GatewayError::SpaceConflict(message) if message.contains("immutable"))
+            matches!(update_error.cause(), Some(swage_core::GatewayError::SpaceConflict(message)) if message.contains("immutable"))
         );
 
         let Json(started) = start_saved_run(
@@ -5884,7 +5881,7 @@ mod tests {
         .await
         .expect_err("carried update must fail");
         assert!(
-            matches!(update_error.0, swage_core::GatewayError::SpaceConflict(message) if message.contains("immutable"))
+            matches!(update_error.cause(), Some(swage_core::GatewayError::SpaceConflict(message)) if message.contains("immutable"))
         );
 
         let Json(started) = start_saved_run(
@@ -7005,8 +7002,8 @@ mod tests {
         .expect_err("reserve without ceiling must be rejected");
 
         assert!(matches!(
-            error.0,
-            swage_core::GatewayError::ValidationError(message)
+            error.cause(),
+            Some(swage_core::GatewayError::ValidationError(message))
                 if message == "reserved_closing_tokens requires max_total_tokens"
         ));
     }
@@ -7022,8 +7019,8 @@ mod tests {
         .expect_err("reserve above ceiling must be rejected");
 
         assert!(matches!(
-            error.0,
-            swage_core::GatewayError::ValidationError(message)
+            error.cause(),
+            Some(swage_core::GatewayError::ValidationError(message))
                 if message == "reserved_closing_tokens cannot exceed max_total_tokens"
         ));
     }

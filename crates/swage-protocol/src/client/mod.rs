@@ -6,6 +6,7 @@ pub mod channel;
 pub mod context;
 pub mod conversation;
 pub mod delivery;
+pub mod error;
 pub mod knowledge;
 pub mod material;
 pub mod page;
@@ -31,6 +32,7 @@ use schemars::JsonSchema;
 #[derive(JsonSchema)]
 #[allow(dead_code)]
 pub struct ClientSurface {
+    api_error: error::ApiErrorBody,
     client_event: websocket::ClientEvent,
     server_event: websocket::ServerEvent,
     voice_capabilities: voice::VoiceCapabilitiesResponse,

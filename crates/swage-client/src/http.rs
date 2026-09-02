@@ -381,21 +381,15 @@ impl GatewayClient {
     /// Validates that a response has a 2xx status code.
     ///
     /// Returns the response unchanged on success so that callers that need the
-    /// body can continue parsing. On non-2xx, reads the body as text and
-    /// returns `ClientError::UnexpectedResponse`.
+    /// body can continue parsing. On non-2xx, reads the body and converts it
+    /// through [`refusal_error`].
     async fn check_success(
         &self,
         response: reqwest::Response,
         url: &str,
     ) -> Result<reqwest::Response, ClientError> {
         if !response.status().is_success() {
-            let status = response.status().as_u16();
-            let body = response.text().await.unwrap_or_default();
-            return Err(ClientError::UnexpectedResponse {
-                address: url.to_string(),
-                status,
-                body,
-            });
+            return Err(refusal_error(response, url).await);
         }
         Ok(response)
     }
@@ -425,13 +419,7 @@ impl GatewayClient {
         url: &str,
     ) -> Result<T, ClientError> {
         if !response.status().is_success() {
-            let status = response.status().as_u16();
-            let body = response.text().await.unwrap_or_default();
-            return Err(ClientError::UnexpectedResponse {
-                address: url.to_string(),
-                status,
-                body,
-            });
+            return Err(refusal_error(response, url).await);
         }
 
         response.json::<T>().await.map_err(|e| {
@@ -446,6 +434,26 @@ impl GatewayClient {
                 self.map_reqwest_error(e, url)
             }
         })
+    }
+}
+
+/// A non-2xx response as a `ClientError`: the wire error contract's body
+/// becomes the typed [`ClientError::Gateway`]; anything else — a proxy's
+/// HTML, an empty body — is kept raw as `UnexpectedResponse`.
+async fn refusal_error(response: reqwest::Response, url: &str) -> ClientError {
+    let status = response.status().as_u16();
+    let body = response.text().await.unwrap_or_default();
+    match serde_json::from_str::<swage_protocol::client::error::ApiErrorBody>(&body) {
+        Ok(contract) => ClientError::Gateway {
+            address: url.to_string(),
+            code: contract.code,
+            message: contract.message,
+        },
+        Err(_) => ClientError::UnexpectedResponse {
+            address: url.to_string(),
+            status,
+            body,
+        },
     }
 }
 
@@ -1066,6 +1074,71 @@ mod tests {
     }
 
     // health() and shutdown() require a live gateway — covered by integration tests.
+
+    /// Serve one canned HTTP response on a loopback listener and return the
+    /// base URL. The listener answers exactly one request, then closes.
+    async fn one_shot_server(status_line: &'static str, body: &'static str) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback listener");
+        let address = listener.local_addr().expect("listener address");
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept one request");
+            let mut request = [0u8; 4096];
+            let _ = stream.read(&mut request).await;
+            let response = format!(
+                "HTTP/1.1 {status_line}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .expect("write response");
+        });
+        format!("http://{address}")
+    }
+
+    #[tokio::test]
+    async fn a_contract_refusal_becomes_a_typed_gateway_error() {
+        let base = one_shot_server(
+            "409 Conflict",
+            r#"{"code":"turn_in_progress","message":"turn already in progress for session 1"}"#,
+        )
+        .await;
+        let error = GatewayClient::new(&base)
+            .list_spaces()
+            .await
+            .expect_err("a refused request fails");
+        match error {
+            ClientError::Gateway {
+                address,
+                code,
+                message,
+            } => {
+                assert_eq!(address, format!("{base}/api/spaces"));
+                assert_eq!(code, ErrorCode::TurnInProgress);
+                assert_eq!(message, "turn already in progress for session 1");
+            }
+            other => panic!("expected a typed gateway refusal, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_refusal_outside_the_contract_keeps_its_raw_body() {
+        let base = one_shot_server("502 Bad Gateway", "<html>upstream down</html>").await;
+        let error = GatewayClient::new(&base)
+            .list_spaces()
+            .await
+            .expect_err("a refused request fails");
+        match error {
+            ClientError::UnexpectedResponse { status, body, .. } => {
+                assert_eq!(status, 502);
+                assert_eq!(body, "<html>upstream down</html>");
+            }
+            other => panic!("expected the raw body to be kept, got: {other:?}"),
+        }
+    }
 
     // -----------------------------------------------------------------------
     // Conversation DTO deserialization tests

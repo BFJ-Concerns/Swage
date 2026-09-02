@@ -19,10 +19,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
-use axum::{
-    Json,
-    extract::{Path, State},
-};
+use axum::extract::{Path, State};
 use swage_core::GatewayError;
 use swage_protocol::hosting::KnowledgeMirrorRegenerateResponse;
 use swage_storage::{
@@ -30,7 +27,7 @@ use swage_storage::{
 };
 use uuid::Uuid;
 
-use crate::error::ApiError;
+use crate::error::{ApiError, Json};
 use crate::state::AppState;
 
 /// Every generated file opens with this, so a reader landing on one knows

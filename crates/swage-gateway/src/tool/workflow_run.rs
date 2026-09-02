@@ -291,7 +291,7 @@ mod tests {
         assert_eq!(record.source_hash, expected_hash);
         assert_eq!(result["source_hash"], expected_hash);
 
-        let axum::Json(detail) = crate::workflow::get_run(
+        let crate::error::Json(detail) = crate::workflow::get_run(
             axum::extract::State(state.clone()),
             axum::extract::Path(run_id),
         )
@@ -300,7 +300,7 @@ mod tests {
         assert_eq!(detail.run.source.as_deref(), Some(source));
         assert_eq!(detail.run.source_hash, expected_hash);
 
-        let axum::Json(list) =
+        let crate::error::Json(list) =
             crate::workflow::list_runs(axum::extract::State(state), axum::extract::Path(space.id))
                 .await
                 .expect("list runs");
