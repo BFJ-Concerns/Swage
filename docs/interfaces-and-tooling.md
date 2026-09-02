@@ -126,8 +126,9 @@ audit event on every access and automatic redaction of resolved values.
 
 Three backends determine where a secret's value lives:
 
-- **Managed** — encrypted at rest in the gateway's own SQLite store. This is
-  the default for secrets created through the API.
+- **Managed** — encrypted at rest in the gateway's own SQLite store. Used by
+  the generate-secret path; the create-secret path takes `backend_kind` from
+  the caller.
 - **Environment** — the secret names an environment variable, read at
   resolution time. This is what `api_key_env` in the provider config uses.
 - **File** — the secret names a file on the gateway host, re-read on every
@@ -220,20 +221,23 @@ reaches it).
 
 ### Route manifest
 
-The client surface also has a route manifest — a single table naming every
-HTTP route once, with its method, path template, request and response schema
-names. Two projections are generated from it:
+The client surface is gaining a route manifest — a single table that names
+each covered HTTP route once, with its method, path template, request and
+response schema names. The manifest does not yet cover the full client
+surface: the space CRUD routes are the first entries, and routes not yet in
+the manifest are registered directly on the router without appearing in the
+projections below. Two projections are generated from the manifest:
 
 - An **OpenAPI 3.1 document** at `crates/swage-protocol/schema/client-openapi.json`,
   whose `components/schemas` are the client surface's own JSON Schema — so
   the OpenAPI document and the schema never disagree.
 - A **generated TypeScript client** at `frontend/src/lib/protocol/client.ts`,
-  with one typed function per route over a shared request helper that raises
-  the API error contract on failure.
+  with one typed function per manifested route over a shared request helper
+  that raises the API error contract on failure.
 
-Adding a route is one entry in the manifest. A router test verifies that
-every manifest route is actually registered on the gateway's HTTP router —
-a manifest entry with no handler fails the test.
+Adding a manifested route is one entry in the manifest. A router test
+verifies that every manifest route is actually registered on the gateway's
+HTTP router — a manifest entry with no handler fails the test.
 
 ### Projections
 

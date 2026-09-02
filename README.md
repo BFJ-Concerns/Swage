@@ -224,11 +224,11 @@ first:
   wire contract and its projections, and the verification gate.
 
 Every failed API response carries a `{"code","message"}` body whose code
-vocabulary is defined in the protocol crate. The client-surface API is
-documented in an OpenAPI 3.1 document at
-`crates/swage-protocol/schema/client-openapi.json`, generated from the same
-route manifest that drives the TypeScript client and the router-coverage
-test.
+vocabulary is defined in the protocol crate. The manifested client-surface
+routes are documented in an OpenAPI 3.1 document at
+`crates/swage-protocol/schema/client-openapi.json`, generated from a route
+manifest that also drives the TypeScript client and a router-coverage test;
+the manifest is growing to cover the full surface.
 
 [`docs/README.md`](docs/README.md) indexes the set, and
 [`docs/architecture-flow.svg`](docs/architecture-flow.svg) is the
