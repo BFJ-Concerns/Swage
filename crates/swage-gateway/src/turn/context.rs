@@ -10,6 +10,9 @@ use swage_context::orientation::{
 use swage_context::working_norms::{WorkingNormsElement, WorkingNormsScaffold};
 
 #[cfg(test)]
+use swage_config::RESERVED_WORKFLOW_AGENT_ID;
+
+#[cfg(test)]
 tokio::task_local! {
     static SPACE_MEMORY_LOAD_COUNT: std::cell::Cell<usize>;
 }
