@@ -197,7 +197,9 @@ mod approval_tests {
             {
                 registrar_observation.store(true, Ordering::SeqCst);
             }
-            *registrar_approval_id.lock().expect("registered approval id") = Some(approval_id);
+            *registrar_approval_id
+                .lock()
+                .expect("registered approval id") = Some(approval_id);
             sender
                 .send(crate::approval::ApprovalDecision {
                     decision: crate::approval::ApprovalDecisionValue::Rejected,
@@ -239,13 +241,113 @@ mod approval_tests {
             event => panic!("expected approval event, got {event:?}"),
         };
         assert_eq!(
-            *registered_approval_id.lock().expect("registered approval id"),
+            *registered_approval_id
+                .lock()
+                .expect("registered approval id"),
             Some(approval_id)
         );
         assert!(matches!(
             outcome,
             crate::approval::ApprovalGateOutcome::Rejected { .. }
         ));
+    }
+
+    #[test]
+    fn rejected_tool_approval_emits_settlement_log() {
+        use tracing_subscriber::{Registry, layer::SubscriberExt};
+
+        #[derive(Default)]
+        struct MessageRecorder(Arc<Mutex<Vec<String>>>);
+
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for MessageRecorder {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _context: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                struct MessageVisitor<'a>(&'a mut Option<String>);
+
+                impl tracing::field::Visit for MessageVisitor<'_> {
+                    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                        if field.name() == "message" {
+                            *self.0 = Some(value.to_owned());
+                        }
+                    }
+
+                    fn record_debug(
+                        &mut self,
+                        field: &tracing::field::Field,
+                        value: &dyn std::fmt::Debug,
+                    ) {
+                        if field.name() == "message" {
+                            *self.0 = Some(format!("{value:?}"));
+                        }
+                    }
+                }
+
+                let mut message = None;
+                event.record(&mut MessageVisitor(&mut message));
+                if let Some(message) = message {
+                    self.0.lock().expect("recorded log messages").push(message);
+                }
+            }
+        }
+
+        let recorder = MessageRecorder::default();
+        let messages = Arc::clone(&recorder.0);
+        let subscriber = Registry::default().with(recorder);
+
+        tracing::subscriber::with_default(subscriber, || {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .expect("test runtime")
+                .block_on(async {
+                    let registrar: ApprovalChannelRegistrar = Arc::new(|_approval_id, sender| {
+                        sender
+                            .send(crate::approval::ApprovalDecision {
+                                decision: crate::approval::ApprovalDecisionValue::Rejected,
+                                scope: crate::approval::ApprovalDecisionScope::Once,
+                                reason: Some("not allowed".into()),
+                            })
+                            .expect("registered sender accepts rejection");
+                    });
+                    let (agent, execution) = approval_fixture(registrar).await;
+                    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+
+                    let outcome = agent
+                        .handle_approval_gate(
+                            &execution,
+                            ApprovalKind::Tool,
+                            Some("shell".into()),
+                            None,
+                            None,
+                            "Allow shell?".into(),
+                            None,
+                            std::time::Duration::from_secs(5),
+                            swage_core::ApprovalTimeoutPolicy::Reject,
+                            &event_tx,
+                            &tokio_util::sync::CancellationToken::new(),
+                            &mut TurnApprovalScope::default(),
+                        )
+                        .await
+                        .expect("approval gate");
+                    assert!(matches!(
+                        outcome,
+                        crate::approval::ApprovalGateOutcome::Rejected { .. }
+                    ));
+                });
+        });
+
+        assert!(
+            messages
+                .lock()
+                .expect("recorded log messages")
+                .iter()
+                .any(|message| message == "tool approval rejected and settled"),
+            "human rejection must emit its settlement log"
+        );
     }
 }
 // Agent struct
@@ -1997,6 +2099,12 @@ impl Agent {
                     decision: crate::approval::ApprovalDecisionValue::Rejected,
                     reason: d.reason,
                 });
+                tracing::info!(
+                    approval_id = %approval.id,
+                    turn_id = %execution.turn_id,
+                    reason = %reason_text,
+                    "tool approval rejected and settled"
+                );
                 Ok(ApprovalGateOutcome::Rejected {
                     feedback: format!("Tool call rejected: {reason_text}"),
                 })
