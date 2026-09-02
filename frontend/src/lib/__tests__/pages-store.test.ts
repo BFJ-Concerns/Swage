@@ -30,6 +30,7 @@ function fakeChannel(): WorkSurfaceChannel & { emit(event: unknown): void } {
 const PAGE_ID = "11111111-1111-4111-8111-111111111111";
 const MODULE_ID = "22222222-2222-4222-8222-222222222222";
 const SPACE_ID = "33333333-3333-4333-8333-333333333333";
+const OTHER_SPACE_ID = "66666666-6666-4666-8666-666666666666";
 const ANNOTATION_ID = "44444444-4444-4444-8444-444444444444";
 
 function jsonResponse(body: unknown): Response {
@@ -85,6 +86,18 @@ const templateListBody = {
   ],
 };
 
+const otherListBody = {
+  pages: [
+    { id: "77777777-7777-4777-8777-777777777777", title: "Other planning", updated_at: "2026-08-28T00:00:00Z" },
+  ],
+};
+
+const otherTemplateListBody = {
+  templates: [
+    { id: "88888888-8888-4888-8888-888888888888", name: "Retrospective", updated_at: "2026-08-28T00:00:00Z" },
+  ],
+};
+
 function requestBody(call: unknown[]): Record<string, unknown> {
   const init = call[1] as RequestInit;
   return JSON.parse(init.body as string) as Record<string, unknown>;
@@ -114,6 +127,59 @@ describe("pages store", () => {
       `/api/spaces/${SPACE_ID}/pages`,
       expect.anything(),
     );
+  });
+
+  it("keeps the current space's pages and templates when a previous template load finishes late", async () => {
+    let resolvePreviousTemplates: (response: Response) => void;
+    let previousTemplateRequests = 0;
+    const previousTemplates = new Promise<Response>((resolve) => {
+      resolvePreviousTemplates = resolve;
+    });
+    const fetchMock = vi.fn((url: string) => {
+      if (url === `/api/spaces/${SPACE_ID}/pages`) {
+        return Promise.resolve(jsonResponse(listBody));
+      }
+      if (url === `/api/spaces/${SPACE_ID}/page-templates`) {
+        previousTemplateRequests += 1;
+        return previousTemplateRequests === 1
+          ? Promise.resolve(jsonResponse(templateListBody))
+          : previousTemplates;
+      }
+      if (url === `/api/spaces/${OTHER_SPACE_ID}/pages`) {
+        return Promise.resolve(jsonResponse(otherListBody));
+      }
+      if (url === `/api/spaces/${OTHER_SPACE_ID}/page-templates`) {
+        return Promise.resolve(jsonResponse(otherTemplateListBody));
+      }
+      throw new Error(`unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const store = createPagesStore({ channelFactory: fakeChannel });
+    await store.loadPages(SPACE_ID);
+    const previousLoad = store.loadPages(SPACE_ID);
+    await vi.waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        `/api/spaces/${SPACE_ID}/page-templates`,
+        expect.anything(),
+      );
+    });
+
+    const currentLoad = store.loadPages(OTHER_SPACE_ID);
+    // A visible previous-space picker is cleared before B's response settles.
+    expect(store.templates).toEqual([]);
+    await currentLoad;
+    expect(store.pages.map((page) => page.title)).toEqual(["Other planning"]);
+    expect(store.templates.map((template) => template.name)).toEqual([
+      "Retrospective",
+    ]);
+
+    resolvePreviousTemplates!(jsonResponse(templateListBody));
+    await previousLoad;
+    expect(store.pages.map((page) => page.title)).toEqual(["Other planning"]);
+    expect(store.templates.map((template) => template.name)).toEqual([
+      "Retrospective",
+    ]);
   });
 
   it("refetches the open page when its page_updated signal arrives", async () => {
