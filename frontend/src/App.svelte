@@ -89,6 +89,9 @@
   }
 
   async function selectAndNavigateOrThrow(id: string): Promise<void> {
+    if (streamingStore.isStreaming && id !== conversationStore.activeConversation?.id) {
+      return;
+    }
     keepSurfaceForConversation();
     await conversationStore.selectConversation(id);
 
@@ -142,6 +145,7 @@
   }
 
   function startNewConversation(): void {
+    if (streamingStore.isStreaming) return;
     void createAndNavigate();
   }
 
@@ -327,6 +331,7 @@
   }
 
   function handleSelectSurface(next: Surface): void {
+    if (streamingStore.isStreaming && next === "operator") return;
     const previous = activeSurface;
     activeSurface = next;
 

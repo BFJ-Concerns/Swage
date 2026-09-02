@@ -1001,6 +1001,7 @@ describe("App", () => {
         id: "conv-stream",
         message_preview: "Earlier message",
       }),
+      makeConversationSummary({ id: "conv-other", message_preview: "Other conversation" }),
     ]);
     vi.mocked(conversationsApi.getConversation).mockResolvedValueOnce(
       makeConversationDetail({ id: "conv-stream" }),
@@ -1037,6 +1038,20 @@ describe("App", () => {
     websocketHarness.fireEvent({ type: "token", content: "reply." });
     await settleUi();
 
+    expect(document.querySelector(".message-display")?.textContent).toContain("Streamed reply.");
+
+    websocketHarness.client.connect.mockClear();
+    websocketHarness.client.disconnect.mockClear();
+    const conversationButtons = document.querySelectorAll<HTMLButtonElement>(".conversation-select-btn");
+    flushSync(() => conversationButtons[1]!.click());
+    (Array.from(document.querySelectorAll("nav button")).find(
+      (button) => button.textContent?.trim() === "Operator",
+    ) as HTMLButtonElement).click();
+    await settleUi();
+
+    expect(websocketHarness.client.disconnect).not.toHaveBeenCalled();
+    expect(websocketHarness.client.connect).not.toHaveBeenCalled();
+    expect(document.querySelector(".action.stop")).not.toBeNull();
     expect(document.querySelector(".message-display")?.textContent).toContain("Streamed reply.");
 
     websocketHarness.fireEvent({
