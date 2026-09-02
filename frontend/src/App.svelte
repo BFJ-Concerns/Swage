@@ -64,9 +64,23 @@
 
   // Route all server events from the WebSocket through the streaming store.
   // The connection store is a pure relay — interpretation belongs to streaming.
-  connectionStore.onServerEvent((event) =>
-    streamingStore.handleServerEvent(event),
-  );
+  connectionStore.onServerEvent((event) => {
+    const streamingConversationId = streamingStore.activeConversationId;
+    streamingStore.handleServerEvent(event);
+
+    // A live turn keeps its own socket while the user navigates. Once it
+    // settles, reconnect the channel to the conversation they selected so the
+    // next outgoing message cannot be sent to the completed turn's socket.
+    const selectedConversationId = conversationStore.activeConversation?.id;
+    if (
+      streamingConversationId &&
+      !streamingStore.isStreaming &&
+      selectedConversationId &&
+      selectedConversationId !== streamingConversationId
+    ) {
+      connectionStore.connectTo(selectedConversationId);
+    }
+  });
 
   // The pages store opens its own work-surface channel: page signals are not
   // turn events, and an open page must stay live even with no conversation

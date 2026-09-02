@@ -62,6 +62,7 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- Live replies now remain with their conversation while the user changes work surfaces.
 - New-conversation controls now create and navigate immediately.
 - New-conversation agent pickers now show every available definition by name.
 - Rejected tool approvals now render as failed calls in the conversation transcript.
