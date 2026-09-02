@@ -9,10 +9,8 @@ export type WorkflowBudget = { max_agent_calls: number | null,
  */
 per_route: { [key in string]: WorkflowRouteBudget },
 /**
- * Legacy default used only when no per-route ledger is configured.
- *
- * Kept while callers move to `per_route`; each resolved provider still
- * receives an independent ledger from these values.
+ * Fallback ceiling for a resolved provider route without a `per_route`
+ * entry.
  */
 max_total_tokens: bigint | null,
 /**

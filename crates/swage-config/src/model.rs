@@ -117,6 +117,46 @@ impl ModelCatalogConfig {
     }
 }
 
+/// The provider route a model draws on: the configured allowance and endpoint
+/// its calls actually touch, named by its provider id.
+///
+/// A route means this wherever the term is used. Held-worker staleness and
+/// workflow token accounting resolve through [`resolve_provider_route`], so
+/// they cannot disagree about which allowance a model belongs to.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ProviderRoute<'a> {
+    pub provider_id: &'a str,
+    pub endpoint: &'a ProviderEndpointConfig,
+    pub model: &'a ModelEndpointConfig,
+}
+
+/// Resolve the provider route a model id draws on.
+///
+/// A supplied model matches catalogue keys first and aliases second; an absent
+/// model resolves the catalogue default. An unknown model has no route rather
+/// than borrowing the default route's allowance.
+pub fn resolve_provider_route<'a>(
+    models: &'a ModelCatalogConfig,
+    providers: &'a ProviderCatalogConfig,
+    model: Option<&str>,
+) -> Option<ProviderRoute<'a>> {
+    let model = match model {
+        Some(name) => models.entries.get(name).or_else(|| {
+            models
+                .entries
+                .values()
+                .find(|entry| entry.aliases.iter().any(|alias| alias == name))
+        })?,
+        None => models.default_model()?,
+    };
+    let (provider_id, endpoint) = providers.entries.get_key_value(&model.provider_id)?;
+    Some(ProviderRoute {
+        provider_id,
+        endpoint,
+        model,
+    })
+}
+
 /// Sandbox isolation settings.
 pub use swage_protocol::client::settings::SandboxConfig;
 
