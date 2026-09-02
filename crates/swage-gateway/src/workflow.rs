@@ -8633,18 +8633,21 @@ mod tests {
             .join("\n");
         assert!(second_request_text.contains("restate the brief"));
         assert!(second_request_text.contains("restated: gather the sources"));
-        assert!(second_request.messages.iter().any(|message| {
-            message.role() == swage_core::Role::Assistant
-                && message.tool_replay().is_some_and(|replay| {
-                    replay.iter().any(|part| {
-                        matches!(
-                            part,
-                            swage_core::ToolReplayPart::ToolCall { call_id, name, .. }
-                                if call_id == "continued-history-tool" && name == "shell"
-                        )
+        assert!(
+            second_request.messages.iter().any(|message| {
+                message.role() == swage_core::Role::Assistant
+                    && message.tool_replay().is_some_and(|replay| {
+                        replay.iter().any(|part| {
+                            matches!(
+                                part,
+                                swage_core::ToolReplayPart::ToolCall { call_id, name, .. }
+                                    if call_id == "continued-history-tool" && name == "shell"
+                            )
+                        })
                     })
-                })
-        }), "the continued provider request must replay the persisted tool name");
+            }),
+            "the continued provider request must replay the persisted tool name"
+        );
 
         drop(tx);
         task.await.expect("host loop");
