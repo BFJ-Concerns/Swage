@@ -14,12 +14,11 @@ use swage_protocol::client::workflow::{
     CreateWorkflowScriptRequest, PostWorkflowRunEventRequest, PostWorkflowRunEventResponse,
     StartInlineWorkflowRunRequest, StartWorkflowRunRequest, UpdateWorkflowScriptRequest,
     WorkflowAgentCallDispatch, WorkflowArgumentContract, WorkflowBudget, WorkflowCallUsage,
-    WorkflowHandoverEvent, WorkflowHandoverEventDelivery,
+    WorkflowCutShortCause, WorkflowHandoverEvent, WorkflowHandoverEventDelivery,
     WorkflowHandoverFailedCall, WorkflowHandoverFailedCallRef, WorkflowRun,
     WorkflowRunDetailResponse, WorkflowRunEvent, WorkflowRunEventSource, WorkflowRunHandover,
     WorkflowRunListResponse, WorkflowRunState, WorkflowScript, WorkflowScriptListResponse,
-    WorkflowCutShortCause, WorkflowUsageUnavailableReason, WorkflowWorkerPlacementRecord,
-    WorkflowWorkerTermination,
+    WorkflowUsageUnavailableReason, WorkflowWorkerPlacementRecord, WorkflowWorkerTermination,
 };
 use swage_storage::WorkflowJournalRecord;
 use swage_storage::{
@@ -480,9 +479,9 @@ fn journal_wire(
     provider_rounds: Option<Vec<swage_protocol::client::workflow::WorkflowProviderRound>>,
 ) -> Result<swage_protocol::client::workflow::WorkflowJournalEntry, String> {
     use swage_protocol::client::workflow::{
-        WorkflowAgentCallDetail, WorkflowAgentCallDispatch, WorkflowCallUsage, WorkflowEffectDetail,
-        WorkflowJournalEntry, WorkflowJournalEntryKind, WorkflowJournalEntryStatus,
-        WorkflowUsageUnavailableReason, WorkflowWorkerTermination,
+        WorkflowAgentCallDetail, WorkflowAgentCallDispatch, WorkflowCallUsage,
+        WorkflowEffectDetail, WorkflowJournalEntry, WorkflowJournalEntryKind,
+        WorkflowJournalEntryStatus, WorkflowUsageUnavailableReason, WorkflowWorkerTermination,
     };
     let kind = match entry.kind.as_str() {
         "agent_call" => WorkflowJournalEntryKind::AgentCall,
@@ -504,17 +503,16 @@ fn journal_wire(
     // stored status stays `failed` for a cut-short worker so replay keeps
     // treating it as terminal.
     let termination = match entry.termination.as_ref() {
-        Some(termination) => {
-            serde_json::from_value::<WorkflowWorkerTermination>(termination.clone()).map_err(
-                |error| {
-                    format!(
-                        "workflow journal entry {} carries a termination record outside \
+        Some(termination) => serde_json::from_value::<WorkflowWorkerTermination>(
+            termination.clone(),
+        )
+        .map_err(|error| {
+            format!(
+                "workflow journal entry {} carries a termination record outside \
                          WorkflowWorkerTermination: {error}",
-                        entry.id
-                    )
-                },
-            )?
-        }
+                entry.id
+            )
+        })?,
         None => match entry.status.as_str() {
             "started" => WorkflowWorkerTermination::Outstanding,
             "completed" => WorkflowWorkerTermination::Settled,
@@ -543,15 +541,15 @@ fn journal_wire(
         // A call with no settled result spent nothing the record can vouch
         // for; the absence is named with its reason rather than read as zero.
         let usage = match result.and_then(|result| result.get("usage")) {
-            Some(usage) => serde_json::from_value::<WorkflowCallUsage>(usage.clone()).map_err(
-                |error| {
+            Some(usage) => {
+                serde_json::from_value::<WorkflowCallUsage>(usage.clone()).map_err(|error| {
                     format!(
                         "workflow journal entry {} carries a usage record outside \
                          WorkflowCallUsage: {error}",
                         entry.id
                     )
-                },
-            )?,
+                })?
+            }
             None => WorkflowCallUsage::Unavailable {
                 reason: WorkflowUsageUnavailableReason::CallDidNotSettle,
             },
@@ -574,15 +572,14 @@ fn journal_wire(
         if let (Some(dispatch), Some(resolution)) =
             (dispatch.as_mut(), entry.dispatch_resolution.as_ref())
         {
-            dispatch.resolved = Some(serde_json::from_value(resolution.clone()).map_err(
-                |error| {
+            dispatch.resolved =
+                Some(serde_json::from_value(resolution.clone()).map_err(|error| {
                     format!(
                         "workflow journal entry {} carries a resolution record outside \
                          WorkflowAgentCallResolution: {error}",
                         entry.id
                     )
-                },
-            )?);
+                })?);
         }
         let resolved = dispatch
             .as_ref()
@@ -767,9 +764,9 @@ fn completed_agent_tokens_before(
             match result
                 .get("usage")
                 .and_then(|usage| {
-                    serde_json::from_value::<
-                        swage_protocol::client::workflow::WorkflowCallUsage,
-                    >(usage.clone())
+                    serde_json::from_value::<swage_protocol::client::workflow::WorkflowCallUsage>(
+                        usage.clone(),
+                    )
                     .ok()
                 })
                 .and_then(|usage| usage.known_total())
@@ -2813,7 +2810,10 @@ async fn run_host_commands_inner(
                     // the accounting records that rather than absorbing the
                     // absence as a zero-spend call.
                     let known = if !completed_replay {
-                        result.as_ref().ok().map(|result| result.usage.known_total())
+                        result
+                            .as_ref()
+                            .ok()
+                            .map(|result| result.usage.known_total())
                     } else {
                         None
                     };
@@ -16241,5 +16241,318 @@ mod tests {
         })
         .await
         .expect("worker turn becomes interrupted");
+    }
+
+    /// The fixture behind the worker-call-record tests: one run, one host
+    /// loop, and a provider scripted with whatever the case needs.
+    async fn worker_call_record_fixture(
+        provider: Arc<ScriptedRecordingProvider>,
+    ) -> (Arc<SqliteStorage>, AppState, WorkflowRunRecord) {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let run = storage
+            .create_workflow_run(NewWorkflowRun {
+                space_id: space.id,
+                parent_run_id: None,
+                parent_seq: None,
+                script_version_id: None,
+                inline_workflow_id: None,
+                inline_workflow_name: None,
+                inline_workflow_version: None,
+                carrying_skill: None,
+                source: Some("return null".into()),
+                source_hash: source_hash("return null"),
+                args: Value::Null,
+                budget: serde_json::json!({}),
+                engine_version: "test".into(),
+                dispatch_bound_agent_ids: vec![],
+                dispatch_bound_task_definition_ids: vec![],
+                workflow_call_tools: None,
+                inherited_worker_placement: None,
+            })
+            .await
+            .expect("run");
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            provider as Arc<dyn swage_provider::LlmProvider>,
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        (storage, state, run)
+    }
+
+    fn worker_call_request(prompt: &str) -> AgentCallRequest {
+        AgentCallRequest {
+            prompt: prompt.into(),
+            agent: Some("default".into()),
+            task: None,
+            tools: Some(vec!["file_read".into()]),
+            skills: None,
+            model: None,
+            effort: Some(swage_protocol::client::settings::Effort::Low),
+            timeout_ms: None,
+            cwd: None,
+            isolation: None,
+            schema: None,
+            max_attempts: 1,
+            label: None,
+            session: None,
+            elements: None,
+            variables: None,
+            assembly: None,
+        }
+    }
+
+    fn spawn_worker_call_host(
+        state: AppState,
+        run: &WorkflowRunRecord,
+    ) -> (
+        mpsc::UnboundedSender<HostCommand>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let task = tokio::spawn(run_host_commands(
+            state,
+            run.id,
+            run.space_id,
+            vec![],
+            vec![],
+            None,
+            None,
+            WorkflowBudget::default(),
+            vec![],
+            Arc::new(AtomicU32::new(0)),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(Mutex::new(std::collections::HashMap::new())),
+            CancellationToken::new(),
+            PARK_TIMER_THRESHOLD_MS,
+            rx,
+        ));
+        (tx, task)
+    }
+
+    async fn send_worker_call(
+        tx: &mpsc::UnboundedSender<HostCommand>,
+        request: AgentCallRequest,
+    ) -> Result<AgentCallResult, WorkflowHostError> {
+        let (reply, receive) = oneshot::channel();
+        tx.send(HostCommand::Agent {
+            request,
+            resolved_working_directory: None,
+            cancellation: CancellationToken::new(),
+            reply,
+        })
+        .expect("send agent call");
+        receive.await.expect("agent reply")
+    }
+
+    fn only_agent_call(
+        detail: &WorkflowRunDetailResponse,
+    ) -> &swage_protocol::client::workflow::WorkflowAgentCallDetail {
+        detail
+            .journal
+            .iter()
+            .find_map(|entry| entry.agent_call.as_ref())
+            .expect("the run detail carries an agent call")
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_worker_call_records_what_it_was_dispatched_with_and_what_it_resolved() {
+        let provider = Arc::new(ScriptedRecordingProvider {
+            outputs: std::sync::Mutex::new(std::collections::VecDeque::from([
+                scripted_text_output_with_usage("worker output", 11, 7),
+            ])),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let (_storage, state, run) = worker_call_record_fixture(provider).await;
+        let (tx, task) = spawn_worker_call_host(state.clone(), &run);
+        send_worker_call(&tx, worker_call_request("read the briefing"))
+            .await
+            .expect("agent call");
+        drop(tx);
+        task.await.expect("host loop");
+
+        let detail = get_run(State(state), Path(run.id)).await.expect("detail").0;
+        let call = only_agent_call(&detail);
+        let dispatch = call.dispatch.as_ref().expect("dispatch record");
+        assert_eq!(dispatch.prompt, "read the briefing");
+        assert_eq!(dispatch.agent_definition_id.as_deref(), Some("default"));
+        assert_eq!(
+            dispatch.requested_effort,
+            Some(swage_protocol::client::settings::Effort::Low)
+        );
+        assert_eq!(
+            dispatch.grants.as_deref(),
+            Some(["file_read".to_string()].as_slice())
+        );
+        let resolved = dispatch.resolved.as_ref().expect("resolution record");
+        assert!(resolved.model.is_some(), "the resolved model is recorded");
+        assert_eq!(
+            resolved.effort,
+            Some(swage_protocol::client::settings::Effort::Low)
+        );
+        assert_eq!(resolved.turn_id, call.turn_id);
+        assert_eq!(
+            call.usage,
+            WorkflowCallUsage::Known {
+                input_tokens: 11,
+                output_tokens: 7,
+            }
+        );
+        assert_eq!(call.termination, WorkflowWorkerTermination::Settled);
+
+        let rounds = call.provider_rounds.as_ref().expect("provider rounds");
+        assert_eq!(rounds.len(), 1, "one provider request went out");
+        assert!(
+            rounds[0].completed_at.is_some(),
+            "the round that came back is settled, not left outstanding"
+        );
+        assert_eq!(
+            rounds[0].outcome,
+            swage_protocol::client::workflow::WorkflowProviderRoundOutcome::Responded {
+                tool_calls: 0
+            }
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_worker_whose_provider_reports_no_usage_reads_unavailable_not_zero() {
+        let provider = Arc::new(ScriptedRecordingProvider {
+            outputs: std::sync::Mutex::new(std::collections::VecDeque::from([vec![
+                swage_core::StreamChunk::Delta {
+                    content: "worker output".into(),
+                },
+                swage_core::StreamChunk::Done {
+                    finish_reason: None,
+                },
+            ]])),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let (_storage, state, run) = worker_call_record_fixture(provider).await;
+        let (tx, task) = spawn_worker_call_host(state.clone(), &run);
+        send_worker_call(&tx, worker_call_request("work without reported usage"))
+            .await
+            .expect("agent call");
+        drop(tx);
+        task.await.expect("host loop");
+
+        let detail = get_run(State(state), Path(run.id)).await.expect("detail").0;
+        assert_eq!(
+            only_agent_call(&detail).usage,
+            WorkflowCallUsage::Unavailable {
+                reason: WorkflowUsageUnavailableReason::ProviderReportedNoUsage,
+            },
+            "a call the provider reported no usage for is unavailable, never zero spend"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_worker_the_run_cut_short_reads_cut_short_not_failed() {
+        let provider = Arc::new(ScriptedRecordingProvider {
+            outputs: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let (storage, state, run) = worker_call_record_fixture(provider).await;
+        // The entry stands for a worker still in flight when the run ended.
+        let request = serde_json::to_value(worker_call_request("still working")).expect("request");
+        let intent = storage
+            .create_workflow_journal_intent(NewWorkflowJournalIntent {
+                run_id: run.id,
+                seq: 1,
+                kind: "agent_call".into(),
+                args_hash: source_hash("still working"),
+                request,
+                effect_kind: None,
+                idempotency_key: None,
+                target_kind: None,
+            })
+            .await
+            .expect("journal intent");
+        settle_cancelled_workflow_journal(
+            storage.as_ref(),
+            run.id,
+            WorkflowCutShortCause::RunCancelled,
+        )
+        .await;
+
+        let settled = storage
+            .list_workflow_journal(run.id)
+            .await
+            .expect("journal")
+            .into_iter()
+            .find(|entry| entry.id == intent.id)
+            .expect("settled entry");
+        assert_eq!(
+            settled.status, "failed",
+            "the stored status stays terminal so replay is unchanged"
+        );
+
+        let detail = get_run(State(state), Path(run.id)).await.expect("detail").0;
+        let entry = detail
+            .journal
+            .iter()
+            .find(|entry| entry.id == intent.id)
+            .expect("wire entry");
+        assert_eq!(
+            entry.status,
+            swage_protocol::client::workflow::WorkflowJournalEntryStatus::CutShort,
+            "the run's own end is not the worker's failure"
+        );
+        assert_eq!(
+            only_agent_call(&detail).termination,
+            WorkflowWorkerTermination::CutShort {
+                cause: WorkflowCutShortCause::RunCancelled,
+            }
+        );
+        assert_eq!(
+            only_agent_call(&detail).usage,
+            WorkflowCallUsage::Unavailable {
+                reason: WorkflowUsageUnavailableReason::CallDidNotSettle,
+            }
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_usage_record_outside_the_contract_is_rejected_not_passed_through() {
+        let provider = Arc::new(ScriptedRecordingProvider {
+            outputs: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let (storage, state, run) = worker_call_record_fixture(provider).await;
+        let intent = storage
+            .create_workflow_journal_intent(NewWorkflowJournalIntent {
+                run_id: run.id,
+                seq: 1,
+                kind: "agent_call".into(),
+                args_hash: source_hash("out of contract"),
+                request: serde_json::json!({}),
+                effect_kind: None,
+                idempotency_key: None,
+                target_kind: None,
+            })
+            .await
+            .expect("journal intent");
+        storage
+            .complete_workflow_journal_entry(
+                intent.id,
+                serde_json::json!({ "usage": { "input_tokens": 3 } }),
+            )
+            .await
+            .expect("stored blob");
+
+        let error = get_run(State(state), Path(run.id))
+            .await
+            .expect_err("a usage record outside the contract must not pass through untyped");
+        let message = format!("{error:?}");
+        assert!(
+            message.contains("outside WorkflowCallUsage"),
+            "error names the contract that was broken: {message}"
+        );
+        assert!(
+            message.contains(&intent.id.to_string()),
+            "error names the offending record: {message}"
+        );
     }
 }
