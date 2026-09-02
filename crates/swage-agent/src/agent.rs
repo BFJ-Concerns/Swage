@@ -28,7 +28,7 @@ use crate::config::AgentConfig;
 use crate::context::{AgentToolContext, TurnExecutionContext};
 use crate::error::AgentError;
 use crate::event::{AgentEvent, SchemaValidationError};
-use crate::extraction::extract_json;
+use crate::extraction::extract_json_values;
 use crate::message::{OutboundMessage, TurnRequest};
 
 // ---------------------------------------------------------------------------
@@ -584,32 +584,36 @@ impl Agent {
             loop {
                 attempt += 1;
 
-                // Step 1: extract JSON from the response text.
-                let validation_errors = match extract_json(&accumulated) {
-                    Some(extracted) => {
-                        // Step 2: validate against the schema.
-                        let errors: Vec<SchemaValidationError> = validator
-                            .iter_errors(&extracted)
-                            .map(|e| SchemaValidationError {
-                                path: e.instance_path().to_string(),
-                                message: e.to_string(),
-                            })
-                            .collect();
-
-                        if errors.is_empty() {
-                            // Step 3: validation passed — carry the structured output.
-                            break Some(extracted);
-                        }
-                        errors
+                // Step 1/2: validate every JSON value in source order. A model
+                // may reason through provisional values before delivering its
+                // result, so the final schema-valid value is authoritative.
+                let mut last_valid = None;
+                let mut last_errors = None;
+                for extracted in extract_json_values(&accumulated) {
+                    let errors: Vec<SchemaValidationError> = validator
+                        .iter_errors(&extracted)
+                        .map(|e| SchemaValidationError {
+                            path: e.instance_path().to_string(),
+                            message: e.to_string(),
+                        })
+                        .collect();
+                    if errors.is_empty() {
+                        last_valid = Some(extracted);
+                    } else {
+                        last_errors = Some(errors);
                     }
-                    None => {
-                        // No JSON found — treat as a single validation error.
-                        vec![SchemaValidationError {
-                            path: String::new(),
-                            message: "no JSON found in response".into(),
-                        }]
-                    }
-                };
+                }
+                if let Some(extracted) = last_valid {
+                    // Step 3: validation passed — carry the final valid value.
+                    break Some(extracted);
+                }
+                let validation_errors = last_errors.unwrap_or_else(|| {
+                    // No JSON found — treat as a single validation error.
+                    vec![SchemaValidationError {
+                        path: String::new(),
+                        message: "no JSON found in response".into(),
+                    }]
+                });
 
                 // Step 4/5: validation failed.
                 if attempt > max_retries {

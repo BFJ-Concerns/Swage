@@ -4,7 +4,9 @@ use std::collections::HashMap;
 use std::{path::Path, sync::Arc, time::Instant};
 
 use serde_json::{Value, json};
-use swage_agent::{AgentConfig, AgentError, AgentEvent, OutboundMessage};
+use swage_agent::{
+    AgentConfig, AgentError, AgentEvent, OutboundMessage, extraction::extract_json_values,
+};
 use swage_codex::{AppServerClient, ClientError, ContentItem, DynamicToolSpec, ToolCallResponse};
 use swage_core::{ChatMessage, Role, StorageError};
 use swage_storage::{
@@ -415,16 +417,15 @@ async fn run_turn_inner(
 
     let structured_output = match request.agent_config.output_schema.as_ref() {
         Some(schema) => {
-            let value: Value = serde_json::from_str(&response_text).map_err(|error| {
-                AgentError::InvalidConfig(format!("Codex structured output was not JSON: {error}"))
-            })?;
             let validator = jsonschema::validator_for(schema).map_err(|error| {
                 AgentError::InvalidConfig(format!("invalid output schema: {error}"))
             })?;
-            if validator.validate(&value).is_err() {
-                return Err(AgentError::OutputSchemaFailed { attempts: 1 });
-            }
-            Some(value)
+            extract_json_values(&response_text)
+                .into_iter()
+                .filter(|value| validator.validate(value).is_ok())
+                .last()
+                .map(Some)
+                .ok_or(AgentError::OutputSchemaFailed { attempts: 1 })?
         }
         None => None,
     };
