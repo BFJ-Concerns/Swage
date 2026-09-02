@@ -22,15 +22,28 @@ impl Default for WorkflowCapabilities {
 }
 
 impl WorkflowCapabilities {
+    /// What the adapter for a protocol actually puts on the wire. `vision`
+    /// is claimed only where the adapter maps `ContentPart::ImageUrl`: the
+    /// intake gate refuses image parts on every other protocol rather than
+    /// letting the adapter drop them, so a claim here is a promise the
+    /// adapter's message conversion keeps.
     pub fn for_protocol(protocol: swage_config::Protocol) -> Self {
         match protocol {
-            swage_config::Protocol::OpenAi
-            | swage_config::Protocol::OpenAiResponses
-            | swage_config::Protocol::OpenRouter
+            // Chat Completions maps image parts (openai.rs convert_content);
+            // OpenRouter speaks the same envelope through the same adapter.
+            swage_config::Protocol::OpenAi | swage_config::Protocol::OpenRouter => Self {
+                text: true,
+                vision: true,
+                embeddings: false,
+                image_generation: false,
+            },
+            // These adapters convert text parts only today; vision is
+            // claimed for each the moment its mapping lands.
+            swage_config::Protocol::OpenAiResponses
             | swage_config::Protocol::Anthropic
             | swage_config::Protocol::Google => Self {
                 text: true,
-                vision: true,
+                vision: false,
                 embeddings: false,
                 image_generation: false,
             },
@@ -60,5 +73,30 @@ pub async fn workflow_capabilities(state: &AppState) -> WorkflowCapabilitiesResp
         image_generation: state.workflow_capabilities.image_generation,
         tts: voice.synthesis,
         transcription: voice.transcription,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A vision claim is a promise the adapter keeps: only the protocols
+    /// whose adapter maps `ContentPart::ImageUrl` may claim it.
+    #[test]
+    fn vision_is_claimed_only_where_the_adapter_maps_image_parts() {
+        use swage_config::Protocol;
+        assert!(WorkflowCapabilities::for_protocol(Protocol::OpenAi).vision);
+        assert!(WorkflowCapabilities::for_protocol(Protocol::OpenRouter).vision);
+        for protocol in [
+            Protocol::OpenAiResponses,
+            Protocol::Anthropic,
+            Protocol::Google,
+            Protocol::Codex,
+        ] {
+            assert!(
+                !WorkflowCapabilities::for_protocol(protocol.clone()).vision,
+                "{protocol:?} has no image mapping yet"
+            );
+        }
     }
 }

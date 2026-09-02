@@ -395,7 +395,10 @@ pub fn build_router(state: AppState) -> Router {
 mod tests {
     use std::sync::Arc;
 
-    use axum::{body::Body, http::Request};
+    use axum::{
+        body::{Body, to_bytes},
+        http::Request,
+    };
     use tower::ServiceExt;
 
     use swage_protocol::client::routes::{Method, routes};
@@ -446,15 +449,27 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            assert!(
-                response.status() != axum::http::StatusCode::METHOD_NOT_ALLOWED
-                    && !(response.status() == axum::http::StatusCode::NOT_FOUND
-                        && route.path_parameters().is_empty()),
-                "{} {} is in the manifest but the router answered {}",
-                method,
-                route.path,
-                response.status()
+            let status = response.status();
+            assert_ne!(
+                status,
+                axum::http::StatusCode::METHOD_NOT_ALLOWED,
+                "{method} {} is in the manifest but the router has no such method",
+                route.path
             );
+            // A registered handler answering 404 for the nil entity carries
+            // the wire error contract's body; an unregistered /api path falls
+            // to the SPA fallback, whose 404 is bodiless. The body is the
+            // discriminator, not the status.
+            if status == axum::http::StatusCode::NOT_FOUND {
+                let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+                let parsed: Result<swage_protocol::client::error::ApiErrorBody, _> =
+                    serde_json::from_slice(&bytes);
+                assert!(
+                    parsed.is_ok(),
+                    "{method} {} is in the manifest but the router fell through to the fallback",
+                    route.path
+                );
+            }
         }
     }
 }

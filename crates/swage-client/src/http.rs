@@ -255,8 +255,8 @@ impl GatewayClient {
 
     /// Fetches a single space by ID.
     ///
-    /// Calls `GET /api/spaces/{id}`. Returns `UnexpectedResponse` with HTTP 404
-    /// if the space does not exist.
+    /// Calls `GET /api/spaces/{id}`. A missing space answers in the wire
+    /// error contract and surfaces as `ClientError::Gateway { code: NotFound, .. }`.
     pub async fn get_space(&self, id: Uuid) -> Result<SpaceResponse, ClientError> {
         let url = format!("{}/api/spaces/{}", self.base_url, id);
         let response = self
