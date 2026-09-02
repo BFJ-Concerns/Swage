@@ -2206,11 +2206,9 @@ async fn process_turn_with_composition_and_focus(
                 message,
                 provider_failure,
             } => {
-                if provider_failure {
-                    if let Some(observer) = provider_failure_observer.as_ref() {
-                        *observer.lock().unwrap_or_else(|error| error.into_inner()) =
-                            Some(message.clone());
-                    }
+                if provider_failure && let Some(observer) = provider_failure_observer.as_ref() {
+                    *observer.lock().unwrap_or_else(|error| error.into_inner()) =
+                        Some(message.clone());
                 }
                 let _ = ws_tx.send(ServerEvent::Error {
                     code: "agent_error".to_string(),
