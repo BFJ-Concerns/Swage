@@ -22,7 +22,6 @@ const FRONTEND_RELEASE_STAMP: &str = "target/xtask/frontend-release.sha256";
 const DESKTOP_DEPS_STAMP: &str = "target/xtask/desktop-deps.sha256";
 const TARGET_MAX_SIZE_MB_ARG: &str = "50000";
 const TARGET_MAX_SIZE_BYTES: u64 = 50_000 * 1024 * 1024;
-const DEBUG_INCREMENTAL_DIR: &str = "target/debug/incremental";
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -258,7 +257,8 @@ fn dev(options: &DevOptions) -> Result<()> {
         "==> Starting Swage gateway on port {} (debug binary)",
         options.gateway_port
     );
-    let mut gateway = Command::new(format!("target/debug/{BINARY_NAME}"))
+    let gateway_binary = cargo_target_directory()?.join("debug").join(BINARY_NAME);
+    let mut gateway = Command::new(gateway_binary)
         .env("SWAGE_DEV_FRONTEND_PORT", &options.vite_port)
         .arg("gateway")
         .arg("start")
@@ -1103,24 +1103,30 @@ fn cargo_sweep() -> Result<()> {
         "Capping target/ at 50 GB",
         command("cargo", ["sweep", "--maxsize", TARGET_MAX_SIZE_MB_ARG]),
     )?;
-    prune_debug_incremental_if_needed()
+    prune_debug_incremental_if_needed(&cargo_target_directory()?)
 }
 
-fn prune_debug_incremental_if_needed() -> Result<()> {
-    if allocated_disk_usage(Path::new("target"))? <= TARGET_MAX_SIZE_BYTES {
+fn prune_debug_incremental_if_needed(target_directory: &Path) -> Result<()> {
+    if allocated_disk_usage(target_directory)? <= TARGET_MAX_SIZE_BYTES {
         return Ok(());
     }
 
-    let incremental_dir = Path::new(DEBUG_INCREMENTAL_DIR);
+    let incremental_dir = debug_incremental_dir(target_directory);
     if !incremental_dir.is_dir() {
         return Ok(());
     }
 
     println!(
-        "==> Removing {DEBUG_INCREMENTAL_DIR} because target/ is still above 50 GB after cargo sweep"
+        "==> Removing {} because {} is still above 50 GB after cargo sweep",
+        incremental_dir.display(),
+        target_directory.display(),
     );
-    fs::remove_dir_all(incremental_dir)?;
+    fs::remove_dir_all(&incremental_dir)?;
     Ok(())
+}
+
+fn debug_incremental_dir(target_directory: &Path) -> PathBuf {
+    target_directory.join("debug/incremental")
 }
 
 #[derive(Debug, Clone)]
@@ -1132,10 +1138,12 @@ struct ArtifactBudgetSnapshot {
 
 impl ArtifactBudgetSnapshot {
     fn capture() -> io::Result<Self> {
+        let target_directory = cargo_target_directory()
+            .map_err(|error| io::Error::other(error.to_string()))?;
         Ok(Self {
-            target: allocated_disk_usage(Path::new("target"))?,
-            debug_deps: allocated_disk_usage(Path::new("target/debug/deps"))?,
-            debug_incremental: allocated_disk_usage(Path::new(DEBUG_INCREMENTAL_DIR))?,
+            target: allocated_disk_usage(&target_directory)?,
+            debug_deps: allocated_disk_usage(&target_directory.join("debug/deps"))?,
+            debug_incremental: allocated_disk_usage(&debug_incremental_dir(&target_directory))?,
         })
     }
 }
@@ -1394,7 +1402,17 @@ fn print_help() {
 
 #[cfg(test)]
 mod tests {
-    use super::{component_style_lines, off_palette_colour_columns};
+    use std::path::Path;
+
+    use super::{component_style_lines, debug_incremental_dir, off_palette_colour_columns};
+
+    #[test]
+    fn derives_cleanup_paths_from_the_resolved_cargo_target_directory() {
+        assert_eq!(
+            debug_incremental_dir(Path::new("/custom/cargo-target")),
+            Path::new("/custom/cargo-target/debug/incremental"),
+        );
+    }
 
     fn component_colour_columns(contents: &str) -> Vec<(usize, usize)> {
         component_style_lines(contents)
