@@ -133,6 +133,10 @@ pub struct MessageView {
     pub turn_id: Option<Uuid>,
     pub role: String,
     pub content: String,
+    /// Content parts recorded beside the text when the message was
+    /// submitted; absent for text-only messages.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<super::turn::MessageAttachment>,
     pub timestamp: DateTime<Utc>,
     pub turn_state: Option<TurnState>,
     pub tool_calls: Vec<ToolCallView>,

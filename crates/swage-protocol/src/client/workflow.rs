@@ -14,10 +14,31 @@ pub struct WorkflowScript {
     pub name: String,
     pub description: String,
     pub head_version: u32,
-    pub built_in: bool,
+    /// The shipped or operator skill that carries this workflow, when it is
+    /// not an authored row of the space. A carried workflow is immutable in
+    /// place; a same-named authored row shadows it.
+    #[ts(optional)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub carrying_skill: Option<String>,
     pub has_delivery_grant: bool,
+    pub argument_contract: WorkflowArgumentContract,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+/// The argument contract a workflow declares in its portable metadata.
+///
+/// Workflows may omit a schema. That is an explicit unconstrained contract,
+/// rather than an absent field that callers could mistake for an incomplete
+/// listing.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WorkflowArgumentContract {
+    Declared {
+        #[ts(type = "unknown")]
+        schema: Value,
+    },
+    Unconstrained,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
@@ -247,6 +268,8 @@ pub enum WorkflowJournalEntryKind {
     /// A journalled budget reading — what the script saw when it checked
     /// its allowance, replayed rather than re-read.
     Budget,
+    /// The authoritative closing-partition balance when the run settled.
+    TerminalBudget,
     /// The working allowance was exhausted. The triggering agent call was
     /// not started; replay returns the same wind-down signal at this point.
     WindDown,

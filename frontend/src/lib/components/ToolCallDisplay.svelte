@@ -34,6 +34,11 @@
 
   // A call is in-progress when it is live and has no result yet.
   const isInProgress = $derived(isLive && toolCall.status === null);
+  // Rejected approvals are terminal failed calls: the model receives the
+  // rejection feedback, but the tool itself did not succeed.
+  const isFailed = $derived(
+    toolCall.status === "error" || toolCall.status === "rejected",
+  );
 
   // True once the result is long enough to warrant collapsing.
   const resultText = $derived(
@@ -103,7 +108,7 @@
   class="tool-call"
   class:in-progress={isInProgress}
   class:completed={toolCall.status === "success"}
-  class:error={toolCall.status === "error"}
+  class:error={isFailed}
 >
   <!-- ---- Header: tool identity and inline status ---- -->
   <div class="tool-header">
@@ -112,7 +117,7 @@
       <span class="pulse" aria-hidden="true"></span>
     {:else if toolCall.status === "success"}
       <span class="status-icon success" aria-hidden="true">✓</span>
-    {:else if toolCall.status === "error"}
+    {:else if isFailed}
       <span class="status-icon error-icon" aria-hidden="true">✗</span>
     {/if}
 

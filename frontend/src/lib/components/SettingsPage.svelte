@@ -13,11 +13,13 @@
   import { fetchSettings, restartGateway, saveSettings } from "../api/settings";
   import AutomationSettingsSurface from "./settings/AutomationSettingsSurface.svelte";
   import AgentDefinitionsPanel from "./AgentDefinitionsPanel.svelte";
+  import CommandsPanel from "./CommandsPanel.svelte";
   import DisplayPreferencesSettingsSurface from "./settings/DisplayPreferencesSettingsSurface.svelte";
   import GenerationSettingsSurface from "./settings/GenerationSettingsSurface.svelte";
   import InformationalSettingsSurface from "./settings/InformationalSettingsSurface.svelte";
   import ProviderSettingsSurface from "./settings/ProviderSettingsSurface.svelte";
   import RecoverySettingsSurface from "./settings/RecoverySettingsSurface.svelte";
+  import SkillsPanel from "./SkillsPanel.svelte";
   import type { GenerationPresetConfig, SettingsResponse, Space } from "../types";
 
   // Agents, providers, generation, automation, and recovery have working
@@ -25,6 +27,8 @@
   type SettingsTabId =
     | "providers"
     | "agents"
+    | "commands"
+    | "skills"
     | "generation"
     | "automation"
     | "plugins"
@@ -179,6 +183,14 @@
       title: "Agent definitions",
       sub: "The effective agent definitions available when starting a conversation in the selected space.",
     },
+    commands: {
+      title: "Commands",
+      sub: "The slash commands available in the selected space.",
+    },
+    skills: {
+      title: "Skills",
+      sub: "The resolved skills available in the selected space.",
+    },
     generation: {
       title: "Generation",
       sub: "Reusable parameter sets for sampling — temperature, max tokens, stop sequences. Each model can pick a preset or fall back to the provider default.",
@@ -221,6 +233,8 @@
   // frontend surfaces; the non-functional subset gets an explicit banner.
   const SHELL_LAYOUT_TABS: ReadonlySet<SettingsTabId> = new Set([
     "agents",
+    "commands",
+    "skills",
     "plugins",
     "channels",
     "devices",
@@ -297,6 +311,10 @@
 
     {#if tab === "agents"}
       <AgentDefinitionsPanel {spaceId} />
+    {:else if tab === "commands"}
+      <CommandsPanel {spaceId} />
+    {:else if tab === "skills"}
+      <SkillsPanel {spaceId} />
     {:else if tab === "plugins"}
       <!--
         Debt marker: this visible settings page is intentionally a shell until

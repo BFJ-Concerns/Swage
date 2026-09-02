@@ -5,10 +5,7 @@ use std::sync::{
     atomic::{AtomicU32, AtomicU64, Ordering},
 };
 
-use axum::{
-    Json,
-    extract::{Path, State},
-};
+use axum::extract::State;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use swage_config::skill::SkillDefinition;
@@ -16,7 +13,7 @@ use swage_core::{ChatMessage, CompletionRequest, Role, StorageError};
 use swage_protocol::client::workflow::{
     CreateWorkflowScriptRequest, PostWorkflowRunEventRequest, PostWorkflowRunEventResponse,
     StartInlineWorkflowRunRequest, StartWorkflowRunRequest, UpdateWorkflowScriptRequest,
-    WorkflowBudget, WorkflowHandoverEvent, WorkflowHandoverEventDelivery,
+    WorkflowArgumentContract, WorkflowBudget, WorkflowHandoverEvent, WorkflowHandoverEventDelivery,
     WorkflowHandoverFailedCall, WorkflowHandoverFailedCallRef, WorkflowRun,
     WorkflowRunDetailResponse, WorkflowRunEvent, WorkflowRunEventSource, WorkflowRunHandover,
     WorkflowRunListResponse, WorkflowRunState, WorkflowScript, WorkflowScriptListResponse,
@@ -24,8 +21,8 @@ use swage_protocol::client::workflow::{
 use swage_storage::WorkflowJournalRecord;
 use swage_storage::{
     NewAuditEvent, NewSession, NewThread, NewWorkflowJournalIntent, NewWorkflowRun,
-    NewWorkflowRunEvent, NewWorkflowScript, Storage, ThreadStore, WorkflowRunEventRecord,
-    WorkflowRunRecord, WorkflowRunWorkerPlacement, WorkflowScriptRecord,
+    NewWorkflowRunEvent, Storage, ThreadStore, WorkflowRunEventRecord, WorkflowRunRecord,
+    WorkflowRunWorkerPlacement, WorkflowScriptRecord,
 };
 use swage_workflow::{
     AgentCallRequest, AgentCallResult, AwaitEventRequest, EffectPayload, EffectReceipt,
@@ -38,8 +35,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::{
-    builtin_workflows::{self, BUILTIN_WORKFLOWS, BuiltinWorkflow},
-    error::ApiError,
+    error::{ApiError, Json, Path},
     state::AppState,
     subscription::SubscriptionState,
     turn::{
@@ -71,6 +67,15 @@ fn runtime_worker_placement(placement: &WorkflowRunWorkerPlacement) -> ResolvedW
     }
 }
 
+fn runtime_placement_from_directory(placement: ResolvedWorkerDirectory) -> ResolvedWorkerPlacement {
+    ResolvedWorkerPlacement {
+        path: placement.path.to_string_lossy().into_owned(),
+        can_write: placement.can_write,
+        authority_path: placement.authority_path.to_string_lossy().into_owned(),
+        authority_context_id: placement.authority_context_id,
+    }
+}
+
 fn worker_placement_directory(placement: &ResolvedWorkerPlacement) -> ResolvedWorkerDirectory {
     ResolvedWorkerDirectory {
         path: placement.path.clone().into(),
@@ -92,9 +97,9 @@ struct EffectiveWorkflow {
     delivery_grant: Option<Value>,
     created_at: chrono::DateTime<chrono::Utc>,
     updated_at: chrono::DateTime<chrono::Utc>,
-    built_in: bool,
     immutable: bool,
     carrying_skill: Option<String>,
+    argument_schema: Option<Value>,
 }
 
 #[derive(Clone)]
@@ -105,28 +110,9 @@ struct InlineWorkflowIdentity {
 }
 
 impl EffectiveWorkflow {
-    fn from_builtin(space_id: Uuid, workflow: &'static BuiltinWorkflow) -> Self {
-        let released_at = builtin_workflows::released_at(workflow);
-        Self {
-            id: builtin_workflows::id(space_id, workflow.name),
-            space_id,
-            name: workflow.name.into(),
-            description: workflow.description.into(),
-            head_version: 1,
-            source: workflow.source.into(),
-            script_version_id: None,
-            delivery_grant: None,
-            created_at: released_at,
-            updated_at: released_at,
-            built_in: true,
-            immutable: true,
-            carrying_skill: None,
-        }
-    }
-
     fn inline_identity(&self) -> Option<InlineWorkflowIdentity> {
-        // Immutable workflows — built-in and skill-carried alike — keep their
-        // source inline rather than in the authored-version tables.
+        // Immutable workflows — skill-carried ones — keep their source inline
+        // rather than in the authored-version tables.
         self.immutable.then(|| InlineWorkflowIdentity {
             id: self.id,
             name: self.name.clone(),
@@ -134,9 +120,22 @@ impl EffectiveWorkflow {
         })
     }
 
-    fn from_carried(space_id: Uuid, skill: &SkillDefinition, name: String, source: String) -> Self {
+    fn from_carried(
+        space_id: Uuid,
+        skill: &SkillDefinition,
+        name: String,
+        source: String,
+    ) -> Result<Self, String> {
         let identity = format!("{}/{}", skill.name, name);
-        Self {
+        let argument_schema = swage_workflow::script_meta(&source)
+            .map_err(|error| {
+                format!(
+                    "workflow {name} carried by skill {} has invalid metadata: {error}",
+                    skill.name
+                )
+            })?
+            .argument_schema;
+        Ok(Self {
             id: crate::synthetic_id::synthetic_id(CARRIED_WORKFLOW_ID_DOMAIN, space_id, &identity),
             space_id,
             name,
@@ -147,10 +146,10 @@ impl EffectiveWorkflow {
             delivery_grant: None,
             created_at: chrono::DateTime::UNIX_EPOCH,
             updated_at: chrono::DateTime::UNIX_EPOCH,
-            built_in: false,
             immutable: true,
             carrying_skill: Some(skill.name.clone()),
-        }
+            argument_schema,
+        })
     }
 }
 
@@ -167,12 +166,17 @@ fn carried_workflows(
                     .rsplit_once('/')
                     .and_then(|(_, file)| file.strip_suffix(".js"))
                     .ok_or_else(|| format!("invalid shipped workflow path: {}", file.path))?;
-                workflows.push(EffectiveWorkflow::from_carried(
+                match EffectiveWorkflow::from_carried(
                     space_id,
                     skill,
                     name.into(),
                     file.contents.into(),
-                ));
+                ) {
+                    Ok(workflow) => workflows.push(workflow),
+                    Err(error) => {
+                        tracing::warn!(%error, "excluding carried workflow with invalid metadata")
+                    }
+                }
             }
             continue;
         }
@@ -218,12 +222,12 @@ fn carried_workflows(
                     skill.name
                 )
             })?;
-            workflows.push(EffectiveWorkflow::from_carried(
-                space_id,
-                skill,
-                name.into(),
-                source,
-            ));
+            match EffectiveWorkflow::from_carried(space_id, skill, name.into(), source) {
+                Ok(workflow) => workflows.push(workflow),
+                Err(error) => {
+                    tracing::warn!(%error, "excluding carried workflow with invalid metadata")
+                }
+            }
         }
     }
     Ok(workflows)
@@ -247,6 +251,11 @@ async fn authored_workflow(
         .await
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "workflow script has no version".to_string())?;
+    // A run resolved from a script reads the grant the script may actually
+    // use, never the stored column: a model-authored script resolves none.
+    // See service::workflow_script.
+    let delivery_grant = record.effective_delivery_grant();
+    let argument_schema = swage_workflow::script_meta(&head.source)?.argument_schema;
     Ok(EffectiveWorkflow {
         id: record.id,
         space_id: record.space_id,
@@ -255,12 +264,12 @@ async fn authored_workflow(
         head_version: head.version,
         source: head.source,
         script_version_id: Some(head.id),
-        delivery_grant: record.delivery_grant,
+        delivery_grant,
         created_at: record.created_at,
         updated_at: record.updated_at,
-        built_in: false,
         immutable: false,
         carrying_skill: None,
+        argument_schema,
     })
 }
 
@@ -280,14 +289,9 @@ async fn resolve_workflow_by_name(
     {
         return authored_workflow(state, record).await.map(Some);
     }
-    if let Some(workflow) = carried_workflows(space_id, skills)?
+    Ok(carried_workflows(space_id, skills)?
         .into_iter()
-        .find(|workflow| workflow.name == name)
-    {
-        return Ok(Some(workflow));
-    }
-    Ok(builtin_workflows::find_by_name(name)
-        .map(|workflow| EffectiveWorkflow::from_builtin(space_id, workflow)))
+        .find(|workflow| workflow.name == name))
 }
 
 async fn resolve_workflow_by_id(
@@ -343,22 +347,18 @@ async fn list_effective_workflows(
         .map_err(|error| error.to_string())?;
     let authored_names: std::collections::HashSet<_> =
         records.iter().map(|record| record.name.clone()).collect();
-    let mut workflows = Vec::with_capacity(records.len() + BUILTIN_WORKFLOWS.len());
+    let mut workflows = Vec::with_capacity(records.len());
     for record in records {
         workflows.push(authored_workflow(state, record).await?);
     }
+    // Carried workflows arrive in skill precedence order (the discovery
+    // sort), so the first carrier of a name wins and later ones are shadowed.
     let mut effective_names = authored_names;
     for workflow in carried_workflows(space_id, skills)? {
         if effective_names.insert(workflow.name.clone()) {
             workflows.push(workflow);
         }
     }
-    workflows.extend(
-        BUILTIN_WORKFLOWS
-            .iter()
-            .filter(|workflow| !effective_names.contains(workflow.name))
-            .map(|workflow| EffectiveWorkflow::from_builtin(space_id, workflow)),
-    );
     workflows.sort_by(|left, right| left.name.cmp(&right.name));
     Ok(workflows)
 }
@@ -447,6 +447,7 @@ fn journal_wire(
         "await_event" => WorkflowJournalEntryKind::AwaitEvent,
         "gate" => WorkflowJournalEntryKind::Gate,
         "budget" => WorkflowJournalEntryKind::Budget,
+        "terminal_budget" => WorkflowJournalEntryKind::TerminalBudget,
         "wind_down" => WorkflowJournalEntryKind::WindDown,
         other => return Err(format!("unknown workflow entry kind: {other}")),
     };
@@ -523,6 +524,105 @@ struct TokenBudgetState {
     replayed_working_credit: u64,
 }
 
+fn closing_partition_remaining(
+    budget: &WorkflowBudget,
+    closing_limit: Option<u64>,
+    spent: u64,
+) -> Option<u64> {
+    budget.reserved_closing_tokens.map(|reserve| {
+        closing_limit
+            .map(|limit| limit.saturating_sub(spent))
+            .unwrap_or_else(|| {
+                reserve.min(
+                    budget
+                        .max_total_tokens
+                        .map(|limit| limit.saturating_sub(spent))
+                        .unwrap_or(0),
+                )
+            })
+    })
+}
+
+fn terminal_budget_reading(accounting: &TokenBudgetState, budget: &WorkflowBudget) -> Value {
+    let spent = accounting.spent;
+    serde_json::json!({
+        "spent": spent,
+        "remaining": budget.max_total_tokens.map(|limit| limit.saturating_sub(spent)),
+        "closing_remaining": closing_partition_remaining(budget, accounting.closing_limit, spent),
+    })
+}
+
+const TERMINAL_BUDGET_SEQUENCE: u64 = i64::MAX as u64;
+
+fn is_positional_journal_entry(entry: &WorkflowJournalRecord) -> bool {
+    entry.kind != "terminal_budget"
+}
+
+async fn record_terminal_budget(
+    state: &AppState,
+    run_id: Uuid,
+    budget: &WorkflowBudget,
+    accounting: &Mutex<TokenBudgetState>,
+) -> Result<(), String> {
+    let request = serde_json::json!({ "budget": "terminal" });
+    let args_hash = journal_args_hash(&request);
+    let journal = state
+        .storage
+        .list_workflow_journal(run_id)
+        .await
+        .map_err(|error| error.to_string())?;
+    if let Some(entry) = journal.iter().find(|entry| entry.kind == "terminal_budget") {
+        if entry.args_hash != args_hash {
+            return Err("NondeterministicReplayError".into());
+        }
+        return match entry.status.as_str() {
+            "completed" => entry
+                .result
+                .as_ref()
+                .map(|_| ())
+                .ok_or_else(|| "completed terminal budget entry has no result".into()),
+            "failed" => Err(entry
+                .error_message
+                .clone()
+                .unwrap_or_else(|| "recorded terminal budget failure".into())),
+            "started" => {
+                let reading = terminal_budget_reading(&*accounting.lock().await, budget);
+                state
+                    .complete_workflow_journal_entry(entry.id, reading.clone())
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+            }
+            other => Err(format!("unknown terminal budget entry status: {other}")),
+        };
+    }
+
+    // Script commands occupy dense sequence numbers for positional replay.
+    // Reserve the largest SQLite-safe value for this out-of-band terminal
+    // audit record so a recovered incomplete run can continue its script
+    // sequence without colliding with the already-recorded balance.
+    let seq = TERMINAL_BUDGET_SEQUENCE;
+    let reading = terminal_budget_reading(&*accounting.lock().await, budget);
+    let intent = state
+        .create_workflow_journal_intent(NewWorkflowJournalIntent {
+            run_id,
+            seq,
+            kind: "terminal_budget".into(),
+            args_hash,
+            request,
+            effect_kind: None,
+            idempotency_key: None,
+            target_kind: None,
+        })
+        .await
+        .map_err(|error| error.to_string())?;
+    state
+        .complete_workflow_journal_entry(intent.id, reading)
+        .await
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
 fn completed_agent_tokens_before(replay: &[WorkflowJournalRecord], transition_seq: u64) -> u64 {
     replay
         .iter()
@@ -535,6 +635,51 @@ fn completed_agent_tokens_before(replay: &[WorkflowJournalRecord], transition_se
                 .saturating_add(result["input_tokens"].as_u64().unwrap_or(0))
                 .saturating_add(result["output_tokens"].as_u64().unwrap_or(0))
         })
+}
+
+fn terminal_budget_accounting_from_journal(
+    journal: &[WorkflowJournalRecord],
+    budget: &WorkflowBudget,
+) -> TokenBudgetState {
+    let spent = completed_agent_tokens_before(journal, TERMINAL_BUDGET_SEQUENCE);
+    let closing_limit = journal
+        .iter()
+        .filter(|entry| {
+            entry.status == "completed"
+                && (entry.kind == "wind_down"
+                    || (entry.kind == "budget"
+                        && entry
+                            .result
+                            .as_ref()
+                            .is_some_and(|reading| reading["winding_down"] == true)))
+        })
+        .map(|entry| entry.seq)
+        .min()
+        .map(|transition_seq| {
+            completed_agent_tokens_before(journal, transition_seq)
+                .saturating_add(budget.reserved_closing_tokens.unwrap_or(0))
+        });
+    TokenBudgetState {
+        spent,
+        working_reserved: 0,
+        closing_reserved: 0,
+        closing_limit,
+        replayed_working_credit: 0,
+    }
+}
+
+async fn record_terminal_budget_from_journal(
+    state: &AppState,
+    run_id: Uuid,
+    budget: &WorkflowBudget,
+) -> Result<(), String> {
+    let journal = state
+        .storage
+        .list_workflow_journal(run_id)
+        .await
+        .map_err(|error| error.to_string())?;
+    let accounting = Mutex::new(terminal_budget_accounting_from_journal(&journal, budget));
+    record_terminal_budget(state, run_id, budget, &accounting).await
 }
 
 #[derive(Clone, Copy)]
@@ -658,6 +803,7 @@ impl WorkflowLauncher for GatewayWorkflowLauncher {
             script.source,
             script.delivery_grant,
             script.carrying_skill,
+            script.argument_schema,
             args,
             budget,
             wait,
@@ -687,6 +833,7 @@ impl WorkflowLauncher for GatewayWorkflowLauncher {
             source.to_owned(),
             None,
             None,
+            None,
             args,
             budget,
             wait,
@@ -704,6 +851,7 @@ impl GatewayWorkflowLauncher {
         source: String,
         delivery_grant: Option<Value>,
         carrying_skill: Option<String>,
+        argument_schema: Option<Value>,
         args: Value,
         budget: Option<WorkflowBudget>,
         wait: bool,
@@ -736,6 +884,7 @@ impl GatewayWorkflowLauncher {
             script_version_id,
             inline_identity,
             source,
+            argument_schema,
             args,
             budget.unwrap_or_default(),
             delivery_grant,
@@ -749,7 +898,7 @@ impl GatewayWorkflowLauncher {
             inherited_worker_placement,
         )
         .await
-        .map_err(|error| error.0.to_string())?;
+        .map_err(|error| error.message().to_owned())?;
         if !wait {
             return serde_json::to_value(run).map_err(|error| error.to_string());
         }
@@ -770,7 +919,7 @@ impl GatewayWorkflowLauncher {
         })
         .await
         .map_err(|_| "workflow wait timed out".to_string())??;
-        serde_json::to_value(run_wire(record).map_err(|error| error.0.to_string())?)
+        serde_json::to_value(run_wire(record).map_err(|error| error.message().to_owned())?)
             .map_err(|error| error.to_string())
     }
 }
@@ -1107,7 +1256,7 @@ async fn run_ephemeral_agent_call(
     request: AgentCallRequest,
     resolved_working_directory: Option<ResolvedWorkerPlacement>,
     cancellation: CancellationToken,
-) -> Result<AgentCallResult, String> {
+) -> Result<AgentCallResult, WorkflowHostError> {
     let inherited_workflow_call_tools = state
         .storage
         .get_workflow_run(run_id)
@@ -1145,7 +1294,8 @@ async fn run_ephemeral_agent_call(
             if let Some(task) = request.task.as_deref() {
                 return Err(format!(
                     "AgentCallError: task {task:?} cannot be selected on a continued session; select it when creating the worker"
-                ));
+                )
+                .into());
             }
             let created_here = state
                 .storage
@@ -1164,7 +1314,8 @@ async fn run_ephemeral_agent_call(
                     "AgentCallError: session {} was not created by this run; \
                      continuation tokens come from this run's own agentStart handles",
                     session_ref.session_id
-                ));
+                )
+                .into());
             }
             let session = state
                 .storage
@@ -1255,6 +1406,22 @@ async fn run_ephemeral_agent_call(
             if let Some(tools) = effective_call_tools.as_ref() {
                 metadata[crate::turn::WORKFLOW_CALL_TOOLS_METADATA_KEY] = serde_json::json!(tools);
             }
+            if let Some(skills) = request.skills.as_ref() {
+                let space = state
+                    .space_store
+                    .get(space_id)
+                    .await
+                    .map_err(|error| error.to_string())?
+                    .ok_or_else(|| format!("AgentCallError: space {space_id} no longer exists"))?;
+                crate::turn::resolve_requested_skills_for_agent(
+                    &space.slug,
+                    &agent_id,
+                    Some(crate::turn::resolve_swage_root(state)),
+                    skills,
+                )
+                .map_err(|error| format!("AgentCallError: {error}"))?;
+                metadata["workflow_call_skills"] = serde_json::json!(skills);
+            }
             let session = state
                 .storage
                 .create_session(NewSession {
@@ -1284,7 +1451,7 @@ async fn run_ephemeral_agent_call(
             (session.id, thread.id)
         }
     };
-    let (events, _events_rx) = mpsc::unbounded_channel::<ServerEvent>();
+    let (events, mut events_rx) = mpsc::unbounded_channel::<ServerEvent>();
     let request_schema = request.schema.clone();
     let request_schema_retries = request
         .schema
@@ -1295,8 +1462,11 @@ async fn run_ephemeral_agent_call(
         elements: request.elements.clone(),
         variables: request.variables.clone(),
         assembly: request.assembly.clone(),
+        skills: request.skills.clone(),
     };
-    let processing = crate::turn::process_turn_with_composition(
+    // Boxed: the turn future carries the whole composed input and would
+    // otherwise push this call's future past the large-future lint.
+    let mut processing = Box::pin(crate::turn::process_turn_with_composition(
         state,
         session_id,
         Some(thread_id),
@@ -1311,8 +1481,7 @@ async fn run_ephemeral_agent_call(
         crate::turn::TurnAttendance::Unattended,
         composition,
         Some(journal_entry_id),
-    );
-    tokio::pin!(processing);
+    ));
     let timeout = request.timeout_ms.map(std::time::Duration::from_millis);
     tokio::select! {
         biased;
@@ -1355,7 +1524,8 @@ async fn run_ephemeral_agent_call(
             return Err(format!(
                 "AgentCallTimeoutError: agent call exceeded its {}ms deadline",
                 request.timeout_ms.expect("timeout branch requires a deadline")
-            ));
+            )
+            .into());
         }
     }
     let turn = state
@@ -1366,11 +1536,26 @@ async fn run_ephemeral_agent_call(
         .into_iter()
         .max_by_key(|turn| turn.created_at)
         .ok_or_else(|| "agent call produced no turn".to_string())?;
+    let schema_exhausted = std::iter::from_fn(|| events_rx.try_recv().ok()).any(|event| {
+        matches!(
+            event,
+            ServerEvent::OutputSchemaFailed { turn_id, .. } if turn_id == turn.id
+        )
+    });
     // The turn's failure must surface as this call's error — the shared turn
     // path reports failures over its event channel, which nobody holds here.
     // Falling through would hand the script raw text (or an empty string)
     // where its schema promised an object, silently.
     if turn.state != swage_storage::TurnState::Completed {
+        if schema_exhausted {
+            return Err(WorkflowHostError::SchemaExhausted {
+                host_reference: None,
+                message: format!(
+                    "SchemaExhaustedError: agent turn {} produced no schema-valid output",
+                    turn.id
+                ),
+            });
+        }
         return Err(format!(
             "AgentCallError: agent turn {} {}",
             turn.id,
@@ -1378,17 +1563,21 @@ async fn run_ephemeral_agent_call(
                 swage_storage::TurnState::Failed => "failed".to_string(),
                 other => format!("ended {other:?}"),
             }
-        ));
+        )
+        .into());
     }
     let output = match (&request_schema, turn.structured_output) {
         (Some(_), Some(structured)) => structured,
         (Some(_), None) => {
             // Schema demanded, none produced: the validated-object contract
             // cannot be met, and unvalidated text must not impersonate it.
-            return Err(format!(
-                "AgentCallError: agent turn {} produced no schema-valid output",
-                turn.id
-            ));
+            return Err(WorkflowHostError::SchemaExhausted {
+                host_reference: None,
+                message: format!(
+                    "SchemaExhaustedError: agent turn {} produced no schema-valid output",
+                    turn.id
+                ),
+            });
         }
         (None, structured) => {
             structured.unwrap_or_else(|| Value::String(turn.assistant_response.unwrap_or_default()))
@@ -1398,6 +1587,7 @@ async fn run_ephemeral_agent_call(
         output,
         input_tokens: turn.input_tokens.unwrap_or(0).max(0) as u64,
         output_tokens: turn.output_tokens.unwrap_or(0).max(0) as u64,
+        working_directory: resolved_working_directory.map(|placement| placement.path),
         session_id: Some(session_id),
         thread_id: Some(thread_id),
         turn_id: Some(turn.id),
@@ -1441,6 +1631,7 @@ async fn settle_cancelled_workflow_journal(storage: &dyn Storage, run_id: Uuid) 
     }
 }
 
+#[cfg(test)]
 fn run_host_commands(
     state: AppState,
     run_id: Uuid,
@@ -1458,6 +1649,51 @@ fn run_host_commands(
     park_threshold_ms: u64,
     commands: mpsc::UnboundedReceiver<HostCommand>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+    let token_budget = Arc::new(Mutex::new(TokenBudgetState {
+        spent: spent_tokens.load(Ordering::SeqCst),
+        working_reserved: 0,
+        closing_reserved: 0,
+        closing_limit: None,
+        replayed_working_credit: 0,
+    }));
+    run_host_commands_with_budget(
+        state,
+        run_id,
+        space_id,
+        dispatch_bound_agent_ids,
+        dispatch_bound_task_definition_ids,
+        inherited_worker_placement,
+        delivery_grant,
+        budget,
+        replay,
+        agent_calls,
+        spent_tokens,
+        token_budget,
+        failed_agent_calls,
+        park,
+        park_threshold_ms,
+        commands,
+    )
+}
+
+fn run_host_commands_with_budget(
+    state: AppState,
+    run_id: Uuid,
+    space_id: Uuid,
+    dispatch_bound_agent_ids: Vec<String>,
+    dispatch_bound_task_definition_ids: Vec<String>,
+    inherited_worker_placement: Option<ResolvedWorkerPlacement>,
+    delivery_grant: Option<Value>,
+    budget: WorkflowBudget,
+    replay: Vec<WorkflowJournalRecord>,
+    agent_calls: Arc<AtomicU32>,
+    spent_tokens: Arc<AtomicU64>,
+    token_budget: Arc<Mutex<TokenBudgetState>>,
+    failed_agent_calls: Arc<Mutex<std::collections::HashMap<String, FailedAgentCallRef>>>,
+    park: CancellationToken,
+    park_threshold_ms: u64,
+    commands: mpsc::UnboundedReceiver<HostCommand>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
     Box::pin(run_host_commands_inner(
         state,
         run_id,
@@ -1470,6 +1706,7 @@ fn run_host_commands(
         replay,
         agent_calls,
         spent_tokens,
+        token_budget,
         failed_agent_calls,
         park,
         park_threshold_ms,
@@ -1720,7 +1957,25 @@ async fn resolve_agent_placement_command(
                 )
                 .await
             }
-            None if request.session.is_some() => Ok(None),
+            None if request.session.is_some() => {
+                let session_ref = request.session.as_ref().expect("checked above");
+                let session = state
+                    .storage
+                    .get_session(session_ref.session_id)
+                    .await
+                    .map_err(|error| error.to_string())?
+                    .ok_or_else(|| {
+                        format!(
+                            "AgentCallError: continued session {} no longer exists",
+                            session_ref.session_id
+                        )
+                    })?;
+                reauthorise_session_worker_placement(state, &session)
+                    .await
+                    .map_err(|error| error.to_string())?
+                    .map(runtime_placement_from_directory)
+                    .map_or_else(|| Ok(None), |placement| Ok(Some(placement)))
+            }
             None => match inherited_worker_placement {
                 Some(placement) => {
                     reauthorise_recorded_worker_placement(state, space_id, placement.clone())
@@ -1754,6 +2009,7 @@ async fn run_host_commands_inner(
     replay: Vec<WorkflowJournalRecord>,
     agent_calls: Arc<AtomicU32>,
     spent_tokens: Arc<AtomicU64>,
+    token_budget: Arc<Mutex<TokenBudgetState>>,
     failed_agent_calls: Arc<Mutex<std::collections::HashMap<String, FailedAgentCallRef>>>,
     park: CancellationToken,
     park_threshold_ms: u64,
@@ -1777,13 +2033,6 @@ async fn run_host_commands_inner(
     // Wind-down is replay position, not run end-state. A transition later in
     // the journal must not classify earlier started calls as closing work.
     let mut winding_down = false;
-    let token_budget = Arc::new(Mutex::new(TokenBudgetState {
-        spent: spent_tokens.load(Ordering::SeqCst),
-        working_reserved: 0,
-        closing_reserved: 0,
-        closing_limit: None,
-        replayed_working_credit: 0,
-    }));
     let effect_seq = Arc::new(AtomicU64::new(
         replay
             .iter()
@@ -2244,7 +2493,9 @@ async fn run_host_commands_inner(
                         if entry.args_hash != hash {
                             (
                                 Some(journal_entry_id),
-                                Err("NondeterministicReplayError".into()),
+                                Err(WorkflowHostError::Message(
+                                    "NondeterministicReplayError".into(),
+                                )),
                             )
                         } else if entry.status == "failed" {
                             // The original run observed this failure (and may
@@ -2252,10 +2503,12 @@ async fn run_host_commands_inner(
                             // error rather than re-executing the call.
                             (
                                 Some(journal_entry_id),
-                                Err(entry
-                                    .error_message
-                                    .clone()
-                                    .unwrap_or_else(|| "recorded agent failure".to_string())),
+                                Err(WorkflowHostError::Message(
+                                    entry
+                                        .error_message
+                                        .clone()
+                                        .unwrap_or_else(|| "recorded agent failure".to_string()),
+                                )),
                             )
                         } else if entry.status == "completed" {
                             let result = entry
@@ -2264,7 +2517,8 @@ async fn run_host_commands_inner(
                                 .ok_or_else(|| "completed agent entry has no result".to_string())
                                 .and_then(|value| {
                                     serde_json::from_value(value).map_err(|error| error.to_string())
-                                });
+                                })
+                                .map_err(WorkflowHostError::Message);
                             if let Some(rank) = replay_agent_ranks.get(&current_seq).copied() {
                                 await_replay_release(
                                     rank,
@@ -2323,7 +2577,9 @@ async fn run_host_commands_inner(
                                     .await,
                                 )
                             }
-                            Err(error) => (None, Err(error.to_string())),
+                            Err(error) => {
+                                (None, Err(WorkflowHostError::Message(error.to_string())))
+                            }
                         }
                     };
                     let result = if result.is_err()
@@ -2337,12 +2593,11 @@ async fn run_host_commands_inner(
                             .lock()
                             .await
                             .insert(failed_call_ref.host_reference(), failed_call_ref);
-                        result.map_err(|message| WorkflowHostError::AgentCall {
-                            host_reference: failed_call_ref.host_reference(),
-                            message,
+                        result.map_err(|error| {
+                            classify_agent_call_failure(error, failed_call_ref.host_reference())
                         })
                     } else {
-                        result.map_err(WorkflowHostError::Message)
+                        result
                     };
                     let actual = if !completed_replay {
                         result
@@ -2928,21 +3183,13 @@ async fn run_host_commands_inner(
                                 .max_total_tokens
                                 .map(|limit| limit.saturating_sub(spent))
                         };
-                        let closing_remaining = budget.reserved_closing_tokens.map(|reserve| {
-                            if reading_winding_down {
-                                proposed_closing_limit
-                                    .or(accounting.closing_limit)
-                                    .map(|limit| limit.saturating_sub(spent))
-                                    .unwrap_or(0)
-                            } else {
-                                reserve.min(
-                                    budget
-                                        .max_total_tokens
-                                        .map(|limit| limit.saturating_sub(spent))
-                                        .unwrap_or(0),
-                                )
-                            }
-                        });
+                        let closing_remaining = closing_partition_remaining(
+                            &budget,
+                            reading_winding_down
+                                .then(|| proposed_closing_limit.or(accounting.closing_limit))
+                                .flatten(),
+                            spent,
+                        );
                         let reading = serde_json::json!({
                             "spent": spent,
                             "remaining": remaining,
@@ -3291,12 +3538,7 @@ async fn complete_worker_directory_resolution(
     .await
     {
         Ok(directory) => {
-            let placement = ResolvedWorkerPlacement {
-                path: directory.path.to_string_lossy().into_owned(),
-                can_write: directory.can_write,
-                authority_path: directory.authority_path.to_string_lossy().into_owned(),
-                authority_context_id: directory.authority_context_id,
-            };
+            let placement = runtime_placement_from_directory(directory);
             state
                 .complete_workflow_journal_entry(
                     entry_id,
@@ -3375,7 +3617,7 @@ async fn complete_agent_entry(
     request: AgentCallRequest,
     resolved_working_directory: Option<ResolvedWorkerPlacement>,
     cancellation: CancellationToken,
-) -> Result<AgentCallResult, String> {
+) -> Result<AgentCallResult, WorkflowHostError> {
     match run_ephemeral_agent_call(
         state,
         run_id,
@@ -3405,11 +3647,36 @@ async fn complete_agent_entry(
         // resumed path. Cancellation is settled for every in-flight entry at
         // the owning run boundary after the host loop drains.
         Err(error) => {
-            if !error.starts_with("WorkflowCancelledError") {
-                let _ = state.fail_workflow_journal_entry(entry_id, &error).await;
+            if !error.to_string().starts_with("WorkflowCancelledError") {
+                let _ = state
+                    .fail_workflow_journal_entry(entry_id, &error.to_string())
+                    .await;
             }
             Err(error)
         }
+    }
+}
+
+fn classify_agent_call_failure(
+    error: WorkflowHostError,
+    host_reference: String,
+) -> WorkflowHostError {
+    match error {
+        WorkflowHostError::SchemaExhausted { message, .. } => WorkflowHostError::SchemaExhausted {
+            host_reference: Some(host_reference),
+            message,
+        },
+        WorkflowHostError::Message(message) if message.starts_with("SchemaExhaustedError:") => {
+            WorkflowHostError::SchemaExhausted {
+                host_reference: Some(host_reference),
+                message,
+            }
+        }
+        WorkflowHostError::AgentCall { .. } => error,
+        WorkflowHostError::Message(message) => WorkflowHostError::AgentCall {
+            host_reference,
+            message,
+        },
     }
 }
 
@@ -3695,9 +3962,13 @@ async fn evaluate_run_gate(
     }
     let config = state.active_config();
     let model_id = match &request.model {
-        Some(model) => crate::schedule::resolve_gate_model(&config, model).ok_or_else(|| {
-            format!("RunEventError: gate model '{model}' is not in the configured model catalogue")
-        })?,
+        Some(model) => crate::turn::resolve_model_catalogue_entry(&config.models, model)
+            .map(|(_, model)| model.model_id.clone())
+            .ok_or_else(|| {
+                format!(
+                    "RunEventError: gate model '{model}' is not in the configured model catalogue"
+                )
+            })?,
         None => config.default_model_id().to_string(),
     };
     let prompt = build_run_gate_prompt(&request.criteria, &events);
@@ -3814,7 +4085,7 @@ async fn complete_workflow_call_entry(
                             .await
                             .map_err(|error| error.to_string())?
                             .ok_or_else(|| "child workflow script is missing".to_string())?;
-                        (version.source, script.delivery_grant)
+                        (version.source, script.effective_delivery_grant())
                     }
                     None => (
                         child.source.clone().ok_or_else(|| {
@@ -3836,7 +4107,7 @@ async fn complete_workflow_call_entry(
                     .ok_or_else(|| "child workflow run disappeared".to_string())?;
                 launch_existing_run(state.clone(), running, source, grant)
                     .await
-                    .map_err(|error| error.0.to_string())?;
+                    .map_err(|error| error.message().to_owned())?;
                 child
             }
             _ => child,
@@ -3911,7 +4182,7 @@ async fn complete_workflow_call_entry(
                 script.delivery_grant.clone(),
             )
             .await
-            .map_err(|error| error.0.to_string())?;
+            .map_err(|error| error.message().to_owned())?;
             record
         }
     };
@@ -4033,20 +4304,6 @@ fn internal(error: impl std::fmt::Display) -> ApiError {
     ApiError::internal(error.to_string())
 }
 
-fn script_wire(record: WorkflowScriptRecord, head_version: u32) -> WorkflowScript {
-    WorkflowScript {
-        id: record.id,
-        space_id: record.space_id,
-        name: record.name,
-        description: record.description,
-        head_version,
-        built_in: false,
-        has_delivery_grant: record.delivery_grant.is_some(),
-        created_at: record.created_at,
-        updated_at: record.updated_at,
-    }
-}
-
 fn effective_script_wire(workflow: EffectiveWorkflow) -> WorkflowScript {
     WorkflowScript {
         id: workflow.id,
@@ -4054,11 +4311,39 @@ fn effective_script_wire(workflow: EffectiveWorkflow) -> WorkflowScript {
         name: workflow.name,
         description: workflow.description,
         head_version: workflow.head_version,
-        built_in: workflow.built_in,
+        carrying_skill: workflow.carrying_skill,
         has_delivery_grant: workflow.delivery_grant.is_some(),
+        argument_contract: argument_contract(workflow.argument_schema),
         created_at: workflow.created_at,
         updated_at: workflow.updated_at,
     }
+}
+
+fn argument_contract(schema: Option<Value>) -> WorkflowArgumentContract {
+    match schema {
+        Some(schema) => WorkflowArgumentContract::Declared { schema },
+        None => WorkflowArgumentContract::Unconstrained,
+    }
+}
+
+fn validate_workflow_arguments(schema: Option<&Value>, args: &Value) -> Result<(), ApiError> {
+    let Some(schema) = schema else {
+        return Ok(());
+    };
+    let validator = jsonschema::validator_for(schema).map_err(|error| {
+        ApiError::validation(format!("workflow argument schema is invalid: {error}"))
+    })?;
+    validator.validate(args).map_err(|error| {
+        let location = error.instance_path().to_string();
+        let field = if location.is_empty() {
+            "arguments"
+        } else {
+            &location
+        };
+        ApiError::validation(format!(
+            "workflow arguments violate the declared schema at {field}: {error}"
+        ))
+    })
 }
 
 fn run_state(state: &str) -> Result<WorkflowRunState, ApiError> {
@@ -4118,19 +4403,22 @@ pub async fn create_script(
         .await
         .map_err(internal)?
         .ok_or_else(|| ApiError::not_found("space", space_id))?;
-    let meta = swage_workflow::script_meta(&request.source).map_err(ApiError::validation)?;
-    let (record, version) = state
-        .storage
-        .create_workflow_script(NewWorkflowScript {
+    let change = crate::service::create_workflow_script(
+        &state,
+        crate::service::WorkflowScriptDraft {
             space_id,
-            name: meta.name.unwrap_or(request.name),
-            description: meta.description.unwrap_or(request.description),
+            name: request.name,
+            description: request.description,
             source: request.source,
             delivery_grant: request.delivery_grant,
-        })
-        .await
-        .map_err(internal)?;
-    Ok(Json(script_wire(record, version.version)))
+            authoring_session_id: None,
+        },
+        OPERATOR_SURFACE,
+        None,
+    )
+    .await
+    .map_err(ApiError::from)?;
+    get_script(State(state), Path(change.script_id)).await
 }
 
 pub async fn list_scripts(
@@ -4199,38 +4487,25 @@ pub async fn update_script(
             "carried and built-in workflow scripts are immutable; create a same-named workflow in the space to customise it".into(),
         ));
     }
-    let _record = state
-        .storage
-        .get_workflow_script(id)
-        .await
-        .map_err(internal)?
-        .ok_or_else(|| ApiError::not_found("workflow script", id))?;
-    let meta = request
-        .source
-        .as_deref()
-        .map(swage_workflow::script_meta)
-        .transpose()
-        .map_err(ApiError::validation)?;
-    let description = meta
-        .as_ref()
-        .and_then(|meta| meta.description.as_deref())
-        .or(request.description.as_deref());
-    if description.is_some() || request.delivery_grant.is_some() {
-        state
-            .storage
-            .update_workflow_script(id, description, request.delivery_grant)
-            .await
-            .map_err(internal)?;
-    }
-    if let Some(source) = request.source {
-        state
-            .storage
-            .append_workflow_script_version(id, &source)
-            .await
-            .map_err(internal)?;
-    }
+    crate::service::update_workflow_script(
+        &state,
+        id,
+        crate::service::WorkflowScriptEdit {
+            description: request.description,
+            source: request.source,
+            delivery_grant: request.delivery_grant,
+            authoring_session_id: None,
+        },
+        OPERATOR_SURFACE,
+        None,
+    )
+    .await
+    .map_err(ApiError::from)?;
     get_script(State(state), Path(id)).await
 }
+
+/// The surface name an operator's own change is recorded under.
+const OPERATOR_SURFACE: &str = "operator_http";
 
 fn source_hash(source: &str) -> String {
     Sha256::digest(source.as_bytes())
@@ -4245,6 +4520,7 @@ async fn start_run(
     script_version_id: Option<Uuid>,
     inline_identity: Option<InlineWorkflowIdentity>,
     source: String,
+    argument_schema: Option<Value>,
     args: Value,
     budget: WorkflowBudget,
     delivery_grant: Option<Value>,
@@ -4255,6 +4531,7 @@ async fn start_run(
     inherited_worker_placement: Option<WorkflowRunWorkerPlacement>,
 ) -> Result<WorkflowRun, ApiError> {
     validate_budget(&budget)?;
+    validate_workflow_arguments(argument_schema.as_ref(), &args)?;
     // Each run owns a QuickJS runtime and an OS thread. Keep the default bound
     // explicit until workflow settings join the resolved configuration model.
     if state.active_workflow_runs.lock().await.len() >= 4 {
@@ -4337,7 +4614,11 @@ async fn failed_agent_call_handover(
             })
         })
         .collect::<Vec<_>>();
-    let last_journal_seq = journal.iter().map(|entry| entry.seq).max()?;
+    let last_journal_seq = journal
+        .iter()
+        .filter(|entry| is_positional_journal_entry(entry))
+        .map(|entry| entry.seq)
+        .max()?;
     let events_delivered_to_failed_call = events
         .iter()
         .filter(|event| event.delivery == WorkflowHandoverEventDelivery::DeliveredToFailedCall)
@@ -4451,11 +4732,18 @@ async fn launch_existing_run(
     let (result_tx, result_rx) = tokio::sync::oneshot::channel();
     let (host_tx, host_rx) = mpsc::unbounded_channel();
     let run_budget = budget_wire(&record.budget);
-    let replay = state
+    let journal = state
         .storage
         .list_workflow_journal(record.id)
         .await
         .map_err(internal)?;
+    // Terminal budget rows are audit records, not script commands. Keeping
+    // them out of positional replay preserves the command sequence when a
+    // failed or cancelled run is later resumed for recovery.
+    let replay = journal
+        .into_iter()
+        .filter(is_positional_journal_entry)
+        .collect::<Vec<_>>();
     // These prefixes are produced by both budget-refusal paths in the host-command loop.
     let initial_agent_calls = replay
         .iter()
@@ -4484,8 +4772,15 @@ async fn launch_existing_run(
         .sum();
     let agent_calls = Arc::new(AtomicU32::new(initial_agent_calls));
     let spent_tokens = Arc::new(AtomicU64::new(initial_spent_tokens));
+    let token_budget = Arc::new(Mutex::new(TokenBudgetState {
+        spent: initial_spent_tokens,
+        working_reserved: 0,
+        closing_reserved: 0,
+        closing_limit: None,
+        replayed_working_credit: 0,
+    }));
     let failed_agent_calls = Arc::new(Mutex::new(std::collections::HashMap::new()));
-    let host_task = tokio::spawn(run_host_commands(
+    let host_task = tokio::spawn(run_host_commands_with_budget(
         state.clone(),
         record.id,
         space_id,
@@ -4500,6 +4795,7 @@ async fn launch_existing_run(
         replay,
         Arc::clone(&agent_calls),
         Arc::clone(&spent_tokens),
+        Arc::clone(&token_budget),
         Arc::clone(&failed_agent_calls),
         park.clone(),
         PARK_TIMER_THRESHOLD_MS,
@@ -4538,6 +4834,9 @@ async fn launch_existing_run(
     let storage = Arc::clone(&state.storage);
     let active = Arc::clone(&state.active_workflow_runs);
     let worktree_host = Arc::clone(&state.worktree_host);
+    let terminal_budget_state = Arc::clone(&token_budget);
+    let terminal_budget = run_budget;
+    let terminal_budget_state_owner = state.clone();
     let run_id = record.id;
     let broadcast = state.broadcast.clone();
     tokio::spawn(async move {
@@ -4588,6 +4887,16 @@ async fn launch_existing_run(
             Ok(Err(problem)) => ("failed", None, Some(problem.to_string())),
             Err(problem) => ("failed", None, Some(problem.to_string())),
         };
+        if let Err(problem) = record_terminal_budget(
+            &terminal_budget_state_owner,
+            run_id,
+            &terminal_budget,
+            &terminal_budget_state,
+        )
+        .await
+        {
+            tracing::warn!(%run_id, %problem, "could not record terminal budget audit entry");
+        }
         if run_state == "cancelled" {
             settle_cancelled_workflow_journal(storage.as_ref(), run_id).await;
         }
@@ -4755,6 +5064,7 @@ pub async fn start_inline_run(
             None,
             None,
             request.source,
+            None,
             request.args,
             request.budget.unwrap_or_default(),
             None,
@@ -4786,6 +5096,7 @@ pub async fn start_saved_run(
             script.script_version_id,
             script.inline_identity(),
             script.source,
+            script.argument_schema,
             request.args,
             request.budget.unwrap_or_default(),
             script.delivery_grant,
@@ -4892,6 +5203,10 @@ pub async fn cancel_run(
     // waker never relaunches it.
     if run.state == "parked" {
         settle_cancelled_workflow_journal(state.storage.as_ref(), id).await;
+        let budget = budget_wire(&run.budget);
+        if let Err(problem) = record_terminal_budget_from_journal(&state, id, &budget).await {
+            tracing::warn!(%id, %problem, "could not record terminal budget audit entry");
+        }
         state
             .storage
             .update_workflow_run_state(id, "cancelled", None, None, None)
@@ -4957,7 +5272,7 @@ async fn resume_workflow_run_record(
             .get_workflow_script(version.script_id)
             .await
             .map_err(internal)?
-            .and_then(|script| script.delivery_grant)
+            .and_then(|script| script.effective_delivery_grant())
     } else {
         None
     };
@@ -5019,7 +5334,7 @@ pub(crate) async fn resume_owed_workflow_runs(state: &AppState) -> usize {
                 tracing::info!(%run_id, from_state = %was, "resumed workflow run");
             }
             Err(error) => {
-                tracing::warn!(%run_id, error = %error.0, "failed to resume workflow run");
+                tracing::warn!(%run_id, error = %error, "failed to resume workflow run");
             }
         }
     }
@@ -5101,12 +5416,29 @@ mod tests {
     use super::*;
     use swage_protocol::client::workflow::{WorkflowJournalEntryKind, WorkflowJournalEntryStatus};
     use swage_storage::{
-        AgentDefinitionStore, AuditStore, CitationStore, ContextSnapshotStore,
+        AgentDefinitionStore, AuditStore, CitationStore, ContextSnapshotStore, NewWorkflowScript,
         NewWorkspaceAttachment, ObservationStore, OrientationCardStore, SessionStore, SpaceStore,
         SqliteStorage, Storage, TaskDefinitionStore, ToolCallStore, TurnState, TurnStore,
         WorkflowStore, WorkspaceAttachmentStore,
     };
     use swage_workflow::AgentSessionRef;
+
+    /// The research sweep as the shipped research skill carries it.
+    fn research_sweep_source() -> &'static str {
+        crate::shipped_skills::workflow_files("research")
+            .find(|file| file.path.ends_with("/research-sweep.js"))
+            .expect("embedded research sweep")
+            .contents
+    }
+
+    /// The carried workflow's per-space identity, as listing assigns it.
+    fn research_sweep_id(space_id: Uuid) -> Uuid {
+        crate::synthetic_id::synthetic_id(
+            CARRIED_WORKFLOW_ID_DOMAIN,
+            space_id,
+            "research/research-sweep",
+        )
+    }
 
     fn workflow_test_state() -> (AppState, Arc<SqliteStorage>) {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
@@ -5158,30 +5490,30 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn empty_space_lists_shipped_carried_and_built_in_workflows() {
+    async fn empty_space_lists_every_shipped_carried_workflow_and_nothing_else() {
         let (state, storage) = workflow_test_state();
         let space = storage.get_or_create_default().await.expect("space");
-        let _skill_root = crate::skill::SpaceSkillRootGuard::empty(space.id);
+        let _skill_root = crate::skill::TestSkillRootGuard::empty(space.id);
 
         let Json(list) = list_scripts(State(state), Path(space.id))
             .await
             .expect("workflow list");
 
-        let names = list
+        // Nothing ships as a global built-in: every listed workflow on a
+        // fresh space names the shipped skill that carries it.
+        let carried = list
             .scripts
             .iter()
-            .map(|script| script.name.as_str())
+            .map(|script| {
+                (
+                    script.name.as_str(),
+                    script.carrying_skill.as_deref().expect("a carrying skill"),
+                )
+            })
             .collect::<Vec<_>>();
-        assert!(names.contains(&"research-sweep"));
-        assert!(names.contains(&"build-verify"));
-        assert!(names.contains(&"teardown-audit"));
-        assert_eq!(
-            list.scripts
-                .iter()
-                .find(|script| script.name == "research-sweep")
-                .map(|script| script.built_in),
-            Some(true)
-        );
+        assert!(carried.contains(&("research-sweep", "research")));
+        assert!(carried.contains(&("build-verify", "assembly")));
+        assert!(carried.contains(&("teardown-audit", "maestro")));
         assert!(
             list.scripts
                 .iter()
@@ -5190,10 +5522,10 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn authored_workflow_shadows_the_same_named_builtin() {
+    async fn authored_workflow_shadows_the_same_named_shipped_workflow() {
         let (state, storage) = workflow_test_state();
         let space = storage.get_or_create_default().await.expect("space");
-        let _skill_root = crate::skill::SpaceSkillRootGuard::empty(space.id);
+        let _skill_root = crate::skill::TestSkillRootGuard::empty(space.id);
         let router = crate::server::build_router(state.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -5220,14 +5552,14 @@ mod tests {
             .json::<Value>()
             .await
             .expect("serialise built-in listing");
-        let builtin = initial_list["scripts"]
+        let shipped = initial_list["scripts"]
             .as_array()
             .expect("script array")
             .iter()
             .find(|script| script["name"] == "research-sweep")
-            .expect("research-sweep built-in");
-        let builtin_id = builtin["id"].as_str().expect("built-in id").to_string();
-        assert_eq!(builtin["built_in"], true);
+            .expect("shipped research-sweep");
+        let shipped_id = shipped["id"].as_str().expect("shipped id").to_string();
+        assert_eq!(shipped["carrying_skill"], "research");
 
         let authored = client
             .post(format!(
@@ -5249,14 +5581,14 @@ mod tests {
             .await
             .expect("serialise authored shadow");
         let authored_id = authored["id"].as_str().expect("authored id");
-        assert_ne!(authored_id, builtin_id);
-        assert_eq!(authored["built_in"], false);
+        assert_ne!(authored_id, shipped_id);
+        assert!(authored["carrying_skill"].is_null());
 
         let hidden_read = client
-            .get(format!("{base_url}/api/workflow-scripts/{builtin_id}"))
+            .get(format!("{base_url}/api/workflow-scripts/{shipped_id}"))
             .send()
             .await
-            .expect("read hidden built-in over HTTP");
+            .expect("read hidden shipped workflow over HTTP");
         assert_eq!(hidden_read.status(), reqwest::StatusCode::NOT_FOUND);
         assert_eq!(
             hidden_read
@@ -5267,11 +5599,11 @@ mod tests {
         );
 
         let hidden_start = client
-            .post(format!("{base_url}/api/workflow-scripts/{builtin_id}/runs"))
+            .post(format!("{base_url}/api/workflow-scripts/{shipped_id}/runs"))
             .json(&serde_json::json!({ "args": null, "budget": null }))
             .send()
             .await
-            .expect("start hidden built-in over HTTP");
+            .expect("start hidden shipped workflow over HTTP");
         assert_eq!(hidden_start.status(), reqwest::StatusCode::NOT_FOUND);
         assert_eq!(
             hidden_start
@@ -5293,7 +5625,7 @@ mod tests {
             .expect("serialise authored winner");
         assert_eq!(read["id"], authored_id);
         assert_eq!(read["name"], "research-sweep");
-        assert_eq!(read["built_in"], false);
+        assert!(read["carrying_skill"].is_null());
 
         let started = client
             .post(format!(
@@ -5330,7 +5662,8 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn carried_workflow_shadows_the_same_named_builtin_when_listed_and_started() {
+    async fn operator_carried_workflow_shadows_the_same_named_shipped_workflow_when_listed_and_started()
+     {
         let root = tempfile::tempdir().expect("skill root");
         let skill_dir = root.path().join("skills/research-shadow");
         std::fs::create_dir_all(skill_dir.join("workflows")).expect("workflow directory");
@@ -5348,7 +5681,7 @@ mod tests {
 
         let (state, storage) = workflow_test_state();
         let space = storage.get_or_create_default().await.expect("space");
-        let _skill_root = crate::skill::SpaceSkillRootGuard::at(space.id, root.path());
+        let _skill_root = crate::skill::TestSkillRootGuard::at(space.id, root.path());
 
         let Json(list) = list_scripts(State(state.clone()), Path(space.id))
             .await
@@ -5358,7 +5691,7 @@ mod tests {
             .into_iter()
             .find(|script| script.name == "research-sweep")
             .expect("research sweep");
-        assert!(!listed.built_in);
+        assert_eq!(listed.carrying_skill.as_deref(), Some("research-shadow"));
 
         let Json(started) = start_saved_run(
             State(state.clone()),
@@ -5385,10 +5718,88 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn listed_builtin_can_be_read_and_started_but_not_updated() {
+    async fn invalid_carried_workflow_metadata_does_not_hide_valid_workflows() {
+        let root = tempfile::tempdir().expect("skill root");
+        let skill_dir = root.path().join("skills/invalid-meta");
+        std::fs::create_dir_all(skill_dir.join("workflows")).expect("workflow directory");
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\ndescription: Invalid metadata proof.\n---\n\nInstructions.\n",
+        )
+        .expect("skill definition");
+        std::fs::write(
+            skill_dir.join("workflows/invalid.js"),
+            r#"export const meta = { argumentSchema: { type: "object" } }; return {};"#,
+        )
+        .expect("carried workflow");
+        std::fs::write(
+            skill_dir.join("workflows/valid.js"),
+            "return { valid: true };",
+        )
+        .expect("carried workflow");
+
         let (state, storage) = workflow_test_state();
         let space = storage.get_or_create_default().await.expect("space");
-        let _skill_root = crate::skill::SpaceSkillRootGuard::empty(space.id);
+        let _skill_root = crate::skill::TestSkillRootGuard::at(space.id, root.path());
+
+        let Json(list) = list_scripts(State(state), Path(space.id))
+            .await
+            .expect("valid carried workflows remain listable");
+        assert!(
+            list.scripts.iter().any(|script| script.name == "valid"),
+            "the valid carried workflow must remain listed: {list:?}"
+        );
+        assert!(
+            !list.scripts.iter().any(|script| script.name == "invalid"),
+            "the malformed carried workflow must be excluded: {list:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn saved_run_rejects_invalid_arguments_before_creating_a_run() {
+        let (state, storage) = workflow_test_state();
+        let space = storage.get_or_create_default().await.expect("space");
+        let (script, _) = storage
+            .create_workflow_script(NewWorkflowScript {
+                space_id: space.id,
+                name: "constrained".into(),
+                description: String::new(),
+                source: r#"export const meta = { argumentSchema: {"type":"object","required":["task"],"properties":{"task":{"type":"string"}}} }; return {};"#.into(),
+                delivery_grant: None,
+                authoring_session_id: None,
+            })
+            .await
+            .expect("workflow");
+
+        let error = start_saved_run(
+            State(state),
+            Path(script.id),
+            Json(StartWorkflowRunRequest {
+                args: serde_json::json!({"task": 42}),
+                budget: None,
+            }),
+        )
+        .await
+        .expect_err("invalid arguments must be rejected");
+        assert!(
+            error.message().contains("/task"),
+            "validation must name the failing field: {error:?}"
+        );
+        assert!(
+            storage
+                .list_workflow_runs(space.id)
+                .await
+                .expect("runs")
+                .is_empty(),
+            "rejected arguments must not create a run"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn shipped_research_sweep_can_be_read_and_started_but_not_updated() {
+        let (state, storage) = workflow_test_state();
+        let space = storage.get_or_create_default().await.expect("space");
+        let _skill_root = crate::skill::TestSkillRootGuard::empty(space.id);
         let Json(list) = list_scripts(State(state.clone()), Path(space.id))
             .await
             .expect("workflow list");
@@ -5400,9 +5811,9 @@ mod tests {
 
         let Json(read) = get_script(State(state.clone()), Path(listed.id))
             .await
-            .expect("read built-in");
+            .expect("read shipped workflow");
         assert_eq!(read.id, listed.id);
-        assert!(read.built_in);
+        assert_eq!(read.carrying_skill.as_deref(), Some("research"));
 
         let update_error = update_script(
             State(state.clone()),
@@ -5413,9 +5824,9 @@ mod tests {
             }),
         )
         .await
-        .expect_err("built-in update must fail");
+        .expect_err("shipped update must fail");
         assert!(
-            matches!(update_error.0, swage_core::GatewayError::SpaceConflict(message) if message.contains("immutable"))
+            matches!(update_error.cause(), Some(swage_core::GatewayError::SpaceConflict(message)) if message.contains("immutable"))
         );
 
         let Json(started) = start_saved_run(
@@ -5427,42 +5838,30 @@ mod tests {
             }),
         )
         .await
-        .expect("start listed built-in");
+        .expect("start shipped research sweep");
         wait_for_terminal(&state, started.id).await;
         let run = storage
             .get_workflow_run(started.id)
             .await
             .expect("run query")
             .expect("run");
+        let embedded = research_sweep_source();
         assert_eq!(run.engine_version, "rquickjs-0.12.2");
         assert_eq!(run.state, "failed");
         assert_eq!(run.script_version_id, None);
         assert_eq!(run.script_id, Some(listed.id));
         assert_eq!(run.script_name.as_deref(), Some("research-sweep"));
         assert_eq!(run.script_version, Some(1));
-        assert_eq!(
-            run.source.as_deref(),
-            Some(
-                builtin_workflows::find_by_name("research-sweep")
-                    .unwrap()
-                    .source
-            )
-        );
-        assert_eq!(
-            run.source_hash,
-            source_hash(
-                builtin_workflows::find_by_name("research-sweep")
-                    .unwrap()
-                    .source
-            )
-        );
+        assert_eq!(run.carrying_skill.as_deref(), Some("research"));
+        assert_eq!(run.source.as_deref(), Some(embedded));
+        assert_eq!(run.source_hash, source_hash(embedded));
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn listed_shipped_carried_workflow_can_start_but_not_update() {
         let (state, storage) = workflow_test_state();
         let space = storage.get_or_create_default().await.expect("space");
-        let _skill_root = crate::skill::SpaceSkillRootGuard::empty(space.id);
+        let _skill_root = crate::skill::TestSkillRootGuard::empty(space.id);
         let Json(list) = list_scripts(State(state.clone()), Path(space.id))
             .await
             .expect("workflow list");
@@ -5471,7 +5870,7 @@ mod tests {
             .into_iter()
             .find(|script| script.name == "build-verify")
             .expect("shipped carried workflow");
-        assert!(!listed.built_in);
+        assert_eq!(listed.carrying_skill.as_deref(), Some("assembly"));
 
         let update_error = update_script(
             State(state.clone()),
@@ -5484,14 +5883,23 @@ mod tests {
         .await
         .expect_err("carried update must fail");
         assert!(
-            matches!(update_error.0, swage_core::GatewayError::SpaceConflict(message) if message.contains("immutable"))
+            matches!(update_error.cause(), Some(swage_core::GatewayError::SpaceConflict(message)) if message.contains("immutable"))
         );
 
         let Json(started) = start_saved_run(
             State(state.clone()),
             Path(listed.id),
             Json(StartWorkflowRunRequest {
-                args: Value::Null,
+                args: serde_json::json!({
+                    "briefPath": "/workspace/brief.md",
+                    "worktree": "/workspace",
+                    "commissionPath": "/workspace/commission.md",
+                    "spinePath": "/workspace/spine.md",
+                    "verificationPath": "/workspace/verification.md",
+                    "unitDir": "/workspace/unit",
+                    "mergePolicy": "direct-merge",
+                    "annexeConfigPath": "/workspace/config.toml"
+                }),
                 budget: None,
             }),
         )
@@ -5510,10 +5918,21 @@ mod tests {
         assert_eq!(run.carrying_skill.as_deref(), Some("assembly"));
         assert_eq!(run.source.as_deref(), Some(embedded));
         assert_eq!(run.source_hash, source_hash(embedded));
+        let journal = storage
+            .list_workflow_journal(started.id)
+            .await
+            .expect("workflow journal");
+        assert!(
+            journal.iter().any(|entry| {
+                entry.kind == "phase"
+                    && entry.request == serde_json::json!({ "message": "restate" })
+            }),
+            "run: {run:?}; journal: {journal:?}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn workflow_tool_name_resolution_falls_back_to_a_builtin() {
+    async fn workflow_tool_name_resolution_reaches_a_shipped_carried_workflow() {
         let (state, storage) = workflow_test_state();
         let space = storage.get_or_create_default().await.expect("space");
         let session = storage
@@ -5525,12 +5944,12 @@ mod tests {
             })
             .await
             .expect("session");
-        let _skill_root = crate::websocket::SessionSkillRootGuard::empty(session.id);
+        let _skill_root = crate::skill::TestSkillRootGuard::empty(session.id);
 
         let started = GatewayWorkflowLauncher::new(state.clone())
             .start_by_name(session.id, "research-sweep", Value::Null, None, false)
             .await
-            .expect("built-in name resolution");
+            .expect("shipped name resolution");
         let run_id: Uuid = serde_json::from_value(started["id"].clone()).expect("run id");
         wait_for_terminal(&state, run_id).await;
         let run = storage
@@ -5538,27 +5957,18 @@ mod tests {
             .await
             .expect("run query")
             .expect("run");
-        assert_eq!(
-            run.script_id,
-            Some(builtin_workflows::id(space.id, "research-sweep"))
-        );
+        assert_eq!(run.script_id, Some(research_sweep_id(space.id)));
         assert_eq!(run.script_name.as_deref(), Some("research-sweep"));
         assert_eq!(run.script_version, Some(1));
-        assert_eq!(
-            run.source.as_deref(),
-            Some(
-                builtin_workflows::find_by_name("research-sweep")
-                    .unwrap()
-                    .source
-            )
-        );
+        assert_eq!(run.carrying_skill.as_deref(), Some("research"));
+        assert_eq!(run.source.as_deref(), Some(research_sweep_source()));
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn workflow_composition_resolves_a_builtin_child() {
+    async fn workflow_composition_resolves_a_shipped_carried_child() {
         let (state, storage) = workflow_test_state();
         let space = storage.get_or_create_default().await.expect("space");
-        let _skill_root = crate::skill::SpaceSkillRootGuard::empty(space.id);
+        let _skill_root = crate::skill::TestSkillRootGuard::empty(space.id);
         let (parent, _) = storage
             .create_workflow_script(NewWorkflowScript {
                 space_id: space.id,
@@ -5566,6 +5976,7 @@ mod tests {
                 description: String::new(),
                 source: "return await workflow('research-sweep', {});".into(),
                 delivery_grant: None,
+                authoring_session_id: None,
             })
             .await
             .expect("parent");
@@ -5600,22 +6011,13 @@ mod tests {
             .expect("runs")
             .into_iter()
             .find(|run| run.parent_run_id == Some(started.id))
-            .expect("built-in child run");
+            .expect("shipped child run");
         assert_eq!(child.engine_version, "rquickjs-0.12.2");
-        assert_eq!(
-            child.script_id,
-            Some(builtin_workflows::id(space.id, "research-sweep"))
-        );
+        assert_eq!(child.script_id, Some(research_sweep_id(space.id)));
         assert_eq!(child.script_name.as_deref(), Some("research-sweep"));
         assert_eq!(child.script_version, Some(1));
-        assert_eq!(
-            child.source.as_deref(),
-            Some(
-                builtin_workflows::find_by_name("research-sweep")
-                    .unwrap()
-                    .source
-            )
-        );
+        assert_eq!(child.carrying_skill.as_deref(), Some("research"));
+        assert_eq!(child.source.as_deref(), Some(research_sweep_source()));
         assert!(
             child
                 .error_message
@@ -5651,7 +6053,7 @@ mod tests {
             })
             .await
             .expect("session");
-        let _skill_root = crate::websocket::SessionSkillRootGuard::at(session.id, root.path());
+        let _skill_root = crate::skill::TestSkillRootGuard::at(session.id, root.path());
 
         let available = crate::websocket::discover_available_for_session(&state, session.id)
             .await
@@ -5699,6 +6101,7 @@ mod tests {
                 description: "Authored shadow".into(),
                 source: "return { source: 'authored' };".into(),
                 delivery_grant: None,
+                authoring_session_id: None,
             })
             .await
             .expect("authored shadow");
@@ -5726,7 +6129,7 @@ mod tests {
     async fn composed_shipped_workflow_retains_embedded_source_and_skill_attribution() {
         let (state, storage) = workflow_test_state();
         let space = storage.get_or_create_default().await.expect("space");
-        let _skill_root = crate::skill::SpaceSkillRootGuard::empty(space.id);
+        let _skill_root = crate::skill::TestSkillRootGuard::empty(space.id);
         let (parent, _) = storage
             .create_workflow_script(NewWorkflowScript {
                 space_id: space.id,
@@ -5734,6 +6137,7 @@ mod tests {
                 description: String::new(),
                 source: "return await workflow('teardown-audit', {});".into(),
                 delivery_grant: None,
+                authoring_session_id: None,
             })
             .await
             .expect("parent");
@@ -5874,7 +6278,7 @@ mod tests {
             Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![
-                Arc::new(WorkflowNamedTool("shell")) as Arc<dyn crate::tool::Tool>
+                Arc::new(NamedTool::new("shell")) as Arc<dyn crate::tool::Tool>
             ]),
             None,
         );
@@ -5949,6 +6353,7 @@ mod tests {
                 agent: Some("gateway".into()),
                 task: None,
                 tools: None,
+                skills: None,
                 model: None,
                 schema: None,
                 max_attempts: 1,
@@ -5986,7 +6391,122 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn fresh_space_workflow_call_applies_the_shipped_researcher_definition() {
+    async fn workflow_agent_call_records_requested_skills_in_its_child_report() {
+        let swage_home = tempfile::TempDir::new().expect("temp swage home");
+        let skill_dir = swage_home
+            .path()
+            .join("spaces/default/skills/workflow-specialist");
+        std::fs::create_dir_all(&skill_dir).expect("create workflow skill directory");
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\ndescription: Workflow specialist\n---\nUse the workflow specialist skill.\n",
+        )
+        .expect("write workflow skill");
+        let _guard = crate::test_support::SwageHomeGuard::set_to(swage_home.path());
+
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::new(crate::turn::tests::MockProvider::new(vec![
+                swage_core::StreamChunk::Delta {
+                    content: "specialist result".into(),
+                },
+                swage_core::StreamChunk::Done {
+                    finish_reason: None,
+                },
+            ])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let request = |skills| AgentCallRequest {
+            cwd: None,
+            isolation: None,
+            effort: None,
+            timeout_ms: None,
+            prompt: "Use the requested skill".into(),
+            agent: Some("workflow-worker".into()),
+            task: None,
+            tools: None,
+            skills,
+            model: None,
+            schema: None,
+            max_attempts: 1,
+            label: None,
+            session: None,
+            elements: None,
+            variables: None,
+            assembly: None,
+        };
+
+        let result = run_ephemeral_agent_call(
+            &state,
+            Uuid::new_v4(),
+            space.id,
+            &[],
+            &[],
+            Uuid::new_v4(),
+            request(Some(vec!["workflow-specialist".into()])),
+            None,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("workflow agent call");
+
+        let snapshot = storage
+            .get_snapshot(result.turn_id.expect("workflow child turn"))
+            .await
+            .expect("read child report")
+            .expect("workflow child report should be persisted");
+        let snapshot: Value = serde_json::from_str(&snapshot).expect("child report JSON");
+        let skills = snapshot["elements"]
+            .as_array()
+            .expect("child report elements")
+            .iter()
+            .find(|element| element["name"] == "skills")
+            .expect("workflow child report should record requested skills");
+        assert!(
+            skills["source"]
+                .as_str()
+                .is_some_and(|source| source.contains("workflow-specialist")),
+            "workflow child report should name the requested skill: {skills}"
+        );
+
+        let error = run_ephemeral_agent_call(
+            &state,
+            Uuid::new_v4(),
+            space.id,
+            &[],
+            &[],
+            Uuid::new_v4(),
+            request(Some(vec!["missing-workflow-skill".into()])),
+            None,
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("unavailable workflow skill must refuse the dispatch");
+        assert!(
+            error.to_string().contains("missing-workflow-skill"),
+            "error was: {error}"
+        );
+        assert_eq!(
+            storage
+                .list_sessions_by_agent_id("workflow-worker")
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "failed skill admission must not create a child session"
+        );
+    }
+
+    /// A shipped workflow's roles are bare dispatches: a fresh space holds no
+    /// definition for them, and the role's whole grant rides the call's
+    /// `tools` list, narrowed further by a later call the same way.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fresh_space_workflow_call_grants_a_role_through_its_call_scoped_tools() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
         let space = storage.get_or_create_default().await.expect("space");
         let provider = Arc::new(ScriptedRecordingProvider {
@@ -6002,15 +6522,45 @@ mod tests {
             Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all([
-                Arc::new(WorkflowNamedTool("knowledge_record")) as Arc<dyn crate::tool::Tool>,
-                Arc::new(WorkflowNamedTool("web_search")) as Arc<dyn crate::tool::Tool>,
-                Arc::new(WorkflowNamedTool("shell")) as Arc<dyn crate::tool::Tool>,
-                Arc::new(WorkflowNamedTool("config_apply")) as Arc<dyn crate::tool::Tool>,
+                Arc::new(NamedTool::new("knowledge_record")) as Arc<dyn crate::tool::Tool>,
+                Arc::new(NamedTool::new("web_search")) as Arc<dyn crate::tool::Tool>,
+                Arc::new(NamedTool::new("shell")) as Arc<dyn crate::tool::Tool>,
+                Arc::new(NamedTool::new("config_apply")) as Arc<dyn crate::tool::Tool>,
             ]),
             None,
         );
+        assert!(
+            crate::service::resolve_effective_agent_definition(
+                storage.as_ref(),
+                "researcher",
+                space.id
+            )
+            .await
+            .unwrap()
+            .is_none(),
+            "a workflow role is not a definition"
+        );
 
         let journal_entry_id = Uuid::new_v4();
+        let gather = |prompt: &str, tools: Vec<&str>| AgentCallRequest {
+            cwd: None,
+            isolation: None,
+            effort: None,
+            timeout_ms: None,
+            prompt: prompt.into(),
+            agent: None,
+            task: None,
+            tools: Some(tools.into_iter().map(String::from).collect()),
+            skills: None,
+            model: None,
+            schema: None,
+            max_attempts: 1,
+            label: None,
+            session: None,
+            elements: None,
+            variables: None,
+            assembly: None,
+        };
         let result = run_ephemeral_agent_call(
             &state,
             Uuid::new_v4(),
@@ -6018,38 +6568,17 @@ mod tests {
             &[],
             &[],
             journal_entry_id,
-            AgentCallRequest {
-                cwd: None,
-                isolation: None,
-                effort: None,
-                timeout_ms: None,
-                prompt: "Gather the selected source".into(),
-                agent: Some("researcher".into()),
-                task: None,
-                tools: None,
-                model: None,
-                schema: None,
-                max_attempts: 1,
-                label: None,
-                session: None,
-                elements: None,
-                variables: None,
-                assembly: None,
-            },
+            gather(
+                "Record gathered source material in the knowledge base.\n\nGather the selected source",
+                vec!["web_search", "knowledge_record"],
+            ),
             None,
             CancellationToken::new(),
         )
         .await
-        .expect("shipped researcher workflow call");
+        .expect("bare role workflow call");
 
         assert_eq!(result.output, Value::String("gathered".into()));
-        assert!(
-            storage
-                .list_agent_definitions(None)
-                .await
-                .unwrap()
-                .is_empty()
-        );
         let requests = provider.requests.lock().expect("requests");
         let advertised_tools = requests[0]
             .tool_definitions
@@ -6069,7 +6598,7 @@ mod tests {
         // The worker session carries its journalled call's identity, so its
         // knowledge captures dedup across an interrupted call's re-run.
         let session = storage
-            .list_sessions_by_agent_id("researcher")
+            .list_sessions_by_agent_id(BARE_WORKFLOW_AGENT_ID)
             .await
             .unwrap()
             .into_iter()
@@ -6087,29 +6616,12 @@ mod tests {
             &[],
             &[],
             Uuid::new_v4(),
-            AgentCallRequest {
-                cwd: None,
-                isolation: None,
-                effort: None,
-                timeout_ms: None,
-                prompt: "Scope sources without recording".into(),
-                agent: Some("researcher".into()),
-                task: None,
-                tools: Some(vec!["web_search".into()]),
-                model: None,
-                schema: None,
-                max_attempts: 1,
-                label: None,
-                session: None,
-                elements: None,
-                variables: None,
-                assembly: None,
-            },
+            gather("Scope sources without recording", vec!["web_search"]),
             None,
             CancellationToken::new(),
         )
         .await
-        .expect("call-scoped researcher workflow call");
+        .expect("narrower bare role workflow call");
         assert_eq!(scoped.output, Value::String("scoped".into()));
         let requests = provider.requests.lock().expect("requests");
         let advertised_tools = requests[1]
@@ -6138,7 +6650,7 @@ mod tests {
         ];
         let mut tools = placeholder_tool_names
             .into_iter()
-            .map(|name| Arc::new(WorkflowNamedTool(name)) as Arc<dyn crate::tool::Tool>)
+            .map(|name| Arc::new(NamedTool::new(name)) as Arc<dyn crate::tool::Tool>)
             .collect::<Vec<_>>();
         tools.extend([
             Arc::new(crate::tool::knowledge::KnowledgeRecordTool) as Arc<dyn crate::tool::Tool>,
@@ -6158,7 +6670,7 @@ mod tests {
 
         let Json(started) = start_saved_run(
             State(state.clone()),
-            Path(builtin_workflows::id(space.id, "research-sweep")),
+            Path(research_sweep_id(space.id)),
             Json(StartWorkflowRunRequest {
                 args: serde_json::json!({
                     "topic": "contract evidence",
@@ -6346,6 +6858,7 @@ mod tests {
             agent: Some("default".into()),
             task: None,
             tools: None,
+            skills: None,
             model: None,
             effort: None,
             timeout_ms: None,
@@ -6409,6 +6922,7 @@ mod tests {
         assert!(journal.iter().all(|entry| entry.request == expected));
 
         let mut reports = Vec::new();
+        let mut tool_roots = Vec::new();
         for result in [&first_result, &replayed_result] {
             let report = storage
                 .get_snapshot(result.turn_id.expect("turn id"))
@@ -6434,6 +6948,13 @@ mod tests {
             report.as_object_mut().unwrap().remove("duration");
             report.as_object_mut().unwrap().remove("provider_visible");
             report.as_object_mut().unwrap().remove("total_tokens");
+            tool_roots.push(
+                report["tool_scope"]["effective_root"]
+                    .as_str()
+                    .expect("effective tool root")
+                    .to_owned(),
+            );
+            report.as_object_mut().unwrap().remove("tool_scope");
             if let Some(orientation) = report["elements"].as_array_mut().and_then(|elements| {
                 elements
                     .iter_mut()
@@ -6442,6 +6963,22 @@ mod tests {
                 orientation.as_object_mut().unwrap().remove("token_count");
             }
             reports.push(report);
+        }
+        assert_ne!(
+            tool_roots[0], tool_roots[1],
+            "separate workflow calls must receive separate managed scratch roots"
+        );
+        for (result, root) in [&first_result, &replayed_result]
+            .into_iter()
+            .zip(tool_roots)
+        {
+            assert!(
+                root.ends_with(&format!(
+                    "/sessions/{}",
+                    result.session_id.expect("session id")
+                )),
+                "effective tool root must belong to the workflow call's session: {root}"
+            );
         }
         assert_eq!(reports[0], reports[1]);
         let requests = provider.requests.lock().expect("provider requests");
@@ -6464,8 +7001,8 @@ mod tests {
         .expect_err("reserve without ceiling must be rejected");
 
         assert!(matches!(
-            error.0,
-            swage_core::GatewayError::ValidationError(message)
+            error.cause(),
+            Some(swage_core::GatewayError::ValidationError(message))
                 if message == "reserved_closing_tokens requires max_total_tokens"
         ));
     }
@@ -6481,8 +7018,8 @@ mod tests {
         .expect_err("reserve above ceiling must be rejected");
 
         assert!(matches!(
-            error.0,
-            swage_core::GatewayError::ValidationError(message)
+            error.cause(),
+            Some(swage_core::GatewayError::ValidationError(message))
                 if message == "reserved_closing_tokens cannot exceed max_total_tokens"
         ));
     }
@@ -6591,6 +7128,95 @@ mod tests {
                     "closing report",
                 )))
             }
+        }
+    }
+
+    struct WorkingBudgetScaffold {
+        storage: Arc<SqliteStorage>,
+        space_id: Uuid,
+        run_id: Uuid,
+        state: AppState,
+        pending_call_started: Arc<Notify>,
+    }
+
+    impl WorkingBudgetScaffold {
+        async fn new(pending_calls: usize) -> Self {
+            let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+            let space = storage.get_or_create_default().await.expect("space");
+            let run = storage
+                .create_workflow_run(NewWorkflowRun {
+                    space_id: space.id,
+                    parent_run_id: None,
+                    parent_seq: None,
+                    script_version_id: None,
+                    inline_workflow_id: None,
+                    inline_workflow_name: None,
+                    inline_workflow_version: None,
+                    carrying_skill: None,
+                    source: Some("return null".into()),
+                    source_hash: source_hash("return null"),
+                    args: Value::Null,
+                    budget: serde_json::json!({}),
+                    engine_version: "test".into(),
+                    dispatch_bound_agent_ids: vec![],
+                    dispatch_bound_task_definition_ids: vec![],
+                    workflow_call_tools: None,
+                    inherited_worker_placement: None,
+                })
+                .await
+                .expect("run");
+            let pending_call_started = Arc::new(Notify::new());
+            let state = AppState::new(
+                Arc::clone(&storage) as Arc<dyn Storage>,
+                Arc::clone(&storage) as Arc<dyn SpaceStore>,
+                Arc::new(PendingWorkingProvider {
+                    calls: AtomicUsize::new(0),
+                    pending_calls,
+                    pending_call_started: Arc::clone(&pending_call_started),
+                }),
+                swage_config::ResolvedConfig::default(),
+                crate::tool::ToolDispatcher::allow_all(vec![]),
+                None,
+            );
+            Self {
+                storage,
+                space_id: space.id,
+                run_id: run.id,
+                state,
+                pending_call_started,
+            }
+        }
+
+        fn spawn(
+            self,
+            budget: WorkflowBudget,
+            replay: Vec<WorkflowJournalRecord>,
+            agent_calls: u32,
+            spent_tokens: u64,
+        ) -> (
+            mpsc::UnboundedSender<HostCommand>,
+            Arc<Notify>,
+            tokio::task::JoinHandle<()>,
+        ) {
+            let (tx, rx) = mpsc::unbounded_channel();
+            let task = tokio::spawn(run_host_commands(
+                self.state,
+                self.run_id,
+                self.space_id,
+                vec![],
+                vec![],
+                None,
+                None,
+                budget,
+                replay,
+                Arc::new(AtomicU32::new(agent_calls)),
+                Arc::new(AtomicU64::new(spent_tokens)),
+                Arc::new(Mutex::new(std::collections::HashMap::new())),
+                CancellationToken::new(),
+                PARK_TIMER_THRESHOLD_MS,
+                rx,
+            ));
+            (tx, self.pending_call_started, task)
         }
     }
 
@@ -6968,30 +7594,7 @@ mod tests {
         }
     }
 
-    struct WorkflowNamedTool(&'static str);
-
-    #[async_trait::async_trait]
-    impl crate::tool::Tool for WorkflowNamedTool {
-        fn name(&self) -> &str {
-            self.0
-        }
-
-        fn description(&self) -> &str {
-            "Test workflow tool"
-        }
-
-        fn parameters(&self) -> serde_json::Value {
-            serde_json::json!({ "type": "object" })
-        }
-
-        async fn execute(
-            &self,
-            _arguments: serde_json::Value,
-            _ctx: &dyn swage_tool::context::ToolContext,
-        ) -> Result<serde_json::Value, swage_core::ToolError> {
-            Ok(serde_json::json!({ "unexpected": "execution" }))
-        }
-    }
+    use crate::test_support::NamedTool;
 
     #[async_trait::async_trait]
     impl DeliveryCapability for CancellingDeliveryCapability {
@@ -7433,21 +8036,27 @@ mod tests {
                 _ => {}
             }
         }
-        assert_eq!(observed.len(), 2);
-        assert_eq!(observed[0].id, observed[1].id);
+        let log_events = observed
+            .into_iter()
+            .filter(|entry| entry.kind == WorkflowJournalEntryKind::Log)
+            .collect::<Vec<_>>();
+        assert_eq!(log_events.len(), 2);
+        assert_eq!(log_events[0].id, log_events[1].id);
         let Json(detail) = get_run(State(state.clone()), Path(started.id))
             .await
             .expect("detail");
-        assert_eq!(observed[1].status, detail.journal[0].status);
-        assert_eq!(
-            observed[1].completed_order,
-            detail.journal[0].completed_order
-        );
+        let log = detail
+            .journal
+            .iter()
+            .find(|entry| entry.kind == WorkflowJournalEntryKind::Log)
+            .expect("logged journal entry");
+        assert_eq!(log_events[1].status, log.status);
+        assert_eq!(log_events[1].completed_order, log.completed_order);
 
         let failed = state
             .create_workflow_journal_intent(NewWorkflowJournalIntent {
                 run_id: started.id,
-                seq: 1,
+                seq: 2,
                 kind: "effect".into(),
                 args_hash: journal_args_hash(&Value::Null),
                 request: Value::Null,
@@ -7498,52 +8107,8 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn configured_working_budget_admits_both_parallel_calls() {
-        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
-        let run = storage
-            .create_workflow_run(NewWorkflowRun {
-                space_id: space.id,
-                parent_run_id: None,
-                parent_seq: None,
-                script_version_id: None,
-                inline_workflow_id: None,
-                inline_workflow_name: None,
-                inline_workflow_version: None,
-                carrying_skill: None,
-                source: Some("return null".into()),
-                source_hash: source_hash("return null"),
-                args: Value::Null,
-                budget: serde_json::json!({}),
-                engine_version: "test".into(),
-                dispatch_bound_agent_ids: vec![],
-                dispatch_bound_task_definition_ids: vec![],
-                workflow_call_tools: None,
-                inherited_worker_placement: None,
-            })
-            .await
-            .expect("run");
-        let pending_call_started = Arc::new(Notify::new());
-        let state = AppState::new(
-            Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
-            Arc::new(PendingWorkingProvider {
-                calls: AtomicUsize::new(0),
-                pending_calls: 2,
-                pending_call_started: Arc::clone(&pending_call_started),
-            }),
-            swage_config::ResolvedConfig::default(),
-            crate::tool::ToolDispatcher::allow_all(vec![]),
-            None,
-        );
-        let (tx, rx) = mpsc::unbounded_channel();
-        let task = tokio::spawn(run_host_commands(
-            state,
-            run.id,
-            space.id,
-            vec![],
-            vec![],
-            None,
-            None,
+        let scaffold = WorkingBudgetScaffold::new(2).await;
+        let (tx, pending_call_started, task) = scaffold.spawn(
             WorkflowBudget {
                 max_agent_calls: Some(2),
                 max_total_tokens: Some(1_000),
@@ -7551,13 +8116,9 @@ mod tests {
                 max_concurrent_agent_calls: Some(2),
             },
             vec![],
-            Arc::new(AtomicU32::new(0)),
-            Arc::new(AtomicU64::new(0)),
-            Arc::new(Mutex::new(std::collections::HashMap::new())),
-            CancellationToken::new(),
-            PARK_TIMER_THRESHOLD_MS,
-            rx,
-        ));
+            0,
+            0,
+        );
         let request = |prompt: &str| AgentCallRequest {
             cwd: None,
             isolation: None,
@@ -7567,6 +8128,7 @@ mod tests {
             agent: Some("default".into()),
             task: None,
             tools: None,
+            skills: None,
             model: None,
             schema: None,
             max_attempts: 1,
@@ -7677,6 +8239,7 @@ mod tests {
             agent: Some("default".into()),
             task: None,
             tools: None,
+            skills: None,
             model: None,
             schema: None,
             max_attempts: 1,
@@ -7754,6 +8317,8 @@ mod tests {
     async fn a_continued_call_lands_on_the_same_worker_session_with_history() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
         let space = storage.get_or_create_default().await.expect("space");
+        let worker_directory = tempfile::tempdir().expect("worker directory");
+        grant_workspace(&storage, space.id, worker_directory.path()).await;
         let swage_home = crate::test_support::SwageHomeGuard::new();
         for (agent, allow) in [("lead", "shell"), ("worker", "shell")] {
             let agent_dir = swage_home.path().join("spaces/default/agents").join(agent);
@@ -7813,7 +8378,7 @@ mod tests {
             Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![
-                Arc::new(WorkflowNamedTool("shell")) as Arc<dyn crate::tool::Tool>
+                Arc::new(NamedTool::new("shell")) as Arc<dyn crate::tool::Tool>
             ]),
             None,
         );
@@ -7842,10 +8407,9 @@ mod tests {
         ));
 
         let (first_reply, first_receive) = oneshot::channel();
-        tx.send(HostCommand::Agent {
-            resolved_working_directory: None,
+        tx.send(HostCommand::DispatchAgent {
             request: AgentCallRequest {
-                cwd: None,
+                cwd: Some(worker_directory.path().to_string_lossy().into_owned()),
                 isolation: None,
                 effort: None,
                 timeout_ms: None,
@@ -7853,6 +8417,7 @@ mod tests {
                 agent: Some("worker".into()),
                 task: None,
                 tools: None,
+                skills: None,
                 model: None,
                 schema: None,
                 max_attempts: 1,
@@ -7870,6 +8435,11 @@ mod tests {
             .await
             .expect("first reply")
             .expect("first result");
+        assert_eq!(
+            first.working_directory.as_deref(),
+            Some(worker_directory.path().to_string_lossy().as_ref()),
+            "the first call reports its resolved worker directory"
+        );
         let token = AgentSessionRef {
             session_id: first.session_id.expect("session id"),
             thread_id: first.thread_id.expect("thread id"),
@@ -7904,8 +8474,7 @@ mod tests {
         .expect("revoke lead shell grant");
 
         let (second_reply, second_receive) = oneshot::channel();
-        tx.send(HostCommand::Agent {
-            resolved_working_directory: None,
+        tx.send(HostCommand::DispatchAgent {
             request: AgentCallRequest {
                 cwd: None,
                 isolation: None,
@@ -7915,6 +8484,7 @@ mod tests {
                 agent: Some("worker".into()),
                 task: None,
                 tools: None,
+                skills: None,
                 model: None,
                 schema: None,
                 max_attempts: 1,
@@ -7932,6 +8502,11 @@ mod tests {
             .await
             .expect("second reply")
             .expect("second result");
+        assert_eq!(
+            second.working_directory.as_deref(),
+            first.working_directory.as_deref(),
+            "a continuation reports the immutable directory of its existing worker"
+        );
 
         let second_entry_id = storage
             .list_workflow_journal(run.id)
@@ -7964,6 +8539,7 @@ mod tests {
                 agent: Some("worker".into()),
                 task: None,
                 tools: None,
+                skills: None,
                 model: None,
                 schema: None,
                 max_attempts: 1,
@@ -7984,13 +8560,15 @@ mod tests {
                 .expect_err("continued placement must be immutable"),
             "WorkerPlacementError: a continued worker keeps its original placement; cwd and isolation cannot be supplied with session".into()
         );
-        assert!(
+        assert_eq!(
             storage
                 .list_workflow_journal(run.id)
                 .await
                 .expect("journal")
                 .iter()
-                .all(|entry| entry.kind != "worker_placement"),
+                .filter(|entry| entry.kind == "worker_placement")
+                .count(),
+            1,
             "a rejected continuation must not provision or journal an unused worktree"
         );
 
@@ -7998,6 +8576,20 @@ mod tests {
         assert_eq!(second.session_id, Some(token.session_id));
         assert_eq!(second.thread_id, Some(token.thread_id));
         assert_eq!(second.output, Value::String("the work is done".into()));
+        let continued_result = storage
+            .list_workflow_journal(run.id)
+            .await
+            .expect("journal")
+            .into_iter()
+            .filter(|entry| entry.kind == "agent_call" && entry.status == "completed")
+            .max_by_key(|entry| entry.seq)
+            .and_then(|entry| entry.result)
+            .expect("continued agent call result");
+        assert_eq!(
+            continued_result["working_directory"],
+            worker_directory.path().to_string_lossy().as_ref(),
+            "the continued call journals its known worker directory"
+        );
         let turns = storage
             .list_turns_by_thread(token.thread_id)
             .await
@@ -8082,7 +8674,7 @@ mod tests {
             Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![
-                Arc::new(WorkflowNamedTool("shell")) as Arc<dyn crate::tool::Tool>
+                Arc::new(NamedTool::new("shell")) as Arc<dyn crate::tool::Tool>
             ]),
             None,
         );
@@ -8100,11 +8692,14 @@ mod tests {
             .list_workflow_journal(run.id)
             .await
             .expect("journal");
-        assert_eq!(journal.len(), 1);
-        assert_eq!(journal[0].status, "completed");
-        assert!(journal[0].request.get("agent").is_none());
+        let agent_call = journal
+            .iter()
+            .find(|entry| entry.kind == "agent_call")
+            .expect("bare agent call");
+        assert_eq!(agent_call.status, "completed");
+        assert!(agent_call.request.get("agent").is_none());
         assert_eq!(
-            journal_wire(journal[0].clone())
+            journal_wire(agent_call.clone())
                 .expect("journal wire projection")
                 .agent_call
                 .expect("agent-call detail")
@@ -8112,12 +8707,12 @@ mod tests {
             None,
             "a bare call must not project an invented agent definition identity"
         );
-        assert_eq!(journal[0].request["prompt"], "bounded work");
+        assert_eq!(agent_call.request["prompt"], "bounded work");
         assert_eq!(
-            journal[0].result.as_ref().unwrap()["output"],
+            agent_call.result.as_ref().unwrap()["output"],
             "bounded work completed"
         );
-        let session_id = journal[0].result.as_ref().unwrap()["session_id"]
+        let session_id = agent_call.result.as_ref().unwrap()["session_id"]
             .as_str()
             .and_then(|id| Uuid::parse_str(id).ok())
             .expect("journalled worker session id");
@@ -8162,6 +8757,112 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn schema_exhaustion_returns_null_and_replays_without_a_new_agent_call() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let provider = Arc::new(ScriptedRecordingProvider {
+            outputs: std::sync::Mutex::new(std::collections::VecDeque::from([
+                scripted_text_output("not JSON"),
+                scripted_text_output("still not JSON"),
+            ])),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let source = r#"return await agent("return a JSON object", {
+            schema: {type: "object", required: ["answer"]}, maxAttempts: 2
+        });"#;
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(space.id),
+            Json(StartInlineWorkflowRunRequest {
+                source: source.into(),
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start schema-constrained run");
+        wait_for_terminal(&state, started.id).await;
+
+        let completed = storage
+            .get_workflow_run(started.id)
+            .await
+            .expect("run")
+            .expect("present");
+        assert_eq!(completed.state, "completed");
+        assert_eq!(completed.final_output, Some(Value::Null));
+        let journal = storage
+            .list_workflow_journal(started.id)
+            .await
+            .expect("journal");
+        assert_eq!(journal.len(), 2);
+        let agent_call = journal
+            .iter()
+            .find(|entry| entry.kind == "agent_call")
+            .expect("failed schema-constrained agent call");
+        assert_eq!(agent_call.status, "failed");
+        assert!(
+            agent_call
+                .error_message
+                .as_deref()
+                .is_some_and(|error| error.starts_with("SchemaExhaustedError:"))
+        );
+        assert_eq!(
+            journal
+                .iter()
+                .find(|entry| entry.kind == "terminal_budget")
+                .expect("terminal budget audit")
+                .status,
+            "completed"
+        );
+        assert_eq!(provider.requests.lock().expect("requests").len(), 2);
+
+        storage
+            .update_workflow_run_state(started.id, "interrupted", None, None, None)
+            .await
+            .expect("simulate restart");
+        let _ = resume_run(State(state.clone()), Path(started.id))
+            .await
+            .expect("replay schema-constrained run");
+        wait_for_terminal(&state, started.id).await;
+
+        let replayed = storage
+            .get_workflow_run(started.id)
+            .await
+            .expect("run")
+            .expect("present");
+        assert_eq!(replayed.state, "completed");
+        assert_eq!(replayed.final_output, Some(Value::Null));
+        let replayed_journal = storage
+            .list_workflow_journal(started.id)
+            .await
+            .expect("journal");
+        assert_eq!(replayed_journal.len(), 2);
+        assert_eq!(
+            replayed_journal
+                .iter()
+                .filter(|entry| entry.kind == "agent_call")
+                .count(),
+            1
+        );
+        assert_eq!(
+            replayed_journal
+                .iter()
+                .filter(|entry| entry.kind == "terminal_budget")
+                .count(),
+            1
+        );
+        assert_eq!(provider.requests.lock().expect("requests").len(), 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn workflow_launched_by_a_placed_worker_keeps_its_exact_filesystem_authority() {
         let fixture = tempfile::tempdir().expect("workspace fixture");
         let workspace = fixture.path().join("workspace");
@@ -8181,6 +8882,7 @@ mod tests {
                 description: String::new(),
                 source: "return await agent('attempt sibling read', { maxAttempts: 1 });".into(),
                 delivery_grant: None,
+                authoring_session_id: None,
             })
             .await
             .expect("store workflow");
@@ -8299,6 +9001,7 @@ mod tests {
                 description: String::new(),
                 source: source.into(),
                 delivery_grant: None,
+                authoring_session_id: None,
             })
             .await
             .expect("store workflow");
@@ -8311,7 +9014,7 @@ mod tests {
             })
             .await
             .expect("session");
-        let _skill_root = crate::websocket::SessionSkillRootGuard::empty(session.id);
+        let _skill_root = crate::skill::TestSkillRootGuard::empty(session.id);
         let provider = Arc::new(ScriptedRecordingProvider {
             outputs: std::sync::Mutex::new(std::collections::VecDeque::from([
                 scripted_text_output("bounded work completed"),
@@ -8334,7 +9037,7 @@ mod tests {
             Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
             config,
             crate::tool::ToolDispatcher::allow_all(vec![
-                Arc::new(WorkflowNamedTool("shell")) as Arc<dyn crate::tool::Tool>
+                Arc::new(NamedTool::new("shell")) as Arc<dyn crate::tool::Tool>
             ]),
             None,
         );
@@ -8421,6 +9124,7 @@ mod tests {
                 description: String::new(),
                 source: "return await agent('nested bounded work');".into(),
                 delivery_grant: None,
+                authoring_session_id: None,
             })
             .await
             .expect("store inner workflow");
@@ -8431,6 +9135,7 @@ mod tests {
                 description: String::new(),
                 source: "return await workflow('inner-bounded', {});".into(),
                 delivery_grant: None,
+                authoring_session_id: None,
             })
             .await
             .expect("store outer workflow");
@@ -8445,7 +9150,7 @@ mod tests {
             })
             .await
             .expect("call-scoped worker session");
-        let _skill_root = crate::websocket::SessionSkillRootGuard::empty(session.id);
+        let _skill_root = crate::skill::TestSkillRootGuard::empty(session.id);
         let provider = Arc::new(ScriptedRecordingProvider {
             outputs: std::sync::Mutex::new(std::collections::VecDeque::from([
                 scripted_text_output("nested bounded work completed"),
@@ -8469,7 +9174,7 @@ mod tests {
             config,
             crate::tool::ToolDispatcher::allow_all(vec![
                 Arc::new(crate::tool::workflow_run::WorkflowRunTool) as Arc<dyn crate::tool::Tool>,
-                Arc::new(WorkflowNamedTool("shell")) as Arc<dyn crate::tool::Tool>,
+                Arc::new(NamedTool::new("shell")) as Arc<dyn crate::tool::Tool>,
             ]),
             None,
         );
@@ -8574,7 +9279,7 @@ mod tests {
             Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
             config,
             crate::tool::ToolDispatcher::allow_all(vec![
-                Arc::new(WorkflowNamedTool("shell")) as Arc<dyn crate::tool::Tool>
+                Arc::new(NamedTool::new("shell")) as Arc<dyn crate::tool::Tool>
             ]),
             None,
         );
@@ -8583,6 +9288,7 @@ mod tests {
             agent: None,
             task: Some("review".into()),
             tools: None,
+            skills: None,
             model: None,
             effort: None,
             timeout_ms: None,
@@ -8721,7 +9427,9 @@ mod tests {
         .await
         .expect_err("missing task must fail before provider dispatch");
         assert!(
-            error.contains("no task definition 'missing' exists"),
+            error
+                .to_string()
+                .contains("no task definition 'missing' exists"),
             "unexpected missing-task error: {error}"
         );
         assert_eq!(provider.requests.lock().expect("requests").len(), 3);
@@ -9154,12 +9862,10 @@ mod tests {
         let cwd = serde_json::to_string(&repo.to_string_lossy()).unwrap();
         let source = format!(
             r#"
-            const calls = [
-                agent("write first-marker", {{ cwd: {cwd}, isolation: "worktree", maxAttempts: 1 }}),
-                agent("write second-marker", {{ cwd: {cwd}, isolation: "worktree", maxAttempts: 1 }})
-            ];
-            await Promise.all(calls);
-            return await workerPlacements();
+            const first = agentStart("write first-marker", {{ cwd: {cwd}, isolation: "worktree", maxAttempts: 1 }});
+            const second = agentStart("write second-marker", {{ cwd: {cwd}, isolation: "worktree", maxAttempts: 1 }});
+            await Promise.all([first.result, second.result]);
+            return {{ first: first.workingDirectory, second: second.workingDirectory }};
         "#
         );
         let Json(started) = start_inline_run(
@@ -9187,6 +9893,32 @@ mod tests {
             .map(std::path::PathBuf::from)
             .collect::<Vec<_>>();
         assert_eq!(paths.len(), 2);
+        let agent_call_results = journal
+            .iter()
+            .filter(|entry| entry.kind == "agent_call")
+            .map(|entry| {
+                assert_eq!(
+                    entry.request["cwd"],
+                    repo.to_string_lossy().as_ref(),
+                    "the journal retains the caller's requested directory"
+                );
+                entry
+                    .result
+                    .as_ref()
+                    .and_then(|result| result["working_directory"].as_str())
+                    .map(std::path::PathBuf::from)
+                    .expect("completed worker call records its host-resolved directory")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(agent_call_results.len(), 2);
+        assert!(
+            agent_call_results.iter().all(|path| paths.contains(path)),
+            "each call result must report one of this run's provisioned paths"
+        );
+        assert_ne!(
+            agent_call_results[0], agent_call_results[1],
+            "parallel isolated siblings expose independently verifiable directories"
+        );
         let writes = placement_tool.writes.lock().expect("placement writes");
         assert_eq!(writes.len(), 2);
         assert!(
@@ -9473,12 +10205,15 @@ mod tests {
             .await
             .expect("journal read-back");
         assert_eq!(failed_run.state, "failed");
-        assert_eq!(journal.len(), 1);
-        assert_eq!(journal[0].status, "failed");
-        assert_eq!(journal[0].request["effort"], "high");
-        assert_eq!(journal[0].request["timeout_ms"], 10000);
+        let agent_call = journal
+            .iter()
+            .find(|entry| entry.kind == "agent_call")
+            .expect("timed-out agent call");
+        assert_eq!(agent_call.status, "failed");
+        assert_eq!(agent_call.request["effort"], "high");
+        assert_eq!(agent_call.request["timeout_ms"], 10000);
         assert!(
-            journal[0]
+            agent_call
                 .error_message
                 .as_deref()
                 .is_some_and(|error| error.starts_with("AgentCallTimeoutError:"))
@@ -9486,7 +10221,10 @@ mod tests {
         {
             let requests = provider.requests.lock().expect("requests");
             assert_eq!(requests.len(), 1);
-            assert_eq!(requests[0].effort, Some(swage_core::Effort::High));
+            assert_eq!(
+                requests[0].effort.as_ref().map(|effort| effort.requested),
+                Some(swage_core::Effort::High)
+            );
         }
         wait_for_worker_turn_interrupted(&storage).await;
         assert!(
@@ -9545,7 +10283,13 @@ mod tests {
                 source: Some(source.into()),
                 source_hash: source_hash(source),
                 args: Value::Null,
-                budget: serde_json::json!({}),
+                budget: serde_json::to_value(WorkflowBudget {
+                    max_agent_calls: Some(1),
+                    max_total_tokens: Some(10),
+                    reserved_closing_tokens: Some(4),
+                    max_concurrent_agent_calls: Some(1),
+                })
+                .expect("budget"),
                 engine_version: "test".into(),
                 carrying_skill: None,
                 dispatch_bound_agent_ids: vec![],
@@ -9588,11 +10332,29 @@ mod tests {
             .await
             .expect("journal read-back");
         assert_eq!(cancelled_run.state, "cancelled");
-        assert_eq!(journal.len(), 1);
-        assert_eq!(journal[0].status, "failed");
+        let agent_call = journal
+            .iter()
+            .find(|entry| entry.kind == "agent_call")
+            .expect("cancelled agent call");
+        assert_eq!(agent_call.status, "failed");
         assert_eq!(
-            journal[0].error_message.as_deref(),
+            agent_call.error_message.as_deref(),
             Some("WorkflowCancelledError: run cancelled")
+        );
+        let terminal = journal
+            .iter()
+            .find(|entry| entry.kind == "terminal_budget")
+            .expect("terminal budget entry");
+        assert_eq!(terminal.status, "completed");
+        assert_eq!(terminal.result.as_ref().unwrap()["spent"], 0);
+        assert_eq!(terminal.result.as_ref().unwrap()["remaining"], 10);
+        assert_eq!(terminal.result.as_ref().unwrap()["closing_remaining"], 4);
+        assert_eq!(
+            journal
+                .iter()
+                .filter(|entry| entry.kind == "terminal_budget")
+                .count(),
+            1
         );
         assert_eq!(provider.requests.lock().expect("requests").len(), 1);
         wait_for_worker_turn_interrupted(&storage).await;
@@ -9603,11 +10365,16 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn cancelling_a_parked_run_settles_its_started_journal_entry() {
+    async fn cancelling_a_parked_run_settles_journal_and_records_terminal_budget() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
         let space = storage.get_or_create_default().await.expect("space");
         let source = format!(
-            "return await wait({{ timerMs: {} }});",
+            r#"
+                await agent("working segment", {{agent: "default"}});
+                await budgetSnapshot();
+                await agent("closing segment", {{agent: "default"}});
+                return await wait({{ timerMs: {} }});
+            "#,
             PARK_TIMER_THRESHOLD_MS + 1
         );
         let run = storage
@@ -9623,7 +10390,13 @@ mod tests {
                 source: Some(source.clone()),
                 source_hash: source_hash(&source),
                 args: Value::Null,
-                budget: serde_json::json!({}),
+                budget: serde_json::to_value(WorkflowBudget {
+                    max_agent_calls: Some(3),
+                    max_total_tokens: Some(10),
+                    reserved_closing_tokens: Some(4),
+                    max_concurrent_agent_calls: Some(1),
+                })
+                .expect("budget"),
                 engine_version: "test".into(),
                 dispatch_bound_agent_ids: vec![],
                 dispatch_bound_task_definition_ids: vec![],
@@ -9632,10 +10405,17 @@ mod tests {
             })
             .await
             .expect("run");
+        let provider = Arc::new(ScriptedRecordingProvider {
+            outputs: std::sync::Mutex::new(std::collections::VecDeque::from(vec![
+                scripted_text_output_with_usage("working segment", 2, 3),
+                scripted_text_output_with_usage("closing segment", 1, 1),
+            ])),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn SpaceStore>,
-            Arc::new(crate::turn::tests::PendingProvider),
+            provider,
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
             None,
@@ -9673,12 +10453,29 @@ mod tests {
             .list_workflow_journal(run.id)
             .await
             .expect("cancelled journal");
-        assert_eq!(journal.len(), 1);
-        assert_eq!(journal[0].kind, "timer");
-        assert_eq!(journal[0].status, "failed");
+        let timer = journal
+            .iter()
+            .find(|entry| entry.kind == "timer")
+            .expect("timer entry");
+        assert_eq!(timer.status, "failed");
         assert_eq!(
-            journal[0].error_message.as_deref(),
+            timer.error_message.as_deref(),
             Some("WorkflowCancelledError: run cancelled")
+        );
+        let terminal = journal
+            .iter()
+            .find(|entry| entry.kind == "terminal_budget")
+            .expect("terminal budget entry");
+        assert_eq!(terminal.status, "completed");
+        assert_eq!(terminal.result.as_ref().unwrap()["spent"], 7);
+        assert_eq!(terminal.result.as_ref().unwrap()["remaining"], 3);
+        assert_eq!(terminal.result.as_ref().unwrap()["closing_remaining"], 2);
+        assert_eq!(
+            journal
+                .iter()
+                .filter(|entry| entry.kind == "terminal_budget")
+                .count(),
+            1
         );
     }
 
@@ -9762,6 +10559,7 @@ mod tests {
                 agent: Some("worker".into()),
                 task: None,
                 tools: None,
+                skills: None,
                 model: None,
                 schema: None,
                 max_attempts: 1,
@@ -9811,6 +10609,7 @@ mod tests {
                 agent: None,
                 task: Some("review".into()),
                 tools: None,
+                skills: None,
                 model: None,
                 effort: None,
                 timeout_ms: None,
@@ -9833,7 +10632,11 @@ mod tests {
         .await
         .expect_err("continued calls must not silently ignore a task selector");
 
-        assert!(error.contains("cannot be selected on a continued session"));
+        assert!(
+            error
+                .to_string()
+                .contains("cannot be selected on a continued session")
+        );
     }
 
     /// Serves scripted gate verdicts through `complete` and counts calls, so
@@ -10367,9 +11170,11 @@ mod tests {
             .list_workflow_journal(started.id)
             .await
             .expect("journal");
-        assert_eq!(journal.len(), 1);
-        assert_eq!(journal[0].kind, "await_event");
-        assert_eq!(journal[0].status, "completed");
+        let await_event = journal
+            .iter()
+            .find(|entry| entry.kind == "await_event")
+            .expect("await-event journal entry");
+        assert_eq!(await_event.status, "completed");
 
         storage
             .update_workflow_run_state(started.id, "interrupted", None, None, None)
@@ -10621,7 +11426,8 @@ mod tests {
                 .list_workflow_journal(started.id)
                 .await
                 .expect("invalid-kind journal")
-                .is_empty()
+                .iter()
+                .all(|entry| entry.kind == "terminal_budget")
         );
         assert!(
             storage
@@ -11484,6 +12290,7 @@ mod tests {
             agent: Some("worker".into()),
             task: None,
             tools: None,
+            skills: None,
             model: None,
             schema: None,
             max_attempts: 3,
@@ -11514,6 +12321,7 @@ mod tests {
                     output: Value::String("restated".into()),
                     input_tokens: 1,
                     output_tokens: 1,
+                    working_directory: None,
                     session_id: Some(session.id),
                     thread_id: Some(thread.id),
                     turn_id: Some(Uuid::new_v4()),
@@ -11531,6 +12339,7 @@ mod tests {
             agent: Some("worker".into()),
             task: None,
             tools: None,
+            skills: None,
             model: None,
             schema: None,
             session: Some(AgentSessionRef {
@@ -11664,6 +12473,7 @@ mod tests {
             agent: Some("default".into()),
             task: None,
             tools: None,
+            skills: None,
             model: None,
             schema: None,
             max_attempts: 1,
@@ -11722,52 +12532,8 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn in_flight_working_reservations_do_not_consume_the_closing_partition() {
-        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
-        let run = storage
-            .create_workflow_run(NewWorkflowRun {
-                space_id: space.id,
-                parent_run_id: None,
-                parent_seq: None,
-                script_version_id: None,
-                inline_workflow_id: None,
-                inline_workflow_name: None,
-                inline_workflow_version: None,
-                carrying_skill: None,
-                source: Some("return null".into()),
-                source_hash: source_hash("return null"),
-                args: Value::Null,
-                budget: serde_json::json!({}),
-                engine_version: "test".into(),
-                dispatch_bound_agent_ids: vec![],
-                dispatch_bound_task_definition_ids: vec![],
-                workflow_call_tools: None,
-                inherited_worker_placement: None,
-            })
-            .await
-            .expect("run");
-        let pending_call_started = Arc::new(Notify::new());
-        let state = AppState::new(
-            Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
-            Arc::new(PendingWorkingProvider {
-                calls: AtomicUsize::new(0),
-                pending_calls: 2,
-                pending_call_started: Arc::clone(&pending_call_started),
-            }),
-            swage_config::ResolvedConfig::default(),
-            crate::tool::ToolDispatcher::allow_all(vec![]),
-            None,
-        );
-        let (tx, rx) = mpsc::unbounded_channel();
-        let task = tokio::spawn(run_host_commands(
-            state,
-            run.id,
-            space.id,
-            vec![],
-            vec![],
-            None,
-            None,
+        let scaffold = WorkingBudgetScaffold::new(2).await;
+        let (tx, pending_call_started, task) = scaffold.spawn(
             WorkflowBudget {
                 max_agent_calls: Some(3),
                 max_total_tokens: Some(6),
@@ -11775,13 +12541,9 @@ mod tests {
                 max_concurrent_agent_calls: Some(4),
             },
             vec![],
-            Arc::new(AtomicU32::new(0)),
-            Arc::new(AtomicU64::new(2)),
-            Arc::new(Mutex::new(std::collections::HashMap::new())),
-            CancellationToken::new(),
-            PARK_TIMER_THRESHOLD_MS,
-            rx,
-        ));
+            0,
+            2,
+        );
         let request = |prompt: &str| AgentCallRequest {
             cwd: None,
             isolation: None,
@@ -11791,6 +12553,7 @@ mod tests {
             agent: Some("default".into()),
             task: None,
             tools: None,
+            skills: None,
             model: None,
             schema: None,
             max_attempts: 1,
@@ -11865,30 +12628,9 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn replayed_in_flight_working_reservations_leave_the_closing_partition_available() {
-        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
-        let run = storage
-            .create_workflow_run(NewWorkflowRun {
-                space_id: space.id,
-                parent_run_id: None,
-                parent_seq: None,
-                script_version_id: None,
-                inline_workflow_id: None,
-                inline_workflow_name: None,
-                inline_workflow_version: None,
-                carrying_skill: None,
-                source: Some("return null".into()),
-                source_hash: source_hash("return null"),
-                args: Value::Null,
-                budget: serde_json::json!({}),
-                engine_version: "test".into(),
-                dispatch_bound_agent_ids: vec![],
-                dispatch_bound_task_definition_ids: vec![],
-                workflow_call_tools: None,
-                inherited_worker_placement: None,
-            })
-            .await
-            .expect("run");
+        let scaffold = WorkingBudgetScaffold::new(2).await;
+        let storage = Arc::clone(&scaffold.storage);
+        let run_id = scaffold.run_id;
         let request = |prompt: &str| AgentCallRequest {
             cwd: None,
             isolation: None,
@@ -11898,6 +12640,7 @@ mod tests {
             agent: Some("default".into()),
             task: None,
             tools: None,
+            skills: None,
             model: None,
             schema: None,
             max_attempts: 1,
@@ -11911,7 +12654,7 @@ mod tests {
             let request_json = serde_json::to_value(request(prompt)).expect("working request");
             storage
                 .create_workflow_journal_intent(NewWorkflowJournalIntent {
-                    run_id: run.id,
+                    run_id,
                     seq,
                     kind: "agent_call".into(),
                     args_hash: journal_args_hash(&request_json),
@@ -11928,7 +12671,7 @@ mod tests {
             serde_json::to_value(&transition_request).expect("transition request");
         let transition = storage
             .create_workflow_journal_intent(NewWorkflowJournalIntent {
-                run_id: run.id,
+                run_id,
                 seq: 2,
                 kind: "wind_down".into(),
                 args_hash: journal_args_hash(&transition_json),
@@ -11953,31 +12696,10 @@ mod tests {
             .await
             .expect("wind-down transition");
         let replay = storage
-            .list_workflow_journal(run.id)
+            .list_workflow_journal(run_id)
             .await
             .expect("journal");
-        let pending_call_started = Arc::new(Notify::new());
-        let state = AppState::new(
-            Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
-            Arc::new(PendingWorkingProvider {
-                calls: AtomicUsize::new(0),
-                pending_calls: 2,
-                pending_call_started: Arc::clone(&pending_call_started),
-            }),
-            swage_config::ResolvedConfig::default(),
-            crate::tool::ToolDispatcher::allow_all(vec![]),
-            None,
-        );
-        let (tx, rx) = mpsc::unbounded_channel();
-        let task = tokio::spawn(run_host_commands(
-            state,
-            run.id,
-            space.id,
-            vec![],
-            vec![],
-            None,
-            None,
+        let (tx, pending_call_started, task) = scaffold.spawn(
             WorkflowBudget {
                 max_agent_calls: Some(3),
                 max_total_tokens: Some(6),
@@ -11985,13 +12707,9 @@ mod tests {
                 max_concurrent_agent_calls: Some(4),
             },
             replay,
-            Arc::new(AtomicU32::new(2)),
-            Arc::new(AtomicU64::new(0)),
-            Arc::new(Mutex::new(std::collections::HashMap::new())),
-            CancellationToken::new(),
-            PARK_TIMER_THRESHOLD_MS,
-            rx,
-        ));
+            2,
+            0,
+        );
         let first_cancellation = CancellationToken::new();
         let (first_reply, first_receive) = oneshot::channel();
         tx.send(HostCommand::Agent {
@@ -12090,6 +12808,7 @@ mod tests {
             agent: Some("default".into()),
             task: None,
             tools: None,
+            skills: None,
             model: None,
             schema: None,
             max_attempts: 1,
@@ -12227,6 +12946,7 @@ mod tests {
             agent: Some("default".into()),
             task: None,
             tools: None,
+            skills: None,
             model: None,
             schema: None,
             max_attempts: 1,
@@ -12356,6 +13076,7 @@ mod tests {
             agent: Some("default".into()),
             task: None,
             tools: None,
+            skills: None,
             model: None,
             schema: None,
             max_attempts: 1,
@@ -12436,6 +13157,7 @@ mod tests {
             agent: Some("default".into()),
             task: None,
             tools: None,
+            skills: None,
             model: None,
             schema: None,
             max_attempts: 1,
@@ -12467,6 +13189,7 @@ mod tests {
                     output: Value::String("completed work".into()),
                     input_tokens: 1,
                     output_tokens: 1,
+                    working_directory: None,
                     session_id: None,
                     thread_id: None,
                     turn_id: None,
@@ -12679,6 +13402,7 @@ mod tests {
             agent: Some("default".into()),
             task: None,
             tools: None,
+            skills: None,
             model: None,
             schema: None,
             max_attempts: 1,
@@ -12710,6 +13434,7 @@ mod tests {
                     output: Value::String("completed work".into()),
                     input_tokens: 1,
                     output_tokens: 1,
+                    working_directory: None,
                     session_id: None,
                     thread_id: None,
                     turn_id: None,
@@ -12909,6 +13634,7 @@ mod tests {
             agent: Some("default".into()),
             task: None,
             tools: None,
+            skills: None,
             model: None,
             schema: None,
             max_attempts: 1,
@@ -12976,8 +13702,9 @@ mod tests {
             .list_workflow_journal(run.id)
             .await
             .expect("journal");
-        assert_eq!(journal.len(), 2);
+        assert_eq!(journal.len(), 3);
         assert_eq!(journal[0].id, refused.id);
+        assert_eq!(journal[1].kind, "agent_call");
         assert_eq!(journal[1].status, "completed");
     }
 
@@ -13156,10 +13883,18 @@ mod tests {
             .await
             .expect("journal");
         assert!(!journal.iter().any(|entry| entry.kind == "wind_down"));
+        let terminal = journal
+            .iter()
+            .find(|entry| entry.kind == "terminal_budget")
+            .expect("terminal budget entry");
+        let reading = terminal.result.as_ref().expect("terminal budget reading");
+        assert_eq!(reading["spent"], 6);
+        assert_eq!(reading["remaining"], 0);
+        assert!(reading["closing_remaining"].is_null());
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn exhausted_agent_call_leaves_a_durable_handover() {
+    async fn exhausted_schema_agent_call_completes_without_a_durable_handover() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
         let space = storage.get_or_create_default().await.expect("space");
         let provider = Arc::new(ScriptedRecordingProvider {
@@ -13185,7 +13920,7 @@ mod tests {
         let source = r#"
             await postEvent("operator.escalation", { decisionQueued: true });
             const grounding = await deliverEvents(1);
-            await agent(`make the lead decision from ${JSON.stringify(grounding)}`, {
+            return await agent(`make the lead decision from ${JSON.stringify(grounding)}`, {
                 agent: "default",
                 label: "lead segment 3",
                 maxAttempts: 3,
@@ -13194,6 +13929,110 @@ mod tests {
                     required: ["decision"],
                     properties: { decision: { type: "string" } }
                 }
+            });
+        "#;
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(space.id),
+            Json(StartInlineWorkflowRunRequest {
+                source: source.into(),
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start inline run");
+
+        wait_for_terminal(&state, started.id).await;
+
+        let run = storage
+            .get_workflow_run(started.id)
+            .await
+            .expect("run")
+            .expect("present");
+        assert_eq!(run.state, "completed");
+        assert_eq!(run.final_output, Some(Value::Null));
+        assert!(run.handover.is_none());
+        assert!(run.error_message.is_none());
+
+        let journal = storage
+            .list_workflow_journal(started.id)
+            .await
+            .expect("journal");
+        let failed_call = journal
+            .iter()
+            .find(|entry| entry.kind == "agent_call")
+            .expect("failed agent call");
+        assert_eq!(failed_call.status, "failed");
+        assert!(
+            failed_call
+                .error_message
+                .as_deref()
+                .is_some_and(|error| error.starts_with("SchemaExhaustedError:"))
+        );
+
+        let events = storage
+            .list_workflow_run_events(started.id)
+            .await
+            .expect("events");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, "operator.escalation");
+        assert!(events[0].delivered_at.is_some());
+        assert_eq!(provider.requests.lock().expect("requests").len(), 3);
+        assert!(provider.requests.lock().expect("requests")[0]
+            .messages
+            .iter()
+            .flat_map(|message| message.content())
+            .any(|part| matches!(part, swage_core::ContentPart::Text { text } if text.contains(r#""delivered":1"#))));
+
+        let Json(detail) = get_run(State(state.clone()), Path(started.id))
+            .await
+            .expect("run detail");
+        assert_eq!(detail.run.final_output, Some(Value::Null));
+        assert!(detail.run.handover.is_none());
+        assert_eq!(detail.journal.len(), journal.len());
+        assert_eq!(detail.wake_metrics.events_pending, 0);
+
+        assert_eq!(resume_owed_workflow_runs(&state).await, 0);
+        assert_eq!(provider.requests.lock().expect("requests").len(), 3);
+        assert_eq!(
+            storage
+                .get_workflow_run(started.id)
+                .await
+                .expect("run")
+                .expect("present")
+                .state,
+            "completed"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn ordinary_failed_agent_call_keeps_interrupted_handover_event_accounting() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let provider = Arc::new(ScriptedRecordingProvider {
+            outputs: std::sync::Mutex::new(std::collections::VecDeque::from(vec![vec![
+                swage_core::StreamChunk::Error {
+                    message: "ordinary provider failure".into(),
+                },
+            ]])),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let source = r#"
+            await postEvent("operator.escalation", { decisionQueued: true });
+            const grounding = await deliverEvents(1);
+            await agent(`make the lead decision from ${JSON.stringify(grounding)}`, {
+                agent: "default",
+                label: "lead segment 3",
+                maxAttempts: 1,
             });
             return "unexpected";
         "#;
@@ -13247,10 +14086,17 @@ mod tests {
             failed_call.id.to_string()
         );
         assert_eq!(handover["failed_call"]["seq"], failed_call.seq);
+        let last_positional_seq = journal
+            .iter()
+            .filter(|entry| is_positional_journal_entry(entry))
+            .map(|entry| entry.seq)
+            .max()
+            .expect("positional journal entry");
         assert_eq!(
-            handover["last_journal_seq"],
-            journal.last().expect("last journal entry").seq
+            handover["last_journal_seq"], last_positional_seq,
+            "the terminal budget audit record is not a replay position"
         );
+        assert_ne!(last_positional_seq, TERMINAL_BUDGET_SEQUENCE);
 
         let events = storage
             .list_workflow_run_events(started.id)
@@ -13266,7 +14112,7 @@ mod tests {
             handover["events"][0]["delivery"],
             "delivered_to_failed_call"
         );
-        assert_eq!(provider.requests.lock().expect("requests").len(), 3);
+        assert_eq!(provider.requests.lock().expect("requests").len(), 1);
         assert!(provider.requests.lock().expect("requests")[0]
             .messages
             .iter()
@@ -13293,7 +14139,7 @@ mod tests {
         assert_eq!(detail.wake_metrics.events_pending, 0);
 
         assert_eq!(resume_owed_workflow_runs(&state).await, 0);
-        assert_eq!(provider.requests.lock().expect("requests").len(), 3);
+        assert_eq!(provider.requests.lock().expect("requests").len(), 1);
         assert_eq!(
             storage
                 .get_workflow_run(started.id)
@@ -13526,6 +14372,7 @@ mod tests {
             agent: Some("default".into()),
             task: None,
             tools: None,
+            skills: None,
             model: None,
             schema: None,
             max_attempts: 1,
@@ -13634,6 +14481,7 @@ mod tests {
             agent: Some("default".into()),
             task: None,
             tools: None,
+            skills: None,
             model: None,
             schema: None,
             max_attempts: 1,
@@ -13802,6 +14650,7 @@ mod tests {
                 description: String::new(),
                 source: source.into(),
                 delivery_grant: None,
+                authoring_session_id: None,
             })
             .await
             .expect("script");
@@ -13812,8 +14661,8 @@ mod tests {
                 args: Value::Null,
                 budget: Some(WorkflowBudget {
                     max_agent_calls: Some(3),
-                    max_total_tokens: Some(6),
-                    reserved_closing_tokens: Some(2),
+                    max_total_tokens: Some(8),
+                    reserved_closing_tokens: Some(4),
                     max_concurrent_agent_calls: Some(1),
                 }),
             }),
@@ -13833,9 +14682,22 @@ mod tests {
         assert_eq!(output["closing_report"], "the real closing report");
         assert_eq!(output["before_closing"]["winding_down"], true);
         assert_eq!(output["before_closing"]["working_remaining"], 0);
-        assert_eq!(output["before_closing"]["closing_remaining"], 2);
-        assert_eq!(output["after_closing"]["closing_remaining"], 0);
+        assert_eq!(output["before_closing"]["closing_remaining"], 4);
+        assert_eq!(output["after_closing"]["closing_remaining"], 2);
         assert_eq!(provider.requests.lock().expect("requests").len(), 3);
+
+        let journal = storage
+            .list_workflow_journal(started.id)
+            .await
+            .expect("terminal budget journal");
+        let terminal = journal
+            .iter()
+            .find(|entry| entry.kind == "terminal_budget")
+            .expect("terminal budget entry");
+        let reading = terminal.result.as_ref().expect("terminal budget reading");
+        assert_eq!(reading["spent"], 6);
+        assert_eq!(reading["remaining"], 2);
+        assert_eq!(reading["closing_remaining"], 2);
 
         storage
             .update_workflow_run_state(started.id, "interrupted", None, None, None)
@@ -13853,6 +14715,160 @@ mod tests {
         assert_eq!(replayed.state, "completed");
         assert_eq!(replayed.final_output.as_ref(), Some(output));
         assert_eq!(provider.requests.lock().expect("requests").len(), 3);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn terminal_budget_is_read_back_and_replayed_without_recomputation() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let provider = Arc::new(ScriptedRecordingProvider {
+            outputs: std::sync::Mutex::new(std::collections::VecDeque::from(
+                ["working one", "working two", "closing report"].map(scripted_text_output),
+            )),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let source = r#"
+            await agent("working one", {agent: "default"});
+            await agent("working two", {agent: "default"});
+            try { await agent("cross working boundary", {agent: "default"}); } catch (_) {}
+            return await agent("closing report", {agent: "default"});
+        "#;
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(space.id),
+            Json(StartInlineWorkflowRunRequest {
+                source: source.into(),
+                args: Value::Null,
+                budget: Some(WorkflowBudget {
+                    max_agent_calls: Some(4),
+                    max_total_tokens: Some(6),
+                    reserved_closing_tokens: Some(2),
+                    max_concurrent_agent_calls: Some(1),
+                }),
+            }),
+        )
+        .await
+        .expect("start inline run");
+        wait_for_terminal(&state, started.id).await;
+
+        let journal = storage
+            .list_workflow_journal(started.id)
+            .await
+            .expect("independent journal read-back");
+        let terminal = journal
+            .iter()
+            .find(|entry| entry.kind == "terminal_budget")
+            .expect("terminal budget entry");
+        assert_eq!(terminal.status, "completed");
+        assert_eq!(terminal.result.as_ref().unwrap()["closing_remaining"], 0);
+        assert_eq!(terminal.result.as_ref().unwrap()["spent"], 6);
+        assert_eq!(terminal.result.as_ref().unwrap()["remaining"], 0);
+        let terminal_id = terminal.id;
+
+        // The stored entry deliberately disagrees with the accounting that
+        // produced it. Replay must surface the durable audit reading rather
+        // than derive a replacement from its end-state counters.
+        storage
+            .with_conn(move |connection| {
+                connection.execute_batch(&format!(
+                    "UPDATE workflow_journal SET result_json = '{{\"closing_remaining\":99}}' WHERE id = '{terminal_id}';"
+                ))?;
+                Ok(())
+            })
+            .await
+            .expect("replace stored terminal reading");
+        storage
+            .update_workflow_run_state(started.id, "interrupted", None, None, None)
+            .await
+            .expect("simulate restart");
+        let _ = resume_run(State(state.clone()), Path(started.id))
+            .await
+            .expect("resume");
+        wait_for_terminal(&state, started.id).await;
+
+        let Json(detail) = get_run(State(state), Path(started.id))
+            .await
+            .expect("get run");
+        let replayed = detail
+            .journal
+            .iter()
+            .find(|entry| entry.kind == WorkflowJournalEntryKind::TerminalBudget)
+            .expect("projected terminal budget entry");
+        assert_eq!(replayed.result.as_ref().unwrap()["closing_remaining"], 99);
+        assert_eq!(
+            detail
+                .journal
+                .iter()
+                .filter(|entry| entry.kind == WorkflowJournalEntryKind::TerminalBudget)
+                .count(),
+            1
+        );
+        assert_eq!(provider.requests.lock().expect("requests").len(), 3);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn terminal_budget_audit_failure_preserves_the_engine_outcome() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        storage
+            .with_conn(|connection| {
+                connection.execute_batch(
+                    "CREATE TEMP TRIGGER reject_terminal_budget_completion
+                     BEFORE UPDATE OF status ON workflow_journal
+                     WHEN OLD.kind = 'terminal_budget' AND OLD.status = 'started'
+                          AND NEW.status = 'completed'
+                     BEGIN SELECT RAISE(FAIL, 'injected terminal audit failure'); END;",
+                )
+            })
+            .await
+            .expect("install terminal audit failure trigger");
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(space.id),
+            Json(StartInlineWorkflowRunRequest {
+                source: "return { settled: true };".into(),
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start run");
+        wait_for_terminal(&state, started.id).await;
+
+        let run = storage
+            .get_workflow_run(started.id)
+            .await
+            .expect("run")
+            .expect("present");
+        assert_eq!(run.state, "completed");
+        assert_eq!(
+            run.final_output,
+            Some(serde_json::json!({ "settled": true }))
+        );
+        let terminal = storage
+            .list_workflow_journal(started.id)
+            .await
+            .expect("journal")
+            .into_iter()
+            .find(|entry| entry.kind == "terminal_budget")
+            .expect("terminal budget intent");
+        assert_eq!(terminal.status, "started");
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -14127,6 +15143,7 @@ mod tests {
                 description: String::new(),
                 source: source.into(),
                 delivery_grant: None,
+                authoring_session_id: None,
             })
             .await
             .expect("script");
@@ -14244,6 +15261,7 @@ mod tests {
                 description: String::new(),
                 source: source.into(),
                 delivery_grant: None,
+                authoring_session_id: None,
             })
             .await
             .expect("script");
@@ -14332,6 +15350,7 @@ mod tests {
                 description: String::new(),
                 source: source.into(),
                 delivery_grant: None,
+                authoring_session_id: None,
             })
             .await
             .expect("script");
@@ -14455,6 +15474,7 @@ mod tests {
                 description: String::new(),
                 source: source.into(),
                 delivery_grant: None,
+                authoring_session_id: None,
             })
             .await
             .expect("script");
@@ -14503,6 +15523,12 @@ mod tests {
             .list_workflow_journal(started.id)
             .await
             .expect("journal");
+        let terminal = first_journal
+            .iter()
+            .find(|entry| entry.kind == "terminal_budget")
+            .expect("failed run terminal budget entry");
+        assert_eq!(terminal.status, "completed");
+        assert_eq!(terminal.seq, TERMINAL_BUDGET_SEQUENCE);
         let snapshot = first_journal
             .iter()
             .find(|entry| entry.kind == "budget")
@@ -14549,6 +15575,14 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(snapshots.len(), 1);
         assert_eq!(snapshots[0].status, "completed");
+        assert_eq!(
+            replayed_journal
+                .iter()
+                .filter(|entry| entry.kind == "terminal_budget")
+                .count(),
+            1,
+            "replay retains the failed-run terminal audit entry without treating it as a script command"
+        );
         assert_eq!(provider.requests.lock().expect("requests").len(), 2);
     }
 
@@ -14595,6 +15629,7 @@ mod tests {
                 delivery_grant: Some(
                     serde_json::json!([{"kind":"webhook","url":format!("http://{address}/post")}]),
                 ),
+                authoring_session_id: None,
             })
             .await
             .expect("script");
@@ -14641,6 +15676,7 @@ mod tests {
                 description: String::new(),
                 source: "await parallel([()=>{throw new Error('branch failed')}]); return {spent:budget.spent(),remaining:budget.remaining()};".into(),
                 delivery_grant: None,
+                authoring_session_id: None,
             })
             .await
             .expect("script");
@@ -14685,7 +15721,7 @@ mod tests {
     async fn composed_run_executes_the_child_and_journals_its_output() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
         let space = storage.get_or_create_default().await.expect("space");
-        let _skill_root = crate::skill::SpaceSkillRootGuard::empty(space.id);
+        let _skill_root = crate::skill::TestSkillRootGuard::empty(space.id);
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn SpaceStore>,
@@ -14701,6 +15737,7 @@ mod tests {
                 description: String::new(),
                 source: "return { doubled: args.value * 2 };".into(),
                 delivery_grant: None,
+                authoring_session_id: None,
             })
             .await
             .expect("child script");
@@ -14712,6 +15749,7 @@ mod tests {
                 source: "const child = await workflow(\"child\", { value: 21 }); return child;"
                     .into(),
                 delivery_grant: None,
+                authoring_session_id: None,
             })
             .await
             .expect("parent script");
@@ -14761,7 +15799,7 @@ mod tests {
     async fn a_child_run_cannot_compose_further() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
         let space = storage.get_or_create_default().await.expect("space");
-        let _skill_root = crate::skill::SpaceSkillRootGuard::empty(space.id);
+        let _skill_root = crate::skill::TestSkillRootGuard::empty(space.id);
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn SpaceStore>,
@@ -14777,6 +15815,7 @@ mod tests {
                 description: String::new(),
                 source: "return 1;".into(),
                 delivery_grant: None,
+                authoring_session_id: None,
             })
             .await
             .expect("grandchild script");
@@ -14788,6 +15827,7 @@ mod tests {
                 // In a child run `workflow` must be absent entirely.
                 source: "return typeof workflow;".into(),
                 delivery_grant: None,
+                authoring_session_id: None,
             })
             .await
             .expect("child script");
@@ -14798,6 +15838,7 @@ mod tests {
                 description: String::new(),
                 source: "return await workflow(\"child\");".into(),
                 delivery_grant: None,
+                authoring_session_id: None,
             })
             .await
             .expect("parent script");

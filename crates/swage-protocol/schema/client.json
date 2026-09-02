@@ -4,6 +4,9 @@
   "description": "Anchor type for the client surface's schema document.\n\nEvery wire type on the surface is reachable from here, so a single\n`schema_for!` call produces one document with the full type graph in\n`$defs`. The struct itself never crosses the wire — it exists only so\nthe schema generator has a root to walk from.",
   "type": "object",
   "properties": {
+    "api_error": {
+      "$ref": "#/$defs/ApiErrorBody"
+    },
     "attachment_list": {
       "$ref": "#/$defs/AttachmentListResponse"
     },
@@ -61,11 +64,17 @@
     "create_workspace_attachment_request": {
       "$ref": "#/$defs/CreateWorkspaceAttachmentRequest"
     },
+    "effort_capability": {
+      "$ref": "#/$defs/EffortCapability"
+    },
     "knowledge_search": {
       "$ref": "#/$defs/KnowledgeSearchResponse"
     },
     "material_list": {
       "$ref": "#/$defs/MaterialListResponse"
+    },
+    "message_attachment": {
+      "$ref": "#/$defs/MessageAttachment"
     },
     "message_response": {
       "$ref": "#/$defs/MessageResponse"
@@ -199,6 +208,9 @@
     "worker_isolation": {
       "$ref": "#/$defs/WorkerIsolation"
     },
+    "workflow_argument_contract": {
+      "$ref": "#/$defs/WorkflowArgumentContract"
+    },
     "workflow_decision_event_payload": {
       "$ref": "#/$defs/WorkflowDecisionEventPayload"
     },
@@ -228,6 +240,7 @@
     }
   },
   "required": [
+    "api_error",
     "client_event",
     "server_event",
     "voice_capabilities",
@@ -260,11 +273,13 @@
     "conversation_thread",
     "turn_context",
     "submit_turn",
+    "message_attachment",
     "submit_turn_response",
     "turn_poll",
     "send_message",
     "message_response",
     "settings",
+    "effort_capability",
     "skills",
     "save_settings",
     "model_discovery",
@@ -291,6 +306,7 @@
     "create_workflow_script_request",
     "update_workflow_script_request",
     "workflow_script_list",
+    "workflow_argument_contract",
     "start_workflow_run_request",
     "start_inline_workflow_run_request",
     "post_workflow_run_event_request",
@@ -304,6 +320,22 @@
     "worker_isolation"
   ],
   "$defs": {
+    "ApiErrorBody": {
+      "description": "The body of every failed client-surface HTTP response.",
+      "type": "object",
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/ErrorCode"
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ]
+    },
     "ApprovalDecisionScope": {
       "description": "How widely an approved decision should apply.",
       "type": "string",
@@ -388,6 +420,7 @@
           }
         },
         "provider_visible": true,
+        "tool_scope": true,
         "total_tokens": {
           "type": "integer",
           "format": "uint",
@@ -578,6 +611,13 @@
           "description": "Send a message to the conversation, triggering a provider turn.",
           "type": "object",
           "properties": {
+            "attachments": {
+              "description": "Content parts submitted beside the text, in order; absent means\ntext only. The same contract as `SubmitTurnRequest.attachments`.",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/MessageAttachment"
+              }
+            },
             "content": {
               "type": "string"
             },
@@ -1616,12 +1656,96 @@
       ]
     },
     "Effort": {
-      "type": "string",
-      "enum": [
-        "low",
-        "medium",
-        "high",
-        "max"
+      "description": "Reasoning effort as the user means it: one provider-neutral intent,\nordered lowest to highest, resolved per model against that model's\ndeclared [`EffortCapability`] before anything reaches a provider.",
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ]
+        },
+        {
+          "description": "No reasoning at all — a true disable where the model has one.",
+          "type": "string",
+          "const": "off"
+        }
+      ]
+    },
+    "EffortCapability": {
+      "description": "What a model's provider actually accepts as an effort control, declared\nper model in the catalogue or supplied by the provider adapter for the\nmodels it serves. The declaration is bound to the provider's documented\ncontrol: it must admit every level the control accepts and must not\ncollapse levels the control distinguishes.",
+      "oneOf": [
+        {
+          "description": "The control takes a named level from a fixed set. `can_disable`\nsays whether the model can switch reasoning off entirely.",
+          "type": "object",
+          "properties": {
+            "can_disable": {
+              "type": "boolean"
+            },
+            "control": {
+              "type": "string",
+              "const": "levels"
+            },
+            "levels": {
+              "description": "The levels the control accepts, in any order; never `off`,\nwhich is expressed through `can_disable`.",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Effort"
+              }
+            }
+          },
+          "required": [
+            "control",
+            "levels",
+            "can_disable"
+          ]
+        },
+        {
+          "description": "The control takes only a numeric thinking budget, in tokens.",
+          "type": "object",
+          "properties": {
+            "can_disable": {
+              "type": "boolean"
+            },
+            "control": {
+              "type": "string",
+              "const": "budget"
+            },
+            "max_tokens": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "min_tokens": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "control",
+            "min_tokens",
+            "max_tokens",
+            "can_disable"
+          ]
+        },
+        {
+          "description": "The model has no effort control; every intent is omitted.",
+          "type": "object",
+          "properties": {
+            "control": {
+              "type": "string",
+              "const": "none"
+            }
+          },
+          "required": [
+            "control"
+          ]
+        }
       ]
     },
     "ElementReport": {
@@ -1664,6 +1788,76 @@
         "source",
         "token_count",
         "priority"
+      ]
+    },
+    "ErrorCode": {
+      "description": "Machine-readable classification of a failed request.\n\nEach code names one HTTP status (`status`). Codes are stable wire\nidentifiers: add a code for a new class of failure rather than\nwidening the meaning of an existing one.",
+      "oneOf": [
+        {
+          "description": "The request body was not valid JSON, or could not be read.",
+          "type": "string",
+          "const": "malformed_body"
+        },
+        {
+          "description": "The request did not declare `Content-Type: application/json`.",
+          "type": "string",
+          "const": "unsupported_media_type"
+        },
+        {
+          "description": "The body parsed but failed validation — a missing or unknown field,\na value outside its contract.",
+          "type": "string",
+          "const": "validation_error"
+        },
+        {
+          "description": "The caller may not perform this operation from where it is.",
+          "type": "string",
+          "const": "forbidden"
+        },
+        {
+          "description": "The addressed entity does not exist.",
+          "type": "string",
+          "const": "not_found"
+        },
+        {
+          "description": "The operation collides with existing state (a duplicate name, an\nimmutable record).",
+          "type": "string",
+          "const": "conflict"
+        },
+        {
+          "description": "The conversation already has a turn in flight; retry once it settles.",
+          "type": "string",
+          "const": "turn_in_progress"
+        },
+        {
+          "description": "The conversation already has a live connection.",
+          "type": "string",
+          "const": "already_connected"
+        },
+        {
+          "description": "An upstream model provider failed.",
+          "type": "string",
+          "const": "provider_error"
+        },
+        {
+          "description": "The selected provider offers no sign-in flow of the requested kind.",
+          "type": "string",
+          "const": "sign_in_unsupported"
+        },
+        {
+          "description": "The provider refused or could not complete a sign-in.",
+          "type": "string",
+          "const": "sign_in_failed"
+        },
+        {
+          "description": "The provider runtime could not be started or reached.",
+          "type": "string",
+          "const": "provider_runtime_unavailable"
+        },
+        {
+          "description": "An unexpected failure inside the gateway.",
+          "type": "string",
+          "const": "internal_error"
+        }
       ]
     },
     "ExternalChannelIntegration": {
@@ -1925,6 +2119,28 @@
         "updated_at"
       ]
     },
+    "MessageAttachment": {
+      "description": "Something submitted beside a message's text and carried to the model as\nits own content part. The tag names what the attachment is; a client\nsends only kinds the gateway's configured provider can consume, and the\ngateway refuses the turn otherwise rather than dropping the part.",
+      "oneOf": [
+        {
+          "description": "An image the model reads, addressed by URL — `https://` or a\n`data:` URL carrying the bytes inline.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "image_url"
+            },
+            "url": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "url"
+          ]
+        }
+      ]
+    },
     "MessageResponse": {
       "type": "object",
       "properties": {
@@ -1944,6 +2160,13 @@
     "MessageView": {
       "type": "object",
       "properties": {
+        "attachments": {
+          "description": "Content parts recorded beside the text when the message was\nsubmitted; absent for text-only messages.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MessageAttachment"
+          }
+        },
         "content": {
           "type": "string"
         },
@@ -1993,6 +2216,17 @@
     "ModelCapabilitiesConfig": {
       "type": "object",
       "properties": {
+        "effort": {
+          "description": "The model's effort control, when the catalogue declares one; absent,\nthe provider adapter's declaration for the models it serves applies.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EffortCapability"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "reasoning_replay": {
           "type": "boolean",
           "default": false
@@ -4637,6 +4871,13 @@
     "SubmitTurnRequest": {
       "type": "object",
       "properties": {
+        "attachments": {
+          "description": "Content parts submitted beside the text, in order. Absent means\ntext only.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MessageAttachment"
+          }
+        },
         "compaction_focus": {
           "type": [
             "string",
@@ -5199,6 +5440,37 @@
         }
       }
     },
+    "WorkflowArgumentContract": {
+      "description": "The argument contract a workflow declares in its portable metadata.\n\nWorkflows may omit a schema. That is an explicit unconstrained contract,\nrather than an absent field that callers could mistake for an incomplete\nlisting.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "declared"
+            },
+            "schema": true
+          },
+          "required": [
+            "kind",
+            "schema"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "unconstrained"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        }
+      ]
+    },
     "WorkflowBudget": {
       "type": "object",
       "properties": {
@@ -5507,6 +5779,11 @@
           "description": "A journalled budget reading — what the script saw when it checked\nits allowance, replayed rather than re-read.",
           "type": "string",
           "const": "budget"
+        },
+        {
+          "description": "The authoritative closing-partition balance when the run settled.",
+          "type": "string",
+          "const": "terminal_budget"
         },
         {
           "description": "The working allowance was exhausted. The triggering agent call was\nnot started; replay returns the same wind-down signal at this point.",
@@ -5856,8 +6133,15 @@
     "WorkflowScript": {
       "type": "object",
       "properties": {
-        "built_in": {
-          "type": "boolean"
+        "argument_contract": {
+          "$ref": "#/$defs/WorkflowArgumentContract"
+        },
+        "carrying_skill": {
+          "description": "The shipped or operator skill that carries this workflow, when it is\nnot an authored row of the space. A carried workflow is immutable in\nplace; a same-named authored row shadows it.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "created_at": {
           "type": "string",
@@ -5896,8 +6180,8 @@
         "name",
         "description",
         "head_version",
-        "built_in",
         "has_delivery_grant",
+        "argument_contract",
         "created_at",
         "updated_at"
       ]

@@ -11,8 +11,9 @@ use futures::{Stream, StreamExt};
 use reqwest::header::{HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
 use swage_core::{
-    ChatMessage, CompletionRequest, CompletionResponse, ContentPart, FinishReason, ProviderError,
-    Role, StreamChunk, ToolCall, ToolCompletionRequest, ToolCompletionResponse, ToolReplayPart,
+    ChatMessage, CompletionRequest, CompletionResponse, ContentPart, Effort, EffortCapability,
+    EffortControl, FinishReason, ProviderError, Role, StreamChunk, ToolCall, ToolCompletionRequest,
+    ToolCompletionResponse, ToolReplayPart,
 };
 
 use crate::http::{HttpClient, SseEvent};
@@ -29,6 +30,46 @@ const OPENAI_REQUEST_DIVERGENCES: &[(&str, &str)] = &[(
 // ---------------------------------------------------------------------------
 // OpenAI wire types
 // ---------------------------------------------------------------------------
+
+/// The effort control OpenAI documents for its GPT reasoning models, shared
+/// by Chat Completions (`reasoning_effort`) and the Responses API
+/// (`reasoning.effort`): `none` through `xhigh`, where `none` is the
+/// model's own off. `max` is not a level the control accepts.
+pub(crate) fn openai_effort_capability() -> EffortCapability {
+    EffortCapability::Levels {
+        levels: vec![
+            Effort::Minimal,
+            Effort::Low,
+            Effort::Medium,
+            Effort::High,
+            Effort::Xhigh,
+        ],
+        can_disable: true,
+    }
+}
+
+/// Whether a model id names one of OpenAI's own reasoning models — the
+/// models the documented control is known to accept. The Chat Completions
+/// adapter also serves arbitrary OpenAI-compatible endpoints, whose models
+/// the adapter cannot vouch for: those answer `None`, and the catalogue's
+/// own declaration governs.
+pub(crate) fn is_openai_reasoning_model(model: &str) -> bool {
+    let model = model.trim().to_ascii_lowercase();
+    model.starts_with("gpt-5")
+        || model.starts_with("o1")
+        || model.starts_with("o3")
+        || model.starts_with("o4")
+}
+
+/// The `reasoning_effort` / `reasoning.effort` value for a resolved control.
+/// Expresses the control only — a level here is one the wire accepts.
+pub(crate) fn openai_reasoning_effort(control: EffortControl) -> Option<String> {
+    match control {
+        EffortControl::Level { level } => Some(level.as_str().to_string()),
+        EffortControl::Disabled => Some("none".to_string()),
+        EffortControl::Budget { .. } | EffortControl::Omitted => None,
+    }
+}
 
 /// Request body for POST /chat/completions.
 #[derive(Serialize)]
@@ -64,13 +105,48 @@ struct OpenAiStreamOptions {
 struct OpenAiMessage {
     role: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    content: Option<String>,
+    content: Option<OpenAiContent>,
     #[serde(skip_serializing_if = "Option::is_none")]
     name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_call_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_calls: Option<Vec<OpenAiToolCall>>,
+}
+
+/// A message's content on the Chat Completions wire: a bare string when the
+/// message is text only, an array of typed parts once it carries an image.
+/// The string form is kept for text so a text-only request's body is
+/// byte-identical to what it was before image parts existed.
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
+#[serde(untagged)]
+enum OpenAiContent {
+    Text(String),
+    Parts(Vec<OpenAiContentPart>),
+}
+
+#[cfg(test)]
+impl OpenAiContent {
+    /// The text-only projection of the content — what a caller that reads
+    /// the message as a string sees.
+    fn as_text(&self) -> Option<&str> {
+        match self {
+            Self::Text(text) => Some(text.as_str()),
+            Self::Parts(_) => None,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum OpenAiContentPart {
+    Text { text: String },
+    ImageUrl { image_url: OpenAiImageUrl },
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
+struct OpenAiImageUrl {
+    url: String,
 }
 
 /// Wire representation of a tool call from the OpenAI response.
@@ -252,15 +328,7 @@ impl OpenAiProvider {
             Role::Tool => "tool",
         };
 
-        let content_text: String = message
-            .content()
-            .iter()
-            .filter_map(|part| match part {
-                ContentPart::Text { text } => Some(text.as_str()),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("");
+        let content = Self::convert_content(message.content());
 
         let tool_calls = message.tool_calls().map(|calls| {
             calls
@@ -278,15 +346,44 @@ impl OpenAiProvider {
 
         vec![OpenAiMessage {
             role: role.to_string(),
-            content: if content_text.is_empty() {
-                None
-            } else {
-                Some(content_text)
-            },
+            content,
             name: message.name().map(ToOwned::to_owned),
             tool_call_id: message.tool_call_id().map(ToOwned::to_owned),
             tool_calls,
         }]
+    }
+
+    /// Message content on the wire. Text-only content stays a single string;
+    /// an image part switches the message to the typed-parts array, every
+    /// part in its original order. Empty content is omitted.
+    fn convert_content(parts: &[ContentPart]) -> Option<OpenAiContent> {
+        let has_image = parts
+            .iter()
+            .any(|part| matches!(part, ContentPart::ImageUrl { .. }));
+        if has_image {
+            return Some(OpenAiContent::Parts(
+                parts
+                    .iter()
+                    .map(|part| match part {
+                        ContentPart::Text { text } => {
+                            OpenAiContentPart::Text { text: text.clone() }
+                        }
+                        ContentPart::ImageUrl { url } => OpenAiContentPart::ImageUrl {
+                            image_url: OpenAiImageUrl { url: url.clone() },
+                        },
+                    })
+                    .collect(),
+            ));
+        }
+        let text: String = parts
+            .iter()
+            .filter_map(|part| match part {
+                ContentPart::Text { text } => Some(text.as_str()),
+                ContentPart::ImageUrl { .. } => None,
+            })
+            .collect::<Vec<_>>()
+            .join("");
+        (!text.is_empty()).then_some(OpenAiContent::Text(text))
     }
 
     fn convert_tool_replay_message(
@@ -328,11 +425,8 @@ impl OpenAiProvider {
 
                 Some(vec![OpenAiMessage {
                     role: "assistant".to_string(),
-                    content: if text_content.is_empty() {
-                        None
-                    } else {
-                        Some(text_content)
-                    },
+                    content: (!text_content.is_empty())
+                        .then_some(OpenAiContent::Text(text_content)),
                     name: message.name().map(ToOwned::to_owned),
                     tool_call_id: None,
                     tool_calls: if tool_calls.is_empty() {
@@ -350,7 +444,7 @@ impl OpenAiProvider {
                             call_id, content, ..
                         } => Some(OpenAiMessage {
                             role: "tool".to_string(),
-                            content: Some(content.clone()),
+                            content: Some(OpenAiContent::Text(content.clone())),
                             name: None,
                             tool_call_id: Some(call_id.clone()),
                             tool_calls: None,
@@ -382,15 +476,10 @@ impl OpenAiProvider {
 
         ChatCompletionsRequest {
             model,
-            reasoning_effort: request.effort.map(|effort| {
-                match effort {
-                    swage_core::Effort::Low => "low",
-                    swage_core::Effort::Medium => "medium",
-                    swage_core::Effort::High => "high",
-                    swage_core::Effort::Max => "xhigh",
-                }
-                .to_string()
-            }),
+            reasoning_effort: request
+                .effort
+                .as_ref()
+                .and_then(|effort| openai_reasoning_effort(effort.control)),
             messages: Self::convert_messages(&request.messages),
             max_tokens: request.max_tokens,
             temperature: request.temperature,
@@ -697,6 +786,10 @@ impl LlmProvider for OpenAiProvider {
         &self.config.model
     }
 
+    fn effort_capability(&self, model: &str) -> Option<EffortCapability> {
+        is_openai_reasoning_model(model).then(openai_effort_capability)
+    }
+
     fn provider_request_snapshot(
         &self,
         request: &CompletionRequest,
@@ -845,6 +938,7 @@ impl LlmProvider for OpenAiProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{empty_completion_request, local_provider_config};
     use swage_core::{ChatMessage, Role, ToolCall};
 
     // --- Message conversion ---
@@ -855,7 +949,13 @@ mod tests {
         let converted = OpenAiProvider::convert_messages(&messages);
         assert_eq!(converted.len(), 1);
         assert_eq!(converted[0].role, "system");
-        assert_eq!(converted[0].content.as_deref(), Some("You are helpful"));
+        assert_eq!(
+            converted[0]
+                .content
+                .as_ref()
+                .and_then(OpenAiContent::as_text),
+            Some("You are helpful")
+        );
     }
 
     #[test]
@@ -868,6 +968,73 @@ mod tests {
         assert_eq!(converted.len(), 2);
         assert_eq!(converted[0].role, "user");
         assert_eq!(converted[1].role, "assistant");
+    }
+
+    #[test]
+    fn text_only_content_stays_a_string_on_the_wire() {
+        let messages = vec![ChatMessage::new(Role::User, "Hello")];
+        let converted = OpenAiProvider::convert_messages(&messages);
+        let wire = serde_json::to_value(&converted[0]).expect("serialise message");
+        assert_eq!(wire["content"], "Hello");
+    }
+
+    #[test]
+    fn an_image_part_switches_content_to_typed_parts_in_order() {
+        let messages = vec![ChatMessage::new_parts(
+            Role::User,
+            vec![
+                ContentPart::Text {
+                    text: "What is in this picture?".into(),
+                },
+                ContentPart::ImageUrl {
+                    url: "https://example.test/cat.png".into(),
+                },
+            ],
+        )];
+        let converted = OpenAiProvider::convert_messages(&messages);
+        let wire = serde_json::to_value(&converted[0]).expect("serialise message");
+        assert_eq!(
+            wire["content"],
+            serde_json::json!([
+                {"type": "text", "text": "What is in this picture?"},
+                {"type": "image_url", "image_url": {"url": "https://example.test/cat.png"}}
+            ])
+        );
+    }
+
+    #[test]
+    fn a_request_carrying_an_image_puts_it_on_the_wire_body() {
+        let provider = OpenAiProvider::from_config(ProviderConfig::new(
+            "https://api.openai.com/v1",
+            "key",
+            "gpt-4o",
+        ));
+        let request = CompletionRequest {
+            messages: vec![ChatMessage::new_parts(
+                Role::User,
+                vec![
+                    ContentPart::Text {
+                        text: "Describe it".into(),
+                    },
+                    ContentPart::ImageUrl {
+                        url: "data:image/png;base64,AAAA".into(),
+                    },
+                ],
+            )],
+            model: None,
+            effort: None,
+            max_tokens: None,
+            temperature: None,
+            stop_sequences: None,
+            metadata: None,
+            tool_definitions: vec![],
+        };
+        let body = serde_json::to_value(provider.build_request(&request, false))
+            .expect("serialise request body");
+        assert_eq!(
+            body["messages"][0]["content"][1]["image_url"]["url"],
+            "data:image/png;base64,AAAA"
+        );
     }
 
     #[test]
@@ -922,17 +1089,20 @@ mod tests {
     }
 
     #[test]
-    fn every_completion_effort_maps_to_openai_reasoning_effort() {
-        let provider =
-            OpenAiProvider::from_config(ProviderConfig::new("key", "model", "http://localhost"));
-        for (effort, expected) in [
-            (swage_core::Effort::Low, "low"),
-            (swage_core::Effort::Medium, "medium"),
-            (swage_core::Effort::High, "high"),
-            (swage_core::Effort::Max, "xhigh"),
+    fn every_native_level_maps_to_openai_reasoning_effort() {
+        let provider = OpenAiProvider::from_config(local_provider_config());
+        for (level, expected) in [
+            (Effort::Minimal, "minimal"),
+            (Effort::Low, "low"),
+            (Effort::Medium, "medium"),
+            (Effort::High, "high"),
+            (Effort::Xhigh, "xhigh"),
         ] {
             let request = CompletionRequest {
-                effort: Some(effort),
+                effort: Some(swage_core::resolve_effort(
+                    level,
+                    &openai_effort_capability(),
+                )),
                 messages: vec![],
                 model: None,
                 max_tokens: None,
@@ -946,12 +1116,28 @@ mod tests {
         }
     }
 
+    /// The adapter vouches for OpenAI's own reasoning models only; a model
+    /// behind a generic OpenAI-compatible endpoint answers `None`, and the
+    /// catalogue's declaration governs.
     #[test]
-    fn completion_without_effort_omits_openai_reasoning_effort() {
-        let provider =
-            OpenAiProvider::from_config(ProviderConfig::new("key", "model", "http://localhost"));
-        let request = CompletionRequest {
-            effort: None,
+    fn effort_capability_is_declared_only_for_recognised_models() {
+        let provider = OpenAiProvider::from_config(local_provider_config());
+        assert!(provider.effort_capability("gpt-5.6-terra").is_some());
+        assert!(provider.effort_capability("o3-mini").is_some());
+        assert!(provider.effort_capability("llama-3.3-70b").is_none());
+        assert!(provider.effort_capability("qwen-3").is_none());
+    }
+
+    /// `max` is not an OpenAI level: it arrives clamped to `xhigh`, and
+    /// `off` arrives as the model's own `none`.
+    #[test]
+    fn a_resolved_clamp_and_a_disable_reach_the_openai_wire_as_resolved() {
+        let provider = OpenAiProvider::from_config(local_provider_config());
+        let mut request = CompletionRequest {
+            effort: Some(swage_core::resolve_effort(
+                Effort::Max,
+                &openai_effort_capability(),
+            )),
             messages: vec![],
             model: None,
             max_tokens: None,
@@ -960,6 +1146,25 @@ mod tests {
             metadata: None,
             tool_definitions: vec![],
         };
+        assert_eq!(
+            request.effort.as_ref().unwrap().clamped_to,
+            Some(Effort::Xhigh)
+        );
+        let body = serde_json::to_value(provider.build_request(&request, false)).unwrap();
+        assert_eq!(body["reasoning_effort"], "xhigh");
+
+        request.effort = Some(swage_core::resolve_effort(
+            Effort::Off,
+            &openai_effort_capability(),
+        ));
+        let body = serde_json::to_value(provider.build_request(&request, false)).unwrap();
+        assert_eq!(body["reasoning_effort"], "none");
+    }
+
+    #[test]
+    fn completion_without_effort_omits_openai_reasoning_effort() {
+        let provider = OpenAiProvider::from_config(local_provider_config());
+        let request = empty_completion_request();
         let body = serde_json::to_value(provider.build_request(&request, false)).unwrap();
         assert!(!body.as_object().unwrap().contains_key("reasoning_effort"));
     }
@@ -1009,18 +1214,8 @@ mod tests {
 
     #[test]
     fn build_request_sets_stream_flag() {
-        let provider =
-            OpenAiProvider::from_config(ProviderConfig::new("key", "model", "http://localhost"));
-        let request = CompletionRequest {
-            effort: None,
-            messages: vec![],
-            model: None,
-            max_tokens: None,
-            temperature: None,
-            stop_sequences: None,
-            metadata: None,
-            tool_definitions: vec![],
-        };
+        let provider = OpenAiProvider::from_config(local_provider_config());
+        let request = empty_completion_request();
         let non_streaming = provider.build_request(&request, false);
         assert!(non_streaming.stream.is_none());
         assert!(non_streaming.stream_options.is_none());
@@ -1037,18 +1232,8 @@ mod tests {
 
     #[test]
     fn build_request_serialises_stream_usage_options_only_for_streaming() {
-        let provider =
-            OpenAiProvider::from_config(ProviderConfig::new("key", "model", "http://localhost"));
-        let request = CompletionRequest {
-            effort: None,
-            messages: vec![],
-            model: None,
-            max_tokens: None,
-            temperature: None,
-            stop_sequences: None,
-            metadata: None,
-            tool_definitions: vec![],
-        };
+        let provider = OpenAiProvider::from_config(local_provider_config());
+        let request = empty_completion_request();
 
         let non_streaming = serde_json::to_value(provider.build_request(&request, false)).unwrap();
         assert!(non_streaming.get("stream").is_none());
@@ -1265,7 +1450,13 @@ mod tests {
 
         assert_eq!(converted[1].role, "tool");
         assert_eq!(converted[1].tool_call_id.as_deref(), Some("call_1"));
-        assert_eq!(converted[1].content.as_deref(), Some("/workspace"));
+        assert_eq!(
+            converted[1]
+                .content
+                .as_ref()
+                .and_then(OpenAiContent::as_text),
+            Some("/workspace")
+        );
     }
 
     // --- Tool request building ---

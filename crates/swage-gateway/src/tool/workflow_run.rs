@@ -291,17 +291,17 @@ mod tests {
         assert_eq!(record.source_hash, expected_hash);
         assert_eq!(result["source_hash"], expected_hash);
 
-        let axum::Json(detail) = crate::workflow::get_run(
+        let crate::error::Json(detail) = crate::workflow::get_run(
             axum::extract::State(state.clone()),
-            axum::extract::Path(run_id),
+            crate::error::Path(run_id),
         )
         .await
         .expect("run detail");
         assert_eq!(detail.run.source.as_deref(), Some(source));
         assert_eq!(detail.run.source_hash, expected_hash);
 
-        let axum::Json(list) =
-            crate::workflow::list_runs(axum::extract::State(state), axum::extract::Path(space.id))
+        let crate::error::Json(list) =
+            crate::workflow::list_runs(axum::extract::State(state), crate::error::Path(space.id))
                 .await
                 .expect("list runs");
         let listed = list
@@ -324,6 +324,7 @@ mod tests {
                 description: "Produce an operator report.".into(),
                 source: "return {};".into(),
                 delivery_grant: None,
+                authoring_session_id: None,
             })
             .await
             .expect("saved workflow");

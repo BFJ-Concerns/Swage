@@ -7,8 +7,11 @@ import * as spacesApi from "../api/spaces";
 import type { Space } from "../types";
 
 vi.mock("../api/spaces", () => ({
+  attachSpaceWorkspace: vi.fn(),
+  detachSpaceWorkspace: vi.fn(),
   listSpaceSessions: vi.fn(),
   listSpaceWorkspaces: vi.fn(),
+  updateSpaceWorkspaceTrust: vi.fn(),
 }));
 
 type MountedComponent = ReturnType<typeof mount>;
@@ -87,6 +90,46 @@ describe("SpaceSettingsPage", () => {
 
     expect(document.body.textContent).toContain("Source");
     expect(document.body.textContent).toContain("/work/source");
+    expect(document.body.textContent).toContain("Trusted workspace content can supply instructions");
+    expect(document.body.textContent).toContain("Revoke trust");
+    expect(document.body.textContent).toContain("Detach");
     expect(document.body.textContent).not.toContain("Providers");
+  });
+
+  it("attaches a workspace from settings and reloads the displayed attachments", async () => {
+    vi.mocked(spacesApi.attachSpaceWorkspace).mockResolvedValue({
+      id: "workspace-2", space_id: "space-1", label: "New source", path: "/work/new", canonical_path: "/work/new", is_missing: false, permissions: ["read"], is_trusted: false, is_default: false, created_at: "2026-05-26T10:00:00Z",
+    });
+    component = mount(SpaceSettingsPage, { target: document.body, props: { space, tab: "workspaces" } });
+    await flushUi();
+    const inputs = document.querySelectorAll("input");
+    (inputs[0] as HTMLInputElement).value = "/work/new";
+    inputs[0].dispatchEvent(new Event("input", { bubbles: true }));
+    document.querySelector("form")?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await flushUi();
+    expect(spacesApi.attachSpaceWorkspace).toHaveBeenCalledWith("space-1", { path: "/work/new", label: undefined });
+    expect(spacesApi.listSpaceWorkspaces).toHaveBeenCalledTimes(2);
+  });
+
+  it("revokes trust through the workspace mutation API and reloads", async () => {
+    vi.mocked(spacesApi.updateSpaceWorkspaceTrust).mockResolvedValue({
+      id: "workspace-1", space_id: "space-1", label: "Source", path: "/work/source", canonical_path: "/work/source", is_missing: false, permissions: ["read", "write"], is_trusted: false, is_default: true, created_at: "2026-05-26T10:00:00Z",
+    });
+    component = mount(SpaceSettingsPage, { target: document.body, props: { space, tab: "workspaces" } });
+    await flushUi();
+    Array.from(document.querySelectorAll("button")).find((button) => button.textContent?.includes("Revoke trust"))?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await flushUi();
+    expect(spacesApi.updateSpaceWorkspaceTrust).toHaveBeenCalledWith("space-1", "workspace-1", { is_trusted: false });
+    expect(spacesApi.listSpaceWorkspaces).toHaveBeenCalledTimes(2);
+  });
+
+  it("detaches a workspace through the workspace mutation API and reloads", async () => {
+    vi.mocked(spacesApi.detachSpaceWorkspace).mockResolvedValue();
+    component = mount(SpaceSettingsPage, { target: document.body, props: { space, tab: "workspaces" } });
+    await flushUi();
+    Array.from(document.querySelectorAll("button")).find((button) => button.textContent?.includes("Detach"))?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await flushUi();
+    expect(spacesApi.detachSpaceWorkspace).toHaveBeenCalledWith("space-1", "workspace-1");
+    expect(spacesApi.listSpaceWorkspaces).toHaveBeenCalledTimes(2);
   });
 });

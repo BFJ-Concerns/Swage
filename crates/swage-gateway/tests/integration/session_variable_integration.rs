@@ -8,16 +8,18 @@ use std::time::Duration;
 use async_trait::async_trait;
 use futures::{SinkExt, StreamExt};
 use serde_json::json;
-use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite;
 use uuid::Uuid;
+
+use crate::support::start_live_server;
 
 use swage_config::HierarchyLevel;
 use swage_context::briefing::BriefingElement;
 use swage_context::element::ContextElement;
 use swage_context::named_element::ResolvedNamedElement;
+use swage_context::tokeniser::{TiktokenTokeniser, Tokeniser};
 use swage_core::{
-    ChatMessage, CompletionRequest, CompletionResponse, ProviderError, StreamChunk,
+    ChatMessage, CompletionRequest, CompletionResponse, ProviderError, Role, StreamChunk,
     ToolCompletionRequest, ToolCompletionResponse,
 };
 use swage_gateway::server::build_router;
@@ -55,46 +57,6 @@ impl LlmProvider for UnusedProvider {
         _: CompletionRequest,
     ) -> Pin<Box<dyn futures::Stream<Item = StreamChunk> + Send>> {
         unreachable!()
-    }
-}
-
-struct ToolCallingProvider {
-    rounds: std::sync::Mutex<Vec<Vec<StreamChunk>>>,
-    requests: Arc<std::sync::Mutex<Vec<CompletionRequest>>>,
-}
-
-impl ToolCallingProvider {
-    fn new(rounds: Vec<Vec<StreamChunk>>) -> (Self, Arc<std::sync::Mutex<Vec<CompletionRequest>>>) {
-        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
-        (
-            Self {
-                rounds: std::sync::Mutex::new(rounds),
-                requests: Arc::clone(&requests),
-            },
-            requests,
-        )
-    }
-}
-#[async_trait]
-impl LlmProvider for ToolCallingProvider {
-    fn model_id(&self) -> &str {
-        "tool-caller"
-    }
-    async fn complete(&self, _: CompletionRequest) -> Result<CompletionResponse, ProviderError> {
-        unreachable!()
-    }
-    async fn complete_with_tools(
-        &self,
-        _: ToolCompletionRequest,
-    ) -> Result<ToolCompletionResponse, ProviderError> {
-        unreachable!()
-    }
-    fn stream(
-        &self,
-        request: CompletionRequest,
-    ) -> Pin<Box<dyn futures::Stream<Item = StreamChunk> + Send>> {
-        self.requests.lock().unwrap().push(request);
-        Box::pin(futures::stream::iter(self.rounds.lock().unwrap().remove(0)))
     }
 }
 
@@ -359,49 +321,52 @@ async fn real_tool_audits_whole_state_and_updated_values_recompose() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn live_listener_turns_set_and_update_the_values_used_by_composition() {
-    let (provider, captured_requests) = ToolCallingProvider::new(vec![
+    let (provider, captured_requests) = crate::support::CapturingProvider::new(
+        "tool-caller",
         vec![
-            StreamChunk::ToolUse {
-                call_id: "set-1".into(),
-                name: "session_values".into(),
-                arguments: json!({"action":"set","name":"task","value":"inspect storage"}),
-            },
-            StreamChunk::Done {
-                finish_reason: None,
-            },
+            vec![
+                StreamChunk::ToolUse {
+                    call_id: "set-1".into(),
+                    name: "session_values".into(),
+                    arguments: json!({"action":"set","name":"task","value":"inspect storage"}),
+                },
+                StreamChunk::Done {
+                    finish_reason: None,
+                },
+            ],
+            vec![
+                StreamChunk::Delta {
+                    content: "saved".into(),
+                },
+                StreamChunk::Done {
+                    finish_reason: None,
+                },
+            ],
+            vec![
+                StreamChunk::ToolUse {
+                    call_id: "set-2".into(),
+                    name: "session_values".into(),
+                    arguments: json!({"action":"set","name":"task","value":"verify audit with durable evidence"}),
+                },
+                StreamChunk::Done {
+                    finish_reason: None,
+                },
+            ],
+            vec![
+                StreamChunk::Delta {
+                    content: "updated".into(),
+                },
+                StreamChunk::Done {
+                    finish_reason: None,
+                },
+            ],
         ],
-        vec![
-            StreamChunk::Delta {
-                content: "saved".into(),
-            },
-            StreamChunk::Done {
-                finish_reason: None,
-            },
-        ],
-        vec![
-            StreamChunk::ToolUse {
-                call_id: "set-2".into(),
-                name: "session_values".into(),
-                arguments: json!({"action":"set","name":"task","value":"verify audit"}),
-            },
-            StreamChunk::Done {
-                finish_reason: None,
-            },
-        ],
-        vec![
-            StreamChunk::Delta {
-                content: "updated".into(),
-            },
-            StreamChunk::Done {
-                finish_reason: None,
-            },
-        ],
-    ]);
+    );
     let swage_home = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(swage_home.path().join("assemblies")).unwrap();
     std::fs::write(
         swage_home.path().join("assemblies/briefing.js"),
-        "add(elements.find(element => element.name === 'prompts')); add(elements.find(element => element.name === 'current-work').render());",
+        "add(elements.find(element => element.name === 'working_norms')); add(elements.find(element => element.name === 'prompts')); add(elements.find(element => element.name === 'current-work').render());",
     )
     .unwrap();
     let element_path = swage_home
@@ -423,11 +388,7 @@ async fn live_listener_turns_set_and_update_the_values_used_by_composition() {
         ToolDispatcher::allow_all(vec![Arc::new(SessionVariableTool) as Arc<dyn Tool>]),
         None,
     );
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        axum::serve(listener, build_router(state)).await.unwrap();
-    });
+    let (address, _server) = start_live_server(build_router(state)).await;
     let conversation: serde_json::Value = reqwest::Client::new()
         .post(format!("http://{address}/api/conversations"))
         .send()
@@ -443,8 +404,16 @@ async fn live_listener_turns_set_and_update_the_values_used_by_composition() {
     .await
     .unwrap();
     let (mut sink, mut stream) = socket.split();
+    sink.send(tungstenite::Message::Text(
+        json!({"type":"subscribe","channels":["context"]})
+            .to_string()
+            .into(),
+    ))
+    .await
+    .unwrap();
+    let mut context_reports = Vec::new();
 
-    for prompt in ["save the task", "update the task"] {
+    for (turn_index, prompt) in ["save the task", "update the task"].into_iter().enumerate() {
         sink.send(tungstenite::Message::Text(
             json!({"type":"send_message","content":prompt})
                 .to_string()
@@ -457,6 +426,9 @@ async fn live_listener_turns_set_and_update_the_values_used_by_composition() {
                 let message = message.unwrap();
                 if let tungstenite::Message::Text(text) = message {
                     let event: serde_json::Value = serde_json::from_str(&text).unwrap();
+                    if event["type"] == "context_assembled" {
+                        context_reports.push(event["report"].clone());
+                    }
                     if event["type"] == "turn_complete" {
                         break;
                     }
@@ -475,9 +447,13 @@ async fn live_listener_turns_set_and_update_the_values_used_by_composition() {
         let expected = if prompt.starts_with("save") {
             "Task: inspect storage; owner: ⟦unset:owner⟧"
         } else {
-            "Task: verify audit; owner: ⟦unset:owner⟧"
+            "Task: verify audit with durable evidence; owner: ⟦unset:owner⟧"
         };
         assert_eq!(render(variables)[0].text_content(), expected);
+        if turn_index == 0 {
+            std::fs::write(&element_path, "Reloaded current work: {{task}}")
+                .expect("rewrite briefing between foreground turns");
+        }
     }
     let events: Vec<_> = storage
         .list_audit_events_by_session(session_id)
@@ -495,7 +471,7 @@ async fn live_listener_turns_set_and_update_the_values_used_by_composition() {
     );
     assert_eq!(
         events[0].metadata["new_state"],
-        json!({"task":"verify audit"})
+        json!({"task":"verify audit with durable evidence"})
     );
 
     let requests = captured_requests.lock().unwrap();
@@ -525,31 +501,203 @@ async fn live_listener_turns_set_and_update_the_values_used_by_composition() {
         "literal prompts should remain unchanged after session values are saved: {second_turn_context}"
     );
     assert!(
-        second_turn_context.contains("Current work: inspect storage"),
-        "the real session_values update should re-render the named element: {second_turn_context}"
+        second_turn_context.contains("Reloaded current work: inspect storage"),
+        "the second foreground turn must re-read the rewritten named briefing: {second_turn_context}"
+    );
+    for context in [&first_context, &second_turn_context] {
+        assert!(
+            context.contains("## Working norms"),
+            "the named JavaScript assembly must deliver working-norm text to the provider: {context}"
+        );
+    }
+    assert_eq!(
+        context_reports.len(),
+        2,
+        "one context report per foreground turn"
+    );
+    for report in &context_reports {
+        assert_eq!(report["assembly_name"], "briefing");
+        assert!(
+            report["elements"]
+                .as_array()
+                .expect("assembled elements")
+                .iter()
+                .any(|element| element["name"] == "working_norms"),
+            "the named JavaScript route must account for its working-norms element: {report}"
+        );
+    }
+    let briefing_token_count = |report: &serde_json::Value| {
+        report["elements"]
+            .as_array()
+            .expect("assembled elements")
+            .iter()
+            .find(|element| element["name"] == "current-work")
+            .and_then(|element| element["token_count"].as_u64())
+            .expect("current-work token count") as usize
+    };
+    let tokeniser = TiktokenTokeniser::new("tool-caller");
+    let expected_briefing_tokens = [
+        tokeniser.count_messages(&[ChatMessage::new(Role::System, "Current work: ⟦unset:task⟧")]),
+        tokeniser.count_messages(&[ChatMessage::new(
+            Role::System,
+            "Reloaded current work: inspect storage",
+        )]),
+    ];
+    assert_eq!(
+        [
+            briefing_token_count(&context_reports[0]),
+            briefing_token_count(&context_reports[1]),
+        ],
+        expected_briefing_tokens,
+        "each foreground report must recount the rendered briefing message, not retain an ambient total"
+    );
+    let audit = storage
+        .list_audit_events_by_session(session_id)
+        .await
+        .unwrap();
+    assert!(
+        audit.iter().any(|event| {
+            event.entity_id == swage_gateway::experimentation::LOCATION_WORKING_NORMS
+                && event.event_kind == "variant_selected"
+        }),
+        "the named JavaScript turn must retain the working-norms selection audit event: {audit:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn live_listener_default_assembly_delivers_working_norms_to_the_provider() {
+    let (provider, captured_requests) = crate::support::CapturingProvider::new(
+        "tool-caller",
+        vec![vec![
+            StreamChunk::Delta {
+                content: "default assembly reply".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ]],
+    );
+    let swage_home = tempfile::tempdir().unwrap();
+    let mut environment = crate::support::ProcessEnvGuard::new();
+    environment.set_swage_home(swage_home.path());
+    let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+    let config = swage_config::ResolvedConfig {
+        instructions: "Default-route prompt".into(),
+        ..Default::default()
+    };
+    let state = AppState::new(
+        storage.clone() as Arc<dyn Storage>,
+        storage.clone(),
+        Arc::new(provider),
+        config,
+        ToolDispatcher::allow_all(vec![]),
+        None,
+    );
+    let (address, _server) = start_live_server(build_router(state)).await;
+    let conversation: serde_json::Value = reqwest::Client::new()
+        .post(format!("http://{address}/api/conversations"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let session_id: Uuid = conversation["id"].as_str().unwrap().parse().unwrap();
+    let (socket, _) = tokio_tungstenite::connect_async(format!(
+        "ws://{address}/api/conversations/{session_id}/ws"
+    ))
+    .await
+    .unwrap();
+    let (mut sink, mut stream) = socket.split();
+    sink.send(tungstenite::Message::Text(
+        json!({"type":"subscribe","channels":["context"]})
+            .to_string()
+            .into(),
+    ))
+    .await
+    .unwrap();
+    sink.send(tungstenite::Message::Text(
+        json!({"type":"send_message","content":"use default assembly"})
+            .to_string()
+            .into(),
+    ))
+    .await
+    .unwrap();
+    let report = tokio::time::timeout(Duration::from_secs(10), async {
+        let mut report = None;
+        while let Some(message) = stream.next().await {
+            let message = message.unwrap();
+            if let tungstenite::Message::Text(text) = message {
+                let event: serde_json::Value = serde_json::from_str(&text).unwrap();
+                if event["type"] == "context_assembled" {
+                    report = Some(event["report"].clone());
+                }
+                if event["type"] == "turn_complete" {
+                    return report
+                        .expect("default turn emitted a context report before completion");
+                }
+            }
+        }
+        panic!("context stream closed before default assembly report")
+    })
+    .await
+    .expect("default assembly report before timeout");
+    assert_eq!(report["assembly_name"], "default");
+    assert!(
+        report["elements"]
+            .as_array()
+            .expect("default assembly elements")
+            .iter()
+            .any(|element| element["name"] == "working_norms"),
+        "the default assembly must account for its working-norms element: {report}"
+    );
+    let requests = captured_requests.lock().unwrap();
+    assert_eq!(requests.len(), 1, "one foreground provider request");
+    assert!(
+        requests[0]
+            .messages
+            .iter()
+            .any(|message| message.text_content().contains("## Working norms")),
+        "the default assembly must deliver working-norm text to the provider: {:?}",
+        requests[0].messages
+    );
+    drop(requests);
+    let audit = storage
+        .list_audit_events_by_session(session_id)
+        .await
+        .unwrap();
+    assert!(
+        audit.iter().any(|event| {
+            event.entity_id == swage_gateway::experimentation::LOCATION_WORKING_NORMS
+                && event.event_kind == "variant_selected"
+        }),
+        "the default assembly turn must retain the working-norms selection audit event: {audit:?}"
     );
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn live_http_delegations_apply_call_scoped_context_composition() {
-    let (provider, captured_requests) = ToolCallingProvider::new(vec![
+    let (provider, captured_requests) = crate::support::CapturingProvider::new(
+        "tool-caller",
         vec![
-            StreamChunk::Delta {
-                content: "first child response".into(),
-            },
-            StreamChunk::Done {
-                finish_reason: None,
-            },
+            vec![
+                StreamChunk::Delta {
+                    content: "first child response".into(),
+                },
+                StreamChunk::Done {
+                    finish_reason: None,
+                },
+            ],
+            vec![
+                StreamChunk::Delta {
+                    content: "second child response".into(),
+                },
+                StreamChunk::Done {
+                    finish_reason: None,
+                },
+            ],
         ],
-        vec![
-            StreamChunk::Delta {
-                content: "second child response".into(),
-            },
-            StreamChunk::Done {
-                finish_reason: None,
-            },
-        ],
-    ]);
+    );
     let swage_home = tempfile::tempdir().unwrap();
     let element_path = swage_home
         .path()
@@ -581,11 +729,7 @@ async fn live_http_delegations_apply_call_scoped_context_composition() {
         ToolDispatcher::allow_all(vec![]),
         None,
     );
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        axum::serve(listener, build_router(state)).await.unwrap();
-    });
+    let (address, _server) = start_live_server(build_router(state)).await;
     let client = reqwest::Client::new();
 
     let dispatch = |task: &'static str| {

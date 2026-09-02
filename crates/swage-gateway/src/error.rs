@@ -1,96 +1,261 @@
+//! The gateway's side of the wire error contract.
+//!
+//! Every failed HTTP response on the client surface carries
+//! `swage_protocol::client::error::ApiErrorBody` — one `{code, message}`
+//! shape with the status projected from the code. Three things produce
+//! failures and all three land here: a `GatewayError` a handler returns
+//! (`From` below, with the exhaustive code mapping in `error_code`), a
+//! request body or path segment the framework could not parse (the [`Json`]
+//! and [`Path`] extractors' rejections), and a refusal a handler states
+//! directly (the constructors).
+//! No handler builds an error body by hand.
+
 use axum::{
-    Json,
-    http::StatusCode,
+    extract::{
+        FromRequest, FromRequestParts, OptionalFromRequest, Request,
+        rejection::{JsonRejection, PathRejection},
+    },
+    http::{StatusCode, request::Parts},
     response::{IntoResponse, Response},
 };
-use serde_json::json;
+use serde::{Serialize, de::DeserializeOwned};
 
-use swage_core::GatewayError;
+use swage_core::{GatewayError, StorageError};
+use swage_protocol::client::error::{ApiErrorBody, ErrorCode};
 
-/// Wraps `GatewayError` and implements axum's `IntoResponse` so handlers can
-/// return `Result<_, ApiError>` and the correct HTTP status + JSON body is sent
-/// automatically.
+/// A failed request, ready to answer with the contract's body.
+///
+/// Handlers return `Result<_, ApiError>`; `?` on a `GatewayError` converts
+/// through [`error_code`]. The originating `GatewayError` is kept where
+/// there was one, so callers that need to branch on the domain error
+/// (a retry decision, a log line) still can.
 #[derive(Debug)]
-pub struct ApiError(pub GatewayError);
-
-impl From<GatewayError> for ApiError {
-    fn from(err: GatewayError) -> Self {
-        ApiError(err)
-    }
+pub struct ApiError {
+    code: ErrorCode,
+    message: String,
+    cause: Option<GatewayError>,
 }
 
 impl ApiError {
+    /// A failure stated directly by a handler, with no domain error behind
+    /// it — a refusal the route itself decides.
+    pub fn new(code: ErrorCode, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+            cause: None,
+        }
+    }
+
     /// 404 Not Found for a named entity.
     pub fn not_found(entity: &str, id: uuid::Uuid) -> Self {
-        Self::not_found_string(entity, id.to_string())
+        Self::not_found_str(entity, &id.to_string())
     }
 
     /// 404 Not Found for a named entity with a non-UUID identifier.
     pub fn not_found_str(entity: &str, id: &str) -> Self {
-        Self::not_found_string(entity, id.to_string())
-    }
-
-    fn not_found_string(entity: &str, id: String) -> Self {
-        ApiError(GatewayError::Storage(swage_core::StorageError::NotFound {
+        GatewayError::Storage(StorageError::NotFound {
             entity: entity.to_string(),
-            id,
-        }))
+            id: id.to_string(),
+        })
+        .into()
     }
 
     /// 500 Internal Server Error with a free-form message.
     pub fn internal(message: String) -> Self {
-        ApiError(GatewayError::ConfigError(message))
+        GatewayError::ConfigError(message).into()
     }
 
     /// 409 Conflict.
     pub fn conflict(message: String) -> Self {
-        ApiError(GatewayError::SpaceConflict(message))
+        GatewayError::SpaceConflict(message).into()
     }
 
     /// 422 Validation Error.
     pub fn validation(message: String) -> Self {
-        ApiError(GatewayError::ValidationError(message))
+        GatewayError::ValidationError(message).into()
+    }
+
+    /// 403 Forbidden.
+    pub fn forbidden(message: impl Into<String>) -> Self {
+        Self::new(ErrorCode::Forbidden, message)
+    }
+
+    pub fn code(&self) -> ErrorCode {
+        self.code
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    /// The domain error this response answers, when one produced it.
+    pub fn cause(&self) -> Option<&GatewayError> {
+        self.cause.as_ref()
+    }
+
+    pub fn status(&self) -> StatusCode {
+        StatusCode::from_u16(self.code.status()).expect("error codes name valid statuses")
+    }
+
+    fn body(&self) -> ApiErrorBody {
+        ApiErrorBody {
+            code: self.code,
+            message: self.message.clone(),
+        }
+    }
+}
+
+impl std::fmt::Display for ApiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for ApiError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.cause
+            .as_ref()
+            .map(|cause| cause as &(dyn std::error::Error + 'static))
+    }
+}
+
+impl From<GatewayError> for ApiError {
+    fn from(error: GatewayError) -> Self {
+        Self {
+            code: error_code(&error),
+            message: error.to_string(),
+            cause: Some(error),
+        }
     }
 }
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        let (status, code) = classify(&self.0);
-        let body = json!({
-            "code": code,
-            "message": self.0.to_string(),
-        });
-        (status, Json(body)).into_response()
+        (self.status(), axum::Json(self.body())).into_response()
     }
 }
 
-/// Map a `GatewayError` variant to an HTTP status code and a short error code
-/// string suitable for machine consumption.
-fn classify(err: &GatewayError) -> (StatusCode, &'static str) {
-    match err {
-        GatewayError::ConversationNotFound { .. } => (StatusCode::NOT_FOUND, "not_found"),
-        GatewayError::SpaceNotFound { .. } => (StatusCode::NOT_FOUND, "not_found"),
-        GatewayError::TurnInProgress { .. } => (StatusCode::CONFLICT, "turn_in_progress"),
-        GatewayError::SpaceConflict(_) => (StatusCode::CONFLICT, "conflict"),
-        GatewayError::ValidationError(_) => (StatusCode::UNPROCESSABLE_ENTITY, "validation_error"),
-        GatewayError::Provider(_) => (StatusCode::BAD_GATEWAY, "provider_error"),
-        GatewayError::SignInUnsupported(_) => {
-            (StatusCode::UNPROCESSABLE_ENTITY, "sign_in_unsupported")
+/// The wire code for a domain error. Exhaustive on purpose: a new
+/// `GatewayError` variant must choose its code here rather than fall to an
+/// internal-error catch-all that hides it from clients.
+pub fn error_code(error: &GatewayError) -> ErrorCode {
+    match error {
+        GatewayError::ConversationNotFound { .. } | GatewayError::SpaceNotFound { .. } => {
+            ErrorCode::NotFound
         }
-        GatewayError::SignInFailed(_) => (StatusCode::BAD_GATEWAY, "sign_in_failed"),
-        GatewayError::ProviderRuntimeUnavailable(_) => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "provider_runtime_unavailable",
-        ),
-        GatewayError::Storage(swage_core::StorageError::NotFound { .. }) => {
-            (StatusCode::NOT_FOUND, "not_found")
-        }
-        GatewayError::Storage(swage_core::StorageError::ConstraintViolation(_)) => {
-            (StatusCode::CONFLICT, "conflict")
-        }
-        // All other variants are unexpected internal failures.
-        _ => (StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
+        GatewayError::TurnInProgress { .. } => ErrorCode::TurnInProgress,
+        GatewayError::SpaceConflict(_) => ErrorCode::Conflict,
+        GatewayError::ValidationError(_) => ErrorCode::ValidationError,
+        GatewayError::Provider(_) => ErrorCode::ProviderError,
+        GatewayError::SignInUnsupported(_) => ErrorCode::SignInUnsupported,
+        GatewayError::SignInFailed(_) => ErrorCode::SignInFailed,
+        GatewayError::ProviderRuntimeUnavailable(_) => ErrorCode::ProviderRuntimeUnavailable,
+        GatewayError::Storage(storage) => match storage {
+            StorageError::NotFound { .. } => ErrorCode::NotFound,
+            StorageError::ConstraintViolation(_) => ErrorCode::Conflict,
+            StorageError::Io(_)
+            | StorageError::Serialisation { .. }
+            | StorageError::Corruption { .. }
+            | StorageError::CapacityExceeded { .. }
+            | StorageError::ConnectionFailed(_)
+            | StorageError::QueryFailed(_)
+            | StorageError::MigrationFailed(_) => ErrorCode::InternalError,
+        },
+        GatewayError::ConfigError(_)
+        | GatewayError::BindError(_)
+        | GatewayError::WebSocketError(_)
+        | GatewayError::ShutdownError(_) => ErrorCode::InternalError,
     }
+}
+
+/// The client surface's JSON body extractor and JSON response.
+///
+/// Extraction is `axum::Json` with its rejection answered as an
+/// [`ApiError`], so a body the framework cannot read fails in the
+/// contract's shape like every other failure. As a response it is
+/// `axum::Json` unchanged. Handlers on the client surface take and return
+/// this `Json`, never `axum::Json` directly.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Json<T>(pub T);
+
+impl<T, S> FromRequest<S> for Json<T>
+where
+    T: DeserializeOwned,
+    S: Send + Sync,
+{
+    type Rejection = ApiError;
+
+    async fn from_request(request: Request, state: &S) -> Result<Self, Self::Rejection> {
+        <axum::Json<T> as FromRequest<S>>::from_request(request, state)
+            .await
+            .map(|axum::Json(value)| Self(value))
+            .map_err(rejection_error)
+    }
+}
+
+impl<T, S> OptionalFromRequest<S> for Json<T>
+where
+    T: DeserializeOwned,
+    S: Send + Sync,
+{
+    type Rejection = ApiError;
+
+    async fn from_request(request: Request, state: &S) -> Result<Option<Self>, Self::Rejection> {
+        <axum::Json<T> as OptionalFromRequest<S>>::from_request(request, state)
+            .await
+            .map(|value| value.map(|axum::Json(value)| Self(value)))
+            .map_err(rejection_error)
+    }
+}
+
+impl<T: Serialize> IntoResponse for Json<T> {
+    fn into_response(self) -> Response {
+        axum::Json(self.0).into_response()
+    }
+}
+
+/// The client surface's path-parameter extractor: `axum::extract::Path` with
+/// its rejection answered as an [`ApiError`], so a path segment that is not
+/// the UUID the route declares fails in the contract's shape rather than as
+/// the framework's plain-text 400.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Path<T>(pub T);
+
+impl<T, S> FromRequestParts<S> for Path<T>
+where
+    T: serde::de::DeserializeOwned + Send,
+    S: Send + Sync,
+{
+    type Rejection = ApiError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        <axum::extract::Path<T> as FromRequestParts<S>>::from_request_parts(parts, state)
+            .await
+            .map(|axum::extract::Path(value)| Self(value))
+            .map_err(path_rejection_error)
+    }
+}
+
+/// A path the framework refused: the segment did not parse as the route's
+/// declared type. Validation, since the shape of the request is wrong.
+fn path_rejection_error(rejection: PathRejection) -> ApiError {
+    ApiError::new(ErrorCode::ValidationError, rejection.body_text())
+}
+
+/// A body the framework refused, in the contract's shape. The rejection's
+/// own text is kept as the message: for a validation failure it names the
+/// offending field, which is what a client needs.
+fn rejection_error(rejection: JsonRejection) -> ApiError {
+    let code = match &rejection {
+        JsonRejection::JsonDataError(_) => ErrorCode::ValidationError,
+        JsonRejection::JsonSyntaxError(_) | JsonRejection::BytesRejection(_) => {
+            ErrorCode::MalformedBody
+        }
+        JsonRejection::MissingJsonContentType(_) => ErrorCode::UnsupportedMediaType,
+        _ => ErrorCode::MalformedBody,
+    };
+    ApiError::new(code, rejection.body_text())
 }
 
 // ---------------------------------------------------------------------------
@@ -99,19 +264,25 @@ fn classify(err: &GatewayError) -> (StatusCode, &'static str) {
 
 #[cfg(test)]
 mod tests {
-    use axum::body::to_bytes;
+    use axum::{Router, body::to_bytes, http::Request, routing::post};
+    use tower::ServiceExt;
     use uuid::Uuid;
 
     use swage_core::ProviderError;
 
     use super::*;
 
-    async fn status_and_code(err: GatewayError) -> (StatusCode, String) {
-        let response = ApiError(err).into_response();
+    async fn read_error(response: Response) -> (StatusCode, ApiErrorBody) {
         let status = response.status();
         let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        (status, body["code"].as_str().unwrap().to_string())
+        let body: ApiErrorBody = serde_json::from_slice(&bytes)
+            .unwrap_or_else(|error| panic!("every failure carries the contract body: {error}"));
+        (status, body)
+    }
+
+    async fn status_and_code(error: GatewayError) -> (StatusCode, ErrorCode) {
+        let (status, body) = read_error(ApiError::from(error).into_response()).await;
+        (status, body.code)
     }
 
     #[tokio::test]
@@ -119,7 +290,7 @@ mod tests {
         let (status, code) =
             status_and_code(GatewayError::ConversationNotFound { id: Uuid::new_v4() }).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
-        assert_eq!(code, "not_found");
+        assert_eq!(code, ErrorCode::NotFound);
     }
 
     #[tokio::test]
@@ -129,7 +300,7 @@ mod tests {
         })
         .await;
         assert_eq!(status, StatusCode::CONFLICT);
-        assert_eq!(code, "turn_in_progress");
+        assert_eq!(code, ErrorCode::TurnInProgress);
     }
 
     #[tokio::test]
@@ -139,7 +310,7 @@ mod tests {
         )))
         .await;
         assert_eq!(status, StatusCode::BAD_GATEWAY);
-        assert_eq!(code, "provider_error");
+        assert_eq!(code, ErrorCode::ProviderError);
     }
 
     #[tokio::test]
@@ -147,7 +318,7 @@ mod tests {
         let (status, code) =
             status_and_code(GatewayError::ConfigError("bad config".to_string())).await;
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-        assert_eq!(code, "internal_error");
+        assert_eq!(code, ErrorCode::InternalError);
     }
 
     #[tokio::test]
@@ -156,17 +327,17 @@ mod tests {
             (
                 GatewayError::SignInUnsupported("native provider".to_string()),
                 StatusCode::UNPROCESSABLE_ENTITY,
-                "sign_in_unsupported",
+                ErrorCode::SignInUnsupported,
             ),
             (
                 GatewayError::SignInFailed("login rejected".to_string()),
                 StatusCode::BAD_GATEWAY,
-                "sign_in_failed",
+                ErrorCode::SignInFailed,
             ),
             (
                 GatewayError::ProviderRuntimeUnavailable("spawn failed".to_string()),
                 StatusCode::SERVICE_UNAVAILABLE,
-                "provider_runtime_unavailable",
+                ErrorCode::ProviderRuntimeUnavailable,
             ),
         ];
 
@@ -175,5 +346,120 @@ mod tests {
             assert_eq!(status, expected_status);
             assert_eq!(code, expected_code);
         }
+    }
+
+    #[tokio::test]
+    async fn a_domain_error_keeps_its_cause_and_message() {
+        let error = ApiError::from(GatewayError::ValidationError("name is empty".into()));
+        assert_eq!(error.code(), ErrorCode::ValidationError);
+        assert_eq!(error.message(), "validation error: name is empty");
+        assert!(matches!(
+            error.cause(),
+            Some(GatewayError::ValidationError(message)) if message == "name is empty"
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_stated_refusal_answers_in_the_contract_shape() {
+        let (status, body) =
+            read_error(ApiError::forbidden("shutdown is local only").into_response()).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body.code, ErrorCode::Forbidden);
+        assert_eq!(body.message, "shutdown is local only");
+    }
+
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Probe {
+        #[allow(dead_code)]
+        name: String,
+    }
+
+    fn probe_router() -> Router {
+        Router::new()
+            .route(
+                "/probe",
+                post(|Json(_): Json<Probe>| async { StatusCode::OK }),
+            )
+            .route(
+                "/probe/{id}",
+                axum::routing::get(|Path(_): Path<Uuid>| async { StatusCode::OK }),
+            )
+    }
+
+    #[tokio::test]
+    async fn a_path_segment_outside_its_declared_type_answers_in_the_contract_shape() {
+        let response = probe_router()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/probe/not-a-uuid")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let (status, body) = read_error(response).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body.code, ErrorCode::ValidationError);
+
+        let ok = probe_router()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/probe/{}", Uuid::nil()))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ok.status(), StatusCode::OK);
+    }
+
+    async fn probe(content_type: &str, body: &'static str) -> Response {
+        probe_router()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/probe")
+                    .header("content-type", content_type)
+                    .body(axum::body::Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_body_the_framework_cannot_parse_answers_in_the_contract_shape() {
+        let (status, body) = read_error(probe("application/json", "{not json").await).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body.code, ErrorCode::MalformedBody);
+    }
+
+    #[tokio::test]
+    async fn a_body_outside_its_contract_names_the_offending_field() {
+        let (status, body) =
+            read_error(probe("application/json", r#"{"name":"x","extra":1}"#).await).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body.code, ErrorCode::ValidationError);
+        assert!(
+            body.message.contains("extra"),
+            "the message names the field: {}",
+            body.message
+        );
+    }
+
+    #[tokio::test]
+    async fn a_body_without_a_json_content_type_is_refused_in_the_contract_shape() {
+        let (status, body) = read_error(probe("text/plain", r#"{"name":"x"}"#).await).await;
+        assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert_eq!(body.code, ErrorCode::UnsupportedMediaType);
+    }
+
+    #[tokio::test]
+    async fn a_well_formed_body_reaches_the_handler() {
+        let response = probe("application/json", r#"{"name":"x"}"#).await;
+        assert_eq!(response.status(), StatusCode::OK);
     }
 }

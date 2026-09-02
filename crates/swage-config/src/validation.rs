@@ -13,7 +13,6 @@ const KNOWN_SECTIONS: &[&str] = &[
     "server",
     "providers",
     "models",
-    "workspace",
     "sandbox",
     "logging",
     "tools",
@@ -39,7 +38,6 @@ fn known_fields_for(section: &str) -> &'static [&'static str] {
         "server" => &["host", "port"],
         "providers" => &["default", "entries"],
         "models" => &["default", "default_model_id", "entries"],
-        "workspace" => &["path"],
         "sandbox" => &["enabled", "allow_degraded_execution"],
         "logging" => &["level"],
         // Scalar tool settings plus flattened permission fields (allow, deny,
@@ -140,7 +138,6 @@ fn check_field_type(
         ("models", "default") => ("string", matches!(value, Value::String(_))),
         ("models", "default_model_id") => ("string", matches!(value, Value::String(_))),
         ("models", "entries") => ("table", matches!(value, Value::Table(_))),
-        ("workspace", "path") => ("string", matches!(value, Value::String(_))),
         ("sandbox", "enabled" | "allow_degraded_execution") => {
             ("boolean", matches!(value, Value::Boolean(_)))
         }
@@ -922,6 +919,20 @@ pub fn validate_resolved_catalog_references(
         ));
     }
 
+    for (model_id, model) in &config.models.entries {
+        if let Some(effort) = model.capabilities.effort.as_ref()
+            && let Err(message) = effort.validate()
+        {
+            problems.push(make_problem(
+                file_path,
+                Some(format!("models.entries.{model_id}.capabilities.effort")),
+                ConfigProblemKind::SemanticError {
+                    message: format!("model '{model_id}' declares an effort capability that cannot be honoured: {message}"),
+                },
+            ));
+        }
+    }
+
     if config.models.default.is_empty() && config.models.entries.is_empty() {
         return problems;
     }
@@ -1191,6 +1202,21 @@ max_tokens = 1024
                 if section == "server" && name == "protocol")
         });
         assert!(found, "should report unknown field 'protocol' in [server]");
+    }
+
+    #[test]
+    fn workspace_path_is_rejected_as_an_unknown_section() {
+        let problems =
+            validate_toml_string("[workspace]\npath = \"/tmp/project\"", &path("config.toml"));
+        assert!(
+            problems.iter().any(|problem| {
+                matches!(
+                    &problem.kind,
+                    ConfigProblemKind::UnknownSection { name } if name == "workspace"
+                )
+            }),
+            "removed [workspace] configuration must be rejected: {problems:?}"
+        );
     }
 
     #[test]
@@ -2017,6 +2043,40 @@ message_ttl_secs = 86400
                 .iter()
                 .any(|p| matches!(&p.kind, ConfigProblemKind::TypeError { .. })),
             "string value for tools.search should produce TypeError"
+        );
+    }
+
+    #[test]
+    fn an_effort_capability_that_cannot_be_honoured_is_a_semantic_problem() {
+        let mut config = ResolvedConfig::default();
+        config.models.default = "m".into();
+        config.models.entries.insert(
+            "m".into(),
+            crate::ModelEndpointConfig {
+                provider_id: "p".into(),
+                model_id: "m".into(),
+                capabilities: crate::ModelCapabilitiesConfig {
+                    reasoning_replay: false,
+                    effort: Some(swage_protocol::client::settings::EffortCapability::Budget {
+                        min_tokens: 100,
+                        max_tokens: 10,
+                        can_disable: false,
+                    }),
+                },
+                ..Default::default()
+            },
+        );
+        config
+            .providers
+            .entries
+            .insert("p".into(), crate::ProviderEndpointConfig::default());
+        let problems = validate_resolved_catalog_references(&config, Path::new("config.toml"));
+        assert!(
+            problems.iter().any(|problem| {
+                problem.field_path.as_deref() == Some("models.entries.m.capabilities.effort")
+                    && problem.to_string().contains("inverted")
+            }),
+            "{problems:?}"
         );
     }
 }

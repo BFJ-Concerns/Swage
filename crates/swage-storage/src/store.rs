@@ -135,7 +135,7 @@ pub trait SessionStore: Send + Sync {
 pub trait DeviceStore: Send + Sync {
     async fn upsert_device(
         &self,
-        host: NewDeviceRegistration,
+        device: NewDeviceRegistration,
     ) -> Result<DeviceRegistration, StorageError>;
     async fn list_devices(&self) -> Result<Vec<DeviceRegistration>, StorageError>;
     async fn delete_device(&self, device_id: &str) -> Result<bool, StorageError>;
@@ -1012,11 +1012,17 @@ pub trait WorkflowStore: Send + Sync {
         &self,
         id: Uuid,
     ) -> Result<Option<WorkflowScriptVersion>, StorageError>;
+    /// Change a script row's mutable fields; every argument left `None`
+    /// leaves its column alone. Setting `authoring_session_id` marks the row
+    /// as a conversation's own work, which
+    /// [`WorkflowScriptRecord::effective_delivery_grant`] reads as "this
+    /// script never delivers".
     async fn update_workflow_script(
         &self,
         id: Uuid,
         description: Option<&str>,
         delivery_grant: Option<serde_json::Value>,
+        authoring_session_id: Option<Uuid>,
     ) -> Result<WorkflowScriptRecord, StorageError>;
     async fn list_workflow_scripts(
         &self,
@@ -1080,6 +1086,8 @@ pub trait WorkflowStore: Send + Sync {
         &self,
         now: chrono::DateTime<chrono::Utc>,
     ) -> Result<Vec<WorkflowRunRecord>, StorageError>;
+    /// All parked runs, oldest wake first, including runs not yet due.
+    async fn list_parked_workflow_runs(&self) -> Result<Vec<WorkflowRunRecord>, StorageError>;
     /// Runs a crash or shutdown left interrupted, oldest first — the boot
     /// resume's work list.
     async fn list_interrupted_workflow_runs(&self) -> Result<Vec<WorkflowRunRecord>, StorageError>;
@@ -2465,6 +2473,7 @@ mod tests {
             _: Uuid,
             _: Option<&str>,
             _: Option<serde_json::Value>,
+            _: Option<Uuid>,
         ) -> Result<WorkflowScriptRecord, StorageError> {
             unimplemented!()
         }
@@ -2542,6 +2551,9 @@ mod tests {
             &self,
             _: chrono::DateTime<chrono::Utc>,
         ) -> Result<Vec<WorkflowRunRecord>, StorageError> {
+            unimplemented!()
+        }
+        async fn list_parked_workflow_runs(&self) -> Result<Vec<WorkflowRunRecord>, StorageError> {
             unimplemented!()
         }
         async fn list_interrupted_workflow_runs(

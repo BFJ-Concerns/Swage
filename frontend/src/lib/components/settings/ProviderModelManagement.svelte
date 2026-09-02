@@ -40,7 +40,7 @@
         <div class="model-facts">
           <span>{model.context_window ? `${model.context_window.toLocaleString()} ctx` : "context unknown"}</span>
           <span>{model.generation_preset ?? "provider generation defaults"}</span>
-          <label class="model-effort"><span aria-hidden="true">Default effort</span><select aria-label={`Default effort for ${modelKey}`} bind:value={model.default_effort}><option value={undefined}>No effort</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="max">Maximum</option></select></label>
+          <label class="model-effort"><span aria-hidden="true">Default effort</span><select aria-label={`Default effort for ${modelKey}`} bind:value={model.default_effort}><option value={undefined}>No effort</option><option value="off">Off</option><option value="minimal">Minimal</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="xhigh">Extra high</option><option value="max">Maximum</option></select></label>
           {#if defaultModel === modelKey}<span class="fact-strong">Default</span>{/if}
         </div>
         <div class="opt-row row-actions">

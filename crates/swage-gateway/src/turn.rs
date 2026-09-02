@@ -5,9 +5,9 @@
 // with a test explaining why defaulting is safe.
 // ---
 
+use std::mem;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::{env, mem};
 
 use tokio::sync::{Mutex, mpsc};
 use tokio_util::sync::CancellationToken;
@@ -16,10 +16,11 @@ use uuid::Uuid;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use swage_core::{
-    ApprovalTimeoutPolicy, ChatMessage, GatewayError, Role, ToolCall, ToolResult,
+    ApprovalTimeoutPolicy, ChatMessage, ContentPart, GatewayError, Role, ToolCall, ToolResult,
     build_tool_round_messages,
 };
 use swage_hook::{HookEvent, HookOutcome, HookRegistry};
+use swage_protocol::client::turn::MessageAttachment;
 use swage_storage::model::{
     AppendMessage, ApprovalKind, ApprovalState, InboundAudit, NewAgentMessage, NewApprovalRequest,
     NewTurn, ToolCallRecord, TurnState,
@@ -70,6 +71,107 @@ pub(crate) use operator_guidance::*;
 pub(crate) use workspace::*;
 
 pub(crate) use swage_core::DispatchContextComposition;
+
+/// What a caller submits for one turn: the message text plus the content
+/// parts sent beside it. Every turn entry point takes this; a `String`
+/// converts, so a text-only caller passes its text unchanged.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TurnInput {
+    pub text: String,
+    pub attachments: Vec<MessageAttachment>,
+}
+
+impl TurnInput {
+    pub fn text(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            attachments: Vec::new(),
+        }
+    }
+
+    pub fn with_attachments(text: impl Into<String>, attachments: Vec<MessageAttachment>) -> Self {
+        Self {
+            text: text.into(),
+            attachments,
+        }
+    }
+}
+
+impl From<String> for TurnInput {
+    fn from(text: String) -> Self {
+        Self::text(text)
+    }
+}
+
+impl From<&str> for TurnInput {
+    fn from(text: &str) -> Self {
+        Self::text(text)
+    }
+}
+
+/// The content parts a stored message carries, parsed against the wire
+/// contract. Storage keeps attachments as opaque JSON; a value outside the
+/// contract is a corrupt record and is refused loudly here, never dropped.
+pub(crate) fn message_attachments(
+    stored: &[serde_json::Value],
+) -> Result<Vec<MessageAttachment>, GatewayError> {
+    stored
+        .iter()
+        .map(|value| {
+            serde_json::from_value(value.clone()).map_err(|error| {
+                GatewayError::Storage(swage_core::StorageError::Corruption {
+                    message: format!("message attachment outside the wire contract: {error}"),
+                })
+            })
+        })
+        .collect()
+}
+
+/// The attachment values as storage records them: the wire representation
+/// verbatim, so the stored row and the client contract never disagree.
+pub(crate) fn attachment_records(attachments: &[MessageAttachment]) -> Vec<serde_json::Value> {
+    attachments
+        .iter()
+        .map(|attachment| serde_json::to_value(attachment).expect("attachments serialise"))
+        .collect()
+}
+
+/// The model-facing content parts for a submitted message: the text first,
+/// then one part per attachment in submission order.
+pub(crate) fn content_parts(text: String, attachments: &[MessageAttachment]) -> Vec<ContentPart> {
+    let mut parts = Vec::with_capacity(1 + attachments.len());
+    parts.push(ContentPart::Text { text });
+    parts.extend(attachments.iter().map(|attachment| match attachment {
+        MessageAttachment::ImageUrl { url } => ContentPart::ImageUrl { url: url.clone() },
+    }));
+    parts
+}
+
+/// Refuse a submission whose attachments the configured provider cannot
+/// consume. The check runs before anything is persisted: a part the model
+/// would never see must fail the turn, not ride along silently.
+pub(crate) fn check_attachment_support(
+    capabilities: &crate::capabilities::WorkflowCapabilities,
+    attachments: &[MessageAttachment],
+) -> Result<(), GatewayError> {
+    for attachment in attachments {
+        match attachment {
+            MessageAttachment::ImageUrl { url } => {
+                if url.trim().is_empty() {
+                    return Err(GatewayError::ValidationError(
+                        "an image attachment needs a non-empty url".into(),
+                    ));
+                }
+                if !capabilities.vision {
+                    return Err(GatewayError::ValidationError(
+                        "the configured provider does not accept image attachments".into(),
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
 
 // Gateway messaging spans three surfaces: REST endpoints for durable messages
 // and turn submission, session-scoped WebSocket events for live approval and
@@ -127,38 +229,76 @@ pub(crate) async fn redact_provider_visible_request(
     Ok(request)
 }
 
-async fn known_secret_values(state: &AppState) -> Result<Vec<String>, swage_core::StorageError> {
-    let records = state.storage.list_secrets().await?;
+/// Apply a provider diagnostic event to its durable context report. Both the
+/// ordinary and delegated turn paths use this seam so request redaction cannot
+/// drift from response and reasoning capture.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum ProviderSnapshotCapturePath {
+    Ordinary,
+    Delegated,
+}
 
-    let mut values = Vec::new();
-    for record in records
-        .into_iter()
-        .filter(|record| record.status == "active")
-    {
-        let value = match record.backend_kind.as_str() {
-            "managed" => Some(
-                state
-                    .storage
-                    .get_managed_secret_value(record.id)
-                    .await?
-                    .ok_or_else(|| swage_core::StorageError::Corruption {
-                        message: format!(
-                            "active managed secret '{}' has no stored value",
-                            record.id
+pub(crate) async fn apply_provider_snapshot_event(
+    state: &AppState,
+    report_json: &mut serde_json::Value,
+    event: AgentEvent,
+    capture_path: ProviderSnapshotCapturePath,
+) {
+    let turn_id = match &event {
+        AgentEvent::ProviderRequestPrepared { turn_id, .. }
+        | AgentEvent::ProviderResponseCaptured { turn_id, .. }
+        | AgentEvent::ProviderReasoningCaptured { turn_id, .. } => *turn_id,
+        _ => return,
+    };
+    match event {
+        AgentEvent::ProviderRequestPrepared { round, request, .. } => {
+            match redact_provider_visible_request(state, request).await {
+                Ok(request) => append_provider_visible_request(report_json, round, request),
+                Err(error) => {
+                    match capture_path {
+                        ProviderSnapshotCapturePath::Ordinary => tracing::error!(
+                            turn_id = %turn_id,
+                            round,
+                            error = %error,
+                            "provider-visible request capture omitted because secret redaction was unavailable"
                         ),
-                    })?,
-            ),
-            "env" => record
-                .external_reference
-                .as_deref()
-                .and_then(|variable| env::var(variable).ok()),
-            _ => None,
-        };
-        if let Some(value) = value.filter(|value| !value.is_empty()) {
-            values.push(value);
+                        ProviderSnapshotCapturePath::Delegated => tracing::error!(
+                            turn_id = %turn_id,
+                            round,
+                            error = %error,
+                            "delegated provider-visible request capture omitted because secret redaction was unavailable"
+                        ),
+                    }
+                    append_provider_visible_capture_error(report_json, round);
+                }
+            }
         }
+        AgentEvent::ProviderResponseCaptured { round, witness, .. } => {
+            append_provider_visible_response(report_json, round, witness);
+        }
+        AgentEvent::ProviderReasoningCaptured {
+            round,
+            content,
+            details,
+            ..
+        } => {
+            append_provider_visible_reasoning(report_json, round, content, details);
+        }
+        _ => unreachable!("non-provider event returned above"),
     }
-    Ok(values)
+}
+
+async fn known_secret_values(state: &AppState) -> Result<Vec<String>, swage_core::StorageError> {
+    state
+        .secret_manager
+        .known_values()
+        .await
+        .map_err(|error| match error {
+            GatewayError::Storage(storage) => storage,
+            other => swage_core::StorageError::Corruption {
+                message: format!("secret redaction set could not be read: {other}"),
+            },
+        })
 }
 
 fn redact_secret_values(value: &mut serde_json::Value, secret_values: &[String]) {
@@ -232,6 +372,37 @@ fn provider_visible_array<'a>(
     values
         .as_array_mut()
         .expect("provider-visible value was normalised to an array")
+}
+
+/// The effort control the effective model accepts: the catalogue's own
+/// declaration when the entry carries one, otherwise the provider adapter's
+/// account of the documented control, otherwise no control at all.
+pub(crate) fn effort_capability_for_model(
+    config: &swage_config::ResolvedConfig,
+    catalogue_entry: &str,
+    provider: &dyn swage_provider::LlmProvider,
+) -> swage_core::EffortCapability {
+    let model = config.models.entries.get(catalogue_entry);
+    model
+        .and_then(|model| model.capabilities.effort.clone())
+        .or_else(|| {
+            provider.effort_capability(model.map_or(catalogue_entry, |model| &model.model_id))
+        })
+        .unwrap_or(swage_core::EffortCapability::None)
+}
+
+/// Record the resolved effort beside the effective model in the turn's
+/// provider-visible snapshot: what was asked, what is sent, and any clamp.
+fn record_effort_snapshot(
+    report_json: &mut serde_json::Value,
+    resolved: &swage_core::ResolvedEffort,
+) {
+    normalise_report_object(report_json);
+    if !report_json["provider_visible"].is_object() {
+        report_json["provider_visible"] = serde_json::json!({});
+    }
+    report_json["provider_visible"]["effort"] =
+        serde_json::to_value(resolved).expect("resolved effort serialises");
 }
 
 fn record_effective_model_snapshot(
@@ -580,7 +751,7 @@ pub async fn process_turn(
     state: &AppState,
     session_id: Uuid,
     target_thread_id: Option<Uuid>,
-    content: String,
+    input: impl Into<TurnInput>,
     ws_tx: mpsc::UnboundedSender<ServerEvent>,
     subscription: Arc<Mutex<SubscriptionState>>,
     output_schema_override: Option<serde_json::Value>,
@@ -589,7 +760,7 @@ pub async fn process_turn(
         state,
         session_id,
         target_thread_id,
-        content,
+        input.into(),
         ws_tx,
         subscription,
         output_schema_override,
@@ -607,7 +778,7 @@ pub(crate) async fn process_turn_with_existing_turn(
     state: &AppState,
     session_id: Uuid,
     target_thread_id: Option<Uuid>,
-    content: String,
+    input: impl Into<TurnInput>,
     ws_tx: mpsc::UnboundedSender<ServerEvent>,
     subscription: Arc<Mutex<SubscriptionState>>,
     output_schema_override: Option<serde_json::Value>,
@@ -621,7 +792,7 @@ pub(crate) async fn process_turn_with_existing_turn(
         state,
         session_id,
         target_thread_id,
-        content,
+        input.into(),
         ws_tx,
         subscription,
         output_schema_override,
@@ -640,7 +811,7 @@ pub(crate) async fn process_turn_with_existing_turn_and_focus(
     state: &AppState,
     session_id: Uuid,
     target_thread_id: Option<Uuid>,
-    content: String,
+    input: impl Into<TurnInput>,
     ws_tx: mpsc::UnboundedSender<ServerEvent>,
     subscription: Arc<Mutex<SubscriptionState>>,
     output_schema_override: Option<serde_json::Value>,
@@ -655,7 +826,7 @@ pub(crate) async fn process_turn_with_existing_turn_and_focus(
         state,
         session_id,
         target_thread_id,
-        content,
+        input.into(),
         ws_tx,
         subscription,
         output_schema_override,
@@ -675,7 +846,7 @@ pub(crate) async fn process_turn_with_existing_turn_and_focus_and_model(
     state: &AppState,
     session_id: Uuid,
     target_thread_id: Option<Uuid>,
-    content: String,
+    input: impl Into<TurnInput>,
     ws_tx: mpsc::UnboundedSender<ServerEvent>,
     subscription: Arc<Mutex<SubscriptionState>>,
     output_schema_override: Option<serde_json::Value>,
@@ -691,7 +862,7 @@ pub(crate) async fn process_turn_with_existing_turn_and_focus_and_model(
         state,
         session_id,
         target_thread_id,
-        content,
+        input.into(),
         ws_tx,
         subscription,
         output_schema_override,
@@ -713,7 +884,7 @@ pub(crate) async fn process_turn_with_composition(
     state: &AppState,
     session_id: Uuid,
     target_thread_id: Option<Uuid>,
-    content: String,
+    input: impl Into<TurnInput>,
     ws_tx: mpsc::UnboundedSender<ServerEvent>,
     subscription: Arc<Mutex<SubscriptionState>>,
     output_schema_override: Option<serde_json::Value>,
@@ -729,7 +900,7 @@ pub(crate) async fn process_turn_with_composition(
         state,
         session_id,
         target_thread_id,
-        content,
+        input.into(),
         ws_tx,
         subscription,
         output_schema_override,
@@ -748,7 +919,7 @@ pub(crate) async fn process_turn_with_composition(
 
 #[tracing::instrument(
     name = "turn",
-    skip(state, content, ws_tx, subscription, composition, compaction_focus),
+    skip(state, input, ws_tx, subscription, composition, compaction_focus),
     fields(turn_id = tracing::field::Empty),
 )]
 #[allow(clippy::too_many_arguments)]
@@ -756,7 +927,7 @@ async fn process_turn_with_composition_and_focus(
     state: &AppState,
     session_id: Uuid,
     target_thread_id: Option<Uuid>,
-    content: String,
+    input: TurnInput,
     ws_tx: mpsc::UnboundedSender<ServerEvent>,
     subscription: Arc<Mutex<SubscriptionState>>,
     output_schema_override: Option<serde_json::Value>,
@@ -770,6 +941,14 @@ async fn process_turn_with_composition_and_focus(
     compaction_focus: Option<String>,
     requested_model: Option<String>,
 ) -> Result<(), GatewayError> {
+    let TurnInput {
+        text: content,
+        attachments,
+    } = input;
+    // An attachment the provider cannot consume fails the turn before any
+    // record is written — a part the model never sees must not ride along.
+    check_attachment_support(&state.workflow_capabilities, &attachments)?;
+
     // Step 1: Resolve the space and target thread for this session.
     let mut session = state
         .storage
@@ -965,8 +1144,10 @@ async fn process_turn_with_composition_and_focus(
         Some(swage_root),
         true,
         &config.declared_skills,
+        composition.skills.as_deref().unwrap_or_default(),
     )
-    .await;
+    .await
+    .map_err(GatewayError::ConfigError)?;
 
     // Step 4: Ensure the turn exists before any hook execution so the raw
     // input is recorded durably even when inbound processing blocks the turn.
@@ -1039,6 +1220,7 @@ async fn process_turn_with_composition_and_focus(
             .storage
             .append_message(AppendMessage {
                 thread_id,
+                attachments: attachment_records(&attachments),
                 turn_id: Some(prepared_turn_id),
                 role: Role::User,
                 content: before_inbound.canonical_content.clone(),
@@ -1074,6 +1256,7 @@ async fn process_turn_with_composition_and_focus(
                 .storage
                 .append_message(AppendMessage {
                     thread_id,
+                    attachments: Vec::new(),
                     turn_id: Some(prepared_turn_id),
                     role: Role::User,
                     content: render_delegation_result(result),
@@ -1166,6 +1349,22 @@ async fn process_turn_with_composition_and_focus(
         let path = std::path::PathBuf::from(path);
         (path.clone(), vec![path])
     } else {
+        if attendance == TurnAttendance::Unattended
+            && workspace_policy.active_workspace.is_none()
+            && !state.config_root.is_absolute()
+        {
+            record_terminal_state_and_release(
+                state,
+                session_id,
+                prepared_turn_id,
+                TurnState::Failed,
+            )
+            .await?;
+            return Err(GatewayError::ConfigError(format!(
+                "unattended turn has no deliberate tool root: attach a workspace or configure an absolute managed scratch root (current root: {})",
+                state.config_root.display()
+            )));
+        }
         agent_workspace_from_policy(&state.config_root, &workspace_policy, space_id, session.id)
     };
 
@@ -1175,7 +1374,7 @@ async fn process_turn_with_composition_and_focus(
         available_skills_for_agent(&space_slug, &session.agent_id, Some(swage_root));
 
     let operator_guidance = operator_guidance_rules(Some(swage_root), &workspace_policy);
-    let hierarchy = configuration_hierarchy(swage_root, &space_slug, &session.agent_id);
+    let hierarchy = configuration_hierarchy(swage_root, &space_slug, Some(&session.agent_id));
 
     let elements = build_assembly_elements(
         &config.instructions,
@@ -1206,7 +1405,10 @@ async fn process_turn_with_composition_and_focus(
         &session.agent_id,
         &session_variables,
     );
-    let (assembled_messages, assembly_report) = (output.messages, output.report);
+    let (assembled_messages, mut assembly_report) = (output.messages, output.report);
+    assembly_report.tool_scope = Some(serde_json::json!({
+        "effective_root": workspace_root,
+    }));
 
     tracing::debug!(
         total_tokens = assembly_report.total_tokens,
@@ -1232,7 +1434,6 @@ async fn process_turn_with_composition_and_focus(
             effective_model_source,
         );
     }
-
     let session_approval_grants = state
         .session_approval_grants
         .lock()
@@ -1329,7 +1530,22 @@ async fn process_turn_with_composition_and_focus(
             )
             .await?;
             match approval {
-                SandboxDegradationApproval::Approved => {}
+                SandboxDegradationApproval::Approved => {
+                    // The approval wait temporarily marks the placeholder as
+                    // Processing. Agent::process_turn_streaming takes over
+                    // existing placeholders only while they are Pending.
+                    record_failed_turn_and_release_on_error(
+                        state,
+                        session_id,
+                        prepared_turn_id,
+                        state
+                            .storage
+                            .update_turn_state(prepared_turn_id, TurnState::Pending)
+                            .await
+                            .map_err(GatewayError::from),
+                    )
+                    .await?;
+                }
                 SandboxDegradationApproval::Rejected => {
                     record_terminal_state_and_release(
                         state,
@@ -1511,7 +1727,7 @@ async fn process_turn_with_composition_and_focus(
                 )));
             }
         };
-        let effort = match effort_override {
+        let requested_effort = match effort_override {
             Some(effort) => Some(effort),
             None => session
                 .metadata
@@ -1535,6 +1751,21 @@ async fn process_turn_with_composition_and_focus(
                     }
                 }),
         };
+        // The intent is resolved once, here, against the effective model's
+        // declared capability; adapters express the resolved control. The
+        // outcome is written into the turn's audit snapshot so a clamp or an
+        // unsupported `off` is reconstructable from the record.
+        let effort = requested_effort.map(|requested| {
+            let capability = effort_capability_for_model(
+                &config,
+                &config.models.default,
+                state.active_provider().as_ref(),
+            );
+            swage_core::resolve_effort(requested, &capability)
+        });
+        if let Some(resolved) = effort.as_ref() {
+            record_effort_snapshot(&mut report_json, resolved);
+        }
         let turn_request = TurnRequest {
             execution: swage_agent::context::TurnExecutionContext {
                 session_id,
@@ -1630,6 +1861,19 @@ async fn process_turn_with_composition_and_focus(
                     .await
                 {
                     tracing::warn!(%error, "failed to persist compaction record");
+                    if let Err(audit_error) = record_durability::record_reconstruction_gap(
+                        state.storage.as_ref(),
+                        Some(session_id),
+                        snapshot_turn_id,
+                        "compaction_snapshot",
+                        &error,
+                    )
+                    .await
+                    {
+                        record_integrity_lost.get_or_insert(format!(
+                            "compaction snapshot lost and the loss could not be recorded: {audit_error}"
+                        ));
+                    }
                 }
             }
             AgentEvent::Token { content } => {
@@ -1641,23 +1885,17 @@ async fn process_turn_with_composition_and_focus(
                 round,
                 request,
             } => {
-                match redact_provider_visible_request(state, request).await {
-                    Ok(request) => {
-                        append_provider_visible_request(&mut report_json, round, request);
-                    }
-                    Err(error) => {
-                        // Never persist an unredacted provider request. The
-                        // turn may continue, but the snapshot must record why
-                        // this round's provider-visible capture is absent.
-                        tracing::error!(
-                            turn_id = %snapshot_turn_id,
-                            round,
-                            error = %error,
-                            "provider-visible request capture omitted because secret redaction was unavailable"
-                        );
-                        append_provider_visible_capture_error(&mut report_json, round);
-                    }
-                }
+                apply_provider_snapshot_event(
+                    state,
+                    &mut report_json,
+                    AgentEvent::ProviderRequestPrepared {
+                        turn_id: snapshot_turn_id,
+                        round,
+                        request,
+                    },
+                    ProviderSnapshotCapturePath::Ordinary,
+                )
+                .await;
                 if let Err(e) = state
                     .storage
                     .store_snapshot(snapshot_turn_id, &report_json.to_string())
@@ -1689,7 +1927,18 @@ async fn process_turn_with_composition_and_focus(
                 content,
                 details,
             } => {
-                append_provider_visible_reasoning(&mut report_json, round, content, details);
+                apply_provider_snapshot_event(
+                    state,
+                    &mut report_json,
+                    AgentEvent::ProviderReasoningCaptured {
+                        turn_id: snapshot_turn_id,
+                        round,
+                        content,
+                        details,
+                    },
+                    ProviderSnapshotCapturePath::Ordinary,
+                )
+                .await;
                 if let Err(e) = state
                     .storage
                     .store_snapshot(snapshot_turn_id, &report_json.to_string())
@@ -1720,7 +1969,17 @@ async fn process_turn_with_composition_and_focus(
                 round,
                 witness,
             } => {
-                append_provider_visible_response(&mut report_json, round, witness);
+                apply_provider_snapshot_event(
+                    state,
+                    &mut report_json,
+                    AgentEvent::ProviderResponseCaptured {
+                        turn_id: snapshot_turn_id,
+                        round,
+                        witness,
+                    },
+                    ProviderSnapshotCapturePath::Ordinary,
+                )
+                .await;
                 if let Err(e) = state
                     .storage
                     .store_snapshot(snapshot_turn_id, &report_json.to_string())
@@ -2163,7 +2422,7 @@ fn execute_context_assembly(
     }
 
     let search_levels = swage_root
-        .map(|root| configuration_hierarchy(root, space_slug, agent_id))
+        .map(|root| configuration_hierarchy(root, space_slug, Some(agent_id)))
         .unwrap_or_default();
     let level_refs: Vec<(swage_config::HierarchyLevel, &Path)> = search_levels
         .iter()
