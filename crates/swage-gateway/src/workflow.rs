@@ -9066,6 +9066,255 @@ mod tests {
         task.await.expect("host loop");
     }
 
+    /// A run whose script is `source`, with a bounded lead and a provider
+    /// serving `outputs` in order. Returns the storage, the run, and the
+    /// provider so a test can read the journal and the provider's own view.
+    async fn run_held_worker_script(
+        source: &str,
+        outputs: Vec<Vec<swage_core::StreamChunk>>,
+    ) -> (
+        Arc<SqliteStorage>,
+        WorkflowRunRecord,
+        Arc<ScriptedRecordingProvider>,
+        crate::test_support::SwageHomeGuard,
+    ) {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let swage_home = crate::test_support::SwageHomeGuard::new();
+        for agent in ["lead", "worker"] {
+            let agent_dir = swage_home.path().join("spaces/default/agents").join(agent);
+            std::fs::create_dir_all(&agent_dir).expect("create agent config directory");
+            std::fs::write(
+                agent_dir.join("config.toml"),
+                "[tools]\nallow = [\"knowledge_search\"]\ndeny = []\nbundles = {}\n",
+            )
+            .expect("write agent config");
+        }
+        let run = storage
+            .create_workflow_run(NewWorkflowRun {
+                space_id: space.id,
+                parent_run_id: None,
+                parent_seq: None,
+                script_version_id: None,
+                inline_workflow_id: None,
+                inline_workflow_name: None,
+                inline_workflow_version: None,
+                source: Some(source.into()),
+                source_hash: source_hash(source),
+                args: Value::Null,
+                budget: serde_json::json!({}),
+                engine_version: "test".into(),
+                carrying_skill: None,
+                dispatch_bound_agent_ids: vec!["lead".into()],
+                dispatch_bound_task_definition_ids: vec![],
+                workflow_call_tools: None,
+                inherited_worker_placement: None,
+            })
+            .await
+            .expect("run");
+        let provider = Arc::new(ScriptedRecordingProvider {
+            outputs: std::sync::Mutex::new(std::collections::VecDeque::from(outputs)),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![
+                Arc::new(NamedTool::new("knowledge_search")) as Arc<dyn crate::tool::Tool>,
+            ]),
+            None,
+        );
+        launch_existing_run(state.clone(), run.clone(), source.into(), None)
+            .await
+            .expect("launch held-worker run");
+        wait_for_terminal(&state, run.id).await;
+        let finished = storage
+            .get_workflow_run(run.id)
+            .await
+            .expect("run query")
+            .expect("finished run");
+        (storage, finished, provider, swage_home)
+    }
+
+    fn worker_journal_actions(journal: &[WorkflowJournalRecord]) -> Vec<(String, String)> {
+        journal
+            .iter()
+            .filter(|entry| entry.kind == "worker")
+            .map(|entry| {
+                (
+                    entry
+                        .request
+                        .get("action")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    entry.status.clone(),
+                )
+            })
+            .collect()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_held_worker_carries_its_first_turn_into_its_second_and_records_its_life() {
+        let source = r#"
+            const worker = await session({agent: "worker", label: "reviewer"});
+            await send(worker, "restate the brief");
+            const reading = await staleness(worker);
+            const second = await send(worker, "now do the work");
+            await close(worker);
+            return {second, stale: reading.stale, thresholdMs: reading.thresholdMs};
+        "#;
+        let (storage, run, provider, _home) = run_held_worker_script(
+            source,
+            vec![
+                scripted_text_output("restated: gather the sources"),
+                scripted_text_output("the work is done"),
+            ],
+        )
+        .await;
+        assert_eq!(run.state, "completed", "run error: {:?}", run.error_message);
+        assert_eq!(
+            run.final_output,
+            Some(serde_json::json!({
+                "second": "the work is done",
+                "stale": Value::Null,
+                "thresholdMs": Value::Null,
+            })),
+            "a route declaring no threshold reports an unknown verdict, not a guessed one"
+        );
+
+        let requests = provider.requests.lock().expect("requests");
+        assert_eq!(requests.len(), 2, "two turns reached the provider");
+        let second_turn = requests[1]
+            .messages
+            .iter()
+            .map(swage_core::ChatMessage::text_content)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            second_turn.contains("restate the brief")
+                && second_turn.contains("restated: gather the sources"),
+            "the second turn carries the first turn's exchange: {second_turn}"
+        );
+        drop(requests);
+
+        let journal = storage
+            .list_workflow_journal(run.id)
+            .await
+            .expect("journal");
+        assert_eq!(
+            worker_journal_actions(&journal),
+            vec![
+                ("open".to_string(), "completed".to_string()),
+                ("staleness".to_string(), "completed".to_string()),
+                ("close".to_string(), "completed".to_string()),
+            ],
+            "creation, the staleness reading, and closure are all recorded facts"
+        );
+        assert_eq!(
+            journal
+                .iter()
+                .filter(|entry| entry.kind == "agent_call" && entry.status == "completed")
+                .count(),
+            2,
+            "each held turn is an ordinary journalled agent call"
+        );
+        let closure = journal
+            .iter()
+            .find(|entry| entry.kind == "worker"
+                && entry.request.get("action").and_then(Value::as_str) == Some("close"))
+            .expect("closure entry");
+        assert_eq!(closure.result.as_ref().unwrap()["closed_by"], "script");
+
+        let opened = journal
+            .iter()
+            .find(|entry| entry.kind == "worker"
+                && entry.request.get("action").and_then(Value::as_str) == Some("open"))
+            .expect("open entry");
+        let worker_id = opened.result.as_ref().unwrap()["worker_id"]
+            .as_str()
+            .expect("worker id");
+        assert!(
+            journal
+                .iter()
+                .filter(|entry| entry.kind == "agent_call")
+                .all(|entry| entry.request["worker"] == worker_id),
+            "every turn names the worker it belongs to"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_run_that_throws_closes_the_worker_it_still_holds() {
+        let source = r#"
+            const worker = await session({agent: "worker"});
+            await send(worker, "start something");
+            throw new Error("the script gave up");
+        "#;
+        let (storage, run, _provider, _home) =
+            run_held_worker_script(source, vec![scripted_text_output("started")]).await;
+        assert_eq!(run.state, "failed");
+
+        let journal = storage
+            .list_workflow_journal(run.id)
+            .await
+            .expect("journal");
+        let closure = journal
+            .iter()
+            .find(|entry| entry.kind == "worker"
+                && entry.request.get("action").and_then(Value::as_str) == Some("close"))
+            .expect("a run that throws still closes its held worker");
+        assert_eq!(closure.status, "completed");
+        assert_eq!(closure.result.as_ref().unwrap()["closed_by"], "run_end");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_held_worker_turn_cannot_escalate_its_model_even_by_its_own_session_token() {
+        let source = r#"
+            const worker = await session({agent: "worker"});
+            await send(worker, "first");
+            let refusal = null;
+            try {
+                await agent("escalate", {
+                    agent: "worker",
+                    session: worker.session,
+                    model: "strong",
+                });
+            } catch (error) { refusal = error.message; }
+            await close(worker);
+            return refusal;
+        "#;
+        let (storage, run, provider, _home) =
+            run_held_worker_script(source, vec![scripted_text_output("first done")]).await;
+        assert_eq!(run.state, "completed", "run error: {:?}", run.error_message);
+        let refusal = run
+            .final_output
+            .as_ref()
+            .and_then(Value::as_str)
+            .expect("refusal message");
+        assert!(
+            refusal.contains("cannot be selected on a continued session"),
+            "escalation is refused by the host, not merely by the script surface: {refusal}"
+        );
+        assert_eq!(
+            provider.requests.lock().expect("requests").len(),
+            1,
+            "the escalating turn never reaches the provider"
+        );
+        let journal = storage
+            .list_workflow_journal(run.id)
+            .await
+            .expect("journal");
+        assert_eq!(
+            journal
+                .iter()
+                .filter(|entry| entry.kind == "agent_call" && entry.status == "completed")
+                .count(),
+            1,
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn a_bare_worker_completes_with_dispatch_bounded_tools_and_an_agentless_journal() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
