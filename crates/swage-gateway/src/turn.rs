@@ -374,6 +374,32 @@ fn provider_visible_array<'a>(
         .expect("provider-visible value was normalised to an array")
 }
 
+/// The effort control the effective model accepts: the catalogue's own
+/// declaration when the entry carries one, otherwise the provider adapter's
+/// account of the documented control, otherwise no control at all.
+pub(crate) fn effort_capability_for_model(
+    config: &swage_config::ResolvedConfig,
+    catalogue_entry: &str,
+    provider: &dyn swage_provider::LlmProvider,
+) -> swage_core::EffortCapability {
+    let model = config.models.entries.get(catalogue_entry);
+    model
+        .and_then(|model| model.capabilities.effort.clone())
+        .or_else(|| provider.effort_capability(model.map_or(catalogue_entry, |model| &model.model_id)))
+        .unwrap_or(swage_core::EffortCapability::None)
+}
+
+/// Record the resolved effort beside the effective model in the turn's
+/// provider-visible snapshot: what was asked, what is sent, and any clamp.
+fn record_effort_snapshot(report_json: &mut serde_json::Value, resolved: &swage_core::ResolvedEffort) {
+    normalise_report_object(report_json);
+    if !report_json["provider_visible"].is_object() {
+        report_json["provider_visible"] = serde_json::json!({});
+    }
+    report_json["provider_visible"]["effort"] =
+        serde_json::to_value(resolved).expect("resolved effort serialises");
+}
+
 fn record_effective_model_snapshot(
     report_json: &mut serde_json::Value,
     catalogue_entry: &str,
@@ -1696,7 +1722,7 @@ async fn process_turn_with_composition_and_focus(
                 )));
             }
         };
-        let effort = match effort_override {
+        let requested_effort = match effort_override {
             Some(effort) => Some(effort),
             None => session
                 .metadata
@@ -1720,6 +1746,21 @@ async fn process_turn_with_composition_and_focus(
                     }
                 }),
         };
+        // The intent is resolved once, here, against the effective model's
+        // declared capability; adapters express the resolved control. The
+        // outcome is written into the turn's audit snapshot so a clamp or an
+        // unsupported `off` is reconstructable from the record.
+        let effort = requested_effort.map(|requested| {
+            let capability = effort_capability_for_model(
+                &config,
+                &config.models.default,
+                state.active_provider().as_ref(),
+            );
+            swage_core::resolve_effort(requested, &capability)
+        });
+        if let Some(resolved) = effort.as_ref() {
+            record_effort_snapshot(&mut report_json, resolved);
+        }
         let turn_request = TurnRequest {
             execution: swage_agent::context::TurnExecutionContext {
                 session_id,

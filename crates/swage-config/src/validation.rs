@@ -919,6 +919,20 @@ pub fn validate_resolved_catalog_references(
         ));
     }
 
+    for (model_id, model) in &config.models.entries {
+        if let Some(effort) = model.capabilities.effort.as_ref()
+            && let Err(message) = effort.validate()
+        {
+            problems.push(make_problem(
+                file_path,
+                Some(format!("models.entries.{model_id}.capabilities.effort")),
+                ConfigProblemKind::SemanticError {
+                    message: format!("model '{model_id}' declares an effort capability that cannot be honoured: {message}"),
+                },
+            ));
+        }
+    }
+
     if config.models.default.is_empty() && config.models.entries.is_empty() {
         return problems;
     }
@@ -2029,6 +2043,37 @@ message_ttl_secs = 86400
                 .iter()
                 .any(|p| matches!(&p.kind, ConfigProblemKind::TypeError { .. })),
             "string value for tools.search should produce TypeError"
+        );
+    }
+
+    #[test]
+    fn an_effort_capability_that_cannot_be_honoured_is_a_semantic_problem() {
+        let mut config = ResolvedConfig::default();
+        config.models.default = "m".into();
+        config.models.entries.insert(
+            "m".into(),
+            crate::ModelEndpointConfig {
+                provider_id: "p".into(),
+                model_id: "m".into(),
+                capabilities: crate::ModelCapabilitiesConfig {
+                    reasoning_replay: false,
+                    effort: Some(swage_protocol::client::settings::EffortCapability::Budget {
+                        min_tokens: 100,
+                        max_tokens: 10,
+                        can_disable: false,
+                    }),
+                },
+                ..Default::default()
+            },
+        );
+        config.providers.entries.insert("p".into(), crate::ProviderEndpointConfig::default());
+        let problems = validate_resolved_catalog_references(&config, Path::new("config.toml"));
+        assert!(
+            problems.iter().any(|problem| {
+                problem.field_path.as_deref() == Some("models.entries.m.capabilities.effort")
+                    && problem.to_string().contains("inverted")
+            }),
+            "{problems:?}"
         );
     }
 }

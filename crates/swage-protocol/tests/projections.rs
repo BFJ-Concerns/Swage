@@ -63,6 +63,7 @@ fn typescript_bindings_are_regenerated() {
     client::turn::SendMessageRequest::export_all(&cfg).expect("export send message");
     client::turn::MessageResponse::export_all(&cfg).expect("export message response");
     client::settings::SettingsResponse::export_all(&cfg).expect("export settings");
+    client::settings::EffortCapability::export_all(&cfg).expect("export effort capability");
     client::settings::SaveSettingsRequest::export_all(&cfg).expect("export save settings");
     client::settings::ModelDiscoveryResponse::export_all(&cfg).expect("export model discovery");
     client::settings::RestartStatusResponse::export_all(&cfg).expect("export restart status");
