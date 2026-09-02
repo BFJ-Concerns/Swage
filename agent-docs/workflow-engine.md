@@ -464,11 +464,32 @@ when it is not a standalone authored row. A carried workflow is
 immutable in place; an operator can shadow it by authoring a same-named
 workflow in the space.
 
-The shipped research skill (`shipped/skills/research/`) carries the
-`research-sweep` workflow. No other workflows ship with the gateway.
-A carried workflow's roles (the research sweep's researcher, organiser,
-and synthesist) are bare dispatches inside the script, not standalone
-agent definitions — they do not appear in the agent registry.
+Several shipped skills carry workflows (assembly, commission, maestro,
+research, among others). The research skill
+(`shipped/skills/research/`) carries `research-sweep`, the only
+shipped workflow intended for direct user invocation — the others serve
+internal skill orchestration.
+
+### Running a research sweep
+
+Activate the research skill on a session (via `activate_skill`), then
+dispatch its carried workflow with `workflow_run`:
+
+```json
+{ "name": "research-sweep", "args": { "topic": "…", "purpose": "…", "maxSources": 8 } }
+```
+
+- `topic` — what to research, as the user phrased it.
+- `purpose` — what the findings must serve; the synthesis is judged
+  against this.
+- `maxSources` — optional ceiling on sources gathered (default 8).
+
+The sweep runs unattended: sources are gathered as immutable
+observations, an organising pass signposts what landed using
+`knowledge_curate_orientation` (which can author, supersede, and retire
+orientation cards), and a synthesis pass delivers cited findings. The
+sweep's roles — scout, gatherers, organiser, synthesist — are bare
+dispatches inside the script, not standalone agent definitions.
 
 ## Storage
 
