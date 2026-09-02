@@ -7,7 +7,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::{env, mem};
+use std::mem;
 
 use tokio::sync::{Mutex, mpsc};
 use tokio_util::sync::CancellationToken;
@@ -289,37 +289,16 @@ pub(crate) async fn apply_provider_snapshot_event(
 }
 
 async fn known_secret_values(state: &AppState) -> Result<Vec<String>, swage_core::StorageError> {
-    let records = state.storage.list_secrets().await?;
-
-    let mut values = Vec::new();
-    for record in records
-        .into_iter()
-        .filter(|record| record.status == "active")
-    {
-        let value = match record.backend_kind.as_str() {
-            "managed" => Some(
-                state
-                    .storage
-                    .get_managed_secret_value(record.id)
-                    .await?
-                    .ok_or_else(|| swage_core::StorageError::Corruption {
-                        message: format!(
-                            "active managed secret '{}' has no stored value",
-                            record.id
-                        ),
-                    })?,
-            ),
-            "env" => record
-                .external_reference
-                .as_deref()
-                .and_then(|variable| env::var(variable).ok()),
-            _ => None,
-        };
-        if let Some(value) = value.filter(|value| !value.is_empty()) {
-            values.push(value);
-        }
-    }
-    Ok(values)
+    state
+        .secret_manager
+        .known_values()
+        .await
+        .map_err(|error| match error {
+            GatewayError::Storage(storage) => storage,
+            other => swage_core::StorageError::Corruption {
+                message: format!("secret redaction set could not be read: {other}"),
+            },
+        })
 }
 
 fn redact_secret_values(value: &mut serde_json::Value, secret_values: &[String]) {
