@@ -16525,9 +16525,13 @@ mod tests {
         });
         let (_storage, state, run) = worker_call_record_fixture(provider).await;
         let (tx, task) = spawn_worker_call_host(state.clone(), &run);
-        send_worker_call(&tx, worker_call_request("work without reported usage"), None)
-            .await
-            .expect("agent call");
+        send_worker_call(
+            &tx,
+            worker_call_request("work without reported usage"),
+            None,
+        )
+        .await
+        .expect("agent call");
         drop(tx);
         task.await.expect("host loop");
 
@@ -16610,6 +16614,145 @@ mod tests {
             WorkflowCallUsage::Unavailable {
                 reason: WorkflowUsageUnavailableReason::CallDidNotSettle,
             }
+        );
+    }
+
+    /// Opens the provider round and then blocks on a gate the test holds, so
+    /// the worker is demonstrably mid-round — a request went out and no
+    /// answer can arrive — when the run is cancelled underneath it.
+    struct GatedRoundProvider {
+        round_opened: Arc<Notify>,
+        release: Arc<Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl swage_provider::LlmProvider for GatedRoundProvider {
+        fn model_id(&self) -> &str {
+            "gated-round-model"
+        }
+
+        async fn complete(
+            &self,
+            _request: swage_core::CompletionRequest,
+        ) -> Result<swage_core::CompletionResponse, swage_core::ProviderError> {
+            unimplemented!("workflow calls use streaming")
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _request: swage_core::ToolCompletionRequest,
+        ) -> Result<swage_core::ToolCompletionResponse, swage_core::ProviderError> {
+            unimplemented!("workflow calls use streaming")
+        }
+
+        fn stream(
+            &self,
+            _request: swage_core::CompletionRequest,
+        ) -> std::pin::Pin<Box<dyn futures::Stream<Item = swage_core::StreamChunk> + Send>>
+        {
+            let release = Arc::clone(&self.release);
+            self.round_opened.notify_one();
+            Box::pin(futures::stream::once(async move {
+                release.notified().await;
+                swage_core::StreamChunk::Done {
+                    finish_reason: None,
+                }
+            }))
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_worker_cancelled_mid_round_reads_cut_short_not_failed() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let source = r#"return await agent("work the run interrupts", {maxAttempts: 1});"#;
+        let run = storage
+            .create_workflow_run(NewWorkflowRun {
+                space_id: space.id,
+                parent_run_id: None,
+                parent_seq: None,
+                script_version_id: None,
+                inline_workflow_id: None,
+                inline_workflow_name: None,
+                inline_workflow_version: None,
+                carrying_skill: None,
+                source: Some(source.into()),
+                source_hash: source_hash(source),
+                args: Value::Null,
+                budget: serde_json::to_value(WorkflowBudget {
+                    max_agent_calls: Some(1),
+                    max_total_tokens: Some(10),
+                    reserved_closing_tokens: Some(4),
+                    max_concurrent_agent_calls: Some(1),
+                })
+                .expect("budget"),
+                engine_version: "test".into(),
+                dispatch_bound_agent_ids: vec![],
+                dispatch_bound_task_definition_ids: vec![],
+                workflow_call_tools: None,
+                inherited_worker_placement: None,
+            })
+            .await
+            .expect("run");
+        let round_opened = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::new(GatedRoundProvider {
+                round_opened: Arc::clone(&round_opened),
+                release: Arc::clone(&release),
+            }) as Arc<dyn swage_provider::LlmProvider>,
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+
+        launch_existing_run(state.clone(), run.clone(), source.into(), None)
+            .await
+            .expect("launch the run");
+        // Cancel a worker that is genuinely running: the gate holds its
+        // round open, so this is the live path rather than a run parked with
+        // an outstanding entry nobody is working on.
+        round_opened.notified().await;
+        cancel_run(State(state.clone()), Path(run.id))
+            .await
+            .expect("cancel the running run");
+        wait_for_terminal(&state, run.id).await;
+        wait_for_worker_turn_interrupted(&storage).await;
+
+        let detail = get_run(State(state), Path(run.id)).await.expect("detail").0;
+        let entry = detail
+            .journal
+            .iter()
+            .find(|entry| entry.agent_call.is_some())
+            .expect("the cut-short worker's entry");
+        assert_eq!(
+            entry.status,
+            swage_protocol::client::workflow::WorkflowJournalEntryStatus::CutShort,
+            "the run's own end is not the worker's failure"
+        );
+        let call = only_agent_call(&detail);
+        assert_eq!(
+            call.termination,
+            WorkflowWorkerTermination::CutShort {
+                cause: WorkflowCutShortCause::RunCancelled,
+            }
+        );
+        assert_eq!(
+            call.usage,
+            WorkflowCallUsage::Unavailable {
+                reason: WorkflowUsageUnavailableReason::CallDidNotSettle,
+            },
+            "a round that never came back reports no spend it cannot know"
+        );
+        assert_eq!(
+            call.dispatch
+                .as_ref()
+                .expect("the cut-short worker still left its dispatch record")
+                .prompt,
+            "work the run interrupts",
+            "a worker cut short still accounts for what it was asked to do"
         );
     }
 
