@@ -147,6 +147,7 @@ describe("pages store", () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(jsonResponse(listBody))
+      .mockResolvedValueOnce(jsonResponse(templateListBody))
       .mockResolvedValueOnce(jsonResponse(pageBody("# Draft")))
       // The signal answers with a refetch: the note the agent left arrives
       // on the module it names, through the authoritative read path.
@@ -189,6 +190,7 @@ describe("pages store", () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(jsonResponse(listBody))
+      .mockResolvedValueOnce(jsonResponse(templateListBody))
       .mockResolvedValueOnce(jsonResponse(pageBody("# Draft")))
       .mockResolvedValueOnce(
         jsonResponse(annotationBody("mine, on this module", "user")),
@@ -206,7 +208,7 @@ describe("pages store", () => {
 
     await store.annotate(PAGE_ID, MODULE_ID, "mine, on this module");
 
-    const [url, init] = fetchMock.mock.calls[2];
+    const [url, init] = fetchMock.mock.calls[3];
     expect(url).toBe(`/api/pages/${PAGE_ID}/annotations`);
     expect(JSON.parse(init.body as string)).toEqual({
       module_id: MODULE_ID,
