@@ -104,12 +104,17 @@ export function createPagesStore(options?: PagesStoreOptions): PagesStore {
         // A space switch closes the previous space's page — the surface
         // must never leave another space's page visible and writable.
         activePageStore.set(null);
+        // The picker must not offer a previous space's templates while this
+        // space's request is still in flight.
+        templatesStore.set([]);
       }
       currentSpaceId = spaceId;
       const response = await pagesApi.listPages(spaceId);
+      if (spaceId !== currentSpaceId) return;
       pagesStore.set(response.pages);
       // Templates are space-local: the picker only ever offers this space's.
       const templates = await pagesApi.listPageTemplates(spaceId);
+      if (spaceId !== currentSpaceId) return;
       templatesStore.set(templates.templates);
     },
 
