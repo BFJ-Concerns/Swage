@@ -10,12 +10,12 @@ use axum::extract::State;
 use serde_json::json;
 use uuid::Uuid;
 
-use swage_core::GatewayError;
+use swage_core::{GatewayError, StorageError};
 use swage_protocol::client::page::{
-    CreatePageAnnotationRequest, CreatePageRequest, DeletePageAnnotationResponse,
-    CreatePageTemplateRequest, PageAnnotationView, PageListResponse, PageModuleView, PageResponse,
-    PageSummary, PageTemplateListResponse, PageTemplateModuleView, PageTemplateResponse,
-    PageTemplateSummary, UpdatePageAnnotationRequest, WritePageModuleRequest,
+    CreatePageAnnotationRequest, CreatePageRequest, CreatePageTemplateRequest,
+    DeletePageAnnotationResponse, PageAnnotationView, PageListResponse, PageModuleView,
+    PageResponse, PageSummary, PageTemplateListResponse, PageTemplateModuleView,
+    PageTemplateResponse, PageTemplateSummary, UpdatePageAnnotationRequest, WritePageModuleRequest,
 };
 use swage_protocol::client::websocket::ServerEvent;
 use swage_storage::{
@@ -510,20 +510,27 @@ pub async fn delete_page_annotation(
         .ok_or_else(|| {
             GatewayError::ValidationError(format!("no annotation with id {annotation_id}"))
         })?;
-    state.storage.delete_page_annotation(existing.id).await?;
-
     let page = state.storage.get_page(existing.page_id).await?;
     let title = page.map(|page| page.title).unwrap_or_default();
-    record_annotation_change(
-        state,
+    let audit_event = annotation_change_event(
         &title,
         existing.page_id,
         &existing,
         "page_annotation_deleted",
         Some(&existing),
+        None,
         author,
-    )
-    .await?;
+    );
+    if !state
+        .storage
+        .delete_page_annotation_with_audit(existing.clone(), audit_event)
+        .await?
+    {
+        return Err(GatewayError::Storage(StorageError::NotFound {
+            entity: "page annotation".into(),
+            id: annotation_id.to_string(),
+        }));
+    }
 
     let _ = state.broadcast.send(ServerEvent::PageUpdated {
         page_id: existing.page_id,
@@ -549,26 +556,46 @@ async fn record_annotation_change(
 ) -> Result<(), GatewayError> {
     state
         .storage
-        .create_audit_event(NewAuditEvent {
-            id: Uuid::new_v4().to_string(),
-            session_id: None,
-            entity_kind: "page".into(),
-            entity_id: page_id.to_string(),
-            event_kind: event_kind.into(),
-            summary: format!("annotation change on page: {page_title}"),
-            metadata: json!({
-                "annotation_id": annotation.id,
-                "module_id": annotation.module_id,
-                "author": author,
-                "annotation_author": annotation.author,
-                "prior_body": prior.map(|prior| prior.body.clone()),
-                "prior_tags": prior.map(|prior| prior.tags.clone()),
-                "new_body": annotation.body,
-                "new_tags": annotation.tags,
-            }),
-        })
+        .create_audit_event(annotation_change_event(
+            page_title,
+            page_id,
+            annotation,
+            event_kind,
+            prior,
+            Some(annotation),
+            author,
+        ))
         .await?;
     Ok(())
+}
+
+fn annotation_change_event(
+    page_title: &str,
+    page_id: Uuid,
+    annotation: &PageAnnotation,
+    event_kind: &str,
+    prior: Option<&PageAnnotation>,
+    current: Option<&PageAnnotation>,
+    author: &str,
+) -> NewAuditEvent {
+    NewAuditEvent {
+        id: Uuid::new_v4().to_string(),
+        session_id: None,
+        entity_kind: "page".into(),
+        entity_id: page_id.to_string(),
+        event_kind: event_kind.into(),
+        summary: format!("annotation change on page: {page_title}"),
+        metadata: json!({
+            "annotation_id": annotation.id,
+            "module_id": annotation.module_id,
+            "author": author,
+            "annotation_author": annotation.author,
+            "prior_body": prior.map(|prior| prior.body.clone()),
+            "prior_tags": prior.map(|prior| prior.tags.clone()),
+            "new_body": current.map(|current| current.body.clone()),
+            "new_tags": current.map(|current| current.tags.clone()),
+        }),
+    }
 }
 
 pub async fn page_response(state: &AppState, page_id: Uuid) -> Result<PageResponse, GatewayError> {
@@ -980,6 +1007,7 @@ mod tests {
         )
         .await
         .unwrap();
+        let before_delete = storage.get_page(page_id).await.unwrap().unwrap().updated_at;
 
         delete_page_annotation(&state, created.id, "user")
             .await
@@ -1001,6 +1029,51 @@ mod tests {
         assert_eq!(
             recorded.metadata["prior_body"], "withdrawn on reflection",
             "recovery is re-writing the note, informed by the trail"
+        );
+        assert_eq!(recorded.metadata["prior_tags"], json!(["question"]));
+        assert!(recorded.metadata["new_body"].is_null());
+        assert!(recorded.metadata["new_tags"].is_null());
+        assert!(
+            storage.get_page(page_id).await.unwrap().unwrap().updated_at > before_delete,
+            "deleting a note advances the page's freshness marker"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn concurrent_annotation_deletes_leave_one_audit_event() {
+        let (state, storage, page_id, module_id, _) = seeded().await;
+        let created = create_page_annotation(
+            &state,
+            page_id,
+            annotation(module_id, "only one removal is recorded"),
+            "user",
+        )
+        .await
+        .unwrap();
+
+        let (first, second) = tokio::join!(
+            delete_page_annotation(&state, created.id, "user"),
+            delete_page_annotation(&state, created.id, "user"),
+        );
+        assert_eq!(usize::from(first.is_ok()) + usize::from(second.is_ok()), 1);
+        let failure = first
+            .err()
+            .or(second.err())
+            .expect("one delete loses the race");
+        assert!(matches!(
+            failure,
+            GatewayError::Storage(StorageError::NotFound { .. })
+        ));
+        assert_eq!(
+            storage
+                .list_audit_events()
+                .await
+                .unwrap()
+                .iter()
+                .filter(|event| event.event_kind == "page_annotation_deleted")
+                .count(),
+            1,
+            "the losing delete must not append a second audit event"
         );
     }
 
