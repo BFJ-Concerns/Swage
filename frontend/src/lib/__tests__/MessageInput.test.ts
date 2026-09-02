@@ -8,10 +8,16 @@ import type { StreamingStore } from "../stores/streaming";
 
 type MountedComponent = ReturnType<typeof mount>;
 
-function makeStreamingStore(isStreaming = false): StreamingStore {
+function makeStreamingStore(
+  isStreaming = false,
+  activeConversationId?: string | null,
+): StreamingStore {
   return {
     get isStreaming() {
       return isStreaming;
+    },
+    get activeConversationId() {
+      return activeConversationId;
     },
     get activeTurnGeneration() {
       return 0;
@@ -306,5 +312,16 @@ describe("MessageInput", () => {
     });
 
     expect(store.cancelTurn).toHaveBeenCalledOnce();
+  });
+
+  it("does not show another conversation's stream controls", () => {
+    const store = makeStreamingStore(true, "conversation-one");
+    component = mount(MessageInput, {
+      target: document.body,
+      props: { store, sessionId: "conversation-two" },
+    });
+
+    expect(document.querySelector(".action.stop")).toBeNull();
+    expect(document.querySelector(".action.send")).not.toBeNull();
   });
 });
