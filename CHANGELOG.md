@@ -62,6 +62,7 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- Workflow call author errors now fail before a worker or child workflow starts, and propagate out of parallel and pipeline rather than being reported as a failed worker slot.
 - Rejected tool approvals now render as failed calls in the conversation transcript.
 - Gateway runtime discovery no longer reads a partially written metadata file during startup.
 - Compaction audit records now count every source message replaced by a successful summary.
