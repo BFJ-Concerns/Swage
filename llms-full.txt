@@ -978,6 +978,14 @@ override, but `undefined` at the call site falls back to the default.
 | `log(message)` | — | Records via `host.record("log", ...)`. `console.log/warn/error` alias this. |
 | `phase(title)` | — | Records via `host.record("phase", ...)`. |
 
+### Agent model fallback
+
+`agent()` and `agentStart()` accept `fallbackModel`, a catalogue model id. The
+host uses it only when the requested model is unavailable or the provider
+refuses or fails it before any output; schema exhaustion and failures after output do
+not fall back. A completed `agent_call` result records `served_model`, the
+catalogue model that actually served the call.
+
 ### Composition bounds
 
 `ScriptCapabilities { delivery: bool, composition: bool }`. Child runs

@@ -9,7 +9,7 @@ use axum::extract::State;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use swage_config::skill::SkillDefinition;
-use swage_core::{ChatMessage, CompletionRequest, Role, StorageError};
+use swage_core::{ChatMessage, CompletionRequest, GatewayError, Role, StorageError};
 use swage_protocol::client::workflow::{
     CreateWorkflowScriptRequest, PostWorkflowRunEventRequest, PostWorkflowRunEventResponse,
     StartInlineWorkflowRunRequest, StartWorkflowRunRequest, UpdateWorkflowScriptRequest,
@@ -1251,8 +1251,20 @@ impl WorkflowHost for ChannelWorkflowHost {
 }
 
 struct WorkflowTurnAttempt {
-    outcome: Result<(), String>,
+    outcome: Result<(), GatewayError>,
     events: Vec<ServerEvent>,
+}
+
+fn fallback_is_eligible(error: &GatewayError, emitted_output: bool, dispatched_tool: bool) -> bool {
+    if emitted_output || dispatched_tool {
+        return false;
+    }
+
+    match error {
+        GatewayError::Provider(_) => true,
+        GatewayError::ValidationError(message) => message.starts_with("unknown model "),
+        _ => false,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1270,15 +1282,19 @@ async fn execute_workflow_agent_turn(
     journal_entry_id: Uuid,
     requested_model: Option<String>,
 ) -> Result<WorkflowTurnAttempt, WorkflowHostError> {
-    let (events, mut events_rx) = mpsc::unbounded_channel::<ServerEvent>();
+    let (event_tx, mut events_rx) = mpsc::unbounded_channel::<ServerEvent>();
+    let mut events = Vec::new();
     let call_cancellation = cancellation.child_token();
     let mut processing = Box::pin(crate::turn::process_turn_with_composition_and_model(
         state,
         session_id,
         Some(thread_id),
         prompt,
-        events,
-        Arc::new(Mutex::new(SubscriptionState::new(false))),
+        event_tx,
+        // Workflow fallback decisions must see tool dispatches as output
+        // activity. Force delivery to this private channel so the normal
+        // client subscription policy cannot hide them.
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
         schema,
         schema_retries,
         effort,
@@ -1290,41 +1306,53 @@ async fn execute_workflow_agent_turn(
         requested_model,
     ));
     let timeout = timeout_ms.map(std::time::Duration::from_millis);
-    let outcome = tokio::select! {
-        biased;
-        result = &mut processing => {
-            if cancellation.is_cancelled() {
-                if let Err(error) = result {
+    let mut timeout_wait = Box::pin(async {
+        match timeout {
+            Some(duration) => tokio::time::sleep(duration).await,
+            None => std::future::pending().await,
+        }
+    });
+    let outcome = loop {
+        tokio::select! {
+            biased;
+            result = &mut processing => {
+                if cancellation.is_cancelled() {
+                    if let Err(error) = result {
+                        tracing::warn!(%error, "cancelled agent turn failed while settling cancellation");
+                    }
+                    return Err("WorkflowCancelledError".into());
+                }
+                break result;
+            }
+            Some(event) = events_rx.recv() => events.push(event),
+            () = cancellation.cancelled() => {
+                call_cancellation.cancel();
+                if let Err(error) = processing.await {
                     tracing::warn!(%error, "cancelled agent turn failed while settling cancellation");
                 }
                 return Err("WorkflowCancelledError".into());
             }
-            result.map_err(|error| error.to_string())
-        }
-        () = cancellation.cancelled() => {
-            call_cancellation.cancel();
-            if let Err(error) = processing.await {
-                tracing::warn!(%error, "cancelled agent turn failed while settling cancellation");
+            () = &mut timeout_wait => {
+                call_cancellation.cancel();
+                if let Err(error) = processing.await {
+                    tracing::warn!(%error, "timed-out agent turn failed while settling cancellation");
+                }
+                return Err(format!(
+                    "AgentCallTimeoutError: agent call exceeded its {}ms deadline",
+                    timeout_ms.expect("timeout branch requires a deadline")
+                ).into());
             }
-            return Err("WorkflowCancelledError".into());
-        }
-        () = async {
-            match timeout {
-                Some(duration) => tokio::time::sleep(duration).await,
-                None => std::future::pending().await,
-            }
-        } => {
-            call_cancellation.cancel();
-            if let Err(error) = processing.await {
-                tracing::warn!(%error, "timed-out agent turn failed while settling cancellation");
-            }
-            return Err(format!(
-                "AgentCallTimeoutError: agent call exceeded its {}ms deadline",
-                timeout_ms.expect("timeout branch requires a deadline")
-            ).into());
         }
     };
-    let events = std::iter::from_fn(|| events_rx.try_recv().ok()).collect();
+    // The turn's event relay can finish immediately after the turn future.
+    // Give already-dispatched relay work a bounded chance to publish before
+    // deciding whether the attempt was safe to replace with a fallback.
+    while let Ok(Some(event)) =
+        tokio::time::timeout(std::time::Duration::from_millis(50), events_rx.recv()).await
+    {
+        events.push(event);
+    }
+    events.extend(std::iter::from_fn(|| events_rx.try_recv().ok()));
     Ok(WorkflowTurnAttempt { outcome, events })
 }
 
@@ -1576,8 +1604,24 @@ async fn run_ephemeral_agent_call(
         .events
         .iter()
         .any(|event| matches!(event, ServerEvent::Token { .. }));
+    let dispatched_tool = request
+        .tools
+        .as_ref()
+        .is_some_and(|tools| !tools.is_empty())
+        || primary.events.iter().any(|event| {
+            matches!(
+                event,
+                ServerEvent::ToolStart { .. } | ServerEvent::ToolEnd { .. }
+            )
+        });
     let primary_error = match primary.outcome {
-        Err(error) => Some(error),
+        Err(error) => {
+            if fallback_is_eligible(&error, emitted_output, dispatched_tool) {
+                Some(error.to_string())
+            } else {
+                return Err(error.to_string().into());
+            }
+        }
         Ok(()) => {
             let turn = latest_turn(state, thread_id).await?;
             if let Some(turn) = turn
@@ -1600,19 +1644,22 @@ async fn run_ephemeral_agent_call(
                     });
                 }
             }
-            turn.filter(|turn| turn.state != swage_storage::TurnState::Completed)
-                .map(|turn| {
-                    format!(
-                        "AgentCallError: agent turn {} failed before completion",
-                        turn.id
-                    )
-                })
+            if let Some(turn) =
+                turn.filter(|turn| turn.state != swage_storage::TurnState::Completed)
+            {
+                return Err(format!(
+                    "AgentCallError: agent turn {} failed before completion",
+                    turn.id
+                )
+                .into());
+            }
+            None
         }
     };
     let mut served_model = request.model.clone();
     let final_events = match primary_error {
         None => primary.events,
-        Some(error) if !emitted_output => {
+        Some(error) => {
             let Some(fallback_model) = request.fallback_model.clone() else {
                 return Err(error.into());
             };
@@ -1642,10 +1689,16 @@ async fn run_ephemeral_agent_call(
                     "AgentCallError: selected model failed before output ({error}); fallback model {fallback_model:?} failed: {fallback_error}"
                 )
             })?;
+            if request.session.is_none() {
+                state
+                    .storage
+                    .set_session_selected_model(session_id, Some(fallback_model.clone()))
+                    .await
+                    .map_err(|error| error.to_string())?;
+            }
             served_model = Some(fallback_model);
             fallback.events
         }
-        Some(error) => return Err(error.into()),
     };
     let turn = latest_turn(state, thread_id)
         .await?
@@ -8901,6 +8954,7 @@ mod tests {
             outputs: std::sync::Mutex::new(std::collections::VecDeque::from([
                 scripted_text_output("not JSON"),
                 scripted_text_output("still not JSON"),
+                scripted_text_output(r#"{"answer":"fallback must not run"}"#),
             ])),
             requests: std::sync::Mutex::new(Vec::new()),
         });
@@ -8908,11 +8962,12 @@ mod tests {
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn SpaceStore>,
             Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
-            swage_config::ResolvedConfig::default(),
+            fallback_test_config(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
             None,
         );
         let source = r#"return await agent("return a JSON object", {
+            model: "pinned", fallbackModel: "fallback",
             schema: {type: "object", required: ["answer"]}, maxAttempts: 2
         });"#;
         let Json(started) = start_inline_run(
@@ -8959,7 +9014,11 @@ mod tests {
                 .status,
             "completed"
         );
-        assert_eq!(provider.requests.lock().expect("requests").len(), 2);
+        assert_eq!(
+            provider.requests.lock().expect("requests").len(),
+            2,
+            "schema exhaustion must not invoke the declared fallback"
+        );
 
         storage
             .update_workflow_run_state(started.id, "interrupted", None, None, None)
@@ -14294,14 +14353,17 @@ mod tests {
 
         assert_eq!(resume_owed_workflow_runs(&state).await, 0);
         assert_eq!(provider.requests.lock().expect("requests").len(), 1);
+        let run = storage
+            .get_workflow_run(started.id)
+            .await
+            .expect("run")
+            .expect("present");
         assert_eq!(
-            storage
-                .get_workflow_run(started.id)
-                .await
-                .expect("run")
-                .expect("present")
-                .state,
-            "failed"
+            run.state,
+            "failed",
+            "tool-only failure must stay primary: {:?}; requests: {}",
+            run.error_message,
+            provider.requests.lock().expect("requests").len()
         );
     }
 
@@ -16122,8 +16184,22 @@ mod tests {
         Arc<ScriptedRecordingProvider>,
         Uuid,
     ) {
+        fallback_test_state_with_tools(outputs, vec![]).await
+    }
+
+    async fn fallback_test_state_with_tools(
+        outputs: Vec<Vec<swage_core::StreamChunk>>,
+        tools: Vec<Arc<dyn crate::tool::Tool>>,
+    ) -> (
+        AppState,
+        Arc<SqliteStorage>,
+        Arc<ScriptedRecordingProvider>,
+        Uuid,
+    ) {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
         let space = storage.get_or_create_default().await.expect("space");
+        let mut config = fallback_test_config();
+        config.tools.permissions.allow = tools.iter().map(|tool| tool.name().to_string()).collect();
         let provider = Arc::new(ScriptedRecordingProvider {
             outputs: std::sync::Mutex::new(outputs.into()),
             requests: std::sync::Mutex::new(Vec::new()),
@@ -16132,8 +16208,8 @@ mod tests {
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn SpaceStore>,
             Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
-            fallback_test_config(),
-            crate::tool::ToolDispatcher::allow_all(vec![]),
+            config,
+            crate::tool::ToolDispatcher::allow_all(tools),
             None,
         );
         (state, storage, provider, space.id)
@@ -16270,6 +16346,191 @@ mod tests {
             provider.requests.lock().expect("requests").len(),
             1,
             "a partial response must not trigger fallback"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn declared_fallback_does_not_retry_agent_construction_errors() {
+        let (state, storage, provider, space_id) =
+            fallback_test_state(vec![scripted_text_output("fallback answer")]).await;
+        let source = r#"return await agent("answer", {
+            agent: "default", model: "pinned", fallbackModel: "fallback",
+            schema: {type: 17}
+        });"#;
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(space_id),
+            Json(StartInlineWorkflowRunRequest {
+                source: source.into(),
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start workflow");
+        wait_for_terminal(&state, started.id).await;
+
+        let run = storage
+            .get_workflow_run(started.id)
+            .await
+            .expect("run")
+            .expect("present");
+        assert_eq!(run.state, "failed");
+        assert!(
+            run.error_message
+                .as_deref()
+                .is_some_and(|error| error.contains("agent construction failed")),
+            "the primary construction error must survive unchanged: {:?}",
+            run.error_message
+        );
+        assert_eq!(
+            provider.requests.lock().expect("requests").len(),
+            0,
+            "a construction failure must not issue a fallback provider request"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn declared_fallback_does_not_retry_after_a_tool_only_turn_fails() {
+        let (state, _, requests) = crate::turn::tests::make_state_with_capturing_tools(vec![
+            vec![
+                swage_core::StreamChunk::ToolUse {
+                    call_id: "echo-1".into(),
+                    name: "echo".into(),
+                    arguments: serde_json::json!({"text": "work"}),
+                },
+                swage_core::StreamChunk::Done {
+                    finish_reason: None,
+                },
+            ],
+            vec![swage_core::StreamChunk::Error {
+                message: "failed after tool".into(),
+            }],
+            scripted_text_output("must not be used"),
+        ])
+        .await;
+        state.replace_runtime(
+            fallback_test_config(),
+            state.active_provider(),
+            crate::tool::ToolDispatcher::allow_all(vec![Arc::new(
+                crate::test_support::NamedTool::new("echo"),
+            )
+                as Arc<dyn crate::tool::Tool>]),
+        );
+        let error = run_ephemeral_agent_call(
+            &state,
+            Uuid::new_v4(),
+            state
+                .space_store
+                .get_or_create_default()
+                .await
+                .expect("space")
+                .id,
+            &[],
+            &[],
+            Uuid::new_v4(),
+            AgentCallRequest {
+                cwd: None,
+                isolation: None,
+                effort: None,
+                timeout_ms: None,
+                prompt: "answer".into(),
+                agent: Some("gateway".into()),
+                task: None,
+                tools: Some(vec!["echo".into()]),
+                skills: None,
+                model: Some("pinned".into()),
+                fallback_model: Some("fallback".into()),
+                schema: None,
+                max_attempts: 1,
+                label: None,
+                session: None,
+                elements: None,
+                variables: None,
+                assembly: None,
+            },
+            None,
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("the tool-only primary failure must not use the fallback");
+        assert!(error.to_string().contains("AgentCallError"));
+        assert_eq!(
+            requests.lock().expect("requests").len(),
+            2,
+            "the failure after a tool dispatch must not start a fallback turn"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn held_worker_persists_the_fallback_model_for_continuation() {
+        let (state, storage, provider, space_id) = fallback_test_state(vec![
+            scripted_text_output("created by fallback"),
+            scripted_text_output("continued by fallback"),
+        ])
+        .await;
+        let source = r#"
+            const worker = agentStart("create", {
+                agent: "default", model: "missing", fallbackModel: "fallback"
+            });
+            await worker.result;
+            return await agent("continue", { agent: "default", session: worker.session });
+        "#;
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(space_id),
+            Json(StartInlineWorkflowRunRequest {
+                source: source.into(),
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start workflow");
+        wait_for_terminal(&state, started.id).await;
+
+        let journal = storage
+            .list_workflow_journal(started.id)
+            .await
+            .expect("journal");
+        let calls = journal
+            .iter()
+            .filter(|entry| entry.kind == "agent_call")
+            .collect::<Vec<_>>();
+        assert_eq!(calls.len(), 2);
+        assert!(calls.iter().all(|entry| {
+            entry
+                .result
+                .as_ref()
+                .and_then(|result| result["served_model"].as_str())
+                == Some("fallback")
+        }));
+        let session_id = calls[0]
+            .result
+            .as_ref()
+            .and_then(|result| result["session_id"].as_str())
+            .and_then(|id| Uuid::parse_str(id).ok())
+            .expect("worker session id");
+        assert_eq!(
+            storage
+                .get_session(session_id)
+                .await
+                .expect("session")
+                .expect("worker session")
+                .selected_model_id
+                .as_deref(),
+            Some("fallback")
+        );
+        assert_eq!(
+            provider
+                .requests
+                .lock()
+                .expect("requests")
+                .iter()
+                .map(|request| request.model.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("fallback-wire"), Some("fallback-wire")],
+            "continuation must use the persisted fallback without retrying the missing primary"
         );
     }
 
