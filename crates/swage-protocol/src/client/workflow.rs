@@ -84,10 +84,8 @@ pub struct WorkflowBudget {
     /// never consume another entry's allowance.
     #[serde(default)]
     pub per_route: std::collections::BTreeMap<String, WorkflowRouteBudget>,
-    /// Legacy default used only when no per-route ledger is configured.
-    ///
-    /// Kept while callers move to `per_route`; each resolved provider still
-    /// receives an independent ledger from these values.
+    /// Fallback ceiling for a resolved provider route without a `per_route`
+    /// entry.
     pub max_total_tokens: Option<u64>,
     /// Tokens held back from ordinary work for calls made after the run has
     /// observed its wind-down boundary. This allowance is part of, not in

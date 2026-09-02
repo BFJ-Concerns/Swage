@@ -5021,7 +5021,7 @@
             ]
           },
           "max_total_tokens": {
-            "description": "Legacy default used only when no per-route ledger is configured.\n\nKept while callers move to `per_route`; each resolved provider still\nreceives an independent ledger from these values.",
+            "description": "Fallback ceiling for a resolved provider route without a `per_route`\nentry.",
             "format": "uint64",
             "minimum": 0,
             "type": [
