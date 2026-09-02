@@ -525,7 +525,7 @@ the observation stamp.
 
 ### Codex auth store registration
 
-At startup (`startup.rs:207`) the gateway registers the Codex CLI's
+At startup (`startup.rs:208`) the gateway registers the Codex CLI's
 `auth.json` under the file backend as two records:
 
 | Name | Material kind | JSON pointer |
