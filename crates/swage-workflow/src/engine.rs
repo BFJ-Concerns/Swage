@@ -1219,6 +1219,7 @@ mod tests {
                 session_id: None,
                 thread_id: None,
                 turn_id: None,
+                liveness: None,
             })
         }
         async fn deliver(
@@ -1266,6 +1267,7 @@ mod tests {
                 session_id: None,
                 thread_id: None,
                 turn_id: None,
+                liveness: None,
             })
         }
 
@@ -1370,6 +1372,7 @@ mod tests {
                 session_id: Some(uuid::Uuid::from_u128(0xA)),
                 thread_id: Some(uuid::Uuid::from_u128(0xB)),
                 turn_id: None,
+                liveness: None,
             })
         }
 
