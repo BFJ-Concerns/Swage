@@ -6,7 +6,7 @@
 //! kinds are compiled-in until module authoring lands; `document` (markdown
 //! source, client-rendered) is the first.
 
-use axum::extract::{Path, State};
+use axum::extract::State;
 use serde_json::json;
 use uuid::Uuid;
 
@@ -20,7 +20,7 @@ use swage_storage::{
     NewAuditEvent, NewPage, NewPageAnnotation, NewPageModule, PageAnnotation, PageModule,
 };
 
-use crate::error::{ApiError, Json};
+use crate::error::{ApiError, Json, Path};
 use crate::state::AppState;
 
 /// The module kinds the client can render. A write naming any other kind is

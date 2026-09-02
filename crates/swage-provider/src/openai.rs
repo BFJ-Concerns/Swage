@@ -31,8 +31,8 @@ const OPENAI_REQUEST_DIVERGENCES: &[(&str, &str)] = &[(
 // OpenAI wire types
 // ---------------------------------------------------------------------------
 
-/// The effort control OpenAI documents for GPT reasoning models, shared by
-/// Chat Completions (`reasoning_effort`) and the Responses API
+/// The effort control OpenAI documents for its GPT reasoning models, shared
+/// by Chat Completions (`reasoning_effort`) and the Responses API
 /// (`reasoning.effort`): `none` through `xhigh`, where `none` is the
 /// model's own off. `max` is not a level the control accepts.
 pub(crate) fn openai_effort_capability() -> EffortCapability {
@@ -46,6 +46,19 @@ pub(crate) fn openai_effort_capability() -> EffortCapability {
         ],
         can_disable: true,
     }
+}
+
+/// Whether a model id names one of OpenAI's own reasoning models — the
+/// models the documented control is known to accept. The Chat Completions
+/// adapter also serves arbitrary OpenAI-compatible endpoints, whose models
+/// the adapter cannot vouch for: those answer `None`, and the catalogue's
+/// own declaration governs.
+pub(crate) fn is_openai_reasoning_model(model: &str) -> bool {
+    let model = model.trim().to_ascii_lowercase();
+    model.starts_with("gpt-5")
+        || model.starts_with("o1")
+        || model.starts_with("o3")
+        || model.starts_with("o4")
 }
 
 /// The `reasoning_effort` / `reasoning.effort` value for a resolved control.
@@ -773,8 +786,8 @@ impl LlmProvider for OpenAiProvider {
         &self.config.model
     }
 
-    fn effort_capability(&self, _model: &str) -> Option<EffortCapability> {
-        Some(openai_effort_capability())
+    fn effort_capability(&self, model: &str) -> Option<EffortCapability> {
+        is_openai_reasoning_model(model).then(openai_effort_capability)
     }
 
     fn provider_request_snapshot(
@@ -1101,6 +1114,18 @@ mod tests {
             let body = serde_json::to_value(provider.build_request(&request, false)).unwrap();
             assert_eq!(body["reasoning_effort"], expected);
         }
+    }
+
+    /// The adapter vouches for OpenAI's own reasoning models only; a model
+    /// behind a generic OpenAI-compatible endpoint answers `None`, and the
+    /// catalogue's declaration governs.
+    #[test]
+    fn effort_capability_is_declared_only_for_recognised_models() {
+        let provider = OpenAiProvider::from_config(local_provider_config());
+        assert!(provider.effort_capability("gpt-5.6-terra").is_some());
+        assert!(provider.effort_capability("o3-mini").is_some());
+        assert!(provider.effort_capability("llama-3.3-70b").is_none());
+        assert!(provider.effort_capability("qwen-3").is_none());
     }
 
     /// `max` is not an OpenAI level: it arrives clamped to `xhigh`, and

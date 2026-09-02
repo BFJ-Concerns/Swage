@@ -5,7 +5,7 @@ use std::sync::{
     atomic::{AtomicU32, AtomicU64, Ordering},
 };
 
-use axum::extract::{Path, State};
+use axum::extract::State;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use swage_config::skill::SkillDefinition;
@@ -35,7 +35,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::{
-    error::{ApiError, Json},
+    error::{ApiError, Json, Path},
     state::AppState,
     subscription::SubscriptionState,
     turn::{

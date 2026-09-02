@@ -293,7 +293,7 @@ mod tests {
 
         let crate::error::Json(detail) = crate::workflow::get_run(
             axum::extract::State(state.clone()),
-            axum::extract::Path(run_id),
+            crate::error::Path(run_id),
         )
         .await
         .expect("run detail");
@@ -301,7 +301,7 @@ mod tests {
         assert_eq!(detail.run.source_hash, expected_hash);
 
         let crate::error::Json(list) =
-            crate::workflow::list_runs(axum::extract::State(state), axum::extract::Path(space.id))
+            crate::workflow::list_runs(axum::extract::State(state), crate::error::Path(space.id))
                 .await
                 .expect("list runs");
         let listed = list

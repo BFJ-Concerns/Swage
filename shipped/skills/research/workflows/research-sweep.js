@@ -201,6 +201,13 @@ const organised = await agent(
   },
 );
 
+// Schema exhaustion returns null: the organising pass's tool work is done
+// by then, but its account is not, and the terminal report promises one.
+// Stop rather than complete with an organising pass nobody can read.
+if (organised === null) {
+  throw new Error("research-sweep could not validate its organising account");
+}
+
 phase("Synthesise: findings against the purpose");
 // The synthesist reads through search over the accumulated corpus - not this
 // sweep's pocket - and validates quotes through cite before reporting them,
