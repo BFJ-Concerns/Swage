@@ -256,8 +256,10 @@ mod approval_tests {
     async fn rejected_tool_approval_emits_settlement_log() {
         use tracing_subscriber::{Registry, layer::SubscriberExt};
 
+        type RecordedMessages = Arc<Mutex<Vec<(Option<String>, Option<String>)>>>;
+
         #[derive(Default)]
-        struct MessageRecorder(Arc<Mutex<Vec<(Option<String>, Option<String>)>>>);
+        struct MessageRecorder(RecordedMessages);
 
         impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for MessageRecorder {
             fn on_event(
