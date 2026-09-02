@@ -1527,6 +1527,7 @@ impl Agent {
                     cwd,
                     isolation,
                     skills,
+                    child,
                     composition,
                     completion_mode,
                 } = *request;
@@ -1592,6 +1593,7 @@ impl Agent {
                         cwd,
                         isolation,
                         skills,
+                        child.as_deref(),
                         *composition,
                         &call.call_id,
                         &self.config.agent_id,

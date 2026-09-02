@@ -33,7 +33,8 @@ impl Tool for DelegateTool {
         "Delegate a task to another agent. Use completion_mode=\"wait\" when \
          the next parent step needs the delegate's answer. Use \
          completion_mode=\"detach\" to start independent work and continue \
-         this turn with a durable reference to the delegated work."
+         this turn with a durable reference to the delegated work. Name a \
+         child to come back to it later with its context intact."
     }
 
     fn parameters(&self) -> Value {
@@ -56,6 +57,10 @@ impl Tool for DelegateTool {
                     "type": "array",
                     "description": "Named skills to activate for this delegated child.",
                     "items": { "type": "string" }
+                },
+                "child": {
+                    "type": "string",
+                    "description": "A name for this child. Give the same name in a later delegate call to continue with that child rather than starting a fresh one: it keeps everything it was told and did before. Its agent, skills, and working directory are fixed by the first call that names it."
                 },
                 "context": {
                     "type": "array",
@@ -150,6 +155,10 @@ impl Tool for DelegateTool {
                     .collect::<Result<Vec<_>, _>>()
             })
             .transpose()?;
+        let child = params
+            .get("child")
+            .and_then(Value::as_str)
+            .map(str::to_string);
         let cwd = params
             .get("cwd")
             .and_then(Value::as_str)
@@ -184,6 +193,7 @@ impl Tool for DelegateTool {
                 cwd,
                 isolation,
                 skills,
+                child,
                 composition: Box::new(composition),
                 completion_mode,
             }),

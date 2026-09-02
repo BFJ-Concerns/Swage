@@ -1,12 +1,12 @@
 use super::{
-    AgentError, AppState, Arc, CancellationToken, DelegationExecutor, DelegationHandler,
-    DispatchContextComposition, GatewayDispatcherRequest, MessageRouter, NewAgentMessage, Uuid,
-    WORKER_PLACEMENT_AUTHORITY_CONTEXT_METADATA_KEY, WORKER_PLACEMENT_AUTHORITY_PATH_METADATA_KEY,
-    WORKER_PLACEMENT_CAN_WRITE_METADATA_KEY, WORKER_PLACEMENT_CWD_METADATA_KEY,
-    WORKFLOW_CALL_TOOLS_METADATA_KEY, add_dispatch_bound_task_definition_ids,
-    apply_agent_definition, apply_dispatch_bounds, apply_dispatch_task_bounds,
-    apply_workflow_call_tools, available_skills_for_agent, build_agent_config_for_space_workspace,
-    build_approval_registrar, build_assembly_elements,
+    AgentError, AppState, Arc, CancellationToken, DELEGATED_CHILDREN_METADATA_KEY,
+    DelegationExecutor, DelegationHandler, DispatchContextComposition, GatewayDispatcherRequest,
+    MessageRouter, NewAgentMessage, Uuid, WORKER_PLACEMENT_AUTHORITY_CONTEXT_METADATA_KEY,
+    WORKER_PLACEMENT_AUTHORITY_PATH_METADATA_KEY, WORKER_PLACEMENT_CAN_WRITE_METADATA_KEY,
+    WORKER_PLACEMENT_CWD_METADATA_KEY, WORKFLOW_CALL_TOOLS_METADATA_KEY,
+    add_dispatch_bound_task_definition_ids, apply_agent_definition, apply_dispatch_bounds,
+    apply_dispatch_task_bounds, apply_workflow_call_tools, available_skills_for_agent,
+    build_agent_config_for_space_workspace, build_approval_registrar, build_assembly_elements,
     build_gateway_dispatcher_for_unattended_execution, build_session_environment,
     configuration_hierarchy, dispatch_bound_agent_ids_for_turn, dispatch_bound_metadata,
     dispatch_bound_task_definition_ids_for_turn, effective_tool_permissions_record,
@@ -19,11 +19,97 @@ use super::{
 use crate::turn::workspace::ResolvedWorkerDirectory;
 use sha2::{Digest, Sha256};
 use swage_agent::{
-    AgentEvent, DelegatedAssembly, DelegationContextAssembler, DelegationOutcome,
-    DelegationSnapshotRecorder,
+    AgentEvent, DelegatedAssembly, DelegatedChildContinuation, DelegationContextAssembler,
+    DelegationOutcome, DelegationSnapshotRecorder,
 };
 use swage_context::tokeniser::TiktokenTokeniser;
 use swage_core::DelegateCompletionMode;
+
+/// Look up a child this session has delegated to under `name`, and load
+/// everything it has heard and said so far.
+///
+/// The agent is fixed by the call that opened the child: a later call naming
+/// it must be talking to the same agent, or it is a different child wearing a
+/// used name. An unknown name is not an error — it opens a child.
+async fn resolve_named_child(
+    state: &AppState,
+    parent_session_id: Uuid,
+    name: &str,
+    target_agent_id: &str,
+) -> Result<Option<DelegatedChildContinuation>, AgentError> {
+    let session = state
+        .storage
+        .get_session(parent_session_id)
+        .await?
+        .ok_or(AgentError::SessionNotFound(parent_session_id))?;
+    let Some(entry) = session
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get(DELEGATED_CHILDREN_METADATA_KEY))
+        .and_then(|children| children.get(name))
+    else {
+        return Ok(None);
+    };
+    let recorded_agent = entry.get("agent_id").and_then(serde_json::Value::as_str);
+    if recorded_agent != Some(target_agent_id) {
+        return Err(AgentError::InvalidConfig(format!(
+            "child {name:?} is {recorded_agent:?}, not {target_agent_id:?}; \
+             use a different name to delegate to a different agent"
+        )));
+    }
+    let id = |field: &str| {
+        entry
+            .get(field)
+            .and_then(serde_json::Value::as_str)
+            .and_then(|value| Uuid::parse_str(value).ok())
+            .ok_or_else(|| {
+                AgentError::InvalidConfig(format!("child {name:?} has no usable {field}"))
+            })
+    };
+    let session_id = id("session_id")?;
+    let thread_id = id("thread_id")?;
+    let history = super::rebuild_thread_history_messages(state.storage.as_ref(), thread_id)
+        .await
+        .map_err(|error| {
+            AgentError::InvalidConfig(format!("cannot reload child {name:?}: {error}"))
+        })?;
+    Ok(Some(DelegatedChildContinuation {
+        session_id,
+        thread_id,
+        history,
+    }))
+}
+
+/// Record a freshly opened child under the name the caller gave it, so a later
+/// delegate call naming it returns to this child.
+async fn record_named_child(
+    state: &AppState,
+    parent_session_id: Uuid,
+    name: &str,
+    target_agent_id: &str,
+    child_session_id: Uuid,
+    child_thread_id: Uuid,
+) -> Result<(), AgentError> {
+    let session = state
+        .storage
+        .get_session(parent_session_id)
+        .await?
+        .ok_or(AgentError::SessionNotFound(parent_session_id))?;
+    let mut metadata = session.metadata.unwrap_or_else(|| serde_json::json!({}));
+    if !metadata[DELEGATED_CHILDREN_METADATA_KEY].is_object() {
+        metadata[DELEGATED_CHILDREN_METADATA_KEY] = serde_json::json!({});
+    }
+    metadata[DELEGATED_CHILDREN_METADATA_KEY][name] = serde_json::json!({
+        "agent_id": target_agent_id,
+        "session_id": child_session_id,
+        "thread_id": child_thread_id,
+    });
+    state
+        .storage
+        .set_session_metadata(parent_session_id, Some(metadata))
+        .await?;
+    Ok(())
+}
 
 pub(crate) fn delegate_worktree_owner(sender_turn_id: Uuid, delegate_call_id: &str) -> Uuid {
     let mut digest = Sha256::new();
@@ -339,6 +425,7 @@ impl DelegationHandler for GatewayDelegationHandler {
         cwd: Option<String>,
         isolation: Option<swage_protocol::client::workflow::WorkerIsolation>,
         skills: Option<Vec<String>>,
+        child: Option<&str>,
         composition: DispatchContextComposition,
         delegate_call_id: &str,
         sender_agent_id: &str,
@@ -459,6 +546,12 @@ impl DelegationHandler for GatewayDelegationHandler {
         let active_workspace_attachment_id =
             sender_filesystem_authority.active_workspace_attachment_id;
         let sender_session_id = sender_filesystem_authority.session_id;
+        let existing_child = match child {
+            Some(name) => {
+                resolve_named_child(&self.state, sender_session_id, name, target_agent_id).await?
+            }
+            None => None,
+        };
         let mut target_agent_config = build_agent_config_for_space_workspace(
             &self.state,
             target_agent_id.to_string(),
@@ -653,6 +746,7 @@ impl DelegationHandler for GatewayDelegationHandler {
                         session_metadata,
                         child_cancel_token,
                         None,
+                        existing_child,
                     )
                     .await
                 {
@@ -705,6 +799,32 @@ impl DelegationHandler for GatewayDelegationHandler {
                     .await;
                     return Err(error);
                 }
+                if let Some(name) = child {
+                    let child_id = |field: &str| {
+                        result_msg
+                            .payload
+                            .get(field)
+                            .and_then(serde_json::Value::as_str)
+                            .and_then(|value| Uuid::parse_str(value).ok())
+                    };
+                    if let (Some(child_session_id), Some(child_thread_id)) =
+                        (child_id("child_session_id"), child_id("child_thread_id"))
+                        && let Err(error) = record_named_child(
+                            &self.state,
+                            sender_session_id,
+                            name,
+                            target_agent_id,
+                            child_session_id,
+                            child_thread_id,
+                        )
+                        .await
+                    {
+                        // The child answered; losing the name only costs the
+                        // caller the ability to come back to it, so the
+                        // result still stands.
+                        tracing::warn!(%error, child = name, "could not record the named child");
+                    }
+                }
                 Ok(DelegationOutcome::Completed(result_msg.payload.clone()))
             }
             DelegateCompletionMode::Detach => {
@@ -728,6 +848,7 @@ impl DelegationHandler for GatewayDelegationHandler {
                             session_metadata,
                             child_cancel_token,
                             Some(started_tx),
+                            existing_child,
                         )
                         .await;
 
@@ -782,6 +903,19 @@ impl DelegationHandler for GatewayDelegationHandler {
                         "detached delegation stopped before child turn startup".to_string(),
                     )
                 })?;
+                if let Some(name) = child
+                    && let Err(error) = record_named_child(
+                        &self.state,
+                        sender_session_id,
+                        name,
+                        target_agent_id,
+                        detached.child_session_id,
+                        detached.child_thread_id,
+                    )
+                    .await
+                {
+                    tracing::warn!(%error, child = name, "could not record the named child");
+                }
                 Ok(DelegationOutcome::Detached(detached))
             }
         }

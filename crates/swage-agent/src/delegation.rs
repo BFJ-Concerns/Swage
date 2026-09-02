@@ -158,6 +158,16 @@ pub trait DelegationContextAssembler: Send + Sync {
     ) -> Result<DelegatedAssembly, AgentError>;
 }
 
+/// A child this session has delegated to before, and everything it has heard
+/// and said since. Passing one makes the delegation land on that child's own
+/// session and thread instead of a fresh pair, so the child answers with its
+/// earlier work in view.
+pub struct DelegatedChildContinuation {
+    pub session_id: Uuid,
+    pub thread_id: Uuid,
+    pub history: Vec<ChatMessage>,
+}
+
 pub struct DelegatedAssembly {
     pub messages: Vec<ChatMessage>,
     pub report: serde_json::Value,
@@ -185,6 +195,7 @@ impl DelegationExecutor {
         session_metadata: serde_json::Value,
         cancel_token: tokio_util::sync::CancellationToken,
         started_tx: Option<tokio::sync::oneshot::Sender<DetachedDelegation>>,
+        existing_child: Option<DelegatedChildContinuation>,
     ) -> Result<AgentMessage, AgentError> {
         let target_agent_id = &delegate_msg.recipient_agent_id;
 
@@ -195,24 +206,54 @@ impl DelegationExecutor {
         };
         let delegation_output = resolve_delegation_schema(&delegate_msg.payload, &output_config);
 
-        // 2. Create a child session + thread (per-task lifecycle).
-        let session = self
-            .storage
-            .create_session(NewSession {
-                space_id,
-                agent_id: target_agent_id.clone(),
-                metadata: Some(session_metadata),
-                active_workspace_attachment_id: None,
-            })
-            .await?;
-        let thread = ThreadStore::create(
-            self.storage.as_ref(),
-            NewThread {
-                session_id: session.id,
-                agent_id: target_agent_id.clone(),
-            },
-        )
-        .await?;
+        // 2. The child's session and thread: a fresh pair per task, or the
+        //    pair a named child already has. Continuing keeps the child's
+        //    stored metadata as it was — its dispatch bounds and placement
+        //    were settled when it was first opened.
+        let (session, thread) = match existing_child.as_ref() {
+            Some(continuation) => {
+                let session = self
+                    .storage
+                    .get_session(continuation.session_id)
+                    .await?
+                    .ok_or_else(|| {
+                        AgentError::InvalidConfig(format!(
+                            "delegated child session {} no longer exists",
+                            continuation.session_id
+                        ))
+                    })?;
+                let thread = ThreadStore::get(self.storage.as_ref(), continuation.thread_id)
+                    .await?
+                    .filter(|thread| thread.session_id == session.id)
+                    .ok_or_else(|| {
+                        AgentError::InvalidConfig(format!(
+                            "delegated child thread {} does not belong to session {}",
+                            continuation.thread_id, continuation.session_id
+                        ))
+                    })?;
+                (session, thread)
+            }
+            None => {
+                let session = self
+                    .storage
+                    .create_session(NewSession {
+                        space_id,
+                        agent_id: target_agent_id.clone(),
+                        metadata: Some(session_metadata),
+                        active_workspace_attachment_id: None,
+                    })
+                    .await?;
+                let thread = ThreadStore::create(
+                    self.storage.as_ref(),
+                    NewThread {
+                        session_id: session.id,
+                        agent_id: target_agent_id.clone(),
+                    },
+                )
+                .await?;
+                (session, thread)
+            }
+        };
 
         // Annotate the delegate message with the child thread_id so the
         // fallback cancel path (when the active registry has no entry) can
@@ -262,7 +303,13 @@ impl DelegationExecutor {
             })
             .unwrap_or_default();
 
-        let delegated_history = build_delegated_history(&transferred_context, task_description);
+        let mut delegated_history = existing_child
+            .map(|continuation| continuation.history)
+            .unwrap_or_default();
+        delegated_history.extend(build_delegated_history(
+            &transferred_context,
+            task_description,
+        ));
         let turn = self
             .storage
             .create_turn(NewTurn {
@@ -415,12 +462,19 @@ impl DelegationExecutor {
         }
 
         // 6. Create Result or failure message — only the payload differs.
-        let send_result = |payload| NewAgentMessage {
+        //    Both name the child that produced them, so the delegating side
+        //    can come back to this child later and the record says which
+        //    child answered.
+        let send_result = |mut payload: serde_json::Value| NewAgentMessage {
             sender_agent_id: delegate_msg.recipient_agent_id.clone(),
             recipient_agent_id: delegate_msg.sender_agent_id.clone(),
             kind: MessageKind::Result,
             correlation_id: Some(delegate_msg.id),
-            payload,
+            payload: {
+                payload["child_session_id"] = serde_json::json!(session.id);
+                payload["child_thread_id"] = serde_json::json!(thread.id);
+                payload
+            },
         };
 
         match result {
@@ -621,6 +675,7 @@ pub trait DelegationHandler: Send + Sync {
         cwd: Option<String>,
         isolation: Option<swage_protocol::client::workflow::WorkerIsolation>,
         skills: Option<Vec<String>>,
+        child: Option<&str>,
         composition: DispatchContextComposition,
         delegate_call_id: &str,
         sender_agent_id: &str,
@@ -767,6 +822,7 @@ mod tests {
                 None,
                 serde_json::json!({"dispatch_bound_agent_id": "agent-a"}),
                 tokio_util::sync::CancellationToken::new(),
+                None,
                 None,
             )
             .await

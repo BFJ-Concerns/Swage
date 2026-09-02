@@ -1719,6 +1719,7 @@ async fn execute_external_delegate_message(
             session_metadata,
             tokio_util::sync::CancellationToken::new(),
             None,
+            None,
         )
         .await;
 
