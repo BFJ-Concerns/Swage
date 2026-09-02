@@ -55,7 +55,7 @@ impl WorktreeHost {
             .root
             .join(owner_id.to_string())
             .join(format!("worker-{seq}"));
-        self.provision_at(owner_id, seq, repo, path).await
+        self.provision_at(owner_id, seq, repo, path, None).await
     }
 
     pub async fn restore(
@@ -64,8 +64,9 @@ impl WorktreeHost {
         seq: u64,
         repo: &Path,
         path: &Path,
+        base_commit: Option<String>,
     ) -> Result<ProvisionedWorktree, String> {
-        self.provision_at(owner_id, seq, repo, path.to_path_buf())
+        self.provision_at(owner_id, seq, repo, path.to_path_buf(), base_commit)
             .await
     }
 
@@ -75,6 +76,7 @@ impl WorktreeHost {
         seq: u64,
         repo: &Path,
         path: PathBuf,
+        restored_base_commit: Option<String>,
     ) -> Result<ProvisionedWorktree, String> {
         let key = (owner_id, seq);
         if let Some(existing) = self.inner.lock().await.get(&key) {
@@ -87,7 +89,8 @@ impl WorktreeHost {
             )
         })?;
         if path.join(".git").exists() {
-            let base_commit = git_stdout(&repo, ["rev-parse", "HEAD"]).await?;
+            let base_commit =
+                restored_base_commit.unwrap_or(git_stdout(&path, ["rev-parse", "HEAD"]).await?);
             let worktree = ProvisionedWorktree {
                 owner_id,
                 seq,

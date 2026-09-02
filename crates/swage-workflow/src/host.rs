@@ -100,6 +100,7 @@ pub struct ResolvedWorkerPlacement {
     pub authority_path: String,
     pub authority_context_id: Uuid,
     pub worktree_seq: Option<u64>,
+    pub worktree_base_commit: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -239,6 +240,7 @@ pub trait WorkflowHost: Send + Sync {
             can_write: true,
             authority_context_id: Uuid::nil(),
             worktree_seq: None,
+            worktree_base_commit: None,
         }))
     }
 

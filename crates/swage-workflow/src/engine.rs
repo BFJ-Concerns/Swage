@@ -1396,6 +1396,7 @@ mod tests {
                     authority_path: request.cwd.clone().unwrap_or_default(),
                     authority_context_id: uuid::Uuid::nil(),
                     worktree_seq: None,
+                    worktree_base_commit: None,
                 }),
                 None => request
                     .cwd
@@ -1406,6 +1407,7 @@ mod tests {
                         can_write: true,
                         authority_context_id: uuid::Uuid::nil(),
                         worktree_seq: None,
+                        worktree_base_commit: None,
                     }),
             })
         }

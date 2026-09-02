@@ -5,28 +5,34 @@
 //! text so schema validation can choose the final value that fulfils its
 //! contract.
 
-/// Return every JSON value that starts in the response, in source order.
+/// Return every non-overlapping object or array that starts in the response.
 ///
-///
-/// The scan deliberately does not treat Markdown fences as syntax. JSON's
-/// grammar is sufficient to recognise values in bare text and fenced blocks
-/// alike, while preserving their order in the complete reply.
+/// Markdown fences are not syntax here: JSON grammar recognises their contents
+/// directly. Once a complete candidate is found, its interior is skipped so a
+/// nested value can never supersede the outer worker reply.
 pub fn extract_json_values(text: &str) -> Vec<serde_json::Value> {
-    text.char_indices()
-        .filter_map(|(offset, character)| {
-            matches!(
-                character,
-                '{' | '[' | '"' | '-' | '0'..='9' | 't' | 'f' | 'n'
-            )
-            .then(|| {
-                serde_json::Deserializer::from_str(&text[offset..])
-                    .into_iter::<serde_json::Value>()
-                    .next()
-                    .and_then(Result::ok)
+    let mut candidates = Vec::new();
+    let mut offset = 0;
+    while offset < text.len() {
+        let Some(start) = text[offset..]
+            .char_indices()
+            .find_map(|(index, character)| {
+                matches!(character, '{' | '[').then_some(offset + index)
             })
-            .flatten()
-        })
-        .collect()
+        else {
+            break;
+        };
+        let mut stream =
+            serde_json::Deserializer::from_str(&text[start..]).into_iter::<serde_json::Value>();
+        if let Some(Ok(value)) = stream.next() {
+            let end = start + stream.byte_offset();
+            candidates.push(value);
+            offset = end;
+        } else {
+            offset = start + 1;
+        }
+    }
+    candidates
 }
 
 #[cfg(test)]
@@ -40,24 +46,13 @@ mod tests {
     #[test]
     fn bare_json_object() {
         let result = extract_json_values(r#"{"x": 1}"#);
-        assert_eq!(
-            result,
-            vec![serde_json::json!({"x": 1}), serde_json::json!(1)]
-        );
+        assert_eq!(result, vec![serde_json::json!({"x": 1})]);
     }
 
     #[test]
     fn bare_json_array() {
         let result = extract_json_values(r#"[1, 2, 3]"#);
-        assert_eq!(
-            result,
-            vec![
-                serde_json::json!([1, 2, 3]),
-                serde_json::json!(1),
-                serde_json::json!(2),
-                serde_json::json!(3),
-            ]
-        );
+        assert_eq!(result, vec![serde_json::json!([1, 2, 3])]);
     }
 
     #[test]
@@ -87,10 +82,7 @@ mod tests {
         let input = "Here is the result:\n```json\n{\"name\": \"alice\"}\n```\nHope that helps!";
         assert_eq!(
             extract_json_values(input),
-            vec![
-                serde_json::json!({"name": "alice"}),
-                serde_json::json!("alice"),
-            ]
+            vec![serde_json::json!({"name": "alice"})]
         );
     }
 
@@ -123,7 +115,7 @@ mod tests {
     fn prose_with_embedded_fragment_returns_none() {
         assert_eq!(
             extract_json_values("The answer is {\"x\": 1} as you can see."),
-            vec![serde_json::json!({"x": 1}), serde_json::json!(1)]
+            vec![serde_json::json!({"x": 1})]
         );
     }
 
