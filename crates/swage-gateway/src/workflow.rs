@@ -433,7 +433,7 @@ fn journal_wire(
 ) -> Result<swage_protocol::client::workflow::WorkflowJournalEntry, String> {
     use swage_protocol::client::workflow::{
         WorkflowAgentCallDetail, WorkflowEffectDetail, WorkflowJournalEntry,
-        WorkflowJournalEntryKind, WorkflowJournalEntryStatus,
+        WorkflowJournalEntryKind, WorkflowJournalEntryStatus, WorkflowWorkerLiveness,
     };
     let kind = match entry.kind.as_str() {
         "agent_call" => WorkflowJournalEntryKind::AgentCall,
@@ -464,9 +464,9 @@ fn journal_wire(
             target_kind: entry.target_kind.unwrap_or_default(),
             idempotency_key,
         });
-    let agent_call = (entry.kind == "agent_call").then(|| {
+    let agent_call = if entry.kind == "agent_call" {
         let result = entry.result.as_ref();
-        WorkflowAgentCallDetail {
+        Some(WorkflowAgentCallDetail {
             agent_definition_id: entry
                 .request
                 .get("agent")
@@ -487,8 +487,36 @@ fn journal_wire(
             output_tokens: result
                 .and_then(|v| v.get("output_tokens"))
                 .and_then(Value::as_u64),
-        }
-    });
+            liveness: result
+                .and_then(|value| value.get("liveness"))
+                .map(|value| {
+                    serde_json::from_value::<swage_workflow::WorkerLiveness>(value.clone())
+                })
+                .transpose()
+                .map_err(|error| {
+                    format!("workflow agent-call liveness is outside the contract: {error}")
+                })?
+                .map(|liveness| {
+                    Ok::<WorkflowWorkerLiveness, String>(WorkflowWorkerLiveness {
+                        started_at: liveness.started_at.parse().map_err(|error| {
+                            format!("workflow worker liveness started_at is invalid: {error}")
+                        })?,
+                        first_evidence_at: liveness
+                            .first_evidence_at
+                            .map(|value| value.parse())
+                            .transpose()
+                            .map_err(|error| {
+                                format!(
+                                    "workflow worker liveness first_evidence_at is invalid: {error}"
+                                )
+                            })?,
+                    })
+                })
+                .transpose()?,
+        })
+    } else {
+        None
+    };
     let label = entry
         .request
         .get("label")
@@ -1452,6 +1480,22 @@ async fn run_ephemeral_agent_call(
         }
     };
     let (events, mut events_rx) = mpsc::unbounded_channel::<ServerEvent>();
+    let observed_events = Arc::new(Mutex::new(Vec::new()));
+    let event_liveness = Arc::clone(&state.active_workflow_workers);
+    let recorded_events = Arc::clone(&observed_events);
+    let event_task = tokio::spawn(async move {
+        while let Some(event) = events_rx.recv().await {
+            if matches!(
+                event,
+                ServerEvent::Token { .. } | ServerEvent::ToolStart { .. }
+            ) && let Some(liveness) = event_liveness.lock().await.get_mut(&journal_entry_id)
+                && liveness.first_evidence_at.is_none()
+            {
+                liveness.first_evidence_at = Some(chrono::Utc::now().to_rfc3339());
+            }
+            recorded_events.lock().await.push(event);
+        }
+    });
     let request_schema = request.schema.clone();
     let request_schema_retries = request
         .schema
@@ -1528,6 +1572,10 @@ async fn run_ephemeral_agent_call(
             .into());
         }
     }
+    event_task
+        .await
+        .map_err(|error| format!("workflow worker event capture failed: {error}"))?;
+    let observed_events = observed_events.lock().await.clone();
     let turn = state
         .storage
         .list_turns_by_thread(thread_id)
@@ -1536,10 +1584,10 @@ async fn run_ephemeral_agent_call(
         .into_iter()
         .max_by_key(|turn| turn.created_at)
         .ok_or_else(|| "agent call produced no turn".to_string())?;
-    let schema_exhausted = std::iter::from_fn(|| events_rx.try_recv().ok()).any(|event| {
+    let schema_exhausted = observed_events.iter().any(|event| {
         matches!(
             event,
-            ServerEvent::OutputSchemaFailed { turn_id, .. } if turn_id == turn.id
+            ServerEvent::OutputSchemaFailed { turn_id, .. } if *turn_id == turn.id
         )
     });
     // The turn's failure must surface as this call's error — the shared turn
@@ -1591,6 +1639,7 @@ async fn run_ephemeral_agent_call(
         session_id: Some(session_id),
         thread_id: Some(thread_id),
         turn_id: Some(turn.id),
+        liveness: None,
     })
 }
 
@@ -3618,6 +3667,13 @@ async fn complete_agent_entry(
     resolved_working_directory: Option<ResolvedWorkerPlacement>,
     cancellation: CancellationToken,
 ) -> Result<AgentCallResult, WorkflowHostError> {
+    state.active_workflow_workers.lock().await.insert(
+        entry_id,
+        swage_workflow::WorkerLiveness {
+            started_at: chrono::Utc::now().to_rfc3339(),
+            first_evidence_at: None,
+        },
+    );
     match run_ephemeral_agent_call(
         state,
         run_id,
@@ -3631,7 +3687,8 @@ async fn complete_agent_entry(
     )
     .await
     {
-        Ok(result) => {
+        Ok(mut result) => {
+            result.liveness = state.active_workflow_workers.lock().await.remove(&entry_id);
             state
                 .complete_workflow_journal_entry(
                     entry_id,
@@ -3647,6 +3704,7 @@ async fn complete_agent_entry(
         // resumed path. Cancellation is settled for every in-flight entry at
         // the owning run boundary after the host loop drains.
         Err(error) => {
+            state.active_workflow_workers.lock().await.remove(&entry_id);
             if !error.to_string().starts_with("WorkflowCancelledError") {
                 let _ = state
                     .fail_workflow_journal_entry(entry_id, &error.to_string())
@@ -5160,10 +5218,26 @@ pub async fn get_run(
             .filter(|event| event.delivered_at.is_none())
             .count() as u32,
     };
-    let journal = entries
+    let live_workers = state.active_workflow_workers.lock().await.clone();
+    let mut journal = entries
         .into_iter()
         .map(|entry| journal_wire(entry).map_err(internal))
         .collect::<Result<Vec<_>, ApiError>>()?;
+    for entry in &mut journal {
+        if let Some(liveness) = live_workers.get(&entry.id)
+            && let Some(agent_call) = entry.agent_call.as_mut()
+        {
+            agent_call.liveness = Some(swage_protocol::client::workflow::WorkflowWorkerLiveness {
+                started_at: liveness.started_at.parse().map_err(internal)?,
+                first_evidence_at: liveness
+                    .first_evidence_at
+                    .as_deref()
+                    .map(str::parse)
+                    .transpose()
+                    .map_err(internal)?,
+            });
+        }
+    }
     Ok(Json(WorkflowRunDetailResponse {
         run: run_wire(run)?,
         journal,
@@ -5414,6 +5488,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
+    use futures::StreamExt;
     use swage_protocol::client::workflow::{WorkflowJournalEntryKind, WorkflowJournalEntryStatus};
     use swage_storage::{
         AgentDefinitionStore, AuditStore, CitationStore, ContextSnapshotStore, NewWorkflowScript,
@@ -7227,6 +7302,28 @@ mod tests {
         requests: std::sync::Mutex<Vec<swage_core::CompletionRequest>>,
     }
 
+    /// Holds a worker at the exact boundary between dispatch and its first
+    /// provider evidence, so the handler can observe a genuinely running call.
+    struct ParkedFirstDeltaProvider {
+        parked: std::sync::Mutex<Option<oneshot::Sender<()>>>,
+        release: std::sync::Mutex<Option<oneshot::Receiver<()>>>,
+    }
+
+    impl ParkedFirstDeltaProvider {
+        fn new() -> (Self, oneshot::Receiver<()>, oneshot::Sender<()>) {
+            let (parked_tx, parked_rx) = oneshot::channel();
+            let (release_tx, release_rx) = oneshot::channel();
+            (
+                Self {
+                    parked: std::sync::Mutex::new(Some(parked_tx)),
+                    release: std::sync::Mutex::new(Some(release_rx)),
+                },
+                parked_rx,
+                release_tx,
+            )
+        }
+    }
+
     const RESEARCH_SWEEP_QUOTE: &str = "The landed source supports the purpose.";
 
     /// Matches responses to stage prompts so concurrent gather calls cannot
@@ -7389,6 +7486,60 @@ mod tests {
                 Some(output) => Box::pin(futures::stream::iter(output)),
                 None => Box::pin(futures::stream::pending()),
             }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl swage_provider::LlmProvider for ParkedFirstDeltaProvider {
+        fn model_id(&self) -> &str {
+            "parked-first-delta"
+        }
+
+        async fn complete(
+            &self,
+            _: swage_core::CompletionRequest,
+        ) -> Result<swage_core::CompletionResponse, swage_core::ProviderError> {
+            unimplemented!("workflow calls use streaming")
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _: swage_core::ToolCompletionRequest,
+        ) -> Result<swage_core::ToolCompletionResponse, swage_core::ProviderError> {
+            unimplemented!("workflow calls use streaming")
+        }
+
+        fn stream(
+            &self,
+            _: swage_core::CompletionRequest,
+        ) -> std::pin::Pin<Box<dyn futures::Stream<Item = swage_core::StreamChunk> + Send>>
+        {
+            let parked = self
+                .parked
+                .lock()
+                .expect("parked sender")
+                .take()
+                .expect("one workflow provider call");
+            let release = self
+                .release
+                .lock()
+                .expect("release receiver")
+                .take()
+                .expect("one workflow provider call");
+            Box::pin(
+                futures::stream::once(async move {
+                    let _ = parked.send(());
+                    let _ = release.await;
+                    swage_core::StreamChunk::Delta {
+                        content: "first evidence".into(),
+                    }
+                })
+                .chain(futures::stream::iter(vec![
+                    swage_core::StreamChunk::Done {
+                        finish_reason: None,
+                    },
+                ])),
+            )
         }
     }
 
@@ -8754,6 +8905,100 @@ mod tests {
             Some(Value::String("bounded work completed".into()))
         );
         assert_eq!(provider.requests.lock().expect("requests").len(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn get_run_shows_worker_liveness_before_first_evidence_and_after_settlement() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let (provider, parked, release) = ParkedFirstDeltaProvider::new();
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::new(provider) as Arc<dyn swage_provider::LlmProvider>,
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(space.id),
+            Json(StartInlineWorkflowRunRequest {
+                source: "return await agent('wait for the provider');".into(),
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start run");
+        tokio::time::timeout(std::time::Duration::from_secs(2), parked)
+            .await
+            .expect("worker reaches the parked provider boundary")
+            .expect("provider park signal");
+
+        let Json(blocked) = get_run(State(state.clone()), Path(started.id))
+            .await
+            .expect("real get_run handler while worker is blocked");
+        let blocked_liveness = blocked
+            .journal
+            .iter()
+            .find_map(|entry| {
+                entry
+                    .agent_call
+                    .as_ref()
+                    .and_then(|call| call.liveness.as_ref())
+            })
+            .expect("running agent call projects liveness through get_run");
+        assert!(
+            blocked_liveness.started_at <= chrono::Utc::now(),
+            "dispatch must stamp the worker before its provider emits evidence"
+        );
+        assert_eq!(
+            blocked_liveness.first_evidence_at, None,
+            "a provider blocked before its first delta has no evidence stamp"
+        );
+
+        release.send(()).expect("release first provider delta");
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let Json(detail) = get_run(State(state.clone()), Path(started.id))
+                    .await
+                    .expect("real get_run handler after provider evidence");
+                if detail
+                    .journal
+                    .iter()
+                    .find_map(|entry| {
+                        entry
+                            .agent_call
+                            .as_ref()
+                            .and_then(|call| call.liveness.as_ref())
+                    })
+                    .is_some_and(|liveness| liveness.first_evidence_at.is_some())
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("first provider delta becomes visible through get_run");
+
+        wait_for_terminal(&state, started.id).await;
+        let Json(settled) = get_run(State(state), Path(started.id))
+            .await
+            .expect("real get_run handler after settlement");
+        let settled_liveness = settled
+            .journal
+            .iter()
+            .find_map(|entry| {
+                entry
+                    .agent_call
+                    .as_ref()
+                    .and_then(|call| call.liveness.as_ref())
+            })
+            .expect("settled agent call persists liveness");
+        assert!(settled_liveness.first_evidence_at.is_some());
+        assert!(settled_liveness.first_evidence_at >= Some(settled_liveness.started_at));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -12325,6 +12570,7 @@ mod tests {
                     session_id: Some(session.id),
                     thread_id: Some(thread.id),
                     turn_id: Some(Uuid::new_v4()),
+                    liveness: None,
                 })
                 .expect("first result"),
             )
@@ -13193,6 +13439,7 @@ mod tests {
                     session_id: None,
                     thread_id: None,
                     turn_id: None,
+                    liveness: None,
                 })
                 .expect("work result"),
             )
@@ -13438,6 +13685,7 @@ mod tests {
                     session_id: None,
                     thread_id: None,
                     turn_id: None,
+                    liveness: None,
                 })
                 .expect("work result"),
             )

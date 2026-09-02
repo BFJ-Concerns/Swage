@@ -298,6 +298,14 @@ pub struct WorkflowAgentCallDetail {
     pub turn_id: Option<Uuid>,
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
+    pub liveness: Option<WorkflowWorkerLiveness>,
+}
+
+/// Earliest liveness evidence for one workflow worker.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+pub struct WorkflowWorkerLiveness {
+    pub started_at: DateTime<Utc>,
+    pub first_evidence_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
