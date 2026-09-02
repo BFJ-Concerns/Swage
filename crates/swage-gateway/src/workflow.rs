@@ -6358,6 +6358,8 @@ mod tests {
                 schema: None,
                 max_attempts: 1,
                 label: None,
+                phase: None,
+                identity: None,
                 session: None,
                 elements: None,
                 variables: None,
@@ -6435,6 +6437,8 @@ mod tests {
             schema: None,
             max_attempts: 1,
             label: None,
+            phase: None,
+            identity: None,
             session: None,
             elements: None,
             variables: None,
@@ -6556,6 +6560,8 @@ mod tests {
             schema: None,
             max_attempts: 1,
             label: None,
+            phase: None,
+            identity: None,
             session: None,
             elements: None,
             variables: None,
@@ -6867,6 +6873,8 @@ mod tests {
             schema: None,
             max_attempts: 1,
             label: None,
+            phase: None,
+            identity: None,
             session: None,
             elements: Some(vec!["current-work".into()]),
             variables: Some(std::collections::BTreeMap::from([(
@@ -8133,6 +8141,8 @@ mod tests {
             schema: None,
             max_attempts: 1,
             label: None,
+            phase: None,
+            identity: None,
             session: None,
             elements: None,
             variables: None,
@@ -8244,6 +8254,8 @@ mod tests {
             schema: None,
             max_attempts: 1,
             label: None,
+            phase: None,
+            identity: None,
             session: None,
             elements: None,
             variables: None,
@@ -8422,6 +8434,8 @@ mod tests {
                 schema: None,
                 max_attempts: 1,
                 label: None,
+                phase: None,
+                identity: None,
                 session: None,
                 elements: None,
                 variables: None,
@@ -8489,6 +8503,8 @@ mod tests {
                 schema: None,
                 max_attempts: 1,
                 label: None,
+                phase: None,
+                identity: None,
                 session: Some(token.clone()),
                 elements: None,
                 variables: None,
@@ -8544,6 +8560,8 @@ mod tests {
                 schema: None,
                 max_attempts: 1,
                 label: None,
+                phase: None,
+                identity: None,
                 session: Some(token.clone()),
                 elements: None,
                 variables: None,
@@ -8757,7 +8775,8 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn schema_exhaustion_returns_null_and_replays_without_a_new_agent_call() {
+    async fn identified_schema_exhaustion_returns_its_failure_envelope_and_replays_without_a_new_agent_call()
+     {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
         let space = storage.get_or_create_default().await.expect("space");
         let provider = Arc::new(ScriptedRecordingProvider {
@@ -8776,7 +8795,8 @@ mod tests {
             None,
         );
         let source = r#"return await agent("return a JSON object", {
-            schema: {type: "object", required: ["answer"]}, maxAttempts: 2
+            schema: {type: "object", required: ["answer"]}, maxAttempts: 2,
+            identity: true, label: "schema leg", phase: "fan-in"
         });"#;
         let Json(started) = start_inline_run(
             State(state.clone()),
@@ -8797,7 +8817,34 @@ mod tests {
             .expect("run")
             .expect("present");
         assert_eq!(completed.state, "completed");
-        assert_eq!(completed.final_output, Some(Value::Null));
+        assert_eq!(
+            completed
+                .final_output
+                .as_ref()
+                .and_then(|value| value.get("label")),
+            Some(&Value::String("schema leg".into()))
+        );
+        assert_eq!(
+            completed
+                .final_output
+                .as_ref()
+                .and_then(|value| value.get("phase")),
+            Some(&Value::String("fan-in".into()))
+        );
+        assert_eq!(
+            completed
+                .final_output
+                .as_ref()
+                .and_then(|value| value.get("output")),
+            Some(&Value::Null)
+        );
+        assert!(
+            completed
+                .final_output
+                .as_ref()
+                .and_then(|value| value["failure"]["message"].as_str())
+                .is_some_and(|message| message.starts_with("SchemaExhaustedError: agent turn "))
+        );
         let journal = storage
             .list_workflow_journal(started.id)
             .await
@@ -8839,7 +8886,7 @@ mod tests {
             .expect("run")
             .expect("present");
         assert_eq!(replayed.state, "completed");
-        assert_eq!(replayed.final_output, Some(Value::Null));
+        assert_eq!(replayed.final_output, completed.final_output);
         let replayed_journal = storage
             .list_workflow_journal(started.id)
             .await
@@ -9303,6 +9350,8 @@ mod tests {
             })),
             max_attempts: 1,
             label: None,
+            phase: None,
+            identity: None,
             session: None,
             elements: None,
             variables: None,
@@ -10564,6 +10613,8 @@ mod tests {
                 schema: None,
                 max_attempts: 1,
                 label: None,
+                phase: None,
+                identity: None,
                 session: Some(AgentSessionRef {
                     session_id: foreign_session.id,
                     thread_id: Uuid::new_v4(),
@@ -10618,6 +10669,8 @@ mod tests {
                 schema: None,
                 max_attempts: 1,
                 label: None,
+                phase: None,
+                identity: None,
                 session: Some(AgentSessionRef {
                     session_id: Uuid::new_v4(),
                     thread_id: Uuid::new_v4(),
@@ -12295,6 +12348,8 @@ mod tests {
             schema: None,
             max_attempts: 3,
             label: None,
+            phase: None,
+            identity: None,
             session: None,
             elements: None,
             variables: None,
@@ -12348,6 +12403,8 @@ mod tests {
             }),
             max_attempts: 3,
             label: None,
+            phase: None,
+            identity: None,
             elements: None,
             variables: None,
             assembly: None,
@@ -12478,6 +12535,8 @@ mod tests {
             schema: None,
             max_attempts: 1,
             label: None,
+            phase: None,
+            identity: None,
             session: None,
             elements: None,
             variables: None,
@@ -12558,6 +12617,8 @@ mod tests {
             schema: None,
             max_attempts: 1,
             label: None,
+            phase: None,
+            identity: None,
             session: None,
             elements: None,
             variables: None,
@@ -12645,6 +12706,8 @@ mod tests {
             schema: None,
             max_attempts: 1,
             label: None,
+            phase: None,
+            identity: None,
             session: None,
             elements: None,
             variables: None,
@@ -12813,6 +12876,8 @@ mod tests {
             schema: None,
             max_attempts: 1,
             label: None,
+            phase: None,
+            identity: None,
             session: None,
             elements: None,
             variables: None,
@@ -12951,6 +13016,8 @@ mod tests {
             schema: None,
             max_attempts: 1,
             label: None,
+            phase: None,
+            identity: None,
             session: None,
             elements: None,
             variables: None,
@@ -13081,6 +13148,8 @@ mod tests {
             schema: None,
             max_attempts: 1,
             label: None,
+            phase: None,
+            identity: None,
             session: None,
             elements: None,
             variables: None,
@@ -13162,6 +13231,8 @@ mod tests {
             schema: None,
             max_attempts: 1,
             label: None,
+            phase: None,
+            identity: None,
             session: None,
             elements: None,
             variables: None,
@@ -13407,6 +13478,8 @@ mod tests {
             schema: None,
             max_attempts: 1,
             label: None,
+            phase: None,
+            identity: None,
             session: None,
             elements: None,
             variables: None,
@@ -13639,6 +13712,8 @@ mod tests {
             schema: None,
             max_attempts: 1,
             label: None,
+            phase: None,
+            identity: None,
             session: None,
             elements: None,
             variables: None,
@@ -14377,6 +14452,8 @@ mod tests {
             schema: None,
             max_attempts: 1,
             label: None,
+            phase: None,
+            identity: None,
             session: None,
             elements: None,
             variables: None,
@@ -14486,6 +14563,8 @@ mod tests {
             schema: None,
             max_attempts: 1,
             label: Some("recorded failure".into()),
+            phase: None,
+            identity: None,
             session: None,
             elements: None,
             variables: None,
