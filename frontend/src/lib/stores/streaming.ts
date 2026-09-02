@@ -32,6 +32,12 @@ export interface ProviderRetryState {
 
 export interface StreamingStore {
   readonly isStreaming: boolean;
+  /** Conversation that owns the current streamed turn, when one is active. */
+  readonly activeConversationId?: string | null;
+  /** Whether the live turn state belongs on a displayed conversation surface. */
+  streamBelongsTo?(conversationId: string | null): boolean;
+  /** Forget a settled turn's display ownership after its conversation is left. */
+  clearConversationOwnership?(): void;
   /** Monotonic local identity for the current streamed projection. */
   readonly activeTurnGeneration: number;
   readonly streamedContent: string;
@@ -65,7 +71,7 @@ export interface StreamingStoreOptions {
   /** Receives messages pushed by the streaming store (user turns and settled
    *  assistant turns). */
   conversationStore?: {
-    readonly activeConversation?: { messages: MessageView[] } | null;
+    readonly activeConversation?: { id?: string; messages: MessageView[] } | null;
     appendOptimisticUserMessage(message: {
       content: string;
       timestamp: string;
@@ -105,6 +111,7 @@ export function createStreamingStore(
   // Currently active approval awaiting user decision; null when none.
   const pendingApprovalStore = writable<PendingApproval | null>(null);
   let activeTurnGeneration = 0;
+  let activeConversationId: string | null = null;
 
   const isStreamingState = fromStore(isStreamingStore);
   const streamedContentState = fromStore(streamedContentStore);
@@ -125,6 +132,14 @@ export function createStreamingStore(
     turn_id?: string,
     tool_calls?: ToolCallView[],
   ): void {
+    // A user can select another conversation while this turn is still live.
+    // The gateway persists the response for its owner, so mirror it into
+    // local history only while that same conversation remains active.
+    if (
+      activeConversationId &&
+      options?.conversationStore?.activeConversation?.id !== activeConversationId
+    ) return;
+
     options?.conversationStore?.appendAssistantMessage({
       content,
       timestamp: new Date().toISOString(),
@@ -151,6 +166,17 @@ export function createStreamingStore(
   return {
     get isStreaming(): boolean {
       return isStreamingState.current;
+    },
+    get activeConversationId(): string | null {
+      return activeConversationId;
+    },
+    streamBelongsTo(conversationId: string | null): boolean {
+      // A null conversation is the space-home composer. During its creation
+      // window it must remain busy even before the new conversation exists.
+      return conversationId === null || activeConversationId === conversationId;
+    },
+    clearConversationOwnership(): void {
+      activeConversationId = null;
     },
     get activeTurnGeneration(): number {
       return activeTurnGeneration;
@@ -432,6 +458,7 @@ export function createStreamingStore(
       // is authoritative only for the projection captured before reconnect.
       streamedContentStore.set("");
       isStreamingStore.set(false);
+      activeConversationId = null;
       turnStartedAtStore.set(null);
       activeToolCallsStore.set([]);
       providerRetryStore.set(null);
@@ -444,6 +471,7 @@ export function createStreamingStore(
       turnErrorStore.set(null);
       activeToolCallsStore.set([]);
       providerRetryStore.set(null);
+      activeConversationId = options?.conversationStore?.activeConversation?.id ?? null;
       activeTurnGeneration += 1;
       turnStartedAtStore.set(new Date().toISOString());
       isStreamingStore.set(true);
@@ -498,6 +526,12 @@ export function withConversationAutoCreate(
     get isStreaming(): boolean {
       return isCreatingState.current || base.isStreaming;
     },
+    get activeConversationId(): string | null | undefined {
+      return base.activeConversationId;
+    },
+    streamBelongsTo: (conversationId) =>
+      isCreatingState.current || base.streamBelongsTo?.(conversationId) === true,
+    clearConversationOwnership: () => base.clearConversationOwnership?.(),
     get activeTurnGeneration(): number {
       return base.activeTurnGeneration;
     },
