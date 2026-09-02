@@ -10068,8 +10068,8 @@ mod tests {
             })
             .expect("failed run should retain its worktree path");
         assert!(
-            retained_path.exists(),
-            "the failed run retains its changed worker worktree for inspection"
+            !retained_path.exists(),
+            "the failed run reclaims its unchanged worker worktree"
         );
 
         let cancelled_source = format!(
