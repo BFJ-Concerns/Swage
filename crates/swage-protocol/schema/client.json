@@ -61,6 +61,9 @@
     "create_workspace_attachment_request": {
       "$ref": "#/$defs/CreateWorkspaceAttachmentRequest"
     },
+    "delete_page_annotation_response": {
+      "$ref": "#/$defs/DeletePageAnnotationResponse"
+    },
     "effort_capability": {
       "$ref": "#/$defs/EffortCapability"
     },
@@ -108,6 +111,9 @@
     },
     "restart_status": {
       "$ref": "#/$defs/RestartStatusResponse"
+    },
+    "save_provider_settings": {
+      "$ref": "#/$defs/SaveProviderSettings"
     },
     "save_settings": {
       "$ref": "#/$defs/SaveSettingsRequest"
@@ -245,6 +251,7 @@
     "write_page_module_request",
     "create_page_annotation_request",
     "update_page_annotation_request",
+    "delete_page_annotation_response",
     "page",
     "page_list",
     "update_space_request",
@@ -271,7 +278,11 @@
     "skills",
     "save_settings",
     "model_discovery",
+    "save_provider_settings",
     "restart_status",
+    "provider_sign_in_state",
+    "start_provider_sign_in_request",
+    "start_provider_sign_in_response",
     "create_attachment_request",
     "queued_attachment",
     "attachment_list",
@@ -288,9 +299,6 @@
     "schedule_run",
     "schedule_run_list",
     "trigger_schedule_response",
-    "start_provider_sign_in_request",
-    "start_provider_sign_in_response",
-    "provider_sign_in_state",
     "create_workflow_script_request",
     "update_workflow_script_request",
     "workflow_script_list",
@@ -1482,6 +1490,18 @@
       },
       "required": [
         "path"
+      ]
+    },
+    "DeletePageAnnotationResponse": {
+      "description": "Confirms that an annotation was removed.",
+      "type": "object",
+      "properties": {
+        "deleted": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "deleted"
       ]
     },
     "DeliveryRoutingRequest": {

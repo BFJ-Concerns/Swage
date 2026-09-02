@@ -9,6 +9,7 @@ import type { CreateConversationRequest } from "./CreateConversationRequest";
 import type { CreatePageAnnotationRequest } from "./CreatePageAnnotationRequest";
 import type { CreatePageRequest } from "./CreatePageRequest";
 import type { CreateSpaceRequest } from "./CreateSpaceRequest";
+import type { DeletePageAnnotationResponse } from "./DeletePageAnnotationResponse";
 import type { ModelDiscoveryResponse } from "./ModelDiscoveryResponse";
 import type { PageAnnotationView } from "./PageAnnotationView";
 import type { PageListResponse } from "./PageListResponse";
@@ -137,8 +138,8 @@ export async function updatePageAnnotation(annotationId: string, body: UpdatePag
 }
 
 /** Delete a page annotation. */
-export async function deletePageAnnotation(annotationId: string): Promise<void> {
-  return request<void>("DELETE", `/api/page-annotations/${encodeURIComponent(annotationId)}`);
+export async function deletePageAnnotation(annotationId: string): Promise<DeletePageAnnotationResponse> {
+  return request<DeletePageAnnotationResponse>("DELETE", `/api/page-annotations/${encodeURIComponent(annotationId)}`);
 }
 
 /** Read gateway settings. */

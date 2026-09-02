@@ -45,6 +45,8 @@ fn typescript_bindings_are_regenerated() {
         .expect("export create page annotation");
     client::page::UpdatePageAnnotationRequest::export_all(&cfg)
         .expect("export update page annotation");
+    client::page::DeletePageAnnotationResponse::export_all(&cfg)
+        .expect("export delete page annotation");
     client::space::CreateWorkspaceAttachmentRequest::export_all(&cfg)
         .expect("export attach workspace");
     client::space::WorkspaceAttachmentListResponse::export_all(&cfg).expect("export workspaces");
