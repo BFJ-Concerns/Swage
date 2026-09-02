@@ -301,7 +301,7 @@ fn object_schema() -> Value {
 mod tests {
     use serde_json::json;
 
-    use super::{provider_tool_schema, MAX_DESCRIBED_SCHEMA_CHOICES};
+    use super::{MAX_DESCRIBED_SCHEMA_CHOICES, provider_tool_schema};
 
     #[test]
     fn provider_tool_schema_strips_hostile_keywords_and_notes_local_validation() {
