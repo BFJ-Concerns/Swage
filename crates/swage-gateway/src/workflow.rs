@@ -12,27 +12,27 @@ use swage_config::skill::SkillDefinition;
 use swage_core::{ChatMessage, CompletionRequest, Role, StorageError};
 use swage_protocol::client::workflow::{
     AnswerWorkflowRunHoldRequest, AnswerWorkflowRunHoldResponse, CreateWorkflowScriptRequest,
-    PostWorkflowRunEventRequest, PostWorkflowRunEventResponse,
-    StartInlineWorkflowRunRequest, StartWorkflowRunRequest, UpdateWorkflowScriptRequest,
-    WorkflowArgumentContract, WorkflowBudget, WorkflowHandoverEvent, WorkflowHandoverEventDelivery,
-    WorkflowHandoverFailedCall, WorkflowHandoverFailedCallRef, WorkflowRun,
-    WorkflowRunDetailResponse, WorkflowRunEvent, WorkflowRunEventSource, WorkflowRunHandover,
-    WorkflowRunHold, WorkflowRunHoldRejection, WorkflowRunHoldState,
-    WorkflowRunListResponse, WorkflowRunState, WorkflowScript, WorkflowScriptListResponse,
+    PostWorkflowRunEventRequest, PostWorkflowRunEventResponse, StartInlineWorkflowRunRequest,
+    StartWorkflowRunRequest, UpdateWorkflowScriptRequest, WorkflowArgumentContract, WorkflowBudget,
+    WorkflowHandoverEvent, WorkflowHandoverEventDelivery, WorkflowHandoverFailedCall,
+    WorkflowHandoverFailedCallRef, WorkflowRun, WorkflowRunDetailResponse, WorkflowRunEvent,
+    WorkflowRunEventSource, WorkflowRunHandover, WorkflowRunHold, WorkflowRunHoldRejection,
+    WorkflowRunHoldState, WorkflowRunListResponse, WorkflowRunState, WorkflowScript,
+    WorkflowScriptListResponse,
 };
 use swage_storage::WorkflowJournalRecord;
 use swage_storage::{
     NewAuditEvent, NewSession, NewThread, NewWorkflowJournalIntent, NewWorkflowRun,
     NewWorkflowRunEvent, NewWorkflowRunHold, NewWorkflowRunHoldRejection, Storage, ThreadStore,
     WorkflowRunEventRecord, WorkflowRunHoldAnswer, WorkflowRunHoldRecord,
-    WorkflowRunHoldRejectionRecord, WorkflowRunRecord,
-    WorkflowRunWorkerPlacement, WorkflowScriptRecord,
+    WorkflowRunHoldRejectionRecord, WorkflowRunRecord, WorkflowRunWorkerPlacement,
+    WorkflowScriptRecord,
 };
 use swage_workflow::{
-    AgentCallRequest, AgentCallResult, AwaitEventRequest, EffectPayload, EffectReceipt, HoldRequest,
-    EffectRecoveryHost, EngineLimits, GateRequest, QUICKJS_ENGINE_VERSION, ResolvedWorkerPlacement,
-    RunEventPost, ScriptCapabilities, WorkflowCallRequest, WorkflowEngine, WorkflowHost,
-    WorkflowHostError, journal_args_hash, recover_started_effect,
+    AgentCallRequest, AgentCallResult, AwaitEventRequest, EffectPayload, EffectReceipt,
+    EffectRecoveryHost, EngineLimits, GateRequest, HoldRequest, QUICKJS_ENGINE_VERSION,
+    ResolvedWorkerPlacement, RunEventPost, ScriptCapabilities, WorkflowCallRequest, WorkflowEngine,
+    WorkflowHost, WorkflowHostError, journal_args_hash, recover_started_effect,
 };
 use tokio::sync::{Mutex, Notify, Semaphore, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -11478,7 +11478,6 @@ mod tests {
         }
     }
 
-
     /// A gateway turn's tool context for the answering agent: attribution is
     /// the session's own, which is the whole point of answering through the
     /// tool rather than through a parameter.
@@ -11503,8 +11502,7 @@ mod tests {
             .await
             .expect("answering session");
         let turn_id = Uuid::new_v4();
-        let mut base =
-            swage_tool::context::MockToolContext::new(agent_id, session.id.to_string());
+        let mut base = swage_tool::context::MockToolContext::new(agent_id, session.id.to_string());
         base.turn_id = Some(turn_id);
         let (ws_tx, _ws_rx) = tokio::sync::mpsc::unbounded_channel();
         let _ = state;
