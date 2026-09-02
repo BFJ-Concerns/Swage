@@ -7,6 +7,6 @@
 
 - [Agents and permissions](agent-docs/agents-and-permissions.md): Agent definitions, operator guidance (AGENTS.md), tool permissions, approval mechanics, dispatch-bound grant intersection, and space-targeted session creation
 - [First session](agent-docs/first-session.md): First-session walkthrough — open a space, attach a workspace, trust it so its AGENTS.md feeds agent context
-- [Interfaces and tooling](agent-docs/interfaces-and-tooling.md): Turn context inspector API, wire-contract crate layout, verification gate stages, and client-side route handling
+- [Interfaces and tooling](agent-docs/interfaces-and-tooling.md): Turn context inspector, image attachments, wire error contract, route manifest and OpenAPI projection, verification gate, and client-side route handling
 - [Workflow engine](agent-docs/workflow-engine.md): Run lifecycle, journal/replay, budget partitions, parking, wake gate, worker sessions, cancellation, and failure handover
 <!-- doc-index:end -->

@@ -3,6 +3,7 @@
 
 <!-- source: agent-docs/agents-and-permissions.md -->
 
+
 # Agents and permissions
 
 ## Agent definitions
@@ -343,8 +344,8 @@ Per-tool overrides via `RequireApprovalEntry::WithOptions { timeout, timeout_pol
 - `Interrupt` — mark the turn as Interrupted; no further tool calls or
   completions are issued.
 
-
 <!-- source: agent-docs/first-session.md -->
+
 
 # First session
 
@@ -400,8 +401,8 @@ instructions).
 read grant and guidance are removed from future turns. **Detach** removes the attachment
 entirely.
 
-
 <!-- source: agent-docs/interfaces-and-tooling.md -->
+
 
 # Interfaces and tooling
 
@@ -452,6 +453,136 @@ four-member contract — `activeConversationId`, `checkConversationExists`,
 `clearActiveConversation`, `selectConversation` — decoupled from Svelte store
 internals.
 
+## Image attachments
+
+A message may carry content parts beside its text, submitted as the
+`attachments` array on `SubmitTurnRequest` (REST) or the `SendMessage`
+WebSocket event. Each attachment is a tagged `MessageAttachment`
+(`swage-protocol::client::turn`); the only kind at this tree is `image_url`,
+carrying a URL (https or `data:` inline).
+
+### Intake check
+
+`check_attachment_support` (`turn.rs:154`) runs before anything is persisted.
+For each attachment:
+
+- An `image_url` with an empty URL is rejected as a `ValidationError`.
+- An `image_url` when the configured provider's `WorkflowCapabilities.vision`
+  is `false` is rejected as a `ValidationError`.
+
+### Which protocols claim vision
+
+`WorkflowCapabilities::for_protocol` (`capabilities.rs:30`) sets `vision`
+per protocol:
+
+| Protocol | `vision` | Reason |
+|---|---|---|
+| `OpenAi` | `true` | The Chat Completions adapter maps `ContentPart::ImageUrl` |
+| `OpenRouter` | `true` | Same adapter (OpenAI-shaped envelope) |
+| `OpenAiResponses` | `false` | Adapter converts text parts only |
+| `Anthropic` | `false` | Adapter converts text parts only |
+| `Google` | `false` | Adapter converts text parts only |
+| `Codex` | `false` | App Server integration; assembled text only |
+
+Vision is claimed only where the adapter's message conversion maps
+`ContentPart::ImageUrl` to the wire body. The capability is resolved once at
+startup from the default provider's protocol and stored in
+`AppState.workflow_capabilities`.
+
+### Wire shape
+
+When image parts are present, the OpenAI adapter (`openai.rs`) emits a JSON
+array of typed content parts (`[{"type":"text","text":"…"},
+{"type":"image_url","image_url":{"url":"…"}}]`). Text-only messages keep
+the plain string form, preserving wire compatibility.
+
+Stored messages carry attachments as opaque JSON records in the
+`message_attachments` table. The `MessageView` returned by the API includes
+the `attachments` array.
+
+## Secret backends
+
+Every credential the gateway uses resolves through the `SecretManager`
+(`secret.rs`), by reference, with an audit event per access and the resolved
+value registered for redaction. A secret's `backend_kind` names where its
+value lives; resolution reads the backend on every call, so material that
+changes underneath (a harness refreshing its own tokens) is current at the
+next access.
+
+| Backend | `backend_kind` | Value source |
+|---|---|---|
+| Managed | `managed` | Encrypted at rest in the gateway's SQLite store |
+| Environment | `env` | `external_reference` names an environment variable |
+| File | `file` | `external_reference` names a file path; `metadata.json_pointer` (RFC 6901) optionally selects one field of a JSON document |
+
+### File backend
+
+The file is re-read on every resolution. When `json_pointer` is absent, the
+whole file (trimmed) is the value. When present, the file is parsed as JSON
+and the pointer selects the field — a string value is used directly; any
+other JSON type is serialised. The file's modification time is recorded as
+the observation stamp.
+
+### Codex auth store registration
+
+At startup (`startup.rs:207`) the gateway registers the Codex CLI's
+`auth.json` under the file backend as two records:
+
+| Name | Material kind | JSON pointer |
+|---|---|---|
+| `codex.access_token` | `oauth_access_token` | `/tokens/access_token` |
+| `codex.refresh_token` | `oauth_refresh_token` | `/tokens/refresh_token` |
+
+Registration is idempotent: an existing active record for either token is
+re-pointed at the current path. Registration precedes sign-in, so the file
+need not exist yet. Both tokens resolve, audit, and redact through the
+governed system.
+
+## Wire error contract
+
+Every failed HTTP response on the client surface carries
+`{"code":"<snake_case>","message":"…"}` — the `ApiErrorBody` type
+(`swage-protocol::client::error`).
+
+### ErrorCode enum
+
+`ErrorCode` (`error.rs:21`) names one HTTP status each:
+
+| Code | Status | Meaning |
+|---|---|---|
+| `malformed_body` | 400 | Body was not valid JSON or could not be read |
+| `forbidden` | 403 | Caller may not perform this operation |
+| `not_found` | 404 | Addressed entity does not exist |
+| `conflict` | 409 | Collides with existing state |
+| `turn_in_progress` | 409 | Conversation already has a turn in flight |
+| `already_connected` | 409 | Conversation already has a live connection |
+| `unsupported_media_type` | 415 | Missing `Content-Type: application/json` |
+| `validation_error` | 422 | Body parsed but failed validation |
+| `sign_in_unsupported` | 422 | Provider offers no sign-in flow of the requested kind |
+| `internal_error` | 500 | Unexpected gateway failure |
+| `provider_error` | 502 | Upstream model provider failed |
+| `sign_in_failed` | 502 | Provider refused or could not complete sign-in |
+| `provider_runtime_unavailable` | 503 | Provider runtime could not be started or reached |
+
+The HTTP status is a projection of the code (`ErrorCode::status`), never an
+independent fact. Codes serialise as `snake_case` strings via serde.
+
+### Coverage
+
+`GatewayError` maps exhaustively to an `ErrorCode` — a new variant must
+choose one. The gateway's own `Json` extractor answers body-parsing
+rejections (malformed JSON, unsupported media type, `deny_unknown_fields`
+violations naming the rejected field) in the same `ApiErrorBody` shape.
+Handlers construct refusals through `ApiError` rather than hand-built bodies.
+
+### Client consumers
+
+- **Rust client** — `ClientError::Gateway` variant parses the body into a
+  typed error.
+- **Frontend** — `ApiError` class (`frontend/src/lib/api/error.ts`) reads
+  the `code` field. The generated TypeScript client's request helper raises
+  `ApiError` on non-ok responses.
+
 ## Wire-contract architecture
 
 All types that cross a process boundary live in `swage-protocol`
@@ -473,19 +604,37 @@ surface. A `schemars::schema_for!` call walks only the type graph reachable from
 that anchor, so a new top-level type must be added to the anchor unless an
 existing field already reaches it.
 
+### Route manifest
+
+`routes.rs` (`swage-protocol::client::routes`) names every client-surface HTTP
+route once: method, path template, path parameters, request body schema name,
+and response body schema name. Failures are not listed per route — every route
+answers a failure with `ApiErrorBody`, projected once as the shared error
+response.
+
+Adding a route is one entry in the `routes()` function; the OpenAPI document,
+the generated TypeScript client, and the router-coverage test all read this
+table. The router test (`server.rs:418`) proves every manifest route is
+registered on the axum router — a manifest entry with no matching handler
+fails the test.
+
 ### Projections
 
 | Projection | Output | Mechanism |
 |---|---|---|
-| TypeScript (ts-rs) | `frontend/src/lib/protocol/` | `projections.rs` test manually calls `export_all` for each top-level export, then trims trailing whitespace |
+| TypeScript types (ts-rs) | `frontend/src/lib/protocol/` | `projections.rs` test manually calls `export_all` for each top-level export, then trims trailing whitespace |
 | JSON Schema (schemars) | `crates/swage-protocol/schema/{client,hosting,device,channel}.json` | `projections.rs` tests per surface, via the anchor type |
+| OpenAPI 3.1 (from route manifest) | `crates/swage-protocol/schema/client-openapi.json` | `projections.rs` test renders `openapi::document()`, which walks the manifest and reuses the client surface's JSON Schema as its `components/schemas` |
+| TypeScript client (from route manifest) | `frontend/src/lib/protocol/client.ts` | `projections.rs` test renders `typescript_client::generate()` — one typed function per manifest route over a shared `request` helper that raises `ApiError` on non-ok responses |
 
 Running `cargo test -p swage-protocol` regenerates all projections in place.
 New top-level wire types must be added to the appropriate anchor for JSON
 Schema and to the explicit `export_all` list for TypeScript unless already
-reachable from an existing entry. Drift shows as uncommitted changes, caught by
-the verify gate's projection-freshness check; an unregistered type creates no
-drift for that check to detect.
+reachable from an existing entry. New routes must be added to the `routes()`
+manifest for the OpenAPI and client projections. Drift shows as uncommitted
+changes, caught by the verify gate's projection-freshness check; an
+unregistered type or unmanifested route creates no drift for that check to
+detect.
 
 ## Verification gate
 
@@ -552,8 +701,8 @@ Route changes propagate `notFound` state to the UI, so the "conversation not
 found" notice appears for `popstate`-triggered navigations and initial page
 loads alike.
 
-
 <!-- source: agent-docs/workflow-engine.md -->
+
 
 # Workflow engine
 
