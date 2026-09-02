@@ -8,7 +8,9 @@ import type { WorkflowProviderRoundOutcome } from "./WorkflowProviderRoundOutcom
  * the provider and no response has come back. A settled round names what
  * came back, so a tool loop (rounds settling with tool calls), a hung
  * request (an outstanding round), and a slow response (a settled round with
- * a long span) are told apart from the record alone.
+ * a long span) are told apart from the record alone. A round the
+ * interruption caught also ends — at the moment the request became
+ * unanswerable rather than at a response — and its outcome says so.
  */
 export type WorkflowProviderRound = {
 /**

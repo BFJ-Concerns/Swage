@@ -229,7 +229,7 @@ describe("WorkflowRunDetail", () => {
             attempt: 1,
             round: 2,
             started_at: "2026-09-02T10:00:03Z",
-            completed_at: null,
+            completed_at: "2026-09-02T10:04:07Z",
             outcome: { outcome: "interrupted" },
           },
           {
@@ -247,6 +247,11 @@ describe("WorkflowRunDetail", () => {
     expect(rows.length).toBe(3);
     expect(rows[1].textContent).toContain("interrupted");
     expect(rows[1].textContent).not.toContain("no response yet");
+    // The interrupted round ended when nothing could answer it any more, so
+    // the Ended cell carries that time rather than a dash.
+    const interruptedEnd = rows[1].querySelectorAll("td")[3].textContent;
+    expect(interruptedEnd).toContain("2026-09-02T10:04:07Z");
+    expect(interruptedEnd).not.toContain("—");
     expect(document.querySelector(".attempts")!.textContent).toContain("2");
     // The call ran to its end on the last attempt, and that is what "ran
     // with" names.

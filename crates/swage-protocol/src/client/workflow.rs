@@ -366,7 +366,9 @@ pub enum WorkflowCutShortCause {
 /// the provider and no response has come back. A settled round names what
 /// came back, so a tool loop (rounds settling with tool calls), a hung
 /// request (an outstanding round), and a slow response (a settled round with
-/// a long span) are told apart from the record alone.
+/// a long span) are told apart from the record alone. A round the
+/// interruption caught also ends — at the moment the request became
+/// unanswerable rather than at a response — and its outcome says so.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
 pub struct WorkflowProviderRound {
     /// Which attempt of the call ran this round, counting from 1. A call the
@@ -393,9 +395,11 @@ pub enum WorkflowProviderRoundOutcome {
         message: String,
     },
     /// The request went out and nothing can answer it any more: the attempt
-    /// that made it stopped, and the call was re-dispatched under a later
-    /// one. Distinct from `outstanding`, which is a request that may still
-    /// come back.
+    /// that made it stopped, because the call was re-dispatched under a later
+    /// one or because the run's own end cut the worker short. Distinct from
+    /// `outstanding`, which is a request that may still come back. The
+    /// round's end time is when that became true, not when a response
+    /// arrived — none did.
     Interrupted,
 }
 

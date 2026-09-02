@@ -3,7 +3,9 @@
 //! One row per provider request inside a turn. The row is written when the
 //! request goes out and settled when the round ends, so a request still
 //! outstanding is a row with no `completed_at` — the fact that tells a hung
-//! provider request from a tool loop that is making progress.
+//! provider request from a tool loop that is making progress. A round ends
+//! either because a response arrived or because the request became
+//! unanswerable; both are ends, and both are stamped.
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -123,16 +125,18 @@ impl ProviderRoundStore for SqliteStorage {
         turn_id: Uuid,
         outcome: serde_json::Value,
     ) -> Result<(), StorageError> {
+        let now = Utc::now();
         let outcome = serde_json::to_string(&outcome)
             .map_err(|error| StorageError::QueryFailed(error.to_string()))?;
         self.with_conn(move |conn| {
-            // `completed_at` stays empty: no response came back, and stamping
-            // one would put a time on the record that nothing observed. The
-            // outcome is the whole of what is newly known.
+            // The round ends here. No response arrived, but the request
+            // stopped being answerable at this moment and that is an
+            // observed time, not a guess at when a response would have come:
+            // the outcome says which kind of end it was.
             conn.execute(
-                "UPDATE provider_rounds SET outcome_json=?2
+                "UPDATE provider_rounds SET completed_at=?2, outcome_json=?3
                  WHERE turn_id=?1 AND completed_at IS NULL",
-                params![turn_id.to_string(), outcome],
+                params![turn_id.to_string(), now.to_rfc3339(), outcome],
             )?;
             Ok(())
         })
