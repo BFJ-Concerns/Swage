@@ -1328,6 +1328,19 @@ async fn execute_workflow_agent_turn(
     Ok(WorkflowTurnAttempt { outcome, events })
 }
 
+async fn latest_turn(
+    state: &AppState,
+    thread_id: Uuid,
+) -> Result<Option<swage_storage::Turn>, WorkflowHostError> {
+    state
+        .storage
+        .list_turns_by_thread(thread_id)
+        .await
+        .map_err(|error| error.to_string())
+        .map(|turns| turns.into_iter().max_by_key(|turn| turn.created_at))
+        .map_err(Into::into)
+}
+
 async fn run_ephemeral_agent_call(
     state: &AppState,
     run_id: Uuid,
@@ -1563,10 +1576,22 @@ async fn run_ephemeral_agent_call(
         .events
         .iter()
         .any(|event| matches!(event, ServerEvent::Token { .. }));
+    let primary_error = match primary.outcome {
+        Err(error) => Some(error),
+        Ok(()) => latest_turn(state, thread_id)
+            .await?
+            .filter(|turn| turn.state != swage_storage::TurnState::Completed)
+            .map(|turn| {
+                format!(
+                    "AgentCallError: agent turn {} failed before completion",
+                    turn.id
+                )
+            }),
+    };
     let mut served_model = request.model.clone();
-    let final_events = match primary.outcome {
-        Ok(()) => primary.events,
-        Err(error) if !emitted_output => {
+    let final_events = match primary_error {
+        None => primary.events,
+        Some(error) if !emitted_output => {
             let Some(fallback_model) = request.fallback_model.clone() else {
                 return Err(error.into());
             };
@@ -1599,15 +1624,10 @@ async fn run_ephemeral_agent_call(
             served_model = Some(fallback_model);
             fallback.events
         }
-        Err(error) => return Err(error.into()),
+        Some(error) => return Err(error.into()),
     };
-    let turn = state
-        .storage
-        .list_turns_by_thread(thread_id)
-        .await
-        .map_err(|error| error.to_string())?
-        .into_iter()
-        .max_by_key(|turn| turn.created_at)
+    let turn = latest_turn(state, thread_id)
+        .await?
         .ok_or_else(|| "agent call produced no turn".to_string())?;
     let schema_exhausted = final_events.iter().any(|event| {
         matches!(
@@ -12422,6 +12442,7 @@ mod tests {
                     input_tokens: 1,
                     output_tokens: 1,
                     working_directory: None,
+                    served_model: None,
                     session_id: Some(session.id),
                     thread_id: Some(thread.id),
                     turn_id: Some(Uuid::new_v4()),
@@ -13298,6 +13319,7 @@ mod tests {
                     input_tokens: 1,
                     output_tokens: 1,
                     working_directory: None,
+                    served_model: None,
                     session_id: None,
                     thread_id: None,
                     turn_id: None,
@@ -13544,6 +13566,7 @@ mod tests {
                     input_tokens: 1,
                     output_tokens: 1,
                     working_directory: None,
+                    served_model: None,
                     session_id: None,
                     thread_id: None,
                     turn_id: None,
