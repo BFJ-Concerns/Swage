@@ -430,29 +430,86 @@ impl AppState {
     }
 }
 
-/// The turn an agent-call entry ran, from whichever record carries it: the
-/// settled result, or the dispatch resolution stamped when the turn started.
-/// A call killed mid-run has only the latter.
-fn agent_call_turn_id(entry: &WorkflowJournalRecord) -> Option<Uuid> {
-    entry
+/// Append one attempt of an agent call to its journal entry, and settle what
+/// the attempts it supersedes left outstanding.
+///
+/// Replay re-dispatches an unfinished call under a new turn. The attempts it
+/// follows can no longer receive a provider response, so their open rounds
+/// are recorded as interrupted at the moment that becomes true — leaving them
+/// reading as outstanding would say a request might still come back when
+/// nothing can answer it.
+pub(crate) async fn record_agent_call_attempt(
+    storage: &dyn Storage,
+    journal_entry_id: Uuid,
+    attempt: Value,
+) -> Result<(), swage_core::StorageError> {
+    let superseded = storage
+        .record_workflow_call_attempt(journal_entry_id, attempt)
+        .await?;
+    let superseded: Vec<swage_protocol::client::workflow::WorkflowAgentCallResolution> = superseded
+        .into_iter()
+        .map(serde_json::from_value)
+        .collect::<Result<_, _>>()
+        .map_err(|error| {
+            swage_core::StorageError::QueryFailed(format!(
+                "workflow journal entry {journal_entry_id} carries an attempt record outside \
+                 WorkflowAgentCallResolution: {error}"
+            ))
+        })?;
+    let interrupted = serde_json::to_value(
+        swage_protocol::client::workflow::WorkflowProviderRoundOutcome::Interrupted,
+    )
+    .map_err(|error| swage_core::StorageError::QueryFailed(error.to_string()))?;
+    for turn_id in superseded.into_iter().filter_map(|attempt| attempt.turn_id) {
+        storage
+            .interrupt_outstanding_provider_rounds(turn_id, interrupted.clone())
+            .await?;
+    }
+    Ok(())
+}
+
+/// Every turn an agent-call entry dispatched, oldest attempt first.
+///
+/// A call the run's end interrupted and replay re-dispatched ran more than
+/// one turn under the same entry. Reading only the settled result's turn
+/// would hide the interrupted attempt's provider rounds, so the attempt
+/// records are the source and the settled result only adds a turn they did
+/// not already name.
+fn agent_call_attempt_turns(entry: &WorkflowJournalRecord) -> Result<Vec<Uuid>, String> {
+    let mut turns: Vec<Uuid> = Vec::new();
+    if let Some(attempts) = entry.dispatch_attempts.as_ref() {
+        let attempts: Vec<swage_protocol::client::workflow::WorkflowAgentCallResolution> =
+            serde_json::from_value(attempts.clone()).map_err(|error| {
+                format!(
+                    "workflow journal entry {} carries an attempt record outside \
+                     WorkflowAgentCallResolution: {error}",
+                    entry.id
+                )
+            })?;
+        turns.extend(attempts.into_iter().filter_map(|attempt| attempt.turn_id));
+    }
+    let settled = entry
         .result
         .as_ref()
         .and_then(|result| result.get("turn_id"))
-        .or_else(|| {
-            entry
-                .dispatch_resolution
-                .as_ref()
-                .and_then(|resolution| resolution.get("turn_id"))
-        })
-        .and_then(|value| serde_json::from_value(value.clone()).ok())
+        .and_then(|value| serde_json::from_value::<Uuid>(value.clone()).ok());
+    if let Some(settled) = settled
+        && !turns.contains(&settled)
+    {
+        turns.push(settled);
+    }
+    Ok(turns)
 }
 
 /// Project one stored provider round onto the wire contract, rejecting an
-/// outcome blob that is no longer in it.
+/// outcome blob that is no longer in it. `attempt` is which attempt of the
+/// call ran the round, counting from 1.
 fn provider_round_wire(
     round: swage_storage::ProviderRoundRecord,
+    attempt: u32,
 ) -> Result<swage_protocol::client::workflow::WorkflowProviderRound, String> {
     Ok(swage_protocol::client::workflow::WorkflowProviderRound {
+        attempt,
         round: round.round as u32,
         started_at: round.started_at,
         completed_at: round.completed_at,
@@ -569,21 +626,22 @@ fn journal_wire(
                 )
             })
             .transpose()?;
-        if let (Some(dispatch), Some(resolution)) =
-            (dispatch.as_mut(), entry.dispatch_resolution.as_ref())
+        if let (Some(dispatch), Some(attempts)) =
+            (dispatch.as_mut(), entry.dispatch_attempts.as_ref())
         {
-            dispatch.resolved =
-                Some(serde_json::from_value(resolution.clone()).map_err(|error| {
-                    format!(
-                        "workflow journal entry {} carries a resolution record outside \
-                         WorkflowAgentCallResolution: {error}",
-                        entry.id
-                    )
-                })?);
+            dispatch.attempts = serde_json::from_value(attempts.clone()).map_err(|error| {
+                format!(
+                    "workflow journal entry {} carries an attempt record outside \
+                     WorkflowAgentCallResolution: {error}",
+                    entry.id
+                )
+            })?;
         }
+        // The last attempt is the one that ran to the entry's own ending;
+        // the earlier ones are the interrupted attempts it followed.
         let resolved = dispatch
             .as_ref()
-            .and_then(|dispatch| dispatch.resolved.as_ref());
+            .and_then(|dispatch| dispatch.attempts.last());
         let from_result = |field: &str| {
             result
                 .and_then(|value| value.get(field))
@@ -1612,7 +1670,9 @@ async fn run_ephemeral_agent_call(
             }
         }),
         grants: effective_call_tools.clone(),
-        resolved: None,
+        // The attempts are appended to their own field as each turn resolves;
+        // the dispatch record carries only what the call asked for.
+        attempts: Vec::new(),
     };
     // The record is constitutive, not a trace: a call that ran without one
     // is a worker nobody can say what was asked of. Refusing to dispatch is
@@ -5369,25 +5429,32 @@ pub async fn get_run(
             .count() as u32,
     };
     // The run detail is the read that carries the provider rounds, so a
-    // reader can tell an outstanding request from a tool loop.
+    // reader can tell an outstanding request from a tool loop. Every attempt
+    // the entry dispatched contributes its own rounds, ordered by attempt and
+    // then by round: a call interrupted and re-dispatched would otherwise
+    // surface only the attempt that finished, hiding the rounds the
+    // interrupted one actually made.
     let mut journal = Vec::with_capacity(entries.len());
     for entry in entries {
         let rounds = match entry.kind == "agent_call" {
-            true => match agent_call_turn_id(&entry) {
-                Some(turn_id) => Some(
-                    state
+            true => {
+                // An entry with no attempt turns resolved nothing and so ran
+                // no rounds.
+                let turns = agent_call_attempt_turns(&entry).map_err(internal)?;
+                let mut rounds = Vec::new();
+                for (index, turn_id) in turns.into_iter().enumerate() {
+                    let attempt = index as u32 + 1;
+                    for round in state
                         .storage
                         .list_provider_rounds_by_turn(turn_id)
                         .await
                         .map_err(internal)?
-                        .into_iter()
-                        .map(provider_round_wire)
-                        .collect::<Result<Vec<_>, String>>()
-                        .map_err(internal)?,
-                ),
-                // No turn was ever resolved, so the call ran no rounds.
-                None => Some(Vec::new()),
-            },
+                    {
+                        rounds.push(provider_round_wire(round, attempt).map_err(internal)?);
+                    }
+                }
+                Some(rounds)
+            }
             false => None,
         };
         journal.push(journal_wire(entry, rounds).map_err(internal)?);
@@ -5650,9 +5717,9 @@ mod tests {
     use swage_protocol::client::workflow::{WorkflowJournalEntryKind, WorkflowJournalEntryStatus};
     use swage_storage::{
         AgentDefinitionStore, AuditStore, CitationStore, ContextSnapshotStore, NewWorkflowScript,
-        NewWorkspaceAttachment, ObservationStore, OrientationCardStore, SessionStore, SpaceStore,
-        SqliteStorage, Storage, TaskDefinitionStore, ToolCallStore, TurnState, TurnStore,
-        WorkflowStore, WorkspaceAttachmentStore,
+        NewWorkspaceAttachment, ObservationStore, OrientationCardStore, ProviderRoundStore,
+        SessionStore, SpaceStore, SqliteStorage, Storage, TaskDefinitionStore, ToolCallStore,
+        TurnState, TurnStore, WorkflowStore, WorkspaceAttachmentStore,
     };
     use swage_workflow::AgentSessionRef;
 
@@ -16423,6 +16490,82 @@ mod tests {
         }
     }
 
+    /// A worker turn standing in for one attempt of a call: its own session,
+    /// thread, and turn, so the provider rounds hang off a real row.
+    async fn worker_turn(storage: &SqliteStorage, space_id: Uuid, input: &str) -> Uuid {
+        let session = storage
+            .create_session(swage_storage::NewSession {
+                space_id,
+                agent_id: BARE_WORKFLOW_AGENT_ID.into(),
+                metadata: Some(serde_json::json!({})),
+                active_workspace_attachment_id: None,
+            })
+            .await
+            .expect("worker session");
+        let thread = swage_storage::store::ThreadStore::create(
+            storage,
+            swage_storage::NewThread {
+                session_id: session.id,
+                agent_id: BARE_WORKFLOW_AGENT_ID.into(),
+            },
+        )
+        .await
+        .expect("worker thread");
+        storage
+            .create_turn(swage_storage::NewTurn {
+                thread_id: thread.id,
+                agent_id: BARE_WORKFLOW_AGENT_ID.into(),
+                state: TurnState::Processing,
+                user_input: Some(input.into()),
+                parent_turn_id: None,
+            })
+            .await
+            .expect("worker turn")
+            .id
+    }
+
+    async fn open_round(storage: &SqliteStorage, turn_id: Uuid, round: i64) {
+        storage
+            .open_provider_round(
+                turn_id,
+                round,
+                serde_json::to_value(
+                    swage_protocol::client::workflow::WorkflowProviderRoundOutcome::Outstanding,
+                )
+                .expect("outcome"),
+            )
+            .await
+            .expect("open the round");
+    }
+
+    async fn settle_round(
+        storage: &SqliteStorage,
+        turn_id: Uuid,
+        round: i64,
+        outcome: swage_protocol::client::workflow::WorkflowProviderRoundOutcome,
+    ) {
+        storage
+            .settle_provider_round(
+                turn_id,
+                round,
+                serde_json::to_value(outcome).expect("outcome"),
+            )
+            .await
+            .expect("settle the round");
+    }
+
+    fn attempt_on_turn(
+        turn_id: Uuid,
+    ) -> swage_protocol::client::workflow::WorkflowAgentCallResolution {
+        swage_protocol::client::workflow::WorkflowAgentCallResolution {
+            model: Some("scripted-model".into()),
+            effort: None,
+            session_id: None,
+            thread_id: None,
+            turn_id: Some(turn_id),
+        }
+    }
+
     fn only_agent_call(
         detail: &WorkflowRunDetailResponse,
     ) -> &swage_protocol::client::workflow::WorkflowAgentCallDetail {
@@ -16480,7 +16623,12 @@ mod tests {
             }),
             "the record carries where the worker was actually placed"
         );
-        let resolved = dispatch.resolved.as_ref().expect("resolution record");
+        assert_eq!(
+            dispatch.attempts.len(),
+            1,
+            "one attempt ran, so one is recorded"
+        );
+        let resolved = dispatch.attempts.last().expect("attempt record");
         assert!(resolved.model.is_some(), "the resolved model is recorded");
         assert_eq!(
             resolved.effort,
@@ -16507,6 +16655,145 @@ mod tests {
             swage_protocol::client::workflow::WorkflowProviderRoundOutcome::Responded {
                 tool_calls: 0
             }
+        );
+    }
+
+    /// One journal entry, two turns: the attempt the run's end interrupted
+    /// and the attempt replay re-dispatched. The record has to carry both
+    /// attempts' rounds — reading only the settled turn hides everything the
+    /// interrupted attempt actually asked the provider for.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_re_dispatched_call_keeps_the_interrupted_attempts_rounds() {
+        let provider = Arc::new(ScriptedRecordingProvider {
+            outputs: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let (storage, state, run) = worker_call_record_fixture(provider).await;
+        let entry = storage
+            .create_workflow_journal_intent(NewWorkflowJournalIntent {
+                run_id: run.id,
+                seq: 1,
+                kind: "agent_call".into(),
+                args_hash: source_hash("interrupted then resumed"),
+                request: serde_json::to_value(worker_call_request("survey the tree"))
+                    .expect("request"),
+                effect_kind: None,
+                idempotency_key: None,
+                target_kind: None,
+            })
+            .await
+            .expect("journal intent");
+        storage
+            .record_workflow_call_dispatch(
+                entry.id,
+                serde_json::to_value(WorkflowAgentCallDispatch {
+                    prompt: "survey the tree".into(),
+                    agent_definition_id: None,
+                    requested_model: None,
+                    requested_effort: None,
+                    placement: None,
+                    grants: None,
+                    attempts: Vec::new(),
+                })
+                .expect("dispatch record"),
+            )
+            .await
+            .expect("dispatch record");
+
+        // The interrupted attempt: one round that came back with a tool call,
+        // and a second still out when the gateway went away.
+        let interrupted = worker_turn(&storage, run.space_id, "interrupted attempt").await;
+        open_round(&storage, interrupted, 1).await;
+        settle_round(
+            &storage,
+            interrupted,
+            1,
+            swage_protocol::client::workflow::WorkflowProviderRoundOutcome::Responded {
+                tool_calls: 1,
+            },
+        )
+        .await;
+        open_round(&storage, interrupted, 2).await;
+        record_agent_call_attempt(
+            storage.as_ref(),
+            entry.id,
+            serde_json::to_value(attempt_on_turn(interrupted)).expect("attempt"),
+        )
+        .await
+        .expect("first attempt");
+
+        // Replay re-dispatches the same entry under a fresh turn.
+        let resumed = worker_turn(&storage, run.space_id, "resumed attempt").await;
+        record_agent_call_attempt(
+            storage.as_ref(),
+            entry.id,
+            serde_json::to_value(attempt_on_turn(resumed)).expect("attempt"),
+        )
+        .await
+        .expect("second attempt");
+        open_round(&storage, resumed, 1).await;
+        settle_round(
+            &storage,
+            resumed,
+            1,
+            swage_protocol::client::workflow::WorkflowProviderRoundOutcome::Responded {
+                tool_calls: 0,
+            },
+        )
+        .await;
+        storage
+            .complete_workflow_journal_entry(
+                entry.id,
+                serde_json::json!({
+                    "turn_id": resumed,
+                    "usage": { "availability": "known", "input_tokens": 5, "output_tokens": 2 },
+                }),
+            )
+            .await
+            .expect("settle the resumed call");
+
+        let detail = get_run(State(state), Path(run.id)).await.expect("detail").0;
+        let call = only_agent_call(&detail);
+        let attempts = &call.dispatch.as_ref().expect("dispatch record").attempts;
+        assert_eq!(
+            attempts
+                .iter()
+                .map(|attempt| attempt.turn_id)
+                .collect::<Vec<_>>(),
+            vec![Some(interrupted), Some(resumed)],
+            "both attempts stay on the entry, oldest first"
+        );
+
+        let rounds = call.provider_rounds.as_ref().expect("provider rounds");
+        assert_eq!(
+            rounds
+                .iter()
+                .map(|round| (round.attempt, round.round))
+                .collect::<Vec<_>>(),
+            vec![(1, 1), (1, 2), (2, 1)],
+            "every attempt's rounds are projected, ordered by attempt then round"
+        );
+        assert_eq!(
+            rounds[0].outcome,
+            swage_protocol::client::workflow::WorkflowProviderRoundOutcome::Responded {
+                tool_calls: 1,
+            },
+            "the interrupted attempt's settled round keeps what came back"
+        );
+        assert_eq!(
+            rounds[1].outcome,
+            swage_protocol::client::workflow::WorkflowProviderRoundOutcome::Interrupted,
+            "the round the interruption caught reads interrupted, not still outstanding"
+        );
+        assert!(
+            rounds[1].completed_at.is_none(),
+            "no response came back, so the record invents no end time"
+        );
+        assert_eq!(
+            rounds[2].outcome,
+            swage_protocol::client::workflow::WorkflowProviderRoundOutcome::Responded {
+                tool_calls: 0,
+            },
         );
     }
 

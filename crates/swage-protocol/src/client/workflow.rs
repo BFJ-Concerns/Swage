@@ -369,6 +369,10 @@ pub enum WorkflowCutShortCause {
 /// a long span) are told apart from the record alone.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
 pub struct WorkflowProviderRound {
+    /// Which attempt of the call ran this round, counting from 1. A call the
+    /// run's end interrupted and replay re-dispatched runs its rounds again
+    /// under a later attempt; the number is what keeps the two apart.
+    pub attempt: u32,
     pub round: u32,
     pub started_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
@@ -388,6 +392,11 @@ pub enum WorkflowProviderRoundOutcome {
     Failed {
         message: String,
     },
+    /// The request went out and nothing can answer it any more: the attempt
+    /// that made it stopped, and the call was re-dispatched under a later
+    /// one. Distinct from `outstanding`, which is a request that may still
+    /// come back.
+    Interrupted,
 }
 
 /// What a worker was asked to do, recorded when it was dispatched.
@@ -407,8 +416,12 @@ pub struct WorkflowAgentCallDispatch {
     /// The call-scoped tool grants after intersection with the dispatching
     /// context's own authority. `None` means the call narrowed nothing.
     pub grants: Option<Vec<String>>,
-    /// Stamped once the turn resolved the options it actually ran with.
-    pub resolved: Option<WorkflowAgentCallResolution>,
+    /// Every attempt the call ran, oldest first, each stamped once its turn
+    /// resolved the options it actually ran with. A call interrupted and
+    /// re-dispatched by replay has more than one, and each names its own
+    /// turn — so the record keeps the interrupted attempt rather than only
+    /// the one that settled. Empty until the first turn resolves.
+    pub attempts: Vec<WorkflowAgentCallResolution>,
 }
 
 /// Where a dispatched worker was placed.

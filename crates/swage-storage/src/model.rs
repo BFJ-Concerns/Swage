@@ -2156,8 +2156,10 @@ pub struct WorkflowJournalRecord {
     /// What the call was dispatched with, written before any provider work.
     /// Generic JSON; the contract is enforced where the record is projected.
     pub dispatch: Option<serde_json::Value>,
-    /// The options the dispatched worker's turn resolved for itself.
-    pub dispatch_resolution: Option<serde_json::Value>,
+    /// Every attempt the call ran, oldest first, each carrying the options
+    /// its own turn resolved. A call replay re-dispatched appends rather
+    /// than overwrites, so the interrupted attempt stays in the record.
+    pub dispatch_attempts: Option<serde_json::Value>,
     /// Why the entry's work stopped, when that is not the work's own ending.
     pub termination: Option<serde_json::Value>,
     pub started_at: DateTime<Utc>,

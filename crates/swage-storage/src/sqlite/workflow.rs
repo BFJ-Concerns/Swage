@@ -172,7 +172,7 @@ const RUN_COLUMNS: &str = "id, space_id, parent_run_id, parent_seq, script_versi
     COALESCE((SELECT name FROM workflow_scripts WHERE id = (SELECT script_id FROM workflow_script_versions WHERE id = workflow_runs.script_version_id)), inline_workflow_name), \
     COALESCE((SELECT version FROM workflow_script_versions WHERE id = workflow_runs.script_version_id), inline_workflow_version), \
     carrying_skill, source, source_hash, args_json, budget_json, state, final_output_json, handover_json, error_message, engine_version, created_at, completed_at, dispatch_bound_agent_ids_json, dispatch_bound_task_definition_ids_json, wake_at, inherited_worker_placement_json, workflow_call_tools_json";
-const JOURNAL_COLUMNS: &str = "id, run_id, seq, completed_order, kind, status, args_hash, request_json, result_json, error_message, effect_kind, idempotency_key, target_kind, started_at, completed_at, dispatch_json, dispatch_resolution_json, termination_json";
+const JOURNAL_COLUMNS: &str = "id, run_id, seq, completed_order, kind, status, args_hash, request_json, result_json, error_message, effect_kind, idempotency_key, target_kind, started_at, completed_at, dispatch_json, dispatch_attempts_json, termination_json";
 const RUN_EVENT_COLUMNS: &str = "id, run_id, journal_entry_id, seq, kind, payload_json, source_surface, source_agent_id, source_session_id, source_turn_id, posted_at, delivered_wake_seq, delivered_at";
 
 fn run_event_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkflowRunEventRecord> {
@@ -236,7 +236,7 @@ fn journal_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkflowJournalRecor
         started_at: time(row.get(13)?)?,
         completed_at: completed.map(time).transpose()?,
         dispatch: json_column(row, 15)?,
-        dispatch_resolution: json_column(row, 16)?,
+        dispatch_attempts: json_column(row, 16)?,
         termination: json_column(row, 17)?,
     })
 }
@@ -754,31 +754,55 @@ impl WorkflowStore for SqliteStorage {
         Ok(())
     }
 
-    async fn record_workflow_call_resolution(
+    async fn record_workflow_call_attempt(
         &self,
         id: Uuid,
-        resolution: serde_json::Value,
-    ) -> Result<(), StorageError> {
-        let resolution = serde_json::to_string(&resolution)
-            .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
-        let updated = self
-            .with_conn(move |conn| {
-                conn.execute(
-                    "UPDATE workflow_journal SET dispatch_resolution_json=?2 WHERE id=?1",
-                    params![id.to_string(), resolution],
+        attempt: serde_json::Value,
+    ) -> Result<Vec<serde_json::Value>, StorageError> {
+        self.with_conn(move |conn| {
+            let tx = conn.unchecked_transaction()?;
+            // Read, append, write inside one transaction: an attempt that
+            // replaced its predecessor would erase the turn the interrupted
+            // attempt ran, which is the record this list exists to keep.
+            let stored: Option<Option<String>> = tx
+                .query_row(
+                    "SELECT dispatch_attempts_json FROM workflow_journal WHERE id=?1",
+                    [id.to_string()],
+                    |row| row.get(0),
                 )
-            })
-            .await?;
-        // An update that matches nothing means the entry this record belongs
-        // to is not there. Reporting success would leave the caller believing
-        // the account was written.
-        if updated == 0 {
-            return Err(StorageError::NotFound {
-                entity: "workflow journal entry".to_string(),
-                id: id.to_string(),
-            });
-        }
-        Ok(())
+                .optional()?;
+            // No row means the entry this record belongs to is not there.
+            // Reporting success would leave the caller believing the account
+            // was written.
+            let Some(stored) = stored else {
+                return Ok(None);
+            };
+            let earlier: Vec<serde_json::Value> = match stored {
+                Some(json) => serde_json::from_str(&json).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        0,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })?,
+                None => Vec::new(),
+            };
+            let mut attempts = earlier.clone();
+            attempts.push(attempt);
+            let encoded = serde_json::to_string(&attempts)
+                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+            tx.execute(
+                "UPDATE workflow_journal SET dispatch_attempts_json=?2 WHERE id=?1",
+                params![id.to_string(), encoded],
+            )?;
+            tx.commit()?;
+            Ok(Some(earlier))
+        })
+        .await?
+        .ok_or_else(|| StorageError::NotFound {
+            entity: "workflow journal entry".to_string(),
+            id: id.to_string(),
+        })
     }
 
     async fn cut_short_workflow_journal_entry(
@@ -1253,12 +1277,86 @@ mod tests {
         );
 
         let error = storage
-            .record_workflow_call_resolution(Uuid::new_v4(), serde_json::json!({"model": "m"}))
+            .record_workflow_call_attempt(Uuid::new_v4(), serde_json::json!({"model": "m"}))
             .await
-            .expect_err("a resolution record with no entry to attach to must fail");
+            .expect_err("an attempt record with no entry to attach to must fail");
         assert!(
             matches!(error, StorageError::NotFound { .. }),
             "expected the missing entry to be reported, got {error:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_second_attempt_is_appended_beside_the_first_not_over_it() {
+        let storage = SqliteStorage::in_memory().expect("storage");
+        let space = storage.get_or_create_default().await.expect("space");
+        let run = storage
+            .create_workflow_run(NewWorkflowRun {
+                space_id: space.id,
+                parent_run_id: None,
+                parent_seq: None,
+                script_version_id: None,
+                inline_workflow_id: None,
+                inline_workflow_name: None,
+                inline_workflow_version: None,
+                carrying_skill: None,
+                source: Some("return null".into()),
+                source_hash: "hash".into(),
+                args: serde_json::json!({}),
+                budget: serde_json::json!({}),
+                engine_version: "test".into(),
+                dispatch_bound_agent_ids: vec![],
+                dispatch_bound_task_definition_ids: vec![],
+                workflow_call_tools: None,
+                inherited_worker_placement: None,
+            })
+            .await
+            .expect("run");
+        let entry = storage
+            .create_workflow_journal_intent(NewWorkflowJournalIntent {
+                run_id: run.id,
+                seq: 0,
+                kind: "agent_call".into(),
+                args_hash: "a".into(),
+                request: serde_json::json!({}),
+                effect_kind: None,
+                idempotency_key: None,
+                target_kind: None,
+            })
+            .await
+            .expect("intent");
+
+        let before_first = storage
+            .record_workflow_call_attempt(entry.id, serde_json::json!({"turn_id": "one"}))
+            .await
+            .expect("first attempt");
+        assert!(
+            before_first.is_empty(),
+            "the first attempt had none before it"
+        );
+        let before_second = storage
+            .record_workflow_call_attempt(entry.id, serde_json::json!({"turn_id": "two"}))
+            .await
+            .expect("second attempt");
+        assert_eq!(
+            before_second,
+            vec![serde_json::json!({"turn_id": "one"})],
+            "the re-dispatch is told which attempts it superseded"
+        );
+
+        let stored = storage
+            .list_workflow_journal(run.id)
+            .await
+            .expect("journal")
+            .into_iter()
+            .find(|stored| stored.id == entry.id)
+            .expect("entry")
+            .dispatch_attempts
+            .expect("attempts");
+        assert_eq!(
+            stored,
+            serde_json::json!([{"turn_id": "one"}, {"turn_id": "two"}]),
+            "both attempts stay in the record, oldest first"
         );
     }
 }
