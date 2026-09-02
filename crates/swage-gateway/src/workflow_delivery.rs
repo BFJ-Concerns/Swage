@@ -43,11 +43,14 @@ pub(crate) async fn capability_from_grant(
     let targets = grant
         .and_then(Value::as_array)
         .ok_or_else(|| "DeliveryNotGrantedError: script has no delivery targets".to_string())?;
+    // Untargeted workflow delivery historically selects the webhook capability.
+    // A page is therefore opt-in through its named grant, rather than changing
+    // what an existing workflow does merely because a page grant is added first.
     let target = targets
         .iter()
-        .find(|target| {
-            requested_target
-                .is_none_or(|name| target.get("name").and_then(Value::as_str) == Some(name))
+        .find(|target| match requested_target {
+            Some(name) => target.get("name").and_then(Value::as_str) == Some(name),
+            None => target.get("kind").and_then(Value::as_str) == Some("webhook"),
         })
         .ok_or_else(|| {
             "DeliveryNotGrantedError: requested delivery target is not granted".to_string()
@@ -240,10 +243,22 @@ mod tests {
     use std::sync::Mutex;
 
     use axum::{Router, http::HeaderMap, routing::post};
-    use swage_storage::{SqliteStorage, Storage};
+    use swage_protocol::client::{page::CreatePageRequest, websocket::ServerEvent};
+    use swage_storage::{NewSpace, PageStore, SpaceStore, SqliteStorage, Storage};
 
     use super::*;
     use crate::secret::CreateSecretRequest;
+
+    fn state(storage: Arc<SqliteStorage>) -> AppState {
+        AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            storage as Arc<dyn SpaceStore>,
+            Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        )
+    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn webhook_resolves_bearer_auth_from_governed_secret_reference() {
@@ -312,5 +327,148 @@ mod tests {
 
         assert_eq!(seen.lock().unwrap().as_deref(), Some("Bearer test-token"));
         unsafe { std::env::remove_var(variable) };
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn page_delivery_writes_a_page_module_and_announces_its_location() {
+        let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+        let space = SpaceStore::create(
+            storage.as_ref(),
+            NewSpace {
+                name: "Delivery".into(),
+                slug: "delivery".into(),
+            },
+        )
+        .await
+        .unwrap();
+        let state = state(Arc::clone(&storage));
+        let page = crate::page::create_page(
+            &state,
+            space.id,
+            CreatePageRequest {
+                title: "Daily delivery".into(),
+            },
+        )
+        .await
+        .unwrap();
+        let mut events = state.broadcast.subscribe();
+        let grant = serde_json::json!([{
+            "kind": "page",
+            "name": "daily-page",
+            "page_id": page.id,
+        }]);
+        let capability = capability_from_grant(
+            Some(state.clone()),
+            space.id,
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Some(&grant),
+            Some("daily-page"),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(capability.kind(), "page");
+        assert_eq!(capability.effect_kind(), EffectKind::CheckBeforeRedo);
+        let receipt = capability
+            .deliver(
+                Uuid::new_v4(),
+                EffectPayload {
+                    content: "# Delivered\n\nThe scheduled result".into(),
+                    metadata: None,
+                    target: Some("daily-page".into()),
+                },
+                7,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(receipt.target, "page");
+        assert_eq!(receipt.effect_seq, 7);
+
+        let modules = storage.list_page_modules(page.id).await.unwrap();
+        assert_eq!(modules.len(), 1);
+        assert_eq!(modules[0].source, "# Delivered\n\nThe scheduled result");
+        let event = events.recv().await.expect("page delivery broadcasts a refetch signal");
+        assert!(matches!(
+            event,
+            ServerEvent::PageUpdated {
+                page_id,
+                module_id: Some(_),
+            } if page_id == page.id
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn page_delivery_refuses_a_page_outside_the_workflow_space() {
+        let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+        let workflow_space = SpaceStore::create(
+            storage.as_ref(),
+            NewSpace {
+                name: "Workflow".into(),
+                slug: "workflow".into(),
+            },
+        )
+        .await
+        .unwrap();
+        let other_space = SpaceStore::create(
+            storage.as_ref(),
+            NewSpace {
+                name: "Other".into(),
+                slug: "other".into(),
+            },
+        )
+        .await
+        .unwrap();
+        let state = state(Arc::clone(&storage));
+        let page = crate::page::create_page(
+            &state,
+            other_space.id,
+            CreatePageRequest {
+                title: "Other page".into(),
+            },
+        )
+        .await
+        .unwrap();
+        let grant = serde_json::json!([{
+            "kind": "page",
+            "name": "other-page",
+            "page_id": page.id,
+        }]);
+
+        let result = capability_from_grant(
+            Some(state),
+            workflow_space.id,
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Some(&grant),
+            Some("other-page"),
+        )
+        .await;
+        let error = match result {
+            Ok(_) => panic!("a workflow cannot deliver to another space's page"),
+            Err(error) => error,
+        };
+        assert!(error.contains("workflow's space"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn untargeted_delivery_keeps_selecting_the_webhook_grant() {
+        let storage: Arc<dyn Storage> = Arc::new(SqliteStorage::in_memory().unwrap());
+        let grant = serde_json::json!([
+            {
+                "kind": "page",
+                "name": "first-page",
+                "page_id": Uuid::new_v4(),
+            },
+            {
+                "kind": "webhook",
+                "name": "existing-webhook",
+                "url": "http://127.0.0.1:1/deliver",
+            },
+        ]);
+
+        let capability = capability_from_grant(None, Uuid::new_v4(), storage, Some(&grant), None)
+            .await
+            .unwrap();
+        assert_eq!(capability.kind(), "webhook");
     }
 }
