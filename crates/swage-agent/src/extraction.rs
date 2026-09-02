@@ -112,7 +112,7 @@ mod tests {
     }
 
     #[test]
-    fn prose_with_embedded_fragment_returns_none() {
+    fn prose_with_embedded_fragment_extracts_the_fragment() {
         assert_eq!(
             extract_json_values("The answer is {\"x\": 1} as you can see."),
             vec![serde_json::json!({"x": 1})]
