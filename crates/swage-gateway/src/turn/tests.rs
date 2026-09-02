@@ -1163,6 +1163,9 @@ pub(crate) struct MockStorage {
     fail_audit_writes: AtomicBool,
     fail_snapshot_writes: AtomicBool,
     last_snapshot_list_limit: AtomicUsize,
+    pause_structured_output_writes: AtomicBool,
+    structured_output_write_started: Notify,
+    structured_output_write_release: Notify,
 }
 
 #[async_trait]
@@ -1443,6 +1446,9 @@ impl MockStorage {
             fail_audit_writes: AtomicBool::new(false),
             fail_snapshot_writes: AtomicBool::new(false),
             last_snapshot_list_limit: AtomicUsize::new(0),
+            pause_structured_output_writes: AtomicBool::new(false),
+            structured_output_write_started: Notify::new(),
+            structured_output_write_release: Notify::new(),
         }
     }
 
@@ -1493,6 +1499,19 @@ impl MockStorage {
 
     fn fail_snapshot_writes(&self) {
         self.fail_snapshot_writes.store(true, Ordering::SeqCst);
+    }
+
+    fn pause_structured_output_writes(&self) {
+        self.pause_structured_output_writes
+            .store(true, Ordering::SeqCst);
+    }
+
+    async fn wait_for_structured_output_write(&self) {
+        self.structured_output_write_started.notified().await;
+    }
+
+    fn release_structured_output_write(&self) {
+        self.structured_output_write_release.notify_one();
     }
 
     pub(crate) fn last_snapshot_list_limit(&self) -> usize {
@@ -3015,6 +3034,10 @@ impl TurnStore for MockStorage {
         id: Uuid,
         output: &serde_json::Value,
     ) -> Result<(), StorageError> {
+        if self.pause_structured_output_writes.load(Ordering::SeqCst) {
+            self.structured_output_write_started.notify_one();
+            self.structured_output_write_release.notified().await;
+        }
         if let Some(t) = self.db.lock().await.turns.get_mut(&id) {
             t.structured_output = Some(output.clone());
         }
@@ -14442,9 +14465,10 @@ async fn turn_complete_carries_structured_output_when_schema_passes() {
     }
 }
 
-/// After a valid schema turn, the turn record in storage has structured_output.
+/// A consumer can read structured output from storage as soon as it receives
+/// TurnComplete; the event must not outrun the durable projection.
 #[tokio::test]
-async fn structured_output_persisted_on_turn_after_schema_validation() {
+async fn structured_output_is_persisted_before_turn_complete() {
     let _guard = SwageHomeGuard::isolate();
     use swage_config::OutputConfig;
     use swage_core::FinishReason;
@@ -14472,23 +14496,44 @@ async fn structured_output_persisted_on_turn_after_schema_validation() {
         ..Default::default()
     };
 
-    let (state, session_id) = make_state_with_config(chunks, config).await;
+    let storage = Arc::new(MockStorage::new());
+    storage.pause_structured_output_writes();
+    let (state, session_id) =
+        make_state_with_config_and_storage(chunks, config, Arc::clone(&storage)).await;
     let (tx, mut rx) = mpsc::unbounded_channel();
 
-    process_turn(
-        &state,
-        session_id,
-        None,
-        "give me x".to_string(),
-        tx,
-        Arc::new(Mutex::new(SubscriptionState::new(false))),
-        None,
-    )
-    .await
-    .expect("turn should complete");
+    let state_for_turn = state.clone();
+    let turn = tokio::spawn(async move {
+        process_turn(
+            &state_for_turn,
+            session_id,
+            None,
+            "give me x".to_string(),
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(false))),
+            None,
+        )
+        .await
+    });
 
-    // Drain events to let the turn finish.
-    while rx.try_recv().is_ok() {}
+    loop {
+        tokio::select! {
+            () = storage.wait_for_structured_output_write() => break,
+            event = rx.recv() => {
+                assert!(
+                    !matches!(event, Some(ServerEvent::TurnComplete { .. })),
+                    "TurnComplete became observable before structured-output persistence began"
+                );
+            }
+        }
+    }
+    storage.release_structured_output_write();
+
+    loop {
+        if matches!(rx.recv().await, Some(ServerEvent::TurnComplete { .. })) {
+            break;
+        }
+    }
 
     // Look up the turn in storage and verify structured_output was persisted.
     let threads = state.storage.list_by_session(session_id).await.unwrap();
@@ -14502,6 +14547,9 @@ async fn structured_output_persisted_on_turn_after_schema_validation() {
         "turn record should have structured_output persisted"
     );
     assert_eq!(turns[0].structured_output.as_ref().unwrap()["x"], 42);
+    turn.await
+        .expect("turn task should not panic")
+        .expect("turn should complete");
 }
 
 /// When NOT subscribed to context channel, TurnComplete omits usage fields.
