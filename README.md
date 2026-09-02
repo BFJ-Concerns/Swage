@@ -109,15 +109,23 @@ models can also be managed from the web UI under Settings → Providers.
 
 ### Credentials beyond environment variables
 
-Every provider credential resolves through the gateway's secret manager,
-which supports three backends: `managed` (encrypted in the gateway's store),
-`env` (an environment variable, as `api_key_env` above), and `file` (a file
-on the gateway host, re-read on every access so externally refreshed tokens
+The `api_key_env` field shown above is a legacy convenience: a direct
+environment-variable read at startup, with a deprecation warning. The
+governed alternative is `api_key_secret_ref`, which resolves through the
+gateway's secret manager — every access is audited and the resolved value is
+redacted from logs.
+
+The secret manager supports three backends: `managed` (encrypted in the
+gateway's store), `env` (an environment variable), and `file` (a file on
+the gateway host, re-read on every access so externally refreshed tokens
 stay current). A file-backed secret can optionally narrow into a JSON
 document with a JSON pointer — useful when a tool's own auth store keeps
 multiple tokens in one file. The Codex CLI's OAuth tokens are registered
 this way at startup, so they resolve and redact through the governed system
 without being copied out of the harness's own `auth.json`.
+
+See [Provider credentials](docs/interfaces-and-tooling.md#provider-credentials)
+for the creation journey and request shape.
 
 `SWAGE_HOME` overrides the whole data root (config, database, logs) — useful
 for throwaway instances: `SWAGE_HOME=/tmp/swage-test swage gateway start`.

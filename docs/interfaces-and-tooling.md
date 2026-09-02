@@ -118,31 +118,73 @@ content as a JSON array of typed parts rather than a plain string, keeping
 text-only messages in the original string form. Stored messages carry their
 attachments as records that survive round-trips through the API.
 
-## Secret backends
+## Provider credentials
 
-Every credential the gateway uses — provider API keys, OAuth tokens,
-service credentials — resolves through a single secret manager with an
-audit event on every access and automatic redaction of resolved values.
+A provider entry has two credential fields, checked in order:
 
-Three backends determine where a secret's value lives:
+1. **`api_key_secret_ref`** — a `secret://` reference resolved through the
+   gateway's secret manager. Every access is audited and the resolved value
+   is registered for redaction. This is the governed path.
+2. **`api_key_env`** — a direct environment-variable read (`std::env::var`)
+   at startup. This is the legacy path; the gateway logs a warning when it is
+   used. It does not go through the secret manager and is neither audited nor
+   redacted.
+
+When both are set, `api_key_secret_ref` wins.
+
+### Secret manager and backends
+
+The secret manager resolves `secret://` references with an audit event on
+every access and automatic redaction of resolved values. Three backends
+determine where a secret's value lives:
 
 - **Managed** — encrypted at rest in the gateway's own SQLite store. Used by
   the generate-secret path; the create-secret path takes `backend_kind` from
   the caller.
 - **Environment** — the secret names an environment variable, read at
-  resolution time. This is what `api_key_env` in the provider config uses.
+  resolution time.
 - **File** — the secret names a file on the gateway host, re-read on every
   access so externally refreshed tokens stay current. A JSON pointer
   (RFC 6901) can optionally select a single field from a JSON file rather
   than using the whole file's content.
 
+### Registering a file-backed secret
+
+Create the secret through the API (`POST /api/secrets`), specifying the file
+path, the JSON pointer if the file is a JSON document, and
+`"provider_key"` as the material kind:
+
+```json
+{
+  "name": "my-service-token",
+  "material_kind": "provider_key",
+  "owner_kind": "operator",
+  "backend_kind": "file",
+  "scope_kind": "provider",
+  "scope_id": "my-provider",
+  "external_reference": "/path/to/token-file.json",
+  "metadata": { "json_pointer": "/tokens/access_token" }
+}
+```
+
+The response includes a `reference` field (e.g. `secret://file/42`). Point
+the provider entry's `api_key_secret_ref` at it to bring the credential
+under the governed path:
+
+```toml
+[providers.entries.my-provider]
+protocol = "openai"
+api_key_secret_ref = "secret://file/42"
+```
+
+### Codex auth store
+
 The file backend is how the gateway governs credentials that a companion
-tool manages itself. The Codex CLI, for example, keeps its ChatGPT OAuth
-tokens in an `auth.json` file and refreshes them on its own schedule. At
-startup, the gateway registers the Codex access and refresh tokens as
-file-backed secrets pointing into that document, so they resolve, audit, and
-redact through the governed system without being copied out of the CLI's own
-store.
+tool manages itself. The Codex CLI keeps its ChatGPT OAuth tokens in an
+`auth.json` file and refreshes them on its own schedule. At startup, the
+gateway registers the Codex access and refresh tokens as file-backed secrets
+pointing into that document, so they resolve, audit, and redact through the
+governed system without being copied out of the CLI's own store.
 
 ## API error contract
 
