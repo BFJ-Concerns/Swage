@@ -47,6 +47,7 @@ const organiserBrief =
   "the knowledge base holds gathered external evidence, and your " +
   "judgements ride cards and curation assertions.\n\n";
 const organiserTools = [
+  "knowledge_orient",
   "knowledge_search",
   "knowledge_curate",
   "knowledge_curate_orientation",
