@@ -68,6 +68,10 @@ Effort resolves through a three-step fallback:
 
 When none of these supplies a value, the turn sends no effort control.
 
+The web UI's Settings → Providers panel exposes a **Default effort**
+dropdown on each model entry, with all seven levels plus "No effort".
+This sets `default_effort` on the model's config entry.
+
 Config example:
 
 ```toml
@@ -134,7 +138,9 @@ The turn's assembly report records the resolution under
 ```
 
 When the request was honoured as-is, `clamped_to` and `note` are absent.
-The context inspector shows this alongside the effective model snapshot.
+This data is stored in the assembly report JSON and available through
+`GET /api/turns/{id}/context`; the web UI's context inspector panel
+does not yet render it.
 
 ## Effective agent registry
 
@@ -548,6 +554,9 @@ imports the generated `AssemblyReport.ts` projection.
 The report's `provider_visible` object also records the resolved effort
 for the turn (see [Agents and permissions — Effort](agents-and-permissions.md#effort)):
 what was requested, what the adapter sent, and any clamp or substitution.
+This data is stored in the report JSON but is not yet rendered by the
+web UI's inspector panel; it is available through the
+`GET /api/turns/{id}/context` endpoint.
 
 `swage-tui` has a terminal-UI equivalent (`ui/inspector.rs:64`), toggled by
 keybinding. It shows per-element fill bars and a budget percentage.
@@ -1133,11 +1142,32 @@ when it is not a standalone authored row. A carried workflow is
 immutable in place; an operator can shadow it by authoring a same-named
 workflow in the space.
 
-The shipped research skill (`shipped/skills/research/`) carries the
-`research-sweep` workflow. No other workflows ship with the gateway.
-A carried workflow's roles (the research sweep's researcher, organiser,
-and synthesist) are bare dispatches inside the script, not standalone
-agent definitions — they do not appear in the agent registry.
+Several shipped skills carry workflows (assembly, commission, maestro,
+research, among others). The research skill
+(`shipped/skills/research/`) carries `research-sweep`, the only
+shipped workflow intended for direct user invocation — the others serve
+internal skill orchestration.
+
+### Running a research sweep
+
+Activate the research skill on a session (via `activate_skill`), then
+dispatch its carried workflow with `workflow_run`:
+
+```json
+{ "name": "research-sweep", "args": { "topic": "…", "purpose": "…", "maxSources": 8 } }
+```
+
+- `topic` — what to research, as the user phrased it.
+- `purpose` — what the findings must serve; the synthesis is judged
+  against this.
+- `maxSources` — optional ceiling on sources gathered (default 8).
+
+The sweep runs unattended: sources are gathered as immutable
+observations, an organising pass signposts what landed using
+`knowledge_curate_orientation` (which can author, supersede, and retire
+orientation cards), and a synthesis pass delivers cited findings. The
+sweep's roles — scout, gatherers, organiser, synthesist — are bare
+dispatches inside the script, not standalone agent definitions.
 
 ## Storage
 

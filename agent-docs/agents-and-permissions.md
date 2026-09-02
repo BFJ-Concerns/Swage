@@ -67,6 +67,10 @@ Effort resolves through a three-step fallback:
 
 When none of these supplies a value, the turn sends no effort control.
 
+The web UI's Settings → Providers panel exposes a **Default effort**
+dropdown on each model entry, with all seven levels plus "No effort".
+This sets `default_effort` on the model's config entry.
+
 Config example:
 
 ```toml
@@ -133,7 +137,9 @@ The turn's assembly report records the resolution under
 ```
 
 When the request was honoured as-is, `clamped_to` and `note` are absent.
-The context inspector shows this alongside the effective model snapshot.
+This data is stored in the assembly report JSON and available through
+`GET /api/turns/{id}/context`; the web UI's context inspector panel
+does not yet render it.
 
 ## Effective agent registry
 

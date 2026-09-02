@@ -63,6 +63,10 @@ Effort can be set in three places, checked in this order:
 
 When none of these supplies a value, no effort control is sent.
 
+The web UI's **Settings → Providers** panel exposes a **Default effort**
+dropdown on each model entry, with all seven levels plus "No effort". The
+same setting can be written in `config.toml`:
+
 A model entry with a default effort looks like this:
 
 ```toml
@@ -114,8 +118,10 @@ self-hosted or proxied endpoint.
 Every turn that resolves effort records the outcome in the assembly report
 under `provider_visible.effort`: what was requested, what control the adapter
 sent, and — when the two differ — what the request was clamped to and why.
-The [turn context inspector](interfaces-and-tooling.md#turn-context-inspector)
-shows this alongside the effective model snapshot.
+This data is stored in the report JSON and available through the
+`GET /api/turns/{id}/context` endpoint; the web UI's
+[turn context inspector](interfaces-and-tooling.md#turn-context-inspector)
+does not yet render it.
 
 ## What agents are available
 
