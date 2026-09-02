@@ -10061,23 +10061,31 @@ mod tests {
         );
         drop(writes);
         assert!(!repo.join("first-marker").exists() && !repo.join("second-marker").exists());
+        assert!(
+            paths[0].join("first-marker").exists() || paths[1].join("first-marker").exists(),
+            "the first marker remains inside a retained changed worktree"
+        );
+        assert!(
+            paths[0].join("second-marker").exists() || paths[1].join("second-marker").exists(),
+            "the second marker remains inside a retained changed worktree"
+        );
         let completed_run_root = fixture
             .path()
             .join("worker-worktrees")
             .join(started.id.to_string());
         for _ in 0..20 {
-            if paths.iter().all(|path| !path.exists()) && !completed_run_root.exists() {
+            if paths.iter().all(|path| path.exists()) {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         }
         assert!(
-            paths.iter().all(|path| !path.exists()),
-            "completed-run cleanup must remove every provisioned worktree: {paths:?}"
+            paths.iter().all(|path| path.exists()),
+            "changed worktrees remain available as completion evidence: {paths:?}"
         );
         assert!(
-            !completed_run_root.exists(),
-            "completed-run cleanup must remove the empty per-run directory"
+            completed_run_root.exists(),
+            "retained worktrees keep their per-run directory"
         );
 
         let failed_source = format!(
@@ -10111,8 +10119,8 @@ mod tests {
             })
             .expect("failed run should retain its worktree path");
         assert!(
-            retained_path.exists(),
-            "failed-run worktree should remain available for inspection"
+            !retained_path.exists(),
+            "a terminal run reclaims its completed worker worktree"
         );
 
         let cancelled_source = format!(
@@ -10149,8 +10157,8 @@ mod tests {
             .expect("cancel parked placement run");
         assert_eq!(cancelled_record.state, WorkflowRunState::Cancelled);
         assert!(
-            cancelled_path.exists(),
-            "cancelled-run worktree should remain available for inspection"
+            !cancelled_path.exists(),
+            "a terminal cancelled run reclaims its completed worker worktree"
         );
 
         state.worktree_host.shutdown().await;
