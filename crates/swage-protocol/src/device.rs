@@ -50,13 +50,16 @@ pub struct RegisterDeviceRequest {
     pub device_id: String,
     pub label: Option<String>,
     #[serde(default = "default_remote_device_kind")]
+    #[ts(optional, as = "Option<_>")]
     pub kind: String,
     pub base_url: String,
     pub shared_token_secret_ref: String,
     pub workspace_root: String,
     #[serde(default)]
+    #[ts(optional, as = "Option<_>")]
     pub workspace_roots: Vec<String>,
     #[serde(default)]
+    #[ts(optional, as = "Option<_>")]
     pub capabilities: Vec<String>,
 }
 

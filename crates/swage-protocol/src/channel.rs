@@ -31,6 +31,7 @@ pub struct DevDmInboundRequest {
     pub user_id: String,
     pub text: String,
     #[serde(default)]
+    #[ts(optional, as = "Option<_>")]
     pub routing: DeliveryRoutingRequest,
 }
 
@@ -41,6 +42,7 @@ pub struct DevThreadInboundRequest {
     pub thread_id: String,
     pub text: String,
     #[serde(default)]
+    #[ts(optional, as = "Option<_>")]
     pub routing: DeliveryRoutingRequest,
 }
 

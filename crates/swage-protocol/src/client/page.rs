@@ -17,12 +17,12 @@ pub struct CreatePageRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
 pub struct WritePageModuleRequest {
     #[serde(default)]
-    #[ts(optional)]
+    #[ts(optional, as = "Option<_>")]
     pub module_id: Option<Uuid>,
     /// Module kind for a new instance ("document" first); ignored when
     /// `module_id` names an existing instance.
     #[serde(default)]
-    #[ts(optional)]
+    #[ts(optional, as = "Option<_>")]
     pub kind: Option<String>,
     pub source: String,
 }
@@ -36,6 +36,7 @@ pub struct CreatePageAnnotationRequest {
     pub module_id: Uuid,
     pub body: String,
     #[serde(default)]
+    #[ts(optional, as = "Option<_>")]
     pub tags: Vec<String>,
 }
 
@@ -46,6 +47,7 @@ pub struct CreatePageAnnotationRequest {
 pub struct UpdatePageAnnotationRequest {
     pub body: String,
     #[serde(default)]
+    #[ts(optional, as = "Option<_>")]
     pub tags: Vec<String>,
 }
 
