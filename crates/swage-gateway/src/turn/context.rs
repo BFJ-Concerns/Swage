@@ -2,7 +2,6 @@ use super::{
     ActiveSkill, AppState, ChatMessage, ContextElement, HierarchyLevel, HistoryElement,
     MemoryElement, Path, PathBuf, PromptRule, PromptsElement, SkillManager, SkillsElement, Uuid,
 };
-use swage_config::RESERVED_WORKFLOW_AGENT_ID;
 use swage_context::briefing::BriefingElement;
 use swage_context::named_element::discover_named_elements;
 use swage_context::orientation::{

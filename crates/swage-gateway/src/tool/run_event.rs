@@ -9,6 +9,9 @@ use swage_tool::context::ToolContext;
 use crate::tool::Tool;
 use crate::workflow::{RunEventSource, post_external_run_event};
 
+#[cfg(test)]
+use crate::tool_executor::GatewayToolContext;
+
 pub struct RunEventPostTool;
 
 const TOOL: &str = "run_event_post";

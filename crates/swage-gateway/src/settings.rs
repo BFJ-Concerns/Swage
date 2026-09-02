@@ -36,9 +36,16 @@ fn config_from_wire<C: DeserializeOwned, W: Serialize>(value: W) -> Result<C, Ap
 }
 
 async fn write_config_atomically(path: &std::path::Path, body: &str) -> Result<(), ApiError> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| ApiError::validation("config path has no parent directory".to_string()))?;
+    if path.parent().is_none() {
+        return Err(ApiError::validation(
+            "config path has no parent directory".to_string(),
+        ));
+    }
+    if path.file_name().and_then(|name| name.to_str()).is_none() {
+        return Err(ApiError::validation(
+            "config path has no valid file name".to_string(),
+        ));
+    }
     let path = path.to_path_buf();
     let body = body.as_bytes().to_vec();
     tokio::task::spawn_blocking(move || swage_client::runtime::write_atomically(&path, &body))

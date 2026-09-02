@@ -6,7 +6,10 @@ use swage_core::ToolError;
 use swage_tool::context::ToolContext;
 use uuid::Uuid;
 
-use crate::{state::AppState, tool::Tool, tool_executor::GatewayToolContext};
+use crate::{state::AppState, tool::Tool};
+
+#[cfg(test)]
+use crate::tool_executor::GatewayToolContext;
 
 pub const WORKFLOW_LIST_TOOL: &str = "workflow_list";
 

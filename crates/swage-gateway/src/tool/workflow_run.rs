@@ -8,9 +8,11 @@ use uuid::Uuid;
 use crate::{
     tool::Tool,
     tool::workflow_list::{workflow_catalogue_error_summary, workflows_for_session},
-    tool_executor::GatewayToolContext,
     workflow::{GatewayWorkflowLauncher, WorkflowLauncher},
 };
+
+#[cfg(test)]
+use crate::tool_executor::GatewayToolContext;
 
 pub struct WorkflowRunTool;
 

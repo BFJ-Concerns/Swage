@@ -38,7 +38,6 @@ use swage_tool::context::ToolContext;
 use crate::knowledge;
 use crate::state::AppState;
 use crate::tool::Tool;
-use crate::tool_executor::GatewayToolContext;
 
 const SEARCH_TOOL: &str = "knowledge_search";
 const RECORD_TOOL: &str = "knowledge_record";
