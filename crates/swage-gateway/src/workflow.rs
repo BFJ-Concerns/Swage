@@ -1300,6 +1300,7 @@ async fn execute_workflow_agent_turn(
     composition: crate::turn::DispatchContextComposition,
     journal_entry_id: Uuid,
     requested_model: Option<String>,
+    reuse_persisted_input: bool,
 ) -> Result<WorkflowTurnAttempt, WorkflowHostError> {
     let (event_tx, mut events_rx) = mpsc::unbounded_channel::<ServerEvent>();
     let mut events = Vec::new();
@@ -1325,6 +1326,7 @@ async fn execute_workflow_agent_turn(
         Some(journal_entry_id),
         requested_model,
         Some(provider_failure.clone()),
+        reuse_persisted_input,
     ));
     let timeout = timeout_ms.map(std::time::Duration::from_millis);
     let mut timeout_wait = Box::pin(async {
@@ -1448,6 +1450,12 @@ async fn run_ephemeral_agent_call(
                 )
                 .into());
             }
+            if request.model.is_some() {
+                return Err(
+                    "AgentCallError: model cannot be selected on a continued session; the worker keeps the model resolved at creation"
+                        .into(),
+                );
+            }
             let created_here = state
                 .storage
                 .list_workflow_journal(run_id)
@@ -1510,13 +1518,6 @@ async fn run_ephemeral_agent_call(
                         session_ref.thread_id, session_ref.session_id
                     )
                 })?;
-            if let Some(model) = request.model.as_deref() {
-                state
-                    .storage
-                    .set_session_selected_model(session.id, Some(model.to_string()))
-                    .await
-                    .map_err(|error| error.to_string())?;
-            }
             (session.id, thread.id)
         }
         None => {
@@ -1626,22 +1627,19 @@ async fn run_ephemeral_agent_call(
         composition.clone(),
         journal_entry_id,
         request.model.clone(),
+        false,
     )
     .await?;
     let emitted_output = primary
         .events
         .iter()
         .any(|event| matches!(event, ServerEvent::Token { .. }));
-    let dispatched_tool = request
-        .tools
-        .as_ref()
-        .is_some_and(|tools| !tools.is_empty())
-        || primary.events.iter().any(|event| {
-            matches!(
-                event,
-                ServerEvent::ToolStart { .. } | ServerEvent::ToolEnd { .. }
-            )
-        });
+    let dispatched_tool = primary.events.iter().any(|event| {
+        matches!(
+            event,
+            ServerEvent::ToolStart { .. } | ServerEvent::ToolEnd { .. }
+        )
+    });
     let primary_error = match primary.outcome {
         Err(error) => {
             if fallback_failure(&error).is_some_and(|failure| {
@@ -1697,7 +1695,12 @@ async fn run_ephemeral_agent_call(
     let final_events = match primary_error {
         None => primary.events,
         Some(error) => {
-            let Some(fallback_model) = request.fallback_model.clone() else {
+            let Some(fallback_model) = request
+                .session
+                .is_none()
+                .then(|| request.fallback_model.clone())
+                .flatten()
+            else {
                 return Err(error.into());
             };
             crate::turn::resolve_requested_turn_model(&state.active_config(), &fallback_model)
@@ -1719,6 +1722,7 @@ async fn run_ephemeral_agent_call(
                 composition,
                 journal_entry_id,
                 Some(fallback_model.clone()),
+                true,
             )
             .await?;
             fallback.outcome.map_err(|fallback_error| {
@@ -16359,6 +16363,15 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![Some("pinned-wire"), Some("fallback-wire")]
         );
+        assert_eq!(
+            requests[1]
+                .messages
+                .iter()
+                .filter(|message| message.text_content() == "answer")
+                .count(),
+            1,
+            "the fallback must reuse the primary prompt rather than append it again"
+        );
 
         let (state, storage, provider, space_id) = fallback_test_state(vec![vec![
             swage_core::StreamChunk::Delta {
@@ -16500,6 +16513,58 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn declared_fallback_retries_a_pre_output_failure_with_tools_configured() {
+        let (state, storage, provider, space_id) = fallback_test_state_with_tools(
+            vec![
+                vec![swage_core::StreamChunk::Error {
+                    message: "pinned refused".into(),
+                }],
+                scripted_text_output("fallback answer"),
+            ],
+            vec![
+                Arc::new(crate::test_support::NamedTool::new("echo")) as Arc<dyn crate::tool::Tool>
+            ],
+        )
+        .await;
+        let source = r#"return await agent("answer", {
+            agent: "default", model: "pinned", fallbackModel: "fallback", tools: ["echo"]
+        });"#;
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(space_id),
+            Json(StartInlineWorkflowRunRequest {
+                source: source.into(),
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start workflow");
+        wait_for_terminal(&state, started.id).await;
+
+        assert_eq!(
+            storage
+                .get_workflow_run(started.id)
+                .await
+                .expect("run")
+                .expect("present")
+                .state,
+            "completed"
+        );
+        assert_eq!(
+            provider
+                .requests
+                .lock()
+                .expect("requests")
+                .iter()
+                .map(|request| request.model.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("pinned-wire"), Some("fallback-wire")],
+            "configured tools do not count as a dispatched tool"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn held_worker_persists_the_fallback_model_for_continuation() {
         let (state, storage, provider, space_id) = fallback_test_state(vec![
             scripted_text_output("created by fallback"),
@@ -16568,6 +16633,79 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![Some("fallback-wire"), Some("fallback-wire")],
             "continuation must use the persisted fallback without retrying the missing primary"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn continuation_ignores_declared_fallback_and_keeps_its_creation_model() {
+        let (state, storage, provider, space_id) = fallback_test_state(vec![
+            scripted_text_output("created by pinned"),
+            vec![swage_core::StreamChunk::Error {
+                message: "pinned refused continuation".into(),
+            }],
+            scripted_text_output("fallback must not run"),
+        ])
+        .await;
+        let source = r#"
+            const worker = agentStart("create", { agent: "default", model: "pinned" });
+            await worker.result;
+            return await agent("continue", {
+                agent: "default", session: worker.session, fallbackModel: "fallback"
+            });
+        "#;
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(space_id),
+            Json(StartInlineWorkflowRunRequest {
+                source: source.into(),
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start workflow");
+        wait_for_terminal(&state, started.id).await;
+
+        assert_eq!(
+            storage
+                .get_workflow_run(started.id)
+                .await
+                .expect("run")
+                .expect("present")
+                .state,
+            "failed"
+        );
+        let journal = storage
+            .list_workflow_journal(started.id)
+            .await
+            .expect("journal");
+        let session_id = journal
+            .iter()
+            .find(|entry| entry.kind == "agent_call")
+            .and_then(|entry| entry.result.as_ref())
+            .and_then(|result| result["session_id"].as_str())
+            .and_then(|id| Uuid::parse_str(id).ok())
+            .expect("worker session id");
+        assert_eq!(
+            storage
+                .get_session(session_id)
+                .await
+                .expect("session")
+                .expect("worker session")
+                .selected_model_id
+                .as_deref(),
+            Some("pinned")
+        );
+        assert_eq!(
+            provider
+                .requests
+                .lock()
+                .expect("requests")
+                .iter()
+                .map(|request| request.model.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("pinned-wire"), Some("pinned-wire")],
+            "the continuation must not run its declared fallback"
         );
     }
 

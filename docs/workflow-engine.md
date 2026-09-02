@@ -79,7 +79,9 @@ new authority; continuations retain the allow-list chosen at worker creation.
 is used only when the requested model is unavailable or the provider refuses
 or fails it before output; schema exhaustion and failures after output still return the
 established `null` result or throw. The completed call record's `served_model`
-names the model that actually served the call.
+names the model that actually served the call. Continuation calls ignore
+`fallbackModel` and never make a fallback attempt; they use the worker's
+persisted model selection, including a fallback selected at creation.
 
 ### Composition
 
