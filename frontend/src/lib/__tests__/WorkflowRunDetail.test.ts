@@ -89,16 +89,19 @@ const baseCall: WorkflowAgentCallDetail = {
     requested_effort: "low",
     placement: null,
     grants: ["file_read"],
-    resolved: {
-      model: "test-model",
-      effort: "low",
-      session_id: null,
-      thread_id: null,
-      turn_id: null,
-    },
+    attempts: [
+      {
+        model: "test-model",
+        effort: "low",
+        session_id: null,
+        thread_id: null,
+        turn_id: null,
+      },
+    ],
   },
   provider_rounds: [
     {
+      attempt: 1,
       round: 1,
       started_at: "2026-09-02T10:00:01Z",
       completed_at: "2026-09-02T10:00:02Z",
@@ -168,12 +171,14 @@ describe("WorkflowRunDetail", () => {
         ...baseCall,
         provider_rounds: [
           {
+            attempt: 1,
             round: 1,
             started_at: "2026-09-02T10:00:01Z",
             completed_at: "2026-09-02T10:00:02Z",
             outcome: { outcome: "responded", tool_calls: 2 },
           },
           {
+            attempt: 1,
             round: 2,
             started_at: "2026-09-02T10:00:03Z",
             completed_at: null,
@@ -187,5 +192,66 @@ describe("WorkflowRunDetail", () => {
     expect(rows.length).toBe(2);
     expect(rows[0].textContent).toContain("responded with 2 tool call(s)");
     expect(rows[1].textContent).toContain("no response yet");
+  });
+
+  it("keeps an interrupted attempt's rounds beside the attempt that followed", async () => {
+    await render(
+      runWith({
+        ...baseCall,
+        dispatch: {
+          ...baseCall.dispatch!,
+          attempts: [
+            {
+              model: "interrupted-model",
+              effort: "low",
+              session_id: null,
+              thread_id: null,
+              turn_id: null,
+            },
+            {
+              model: "test-model",
+              effort: "low",
+              session_id: null,
+              thread_id: null,
+              turn_id: null,
+            },
+          ],
+        },
+        provider_rounds: [
+          {
+            attempt: 1,
+            round: 1,
+            started_at: "2026-09-02T10:00:01Z",
+            completed_at: "2026-09-02T10:00:02Z",
+            outcome: { outcome: "responded", tool_calls: 1 },
+          },
+          {
+            attempt: 1,
+            round: 2,
+            started_at: "2026-09-02T10:00:03Z",
+            completed_at: null,
+            outcome: { outcome: "interrupted" },
+          },
+          {
+            attempt: 2,
+            round: 1,
+            started_at: "2026-09-02T10:05:01Z",
+            completed_at: "2026-09-02T10:05:02Z",
+            outcome: { outcome: "responded", tool_calls: 0 },
+          },
+        ],
+      } as unknown as WorkflowAgentCallDetail),
+    );
+
+    const rows = document.querySelectorAll("table.rounds tbody tr");
+    expect(rows.length).toBe(3);
+    expect(rows[1].textContent).toContain("interrupted");
+    expect(rows[1].textContent).not.toContain("no response yet");
+    expect(document.querySelector(".attempts")!.textContent).toContain("2");
+    // The call ran to its end on the last attempt, and that is what "ran
+    // with" names.
+    expect(document.querySelector(".call")!.textContent).toContain(
+      "test-model",
+    );
   });
 });
