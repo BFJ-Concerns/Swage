@@ -1077,7 +1077,8 @@ describe("App", () => {
     ]);
     vi.mocked(conversationsApi.getConversation)
       .mockResolvedValueOnce(makeConversationDetail({ id: "conv-a" }))
-      .mockResolvedValueOnce(makeConversationDetail({ id: "conv-b" }));
+      .mockResolvedValueOnce(makeConversationDetail({ id: "conv-b" }))
+      .mockResolvedValueOnce(makeConversationDetail({ id: "conv-a" }));
 
     setPath("/conversations/conv-a");
     component = mount(App, { target: document.body });
@@ -1101,16 +1102,34 @@ describe("App", () => {
     flushSync(() => conversationButtons[1]!.click());
     await settleUi();
 
-    expect(websocketHarness.client.connect).not.toHaveBeenCalled();
+    expect(websocketHarness.client.connect).toHaveBeenCalledWith("conv-b");
     expect(websocketHarness.client.disconnect).not.toHaveBeenCalled();
     expect(document.querySelector(".message-display")?.textContent).not.toContain("Reply for A");
     expect(document.querySelector(".action.stop")).toBeNull();
     expect(document.querySelector(".action.send")).not.toBeNull();
 
+    const BTextarea = document.querySelector<HTMLTextAreaElement>("textarea");
+    flushSync(() => {
+      BTextarea!.value = "Message for B";
+      BTextarea!.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    flushSync(() => document.querySelector<HTMLButtonElement>(".action.send")!.click());
+    expect(websocketHarness.client.send).toHaveBeenLastCalledWith({
+      type: "send_message",
+      content: "Message for B",
+    });
+
+    const refreshedConversationButtons = document.querySelectorAll<HTMLButtonElement>(
+      ".conversation-select-btn",
+    );
+    flushSync(() => refreshedConversationButtons[0]!.click());
+    await settleUi();
+    expect(document.querySelector(".message-display")?.textContent).toContain("Reply for A");
+    expect(document.querySelector(".action.stop")).not.toBeNull();
+
     websocketHarness.fireEvent({ type: "turn_complete", turn_id: "turn-a" });
     await settleUi();
 
-    expect(websocketHarness.client.connect).toHaveBeenCalledOnce();
     expect(websocketHarness.client.connect).toHaveBeenCalledWith("conv-b");
   });
 

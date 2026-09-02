@@ -16,13 +16,15 @@ export interface ConnectionStore {
   readonly errorMessage: string | null;
   connectTo(conversationId: string): void;
   disconnect(): void;
+  disconnectAll?(): void;
   sendMessage(
+    conversationId: string,
     content: string,
     selectedModelId?: string | null,
     attachments?: MessageAttachment[],
   ): void;
-  cancelTurn(): void;
-  onServerEvent(handler: (event: ServerEvent) => void): void;
+  cancelTurn(conversationId: string): void;
+  onServerEvent(handler: (event: ServerEvent, conversationId: string) => void): void;
 }
 
 export interface ConnectionStoreOptions {
@@ -37,8 +39,6 @@ export interface ConnectionStoreOptions {
 export function createConnectionStore(
   options?: ConnectionStoreOptions,
 ): ConnectionStore {
-  const wsClient = (options?.wsClientFactory ?? createWebSocketClient)();
-
   // Back the getter API with Svelte stores so connection state changes re-render
   // components that read them after mount.
   const statusStore = writable<ConnectionStatus>("disconnected");
@@ -47,38 +47,35 @@ export function createConnectionStore(
   const statusState = fromStore(statusStore);
   const errorMessageState = fromStore(errorMessageStore);
 
-  const serverEventHandlers: ((event: ServerEvent) => void)[] = [];
+  const serverEventHandlers: ((event: ServerEvent, conversationId: string) => void)[] = [];
+  const clients = new Map<string, WebSocketClient>();
+  const statuses = new Map<string, ConnectionStatus>();
+  let selectedConversationId: string | null = null;
 
-  // ---- Wire up the WS client callbacks ----------------------------------------
-
-  // Route all server events to registered handlers. The connection store is a
-  // pure relay here — event interpretation belongs to the streaming store.
-  wsClient.onEvent((event) => {
-    for (const handler of serverEventHandlers) handler(event);
-  });
-
-  wsClient.onStatusChange((newStatus) => {
-    const previousStatus = get(statusStore);
-
-    // At this point `previousStatus` holds the previous value — check it before
-    // updating so we can detect the reconnecting → connected transition.
-    if (previousStatus === "reconnecting" && newStatus === "connected") {
-      options?.onReconnect?.();
-    }
-
-    if (newStatus === "error") {
-      // Surface a human-readable message. The most common cause of "error"
-      // before the connection ever opens is an HTTP 409 Conflict rejection
-      // (another tab already has this conversation open).
+  function clientFor(conversationId: string): WebSocketClient {
+    const existing = clients.get(conversationId);
+    if (existing) return existing;
+    const client = (options?.wsClientFactory ?? createWebSocketClient)();
+    clients.set(conversationId, client);
+    client.onEvent((event) => {
+      for (const handler of serverEventHandlers) handler(event, conversationId);
+    });
+    client.onStatusChange((newStatus) => {
+      statuses.set(conversationId, newStatus);
+      if (conversationId !== selectedConversationId) return;
+      const previousStatus = get(statusStore);
+      if (previousStatus === "reconnecting" && newStatus === "connected") {
+        options?.onReconnect?.();
+      }
       errorMessageStore.set(
-        "Connection failed. This conversation may already be open in another tab.",
+        newStatus === "error"
+          ? "Connection failed. This conversation may already be open in another tab."
+          : null,
       );
-    } else {
-      errorMessageStore.set(null);
-    }
-
-    statusStore.set(newStatus);
-  });
+      statusStore.set(newStatus);
+    });
+    return client;
+  }
 
   // ---- Public interface --------------------------------------------------------
 
@@ -94,19 +91,39 @@ export function createConnectionStore(
     connectTo(conversationId: string): void {
       // Clear any stale error from a previous attempt before connecting.
       errorMessageStore.set(null);
-      wsClient.connect(conversationId);
+      selectedConversationId = conversationId;
+      const status = statuses.get(conversationId);
+      if (status === "connected" || status === "reconnecting") {
+        statusStore.set(status);
+        return;
+      }
+      clientFor(conversationId).connect(conversationId);
     },
 
     disconnect(): void {
-      wsClient.disconnect();
+      if (!selectedConversationId) return;
+      clients.get(selectedConversationId)?.disconnect();
+      clients.delete(selectedConversationId);
+      statuses.delete(selectedConversationId);
+      selectedConversationId = null;
+      statusStore.set("disconnected");
+    },
+
+    disconnectAll(): void {
+      for (const client of clients.values()) client.disconnect();
+      clients.clear();
+      statuses.clear();
+      selectedConversationId = null;
+      statusStore.set("disconnected");
     },
 
     sendMessage(
+      conversationId: string,
       content: string,
       selectedModelId?: string | null,
       attachments?: MessageAttachment[],
     ): void {
-      wsClient.send({
+      clientFor(conversationId).send({
         type: "send_message",
         content,
         ...(attachments && attachments.length > 0 ? { attachments } : {}),
@@ -114,11 +131,11 @@ export function createConnectionStore(
       });
     },
 
-    cancelTurn(): void {
-      wsClient.send({ type: "cancel" });
+    cancelTurn(conversationId: string): void {
+      clientFor(conversationId).send({ type: "cancel" });
     },
 
-    onServerEvent(handler: (event: ServerEvent) => void): void {
+    onServerEvent(handler: (event: ServerEvent, conversationId: string) => void): void {
       serverEventHandlers.push(handler);
     },
   };

@@ -53,7 +53,7 @@ export interface StreamingStore {
   // The ApprovalCard reads this and replaces the input box while it is set,
   // matching the approval UI.
   readonly pendingApproval: PendingApproval | null;
-  handleServerEvent(event: ServerEvent): void;
+  handleServerEvent(event: ServerEvent, conversationId?: string): void;
   reconcileAfterReconnect(recoveredTurnGeneration: number): void;
   startTurn(content: string, selectedModelId?: string | null, agentId?: string | null, effort?: import("../protocol/Effort").Effort | null): void;
   cancelTurn(): void;
@@ -89,8 +89,8 @@ export interface StreamingStoreOptions {
   };
   /** Sends WebSocket events for outgoing user messages and cancellation. */
   connectionStore?: {
-    sendMessage(content: string, selectedModelId?: string | null): void;
-    cancelTurn(): void;
+    sendMessage(conversationId: string, content: string, selectedModelId?: string | null): void;
+    cancelTurn(conversationId: string): void;
   };
 }
 
@@ -206,7 +206,10 @@ export function createStreamingStore(
       return pendingApprovalState.current;
     },
 
-    handleServerEvent(event: ServerEvent): void {
+    handleServerEvent(event: ServerEvent, conversationId?: string): void {
+      if (conversationId && activeConversationId && conversationId !== activeConversationId) {
+        return;
+      }
       switch (event.type) {
         case "token":
           // Append streaming token — the UI renders this live.
@@ -466,12 +469,24 @@ export function createStreamingStore(
     },
 
     startTurn(content: string, selectedModelId?: string | null): void {
+      const conversationId = options?.conversationStore?.activeConversation?.id ?? null;
+      if (isStreamingState.current && activeConversationId !== conversationId) {
+        // Another conversation may submit while this one streams. Its socket
+        // carries the request, but this singleton projection remains with the
+        // live owner until the conversation store reloads B's persisted turn.
+        options?.conversationStore?.appendOptimisticUserMessage({
+          content,
+          timestamp: new Date().toISOString(),
+        });
+        if (conversationId) options?.connectionStore?.sendMessage(conversationId, content, selectedModelId);
+        return;
+      }
       // Clear state from any previous turn.
       streamedContentStore.set("");
       turnErrorStore.set(null);
       activeToolCallsStore.set([]);
       providerRetryStore.set(null);
-      activeConversationId = options?.conversationStore?.activeConversation?.id ?? null;
+      activeConversationId = conversationId;
       activeTurnGeneration += 1;
       turnStartedAtStore.set(new Date().toISOString());
       isStreamingStore.set(true);
@@ -484,11 +499,11 @@ export function createStreamingStore(
       });
 
       // Dispatch the outgoing message over the WebSocket.
-      options?.connectionStore?.sendMessage(content, selectedModelId);
+      if (conversationId) options?.connectionStore?.sendMessage(conversationId, content, selectedModelId);
     },
 
     cancelTurn(): void {
-      options?.connectionStore?.cancelTurn();
+      if (activeConversationId) options?.connectionStore?.cancelTurn(activeConversationId);
     },
   };
 }
@@ -553,7 +568,7 @@ export function withConversationAutoCreate(
     get pendingApproval(): PendingApproval | null {
       return base.pendingApproval;
     },
-    handleServerEvent: (event) => base.handleServerEvent(event),
+    handleServerEvent: (event, conversationId) => base.handleServerEvent(event, conversationId),
     reconcileAfterReconnect: (turnGeneration) => base.reconcileAfterReconnect(turnGeneration),
     cancelTurn: () => base.cancelTurn(),
 
