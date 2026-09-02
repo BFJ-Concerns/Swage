@@ -4939,6 +4939,17 @@
               "null"
             ]
           },
+          "liveness": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WorkflowWorkerLiveness"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Timestamps for a worker which is running or has completed."
+          },
           "output_tokens": {
             "format": "uint64",
             "minimum": 0,
@@ -4967,6 +4978,17 @@
               "string",
               "null"
             ]
+          },
+          "worktree": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WorkflowWorktreeCompletion"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The resolved state of the isolated worktree after the worker settled."
           }
         },
         "type": "object"
@@ -5766,6 +5788,50 @@
           "gate_suppressions",
           "events_posted",
           "events_pending"
+        ],
+        "type": "object"
+      },
+      "WorkflowWorkerLiveness": {
+        "description": "Earliest liveness evidence for one workflow worker.",
+        "properties": {
+          "first_evidence_at": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "started_at": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "started_at"
+        ],
+        "type": "object"
+      },
+      "WorkflowWorktreeCompletion": {
+        "description": "The final Git state of an isolated worker worktree.",
+        "properties": {
+          "base_commit": {
+            "type": "string"
+          },
+          "changed": {
+            "type": "boolean"
+          },
+          "removed": {
+            "type": "boolean"
+          },
+          "tip_commit": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "base_commit",
+          "tip_commit",
+          "changed",
+          "removed"
         ],
         "type": "object"
       },
