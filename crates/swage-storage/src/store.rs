@@ -1165,12 +1165,18 @@ pub trait WorkflowStore: Send + Sync {
         dispatch: serde_json::Value,
     ) -> Result<(), StorageError>;
 
-    /// Stamp the options the dispatched worker's turn resolved for itself.
-    async fn record_workflow_call_resolution(
+    /// Append one attempt of the call, stamped with the options its turn
+    /// resolved for itself. Appending rather than replacing is what keeps
+    /// the turn an interrupted attempt ran, so every attempt's provider
+    /// rounds stay reachable from the entry.
+    ///
+    /// Returns the attempts already recorded before this one, so the caller
+    /// can settle what the superseded attempts left outstanding.
+    async fn record_workflow_call_attempt(
         &self,
         id: Uuid,
-        resolution: serde_json::Value,
-    ) -> Result<(), StorageError>;
+        attempt: serde_json::Value,
+    ) -> Result<Vec<serde_json::Value>, StorageError>;
 
     /// Settle an entry whose work the run's own end stopped, recording the
     /// cause. The stored status stays `failed` so replay keeps treating the
@@ -1213,6 +1219,16 @@ pub trait ProviderRoundStore: Send + Sync {
         &self,
         turn_id: Uuid,
     ) -> Result<Vec<ProviderRoundRecord>, StorageError>;
+
+    /// Record the outcome of every round of a turn still outstanding, for a
+    /// turn that has stopped and can receive no further response. The rounds
+    /// keep their empty completion time — no response ever arrived, and the
+    /// record does not invent one.
+    async fn interrupt_outstanding_provider_rounds(
+        &self,
+        turn_id: Uuid,
+        outcome: serde_json::Value,
+    ) -> Result<(), StorageError>;
 }
 
 // ---------------------------------------------------------------------------
@@ -2634,11 +2650,11 @@ mod tests {
         ) -> Result<(), StorageError> {
             unimplemented!()
         }
-        async fn record_workflow_call_resolution(
+        async fn record_workflow_call_attempt(
             &self,
             _: Uuid,
             _: serde_json::Value,
-        ) -> Result<(), StorageError> {
+        ) -> Result<Vec<serde_json::Value>, StorageError> {
             unimplemented!()
         }
         async fn cut_short_workflow_journal_entry(
@@ -2673,6 +2689,13 @@ mod tests {
             &self,
             _: Uuid,
         ) -> Result<Vec<ProviderRoundRecord>, StorageError> {
+            unimplemented!()
+        }
+        async fn interrupt_outstanding_provider_rounds(
+            &self,
+            _: Uuid,
+            _: serde_json::Value,
+        ) -> Result<(), StorageError> {
             unimplemented!()
         }
     }

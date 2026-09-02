@@ -1222,6 +1222,27 @@ impl swage_storage::ProviderRoundStore for MockStorage {
         Ok(())
     }
 
+    async fn interrupt_outstanding_provider_rounds(
+        &self,
+        turn_id: Uuid,
+        outcome: serde_json::Value,
+    ) -> Result<(), swage_core::StorageError> {
+        if self.fail_provider_round_writes.load(Ordering::SeqCst) {
+            return Err(swage_core::StorageError::QueryFailed(
+                "provider round write failed".into(),
+            ));
+        }
+        let mut db = self.db.lock().await;
+        for record in db
+            .provider_rounds
+            .iter_mut()
+            .filter(|record| record.turn_id == turn_id && record.completed_at.is_none())
+        {
+            record.outcome = outcome.clone();
+        }
+        Ok(())
+    }
+
     async fn list_provider_rounds_by_turn(
         &self,
         turn_id: Uuid,
@@ -1325,12 +1346,13 @@ impl swage_storage::WorkflowStore for MockStorage {
     ) -> Result<(), StorageError> {
         Ok(())
     }
-    async fn record_workflow_call_resolution(
+    async fn record_workflow_call_attempt(
         &self,
         _: Uuid,
         _: serde_json::Value,
-    ) -> Result<(), StorageError> {
-        Ok(())
+    ) -> Result<Vec<serde_json::Value>, StorageError> {
+        // The mock keeps no journal, so no attempt precedes this one.
+        Ok(Vec::new())
     }
     async fn cut_short_workflow_journal_entry(
         &self,

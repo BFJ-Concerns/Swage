@@ -10,4 +10,10 @@ import type { WorkflowProviderRoundOutcome } from "./WorkflowProviderRoundOutcom
  * request (an outstanding round), and a slow response (a settled round with
  * a long span) are told apart from the record alone.
  */
-export type WorkflowProviderRound = { round: number, started_at: string, completed_at: string | null, outcome: WorkflowProviderRoundOutcome, };
+export type WorkflowProviderRound = {
+/**
+ * Which attempt of the call ran this round, counting from 1. A call the
+ * run's end interrupted and replay re-dispatched runs its rounds again
+ * under a later attempt; the number is what keeps the two apart.
+ */
+attempt: number, round: number, started_at: string, completed_at: string | null, outcome: WorkflowProviderRoundOutcome, };

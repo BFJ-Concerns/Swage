@@ -1861,7 +1861,9 @@ async fn process_turn_with_composition_and_focus(
         // The dispatch record names what the call *asked* for; what the
         // turn actually resolved is only known here, so it is stamped onto
         // the same journal entry as a second field rather than by rewriting
-        // the dispatch one.
+        // the dispatch one. Each turn appends its own attempt, so a call
+        // replay re-dispatched keeps the interrupted attempt beside the one
+        // that follows it.
         if let Some(agent_call_scope) = agent_call_scope {
             let resolution = WorkflowAgentCallResolution {
                 model: Some(model_name.clone()),
@@ -1874,32 +1876,34 @@ async fn process_turn_with_composition_and_focus(
             };
             match serde_json::to_value(&resolution) {
                 Ok(resolution) => {
-                    if let Err(error) = state
-                        .storage
-                        .record_workflow_call_resolution(agent_call_scope, resolution)
-                        .await
+                    if let Err(error) = crate::workflow::record_agent_call_attempt(
+                        state.storage.as_ref(),
+                        agent_call_scope,
+                        resolution,
+                    )
+                    .await
                     {
                         // Reconstructive record (record_durability.rs): the
                         // call still happened and its dispatch record stands.
-                        tracing::warn!(error = %error, "failed to record agent call resolution");
+                        tracing::warn!(error = %error, "failed to record agent call attempt");
                         if let Err(audit_error) = record_durability::record_reconstruction_gap(
                             state.storage.as_ref(),
                             Some(session_id),
                             prepared_turn_id,
-                            "agent_call_resolution",
+                            "agent_call_attempt",
                             &error,
                         )
                         .await
                         {
                             record_integrity_lost_before_agent.get_or_insert(format!(
-                                "agent call resolution lost and the loss could not be recorded: {audit_error}"
+                                "agent call attempt lost and the loss could not be recorded: {audit_error}"
                             ));
                         }
                     }
                 }
                 Err(error) => {
                     record_integrity_lost_before_agent.get_or_insert(format!(
-                        "agent call resolution could not be serialised: {error}"
+                        "agent call attempt could not be serialised: {error}"
                     ));
                 }
             }

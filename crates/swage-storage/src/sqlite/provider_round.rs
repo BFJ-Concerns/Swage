@@ -118,6 +118,27 @@ impl ProviderRoundStore for SqliteStorage {
         .await
     }
 
+    async fn interrupt_outstanding_provider_rounds(
+        &self,
+        turn_id: Uuid,
+        outcome: serde_json::Value,
+    ) -> Result<(), StorageError> {
+        let outcome = serde_json::to_string(&outcome)
+            .map_err(|error| StorageError::QueryFailed(error.to_string()))?;
+        self.with_conn(move |conn| {
+            // `completed_at` stays empty: no response came back, and stamping
+            // one would put a time on the record that nothing observed. The
+            // outcome is the whole of what is newly known.
+            conn.execute(
+                "UPDATE provider_rounds SET outcome_json=?2
+                 WHERE turn_id=?1 AND completed_at IS NULL",
+                params![turn_id.to_string(), outcome],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
     async fn list_provider_rounds_by_turn(
         &self,
         turn_id: Uuid,

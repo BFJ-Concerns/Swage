@@ -4995,6 +4995,13 @@
               "null"
             ]
           },
+          "attempts": {
+            "description": "Every attempt the call ran, oldest first, each stamped once its turn\nresolved the options it actually ran with. A call interrupted and\nre-dispatched by replay has more than one, and each names its own\nturn — so the record keeps the interrupted attempt rather than only\nthe one that settled. Empty until the first turn resolves.",
+            "items": {
+              "$ref": "#/components/schemas/WorkflowAgentCallResolution"
+            },
+            "type": "array"
+          },
           "grants": {
             "description": "The call-scoped tool grants after intersection with the dispatching\ncontext's own authority. `None` means the call narrowed nothing.",
             "items": {
@@ -5036,21 +5043,11 @@
               "string",
               "null"
             ]
-          },
-          "resolved": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/WorkflowAgentCallResolution"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "Stamped once the turn resolved the options it actually ran with."
           }
         },
         "required": [
-          "prompt"
+          "prompt",
+          "attempts"
         ],
         "type": "object"
       },
@@ -5524,6 +5521,12 @@
       "WorkflowProviderRound": {
         "description": "One provider request round inside a worker call.\n\nA round with no `completed_at` is still outstanding: the request went to\nthe provider and no response has come back. A settled round names what\ncame back, so a tool loop (rounds settling with tool calls), a hung\nrequest (an outstanding round), and a slow response (a settled round with\na long span) are told apart from the record alone.",
         "properties": {
+          "attempt": {
+            "description": "Which attempt of the call ran this round, counting from 1. A call the\nrun's end interrupted and replay re-dispatched runs its rounds again\nunder a later attempt; the number is what keeps the two apart.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
           "completed_at": {
             "format": "date-time",
             "type": [
@@ -5545,6 +5548,7 @@
           }
         },
         "required": [
+          "attempt",
           "round",
           "started_at",
           "outcome"
@@ -5598,6 +5602,19 @@
             "required": [
               "outcome",
               "message"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The request went out and nothing can answer it any more: the attempt\nthat made it stopped, and the call was re-dispatched under a later\none. Distinct from `outstanding`, which is a request that may still\ncome back.",
+            "properties": {
+              "outcome": {
+                "const": "interrupted",
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome"
             ],
             "type": "object"
           }

@@ -5291,6 +5291,13 @@
             "null"
           ]
         },
+        "attempts": {
+          "description": "Every attempt the call ran, oldest first, each stamped once its turn\nresolved the options it actually ran with. A call interrupted and\nre-dispatched by replay has more than one, and each names its own\nturn — so the record keeps the interrupted attempt rather than only\nthe one that settled. Empty until the first turn resolves.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/WorkflowAgentCallResolution"
+          }
+        },
         "grants": {
           "description": "The call-scoped tool grants after intersection with the dispatching\ncontext's own authority. `None` means the call narrowed nothing.",
           "type": [
@@ -5332,21 +5339,11 @@
             "string",
             "null"
           ]
-        },
-        "resolved": {
-          "description": "Stamped once the turn resolved the options it actually ran with.",
-          "anyOf": [
-            {
-              "$ref": "#/$defs/WorkflowAgentCallResolution"
-            },
-            {
-              "type": "null"
-            }
-          ]
         }
       },
       "required": [
-        "prompt"
+        "prompt",
+        "attempts"
       ]
     },
     "WorkflowAgentCallResolution": {
@@ -5820,6 +5817,12 @@
       "description": "One provider request round inside a worker call.\n\nA round with no `completed_at` is still outstanding: the request went to\nthe provider and no response has come back. A settled round names what\ncame back, so a tool loop (rounds settling with tool calls), a hung\nrequest (an outstanding round), and a slow response (a settled round with\na long span) are told apart from the record alone.",
       "type": "object",
       "properties": {
+        "attempt": {
+          "description": "Which attempt of the call ran this round, counting from 1. A call the\nrun's end interrupted and replay re-dispatched runs its rounds again\nunder a later attempt; the number is what keeps the two apart.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
         "completed_at": {
           "type": [
             "string",
@@ -5841,6 +5844,7 @@
         }
       },
       "required": [
+        "attempt",
         "round",
         "started_at",
         "outcome"
@@ -5894,6 +5898,19 @@
           "required": [
             "outcome",
             "message"
+          ]
+        },
+        {
+          "description": "The request went out and nothing can answer it any more: the attempt\nthat made it stopped, and the call was re-dispatched under a later\none. Distinct from `outstanding`, which is a request that may still\ncome back.",
+          "type": "object",
+          "properties": {
+            "outcome": {
+              "type": "string",
+              "const": "interrupted"
+            }
+          },
+          "required": [
+            "outcome"
           ]
         }
       ]

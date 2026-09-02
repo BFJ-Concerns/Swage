@@ -28,6 +28,10 @@ placement: WorkflowWorkerPlacementRecord | null,
  */
 grants: Array<string> | null,
 /**
- * Stamped once the turn resolved the options it actually ran with.
+ * Every attempt the call ran, oldest first, each stamped once its turn
+ * resolved the options it actually ran with. A call interrupted and
+ * re-dispatched by replay has more than one, and each names its own
+ * turn — so the record keeps the interrupted attempt rather than only
+ * the one that settled. Empty until the first turn resolves.
  */
-resolved: WorkflowAgentCallResolution | null, };
+attempts: Array<WorkflowAgentCallResolution>, };

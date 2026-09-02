@@ -101,11 +101,13 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
 ///
 /// `dispatch_json` is written when the call is dispatched, before any
 /// provider work, so a worker that dies mid-run still leaves what it was
-/// asked to do; `dispatch_resolution_json` is stamped once the worker's turn
-/// resolved the options it actually ran with; `termination_json` names why a
-/// worker stopped, so the run's own end reaching into a live worker is not
-/// recorded as that worker failing. All three stay generic JSON — the
-/// contract lives in swage-protocol and is enforced at the projection.
+/// asked to do; `dispatch_attempts_json` is a list appended to once per
+/// attempt, each stamped when that attempt's turn resolved the options it
+/// ran with, so a call replay re-dispatched still names the turn the
+/// interrupted attempt used; `termination_json` names why a worker stopped,
+/// so the run's own end reaching into a live worker is not recorded as that
+/// worker failing. All three stay generic JSON — the contract lives in
+/// swage-protocol and is enforced at the projection.
 ///
 /// `provider_rounds` records each provider request inside a turn. A row with
 /// no `completed_at` is an outstanding request; a settled row names what came
@@ -113,7 +115,7 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
 /// two join on (turn_id, round).
 const CREATE_WORKER_CALL_RECORD: &str = "
     ALTER TABLE workflow_journal ADD COLUMN dispatch_json TEXT;
-    ALTER TABLE workflow_journal ADD COLUMN dispatch_resolution_json TEXT;
+    ALTER TABLE workflow_journal ADD COLUMN dispatch_attempts_json TEXT;
     ALTER TABLE workflow_journal ADD COLUMN termination_json TEXT;
 
     CREATE TABLE IF NOT EXISTS provider_rounds (
