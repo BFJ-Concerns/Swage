@@ -422,8 +422,7 @@ async fn run_turn_inner(
             })?;
             extract_json_values(&response_text)
                 .into_iter()
-                .filter(|value| validator.validate(value).is_ok())
-                .last()
+                .rfind(|value| validator.validate(value).is_ok())
                 .map(Some)
                 .ok_or(AgentError::OutputSchemaFailed { attempts: 1 })?
         }

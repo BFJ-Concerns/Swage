@@ -13,8 +13,8 @@ pub use engine::{
 };
 pub use host::{
     AgentCallRequest, AgentCallResult, AgentSessionRef, AwaitEventRequest, EffectPayload,
-    EffectReceipt, GateRequest, ResolvedWorkerPlacement, RunEventPost, WorkflowCallRequest,
-    WorkflowHost, WorkflowHostError,
+    EffectReceipt, GateRequest, ResolvedWorkerPlacement, RunEventPost, WorkerLiveness,
+    WorkflowCallRequest, WorkflowHost, WorkflowHostError, WorktreeCompletion,
 };
 pub use model::EffectKind;
 pub use recovery::{EffectRecoveryHost, recover_started_effect};

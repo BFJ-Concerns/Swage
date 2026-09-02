@@ -5235,6 +5235,17 @@
           "format": "uint64",
           "minimum": 0
         },
+        "liveness": {
+          "description": "Timestamps for a worker which is running or has completed.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkflowWorkerLiveness"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "output_tokens": {
           "type": [
             "integer",
@@ -5263,6 +5274,17 @@
             "null"
           ],
           "format": "uuid"
+        },
+        "worktree": {
+          "description": "The resolved state of the isolated worktree after the worker settled.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkflowWorktreeCompletion"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       }
     },
@@ -6062,6 +6084,50 @@
         "gate_suppressions",
         "events_posted",
         "events_pending"
+      ]
+    },
+    "WorkflowWorkerLiveness": {
+      "description": "Earliest liveness evidence for one workflow worker.",
+      "type": "object",
+      "properties": {
+        "first_evidence_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "started_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "started_at"
+      ]
+    },
+    "WorkflowWorktreeCompletion": {
+      "description": "The final Git state of an isolated worker worktree.",
+      "type": "object",
+      "properties": {
+        "base_commit": {
+          "type": "string"
+        },
+        "changed": {
+          "type": "boolean"
+        },
+        "removed": {
+          "type": "boolean"
+        },
+        "tip_commit": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "base_commit",
+        "tip_commit",
+        "changed",
+        "removed"
       ]
     },
     "WorkspaceAttachmentListResponse": {

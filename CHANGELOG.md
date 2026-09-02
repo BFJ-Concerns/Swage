@@ -6,6 +6,9 @@ All notable changes to Swage are documented in this file.
 
 ### Added
 
+- Schema-constrained workers now accept JSON values embedded in prose or Markdown fences and use the final value that fulfils their schema.
+- Workflow run details now report each isolated worker worktree's base and tip commits plus whether it changed or was removed.
+- Workflow run details now expose each worker's start and first-output liveness timestamps.
 - Users and agents can leave durable notes on a page's modules, appearing on an open page as they are written and readable by the agent alongside the module they hang on.
 - Work surfaces receive server-wide page signals over their own listen-only WebSocket, so an open page stays current whether or not a conversation is selected.
 - Workflow runs now journal their terminal budget balance.

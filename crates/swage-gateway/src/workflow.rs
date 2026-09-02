@@ -64,6 +64,7 @@ fn runtime_worker_placement(placement: &WorkflowRunWorkerPlacement) -> ResolvedW
         can_write: placement.can_write,
         authority_path: placement.authority_path.clone(),
         authority_context_id: placement.authority_context_id,
+        worktree_seq: None,
     }
 }
 
@@ -73,6 +74,7 @@ fn runtime_placement_from_directory(placement: ResolvedWorkerDirectory) -> Resol
         can_write: placement.can_write,
         authority_path: placement.authority_path.to_string_lossy().into_owned(),
         authority_context_id: placement.authority_context_id,
+        worktree_seq: None,
     }
 }
 
@@ -433,7 +435,8 @@ fn journal_wire(
 ) -> Result<swage_protocol::client::workflow::WorkflowJournalEntry, String> {
     use swage_protocol::client::workflow::{
         WorkflowAgentCallDetail, WorkflowEffectDetail, WorkflowJournalEntry,
-        WorkflowJournalEntryKind, WorkflowJournalEntryStatus,
+        WorkflowJournalEntryKind, WorkflowJournalEntryStatus, WorkflowWorkerLiveness,
+        WorkflowWorktreeCompletion,
     };
     let kind = match entry.kind.as_str() {
         "agent_call" => WorkflowJournalEntryKind::AgentCall,
@@ -487,6 +490,39 @@ fn journal_wire(
             output_tokens: result
                 .and_then(|v| v.get("output_tokens"))
                 .and_then(Value::as_u64),
+            worktree: result
+                .and_then(|value| value.get("worktree"))
+                .and_then(|value| {
+                    serde_json::from_value::<swage_workflow::WorktreeCompletion>(value.clone()).ok()
+                })
+                .map(|worktree| WorkflowWorktreeCompletion {
+                    base_commit: worktree.base_commit,
+                    tip_commit: worktree.tip_commit,
+                    changed: worktree.changed,
+                    removed: worktree.removed,
+                }),
+            liveness: result
+                .and_then(|value| value.get("liveness"))
+                .and_then(|value| {
+                    serde_json::from_value::<swage_workflow::WorkerLiveness>(value.clone()).ok()
+                })
+                .and_then(|liveness| {
+                    Some(WorkflowWorkerLiveness {
+                        started_at: liveness.started_at.parse().ok()?,
+                        first_evidence_at: liveness
+                            .first_evidence_at
+                            .as_deref()
+                            .map(str::parse)
+                            .transpose()
+                            .ok()?,
+                    })
+                })
+                .or({
+                    Some(WorkflowWorkerLiveness {
+                        started_at: entry.started_at,
+                        first_evidence_at: None,
+                    })
+                }),
         }
     });
     let label = entry
@@ -1452,6 +1488,20 @@ async fn run_ephemeral_agent_call(
         }
     };
     let (events, mut events_rx) = mpsc::unbounded_channel::<ServerEvent>();
+    let observed_events = Arc::new(Mutex::new(Vec::new()));
+    let event_liveness = Arc::clone(&state.active_workflow_workers);
+    let recorded_events = Arc::clone(&observed_events);
+    let event_task = tokio::spawn(async move {
+        while let Some(event) = events_rx.recv().await {
+            if matches!(event, ServerEvent::Token { .. })
+                && let Some(liveness) = event_liveness.lock().await.get_mut(&journal_entry_id)
+                && liveness.first_evidence_at.is_none()
+            {
+                liveness.first_evidence_at = Some(chrono::Utc::now().to_rfc3339());
+            }
+            recorded_events.lock().await.push(event);
+        }
+    });
     let request_schema = request.schema.clone();
     let request_schema_retries = request
         .schema
@@ -1528,6 +1578,10 @@ async fn run_ephemeral_agent_call(
             .into());
         }
     }
+    event_task
+        .await
+        .map_err(|error| format!("workflow worker event capture failed: {error}"))?;
+    let observed_events = observed_events.lock().await.clone();
     let turn = state
         .storage
         .list_turns_by_thread(thread_id)
@@ -1536,10 +1590,10 @@ async fn run_ephemeral_agent_call(
         .into_iter()
         .max_by_key(|turn| turn.created_at)
         .ok_or_else(|| "agent call produced no turn".to_string())?;
-    let schema_exhausted = std::iter::from_fn(|| events_rx.try_recv().ok()).any(|event| {
+    let schema_exhausted = observed_events.iter().any(|event| {
         matches!(
             event,
-            ServerEvent::OutputSchemaFailed { turn_id, .. } if turn_id == turn.id
+            ServerEvent::OutputSchemaFailed { turn_id, .. } if *turn_id == turn.id
         )
     });
     // The turn's failure must surface as this call's error — the shared turn
@@ -1591,6 +1645,8 @@ async fn run_ephemeral_agent_call(
         session_id: Some(session_id),
         thread_id: Some(thread_id),
         turn_id: Some(turn.id),
+        worktree: None,
+        liveness: None,
     })
 }
 
@@ -1761,10 +1817,11 @@ async fn provision_worker_command(
                     can_write,
                     authority_path,
                     authority_context_id,
+                    worktree_seq: Some(current_seq),
                 },
             )
             .await?;
-            let restored_path = state
+            let restored = state
                 .worktree_host
                 .restore(
                     run_id,
@@ -1775,7 +1832,7 @@ async fn provision_worker_command(
                 .await
                 .map_err(|error| error.to_string())?;
             Ok(Some(ResolvedWorkerPlacement {
-                path: restored_path.to_string_lossy().into_owned(),
+                path: restored.path.to_string_lossy().into_owned(),
                 ..placement
             }))
         } else if entry.status == "failed" {
@@ -1860,6 +1917,7 @@ async fn resolve_worker_directory_command(
                             result.get("authority_context_id")?.as_str()?,
                         )
                         .ok()?,
+                        worktree_seq: None,
                     })
                 })
                 .ok_or_else(|| "completed worker directory resolution has no result".to_string())?;
@@ -3489,13 +3547,14 @@ async fn complete_worker_placement(
         }
     };
     match state.worktree_host.provision(run_id, seq, &repo.path).await {
-        Ok(path) => {
-            let path = path.to_string_lossy().into_owned();
+        Ok(worktree) => {
+            let path = worktree.path.to_string_lossy().into_owned();
             state
                 .complete_workflow_journal_entry(
                     entry_id,
                     serde_json::json!({
-                        "path": path,
+                        "path": &path,
+                        "base_commit": &worktree.base_commit,
                         "can_write": repo.can_write,
                         "authority_path": repo.authority_path,
                         "authority_context_id": repo.authority_context_id,
@@ -3508,6 +3567,7 @@ async fn complete_worker_placement(
                 can_write: repo.can_write,
                 authority_path: repo.authority_path.to_string_lossy().into_owned(),
                 authority_context_id: repo.authority_context_id,
+                worktree_seq: Some(seq),
             }))
         }
         Err(error) => {
@@ -3618,6 +3678,16 @@ async fn complete_agent_entry(
     resolved_working_directory: Option<ResolvedWorkerPlacement>,
     cancellation: CancellationToken,
 ) -> Result<AgentCallResult, WorkflowHostError> {
+    let worktree_seq = resolved_working_directory
+        .as_ref()
+        .and_then(|placement| placement.worktree_seq);
+    state.active_workflow_workers.lock().await.insert(
+        entry_id,
+        swage_workflow::WorkerLiveness {
+            started_at: chrono::Utc::now().to_rfc3339(),
+            first_evidence_at: None,
+        },
+    );
     match run_ephemeral_agent_call(
         state,
         run_id,
@@ -3631,7 +3701,21 @@ async fn complete_agent_entry(
     )
     .await
     {
-        Ok(result) => {
+        Ok(mut result) => {
+            result.liveness = state.active_workflow_workers.lock().await.remove(&entry_id);
+            if let Some(worktree_seq) = worktree_seq {
+                let completion = state
+                    .worktree_host
+                    .finish(run_id, worktree_seq)
+                    .await
+                    .map_err(WorkflowHostError::Message)?;
+                result.worktree = Some(swage_workflow::WorktreeCompletion {
+                    base_commit: completion.base_commit,
+                    tip_commit: completion.tip_commit,
+                    changed: completion.changed,
+                    removed: completion.removed,
+                });
+            }
             state
                 .complete_workflow_journal_entry(
                     entry_id,
@@ -3647,6 +3731,7 @@ async fn complete_agent_entry(
         // resumed path. Cancellation is settled for every in-flight entry at
         // the owning run boundary after the host loop drains.
         Err(error) => {
+            state.active_workflow_workers.lock().await.remove(&entry_id);
             if !error.to_string().starts_with("WorkflowCancelledError") {
                 let _ = state
                     .fail_workflow_journal_entry(entry_id, &error.to_string())
@@ -5160,10 +5245,26 @@ pub async fn get_run(
             .filter(|event| event.delivered_at.is_none())
             .count() as u32,
     };
-    let journal = entries
+    let live_workers = state.active_workflow_workers.lock().await.clone();
+    let mut journal = entries
         .into_iter()
         .map(|entry| journal_wire(entry).map_err(internal))
         .collect::<Result<Vec<_>, ApiError>>()?;
+    for entry in &mut journal {
+        if let Some(liveness) = live_workers.get(&entry.id)
+            && let Some(agent_call) = entry.agent_call.as_mut()
+        {
+            agent_call.liveness = Some(swage_protocol::client::workflow::WorkflowWorkerLiveness {
+                started_at: liveness.started_at.parse().map_err(internal)?,
+                first_evidence_at: liveness
+                    .first_evidence_at
+                    .as_deref()
+                    .map(str::parse)
+                    .transpose()
+                    .map_err(internal)?,
+            });
+        }
+    }
     Ok(Json(WorkflowRunDetailResponse {
         run: run_wire(run)?,
         journal,
@@ -8711,6 +8812,21 @@ mod tests {
         assert_eq!(
             agent_call.result.as_ref().unwrap()["output"],
             "bounded work completed"
+        );
+        let liveness = &agent_call.result.as_ref().expect("agent result")["liveness"];
+        assert!(
+            liveness["started_at"]
+                .as_str()
+                .and_then(|value| value.parse::<chrono::DateTime<chrono::Utc>>().ok())
+                .is_some(),
+            "a real worker run must record when its execution began"
+        );
+        assert!(
+            liveness["first_evidence_at"]
+                .as_str()
+                .and_then(|value| value.parse::<chrono::DateTime<chrono::Utc>>().ok())
+                .is_some(),
+            "the provider's emitted output must establish first evidence"
         );
         let session_id = agent_call.result.as_ref().unwrap()["session_id"]
             .as_str()
@@ -12325,6 +12441,8 @@ mod tests {
                     session_id: Some(session.id),
                     thread_id: Some(thread.id),
                     turn_id: Some(Uuid::new_v4()),
+                    worktree: None,
+                    liveness: None,
                 })
                 .expect("first result"),
             )
@@ -13193,6 +13311,8 @@ mod tests {
                     session_id: None,
                     thread_id: None,
                     turn_id: None,
+                    worktree: None,
+                    liveness: None,
                 })
                 .expect("work result"),
             )
@@ -13438,6 +13558,8 @@ mod tests {
                     session_id: None,
                     thread_id: None,
                     turn_id: None,
+                    worktree: None,
+                    liveness: None,
                 })
                 .expect("work result"),
             )

@@ -20,6 +20,15 @@ pub struct ProvisionedWorktree {
     pub seq: u64,
     pub repo: PathBuf,
     pub path: PathBuf,
+    pub base_commit: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreeCompletion {
+    pub base_commit: String,
+    pub tip_commit: String,
+    pub changed: bool,
+    pub removed: bool,
 }
 
 pub struct WorktreeHost {
@@ -40,7 +49,7 @@ impl WorktreeHost {
         owner_id: Uuid,
         seq: u64,
         repo: &Path,
-    ) -> Result<PathBuf, String> {
+    ) -> Result<ProvisionedWorktree, String> {
         let path = self
             .config
             .root
@@ -55,7 +64,7 @@ impl WorktreeHost {
         seq: u64,
         repo: &Path,
         path: &Path,
-    ) -> Result<PathBuf, String> {
+    ) -> Result<ProvisionedWorktree, String> {
         self.provision_at(owner_id, seq, repo, path.to_path_buf())
             .await
     }
@@ -66,10 +75,10 @@ impl WorktreeHost {
         seq: u64,
         repo: &Path,
         path: PathBuf,
-    ) -> Result<PathBuf, String> {
+    ) -> Result<ProvisionedWorktree, String> {
         let key = (owner_id, seq);
         if let Some(existing) = self.inner.lock().await.get(&key) {
-            return Ok(existing.path.clone());
+            return Ok(existing.clone());
         }
         let repo = tokio::fs::canonicalize(repo).await.map_err(|error| {
             format!(
@@ -78,16 +87,16 @@ impl WorktreeHost {
             )
         })?;
         if path.join(".git").exists() {
-            self.inner.lock().await.insert(
-                key,
-                ProvisionedWorktree {
-                    owner_id,
-                    seq,
-                    repo,
-                    path: path.clone(),
-                },
-            );
-            return Ok(path);
+            let base_commit = git_stdout(&repo, ["rev-parse", "HEAD"]).await?;
+            let worktree = ProvisionedWorktree {
+                owner_id,
+                seq,
+                repo,
+                path,
+                base_commit,
+            };
+            self.inner.lock().await.insert(key, worktree.clone());
+            return Ok(worktree);
         }
         tokio::fs::create_dir_all(path.parent().expect("worktree path has a parent"))
             .await
@@ -112,16 +121,16 @@ impl WorktreeHost {
                 String::from_utf8_lossy(&output.stderr).trim()
             ));
         }
-        self.inner.lock().await.insert(
-            key,
-            ProvisionedWorktree {
-                owner_id,
-                seq,
-                repo,
-                path: path.clone(),
-            },
-        );
-        Ok(path)
+        let base_commit = git_stdout(&path, ["rev-parse", "HEAD"]).await?;
+        let worktree = ProvisionedWorktree {
+            owner_id,
+            seq,
+            repo,
+            path,
+            base_commit,
+        };
+        self.inner.lock().await.insert(key, worktree.clone());
+        Ok(worktree)
     }
 
     pub async fn list_owner(&self, owner_id: Uuid) -> Vec<ProvisionedWorktree> {
@@ -132,6 +141,41 @@ impl WorktreeHost {
             .filter(|item| item.owner_id == owner_id)
             .cloned()
             .collect()
+    }
+
+    pub async fn finish(&self, owner_id: Uuid, seq: u64) -> Result<WorktreeCompletion, String> {
+        let resource = self
+            .inner
+            .lock()
+            .await
+            .get(&(owner_id, seq))
+            .cloned()
+            .ok_or_else(|| format!("managed worktree {owner_id}/{seq} is not registered"))?;
+        let status = git_stdout(
+            &resource.path,
+            ["status", "--porcelain=v1", "--untracked-files=all"],
+        )
+        .await?;
+        let tip_commit = git_stdout(&resource.path, ["rev-parse", "HEAD"]).await?;
+        let changed = !status.trim().is_empty() || tip_commit != resource.base_commit;
+        if changed {
+            self.inner.lock().await.remove(&(owner_id, seq));
+            return Ok(WorktreeCompletion {
+                base_commit: resource.base_commit,
+                tip_commit,
+                changed: true,
+                removed: false,
+            });
+        }
+        remove_worktree(&resource.repo, &resource.path).await?;
+        self.inner.lock().await.remove(&(owner_id, seq));
+        let _ = tokio::fs::remove_dir(self.config.root.join(owner_id.to_string())).await;
+        Ok(WorktreeCompletion {
+            base_commit: resource.base_commit,
+            tip_commit,
+            changed: false,
+            removed: true,
+        })
     }
 
     /// Reclaim worktrees left behind by a gateway that did not shut down.
@@ -291,6 +335,25 @@ impl WorktreeHost {
     }
 }
 
+async fn git_stdout<const N: usize>(repo: &Path, args: [&str; N]) -> Result<String, String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .stdin(Stdio::null())
+        .output()
+        .await
+        .map_err(|error| format!("failed to inspect worktree {}: {error}", repo.display()))?;
+    if !output.status.success() {
+        return Err(format!(
+            "git inspection failed in {}: {}",
+            repo.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
 async fn remove_worktree(repo: &Path, path: &Path) -> Result<(), String> {
     let removed = Command::new("git")
         .args([
@@ -325,7 +388,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn provisions_isolated_siblings_and_lists_then_removes_them() {
+    async fn finalises_changed_and_unchanged_worktrees_differently() {
         let temp = tempfile::tempdir().unwrap();
         let repo = temp.path().join("repo");
         tokio::fs::create_dir(&repo).await.unwrap();
@@ -373,18 +436,14 @@ mod tests {
         let owner_id = Uuid::new_v4();
         let first = host.provision(owner_id, 0, &repo).await.unwrap();
         let second = host.provision(owner_id, 1, &repo).await.unwrap();
-        tokio::fs::write(first.join("first-only"), "one")
+        tokio::fs::write(first.path.join("first-only"), "one")
             .await
             .unwrap();
-        tokio::fs::write(second.join("second-only"), "two")
-            .await
-            .unwrap();
-        assert!(!second.join("first-only").exists());
-        assert!(!first.join("second-only").exists());
+        assert!(!second.path.join("first-only").exists());
         assert_eq!(host.list_owner(owner_id).await.len(), 2);
         let resumed_host = WorktreeHost::new(config);
         let resumed = resumed_host.provision(owner_id, 0, &repo).await.unwrap();
-        assert_eq!(resumed, first, "resume must reuse the owned path");
+        assert_eq!(resumed.path, first.path, "resume must reuse the owned path");
         let listed = Command::new("git")
             .arg("-C")
             .arg(&repo)
@@ -400,9 +459,17 @@ mod tests {
             3,
             "resume must not provision a duplicate beside the main tree and two workers"
         );
-        resumed_host.shutdown().await;
-        host.cleanup_owner(owner_id).await;
-        assert!(!first.exists() && !second.exists());
+        let changed = host.finish(owner_id, 0).await.unwrap();
+        let removed = host.finish(owner_id, 1).await.unwrap();
+        assert_eq!(changed.base_commit, first.base_commit);
+        assert_eq!(changed.tip_commit, first.base_commit);
+        assert!(changed.changed && !changed.removed);
+        assert!(!removed.changed && removed.removed);
+        assert!(first.path.exists(), "changed worktree remains for merging");
+        assert!(!second.path.exists(), "unchanged worktree is removed");
+        remove_worktree(&repo, &first.path).await.unwrap();
+        let _ =
+            tokio::fs::remove_dir(temp.path().join("worktrees").join(owner_id.to_string())).await;
         assert!(
             !temp
                 .path()
@@ -463,8 +530,12 @@ mod tests {
         let cancelled_path;
         {
             let host = WorktreeHost::new(config.clone());
-            failed_path = host.provision(failed_owner, 0, &repo).await.unwrap();
-            cancelled_path = host.provision(cancelled_owner, 0, &repo).await.unwrap();
+            failed_path = host.provision(failed_owner, 0, &repo).await.unwrap().path;
+            cancelled_path = host
+                .provision(cancelled_owner, 0, &repo)
+                .await
+                .unwrap()
+                .path;
             assert!(failed_path.exists() && cancelled_path.exists());
             // Dropping without shutdown models an unclean gateway exit.
         }

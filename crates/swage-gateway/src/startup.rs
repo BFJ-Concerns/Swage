@@ -1212,19 +1212,20 @@ mod tests {
             "startup must reclaim terminal worktrees and retain replayable worktrees"
         );
         assert!(
-            worktree.exists(),
+            worktree.path.exists(),
             "replayable worktree must survive startup"
         );
         assert!(
-            parked_worktree.exists(),
+            parked_worktree.path.exists(),
             "parked replayable worktree must survive startup"
         );
         assert!(
-            !terminal_worktree.exists(),
+            !terminal_worktree.path.exists(),
             "terminal worktree must be reclaimed at startup"
         );
         assert!(
             !terminal_worktree
+                .path
                 .parent()
                 .expect("terminal owner directory")
                 .exists(),
@@ -1239,17 +1240,17 @@ mod tests {
         assert!(registrations.status.success());
         assert!(
             String::from_utf8_lossy(&registrations.stdout)
-                .contains(&format!("worktree {}", worktree.display())),
+                .contains(&format!("worktree {}", worktree.path.display())),
             "Git registration must survive startup recovery"
         );
         assert!(
             String::from_utf8_lossy(&registrations.stdout)
-                .contains(&format!("worktree {}", parked_worktree.display())),
+                .contains(&format!("worktree {}", parked_worktree.path.display())),
             "parked Git registration must survive startup recovery"
         );
         assert!(
             !String::from_utf8_lossy(&registrations.stdout)
-                .contains(&format!("worktree {}", terminal_worktree.display())),
+                .contains(&format!("worktree {}", terminal_worktree.path.display())),
             "terminal Git registration must be reclaimed at startup"
         );
 
