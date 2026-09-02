@@ -102,6 +102,16 @@
     if (activeSurface === "operator") activeSurface = "conversation";
   }
 
+  function connectToConversationIfNeeded(id: string): void {
+    if (
+      !streamingStore.isStreaming ||
+      (streamingStore.activeConversationId === id &&
+        connectionStore.status !== "connected")
+    ) {
+      connectionStore.connectTo(id);
+    }
+  }
+
   async function selectAndNavigateOrThrow(id: string): Promise<void> {
     keepSurfaceForConversation();
     await conversationStore.selectConversation(id);
@@ -115,7 +125,7 @@
       await conversationStore.loadConversations(conv.space_id);
     }
 
-    if (!streamingStore.isStreaming) connectionStore.connectTo(id);
+    connectToConversationIfNeeded(id);
     // router is declared below but will be initialised before this is called.
     router.navigate(`/conversations/${id}`);
   }
@@ -363,7 +373,7 @@
     // Operator needs to establish the connection again.
     if (previous === "operator") {
       const id = conversationStore.activeConversation?.id;
-      if (id && !streamingStore.isStreaming) connectionStore.connectTo(id);
+      if (id) connectToConversationIfNeeded(id);
     }
   }
 
