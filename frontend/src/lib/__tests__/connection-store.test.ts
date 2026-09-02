@@ -138,12 +138,34 @@ describe("disconnect", () => {
 });
 
 describe("sendMessage", () => {
+  it("keeps one client's stream connected while sending through another conversation", () => {
+    const first = createMockWsClient();
+    const second = createMockWsClient();
+    const clients = [first, second];
+    const store = createConnectionStore({
+      wsClientFactory: () => clients.shift()!,
+    });
+
+    store.connectTo("conv-a");
+    store.connectTo("conv-b");
+    store.sendMessage("conv-b", "Message for B");
+
+    expect(first.disconnect).not.toHaveBeenCalled();
+    expect(first.lastConnectedId()).toBe("conv-a");
+    expect(second.lastConnectedId()).toBe("conv-b");
+    expect(second.sentEvents().map((event) => JSON.parse(event))).toContainEqual({
+      type: "send_message",
+      content: "Message for B",
+    });
+    expect(first.sentEvents()).toEqual([]);
+  });
+
   it("sends a send_message ClientEvent via the WS client", () => {
     const mock = createMockWsClient();
     const store = createConnectionStore({ wsClientFactory: () => mock });
 
     store.connectTo("conv-abc");
-    store.sendMessage("Hello, world");
+    store.sendMessage("conv-abc", "Hello, world");
 
     const events = mock.sentEvents().map((s) => JSON.parse(s));
     expect(events).toContainEqual({ type: "send_message", content: "Hello, world" });
@@ -154,10 +176,10 @@ describe("sendMessage", () => {
     const store = createConnectionStore({ wsClientFactory: () => mock });
 
     store.connectTo("conv-abc");
-    store.sendMessage("What is this?", null, [
+    store.sendMessage("conv-abc", "What is this?", null, [
       { kind: "image_url", url: "https://example.test/cat.png" },
     ]);
-    store.sendMessage("And this?", null, []);
+    store.sendMessage("conv-abc", "And this?", null, []);
 
     const events = mock.sentEvents().map((s) => JSON.parse(s));
     expect(events).toContainEqual({
@@ -175,7 +197,7 @@ describe("cancelTurn", () => {
     const store = createConnectionStore({ wsClientFactory: () => mock });
 
     store.connectTo("conv-abc");
-    store.cancelTurn();
+    store.cancelTurn("conv-abc");
 
     const events = mock.sentEvents().map((s) => JSON.parse(s));
     expect(events).toContainEqual({ type: "cancel" });

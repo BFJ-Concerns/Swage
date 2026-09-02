@@ -64,22 +64,9 @@
 
   // Route all server events from the WebSocket through the streaming store.
   // The connection store is a pure relay — interpretation belongs to streaming.
-  connectionStore.onServerEvent((event) => {
-    const streamingConversationId = streamingStore.activeConversationId;
-    streamingStore.handleServerEvent(event);
-
-    // A live turn keeps its own socket while the user navigates. Once it
-    // settles, bind the channel to the selected conversation for its next turn.
-    const selectedConversationId = conversationStore.activeConversation?.id;
-    if (
-      streamingConversationId &&
-      !streamingStore.isStreaming &&
-      selectedConversationId &&
-      selectedConversationId !== streamingConversationId
-    ) {
-      connectionStore.connectTo(selectedConversationId);
-    }
-  });
+  connectionStore.onServerEvent((event, conversationId) =>
+    streamingStore.handleServerEvent(event, conversationId),
+  );
 
   // The pages store opens its own work-surface channel: page signals are not
   // turn events, and an open page must stay live even with no conversation
@@ -102,13 +89,7 @@
   }
 
   function connectToConversationIfNeeded(id: string): void {
-    if (
-      !streamingStore.isStreaming ||
-      (streamingStore.activeConversationId === id &&
-        connectionStore.status !== "connected")
-    ) {
-      connectionStore.connectTo(id);
-    }
+    connectionStore.connectTo(id);
   }
 
   async function selectAndNavigateOrThrow(id: string): Promise<void> {
@@ -399,7 +380,7 @@
       if (!spaceId) return;
 
       // Drop the WebSocket — it was bound to the previous space's session.
-      connectionStore.disconnect();
+      connectionStore.disconnectAll?.();
       // Drop the active conversation too: left in place, the old space's
       // conversation would keep rendering and the composer would send into it.
       conversationStore.clearActiveConversation();

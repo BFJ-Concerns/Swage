@@ -45,6 +45,7 @@ function createMockConversationStore() {
   }> = [];
 
   return {
+    activeConversation: { id: "test-conversation", messages: messages as never[] },
     appendOptimisticUserMessage: vi.fn((msg) => {
       messages.push({ role: "user", turn_state: "pending", ...msg });
     }),
@@ -189,11 +190,12 @@ describe("startTurn", () => {
 
   it("sends the message via the connection store", () => {
     const conn = createMockConnectionStore();
-    const store = createStreamingStore({ connectionStore: conn });
+    const conv = createMockConversationStore();
+    const store = createStreamingStore({ connectionStore: conn, conversationStore: conv });
 
     store.startTurn("Tell me about Svelte");
 
-    expect(conn.sendMessage).toHaveBeenCalledWith("Tell me about Svelte", undefined);
+    expect(conn.sendMessage).toHaveBeenCalledWith("test-conversation", "Tell me about Svelte", undefined);
   });
 
   it("does not throw when no dependencies are injected", () => {
@@ -514,11 +516,13 @@ describe("cancelled events", () => {
 describe("cancelTurn", () => {
   it("delegates to the connection store", () => {
     const conn = createMockConnectionStore();
-    const store = createStreamingStore({ connectionStore: conn });
+    const conv = createMockConversationStore();
+    const store = createStreamingStore({ connectionStore: conn, conversationStore: conv });
 
+    store.startTurn("cancel me");
     store.cancelTurn();
 
-    expect(conn.cancelTurn).toHaveBeenCalledOnce();
+    expect(conn.cancelTurn).toHaveBeenCalledWith("test-conversation");
   });
 
   it("does not throw when no connection store is injected", () => {
@@ -1044,7 +1048,7 @@ describe("withConversationAutoCreate", () => {
     store.startTurn("hello", "model-a");
 
     expect(createConversation).not.toHaveBeenCalled();
-    expect(connection.sendMessage).toHaveBeenCalledWith("hello", "model-a");
+    expect(connection.sendMessage).toHaveBeenCalledWith("test-conversation", "hello", "model-a");
   });
 
   it("creates a conversation first when none is active, then starts the turn", async () => {
@@ -1060,6 +1064,7 @@ describe("withConversationAutoCreate", () => {
     settleCreate("conv-9");
     await vi.waitFor(() =>
       expect(connection.sendMessage).toHaveBeenCalledWith(
+        "test-conversation",
         "first message",
         "model-a",
       ),
