@@ -388,7 +388,10 @@ mod tests {
         let modules = storage.list_page_modules(page.id).await.unwrap();
         assert_eq!(modules.len(), 1);
         assert_eq!(modules[0].source, "# Delivered\n\nThe scheduled result");
-        let event = events.recv().await.expect("page delivery broadcasts a refetch signal");
+        let event = events
+            .recv()
+            .await
+            .expect("page delivery broadcasts a refetch signal");
         assert!(matches!(
             event,
             ServerEvent::PageUpdated {

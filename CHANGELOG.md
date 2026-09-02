@@ -26,7 +26,7 @@ All notable changes to Swage are documented in this file.
 - Detached gateway starts now accept `--log-file`, report the chosen output destination, and explain foreground output handling in command help.
 - Agents can route scheduled-run output to channels, local storage, and webhooks when creating or updating schedules.
 - Schedules and workflows can deliver output to a page in their own space.
-- `LocalStorage` remains the C17 log target, retaining output in the local delivery record.
+- `LocalStorage` remains the log target, retaining output in the local delivery record.
 - Schedules now record why they made no delivery when overlap policy skips them, gates suppress them, or a run fails before dispatch.
 - New conversations can choose a reasoning effort from the main composer, while each configured model can provide the inherited default.
 - Agents can now run newly authored workflow source directly without saving or registering it first.
