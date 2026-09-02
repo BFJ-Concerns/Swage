@@ -2036,7 +2036,7 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<Value>(&output).unwrap(),
             json!({
-                "name": "TypeError",
+                "name": "InvalidAgentPromptError",
                 "message": "agent prompt must be a string",
             }),
             "host received invalid prompts: {:?}",
@@ -2069,7 +2069,7 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<Value>(&output).unwrap(),
             json!({
-                "name": "TypeError",
+                "name": "InvalidAgentPromptError",
                 "message": "agentStart prompt must be a string",
             })
         );

@@ -2107,16 +2107,6 @@ async fn run_host_commands_inner(
                 cancellation,
                 reply,
             } => {
-                // A fresh invalid schema is an author error, not a worker
-                // failure: reject it before placement provisioning or an
-                // agent journal intent. Existing journal entries predate this
-                // check and must replay exactly as recorded.
-                if replay.get(seq.load(Ordering::SeqCst) as usize).is_none()
-                    && let Err(error) = validate_agent_call(&request)
-                {
-                    let _ = reply.send(Err(WorkflowHostError::Message(error)));
-                    continue;
-                }
                 let resolved_working_directory = match resolve_agent_placement_command(
                     &state,
                     run_id,
@@ -2136,6 +2126,16 @@ async fn run_host_commands_inner(
                         continue;
                     }
                 };
+                // Placement has its own journal entry and consumes the
+                // sequence first. Validate at the following agent-call slot:
+                // fresh invalid schemas stop before a worker or agent intent,
+                // while entries recorded before this check still replay.
+                if replay.get(seq.load(Ordering::SeqCst) as usize).is_none()
+                    && let Err(error) = validate_agent_call(&request)
+                {
+                    let _ = reply.send(Err(WorkflowHostError::Message(error)));
+                    continue;
+                }
                 HostCommand::Agent {
                     request,
                     resolved_working_directory,
@@ -2690,41 +2690,44 @@ async fn run_host_commands_inner(
                                 current_seq,
                                 request,
                                 cancellation,
+                                None,
                             )
                             .await
                         }
                         None => {
-                            if let Err(error) =
-                                validate_workflow_call(&state, run_id, space_id, &request).await
+                            match resolve_composed_workflow(&state, run_id, space_id, &request)
+                                .await
                             {
-                                Err(error)
-                            } else {
-                                match state
-                                    .create_workflow_journal_intent(NewWorkflowJournalIntent {
-                                        run_id,
-                                        seq: current_seq,
-                                        kind: "workflow_call".into(),
-                                        args_hash: hash,
-                                        request: request_json,
-                                        effect_kind: None,
-                                        idempotency_key: None,
-                                        target_kind: None,
-                                    })
-                                    .await
-                                {
-                                    Ok(intent) => {
-                                        complete_workflow_call_entry(
-                                            &state,
+                                Err(error) => Err(error),
+                                Ok(script) => {
+                                    match state
+                                        .create_workflow_journal_intent(NewWorkflowJournalIntent {
                                             run_id,
-                                            space_id,
-                                            intent.id,
-                                            current_seq,
-                                            request,
-                                            cancellation,
-                                        )
+                                            seq: current_seq,
+                                            kind: "workflow_call".into(),
+                                            args_hash: hash,
+                                            request: request_json,
+                                            effect_kind: None,
+                                            idempotency_key: None,
+                                            target_kind: None,
+                                        })
                                         .await
+                                    {
+                                        Ok(intent) => {
+                                            complete_workflow_call_entry(
+                                                &state,
+                                                run_id,
+                                                space_id,
+                                                intent.id,
+                                                current_seq,
+                                                request,
+                                                cancellation,
+                                                Some(script),
+                                            )
+                                            .await
+                                        }
+                                        Err(error) => Err(error.to_string()),
                                     }
-                                    Err(error) => Err(error.to_string()),
                                 }
                             }
                         }
@@ -4066,6 +4069,7 @@ async fn complete_workflow_call_entry(
     parent_seq: u64,
     request: WorkflowCallRequest,
     cancellation: CancellationToken,
+    resolved_script: Option<EffectiveWorkflow>,
 ) -> Result<Value, String> {
     let parent = state
         .storage
@@ -4129,19 +4133,10 @@ async fn complete_workflow_call_entry(
             _ => child,
         },
         None => {
-            let agent_id = parent
-                .as_ref()
-                .and_then(|run| run.dispatch_bound_agent_ids.last())
-                .map(String::as_str);
-            let skills = discover_skills_for_space(state, space_id, agent_id).await?;
-            let script = resolve_workflow_by_name(state, space_id, &request.name, &skills)
-                .await?
-                .ok_or_else(|| {
-                    format!(
-                        "WorkflowCompositionError: workflow script {:?} was not found",
-                        request.name
-                    )
-                })?;
+            let script = match resolved_script {
+                Some(script) => script,
+                None => resolve_composed_workflow(state, parent_run_id, space_id, &request).await?,
+            };
             let inline_identity = script.inline_identity();
             let parent_budget = parent
                 .as_ref()
@@ -4371,12 +4366,12 @@ fn validate_agent_call(request: &AgentCallRequest) -> Result<(), String> {
         .map_err(|error| format!("InvalidAgentSchemaError: agent schema is invalid: {error}"))
 }
 
-async fn validate_workflow_call(
+async fn resolve_composed_workflow(
     state: &AppState,
     parent_run_id: Uuid,
     space_id: Uuid,
     request: &WorkflowCallRequest,
-) -> Result<(), String> {
+) -> Result<EffectiveWorkflow, String> {
     let parent = state
         .storage
         .get_workflow_run(parent_run_id)
@@ -4395,8 +4390,7 @@ async fn validate_workflow_call(
                 request.name
             )
         })?;
-    validate_workflow_arguments(script.argument_schema.as_ref(), &request.args)
-        .map_err(|error| format!("WorkflowArgumentsError: {}", error.message()))
+    Ok(script)
 }
 
 fn run_state(state: &str) -> Result<WorkflowRunState, ApiError> {
