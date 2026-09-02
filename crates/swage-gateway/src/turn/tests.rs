@@ -5941,6 +5941,11 @@ async fn unattended_sandbox_failure_records_unattended_attendance() {
 
 #[tokio::test]
 async fn unattended_turn_rejects_a_relative_managed_scratch_root() {
+    swage_agent::AgentConfig::new("agent")
+        .with_workspace("relative", vec![])
+        .validate()
+        .expect("generic agent validation must leave execution-root policy to the turn owner");
+
     let storage = Arc::new(MockStorage::new());
     let (state, session_id) = make_state_with_storage_and_root(
         vec![],
