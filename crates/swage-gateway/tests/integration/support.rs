@@ -30,10 +30,12 @@ pub fn scratch_tempdir() -> tempfile::TempDir {
         .tempdir_in("/tmp/scratch")
     {
         Ok(tempdir) => tempdir,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+        Err(error) => {
+            eprintln!(
+                "could not create gateway test root in /tmp/scratch ({error}); falling back to the system temporary directory"
+            );
             tempfile::tempdir().expect("create gateway test root")
         }
-        Err(error) => panic!("create gateway test root in scratch: {error}"),
     }
 }
 
