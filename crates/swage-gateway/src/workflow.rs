@@ -16434,6 +16434,7 @@ mod tests {
             .iter()
             .find(|entry| entry.kind == WorkflowJournalEntryKind::WindDown)
             .expect("route wind-down journal");
+        assert_eq!(wind_down.status, WorkflowJournalEntryStatus::Completed);
         assert_eq!(wind_down.request["provider_route"], "alpha-route");
         assert_eq!(wind_down.result.as_ref().unwrap()["closing_limit"], 2);
         let terminal = detail
