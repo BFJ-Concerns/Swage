@@ -1578,15 +1578,36 @@ async fn run_ephemeral_agent_call(
         .any(|event| matches!(event, ServerEvent::Token { .. }));
     let primary_error = match primary.outcome {
         Err(error) => Some(error),
-        Ok(()) => latest_turn(state, thread_id)
-            .await?
-            .filter(|turn| turn.state != swage_storage::TurnState::Completed)
-            .map(|turn| {
-                format!(
-                    "AgentCallError: agent turn {} failed before completion",
-                    turn.id
-                )
-            }),
+        Ok(()) => {
+            let turn = latest_turn(state, thread_id).await?;
+            if let Some(turn) = turn
+                .as_ref()
+                .filter(|turn| turn.state != swage_storage::TurnState::Completed)
+            {
+                let schema_exhausted = primary.events.iter().any(|event| {
+                    matches!(
+                        event,
+                        ServerEvent::OutputSchemaFailed { turn_id, .. } if *turn_id == turn.id
+                    )
+                });
+                if schema_exhausted {
+                    return Err(WorkflowHostError::SchemaExhausted {
+                        host_reference: None,
+                        message: format!(
+                            "SchemaExhaustedError: agent turn {} produced no schema-valid output",
+                            turn.id
+                        ),
+                    });
+                }
+            }
+            turn.filter(|turn| turn.state != swage_storage::TurnState::Completed)
+                .map(|turn| {
+                    format!(
+                        "AgentCallError: agent turn {} failed before completion",
+                        turn.id
+                    )
+                })
+        }
     };
     let mut served_model = request.model.clone();
     let final_events = match primary_error {
