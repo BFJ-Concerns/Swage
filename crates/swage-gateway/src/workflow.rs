@@ -9223,15 +9223,19 @@ mod tests {
         );
         let closure = journal
             .iter()
-            .find(|entry| entry.kind == "worker"
-                && entry.request.get("action").and_then(Value::as_str) == Some("close"))
+            .find(|entry| {
+                entry.kind == "worker"
+                    && entry.request.get("action").and_then(Value::as_str) == Some("close")
+            })
             .expect("closure entry");
         assert_eq!(closure.result.as_ref().unwrap()["closed_by"], "script");
 
         let opened = journal
             .iter()
-            .find(|entry| entry.kind == "worker"
-                && entry.request.get("action").and_then(Value::as_str) == Some("open"))
+            .find(|entry| {
+                entry.kind == "worker"
+                    && entry.request.get("action").and_then(Value::as_str) == Some("open")
+            })
             .expect("open entry");
         let worker_id = opened.result.as_ref().unwrap()["worker_id"]
             .as_str()
@@ -9262,8 +9266,10 @@ mod tests {
             .expect("journal");
         let closure = journal
             .iter()
-            .find(|entry| entry.kind == "worker"
-                && entry.request.get("action").and_then(Value::as_str) == Some("close"))
+            .find(|entry| {
+                entry.kind == "worker"
+                    && entry.request.get("action").and_then(Value::as_str) == Some("close")
+            })
             .expect("a run that throws still closes its held worker");
         assert_eq!(closure.status, "completed");
         assert_eq!(closure.result.as_ref().unwrap()["closed_by"], "run_end");
