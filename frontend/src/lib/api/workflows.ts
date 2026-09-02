@@ -6,6 +6,7 @@ import type {
 import type { VoiceCapabilitiesResponse } from "../protocol/VoiceCapabilitiesResponse";
 import type { CreateScheduleRequest } from "../protocol/CreateScheduleRequest";
 import type { Schedule } from "../protocol/Schedule";
+import type { WorkflowRunDetailResponse } from "../protocol/WorkflowRunDetailResponse";
 
 let baseUrl = "";
 
@@ -74,4 +75,14 @@ export async function listRecoveryExports(): Promise<RecoveryExportListResponse>
 export async function downloadRecoveryExport(exportId: string): Promise<Record<string, unknown>> {
   const response = await request(`/api/recovery/exports/${encodeURIComponent(exportId)}`, "GET");
   return response.json() as Promise<Record<string, unknown>>;
+}
+
+export async function fetchWorkflowRun(
+  runId: string,
+): Promise<WorkflowRunDetailResponse> {
+  const response = await request(
+    `/api/workflow-runs/${encodeURIComponent(runId)}`,
+    "GET",
+  );
+  return response.json() as Promise<WorkflowRunDetailResponse>;
 }
