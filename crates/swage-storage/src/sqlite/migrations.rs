@@ -981,6 +981,9 @@ const COMPLETE_SCHEMA: &str = "
         thread_id    TEXT    NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
         role         TEXT    NOT NULL CHECK (role IN ('system', 'user', 'assistant', 'tool')),
         content      TEXT    NOT NULL,
+        -- Content parts submitted beside the text, as a JSON array of the
+        -- client wire's tagged attachment values; '[]' for text-only rows.
+        attachments  TEXT    NOT NULL DEFAULT '[]',
         position     INTEGER NOT NULL,
         agent_id     TEXT    NOT NULL,
         tool_call_id TEXT,

@@ -224,9 +224,12 @@ describe("MessageInput", () => {
     const picker = document.querySelector('[aria-label="Effort"]') as HTMLSelectElement;
     expect(Array.from(picker.options, (option) => option.value)).toEqual([
       "",
+      "off",
+      "minimal",
       "low",
       "medium",
       "high",
+      "xhigh",
       "max",
     ]);
 

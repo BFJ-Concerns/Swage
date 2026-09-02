@@ -8,6 +8,7 @@ use std::{collections::VecDeque, sync::Mutex};
 use async_trait::async_trait;
 use axum::{Json, Router, routing::post};
 use reqwest::StatusCode;
+use rusqlite::Connection;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
@@ -18,7 +19,12 @@ use swage_core::{
 use swage_gateway::channel_gateway::ExternalChannelIntegration;
 use swage_gateway::{server::build_router, state::AppState};
 use swage_provider::LlmProvider;
-use swage_storage::SqliteStorage;
+use swage_storage::{
+    NewChannelInboundMessage, NewChannelLink, SqliteStorage,
+    store::{
+        ChannelLinkStore, ChannelQueueStore, DeliveryStore, SessionStore, SpaceStore, ThreadStore,
+    },
+};
 
 use crate::support::start_live_server;
 
@@ -80,6 +86,113 @@ async fn start_test_server(provider: impl LlmProvider + 'static) -> SocketAddr {
     let router: Router = build_router(state);
 
     start_live_server(router).await.0
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn queued_channel_drain_carries_the_created_turn_id_into_the_delivery_record() {
+    let directory = tempfile::tempdir().expect("queue database directory");
+    let database_path = directory.path().join("queue.db");
+    let storage = Arc::new(SqliteStorage::open(&database_path).expect("queue storage"));
+    let space = storage
+        .get_or_create_default()
+        .await
+        .expect("default space");
+    storage
+        .upsert_channel_link(NewChannelLink {
+            integration: "dev_dm".into(),
+            account: "queue-account".into(),
+            conversation: "queue-user".into(),
+            space_id: space.id,
+            agent_id: "gateway".into(),
+            session_id: None,
+            home_target: None,
+        })
+        .await
+        .expect("channel link");
+    storage
+        .ingest_channel_inbound(
+            vec![NewChannelInboundMessage {
+                integration: "dev_dm".into(),
+                account: "queue-account".into(),
+                conversation: "queue-user".into(),
+                external_id: "queued-1".into(),
+                sender: "queue-user".into(),
+                content: "drain this queued message".into(),
+            }],
+            "dev_dm",
+            "queue-account",
+            "queued-1",
+        )
+        .await
+        .expect("queue inbound message");
+
+    let state = AppState::new(
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
+        Arc::new(MockProvider::new(vec![vec![
+            StreamChunk::Delta {
+                content: "queued reply".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ]])),
+        swage_config::ResolvedConfig::default(),
+        swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+    );
+
+    swage_gateway::channel_gateway::drain_channel_queue_checked(&state)
+        .await
+        .expect("drain queued channel origin");
+
+    let session = storage
+        .find_session_by_channel_origin("dev_dm", "queue-account", "queue-user")
+        .await
+        .expect("look up channel session")
+        .expect("drain creates the linked session");
+    let turn = storage
+        .list_by_session(session.id)
+        .await
+        .expect("list channel threads")
+        .into_iter()
+        .next()
+        .expect("channel thread");
+    let turn = swage_storage::store::TurnStore::list_turns_by_thread(&*storage, turn.id)
+        .await
+        .expect("list channel turns")
+        .into_iter()
+        .next()
+        .expect("drain creates one turn");
+    let deliveries = storage
+        .list_delivery_records_by_session(session.id)
+        .await
+        .expect("read durable delivery record");
+    let inbound_turn_id: Option<String> = Connection::open(&database_path)
+        .expect("open queue database for durable provenance check")
+        .query_row(
+            "SELECT turn_id
+             FROM channel_inbound_messages
+             WHERE integration = ?1
+               AND account = ?2
+               AND conversation = ?3
+               AND external_id = ?4",
+            ["dev_dm", "queue-account", "queue-user", "queued-1"],
+            |row| row.get(0),
+        )
+        .expect("the inbound row remains available for provenance audit");
+
+    assert_eq!(deliveries.len(), 1);
+    assert_eq!(inbound_turn_id, Some(turn.id.to_string()));
+    assert_eq!(deliveries[0].turn_id, Some(turn.id));
+    assert!(
+        storage
+            .list_pending_channel_origins()
+            .await
+            .expect("inspect queue after drain")
+            .is_empty(),
+        "the queued row must have been claimed by the turn before delivery"
+    );
 }
 
 async fn start_file_backed_test_server(

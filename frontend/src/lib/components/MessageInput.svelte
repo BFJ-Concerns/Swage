@@ -118,9 +118,12 @@
           <AgentPicker definitions={agentDefinitions} bind:selectedAgentId disabled={!store || store?.isStreaming} />
           <select bind:value={selectedEffort} aria-label="Effort" disabled={!store || store?.isStreaming}>
             <option value="">Model default</option>
+            <option value="off">Reasoning off</option>
+            <option value="minimal">Minimal effort</option>
             <option value="low">Low effort</option>
             <option value="medium">Medium effort</option>
             <option value="high">High effort</option>
+            <option value="xhigh">Extra-high effort</option>
             <option value="max">Maximum effort</option>
           </select>
         {/if}

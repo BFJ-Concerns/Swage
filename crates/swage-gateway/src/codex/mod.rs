@@ -444,6 +444,7 @@ async fn run_turn_inner(
         .storage
         .append_message(AppendMessage {
             thread_id: request.thread_id,
+            attachments: Vec::new(),
             turn_id: Some(request.turn_id),
             role: Role::Assistant,
             content: response_text.clone(),
@@ -838,6 +839,7 @@ mod tests {
         Result<OutboundMessage, AgentError>,
         Vec<Value>,
         Arc<crate::turn::tests::MockStorage>,
+        Vec<AgentEvent>,
     ) {
         run_scripted_turn_with_audit_failure(scenario, dispatcher, permissions, false).await
     }
@@ -851,6 +853,7 @@ mod tests {
         Result<OutboundMessage, AgentError>,
         Vec<Value>,
         Arc<crate::turn::tests::MockStorage>,
+        Vec<AgentEvent>,
     ) {
         let storage = Arc::new(crate::turn::tests::MockStorage::new());
         let (mut state, session_id) =
@@ -894,7 +897,7 @@ mod tests {
             )
             .await
         });
-        let (event_tx, _events) = mpsc::unbounded_channel();
+        let (event_tx, mut events) = mpsc::unbounded_channel();
         let request = CodexTurnRequest {
             session_id,
             thread_id: thread.id,
@@ -926,7 +929,8 @@ mod tests {
                     panic!("scenario server did not finish ({elapsed}); turn result: {result:?}")
                 }
             };
-        (result, frames, storage)
+        let events = std::iter::from_fn(|| events.try_recv().ok()).collect();
+        (result, frames, storage, events)
     }
 
     fn successful_turn_notifications() -> Vec<Value> {
@@ -956,7 +960,8 @@ mod tests {
         ]});
         let dispatcher = ToolDispatcher::allow_all(Vec::<Arc<dyn Tool>>::new());
 
-        let (result, _, _) = run_scripted_turn(scenario, dispatcher, permissions(&[], &[])).await;
+        let (result, _, _, _) =
+            run_scripted_turn(scenario, dispatcher, permissions(&[], &[])).await;
         assert_eq!(
             result
                 .expect("valid frames after malformed input win")
@@ -983,7 +988,8 @@ mod tests {
         ]});
         let dispatcher = ToolDispatcher::allow_all(Vec::<Arc<dyn Tool>>::new());
 
-        let (result, _, _) = run_scripted_turn(scenario, dispatcher, permissions(&[], &[])).await;
+        let (result, _, _, _) =
+            run_scripted_turn(scenario, dispatcher, permissions(&[], &[])).await;
         assert!(
             result
                 .expect_err("child death must fail the turn")
@@ -1009,7 +1015,7 @@ mod tests {
         ]});
         let dispatcher = ToolDispatcher::allow_all(Vec::<Arc<dyn Tool>>::new());
 
-        let (result, _, storage) =
+        let (result, _, storage, events) =
             run_scripted_turn(scenario, dispatcher, permissions(&[], &[])).await;
 
         assert!(
@@ -1022,6 +1028,19 @@ mod tests {
             storage.turn_state_write_calls(),
             2,
             "one processing write and one failed write must complete the lifecycle"
+        );
+        assert_eq!(
+            storage.idle_thread_state_write_calls(),
+            1,
+            "a failed Codex turn must return its thread to idle exactly once"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, AgentEvent::Error { .. }))
+                .count(),
+            1,
+            "a failed Codex turn must emit exactly one error event"
         );
     }
 
@@ -1055,7 +1074,7 @@ mod tests {
             }
         ]});
 
-        let (result, _, _) =
+        let (result, _, _, _) =
             run_scripted_turn(scenario, dispatcher, permissions(&["file_read"], &[])).await;
         let output = result.expect("scripted tool turn succeeds");
         assert_eq!(output.response, "done");
@@ -1103,7 +1122,7 @@ mod tests {
         ]});
         let dispatcher = ToolDispatcher::allow_all(Vec::<Arc<dyn Tool>>::new());
 
-        let (result, _, _) = run_scripted_turn(
+        let (result, _, _, _) = run_scripted_turn(
             scenario,
             dispatcher,
             permissions(&["shell", "file_edit"], &[]),
@@ -1135,7 +1154,7 @@ mod tests {
         ]});
         let dispatcher = ToolDispatcher::allow_all(Vec::<Arc<dyn Tool>>::new());
 
-        let (result, _, _) = run_scripted_turn_with_audit_failure(
+        let (result, _, _, _) = run_scripted_turn_with_audit_failure(
             scenario,
             dispatcher,
             permissions(&["shell"], &[]),

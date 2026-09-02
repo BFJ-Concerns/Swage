@@ -199,6 +199,18 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
     );
     state.voice_provider = voice_provider;
     state.telegram = telegram;
+    // The Codex CLI's auth store lives under a Swage-owned state directory;
+    // registering it as file-backed secrets brings the harness's own tokens
+    // under governance — audited resolution and redaction — without moving
+    // them. Registration precedes sign-in, so the store need not exist yet.
+    if let Err(error) = state
+        .secret_manager
+        .register_codex_auth_store(&state.codex_supervisor.state_dir())
+        .await
+    {
+        eprintln!("Failed to register the Codex auth store as governed secrets: {error}");
+        std::process::exit(1);
+    }
     if let Err(error) = recover_worktrees_after_crash(&state).await {
         eprintln!("Worktree startup recovery failed: {error}");
         std::process::exit(1);

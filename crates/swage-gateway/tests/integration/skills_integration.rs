@@ -107,7 +107,7 @@ async fn fresh_root_lists_orients_and_activates_a_shipped_skill() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(catalogue["skills"].as_array().unwrap().len(), 5);
+    assert_eq!(catalogue["skills"].as_array().unwrap().len(), 6);
     assert!(
         catalogue["skills"]
             .as_array()

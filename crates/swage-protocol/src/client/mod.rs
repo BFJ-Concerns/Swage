@@ -6,16 +6,20 @@ pub mod channel;
 pub mod context;
 pub mod conversation;
 pub mod delivery;
+pub mod error;
 pub mod knowledge;
 pub mod material;
+pub mod openapi;
 pub mod page;
 pub mod provider_signin;
 pub mod recovery;
+pub mod routes;
 pub mod schedule;
 pub mod settings;
 pub mod skill;
 pub mod space;
 pub mod turn;
+pub mod typescript_client;
 pub mod voice;
 pub mod websocket;
 pub mod workflow;
@@ -31,6 +35,7 @@ use schemars::JsonSchema;
 #[derive(JsonSchema)]
 #[allow(dead_code)]
 pub struct ClientSurface {
+    api_error: error::ApiErrorBody,
     client_event: websocket::ClientEvent,
     server_event: websocket::ServerEvent,
     voice_capabilities: voice::VoiceCapabilitiesResponse,
@@ -60,11 +65,13 @@ pub struct ClientSurface {
     conversation_thread: conversation::ConversationThreadDetail,
     turn_context: context::TurnContextResponse,
     submit_turn: turn::SubmitTurnRequest,
+    message_attachment: turn::MessageAttachment,
     submit_turn_response: turn::SubmitTurnResponse,
     turn_poll: turn::TurnPollResponse,
     send_message: turn::SendMessageRequest,
     message_response: turn::MessageResponse,
     settings: settings::SettingsResponse,
+    effort_capability: settings::EffortCapability,
     skills: skill::SkillListResponse,
     save_settings: settings::SaveSettingsRequest,
     model_discovery: settings::ModelDiscoveryResponse,

@@ -1399,6 +1399,7 @@ mod tests {
                 default_effort: Some(swage_protocol::client::settings::Effort::Low),
                 capabilities: swage_config::ModelCapabilitiesConfig {
                     reasoning_replay: true,
+                    effort: None,
                 },
             },
         );
@@ -1440,6 +1441,7 @@ mod tests {
                     default_effort: Some(swage_protocol::client::settings::Effort::High),
                     capabilities: swage_protocol::client::settings::ModelCapabilitiesConfig {
                         reasoning_replay: true,
+                        effort: None,
                     },
                 },
             )]
@@ -1813,7 +1815,7 @@ mod tests {
         };
 
         let error = validate_settings_request(&request).expect_err("empty deny rule is invalid");
-        assert!(error.0.to_string().contains("tool deny rules"));
+        assert!(error.message().contains("tool deny rules"));
 
         request.tool_permissions = Some(wire_from_config(
             swage_config::ToolPermissionConfig::default(),
@@ -1823,7 +1825,7 @@ mod tests {
             timeout_policy: swage_protocol::client::settings::ApprovalTimeoutPolicy::Reject,
         });
         let error = validate_settings_request(&request).expect_err("zero HITL timeout is invalid");
-        assert!(error.0.to_string().contains("hitl timeout"));
+        assert!(error.message().contains("hitl timeout"));
 
         request.hitl = Some(wire_from_config(swage_config::HitlConfig::default()));
         request.context = Some(swage_protocol::client::settings::ContextConfig {
@@ -1834,7 +1836,7 @@ mod tests {
         });
         let error = validate_settings_request(&request)
             .expect_err("context timeout above range is invalid");
-        assert!(error.0.to_string().contains("context timeout"));
+        assert!(error.message().contains("context timeout"));
 
         request.context = Some(wire_from_config(swage_config::ContextConfig::default()));
         request.tool_runtime = Some(ToolRuntimeSettings {
@@ -1845,7 +1847,7 @@ mod tests {
             search: None,
         });
         let error = validate_settings_request(&request).expect_err("zero shell timeout is invalid");
-        assert!(error.0.to_string().contains("shell timeout"));
+        assert!(error.message().contains("shell timeout"));
 
         let mut python_execute: swage_protocol::client::settings::PythonExecuteToolConfig =
             wire_from_config(swage_config::PythonExecuteToolConfig::default());
@@ -1859,7 +1861,7 @@ mod tests {
         });
         let error =
             validate_settings_request(&request).expect_err("missing python runtime is invalid");
-        assert!(error.0.to_string().contains("runtime path does not exist"));
+        assert!(error.message().contains("runtime path does not exist"));
 
         request.tool_runtime = Some(ToolRuntimeSettings {
             shell_timeout_secs: 30,

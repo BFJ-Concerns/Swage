@@ -14,7 +14,12 @@ pub struct WorkflowScript {
     pub name: String,
     pub description: String,
     pub head_version: u32,
-    pub built_in: bool,
+    /// The shipped or operator skill that carries this workflow, when it is
+    /// not an authored row of the space. A carried workflow is immutable in
+    /// place; a same-named authored row shadows it.
+    #[ts(optional)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub carrying_skill: Option<String>,
     pub has_delivery_grant: bool,
     pub argument_contract: WorkflowArgumentContract,
     pub created_at: DateTime<Utc>,

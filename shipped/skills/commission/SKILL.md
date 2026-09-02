@@ -69,8 +69,12 @@ annexe. The structural phase (the maestro workflow) starts only from
 that file; the volume build (the assembly workflow) starts only from the
 structural phase's `build/` state. Nothing else this conversation
 produces — a scaffolded annexe, working files, an unsigned draft — is a
-hand-off, and the downstream workflows refuse until the commission
+hand-off, and the downstream workflows refuse until a signed commission
 exists. That refusal is correct gating, never a defect to work around.
+It gates on the committed file alone: once a `README.md` has been
+signed and committed, the build phases start from it even while a
+later, unsigned revision sits in the working tree — they neither see
+nor wait for the revision.
 
 Three consequences, binding:
 
@@ -82,12 +86,22 @@ Three consequences, binding:
   driving this workflow with no user answer available ends unsigned
   rather than inventing a yes.
 - **End legibly.** A conversation that ends without the sign-off yes
-  states its actual state in its closing message: what stands (a
-  scaffold, an unsigned working-tree draft), that no commission exists
-  yet, and that the structural and build workflows will refuse until a
-  later conversation lands the signature. An unsigned draft in the
-  working tree is a legitimate resume marker; presenting it as a
-  commissioned project is the failure.
+  states its actual state in its closing message, and the state differs
+  by whether a signed commission already stands. **Initial capture** —
+  no committed `README.md` in the annexe: say what stands (a scaffold,
+  an unsigned working-tree draft), that no commission exists yet, and
+  that the structural and build workflows will refuse until a later
+  conversation lands the signature. **Unsigned revision of a signed
+  commission** — a committed `README.md` stands and only this
+  conversation's change is unsigned: say that the committed commission
+  stands and remains the contract the build phases read, that the
+  proposed change is an unsigned working-tree diff they do not see,
+  and that a later conversation resumes the diff for its sign-off
+  read; the downstream workflows do not refuse in this case — they
+  build against the last signed text, so the closing message must not
+  claim otherwise. In both cases an unsigned draft in the working tree
+  is a legitimate resume marker; presenting it as commissioned is the
+  failure, and so is telling the user a standing commission has gone.
 - **Decline what needs no commission.** An ask that is ordinary work
   rather than project intent — a fix, a change to something the project
   produces, a task an agent could just do (the boundary in What Counts

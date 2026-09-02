@@ -1750,6 +1750,7 @@ mod tests {
         storage
             .create_message(NewMessage {
                 thread_id: thread.id,
+                attachments: Vec::new(),
                 turn_id: None,
                 role: Role::Assistant,
                 content: "The queue was empty at last check. ".repeat(20),

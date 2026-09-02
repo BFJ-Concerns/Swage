@@ -1177,6 +1177,11 @@ pub struct Message {
     pub turn_id: Option<Uuid>,
     pub role: Role,
     pub content: String,
+    /// Content parts submitted beside the text, one generic JSON value per
+    /// part exactly as the client wire carried it. Storage keeps them
+    /// opaque; the gateway parses them against the wire contract when it
+    /// projects the message and rejects a value outside it.
+    pub attachments: Vec<serde_json::Value>,
     /// Monotonically increasing position within the thread.
     pub position: i32,
     /// The agent that produced or received this message.
@@ -1925,6 +1930,8 @@ pub struct NewMessage {
     pub turn_id: Option<Uuid>,
     pub role: Role,
     pub content: String,
+    /// Content parts beside the text; empty for a text-only message.
+    pub attachments: Vec<serde_json::Value>,
     /// Monotonically increasing position within the thread.
     pub position: i32,
     /// The agent that produced or received this message.
@@ -1941,6 +1948,8 @@ pub struct AppendMessage {
     pub turn_id: Option<Uuid>,
     pub role: Role,
     pub content: String,
+    /// Content parts beside the text; empty for a text-only message.
+    pub attachments: Vec<serde_json::Value>,
     /// The agent that produced or received this message.
     pub agent_id: String,
 }
@@ -2608,6 +2617,7 @@ mod tests {
         let msg = Message {
             id,
             thread_id,
+            attachments: Vec::new(),
             turn_id: Some(Uuid::new_v4()),
             role: Role::User,
             content: "hello".to_string(),
@@ -2639,6 +2649,7 @@ mod tests {
         let msg = Message {
             id,
             thread_id,
+            attachments: Vec::new(),
             turn_id: None,
             role: Role::Assistant,
             content: "sure".to_string(),
@@ -2661,6 +2672,7 @@ mod tests {
         let thread_id = Uuid::new_v4();
         let nm = NewMessage {
             thread_id,
+            attachments: Vec::new(),
             turn_id: None,
             role: Role::User,
             content: "test".to_string(),
@@ -2675,6 +2687,7 @@ mod tests {
     fn new_message_is_debug_clone() {
         let original = NewMessage {
             thread_id: Uuid::new_v4(),
+            attachments: Vec::new(),
             turn_id: Some(Uuid::new_v4()),
             role: Role::User,
             content: "hi".to_string(),
