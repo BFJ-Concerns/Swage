@@ -1,5 +1,6 @@
 //! Durable workflow HTTP surface and detached engine supervision.
 
+use std::collections::HashMap;
 use std::sync::{
     Arc,
     atomic::{AtomicU32, AtomicU64, Ordering},
@@ -1655,17 +1656,40 @@ fn refine_ending(ending: WorkflowRunEnding, journal: &[WorkflowJournalRecord]) -
     }
 }
 
-fn worker_placement_of(entry: &WorkflowJournalRecord) -> Option<String> {
+/// The directories the host provisioned for this run's workers, keyed by the
+/// sequence of the call each one placed.
+///
+/// A worker that never returned a result carries no directory in its own
+/// record, and its work is exactly the work most worth finding again. The
+/// placement is journalled immediately before the call it places, so the
+/// provisioning entry at `seq` belongs to the call at `seq + 1`.
+fn provisioned_placements(journal: &[WorkflowJournalRecord]) -> HashMap<u64, String> {
+    journal
+        .iter()
+        .filter(|entry| entry.kind == "worker_placement" && entry.status == "completed")
+        .filter_map(|entry| {
+            let path = entry.result.as_ref()?.get("path")?.as_str()?;
+            Some((entry.seq + 1, path.to_string()))
+        })
+        .collect()
+}
+
+fn worker_placement_of(
+    entry: &WorkflowJournalRecord,
+    placements: &HashMap<u64, String>,
+) -> Option<String> {
     entry
         .result
         .as_ref()
         .and_then(|result| result.get("working_directory"))
         .and_then(Value::as_str)
         .map(str::to_string)
+        .or_else(|| placements.get(&entry.seq).cloned())
 }
 
 fn worker_account(
     entry: &WorkflowJournalRecord,
+    placements: &HashMap<u64, String>,
     termination: Option<WorkflowWorkerTermination>,
 ) -> WorkflowWorkerAccount {
     WorkflowWorkerAccount {
@@ -1681,7 +1705,7 @@ fn worker_account(
             .get("agent")
             .and_then(Value::as_str)
             .map(str::to_string),
-        placement: worker_placement_of(entry),
+        placement: worker_placement_of(entry, placements),
         termination,
     }
 }
@@ -1733,12 +1757,14 @@ async fn account_for_run_end(
             }
         }
     }
+    let placements = provisioned_placements(&journal);
     let mut workers = WorkflowWorkerPartition::default();
     let mut recovered = Vec::new();
     for entry in journal.iter().filter(|entry| entry.kind == "agent_call") {
         if cut_short.contains(&entry.id) {
             workers.cut_short.push(worker_account(
                 entry,
+                &placements,
                 Some(WorkflowWorkerTermination::CutShort {
                     detail: Some(settlement.to_string()),
                 }),
@@ -1747,7 +1773,7 @@ async fn account_for_run_end(
         }
         match entry.status.as_str() {
             "completed" => {
-                workers.done.push(worker_account(entry, None));
+                workers.done.push(worker_account(entry, &placements, None));
                 if let Some(output) = entry.result.as_ref().and_then(|result| result.get("output"))
                 {
                     recovered.push(WorkflowPartialResult {
@@ -1759,12 +1785,13 @@ async fn account_for_run_end(
                             .and_then(Value::as_str)
                             .map(str::to_string),
                         output: output.clone(),
-                        placement: worker_placement_of(entry),
+                        placement: worker_placement_of(entry, &placements),
                     });
                 }
             }
             "failed" => workers.failed.push(worker_account(
                 entry,
+                &placements,
                 Some(WorkflowWorkerTermination::Failed {
                     error: entry
                         .error_message
@@ -1774,6 +1801,7 @@ async fn account_for_run_end(
             )),
             _ => workers.unsettled.push(worker_account(
                 entry,
+                &placements,
                 Some(WorkflowWorkerTermination::Unsettled),
             )),
         }
