@@ -12,10 +12,10 @@ use uuid::Uuid;
 
 use swage_core::GatewayError;
 use swage_protocol::client::page::{
-    CreatePageAnnotationRequest, CreatePageRequest, CreatePageTemplateRequest,
-    PageAnnotationView, PageListResponse, PageModuleView, PageResponse, PageSummary,
-    PageTemplateListResponse, PageTemplateModuleView, PageTemplateResponse, PageTemplateSummary,
-    UpdatePageAnnotationRequest, WritePageModuleRequest,
+    CreatePageAnnotationRequest, CreatePageRequest, CreatePageTemplateRequest, PageAnnotationView,
+    PageListResponse, PageModuleView, PageResponse, PageSummary, PageTemplateListResponse,
+    PageTemplateModuleView, PageTemplateResponse, PageTemplateSummary, UpdatePageAnnotationRequest,
+    WritePageModuleRequest,
 };
 use swage_protocol::client::websocket::ServerEvent;
 use swage_storage::{
