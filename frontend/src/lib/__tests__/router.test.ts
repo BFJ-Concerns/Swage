@@ -28,6 +28,7 @@ describe("parseRoute", () => {
     expect(parseRoute("/")).toEqual({
       path: "/",
       conversationId: null,
+      workflowRunId: null,
       settingsTab: null,
       settingsSpaceSlug: null,
       settingsSpaceTab: null,
@@ -39,6 +40,19 @@ describe("parseRoute", () => {
     expect(parseRoute("/conversations/abc-123")).toEqual({
       path: "/conversations/abc-123",
       conversationId: "abc-123",
+      workflowRunId: null,
+      settingsTab: null,
+      settingsSpaceSlug: null,
+      settingsSpaceTab: null,
+      notFound: false,
+    });
+  });
+
+  it("maps '/workflow-runs/:id' to that run's own surface", () => {
+    expect(parseRoute("/workflow-runs/run-42")).toEqual({
+      path: "/workflow-runs/run-42",
+      conversationId: null,
+      workflowRunId: "run-42",
       settingsTab: null,
       settingsSpaceSlug: null,
       settingsSpaceTab: null,
@@ -50,6 +64,7 @@ describe("parseRoute", () => {
     expect(parseRoute("/other/path")).toEqual({
       path: "/",
       conversationId: null,
+      workflowRunId: null,
       settingsTab: null,
       settingsSpaceSlug: null,
       settingsSpaceTab: null,
@@ -61,6 +76,7 @@ describe("parseRoute", () => {
     expect(parseRoute("")).toEqual({
       path: "/",
       conversationId: null,
+      workflowRunId: null,
       settingsTab: null,
       settingsSpaceSlug: null,
       settingsSpaceTab: null,
@@ -72,6 +88,7 @@ describe("parseRoute", () => {
     expect(parseRoute("/settings/generation")).toEqual({
       path: "/settings/generation",
       conversationId: null,
+      workflowRunId: null,
       settingsTab: "generation",
       settingsSpaceSlug: null,
       settingsSpaceTab: null,
@@ -92,6 +109,7 @@ describe("parseRoute", () => {
     expect(parseRoute("/settings/space/research/workspaces")).toEqual({
       path: "/settings/space/research/workspaces",
       conversationId: null,
+      workflowRunId: null,
       settingsTab: null,
       settingsSpaceSlug: "research",
       settingsSpaceTab: "workspaces",
@@ -346,6 +364,7 @@ describe("init with conversation store", () => {
     expect(router.currentRoute).toEqual({
       path: "/conversations/new-conv",
       conversationId: "new-conv",
+      workflowRunId: null,
       settingsTab: null,
       settingsSpaceSlug: null,
       settingsSpaceTab: null,
@@ -389,6 +408,7 @@ describe("init with conversation store", () => {
     expect(router.currentRoute).toEqual({
       path: "/conversations/second-conv",
       conversationId: "second-conv",
+      workflowRunId: null,
       settingsTab: null,
       settingsSpaceSlug: null,
       settingsSpaceTab: null,

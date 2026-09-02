@@ -26,6 +26,8 @@ export type SpaceSettingsTab = "overview" | "workspaces" | "sessions";
 export interface Route {
   path: string;
   conversationId: string | null;
+  // Set when the URL addresses a single workflow run's own surface.
+  workflowRunId: string | null;
   settingsTab: SettingsTab | null;
   settingsSpaceSlug: string | null;
   settingsSpaceTab: SpaceSettingsTab | null;
@@ -65,6 +67,7 @@ export interface RouterOptions {
  * Recognised patterns:
  *   /                       → root, no active conversation
  *   /conversations/:id      → load conversation with that ID
+ *   /workflow-runs/:id      → that run's own surface
  *   anything else           → treated as root (unrecognised paths get SPA fallback)
  */
 export function parseRoute(pathname: string): Route {
@@ -73,6 +76,19 @@ export function parseRoute(pathname: string): Route {
     return {
       path: pathname,
       conversationId: match[1],
+      workflowRunId: null,
+      settingsTab: null,
+      settingsSpaceSlug: null,
+      settingsSpaceTab: null,
+      notFound: false,
+    };
+  }
+  const runMatch = pathname.match(/^\/workflow-runs\/([^/]+)$/);
+  if (runMatch) {
+    return {
+      path: pathname,
+      conversationId: null,
+      workflowRunId: decodeURIComponent(runMatch[1]),
       settingsTab: null,
       settingsSpaceSlug: null,
       settingsSpaceTab: null,
@@ -86,6 +102,7 @@ export function parseRoute(pathname: string): Route {
     return {
       path: pathname,
       conversationId: null,
+      workflowRunId: null,
       settingsTab: null,
       settingsSpaceSlug: decodeURIComponent(spaceSettingsMatch[1]),
       settingsSpaceTab: (spaceSettingsMatch[2] as SpaceSettingsTab | undefined) ?? "overview",
@@ -99,6 +116,7 @@ export function parseRoute(pathname: string): Route {
     return {
       path: pathname,
       conversationId: null,
+      workflowRunId: null,
       settingsTab: (settingsMatch[1] as SettingsTab | undefined) ?? "providers",
       settingsSpaceSlug: null,
       settingsSpaceTab: null,
@@ -108,6 +126,7 @@ export function parseRoute(pathname: string): Route {
   return {
     path: "/",
     conversationId: null,
+    workflowRunId: null,
     settingsTab: null,
     settingsSpaceSlug: null,
     settingsSpaceTab: null,
@@ -157,6 +176,7 @@ export function createRouter(options?: RouterOptions): Router {
           updateRoute({
             path: "/",
             conversationId: null,
+            workflowRunId: null,
             settingsTab: null,
             settingsSpaceSlug: null,
             settingsSpaceTab: null,

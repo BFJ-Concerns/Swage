@@ -4,6 +4,7 @@
   import OperatorDashboard from "./OperatorDashboard.svelte";
   import PagesSurface from "./PagesSurface.svelte";
   import SettingsPage from "./SettingsPage.svelte";
+  import WorkflowRunView from "./WorkflowRunView.svelte";
   import SpacePicker from "./SpacePicker.svelte";
   import SpaceSelector from "./SpaceSelector.svelte";
   import SpaceSettingsPage from "./SpaceSettingsPage.svelte";
@@ -87,6 +88,7 @@
       selectedAgentId = "";
     }
   });
+  const workflowRunId = $derived(route?.workflowRunId ?? null);
   const settingsTab = $derived(route?.settingsTab ?? null);
   const settingsSpaceSlug = $derived(route?.settingsSpaceSlug ?? null);
   const settingsSpaceTab = $derived(route?.settingsSpaceTab ?? null);
@@ -121,7 +123,11 @@
   </header>
 {/if}
 
-{#if settingsMode}
+{#if workflowRunId}
+  <!-- A run addressed directly by URL owns the body: its account is the
+       whole point of the visit. -->
+  <WorkflowRunView runId={workflowRunId} />
+{:else if settingsMode}
   <!-- The settings window chrome lives here; the pages own their content only. -->
   <div class="settings-window">
     <header class="settings-chrome">
