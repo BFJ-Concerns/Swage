@@ -525,18 +525,40 @@ impl WorkflowEngine {
                                                 "session_id": session_id,
                                                 "thread_id": thread_id,
                                             }));
+                                        let value = if request.identity == Some(true) {
+                                            serde_json::json!({
+                                                "label": request.label,
+                                                "phase": request.phase,
+                                                "output": result.output,
+                                                "failure": null,
+                                            })
+                                        } else {
+                                            result.output
+                                        };
                                         serde_json::json!({
                                             "ok": true,
-                                            "value": result.output,
+                                            "value": value,
                                             "session": session,
                                             "working_directory": result.working_directory,
                                         }).to_string()
                                     }
-                                    Err(WorkflowHostError::SchemaExhausted { .. }) => {
+                                    Err(WorkflowHostError::SchemaExhausted { message, .. }) => {
                                         // Exhausting a schema's validation attempts is a
                                         // script-visible absence, not an ordinary agent
-                                        // failure. Keep this typed so other failures throw.
-                                        serde_json::json!({"ok": true, "value": null, "session": null}).to_string()
+                                        // failure. Identified calls retain that distinction
+                                        // for a fan-in; unmarked calls keep the bare-null
+                                        // contract.
+                                        let value = if request.identity == Some(true) {
+                                            serde_json::json!({
+                                                "label": request.label,
+                                                "phase": request.phase,
+                                                "output": null,
+                                                "failure": {"message": message},
+                                            })
+                                        } else {
+                                            Value::Null
+                                        };
+                                        serde_json::json!({"ok": true, "value": value, "session": null}).to_string()
                                     }
                                     Err(error) => {
                                         let (host_reference, error) = match error {
@@ -859,7 +881,7 @@ impl WorkflowEngine {
                         };
                         // Agent responses carry a continuation token beside the
                         // value; only agentStart handles surface it.
-                        const unwrapAgentResponse = (json) => {
+                        const unwrapAgentResponse = (json, request) => {
                             const response = JSON.parse(json);
                             if (!response.ok) {
                                 const error = new Error(response.error.message);
@@ -867,6 +889,14 @@ impl WorkflowEngine {
                                 if (typeof response.error.host_reference === "string") {
                                     Object.defineProperty(error, "__swageAgentCallReference", {
                                         value: response.error.host_reference,
+                                    });
+                                }
+                                if (request.identity === true) {
+                                    Object.defineProperty(error, "__swageAgentCallIdentity", {
+                                        value: {
+                                            label: request.label ?? null,
+                                            phase: request.phase ?? null,
+                                        },
                                     });
                                 }
                                 throw error;
@@ -892,7 +922,7 @@ impl WorkflowEngine {
                             const merged = mergeDefaults(options);
                             const knownOptions = new Set([
                                 "agent", "task", "tools", "skills", "model", "effort", "timeoutMs",
-                                "cwd", "isolation", "schema", "maxAttempts", "label",
+                                "cwd", "isolation", "schema", "maxAttempts", "label", "phase", "identity",
                                 "session", "elements", "variables", "assembly",
                             ]);
                             for (const key of Object.keys(merged)) {
@@ -937,6 +967,10 @@ impl WorkflowEngine {
                                 schema: merged.schema ?? null,
                                 max_attempts: merged.maxAttempts ?? 3,
                                 label: merged.label ?? null,
+                                phase: merged.phase ?? null,
+                                ...(merged.identity === undefined || merged.identity === null
+                                    ? {}
+                                    : { identity: merged.identity }),
                                 session: merged.session ?? null,
                                 elements: merged.elements ?? null,
                                 variables: merged.variables ?? null,
@@ -951,7 +985,7 @@ impl WorkflowEngine {
                         globalThis.agent = async (prompt, options = {}) => {
                             validateAgentPrompt(prompt, "agent");
                             const request = buildAgentRequest(options);
-                            const response = unwrapAgentResponse(await __agent(prompt, JSON.stringify(request)));
+                            const response = unwrapAgentResponse(await __agent(prompt, JSON.stringify(request)), request);
                             return response.value;
                         };
                         globalThis.workerPlacements = async () => {
@@ -982,7 +1016,7 @@ impl WorkflowEngine {
                             };
                             handle.result = __agent(prompt, JSON.stringify(request))
                                 .then((json) => {
-                                    const response = unwrapAgentResponse(json);
+                                    const response = unwrapAgentResponse(json, request);
                                     handle.done = true;
                                     handle.session = response.session ?? handle.session;
                                     handle.workingDirectory = response.workingDirectory;
@@ -1076,6 +1110,15 @@ impl WorkflowEngine {
                                 try { return await thunk(); }
                                 catch (error) {
                                     __log(`parallel thunk ${index} failed: ${error.name}: ${error.message}`);
+                                    const identity = error.__swageAgentCallIdentity;
+                                    if (identity !== undefined) {
+                                        return {
+                                            label: identity.label,
+                                            phase: identity.phase,
+                                            output: null,
+                                            failure: { message: error.message },
+                                        };
+                                    }
                                     return null;
                                 }
                             })
@@ -1092,6 +1135,15 @@ impl WorkflowEngine {
                                         previous = await stages[stageIndex](previous, item, index);
                                     } catch (error) {
                                         __log(`pipeline item ${index} stage ${stageIndex} failed: ${error.name}: ${error.message}`);
+                                        const identity = error.__swageAgentCallIdentity;
+                                        if (identity !== undefined) {
+                                            return {
+                                                label: identity.label,
+                                                phase: identity.phase,
+                                                output: null,
+                                                failure: { message: error.message },
+                                            };
+                                        }
                                         return null;
                                     }
                                 }
@@ -1295,7 +1347,7 @@ mod tests {
                 Option<swage_protocol::client::workflow::WorkerIsolation>,
             )>,
         >,
-        agent_outputs: Mutex<VecDeque<Result<Value, String>>>,
+        agent_outputs: Mutex<VecDeque<Result<Value, WorkflowHostError>>>,
         workflow_calls: Mutex<Vec<WorkflowCallRequest>>,
         workflow_output: Value,
         timer_calls: Mutex<Vec<u64>>,
@@ -1764,7 +1816,7 @@ mod tests {
                 r#"await agent("inspect the unit", {
                     agent: "worker", task: "review", model: "cheap", effort: "low",
                     timeoutMs: 75, cwd: "/repo", isolation: "worktree",
-                    schema: { type: "object" }, maxAttempts: 2, label: "inspect",
+                    schema: { type: "object" }, maxAttempts: 2, label: "inspect", phase: "review", identity: true,
                     session: { session_id: "00000000-0000-0000-0000-00000000000a", thread_id: "00000000-0000-0000-0000-00000000000b" },
                     skills: ["code-review", "testing"],
                     elements: ["current-work"], variables: { owner: "operator" }, assembly: "focused",
@@ -1786,6 +1838,8 @@ mod tests {
         assert_eq!(request.timeout_ms, Some(75));
         assert_eq!(request.max_attempts, 2);
         assert_eq!(request.label.as_deref(), Some("inspect"));
+        assert_eq!(request.phase.as_deref(), Some("review"));
+        assert_eq!(request.identity, Some(true));
         assert_eq!(
             request.elements.as_deref(),
             Some(["current-work".to_string()].as_slice())
@@ -1795,6 +1849,96 @@ mod tests {
         assert_eq!(
             request.skills.as_deref(),
             Some(["code-review".to_string(), "testing".to_string()].as_slice())
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn identified_agent_call_preserves_a_successful_worker_result() {
+        let host = Arc::new(SurfaceHost::new());
+        host.agent_outputs
+            .lock()
+            .unwrap()
+            .push_back(Ok(json!({"answer": "ready"})));
+        let output = WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                r#"return await agent("gather", { identity: true, label: "source", phase: "research" });"#,
+                "null",
+                CancellationToken::new(),
+                Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                ScriptCapabilities::default(),
+            )
+            .await
+            .expect("identified success");
+
+        assert_eq!(
+            serde_json::from_str::<Value>(&output).expect("output"),
+            json!({
+                "label": "source",
+                "phase": "research",
+                "output": {"answer": "ready"},
+                "failure": null,
+            })
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn identified_agent_call_reports_schema_exhaustion_without_losing_its_leg() {
+        let host = Arc::new(SurfaceHost::new());
+        host.agent_outputs
+            .lock()
+            .unwrap()
+            .push_back(Err(WorkflowHostError::SchemaExhausted {
+                host_reference: None,
+                message: "SchemaExhaustedError: no valid object".into(),
+            }));
+        let output = WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                r#"return await agent("gather", { identity: true, label: "schema leg", phase: "research", schema: {type: "object"} });"#,
+                "null",
+                CancellationToken::new(),
+                Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                ScriptCapabilities::default(),
+            )
+            .await
+            .expect("identified schema collapse");
+
+        assert_eq!(
+            serde_json::from_str::<Value>(&output).expect("output"),
+            json!({
+                "label": "schema leg",
+                "phase": "research",
+                "output": null,
+                "failure": {"message": "SchemaExhaustedError: no valid object"},
+            })
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn parallel_preserves_an_identified_operational_failure() {
+        let host = Arc::new(SurfaceHost::new());
+        host.agent_outputs
+            .lock()
+            .unwrap()
+            .push_back(Err("provider unavailable".into()));
+        let output = WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                r#"return await parallel([() => agent("gather", { identity: true, label: "network leg", phase: "research" })]);"#,
+                "null",
+                CancellationToken::new(),
+                Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                ScriptCapabilities::default(),
+            )
+            .await
+            .expect("parallel collapse");
+
+        assert_eq!(
+            serde_json::from_str::<Value>(&output).expect("output"),
+            json!([{
+                "label": "network leg",
+                "phase": "research",
+                "output": null,
+                "failure": {"message": "provider unavailable"},
+            }])
         );
     }
 
