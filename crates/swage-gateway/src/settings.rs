@@ -187,6 +187,7 @@ pub async fn save_settings(
         providers.insert(
             provider_id,
             swage_config::ProviderEndpointConfig {
+                worker_staleness_threshold_ms: None,
                 protocol: config_from_wire(provider.protocol)?,
                 api_key_secret_ref: secret_ref.or(provider.api_key_secret_ref),
                 api_key_env: provider.api_key_env,
@@ -540,6 +541,7 @@ fn save_provider_into_endpoint_config(
     provider: SaveProviderSettings,
 ) -> Result<swage_config::ProviderEndpointConfig, ApiError> {
     Ok(swage_config::ProviderEndpointConfig {
+        worker_staleness_threshold_ms: None,
         protocol: config_from_wire(provider.protocol)?,
         base_url: provider.base_url,
         api_key_secret_ref: provider.api_key_secret_ref,
@@ -1348,6 +1350,7 @@ mod tests {
         providers.insert(
             "llama-cpp".to_string(),
             swage_config::ProviderEndpointConfig {
+                worker_staleness_threshold_ms: None,
                 protocol: swage_config::Protocol::OpenAi,
                 base_url: Some("http://127.0.0.1:8080/v1".to_string()),
                 api_key_secret_ref: Some("secret:abc".to_string()),
