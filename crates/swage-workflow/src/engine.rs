@@ -1532,6 +1532,9 @@ mod tests {
         gate_verdict: Value,
         deliveries_up_to: Mutex<Vec<u64>>,
         budget_snapshot: Value,
+        opened_workers: Mutex<Vec<HeldWorkerOpen>>,
+        closed_workers: Mutex<Vec<uuid::Uuid>>,
+        staleness_reading: Value,
     }
 
     impl SurfaceHost {
@@ -1557,6 +1560,14 @@ mod tests {
                     "working_remaining": null,
                     "closing_remaining": null,
                     "winding_down": false,
+                }),
+                opened_workers: Mutex::new(Vec::new()),
+                closed_workers: Mutex::new(Vec::new()),
+                staleness_reading: json!({
+                    "stale": false,
+                    "idle_ms": 0,
+                    "threshold_ms": null,
+                    "route": null,
                 }),
             }
         }
@@ -1702,6 +1713,33 @@ mod tests {
         async fn budget_snapshot(&self, _: CancellationToken) -> Result<Value, String> {
             Ok(self.budget_snapshot.clone())
         }
+
+        async fn open_held_worker(
+            &self,
+            worker: HeldWorkerOpen,
+            _: CancellationToken,
+        ) -> Result<Value, String> {
+            let mut opened = self.opened_workers.lock().expect("opened");
+            opened.push(worker);
+            Ok(json!({"worker_id": uuid::Uuid::from_u128(opened.len() as u128)}))
+        }
+
+        async fn close_held_worker(
+            &self,
+            worker_id: uuid::Uuid,
+            _: CancellationToken,
+        ) -> Result<Value, String> {
+            self.closed_workers.lock().expect("closed").push(worker_id);
+            Ok(json!({"worker_id": worker_id, "closed_by": "script"}))
+        }
+
+        async fn held_worker_staleness(
+            &self,
+            _worker_id: uuid::Uuid,
+            _: CancellationToken,
+        ) -> Result<Value, String> {
+            Ok(self.staleness_reading.clone())
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1746,6 +1784,148 @@ mod tests {
                     "winding_down": true,
                 },
                 "errorName": "BudgetWindDownError",
+            })
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn held_worker_turns_carry_the_creation_options_and_the_session() {
+        let host = Arc::new(SurfaceHost::new());
+        host.agent_outputs
+            .lock()
+            .unwrap()
+            .extend([Ok(json!("first")), Ok(json!("second"))]);
+        let output = WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                r#"
+                const worker = await session({agent: "reviewer", model: "strong", effort: "high"});
+                const first = await send(worker, "read the diff");
+                const second = await send(worker, "now judge it", {schema: {type: "string"}});
+                await close(worker);
+                return {first, second, turns: worker.turns, closed: worker.closed};
+                "#,
+                "null",
+                CancellationToken::new(),
+                Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                ScriptCapabilities::default(),
+            )
+            .await
+            .expect("held worker script runs");
+        assert_eq!(
+            serde_json::from_str::<Value>(&output).unwrap(),
+            json!({"first": "first", "second": "second", "turns": 2, "closed": true})
+        );
+
+        let opened = host.opened_workers.lock().unwrap();
+        assert_eq!(opened.len(), 1, "one worker opened");
+        assert_eq!(opened[0].agent.as_deref(), Some("reviewer"));
+        assert_eq!(opened[0].model.as_deref(), Some("strong"));
+
+        let requests = host.agent_requests.lock().unwrap();
+        assert_eq!(requests.len(), 2, "two turns dispatched");
+        let worker_id = uuid::Uuid::from_u128(1);
+        for request in requests.iter() {
+            assert_eq!(request.agent.as_deref(), Some("reviewer"));
+            assert_eq!(request.model.as_deref(), Some("strong"));
+            assert_eq!(
+                request.worker,
+                Some(worker_id),
+                "every turn names the worker it belongs to"
+            );
+        }
+        assert!(
+            requests[0].session.is_none(),
+            "the first turn opens the session"
+        );
+        assert_eq!(
+            requests[1].session.as_ref().map(|s| s.session_id),
+            Some(uuid::Uuid::from_u128(0xA)),
+            "the second turn continues the first turn's session"
+        );
+        assert!(
+            requests[1].schema.is_some(),
+            "a per-turn schema reaches the dispatch"
+        );
+        assert_eq!(
+            host.closed_workers.lock().unwrap().as_slice(),
+            &[worker_id]
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn held_worker_refuses_mid_session_escalation_and_use_after_close() {
+        let host = Arc::new(SurfaceHost::new());
+        host.agent_outputs.lock().unwrap().extend([Ok(json!("ok"))]);
+        let output = WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                r#"
+                const worker = await session({agent: "reviewer", model: "cheap"});
+                await send(worker, "first");
+                let escalation = null;
+                try { await send(worker, "again", {model: "strong"}); }
+                catch (error) { escalation = error.name; }
+                let effort = null;
+                try { await send(worker, "again", {effort: "high"}); }
+                catch (error) { effort = error.name; }
+                await close(worker);
+                let afterClose = null;
+                try { await send(worker, "one more"); }
+                catch (error) { afterClose = error.name; }
+                return {escalation, effort, afterClose};
+                "#,
+                "null",
+                CancellationToken::new(),
+                Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                ScriptCapabilities::default(),
+            )
+            .await
+            .expect("refusal script runs");
+        assert_eq!(
+            serde_json::from_str::<Value>(&output).unwrap(),
+            json!({
+                "escalation": "HeldWorkerError",
+                "effort": "HeldWorkerError",
+                "afterClose": "HeldWorkerError",
+            })
+        );
+        assert_eq!(
+            host.agent_requests.lock().unwrap().len(),
+            1,
+            "a refused turn never reaches the host"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn held_worker_staleness_reports_the_recorded_route_reading() {
+        let host = Arc::new(SurfaceHost {
+            staleness_reading: json!({
+                "stale": true,
+                "idle_ms": 900_000,
+                "threshold_ms": 600_000,
+                "route": {"provider_id": "proxy", "endpoint": "relay", "model": "strong"},
+            }),
+            ..SurfaceHost::new()
+        });
+        let output = WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                r#"
+                const worker = await session({agent: "reviewer", model: "strong"});
+                return await staleness(worker);
+                "#,
+                "null",
+                CancellationToken::new(),
+                Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                ScriptCapabilities::default(),
+            )
+            .await
+            .expect("staleness script runs");
+        assert_eq!(
+            serde_json::from_str::<Value>(&output).unwrap(),
+            json!({
+                "stale": true,
+                "idleMs": 900_000,
+                "thresholdMs": 600_000,
+                "route": {"provider_id": "proxy", "endpoint": "relay", "model": "strong"},
             })
         );
     }
