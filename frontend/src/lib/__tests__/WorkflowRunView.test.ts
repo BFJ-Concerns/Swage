@@ -55,7 +55,16 @@ describe("WorkflowRunView", () => {
             termination: null,
           },
         ],
-        failed: [],
+        failed: [
+          {
+            journal_entry_id: "entry-3",
+            seq: 1,
+            label: "broken",
+            agent_definition_id: null,
+            placement: "/worktrees/run-1/broken",
+            termination: { cause: "failed", error: "the worker exhausted its attempts" },
+          },
+        ],
         cut_short: [
           {
             journal_entry_id: "entry-2",
@@ -66,7 +75,16 @@ describe("WorkflowRunView", () => {
             termination: { cause: "cut_short", detail: "the run was cancelled" },
           },
         ],
-        unsettled: [],
+        unsettled: [
+          {
+            journal_entry_id: "entry-4",
+            seq: 3,
+            label: null,
+            agent_definition_id: null,
+            placement: null,
+            termination: { cause: "unsettled" },
+          },
+        ],
       },
       partial_results: {
         reason: "the run was cancelled before returning",
@@ -92,10 +110,19 @@ describe("WorkflowRunView", () => {
     // The partition is legible as a partition: the cancelled run's in-flight
     // worker reads as cut short rather than failed, and says so where it ran.
     expect(text).toContain("Done (1)");
+    expect(text).toContain("Failed (1)");
     expect(text).toContain("Cut short (1)");
+    expect(text).toContain("Unsettled (1)");
     expect(text).toContain("hanging");
     expect(text).toContain("the run was cancelled");
     expect(text).toContain("/worktrees/run-1/hanging");
+    // Each standing renders its own workers with its own cause, so a bucket
+    // dropped from the view takes an observable line with it.
+    expect(text).toContain("broken");
+    expect(text).toContain("the worker exhausted its attempts");
+    // A worker with no label is still named by the seq the run gave it.
+    expect(text).toContain("worker 3");
+    expect(text).toContain("never settled");
     // The completed worker's output survives the run that never returned.
     expect(text).toContain("the run was cancelled before returning");
     expect(text).toContain("the survey text");
