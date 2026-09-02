@@ -518,12 +518,6 @@ fn journal_wire(
                             .transpose()
                             .ok()?,
                     })
-                })
-                .or({
-                    Some(WorkflowWorkerLiveness {
-                        started_at: entry.started_at,
-                        first_evidence_at: None,
-                    })
                 }),
         }
     });

@@ -442,7 +442,14 @@ mod tests {
         tokio::fs::write(first.path.join("first-only"), "one")
             .await
             .unwrap();
+        tokio::fs::write(second.path.join("second-only"), "two")
+            .await
+            .unwrap();
         assert!(!second.path.join("first-only").exists());
+        assert!(!first.path.join("second-only").exists());
+        tokio::fs::remove_file(second.path.join("second-only"))
+            .await
+            .unwrap();
         assert_eq!(host.list_owner(owner_id).await.len(), 2);
         let resumed_host = WorktreeHost::new(config);
         let resumed = resumed_host.provision(owner_id, 0, &repo).await.unwrap();
