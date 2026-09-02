@@ -1047,6 +1047,7 @@ describe("App", () => {
     await settleUi();
     expect(document.querySelector<HTMLSelectElement>('select[aria-label="Active conversation"]')?.value)
       .toBe("conv-other");
+    expect(document.querySelector(".message-display")?.textContent).not.toContain("Streamed reply.");
 
     const operatorButton = Array.from(document.querySelectorAll("nav button")).find(
       (button) => button.textContent?.trim() === "Operator",
@@ -1064,7 +1065,7 @@ describe("App", () => {
     expect(websocketHarness.client.disconnect).not.toHaveBeenCalled();
     expect(websocketHarness.client.connect).not.toHaveBeenCalled();
     expect(document.querySelector(".action.stop")).not.toBeNull();
-    expect(document.querySelector(".message-display")?.textContent).toContain("Streamed reply.");
+    expect(document.querySelector(".message-display")?.textContent).not.toContain("Streamed reply.");
 
     websocketHarness.fireEvent({
       type: "turn_complete",
@@ -1072,8 +1073,23 @@ describe("App", () => {
     });
     await settleUi();
 
+    expect(websocketHarness.client.connect).toHaveBeenCalledOnce();
+    expect(websocketHarness.client.connect).toHaveBeenCalledWith("conv-other");
     expect(document.querySelector(".action.stop")).toBeNull();
-    expect(document.querySelector(".message-display")?.textContent).toContain("Streamed reply.");
+
+    const otherTextarea = document.querySelector("textarea") as HTMLTextAreaElement | null;
+    expect(otherTextarea).not.toBeNull();
+    flushSync(() => {
+      otherTextarea!.value = "Message for conv-other";
+      otherTextarea!.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    flushSync(() => document.querySelector<HTMLButtonElement>(".action.send")!.click());
+    await settleUi();
+
+    expect(websocketHarness.client.send).toHaveBeenLastCalledWith({
+      type: "send_message",
+      content: "Message for conv-other",
+    });
   });
 
   it("keeps a newer stream live when reconnect refresh completes late", async () => {
