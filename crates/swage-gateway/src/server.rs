@@ -8,8 +8,8 @@ use axum::{
     routing::{get, post, put},
 };
 use tower_http::trace::TraceLayer;
-use tracing::Instrument;
 use uuid::Uuid;
+use tracing::Instrument;
 
 use crate::{assets, handlers, knowledge_mirror, page, state::AppState, websocket, workflow};
 
@@ -427,10 +427,7 @@ mod tests {
         );
         let router = build_router(state);
         for route in routes() {
-            let mut path = route.path.to_string();
-            for parameter in route.path_parameters() {
-                path = path.replace(&format!("{{{parameter}}}"), &uuid::Uuid::nil().to_string());
-            }
+            let path = route.probe_path();
             let method = match route.method {
                 Method::Get => "GET",
                 Method::Post => "POST",
