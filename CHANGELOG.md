@@ -64,6 +64,8 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- Deleting a page annotation now records its removed body and tags atomically, advances the page timestamp, and rejects a concurrent second delete as not found.
+- Open pages now refetch after their work-surface connection recovers, so updates missed while disconnected appear without a manual reload.
 - Rejected tool approvals now render as failed calls in the conversation transcript.
 - Gateway runtime discovery no longer reads a partially written metadata file during startup.
 - Compaction audit records now count every source message replaced by a successful summary.
