@@ -1056,12 +1056,40 @@
       },
       "CreatePageRequest": {
         "properties": {
+          "template_id": {
+            "default": null,
+            "description": "Seed the new page from a template of the same space. Absent creates a\nblank page. The seeded modules are the page's own from birth; the\ntemplate is recorded as the fork's origin, never projected into it.",
+            "format": "uuid",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "title": {
             "type": "string"
           }
         },
         "required": [
           "title"
+        ],
+        "type": "object"
+      },
+      "CreatePageTemplateRequest": {
+        "description": "Create a reusable page shape for a space, with its module rows in the\norder they will seed.",
+        "properties": {
+          "modules": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/PageTemplateModuleInput"
+            },
+            "type": "array"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
         ],
         "type": "object"
       },
@@ -2176,6 +2204,23 @@
             "format": "date-time",
             "type": "string"
           },
+          "forked_at": {
+            "default": null,
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "forked_from_template_id": {
+            "default": null,
+            "description": "The template this page was forked from, if any — the recorded origin\nof its seeded shape. Absent on a page created blank.",
+            "format": "uuid",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "id": {
             "format": "uuid",
             "type": "string"
@@ -2225,6 +2270,123 @@
         "required": [
           "id",
           "title",
+          "updated_at"
+        ],
+        "type": "object"
+      },
+      "PageTemplateListResponse": {
+        "properties": {
+          "templates": {
+            "items": {
+              "$ref": "#/components/schemas/PageTemplateSummary"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "templates"
+        ],
+        "type": "object"
+      },
+      "PageTemplateModuleInput": {
+        "properties": {
+          "kind": {
+            "default": null,
+            "description": "Module kind for the seeded instance (\"document\" first).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "source"
+        ],
+        "type": "object"
+      },
+      "PageTemplateModuleView": {
+        "properties": {
+          "id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "position": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "source": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "position",
+          "source"
+        ],
+        "type": "object"
+      },
+      "PageTemplateResponse": {
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "modules": {
+            "items": {
+              "$ref": "#/components/schemas/PageTemplateModuleView"
+            },
+            "type": "array"
+          },
+          "name": {
+            "type": "string"
+          },
+          "space_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "space_id",
+          "name",
+          "created_at",
+          "updated_at",
+          "modules"
+        ],
+        "type": "object"
+      },
+      "PageTemplateSummary": {
+        "properties": {
+          "id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
           "updated_at"
         ],
         "type": "object"
