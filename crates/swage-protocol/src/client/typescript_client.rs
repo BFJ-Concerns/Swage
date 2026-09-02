@@ -63,22 +63,30 @@ pub fn render() -> String {
 }
 
 fn render_function(out: &mut String, route: &Route) {
-    let parameters = route.path_parameters();
-    let mut signature: Vec<String> = parameters
+    let mut signature: Vec<String> = route
+        .path_parameters
         .iter()
-        .map(|name| format!("{}: string", camel(name)))
+        .map(|parameter| format!("{}: string", camel(parameter.name)))
         .collect();
     if let Some(request) = route.request.as_ref() {
-        signature.push(format!("body: {request}"));
+        let optional = if route.request_optional { "?" } else { "" };
+        signature.push(format!("body{optional}: {request}"));
     }
+    signature.extend(route.query_parameters.iter().map(|parameter| {
+        let optional = if parameter.required { "" } else { "?" };
+        format!("{}{}: string", camel(parameter.name), optional)
+    }));
     let return_type = route
         .response
         .body
         .as_ref()
         .map_or_else(|| "void".to_string(), |body| body.to_string());
     let mut path = route.path.to_string();
-    for name in &parameters {
-        path = path.replace(&format!("{{{name}}}"), &format!("${{{}}}", camel(name)));
+    for parameter in &route.path_parameters {
+        path = path.replace(
+            &format!("{{{}}}", parameter.name),
+            &format!("${{encodeURIComponent({})}}", camel(parameter.name)),
+        );
     }
     let method = match route.method {
         Method::Get => "GET",
@@ -98,10 +106,26 @@ fn render_function(out: &mut String, route: &Route) {
         camel(route.operation_id),
         signature.join(", ")
     );
-    let _ = writeln!(
-        out,
-        "  return request<{return_type}>(\"{method}\", `{path}`{body_argument});"
-    );
+    if route.query_parameters.is_empty() {
+        let _ = writeln!(
+            out,
+            "  return request<{return_type}>(\"{method}\", `{path}`{body_argument});"
+        );
+    } else {
+        out.push_str("  const query = new URLSearchParams();\n");
+        for parameter in &route.query_parameters {
+            let name = camel(parameter.name);
+            if parameter.required {
+                let _ = writeln!(out, "  query.set(\"{}\", {name});", parameter.name);
+            } else {
+                let _ = writeln!(out, "  if ({name} !== undefined) query.set(\"{}\", {name});", parameter.name);
+            }
+        }
+        let _ = writeln!(
+            out,
+            "  const suffix = query.size === 0 ? \"\" : `?${{query}}`;\n  return request<{return_type}>(\"{method}\", `{path}${{suffix}}`{body_argument});"
+        );
+    }
     out.push_str("}\n");
 }
 
@@ -136,10 +160,10 @@ mod tests {
             "export async function createSpace(body: CreateSpaceRequest): Promise<SpaceResponse> {\n  return request<SpaceResponse>(\"POST\", `/api/spaces`, body);\n}"
         ));
         assert!(rendered.contains(
-            "export async function getSpace(id: string): Promise<SpaceResponse> {\n  return request<SpaceResponse>(\"GET\", `/api/spaces/${id}`);\n}"
+            "export async function getSpace(id: string): Promise<SpaceResponse> {\n  return request<SpaceResponse>(\"GET\", `/api/spaces/${encodeURIComponent(id)}`);\n}"
         ));
         assert!(rendered.contains(
-            "export async function deleteSpace(id: string): Promise<void> {\n  return request<void>(\"DELETE\", `/api/spaces/${id}`);\n}"
+            "export async function deleteSpace(id: string): Promise<void> {\n  return request<void>(\"DELETE\", `/api/spaces/${encodeURIComponent(id)}`);\n}"
         ));
     }
 
@@ -168,5 +192,19 @@ mod tests {
         assert_eq!(camel("list_spaces"), "listSpaces");
         assert_eq!(camel("id"), "id");
         assert_eq!(camel("workspace_id"), "workspaceId");
+    }
+
+    #[test]
+    fn optional_queries_and_string_paths_render_into_the_client_function() {
+        let rendered = render();
+        assert!(rendered.contains(
+            "export async function discoverProviderModels(id: string, q?: string): Promise<ModelDiscoveryResponse>"
+        ));
+        assert!(rendered.contains(
+            "export async function discoverDraftProviderModels(id: string, body: SaveProviderSettings, q?: string): Promise<ModelDiscoveryResponse>"
+        ));
+        assert!(rendered.contains(
+            "if (q !== undefined) query.set(\"q\", q);\n  const suffix = query.size === 0 ? \"\" : `?${query}`;\n  return request<ModelDiscoveryResponse>(\"GET\", `/api/settings/providers/${encodeURIComponent(id)}/models${suffix}`);"
+        ));
     }
 }
